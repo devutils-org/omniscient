@@ -5795,25 +5795,40 @@ fn latency_by_request(result: &serde_json::Value) -> BTreeMap<(u64, u64), u64> {
 /// ground truth, measured the same way both times. `1 %` is the criterion's
 /// number; a loaded machine widens the noise, so this runs alone.
 ///
+/// The percentage is also printed as what it is made of: nanoseconds per
+/// request, `jobs * (1/measured - 1/bare)`. With `irqmode=0` the completion
+/// runs inline in the submitting thread, so both programs run in a job's own
+/// time and that difference is their cost. And when the kernel is keeping
+/// program statistics (`kernel.bpf_stats_enabled=1`, machine wide, granted),
+/// each program's own run time per run is read from the tool's descriptors
+/// while it runs -- the part of the cost that is the programs, apart from the
+/// tracepoints' dispatch and the cache.
+///
 /// ```console
 /// sudo modprobe null_blk queue_mode=2 irqmode=0 completion_nsec=0 nr_devices=1 \
 ///     gb=4 bs=4096 hw_queue_depth=256 submit_queues=8
 /// sudo chmod a+r /dev/nullb0
+/// sudo sysctl kernel.bpf_stats_enabled=1   # optional: the programs' own time
 /// cargo test --test scenario_io -- --ignored --exact \
 ///     the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent --nocapture
+/// sudo sysctl kernel.bpf_stats_enabled=0
 /// sudo rmmod null_blk
 /// ```
 #[test]
 #[ignore = "needs null_blk (root): see the doc comment for the commands"]
 fn the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent() {
     const DEVICE: &str = "/dev/nullb0";
+    const JOBS: f64 = 8.0;
     if std::fs::File::open(DEVICE).is_err() {
         panic!("{DEVICE} is not there or not readable: load null_blk as the doc comment says");
     }
     if let Some(reason) = no_bpf_here() {
         panic!("{reason}");
     }
-    let fio = |under: Option<&str>| -> f64 {
+    let stats_enabled = std::fs::read_to_string("/proc/sys/kernel/bpf_stats_enabled")
+        .map(|text| text.trim() == "1")
+        .unwrap_or(false);
+    let fio = |under: Option<&str>| -> (f64, BTreeMap<u64, (u64, u64)>) {
         let job = [
             "fio",
             "--name=omn-iops",
@@ -5831,25 +5846,63 @@ fn the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent() {
             "--runtime=10",
             "--output-format=json",
         ];
-        let output = match under {
-            None => Command::new(job[0]).args(&job[1..]).output(),
-            Some(emit) => Command::new(BINARY)
-                .args([
-                    "io.latency",
-                    "-m",
-                    "trace",
-                    "-e",
-                    emit,
-                    "--format",
-                    "json",
-                    "--",
-                ])
-                .args(job)
-                .output(),
-        }
-        .expect("fio runs (is it installed?)");
-        assert!(output.status.success(), "{}", stderr(&output));
-        let text = String::from_utf8_lossy(&output.stdout);
+        let mut command = match under {
+            None => {
+                let mut command = Command::new(job[0]);
+                command.args(&job[1..]);
+                command
+            }
+            Some(emit) => {
+                let mut command = Command::new(BINARY);
+                command
+                    .args([
+                        "io.latency",
+                        "-m",
+                        "trace",
+                        "-e",
+                        emit,
+                        "--format",
+                        "json",
+                        "--",
+                    ])
+                    .args(job);
+                command
+            }
+        };
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fio runs (is it installed?)");
+        let mut stdout = child.stdout.take().expect("piped");
+        let mut stderr_pipe = child.stderr.take().expect("piped");
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stdout.read_to_string(&mut text);
+            text
+        });
+        let err_reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr_pipe.read_to_string(&mut text);
+            text
+        });
+        // The programs' statistics, by program id, as last seen before the
+        // tool detached them: `(run_time_ns, run_cnt)`.
+        let mut programs = BTreeMap::new();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("wait") {
+                break status;
+            }
+            if under.is_some() && stats_enabled {
+                for (id, stats) in program_stats(child.id()) {
+                    programs.insert(id, stats);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        let text = reader.join().expect("stdout");
+        let errors = err_reader.join().expect("stderr");
+        assert!(status.success(), "{errors}");
         // Under omn, fio's own document comes first on stdout, then omn's.
         let start = text.find('{').expect("fio printed json");
         let report: serde_json::Value = serde_json::Deserializer::from_str(&text[start..])
@@ -5857,20 +5910,61 @@ fn the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent() {
             .next()
             .expect("a document")
             .expect("fio's json parses");
-        report["jobs"][0]["read"]["iops"]
+        let iops = report["jobs"][0]["read"]["iops"]
             .as_f64()
-            .expect("fio reports iops")
+            .expect("fio reports iops");
+        (iops, programs)
     };
-    let bare = fio(None);
+    let (bare, _) = fio(None);
     assert!(
         bare >= 2_000_000.0,
         "the device answered {bare:.0} IOPS bare, short of the 2 M the criterion is about"
     );
-    let measured = fio(Some("hist"));
+    let (measured, programs) = fio(Some("hist"));
     let overhead = (bare - measured) / bare * 100.0;
-    eprintln!("bare {bare:.0} IOPS, under the in-kernel histogram {measured:.0}: {overhead:.2} %");
+    let per_request_ns = JOBS * (1.0 / measured - 1.0 / bare) * 1e9;
+    let budget_ns = JOBS / bare * 1e9 / 100.0;
+    eprintln!(
+        "bare {bare:.0} IOPS, under the in-kernel histogram {measured:.0}: {overhead:.2} %, \
+         {per_request_ns:.0} ns per request against a 1 % budget of {budget_ns:.1} ns"
+    );
+    if !stats_enabled {
+        eprintln!("kernel.bpf_stats_enabled is not 1: the programs' own run time is not kept");
+    }
+    for (id, (run_time_ns, run_cnt)) in &programs {
+        eprintln!(
+            "program {id}: {run_cnt} runs, {run_time_ns} ns, {:.1} ns per run",
+            *run_time_ns as f64 / (*run_cnt).max(1) as f64
+        );
+    }
     assert!(
         overhead < 1.0,
-        "the in-kernel histogram cost {overhead:.2} % of a {bare:.0} IOPS load"
+        "the in-kernel histogram cost {overhead:.2} % of a {bare:.0} IOPS load \
+         ({per_request_ns:.0} ns per request)"
     );
+}
+
+/// The run statistics of every BPF program a process holds a descriptor to,
+/// by program id: `(run_time_ns, run_cnt)`, which the kernel keeps only while
+/// `kernel.bpf_stats_enabled` is 1. A descriptor that closes between the list
+/// and the read is skipped.
+fn program_stats(pid: u32) -> Vec<(u64, (u64, u64))> {
+    let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fdinfo")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|text| {
+            let field = |name: &str| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+            };
+            Some((
+                field("prog_id:")?,
+                (field("run_time_ns:")?, field("run_cnt:")?),
+            ))
+        })
+        .collect()
 }

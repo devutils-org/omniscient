@@ -1181,3 +1181,96 @@ syscall layer's time above the device under twice the delay times the count
 (a delay applied twice); and the syscall layer's total to at least nine tenths
 of the program's own clock around the calls.
 
+
+## The seventeenth wave
+
+### 19. The in-kernel histogram cost 23.6 % at 3 M IOPS — **reduced; the measurement is the coordinator's**
+
+Found by the coordinator before the wave, running the privileged list:
+`the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent` on
+`null_blk` (`irqmode=0`, 8 submit queues) read *"bare 3158519 IOPS, under the
+in-kernel histogram 2413950: 23.57 %"* against phase 6's 1 %.
+
+**What the number is made of.** Eight `fio` jobs at 3 158 519 IOPS is
+2.533 us of a job's time per request; at 2 413 950 it is 3.314 us. The
+programs cost **781 ns per request**. With `irqmode=0`, `null_blk` completes
+inline in the submitting thread, so both programs run in the job's own time
+and on its own cpu: all of that difference is theirs. The 1 % criterion is
+**25 ns per request** for both programs together.
+
+**Where it went** (counted in the instruction stream, not timed: no device
+here answers fast enough, and loading `null_blk` is the coordinator's). The
+histogram ran the ring path's two programs with a different ending:
+
+| per request | open (`block_rq_issue`) | close (`block_rq_complete`) |
+|---|---|---|
+| helpers | clock, task, comm, current task, task storage, hash **insert** | clock, cpu id, six `probe_read_kernel` (scope, sector, length, flags, partition, device), hash lookup, hash **delete**, row lookup |
+| locks | the entry's bucket lock, a free-list pop | the entry's bucket lock, a free-list push |
+| shared writes | -- | two `lock xadd` on one row that all eight cpus write, 3 M times a second |
+| stack | a 40-byte entry | a 104-byte record cleared and filled, then thrown away |
+
+Most of the close's reads fill a record the histogram never publishes; the
+open's comm and task-storage read fill an entry field the histogram never
+reads. The two atomics are the one cost that grows with the *number of cpus*
+rather than the number of requests: one device and a constant-time device put
+almost every request in one or two `(device, bucket)` rows, so the cache line
+holding them moves on nearly every completion.
+
+**What changed** (`src/bpf/io.rs`). The histogram has its own pair:
+
+- **open**: the task only when a process was named (one helper, before the
+  clock, so a refused request costs that alone), the clock, one inlined hash
+  lookup and a store into the entry. The entry is the open time, eight bytes.
+- **close**: the clock, the inlined lookup, the two reads that find the device,
+  the log2 bucket, and the row's inlined lookup with two plain adds.
+- **The entry outlives its request.** Request pointers are a pool the kernel
+  allocates per hardware queue and hands out again, so the map keys are a few
+  thousand pointers used over and over. An entry is inserted the first time a
+  pointer is seen, written in place every time after, and consumed by zeroing
+  its time: no insert, no delete, no lock on the path every request takes. The
+  map holds 65 536 pointers (under 5 MiB); a full one is the counted loss it
+  always was, and "still in flight" counts the entries whose time is unconsumed.
+- **The row is per-cpu** (`BPF_MAP_TYPE_PERCPU_HASH`): each cpu adds to its own
+  copy with a load and a store, which is safe because a raw tracepoint
+  program runs with preemption off and the kernel skips, and counts, a nested
+  run of the same program on its cpu. The copies are summed once, at the end,
+  after the detach and the grace period, exactly as the shared rows were read.
+
+Per request on the path every paired completion takes: open 2 helpers (3 under
+a process filter) where it was 6, close 5 where it was 11, no lock, no atomic.
+Held by `bpf::io::tests::the_histogram_programs_hot_paths_call_only_what_a_row_needs`
+and `a_histogram_close_writes_no_record_and_counts_its_row_without_an_atomic`.
+The histogram's answer is unchanged: `scenario_io` and `family_io` green,
+including `a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make`
+(1 edge crossing, inside its bound).
+
+**What is not known yet: the new percentage.** It needs the run this wave's
+stream could not make. The test now prints the per-request cost beside the
+percentage and, under `kernel.bpf_stats_enabled=1`, each program's own run
+time per run, read from the tool's descriptors while it runs -- which splits
+what is left between the programs and what any pair of programs costs (the
+tracepoints' dispatch, the cache misses on the request).
+
+**Whether 1 % is the right criterion** (reasoned, not measured). 25 ns per
+request has to pay for two raw-tracepoint dispatches (`__bpf_trace_run`: a
+per-cpu recursion counter, the run context, `rcu_read_lock`, an indirect call),
+two `bpf_ktime_get_ns`, one lookup on each side to pair the two moments, and a
+row -- the least any interval measurement between two tracepoints does. On a
+device that costs nothing (`completion_nsec=0`, completed inline), the
+denominator is the block layer's own submission path, about 2.5 us a request;
+on any device that takes time the same nanoseconds are a fraction of a percent.
+If the coordinator's run reads above 1 % with the programs' own run time a
+small part of the per-request cost, the criterion to keep is a per-request
+cost in nanoseconds on this load (the figure the test now prints), not a
+percentage of a device that does no work. If the programs' own time is most of
+it, there is more to take out here, and the next candidate is the device's two
+`probe_read_kernel` calls, which a BTF-typed tracepoint (`tp_btf`) would turn
+into two loads -- a program type `src/bpf/syscall.rs` does not load yet.
+
+**A pre-existing hazard, unchanged by this and not fixed.** A completion whose
+run the kernel skipped (recursion, counted in `skipped`) leaves its entry's
+time unconsumed; if the next request to reuse that pointer belongs to a task
+the open program refuses, the close finds the old time and counts a long
+interval. The ring pair has the same shape (the entry stays until the pointer's
+next open). Reasoned from the code, not seen; bounded by the skip count, which
+the run reports as an upper bound on loss.

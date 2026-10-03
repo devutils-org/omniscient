@@ -40,6 +40,16 @@
 //! record per request is the cost that grows with the workload. The rows are
 //! read once, at the end, after the closing program is detached.
 //!
+//! Those two programs are their own pair, not the ring pair with a different
+//! ending ([`histogram_open_instructions`], [`histogram_close_instructions`]).
+//! The ring pair, counting into a row, cost 23.6 % of a 3.16 M IOPS load: per
+//! request it read the submitter's name and request identity nobody would see,
+//! six fields of the request where one row needs the device, inserted and
+//! deleted a hash entry under two bucket locks, and added to a row every cpu
+//! shared with two atomic adds. The histogram pair reads the clock, the entry
+//! and the device, writes the entry in place, and adds to its own cpu's copy of
+//! the row (`docs/scenarios/io.md`, defect 19).
+//!
 //! **The scope comes from the kernel, not from this program.** A request
 //! pointer is freed and handed straight back out, often within a millisecond,
 //! so `blk:<ptr>` alone attributes one request's latency to another; the
@@ -159,6 +169,18 @@ const COMPLETE_SIGNATURES: [&[&str]; 2] = [&COMPLETE_SIGNATURE, &ERRNO_COMPLETE_
 /// together; this leaves room for a synthetic sweep and for the requests of
 /// every other process when a run is machine-wide.
 const MAX_INFLIGHT: u32 = 16384;
+
+/// How many request pointers a histogram run may see.
+///
+/// Larger than `MAX_INFLIGHT` because a histogram's entries are not deleted:
+/// they count the request structures the kernel has handed this run's
+/// requests in, which is every hardware queue's depth on every device used --
+/// an NVMe drive with 24 queues of 1023 is 24552 by itself, if every tag is
+/// used. At about 72 bytes per preallocated element this is under 5 MiB.
+const MAX_REQUESTS_SEEN: u32 = 65536;
+
+/// A histogram's in-flight entry: the open time, and nothing else.
+const HIST_ENTRY_VALUE_BYTES: usize = 8;
 
 /// Slots of the drop counter, one per thing that can be lost.
 const DROP_INFLIGHT: u32 = 0;
@@ -523,7 +545,6 @@ fn open_instructions(
 }
 
 /// The program on the closing tracepoint: subtract, describe, publish.
-#[cfg(test)]
 fn close_instructions(
     btf: &Btf,
     stage: Stage,
@@ -533,44 +554,6 @@ fn close_instructions(
     counters_fd: i32,
     storage_fd: Option<i32>,
 ) -> Result<Vec<Insn>, String> {
-    close_instructions_into(
-        btf,
-        stage,
-        submitter,
-        inflight_fd,
-        Sink::Ring(ring_fd),
-        counters_fd,
-        storage_fd,
-    )
-}
-
-/// Where the closing program puts a measurement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Sink {
-    /// One record per request, through the ring: what a join, a filter and
-    /// every emit but a histogram need.
-    Ring(i32),
-    /// One count in a `(dev, log2 bucket)` row of this hash, and the interval
-    /// added to the row's exact total. The requests are not reported one by
-    /// one, so the ring is not written at all.
-    Histogram(i32),
-}
-
-fn close_instructions_into(
-    btf: &Btf,
-    stage: Stage,
-    submitter: Submitter,
-    inflight_fd: i32,
-    sink: Sink,
-    counters_fd: i32,
-    storage_fd: Option<i32>,
-) -> Result<Vec<Insn>, String> {
-    if matches!(sink, Sink::Histogram(_)) && stage.opens_at().is_none() {
-        return Err(format!(
-            "a kernel-side histogram is of an interval, and `{}` alone measures none",
-            stage.closes_at()
-        ));
-    }
     let tracepoint = stage.closes_at();
     let accepted: &[&[&str]] = if tracepoint == "block_rq_complete" {
         &COMPLETE_SIGNATURES
@@ -729,22 +712,15 @@ fn close_instructions_into(
     );
 
     program.label("publish");
-    match sink {
-        Sink::Ring(ring_fd) => {
-            program.extend(Insn::load_map_fd(1, ring_fd));
-            program.push(Insn::mov64_reg(2, R10));
-            program.push(Insn::add64_imm(2, EVENT as i32));
-            program.push(Insn::mov64_imm(3, RECORD_BYTES as i32));
-            program.push(Insn::mov64_imm(4, 0));
-            program.push(Insn::call(helper::RINGBUF_OUTPUT));
-            program.jump_to("done", Insn::jsge_imm(0, 0, 0));
-            count(&mut program, counters_fd, CLOSE_DROP_KEY, DROP_RING, "done");
-            program.jump_to("done", Insn::ja());
-        }
-        Sink::Histogram(hist_fd) => {
-            count_into_histogram(&mut program, hist_fd, counters_fd);
-        }
-    }
+    program.extend(Insn::load_map_fd(1, ring_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, EVENT as i32));
+    program.push(Insn::mov64_imm(3, RECORD_BYTES as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::RINGBUF_OUTPUT));
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count(&mut program, counters_fd, CLOSE_DROP_KEY, DROP_RING, "done");
+    program.jump_to("done", Insn::ja());
 
     if paired {
         program.label("unpaired");
@@ -785,16 +761,134 @@ fn close_instructions_into(
     Ok(instructions)
 }
 
-/// Adds the interval at `EV_DELTA` to its `(dev, log2 bucket)` row, then
-/// jumps to `done`.
+/// The opening program of a kernel-side histogram: when, and nothing else.
 ///
-/// The bucket is `insn::push_log2_bucket`'s, the numbering the emit layer's
-/// own log2 histogram uses, so a row's low bound travels on its event and the
-/// emit layer puts every request back in the bucket the kernel put it in. The
-/// row is shared by every cpu, so both words are added atomically; a row two
-/// cpus create at once is inserted by one of them (`BPF_NOEXIST`) and added to
-/// by the other, and a full map is a counted loss.
-fn count_into_histogram(program: &mut Program, hist_fd: i32, counters_fd: i32) {
+/// A histogram row is `(device, bucket)`, so the submitter's name, its thread
+/// and the request it was serving -- what the ring record carries, and what
+/// [`open_instructions`] spends a `bpf_get_current_comm`, a task-storage
+/// lookup and a forty-byte entry on -- are read by nobody. What is left is the
+/// filter, the clock and one store.
+///
+/// **The entry outlives its request.** A request pointer is one slot of a
+/// pool the kernel allocated once per queue and hands out again as soon as the
+/// request completes, so the keys this map sees are a few thousand pointers
+/// used over and over. The ring path inserts an entry at every open and
+/// deletes it at every close, which at two million requests a second is two
+/// bucket locks and a free list each way per request. Here the entry is
+/// inserted the first time a pointer is seen and written in place every time
+/// after, and the close marks it consumed by zeroing the time instead of
+/// deleting it: an inlined hash lookup on each side, and no lock. A zero time
+/// is "not in flight", which `bpf_ktime_get_ns` never returns.
+fn histogram_open_instructions(
+    btf: &Btf,
+    stage: Stage,
+    submitter: Submitter,
+    inflight_fd: i32,
+    counters_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let tracepoint = stage
+        .opens_at()
+        .expect("an open program is only built for a stage that has one");
+    check_signature(btf, tracepoint, &[&REQUEST_SIGNATURE])?;
+
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::ldx(BPF_DW, 7, 6, 0));
+
+    // The filter reads the task where the ring path's entry would hold it, so
+    // the comparison is the same one, against the same slot.
+    if let Some((slot, wanted)) = submitter.comparison(ENTRY_VALUE) {
+        program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+        program.push(Insn::stx(BPF_W, R10, ENTRY_VALUE + VAL_TID, 0));
+        program.push(Insn::rsh64_imm(0, 32));
+        program.push(Insn::stx(BPF_W, R10, ENTRY_VALUE + VAL_TGID, 0));
+        program.push(Insn::ldx(BPF_W, 1, R10, slot));
+        program.jump_to("done", Insn::jne_imm(1, wanted as i32, 0));
+    }
+
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+
+    program.push(Insn::stx(BPF_DW, R10, ENTRY_KEY, 7));
+    program.extend(Insn::load_map_fd(1, inflight_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, ENTRY_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("first_sighting", Insn::jeq_imm(0, 0, 0));
+    // The pointer has been seen before: its slot is written in place.
+    program.push(Insn::stx(BPF_DW, 0, VAL_OPEN_TS, 8));
+    program.jump_to("done", Insn::ja());
+
+    // The first time this run sees the pointer. `BPF_ANY` rather than
+    // `BPF_NOEXIST`: nothing else inserts this key, and if something had, the
+    // newer time is the right one.
+    program.label("first_sighting");
+    program.push(Insn::stx(BPF_DW, R10, ENTRY_VALUE + VAL_OPEN_TS, 8));
+    program.extend(Insn::load_map_fd(1, inflight_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, ENTRY_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, ENTRY_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    // The map is full of pointers already seen: this request is never timed.
+    count(
+        &mut program,
+        counters_fd,
+        OPEN_DROP_KEY,
+        DROP_INFLIGHT,
+        "done",
+    );
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// The closing program of a kernel-side histogram: subtract, bucket, count.
+///
+/// What it reads out of the request is the device, because that is half the
+/// row's key, and nothing else: the ring path's sector, length, flags, status,
+/// cpu and scope are fields of a record this program does not write.
+///
+/// **The row is per-cpu, and the additions plain.** The first version counted
+/// into one shared hash with two atomic adds per request, and at two million
+/// completions a second on eight cpus those adds all land on the same cache
+/// line -- one device, and almost every request in one or two buckets -- which
+/// then moves between cpus on every request. A `BPF_MAP_TYPE_PERCPU_HASH`
+/// gives each cpu its own copy of the row, which nothing else writes: a raw
+/// tracepoint program runs with preemption off and is never re-entered on its
+/// own cpu (the kernel skips and counts the nested run, [`BlockProgram::skipped`]),
+/// so a load, an add and a store cannot be interleaved. The reader sums the
+/// copies, once, at the end.
+fn histogram_close_instructions(
+    btf: &Btf,
+    stage: Stage,
+    inflight_fd: i32,
+    hist_fd: i32,
+    counters_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    if stage.opens_at().is_none() {
+        return Err(format!(
+            "a kernel-side histogram is of an interval, and `{}` alone measures none",
+            stage.closes_at()
+        ));
+    }
+    let tracepoint = stage.closes_at();
+    let accepted: &[&[&str]] = if tracepoint == "block_rq_complete" {
+        &COMPLETE_SIGNATURES
+    } else {
+        &[&REQUEST_SIGNATURE]
+    };
+    check_signature(btf, tracepoint, accepted)?;
+    let part = btf.member_offset("request", "part")?;
+    let bd_dev = btf.member_offset("block_device", "bd_dev")?;
+
     const LABELS: insn::Log2Labels = [
         "hist_b32",
         "hist_b16",
@@ -804,13 +898,39 @@ fn count_into_histogram(program: &mut Program, hist_fd: i32, counters_fd: i32) {
         "hist_b1",
         "hist_bucket",
     ];
-    // r7 held the request and nothing reads it past here; it is callee-saved,
-    // so the interval survives the helper calls below.
-    program.push(Insn::ldx(BPF_DW, 7, R10, EV_DELTA));
-    insn::push_log2_bucket(program, 7, &LABELS);
+
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::ldx(BPF_DW, 7, 6, 0));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+
+    program.push(Insn::stx(BPF_DW, R10, LOOKUP_KEY, 7));
+    program.extend(Insn::load_map_fd(1, inflight_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, LOOKUP_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    // No entry, or one whose time was consumed: this run never saw the
+    // request open, because it opened before the attach or belongs to a task
+    // the open program refused.
+    program.jump_to("unpaired", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 9, 0, VAL_OPEN_TS));
+    program.jump_to("unpaired", Insn::jeq_imm(9, 0, 0));
+    program.push(Insn::st_imm(BPF_DW, 0, VAL_OPEN_TS, 0));
+    // The interval, kept in r8 across every helper call below.
+    program.push(Insn::sub64_reg(8, 9));
+
+    // The device, or zero for a request that belongs to no partition -- the
+    // same reading, and the same zero, as the ring path's.
+    program.push(Insn::st_imm(BPF_DW, R10, HIST_KEY, 0));
+    read_field(&mut program, PART, 8, 7, part);
+    program.push(Insn::ldx(BPF_DW, 9, R10, PART));
+    program.jump_to("no_device", Insn::jeq_imm(9, 0, 0));
+    read_field(&mut program, HIST_KEY, 4, 9, bd_dev);
+    program.label("no_device");
+
+    insn::push_log2_bucket(&mut program, 8, &LABELS);
     program.push(Insn::stx(BPF_W, R10, HIST_KEY + 4, 3));
-    program.push(Insn::ldx(BPF_W, 1, R10, EV_DEV));
-    program.push(Insn::stx(BPF_W, R10, HIST_KEY, 1));
 
     let lookup = |program: &mut Program| {
         program.extend(Insn::load_map_fd(1, hist_fd));
@@ -818,20 +938,26 @@ fn count_into_histogram(program: &mut Program, hist_fd: i32, counters_fd: i32) {
         program.push(Insn::add64_imm(2, HIST_KEY as i32));
         program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
     };
+    // This cpu's copy of the row: plain loads and stores, no `lock` prefix.
     let add = |program: &mut Program| {
-        program.push(Insn::mov64_imm(1, 1));
-        program.push(Insn::atomic_add(BPF_DW, 0, HIST_VAL_COUNT, 1));
-        program.push(Insn::atomic_add(BPF_DW, 0, HIST_VAL_TOTAL, 7));
+        program.push(Insn::ldx(BPF_DW, 1, 0, HIST_VAL_COUNT));
+        program.push(Insn::add64_imm(1, 1));
+        program.push(Insn::stx(BPF_DW, 0, HIST_VAL_COUNT, 1));
+        program.push(Insn::ldx(BPF_DW, 1, 0, HIST_VAL_TOTAL));
+        program.push(Insn::add64_reg(1, 8));
+        program.push(Insn::stx(BPF_DW, 0, HIST_VAL_TOTAL, 1));
         program.jump_to("done", Insn::ja());
     };
 
-    lookup(program);
+    lookup(&mut program);
     program.jump_to("hist_new", Insn::jeq_imm(0, 0, 0));
-    add(program);
+    add(&mut program);
 
+    // A new row: the kernel writes this value into this cpu's copy and zeroes
+    // every other cpu's.
     program.label("hist_new");
     program.push(Insn::st_imm(BPF_DW, R10, HIST_VALUE + HIST_VAL_COUNT, 1));
-    program.push(Insn::stx(BPF_DW, R10, HIST_VALUE + HIST_VAL_TOTAL, 7));
+    program.push(Insn::stx(BPF_DW, R10, HIST_VALUE + HIST_VAL_TOTAL, 8));
     program.extend(Insn::load_map_fd(1, hist_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, HIST_KEY as i32));
@@ -841,18 +967,30 @@ fn count_into_histogram(program: &mut Program, hist_fd: i32, counters_fd: i32) {
     program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::jeq_imm(0, 0, 0));
     program.jump_to("hist_raced", Insn::jeq_imm(0, -EEXIST, 0));
-    count(program, counters_fd, CLOSE_DROP_KEY, DROP_HIST, "done");
+    count(&mut program, counters_fd, CLOSE_DROP_KEY, DROP_HIST, "done");
     program.jump_to("done", Insn::ja());
 
-    // Another cpu made the row between the lookup and the insert: add to its
-    // row, once, straight-line -- a jump back is a loop the verifier refuses.
+    // Another cpu made the row between the lookup and the insert: add to this
+    // cpu's copy of it, once, straight-line -- a jump back is a loop the
+    // verifier refuses.
     program.label("hist_raced");
-    lookup(program);
+    lookup(&mut program);
     program.jump_to("hist_gone", Insn::jeq_imm(0, 0, 0));
-    add(program);
+    add(&mut program);
     program.label("hist_gone");
-    count(program, counters_fd, CLOSE_DROP_KEY, DROP_HIST, "done");
+    count(&mut program, counters_fd, CLOSE_DROP_KEY, DROP_HIST, "done");
     program.jump_to("done", Insn::ja());
+
+    program.label("unpaired");
+    count(&mut program, counters_fd, CLOSE_DROP_KEY, UNPAIRED, "done");
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
 }
 
 /// One `(device, log2 bucket)` row of the kernel-side latency histogram, over
@@ -915,7 +1053,7 @@ pub struct BlockProgram {
     close_link: Option<OwnedFd>,
     /// The kernel-side histogram, when the closing program counts into one
     /// rather than publishing a record per request.
-    histogram: Option<Hash>,
+    histogram: Option<PerCpuRows>,
     /// Why the programs read no request identity, when they do not: this
     /// kernel would not give them a task-storage map. The measurement is the
     /// same; only `req` is missing from every event, and the run says so.
@@ -961,6 +1099,17 @@ impl BlockProgram {
             .map_err(|error| map_failure("block drop counter", error))?;
 
         let inflight = match stage.opens_at() {
+            // A histogram's entry is the open time alone, and stays for the
+            // run: see `histogram_open_instructions`.
+            Some(_) if histogram => Some(
+                Hash::create(
+                    ENTRY_KEY_BYTES,
+                    HIST_ENTRY_VALUE_BYTES,
+                    MAX_REQUESTS_SEEN,
+                    stage.map_name(),
+                )
+                .map_err(|error| map_failure("in-flight request map", error))?,
+            ),
             Some(_) => Some(
                 Hash::create(
                     ENTRY_KEY_BYTES,
@@ -977,37 +1126,39 @@ impl BlockProgram {
         // The request identity is read wherever the submitting task is the
         // current one. A kernel that cannot make the map still gets the
         // measurement, without the identity, and the collector says which.
+        // A histogram's rows carry no request, so its programs read none.
         let (storage_fd, no_request_identity) = match super::request::storage() {
+            _ if histogram => (None, None),
             Ok(storage) => (Some(storage.as_raw_fd()), None),
             Err(reason) => (None, Some(reason)),
         };
 
         let histogram = if histogram {
             Some(
-                Hash::create(
-                    HIST_KEY_BYTES,
-                    HIST_VALUE_BYTES,
-                    MAX_HIST_ROWS,
-                    "omn_blk_hist",
-                )
-                .map_err(|error| map_failure("block latency histogram", error))?,
+                PerCpuRows::create(MAX_HIST_ROWS, "omn_blk_hist")
+                    .map_err(|error| map_failure("block latency histogram", error))?,
             )
         } else {
             None
         };
-        let sink = match &histogram {
-            Some(map) => Sink::Histogram(map.as_raw_fd()),
-            None => Sink::Ring(ring_map.as_raw_fd()),
+        let close = match &histogram {
+            Some(rows) => histogram_close_instructions(
+                btf,
+                stage,
+                inflight_fd,
+                rows.as_raw_fd(),
+                counters.as_raw_fd(),
+            )?,
+            None => close_instructions(
+                btf,
+                stage,
+                submitter,
+                inflight_fd,
+                ring_map.as_raw_fd(),
+                counters.as_raw_fd(),
+                storage_fd,
+            )?,
         };
-        let close = close_instructions_into(
-            btf,
-            stage,
-            submitter,
-            inflight_fd,
-            sink,
-            counters.as_raw_fd(),
-            storage_fd,
-        )?;
         let close_program = load(&close, "omn_blk_close")?;
         let status_is_errno = stage.closes_at() == "block_rq_complete"
             && check_signature(btf, "block_rq_complete", &COMPLETE_SIGNATURES)? == 1;
@@ -1021,14 +1172,24 @@ impl BlockProgram {
         // wrote, because the lookup that fails is the only path to it.
         let (open_program, open_link) = match stage.opens_at() {
             Some(tracepoint) => {
-                let open = open_instructions(
-                    btf,
-                    stage,
-                    submitter,
-                    inflight_fd,
-                    counters.as_raw_fd(),
-                    storage_fd,
-                )?;
+                let open = if histogram.is_some() {
+                    histogram_open_instructions(
+                        btf,
+                        stage,
+                        submitter,
+                        inflight_fd,
+                        counters.as_raw_fd(),
+                    )?
+                } else {
+                    open_instructions(
+                        btf,
+                        stage,
+                        submitter,
+                        inflight_fd,
+                        counters.as_raw_fd(),
+                        storage_fd,
+                    )?
+                };
                 let program = load(&open, "omn_blk_open")?;
                 let link = syscall::raw_tracepoint_open(tracepoint, program.as_raw_fd()).map_err(
                     |error| format!("cannot attach to the `{tracepoint}` tracepoint: {error}"),
@@ -1107,22 +1268,22 @@ impl BlockProgram {
                  may be in no row"
             )
         });
-        let drained = map
-            .drain()
+        let read = map
+            .read()
             .map_err(|error| format!("cannot read the block latency histogram: {error}"))?;
-        if drained.vanished > 0 || drained.truncated {
+        if read.vanished > 0 || read.truncated {
             return Err(format!(
                 "the block latency histogram's walk lost its place ({} rows vanished{}), so \
                  its counts are not the requests'",
-                drained.vanished,
-                if drained.truncated {
+                read.vanished,
+                if read.truncated {
                     ", walk truncated"
                 } else {
                     ""
                 }
             ));
         }
-        let rows = drained
+        let rows = read
             .entries
             .iter()
             .filter_map(|(key, value)| HistRow::decode(key, value))
@@ -1169,12 +1330,105 @@ impl BlockProgram {
     /// Their interval is real and is in no event, because it has no end yet.
     /// That is a fact about the window rather than a loss, and it is reported
     /// as one.
+    ///
+    /// A histogram's entries outlive their requests, so there it is the
+    /// entries whose open time was not consumed, not every entry.
     pub fn still_in_flight(&self) -> usize {
-        self.inflight
-            .as_ref()
-            .and_then(|map| map.len().ok())
-            .unwrap_or(0)
+        let Some(map) = self.inflight.as_ref() else {
+            return 0;
+        };
+        if self.histogram.is_none() {
+            return map.len().unwrap_or(0);
+        }
+        let Ok((keys, _)) = map.keys() else {
+            return 0;
+        };
+        keys.iter()
+            .filter_map(|key| {
+                syscall::map_lookup(map.as_raw_fd(), key, HIST_ENTRY_VALUE_BYTES)
+                    .ok()
+                    .flatten()
+            })
+            .filter(|value| value.iter().any(|byte| *byte != 0))
+            .count()
     }
+}
+
+/// A `BPF_MAP_TYPE_PERCPU_HASH` of histogram rows, read once and summed.
+///
+/// Each cpu writes its own copy of a row and the reader adds the copies up.
+/// The map layer's `Hash` is a shared hash, and `Rows` swaps two of them for a
+/// drain on a tick; this map is read once, after its program is detached, so
+/// it needs neither, and lives here rather than in a shared file for one user.
+struct PerCpuRows {
+    fd: OwnedFd,
+    max_entries: u32,
+    cpus: usize,
+}
+
+/// `bpf_map_type::BPF_MAP_TYPE_PERCPU_HASH`.
+const BPF_MAP_TYPE_PERCPU_HASH: u32 = 5;
+
+/// What one read of the rows found: every row, its copies summed.
+#[derive(Debug, Default)]
+struct RowsRead {
+    entries: Vec<(Vec<u8>, Vec<u8>)>,
+    vanished: u64,
+    truncated: bool,
+}
+
+impl PerCpuRows {
+    fn create(max_entries: u32, name: &str) -> std::io::Result<Self> {
+        let fd = syscall::map_create(
+            BPF_MAP_TYPE_PERCPU_HASH,
+            HIST_KEY_BYTES as u32,
+            HIST_VALUE_BYTES as u32,
+            max_entries,
+            name,
+        )?;
+        Ok(Self {
+            fd,
+            max_entries,
+            cpus: syscall::possible_cpus(),
+        })
+    }
+
+    fn as_raw_fd(&self) -> i32 {
+        self.fd.as_raw_fd()
+    }
+
+    /// Every row, with each word of its value summed over the cpus.
+    ///
+    /// The kernel hands back one value per *possible* cpu, each padded to
+    /// eight bytes; `HIST_VALUE_BYTES` is already a multiple of eight.
+    fn read(&self) -> std::io::Result<RowsRead> {
+        let fd = self.as_raw_fd();
+        let mut read = RowsRead::default();
+        let mut from: Option<Vec<u8>> = None;
+        while let Some(key) = syscall::map_next_key(fd, from.as_deref(), HIST_KEY_BYTES)? {
+            if read.entries.len() + read.vanished as usize >= self.max_entries as usize {
+                read.truncated = true;
+                break;
+            }
+            match syscall::map_lookup(fd, &key, HIST_VALUE_BYTES * self.cpus)? {
+                Some(copies) => read.entries.push((key.clone(), sum_copies(&copies))),
+                None => read.vanished += 1,
+            }
+            from = Some(key);
+        }
+        Ok(read)
+    }
+}
+
+/// One row's per-cpu copies, added word by word into one value.
+fn sum_copies(copies: &[u8]) -> Vec<u8> {
+    let mut words = [0u64; HIST_VALUE_BYTES / 8];
+    for copy in copies.chunks_exact(HIST_VALUE_BYTES) {
+        for (word, bytes) in words.iter_mut().zip(copy.chunks_exact(8)) {
+            *word = word.wrapping_add(u64::from_ne_bytes(bytes.try_into().expect("8")));
+        }
+    }
+    words.iter().flat_map(|word| word.to_ne_bytes()).collect()
 }
 
 fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
@@ -1292,6 +1546,14 @@ mod tests {
                 programs.push(
                     open_instructions(btf, stage, Submitter::Any, 3, 5, Some(6))
                         .unwrap_or_else(|reason| panic!("{stage:?} open: {reason}")),
+                );
+                programs.push(
+                    histogram_open_instructions(btf, stage, Submitter::Any, 3, 5)
+                        .unwrap_or_else(|reason| panic!("{stage:?} histogram open: {reason}")),
+                );
+                programs.push(
+                    histogram_close_instructions(btf, stage, 3, 7, 5)
+                        .unwrap_or_else(|reason| panic!("{stage:?} histogram close: {reason}")),
                 );
             }
             for program in programs {
@@ -1424,22 +1686,16 @@ mod tests {
         );
     }
 
-    /// A close into the histogram adds to a `(device, bucket)` row in the
-    /// kernel and writes no ring record: the per-request stream is exactly
-    /// what `--emit hist` alone is meant not to pay for.
+    /// A close into the histogram adds to this cpu's copy of a `(device,
+    /// bucket)` row and writes no ring record: the per-request stream is
+    /// exactly what `--emit hist` alone is meant not to pay for, and an atomic
+    /// add on a row every cpu shares is what the 23.6 % at three million
+    /// requests a second was made of (`docs/scenarios/io.md`, defect 19).
     #[test]
-    fn a_histogram_close_writes_no_record_and_counts_its_row_atomically() {
+    fn a_histogram_close_writes_no_record_and_counts_its_row_without_an_atomic() {
         let Some(btf) = kernel_btf() else { return };
-        let program = close_instructions_into(
-            btf,
-            Stage::Latency,
-            Submitter::Any,
-            3,
-            Sink::Histogram(7),
-            5,
-            Some(6),
-        )
-        .expect("a program");
+        let program =
+            histogram_close_instructions(btf, Stage::Latency, 3, 7, 5).expect("a program");
         let helpers = helpers_called(&program);
         assert!(
             !helpers.contains(&helper::RINGBUF_OUTPUT),
@@ -1449,23 +1705,112 @@ mod tests {
             helpers.contains(&helper::MAP_UPDATE_ELEM),
             "a new row is inserted"
         );
-        // `lock xadd` on a doubleword: the count and the total, on each of the
-        // two paths into a row (found, and lost the insert race).
+        assert!(
+            !helpers.contains(&helper::MAP_DELETE_ELEM),
+            "the entry is consumed in place, not deleted"
+        );
         const ATOMIC_DW: u8 = 0xdb;
-        let atomics = program.iter().filter(|insn| insn.code == ATOMIC_DW).count();
-        assert_eq!(atomics, 4, "two atomic adds on each path into a row");
+        assert_eq!(
+            program.iter().filter(|insn| insn.code == ATOMIC_DW).count(),
+            0,
+            "each cpu adds to its own copy of the row"
+        );
         // A stage with no interval has nothing to bucket.
-        let error = close_instructions_into(
-            btf,
-            Stage::Size,
-            Submitter::Any,
-            -1,
-            Sink::Histogram(7),
-            5,
-            Some(6),
-        )
-        .expect_err("io.size has no interval");
+        let error = histogram_close_instructions(btf, Stage::Size, -1, 7, 5)
+            .expect_err("io.size has no interval");
         assert!(error.contains("measures none"), "{error}");
+    }
+
+    /// The hot path of each histogram program, as helper calls: what a
+    /// request costs, counted where it can be counted without a device fast
+    /// enough to measure it. A first sighting and a full map are the rare
+    /// paths; the paths every request takes are these.
+    ///
+    /// - open: the clock, and one lookup -- plus the task, when a process was
+    ///   named. No comm, no task storage, no insert.
+    /// - close: the clock, the lookup, the two reads that find the device, and
+    ///   the row's lookup. No delete, no record, no cpu id.
+    #[test]
+    fn the_histogram_programs_hot_paths_call_only_what_a_row_needs() {
+        let Some(btf) = kernel_btf() else { return };
+        let open = histogram_open_instructions(btf, Stage::Latency, Submitter::Any, 3, 5)
+            .expect("a program");
+        let open_helpers = helpers_called(&open);
+        for absent in [
+            helper::GET_CURRENT_COMM,
+            helper::GET_CURRENT_PID_TGID,
+            helper::TASK_STORAGE_GET,
+        ] {
+            assert!(
+                !open_helpers.contains(&absent),
+                "the machine-wide histogram open calls helper {absent}"
+            );
+        }
+        // The whole program: clock, lookup, and the first-sighting insert and
+        // its counter's lookup.
+        assert_eq!(
+            open_helpers,
+            [
+                helper::KTIME_GET_NS,
+                helper::MAP_LOOKUP_ELEM,
+                helper::MAP_UPDATE_ELEM,
+                helper::MAP_LOOKUP_ELEM,
+            ]
+        );
+        let filtered =
+            histogram_open_instructions(btf, Stage::Latency, Submitter::Process(4242), 3, 5)
+                .expect("a program");
+        assert_eq!(
+            filtered.iter().filter(|insn| insn.imm == 4242).count(),
+            1,
+            "one comparison, against the thread group of the submitting task"
+        );
+        assert_eq!(
+            helpers_called(&filtered)[..2],
+            [helper::GET_CURRENT_PID_TGID, helper::KTIME_GET_NS],
+            "the filter runs before the clock, so a refused request costs one helper"
+        );
+
+        let close = histogram_close_instructions(btf, Stage::Latency, 3, 7, 5).expect("a program");
+        let close_helpers = helpers_called(&close);
+        // Up to the row's first lookup, in order: what every paired
+        // completion pays.
+        assert_eq!(
+            close_helpers[..5],
+            [
+                helper::KTIME_GET_NS,
+                helper::MAP_LOOKUP_ELEM,
+                helper::PROBE_READ_KERNEL,
+                helper::PROBE_READ_KERNEL,
+                helper::MAP_LOOKUP_ELEM,
+            ]
+        );
+        for absent in [
+            helper::GET_CURRENT_COMM,
+            helper::GET_SMP_PROCESSOR_ID,
+            helper::MAP_DELETE_ELEM,
+            helper::RINGBUF_OUTPUT,
+        ] {
+            assert!(
+                !close_helpers.contains(&absent),
+                "the histogram close calls helper {absent}"
+            );
+        }
+    }
+
+    /// A row's per-cpu copies are added word by word: the count with the
+    /// count, the total with the total, and nothing carried across.
+    #[test]
+    fn a_rows_per_cpu_copies_sum_into_one_value() {
+        let mut copies = Vec::new();
+        for (count, total) in [(3u64, 300u64), (0, 0), (2, 1_000)] {
+            copies.extend(count.to_ne_bytes());
+            copies.extend(total.to_ne_bytes());
+        }
+        let summed = sum_copies(&copies);
+        assert_eq!(summed.len(), HIST_VALUE_BYTES);
+        let row = HistRow::decode(&[0u8; HIST_KEY_BYTES], &summed).expect("a row");
+        assert_eq!((row.count, row.total_ns), (5, 1_300));
     }
 
     /// The row the program writes is the row the reader decodes: the device
