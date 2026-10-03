@@ -386,3 +386,19 @@ Fixed on the branch after the adversarial review:
   line while the answer is the second pass's (the shim's 158.98 ms against
   the first run's 148.13 ms). `truth_of` now reads the second half of the
   lines when the answer is a second pass.
+
+**Shown, this round** (with the capabilities, `getcap` before each run,
+load average 16 to 27 from the other streams): `cargo test --lib
+triage::latency` 26 passed (seven new); `cargo test --test triage` 27
+passed before the commit, the child and thread tests among them (the thread
+test followed as `thread` here, the machine being loaded). One `make check`
+on `3857254`: red at `tests/budget.rs`
+(`the_extra_cpu_a_faster_poll_costs_...`, launcher's file, the same as the
+first round). The `--no-fail-fast` run after it wrote to a log another
+stream's run was also writing to, so its tally (13 failures, among them
+`cases`, `runner`, `scenario_io`, `family_sched`, `unwind` and three of
+`tests/triage.rs`) is not this tree's alone and is not counted. Rerun
+alone, `tests/triage.rs` failed two different tests (the disk latency, an
+escalation shedding) that each passed when run alone: the load, as in the
+first round. **Not shown**: the unplaced path on a quiet machine (none was
+available), and the tail's median triggering the second pass.
