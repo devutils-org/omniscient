@@ -702,12 +702,15 @@ under \fBpython3 \-X perf\fR or \fBnode \-\-perf\-basic\-prof\fR the
 leaf is always the runtime's, and the program's function is the frame the map
 named; the sentence says which. The maps are the ones the profile's names note
 cites, read back from \fI/tmp\fR; one that is gone is said. A profile of an
-interpreter (python, node, a JVM, ruby, perl, php, lua, by the program or its
-library) in which no frame of the program's own is named and no function holds
-half the samples is said to be spread over the interpreter's own functions,
-with what would write a perf map, and no C function is presented as the
-suspect. A block's stack is printed leaf first to the program's own frame
-(one a perf map named, or one in its executable): at least four frames, at
+interpreter (python, node, a JVM, ruby, perl, php, lua and their usual
+spellings, by a name the program goes by or by its library in at least half
+the samples) whose hottest function was charged by its leaf and holds less
+than half the samples is said to be spread, with its top C functions listed
+without saying whose they are and what would write a perf map; none is
+presented as the suspect. A function charged by its leaf while some samples
+had a perf-map frame is said to be. A block's stack is printed leaf first to
+the program's own frame (the innermost one a perf map named, else the
+innermost in its executable, symlinks followed): at least four frames, at
 most sixteen. The verdict's notes carry each profile's \fInames came from\fR
 line under its request's label.
 .PP
@@ -728,7 +731,9 @@ is the difference when its own cost \(em its leaf samples, or under a perf
 map the samples whose innermost named frame it is \(em moved beyond three standard
 deviations of Poisson noise, \fI|b \- a| / sqrt(a + b)\fR; the inclusive table
 shows what carried it. A folded file carries no loss accounting and no rate,
-and the answer says it could not check either.
+and the answer says it could not check either. A perf map a run cites is read
+back from \fI/tmp\fR when the runs are compared; one modified after the run's
+results were written is said to be, since it may hold another program's names.
 .SS The escalation
 \fBomn latency\fR pays for every detailed layer over the whole run. A session
 with an \fBescalate:\fR block pays for one at a time: its cheap pass \(em

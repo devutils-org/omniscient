@@ -144,17 +144,26 @@ different functions for the same run:
   the map is a file on this machine whose third field, per line, is the
   symbol a label then spells.
 - **A flat profile of an interpreter is said as one.** When the program is an
-  interpreter (python, node, a JVM, ruby, perl, php, lua -- by its name or by
-  a frame's module, `libpython3.14.so.1.0+0x2ebff6`), no frame of the
-  program's own is named, and no function holds half the samples, the time is
-  in the interpreter's own work, which every program it runs spends. Say that
-  and what would write a perf map; do not present the first of its C
-  functions as the suspect.
+  interpreter (python, node or nodejs, a JVM or jruby, ruby, perl, php or
+  php-fpm, lua or luajit) -- by a name its executable goes by, or by the
+  module of unnamed frames (`libpython3.14.so.1.0+0x2ebff6`) in at least half
+  the samples, so that a C program calling into an embedded python now and
+  then is not one -- and the hottest function was charged by its leaf and
+  holds less than half the samples, the program's own functions are not
+  named: say so, list the top C functions without saying whose they are (the
+  interpreter's work, or a C extension's at 45 %), and say what would write a
+  perf map. Do not present the first of them as the suspect. A function
+  charged by its leaf while a few samples had a perf-map frame (a JIT warming
+  up) is said to be charged by its leaf.
 - **A block's stack, to the program's own frame.** Read a blocking stack leaf
-  first as far as the innermost frame a perf map named or that lies in the
-  program's executable (`sqlite3+0x70880`), at least four frames and at most
-  sixteen: under an interpreter the program's function is the fifth
-  (`__read <- libpython x3 <- py::wait_for_input`).
+  first as far as the innermost frame a perf map named -- or, only when none
+  was, the innermost frame in the program's executable (`sqlite3+0x70880`) --
+  at least four frames and at most sixteen: under an interpreter the
+  program's function is the fifth (`__read <- libpython x3 <-
+  py::wait_for_input`), and a statically linked interpreter's own C frames
+  are in its executable (`python3.12+0x...`), so they must not end the
+  reach. The executable's frames are spelled by the file the kernel mapped,
+  symlinks followed (`python3` is `python3.14`).
 - **Say where the names came from.** Copy the `names came from` note of the
   request whose stacks you name. A frame printed as `module+0x...` was not
   named, and a stripped binary's are named only when the session's request
