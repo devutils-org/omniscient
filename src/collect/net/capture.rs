@@ -262,6 +262,9 @@ impl Collector for CaptureCollector {
                 // clock, and this is what the conversion out of it cost.
                 ts_err_ns,
                 kind: "net.capture".to_owned(),
+                // This process's network namespace: a packet socket sees
+                // the devices of the namespace it was created in and no
+                // other, so the index is one of this namespace's.
                 keys: vec![KeyValue::iface(ifindex, name)],
                 attrs,
                 collector_id: id.clone(),

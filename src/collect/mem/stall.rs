@@ -249,12 +249,17 @@ impl StallCollector {
             // about. What is wide is the *window*, and `window_ns` beside the
             // value already says how wide.
             let ts_ns = stamp(row.first_ns, closed_ns);
+            let mut attrs = attributes(stall, &row, window_ns);
+            attrs.push(Attr::uint(
+                "enclosing_ns",
+                enclosing(&row, ts_ns, closed_ns),
+            ));
             let event = Event {
                 ts_ns,
                 ts_err_ns: 0,
                 kind: source_of(stall).to_owned(),
                 keys: keys_of(stall, &row),
-                attrs: attributes(stall, &row, window_ns),
+                attrs,
                 collector_id: self.id.clone(),
                 seq: seq + index,
             };
@@ -549,6 +554,23 @@ fn stamp(first_ns: u64, closed_ns: u64) -> u64 {
     }
 }
 
+/// The length, from a drained row's stamp, of a window that encloses every
+/// episode it counts: to the last episode's end when the kernel recorded one,
+/// and to the drain's close otherwise, which also encloses them, only less
+/// tightly. An `overlap` rule's `enclosing:` reads it (`join::Rule::enclosing`).
+///
+/// Only on the rows a drain emits. A `count` run's rows are added up across
+/// drains and stamped at the run's close, so they have no window forward of
+/// their stamp; a rule that names this attribute on them is refused by the
+/// join for the missing attribute rather than given a window of zero.
+fn enclosing(row: &StallRow, ts_ns: u64, closed_ns: u64) -> u64 {
+    if row.last_ns > ts_ns {
+        row.last_ns - ts_ns
+    } else {
+        closed_ns.saturating_sub(ts_ns)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,6 +587,7 @@ mod tests {
             total_ns: 9_000_000,
             yielded: 512,
             first_ns: 0,
+            last_ns: 0,
             comm: "hog".to_owned(),
         }
     }
@@ -609,6 +632,20 @@ mod tests {
         assert_eq!(of(&attributes, "total_ns"), 9_000_000.0);
         assert_eq!(of(&attributes, crate::emit::WEIGHT_ATTR), 6.0);
         assert_eq!(of(&attributes, "pages_reclaimed"), 512.0);
+    }
+
+    /// A row's enclosing window runs from its stamp to its last episode's end,
+    /// and to the drain's close when the kernel recorded no end -- which still
+    /// encloses every episode, only less tightly.
+    #[test]
+    fn a_drained_rows_window_ends_at_its_last_episode_or_else_at_the_drain() {
+        let mut row = row();
+        row.first_ns = 1_000;
+        row.last_ns = 4_000;
+        let ts = stamp(row.first_ns, 10_000);
+        assert_eq!(enclosing(&row, ts, 10_000), 3_000);
+        row.last_ns = 0;
+        assert_eq!(enclosing(&row, ts, 10_000), 9_000);
     }
 
     /// Compaction's entry declares no key, and the events must carry none: the
@@ -706,6 +743,37 @@ mod tests {
         let notes = collector.notes().join(" ");
         assert!(notes.contains("1 thread was still inside"), "{notes}");
         assert_eq!(collector.losses().dropped, 0);
+    }
+
+    /// A `count` run's row is summed over the whole run and stamped at its
+    /// close, so it has no window that starts at its stamp, and it carries no
+    /// `enclosing_ns`. A rule that names the attribute on it is then refused by
+    /// the join as a missing span (`join`'s test of `enclosing`), rather than
+    /// given a window of zero width.
+    #[test]
+    fn a_counted_row_carries_no_enclosing_window() {
+        let mut collector = StallCollector::new(Stall::Reclaim, Mode::Count, None, None, None);
+        let mut held = row();
+        held.first_ns = 1_000;
+        held.last_ns = 9_000;
+        collector
+            .counted
+            .insert((held.tid, held.cgroup_id, held.bucket, held.scope), held);
+        let events = collector.stop();
+        assert_eq!(events.len(), 1, "the one counted row: {events:?}");
+        assert!(
+            events[0]
+                .attrs
+                .iter()
+                .all(|attr| attr.name != "enclosing_ns"),
+            "a counted row has no enclosing window: {:?}",
+            events[0].attrs
+        );
+        assert!(
+            events[0].attrs.iter().any(|attr| attr.name == "count"),
+            "and it is still a row: {:?}",
+            events[0].attrs
+        );
     }
 
     /// An aggregated row is stamped where it happened, not where it was read.

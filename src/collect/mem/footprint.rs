@@ -138,6 +138,10 @@ impl Prepared for Prepare {
 pub struct FootprintCollector {
     id: CollectorId,
     pid: i32,
+    /// The process across containers (`KeyValue::proc_of`), read once: a
+    /// process does not change pid namespace, and an exec keeps it. `None`
+    /// when the namespace link is closed to this user.
+    proc_key: Option<KeyValue>,
     metric: Metric,
     source: Source,
     path: PathBuf,
@@ -155,6 +159,7 @@ impl FootprintCollector {
         Self {
             id: CollectorId::new(format!("{}/fs:proc:{}", metric.source_id(), source.label())),
             pid,
+            proc_key: KeyValue::proc_of(pid),
             metric,
             source,
             path: source.path(pid),
@@ -257,7 +262,9 @@ impl Collector for FootprintCollector {
             ts_ns,
             ts_err_ns: 0,
             kind: self.metric.source_id().to_owned(),
-            keys: vec![KeyValue::task(self.pid)],
+            keys: std::iter::once(KeyValue::task(self.pid))
+                .chain(self.proc_key.clone())
+                .collect(),
             attrs,
             collector_id: self.id.clone(),
             seq,
@@ -323,6 +330,26 @@ mod tests {
             FootprintCollector::new(std::process::id() as i32, metric, source, Duration::ZERO);
         let events = collector.sample(0).ok()?;
         events[0].attr("bytes").unwrap().as_f64()
+    }
+
+    /// A footprint carries the process across containers after the thread,
+    /// and it is the one `proc.fd` and `proc.threads` carry for the same
+    /// process: a join `via: proc` between them meets.
+    #[test]
+    fn a_footprint_carries_the_process_after_the_thread() {
+        let me = std::process::id() as i32;
+        let mut collector = FootprintCollector::new(me, Metric::Rss, Source::Statm, Duration::ZERO);
+        let events = collector.sample(0).expect("our own footprint");
+        let keys = &events[0].keys;
+        assert_eq!(keys[0], KeyValue::task(me), "{keys:?}");
+        let Some(KeyValue::Proc { pidns, .. }) = keys.get(1) else {
+            panic!("no `proc` key: {keys:?}");
+        };
+        // The namespace as the link's text names it, `pid:[<inode>]`: read
+        // another way than `proc_of` reads it, by a `stat`.
+        let link = std::fs::read_link("/proc/self/ns/pid").expect("our own namespace link");
+        assert_eq!(link.to_string_lossy(), format!("pid:[{pidns}]"));
+        assert_eq!(Some(&keys[1]), KeyValue::proc_of(me).as_ref());
     }
 
     /// A zombie's `statm` reads `0 0 0 0 0 0 0`, and that is not a footprint.

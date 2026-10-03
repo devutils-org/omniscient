@@ -299,9 +299,11 @@ mod tests {
         let events = collector.sample(1).unwrap();
         assert!(!events.is_empty(), "the machine has at least loopback");
         for event in &events {
-            let KeyValue::Iface { index, name } = &event.keys[0] else {
+            let KeyValue::Iface { netns, index, name } = &event.keys[0] else {
                 panic!("not an interface key: {:?}", event.keys[0]);
             };
+            // `/proc/net/dev` is this process's namespace's, and the key says so.
+            assert_eq!(*netns, crate::event::own_netns(), "`{name}`");
             let Ok(text) = std::fs::read_to_string(format!("/sys/class/net/{name}/ifindex")) else {
                 continue; // removed since the read
             };

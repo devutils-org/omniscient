@@ -129,16 +129,22 @@ impl QdiscCollector {
         // still the name the program read at the time -- which matters here,
         // because a queueing discipline may be in another network namespace
         // whose indices mean nothing in this one.
-        let name = if row.ifname.is_empty() {
+        let here = row.netns == crate::event::own_netns();
+        let name = if !row.ifname.is_empty() {
+            row.ifname.clone()
+        } else if here {
             interfaces::name_of(row.ifindex).unwrap_or_else(|| format!("if{}", row.ifindex))
         } else {
-            row.ifname.clone()
+            // Another namespace's index names nothing in this one.
+            format!("if{}", row.ifindex)
         };
         Event {
             ts_ns,
             ts_err_ns: 0,
             kind: "net.qdisc".to_owned(),
-            keys: vec![KeyValue::iface(row.ifindex, name.clone())],
+            // The packet's own namespace, read in the kernel: `net.qdisc` sees
+            // every namespace's disciplines, and an index is per namespace.
+            keys: vec![KeyValue::iface_in(row.netns, row.ifindex, name.clone())],
             attrs: attributes(row, &name, window_ns),
             collector_id: self.id.clone(),
             seq,
@@ -246,6 +252,8 @@ fn attributes(row: &QdiscWait, name: &str, window_ns: u64) -> Vec<Attr> {
         Attr::uint("window_ns", window_ns),
         Attr::text("iface", name.to_owned()),
         Attr::uint("ifindex", u64::from(row.ifindex)),
+        // The network namespace that index is in, by inode.
+        Attr::uint("netns", row.netns),
         // The discipline's handle, as `tc` prints its major number. A device
         // with a shaper above a fair queue is two rows, and this is what tells
         // them apart.
@@ -264,7 +272,13 @@ impl Collector for QdiscCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(QdiscProgram::load(self.iface.as_ref().map(|(at, _)| *at))?);
+        // A named interface is this process's namespace's: that is where
+        // `if_nametoindex` looked it up.
+        let only = self
+            .iface
+            .as_ref()
+            .map(|(at, _)| (crate::event::own_netns(), *at));
+        self.program = Some(QdiscProgram::load(only)?);
         self.window_opened_ns = monotonic_ns();
         Ok(())
     }
@@ -356,6 +370,7 @@ mod tests {
     fn row() -> QdiscWait {
         QdiscWait {
             ifindex: 42,
+            netns: crate::event::own_netns(),
             handle: 0x8001_0000,
             bucket: 26,
             count: 5,
@@ -419,6 +434,31 @@ mod tests {
             vec![KeyValue::iface(42, "dummy0")],
             "the index and the name the kernel gave it travel together"
         );
+    }
+
+    /// A discipline in another network namespace is keyed in that namespace:
+    /// the same index and name as one of this namespace's, and another
+    /// interface, which the key's name says.
+    #[test]
+    fn a_discipline_in_another_namespace_is_keyed_in_that_namespace() {
+        let collector = QdiscCollector::new(None, None);
+        let mut row = row();
+        row.netns += 1;
+        let event = collector.event(&row, 1, 0, 0);
+        assert_ne!(
+            event.keys[0].iface_identity(),
+            KeyValue::iface(42, "dummy0").iface_identity()
+        );
+        assert_eq!(
+            event.keys[0].to_string(),
+            format!("iface:dummy0@netns:{}", row.netns)
+        );
+        // With no name read in the kernel, the index is not looked up here,
+        // where it would name one of this namespace's interfaces.
+        row.ifname.clear();
+        row.ifindex = 1;
+        let event = collector.event(&row, 1, 0, 0);
+        assert_eq!(event.keys[0].iface_name(), Some("if1"));
     }
 
     /// The value is the bucket's low bound and the exact total is beside it.

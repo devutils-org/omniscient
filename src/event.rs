@@ -79,6 +79,10 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
+fn is_zero_long(value: &u64) -> bool {
+    *value == 0
+}
+
 /// A typed correlation key carried by an event.
 ///
 /// The set is closed, and each variant names the boundary it crosses. A join
@@ -127,16 +131,26 @@ pub enum KeyValue {
     Cgroup {
         id: u64,
     },
-    /// A network interface, by kernel index and by name. Both are carried: the
+    /// A network interface, by network namespace, kernel index and name. The
     /// index is what the kernel uses, the name is what a person reads, and an
     /// interface that gets renamed is still the same interface -- a join
-    /// compares the index ([`KeyValue::iface_identity`]), and only the name
-    /// when no index was known at the read.
+    /// compares the namespace and the index ([`KeyValue::iface_identity`]),
+    /// and the name in place of the index only when no index was known at the
+    /// read.
+    ///
+    /// An index is only an index inside one network namespace: `lo` is 1 in
+    /// every one. `netns` is that namespace's inode, as `/proc/<pid>/ns/net`
+    /// names it -- the kernel's `net->ns.inum` for a producer that reads the
+    /// packet's device, this process's own for one that reads a name in its
+    /// own namespace. Zero is "not known": a key written by hand or read back
+    /// from an older file, which meets only another such key.
     ///
     /// The name may carry a sub-series after a `/` (`lo/drops`, `net.iface`'s
     /// counter kinds): no Linux interface name holds a `/`, so everything
     /// before it is the interface ([`KeyValue::iface_name`]).
     Iface {
+        #[serde(default, skip_serializing_if = "is_zero_long")]
+        netns: u64,
         index: u32,
         name: String,
     },
@@ -159,11 +173,12 @@ pub enum KeyValue {
 }
 
 impl KeyValue {
-    /// An interface key. An index of 0 -- a producer that reads a name, such
-    /// as `/proc/net/dev` -- is resolved from the name at the read, while the
-    /// interface exists, so every producer's key of one interface carries its
-    /// index; it stays 0 when the kernel knows no interface by that name (it
-    /// is gone, or in another network namespace).
+    /// An interface key in this process's network namespace: what a producer
+    /// that reads a name or an index in its own namespace writes
+    /// (`/proc/net/dev`, `if_nametoindex`, a socket this process opened). An
+    /// index of 0 is resolved from the name at the read, while the interface
+    /// exists, so every producer's key of one interface carries its index; it
+    /// stays 0 when the kernel knows no interface by that name here.
     pub fn iface(index: u32, name: impl Into<String>) -> Self {
         let name = name.into();
         let index = if index == 0 {
@@ -171,15 +186,41 @@ impl KeyValue {
         } else {
             index
         };
-        KeyValue::Iface { index, name }
+        KeyValue::Iface {
+            netns: own_netns(),
+            index,
+            name,
+        }
     }
 
-    /// An interface key exactly as given, with no lookup: what a test, or an
-    /// event read back from a file, writes.
-    pub fn iface_as_given(index: u32, name: impl Into<String>) -> Self {
+    /// An interface key in the network namespace `netns` (its inode): what a
+    /// producer that reads the device in the kernel writes, since the device
+    /// may be in any namespace. Nothing is looked up: an index of another
+    /// namespace means nothing in this one.
+    pub fn iface_in(netns: u64, index: u32, name: impl Into<String>) -> Self {
         KeyValue::Iface {
+            netns,
             index,
             name: name.into(),
+        }
+    }
+
+    /// An interface key exactly as given, with no lookup and no namespace:
+    /// what a test, or an event read back from a file, writes.
+    pub fn iface_as_given(index: u32, name: impl Into<String>) -> Self {
+        KeyValue::Iface {
+            netns: 0,
+            index,
+            name: name.into(),
+        }
+    }
+
+    /// The network namespace an `iface` key's index belongs to, by inode;
+    /// `None` for every other key, and for one whose namespace is not known.
+    pub fn iface_netns(&self) -> Option<u64> {
+        match self {
+            KeyValue::Iface { netns, .. } if *netns != 0 => Some(*netns),
+            _ => None,
         }
     }
 
@@ -192,13 +233,19 @@ impl KeyValue {
         }
     }
 
-    /// What two `iface` keys are compared by: the kernel's index when the
-    /// read knew it, so a rename is still one interface and `lo/drops` is
-    /// `lo`; the interface's name otherwise. `None` for every other key.
+    /// What two `iface` keys are compared by: the network namespace and the
+    /// kernel's index when the read knew it (`iface#<netns>:<index>`), so a
+    /// rename is still one interface, `lo/drops` is `lo`, and another
+    /// namespace's `lo` is another interface; the namespace and the name
+    /// otherwise (`iface:<netns>:<name>`). `None` for every other key.
     pub fn iface_identity(&self) -> Option<String> {
         match self {
-            KeyValue::Iface { index, .. } if *index != 0 => Some(format!("iface#{index}")),
-            KeyValue::Iface { name, .. } => Some(format!("iface:{}", iface_base(name))),
+            KeyValue::Iface { netns, index, .. } if *index != 0 => {
+                Some(format!("iface#{netns}:{index}"))
+            }
+            KeyValue::Iface { netns, name, .. } => {
+                Some(format!("iface:{netns}:{}", iface_base(name)))
+            }
             _ => None,
         }
     }
@@ -274,6 +321,17 @@ impl fmt::Display for KeyValue {
             KeyValue::Mem { base, len } => write!(f, "mem:[{base:#x},{:#x})", base + len),
             KeyValue::Gpu { fence_ctx, seqno } => write!(f, "gpu:{fence_ctx}+{seqno}"),
             KeyValue::Cgroup { id } => write!(f, "cgroup:{id}"),
+            // The namespace is printed only when it is not this process's:
+            // another namespace's `lo` is another interface, and a reader
+            // who saw two series called `iface:lo` would add them up.
+            // "This process" is the one printing, not the one that recorded:
+            // a recording rendered from another namespace prints `@netns` on
+            // every interface, the recorder's own included. The identity
+            // (`iface_identity`) carries the namespace either way, so only the
+            // label changes, and it errs towards saying more.
+            KeyValue::Iface { netns, name, .. } if *netns != 0 && *netns != own_netns() => {
+                write!(f, "iface:{name}@netns:{netns}")
+            }
             KeyValue::Iface { name, .. } => write!(f, "iface:{name}"),
             KeyValue::Dev { major, minor } => write!(f, "dev:{major}+{minor}"),
             KeyValue::Cpu { cpu } => write!(f, "cpu:{cpu}"),
@@ -286,6 +344,19 @@ impl fmt::Display for KeyValue {
 /// which the kernel refuses in an interface name.
 fn iface_base(name: &str) -> &str {
     name.split_once('/').map_or(name, |(base, _)| base)
+}
+
+/// This process's network namespace, by the inode `/proc/self/ns/net` names;
+/// 0 where the kernel has no network namespaces to name. Read once: a thread
+/// that `setns`es into another is not a thing this tool does.
+pub fn own_netns() -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    static OWN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *OWN.get_or_init(|| {
+        std::fs::metadata("/proc/self/ns/net")
+            .map(|meta| meta.ino())
+            .unwrap_or(0)
+    })
 }
 
 /// The kernel's index for an interface name in this network namespace, 0 when
@@ -461,15 +532,41 @@ mod tests {
                 "{key:?}"
             );
             assert_eq!(key.iface_name(), Some("lo"));
-            assert_eq!(key.iface_identity().as_deref(), Some("iface#1"));
+            let here = own_netns();
+            assert_ne!(here, 0, "this kernel names its network namespaces");
+            assert_eq!(
+                key.iface_identity(),
+                Some(format!("iface#{here}:1")),
+                "{key:?}"
+            );
         }
         let gone = KeyValue::iface(0, "omn-no-such-if/drops");
         assert!(matches!(gone, KeyValue::Iface { index: 0, .. }), "{gone:?}");
         assert_eq!(
-            gone.iface_identity().as_deref(),
-            Some("iface:omn-no-such-if")
+            gone.iface_identity(),
+            Some(format!("iface:{}:omn-no-such-if", own_netns()))
         );
         assert_eq!(KeyValue::task(1).iface_identity(), None);
+    }
+
+    /// Another namespace's `lo` is another interface: the same index, a
+    /// different identity, and a name that says which namespace it is in.
+    /// This namespace's is printed as it always was.
+    #[test]
+    fn another_namespaces_interface_of_the_same_index_is_another_interface() {
+        let here = own_netns();
+        let ours = KeyValue::iface(1, "lo");
+        let theirs = KeyValue::iface_in(here + 1, 1, "lo");
+        assert_ne!(ours.iface_identity(), theirs.iface_identity());
+        assert_eq!(
+            ours.iface_identity(),
+            KeyValue::iface_in(here, 1, "lo").iface_identity()
+        );
+        assert_eq!(ours.to_string(), "iface:lo");
+        assert_eq!(theirs.to_string(), format!("iface:lo@netns:{}", here + 1));
+        assert_eq!(theirs.iface_name(), Some("lo"));
+        assert_eq!(theirs.iface_netns(), Some(here + 1));
+        assert_eq!(KeyValue::iface_as_given(1, "lo").iface_netns(), None);
     }
 
     fn sample() -> Event {

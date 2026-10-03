@@ -55,6 +55,7 @@ impl Prepared for Prepare {
             id: CollectorId::new(format!("{}/fs:proc", self.0.source())),
             counted: self.0,
             pid,
+            proc_key: KeyValue::proc_of(pid),
             first_read: true,
             departed: false,
             losses: Losses::default(),
@@ -66,6 +67,11 @@ pub struct StatusCollector {
     id: CollectorId,
     counted: Counted,
     pid: i32,
+    /// The process across containers (`KeyValue::proc_of`), read once at
+    /// attach: a process does not change pid namespace, and an exec keeps it.
+    /// `None` when the namespace link is closed to this user, and the events
+    /// then carry `task` alone, which says so by the missing key.
+    proc_key: Option<KeyValue>,
     /// Cleared by the first read, which is the one that has to wait for a
     /// launched target to become the program it was asked to be.
     first_read: bool,
@@ -238,7 +244,9 @@ impl Collector for StatusCollector {
             ts_ns,
             ts_err_ns: 0,
             kind: self.counted.source().to_owned(),
-            keys: vec![KeyValue::task(self.pid)],
+            keys: std::iter::once(KeyValue::task(self.pid))
+                .chain(self.proc_key.clone())
+                .collect(),
             attrs,
             collector_id: self.id.clone(),
             seq,
@@ -272,6 +280,43 @@ mod tests {
     // in parallel threads of one process, so other tests open files and start
     // threads while these read the counts, and an exact delta is not available
     // to a test that shares its process with the rest of the suite.
+
+    /// The pid namespace as the link's own text names it, `pid:[<inode>]`:
+    /// a reference read another way than `KeyValue::proc_of` reads it (that
+    /// one takes the inode from a `stat`).
+    fn own_pidns() -> u64 {
+        let link = std::fs::read_link("/proc/self/ns/pid").expect("our own namespace link");
+        let text = link.to_string_lossy();
+        text.strip_prefix("pid:[")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .and_then(|inode| inode.parse().ok())
+            .unwrap_or_else(|| panic!("an unexpected namespace link: {text}"))
+    }
+
+    /// Both counts carry the process across containers after the thread: the
+    /// pid namespace this test runs in and its pid there, which in the
+    /// namespace `cargo test` runs in is the one `getpid` returns.
+    #[test]
+    fn a_count_carries_the_process_after_the_thread() {
+        let me = std::process::id() as i32;
+        for counted in [Counted::Descriptors, Counted::Threads] {
+            let events = collector(counted).sample(0).expect("readable");
+            let keys = &events[0].keys;
+            assert_eq!(keys[0], KeyValue::task(me), "{keys:?}");
+            let Some(KeyValue::Proc { pidns, pid }) = keys.get(1) else {
+                panic!("{} carries no `proc` key: {keys:?}", counted.source());
+            };
+            assert_eq!(*pidns, own_pidns());
+            let inner: i32 = std::fs::read_to_string("/proc/self/status")
+                .expect("our own status")
+                .lines()
+                .find_map(|line| line.strip_prefix("NSpid:"))
+                .and_then(|ids| ids.split_whitespace().last()?.parse().ok())
+                .expect("an NSpid line");
+            assert_eq!(*pid, inner);
+            assert_eq!(keys.len(), 2, "{keys:?}");
+        }
+    }
 
     #[test]
     fn the_limit_travels_with_the_count() {
