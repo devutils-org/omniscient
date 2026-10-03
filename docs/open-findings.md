@@ -10274,3 +10274,49 @@ unless said otherwise:
   (61 of 2064 samples short, once, stream core) and
   `collect::mem::footprint::tests::the_rollup_agrees_with_the_per_mapping_walk`
   (once, stream core): new, not in the tally before.
+
+## The seventeenth wave, coordinator, after the merge
+
+Run alone at `718cae1`, 2026-10-03, with the sudoers grants (`STATE.md`,
+"Needs privilege").
+
+### To the owner of `Makefile`, `scripts/release.sh` and `docs/install.md`, and the triage's owner: `omn-mcp` carries no capabilities
+
+`make` grants `cap_bpf,cap_perfmon` to `target/debug/omn` only; `make install`
+and the install line print the `setcap` for `omn` only. `tests/cases.rs` asks
+each case through `omn` (privileged) and `omn-mcp` (not), so at
+`perf_event_paranoid` 2 the two ways run on two different machines:
+`sqlite3-durability` fails both of its causes on the agent's way, twice in two
+runs (*"--budget 100% was exceeded: 280.60 % measured over the whole window.
+`cpu.profile` spent 266.25 % of..."*), and is green at paranoid -1. An agent on
+an installed tree meets the same. Wanted: one privilege model for both binaries
+-- `omn-mcp` collecting through the `omn` binary, or granted the same two
+capabilities by `make`, `make install`, `release.sh` and the sudoers line --
+and `tests/cases.rs` refusing to compare two ways run with different
+privileges.
+
+### To the owner of `cpu.profile` (`src/collect/cpu/profile.rs`, `src/unwind.rs`): a user-mode-only profile costs 280 % of the target
+
+The finding above, from the other side: at paranoid 2 without `CAP_PERFMON`,
+`cpu.profile` over `sqlite3`'s commit loop spends 266 % of the target's cpu.
+Whatever mode the ladder picks there (the kernel half refused, the user stack
+copied) is priced far outside its declared band. The CI's `defaults` cell is
+that machine.
+
+### To stream io's owner (`src/bpf/io.rs`, `tests/scenario_io.rs`): the in-kernel histogram, measured
+
+`the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent`:
+**12.03 %** without program statistics (348 ns a request, the 1 % budget
+25.5 ns), 14.47 % with them; 23.57 % before the wave's own pair. And with
+`kernel.bpf_stats_enabled` 1, *"the programs ran 0 times for 0 ns: 0.0 ns per
+run"* while the histogram counted all 26 838 511 requests: the program
+statistics are read from programs other than the ones that ran, or after they
+were closed. The cost is to be found before phase 6's criterion is argued
+either way (`DECISIONS.md`, "Open").
+
+### To the owner of `tests/scenario_io.rs`'s doc comment and `STATE.md`: `chmod` races udev
+
+`modprobe null_blk` returns before udev has applied its rule, which leaves
+`/dev/nullb0` at 0600 after a `chmod a+r` made at once; the test then panics
+*"/dev/nullb0 is not there or not readable"* (twice today). Wait for the node
+(`udevadm settle`, or 2 s) before the `chmod`.

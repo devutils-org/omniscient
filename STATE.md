@@ -874,6 +874,26 @@ capability-less binary, an installed tree (92 usable from
 `/usr/local/bin/omn`), the `nosuid` advice, and `cost:` under
 `bpf_stats_enabled` (39.7 us inside the target over 202 runs).
 
+**Ran after the seventeenth wave's merge** (2026-10-03, at `718cae1`, alone;
+`docs/open-findings.md`, "the seventeenth wave, coordinator, after the merge"):
+
+- **Item 1, `null_blk`**: 12.03 % without program statistics (348 ns a
+  request against a 1 % budget of 25.5 ns; was 23.57 % on the shared pair),
+  14.47 % with them. Phase 6's criterion is still not met. With
+  `bpf_stats_enabled` 1 the test reads *"the programs ran 0 times for 0 ns"*
+  while the histogram counted every one of 26 838 511 requests: the statistics
+  are read from the wrong programs, or after they are gone. And `chmod` right
+  after `modprobe` races udev, which resets `/dev/nullb0` to 0600: wait for the
+  node (2 s here) before the `chmod`.
+- **Item 2, paranoid 2**: without capabilities, `cases` (4 passed, every case
+  skipping with the machine's reason), `cross_memory` (10), the counted page
+  faults (1) and `stack_capture`'s perf-map and python tests (5) are green,
+  and the skip gate passes over all 28 skip lines. **With** capabilities,
+  `cases` fails twice in two runs (green at paranoid -1): `make` grants the
+  capabilities to `omn` and never to `omn-mcp`, so the agent's way runs
+  unprivileged, `cpu.profile` user-mode only, at 280 % of `sqlite3`'s cpu,
+  and stops on its budget. The same holds for an installed `omn-mcp`.
+
 **Still to run**, collected from the seven seventeenth-wave handoffs, all on
 `main` now that every stream is merged:
 
