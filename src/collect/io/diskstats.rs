@@ -188,6 +188,9 @@ pub struct Diskstats {
     metric: Metric,
     mode: Mode,
     path: PathBuf,
+    /// Where each device's own `inflight` file is, for the gauge: see
+    /// [`Diskstats::gauge_events`].
+    sys_block: PathBuf,
     /// What each device name turned out to be, cached: the classification
     /// reads `/sys`, and the answer only changes when hardware appears.
     roles: BTreeMap<String, Role>,
@@ -206,6 +209,7 @@ impl Diskstats {
             metric,
             mode,
             path,
+            sys_block: PathBuf::from("/sys/block"),
             roles: BTreeMap::new(),
             previous: None,
             baseline: None,
@@ -336,25 +340,50 @@ impl Diskstats {
         events
     }
 
+    /// One event per device with what it held outstanding at the read.
+    ///
+    /// **The kernel keeps two accounts of that, and neither is the whole of it
+    /// on every kernel.** `/proc/diskstats`' ninth column is the block
+    /// layer's I/O accounting, counted from the moment a request is accounted,
+    /// scheduler queue included. On the CI's 6.17 kernel the disk's line read
+    /// 0 at every one of 101 polls while `/sys/block/nvme0n1/inflight` read up
+    /// to 199 (`docs/scenarios/io.md`, defect 20): the likeliest reading is
+    /// that the accounting stayed on the partition the writes went through
+    /// and never reached the disk's line, which 7.2 here does not do. `/sys/block/<dev>/inflight`
+    /// is the other account, which on a multi-queue device walks the
+    /// requests the driver holds, whichever partition they came through, and
+    /// leaves out the ones still in the scheduler. Each is a count of requests
+    /// really outstanding, so the larger of the two is still never more than
+    /// the device held; the gauge is that, and the event carries both, so a
+    /// kernel where they part is visible in the output rather than averaged
+    /// away.
     fn gauge_events(&self, reading: &Reading, seq: u64) -> Vec<Event> {
         reading
             .devices
             .iter()
             .enumerate()
-            .map(|(offset, (device, counters))| Event {
-                ts_ns: reading.ts_ns,
-                ts_err_ns: 0,
-                kind: self.metric.source_id().to_owned(),
-                keys: vec![KeyValue::Dev {
-                    major: device.major,
-                    minor: device.minor,
-                }],
-                attrs: vec![
-                    Attr::uint("inflight", counters.in_flight),
+            .map(|(offset, (device, counters))| {
+                let driver = read_inflight(&self.sys_block.join(&device.name).join("inflight"));
+                let mut attrs = vec![
+                    Attr::uint("inflight", counters.in_flight.max(driver.unwrap_or(0))),
                     Attr::text("dev", device.name.clone()),
-                ],
-                collector_id: self.id.clone(),
-                seq: seq + offset as u64,
+                    Attr::uint("diskstats_inflight", counters.in_flight),
+                ];
+                if let Some(driver) = driver {
+                    attrs.push(Attr::uint("sysfs_inflight", driver));
+                }
+                Event {
+                    ts_ns: reading.ts_ns,
+                    ts_err_ns: 0,
+                    kind: self.metric.source_id().to_owned(),
+                    keys: vec![KeyValue::Dev {
+                        major: device.major,
+                        minor: device.minor,
+                    }],
+                    attrs,
+                    collector_id: self.id.clone(),
+                    seq: seq + offset as u64,
+                }
             })
             .collect()
     }
@@ -510,6 +539,17 @@ fn classify_under(root: &Path, name: &str) -> Role {
         },
         Err(_) => Role::Leaf,
     }
+}
+
+/// The reads and writes `/sys/block/<dev>/inflight` holds (`"       0      199"`),
+/// added; `None` when the file is not there or not two numbers.
+fn read_inflight(path: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut numbers = text
+        .split_whitespace()
+        .map(|field| field.parse::<u64>().ok());
+    let (reads, writes) = (numbers.next()??, numbers.next()??);
+    numbers.next().is_none().then_some(reads + writes)
 }
 
 /// Splits `  259  0 nvme0n1 88820 1663 ...` into the name and its counters.
@@ -885,11 +925,61 @@ mod tests {
         write_stats(&path, &[line(&device, 10, 100, 20, 200)]);
 
         let mut collector = Diskstats::new(Metric::Inflight, Mode::Snapshot, path.clone());
+        collector.sys_block = path.join("no-sysfs-here");
         collector.start().expect("the fake file reads");
         let events = collector.sample(0).expect("a read");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].attr("inflight").unwrap().as_f64(), Some(3.0));
+        assert!(
+            events[0].attr("sysfs_inflight").is_none(),
+            "a sysfs file that is not there is absent, not zero"
+        );
         std::fs::remove_file(&path).ok();
+    }
+
+    /// The CI's shape: the disk's diskstats line holding nothing while the
+    /// driver held 199 requests that came through a partition. The gauge is
+    /// the larger account, both ways round, and carries each.
+    #[test]
+    fn a_queue_one_account_misses_is_read_from_the_other() {
+        let Some(device) = a_leaf_device() else {
+            return;
+        };
+        let sys_block = scratch("sys-block");
+        std::fs::remove_file(&sys_block).expect("replacing the file with a directory");
+        std::fs::create_dir_all(sys_block.join(&device)).unwrap();
+        let path = scratch("inflight-two-accounts");
+        let depth = |diskstats: u64, sysfs: &str| {
+            write_stats(
+                &path,
+                &[format!(
+                    "   8       0 {device} 1 0 2 0 3 0 4 0 {diskstats} 0 0"
+                )],
+            );
+            std::fs::write(sys_block.join(&device).join("inflight"), sysfs).unwrap();
+            let mut collector = Diskstats::new(Metric::Inflight, Mode::Snapshot, path.clone());
+            collector.sys_block = sys_block.clone();
+            let events = collector.sample(0).expect("a read");
+            assert_eq!(events.len(), 1);
+            let value = |name: &str| events[0].attr(name).and_then(|attr| attr.as_f64());
+            (
+                value("inflight"),
+                value("diskstats_inflight"),
+                value("sysfs_inflight"),
+            )
+        };
+        assert_eq!(
+            depth(0, "       0      199\n"),
+            (Some(199.0), Some(0.0), Some(199.0))
+        );
+        assert_eq!(
+            depth(12, "       2        3\n"),
+            (Some(12.0), Some(12.0), Some(5.0))
+        );
+        // A file that is not two numbers is no reading at all.
+        assert_eq!(depth(4, "garbage\n"), (Some(4.0), Some(4.0), None));
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir_all(&sys_block).ok();
     }
 
     /// `/proc/diskstats` counts what the device did, not what an event stream
