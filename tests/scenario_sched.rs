@@ -375,8 +375,10 @@ fn one_known_number_of_round_trips_is_found_by_four_sources() {
     );
 
     // Not the event count: `sched.offcpu` aggregates in the kernel, so its
-    // events are drains and the blocks are on them.
-    let blocks = total_attribute(labelled(&results, "blocks"), "blocks");
+    // events are drains and the blocks are on them. And the driver's, not the
+    // run's: `sched.offcpu` follows the processes the shell starts since the
+    // eighteenth wave, and the responder blocks once a round trip as well.
+    let (_, blocks) = driver_blocks(&results);
     assert!(
         close_to(blocks, ROUND_TRIPS),
         "{ROUND_TRIPS} round trips are {ROUND_TRIPS} blocks, saw {blocks}"
@@ -449,7 +451,7 @@ fn perf_counts_the_blocks_a_raw_tracepoint_counts_and_preemption_besides() {
     let results = results(&output);
 
     let switches = driver_switches(&results);
-    let blocks = total_attribute(labelled(&results, "blocks"), "blocks");
+    let (_, blocks) = driver_blocks(&results);
     // The slack is the handful of blocks still in flight when the run ends,
     // which have no duration yet and are therefore in no total.
     assert!(
@@ -465,20 +467,33 @@ fn perf_counts_the_blocks_a_raw_tracepoint_counts_and_preemption_besides() {
     );
 }
 
-/// The driver's switches in `examples/sched-round-trips.yml`: the series of
-/// the task `sched.offcpu` saw block, which is the driver alone -- its target
-/// is the launched shell's process, and the responder is a process of its own
-/// that `sched.switches`, following what the shell starts, counts beside it.
-fn driver_switches(results: &[Value]) -> u64 {
+/// The driver of `examples/sched-round-trips.yml` and how many times it
+/// blocked: of the tasks `sched.offcpu` saw block -- the driver and the
+/// responder, since it follows the processes the shell starts -- the one that
+/// blocked most among those `sched.switches` has a series for. Either of the
+/// pair blocks once a round trip; what matters is that the two counts compared
+/// are one task's.
+fn driver_blocks(results: &[Value]) -> (u64, u64) {
+    let switched: std::collections::BTreeSet<u64> =
+        outputs(labelled(results, "switches-out"), "summary")
+            .flat_map(|output| output["series"].as_array().expect("series").clone())
+            .filter_map(|series| series["key"].as_str()?.strip_prefix("task:")?.parse().ok())
+            .collect();
     let mut blocked = std::collections::BTreeMap::<u64, u64>::new();
     for event in raw_events(labelled(results, "blocks")) {
         let tid = event["tid"].as_u64().expect("a block names its task");
         *blocked.entry(tid).or_default() += event["blocks"].as_u64().unwrap_or(0);
     }
-    let (driver, _) = blocked
+    blocked
         .into_iter()
+        .filter(|(tid, _)| switched.contains(tid))
         .max_by_key(|(_, blocks)| *blocks)
-        .expect("the driver blocked");
+        .expect("the driver blocked and switched")
+}
+
+/// The switches of [`driver_blocks`]'s task.
+fn driver_switches(results: &[Value]) -> u64 {
+    let (driver, _) = driver_blocks(results);
     outputs(labelled(results, "switches-out"), "summary")
         .flat_map(|output| output["series"].as_array().expect("series").clone())
         .find(|series| series["key"] == format!("task:{driver}"))
@@ -511,8 +526,24 @@ fn a_workload_that_is_half_blocked_measures_as_half_blocked() {
     // Blocked, less the run queue wait after each wakeup: a loaded machine
     // lengthens that wait and the responder's spin with it, and the two halves
     // are equal in cpu time, not in wall time (flaky tally #2's leftover).
-    let blocked_ns = total_attribute(labelled(&results, "blocked"), "blocked_ns");
-    let blocks = total_attribute(labelled(&results, "blocked"), "blocks");
+    //
+    // The driver's: `sched.offcpu` follows the processes the shell starts since
+    // the eighteenth wave, and the responder blocks once a round trip too,
+    // while `cpu.oncpu_time` reads the launched process alone -- whose task is
+    // its series.
+    let driver: u64 = outputs(labelled(&results, "on-cpu"), "summary")
+        .flat_map(|output| output["series"].as_array().expect("series").clone())
+        .find_map(|series| series["key"].as_str()?.strip_prefix("task:")?.parse().ok())
+        .expect("the on-cpu half names the launched task");
+    let of_driver = |attribute: &str| -> u64 {
+        raw_events(labelled(&results, "blocked"))
+            .iter()
+            .filter(|event| event["tid"].as_u64() == Some(driver))
+            .filter_map(|event| event[attribute].as_u64())
+            .sum()
+    };
+    let blocked_ns = of_driver("blocked_ns");
+    let blocks = of_driver("blocks");
     assert!(
         close_to(blocks, HALF_BLOCKED_ROUND_TRIPS),
         "{HALF_BLOCKED_ROUND_TRIPS} round trips are {HALF_BLOCKED_ROUND_TRIPS} blocks, \
@@ -1733,8 +1764,58 @@ const FUTEX_HOLD_MS: u64 = 500;
 /// anyone has to calibrate.
 const LONG_WAIT_NS: u64 = FUTEX_HOLD_MS * 1_000_000 / 2;
 
-/// The name the lock workload's processes carry, which the session filters on.
+/// The name the example session filters on. A run here substitutes a name of
+/// its own for it ([`lock_probe_name`]).
 const LOCK_PROBE: &str = "omnlockprobe";
+
+/// The name this run's lock workload carries, and the one its copy of the
+/// session filters on: unique to the checkout and to the test process.
+///
+/// A fixed name was one every checkout on the machine shared, and the
+/// in-process lock below serialises one test binary only: two worktrees
+/// running `scenario_sched` at once each measured the other's writers, and
+/// the attribution assertion said so -- *"the run attributed a wait to pid N,
+/// which is not one of the 12 it started"*, with `ps` showing probes from two
+/// other worktrees (`docs/open-findings.md`, the seventeenth wave, stream
+/// core). Fifteen characters at most, which is what the kernel keeps of a
+/// name; a `comm` truncated by the kernel is one the filter cannot match.
+fn lock_probe_name() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    env!("CARGO_MANIFEST_DIR").hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    let name = format!("omnlk{:08x}", hasher.finish() as u32);
+    assert!(name.len() <= 15, "`{name}` is longer than a comm");
+    name
+}
+
+/// Runs the example session over the workload named `name`: a copy of it,
+/// filtering on that name instead of the shared one, written beside the
+/// workload.
+fn lock_session(name: &str) -> Output {
+    let example = std::fs::read_to_string("examples/sched-lock-shared-file.yml")
+        .expect("examples/sched-lock-shared-file.yml is part of this scenario");
+    let shared = format!("comm == '{LOCK_PROBE}'");
+    assert_eq!(
+        example.matches(&shared).count(),
+        1,
+        "the example filters on `{shared}` exactly once, which is what a run substitutes"
+    );
+    let path = scratch(&format!("{name}.yml"));
+    std::fs::write(
+        &path,
+        example.replace(&shared, &format!("comm == '{name}'")),
+    )
+    .expect("the session copy is written");
+    let output = omn(&[
+        "-f",
+        path.to_str().expect("a utf-8 path"),
+        "--format",
+        "json",
+    ]);
+    let _ = std::fs::remove_file(&path);
+    output
+}
 
 /// One machine, two scenarios that start processes under the same name.
 ///
@@ -1765,10 +1846,10 @@ fn scratch(name: &str) -> PathBuf {
 /// exec'd. A workload that ran as `sh` could not be told apart from every other
 /// shell on the machine, and a `--system` measurement of the machine's own
 /// contention is exactly what this scenario must not accidentally assert.
-fn lock_probe() -> Option<PathBuf> {
-    let path = scratch(LOCK_PROBE);
+fn lock_probe(name: &str) -> Option<LockProbe> {
+    let path = scratch(name);
     if path.exists() {
-        return Some(path);
+        return Some(LockProbe(path));
     }
     let shell = Path::new("/bin/sh");
     if !shell.exists() {
@@ -1782,7 +1863,25 @@ fn lock_probe() -> Option<PathBuf> {
         permissions.set_mode(0o755);
     }
     std::fs::set_permissions(&path, permissions).ok()?;
-    Some(path)
+    Some(LockProbe(path))
+}
+
+/// The copy `lock_probe` made, removed when the scenario that made it is done:
+/// its name is per process, so nothing else would ever remove it.
+struct LockProbe(PathBuf);
+
+impl std::ops::Deref for LockProbe {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for LockProbe {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// Starts the writers and returns them, with the pids they were given.
@@ -1877,7 +1976,8 @@ fn raw_events(result: &Value) -> Vec<std::collections::BTreeMap<String, Value>> 
 #[test]
 fn sharing_one_file_is_the_only_difference_between_these_two_runs() {
     let _serialised = one_lock_workload_at_a_time();
-    let Some(probe) = lock_probe() else {
+    let name = lock_probe_name();
+    let Some(probe) = lock_probe(&name) else {
         eprintln!("skipped: /bin/sh could not be copied, and this workload needs a program with a name of its own to filter on");
         return;
     };
@@ -1896,7 +1996,7 @@ fn sharing_one_file_is_the_only_difference_between_these_two_runs() {
         // Long enough for every writer to be past `exec` and into its loop.
         std::thread::sleep(std::time::Duration::from_millis(300));
 
-        let output = session("sched-lock-shared-file.yml", &["--format", "json"]);
+        let output = lock_session(&name);
         let text = spoken(&output);
         stop(writers);
         if unprivileged(&text) {
@@ -1917,7 +2017,7 @@ fn sharing_one_file_is_the_only_difference_between_these_two_runs() {
         for event in raw_events(result) {
             assert_eq!(
                 event["comm"].as_str(),
-                Some(LOCK_PROBE),
+                Some(name.as_str()),
                 "the session filters on comm and an event carries another: {event:?}"
             );
             let pid = event["pid"].as_u64().expect("a pid on every event") as u32;
@@ -1995,7 +2095,8 @@ fn sharing_one_file_is_the_only_difference_between_these_two_runs() {
 #[test]
 fn more_lock_waits_is_not_more_contention() {
     let _serialised = one_lock_workload_at_a_time();
-    let Some(probe) = lock_probe() else {
+    let name = lock_probe_name();
+    let Some(probe) = lock_probe(&name) else {
         eprintln!("skipped: /bin/sh could not be copied");
         return;
     };
@@ -2005,7 +2106,7 @@ fn more_lock_waits_is_not_more_contention() {
         let _ = std::fs::remove_dir_all(&directory);
         let writers = lock_writers(&probe, shared, &directory);
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let output = session("sched-lock-shared-file.yml", &["--format", "json"]);
+        let output = lock_session(&name);
         let text = spoken(&output);
         stop(writers);
         if unprivileged(&text) {
@@ -2057,7 +2158,8 @@ fn more_lock_waits_is_not_more_contention() {
 #[test]
 fn a_run_that_could_not_time_a_wait_says_which_wait_and_why() {
     let _serialised = one_lock_workload_at_a_time();
-    let Some(probe) = lock_probe() else {
+    let name = lock_probe_name();
+    let Some(probe) = lock_probe(&name) else {
         eprintln!("skipped: /bin/sh could not be copied");
         return;
     };
@@ -2065,7 +2167,7 @@ fn a_run_that_could_not_time_a_wait_says_which_wait_and_why() {
     let _ = std::fs::remove_dir_all(&directory);
     let writers = lock_writers(&probe, true, &directory);
     std::thread::sleep(std::time::Duration::from_millis(300));
-    let output = session("sched-lock-shared-file.yml", &["--format", "json"]);
+    let output = lock_session(&name);
     let text = spoken(&output);
     stop(writers);
     let _ = std::fs::remove_dir_all(&directory);

@@ -94,6 +94,8 @@ pub struct RunqLatCollector {
     /// The kernel's skipped runs of the program, cumulative, as last read.
     skipped: u64,
     notes: Vec<String>,
+    /// Waits the kernel held no queue stamp for, as last read.
+    unstamped: u64,
     /// The names tasks took at exec, applied to the rows of the window.
     renames: Option<Renames>,
     /// The program's counters are cumulative, so what is new is the difference.
@@ -125,6 +127,7 @@ impl RunqLatCollector {
             losses: Losses::default(),
             skipped: 0,
             notes: Vec::new(),
+            unstamped: 0,
             renames: None,
             dropped_queued: 0,
             dropped_rows: 0,
@@ -246,6 +249,17 @@ impl RunqLatCollector {
             );
             self.skipped = skipped;
         }
+        let unfollowed = program.unfollowed();
+        if unfollowed > 0 {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so {} waits are in no row",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "its" } else { "their" },
+            ));
+        }
+        self.unstamped = program.unstamped();
         let (queued, rows) = program.dropped();
         if queued > self.dropped_queued {
             self.losses.dropped += queued - self.dropped_queued;
@@ -289,6 +303,11 @@ fn attributes(row: &RunqLat, window_ns: u64) -> Vec<Attr> {
         // log2 bucket is a factor of two wide, so a total built from bounds
         // inherits that error and this does not.
         Attr::uint("total_ns", row.total_ns),
+        // The same waits by the tracepoints, where `total_ns` is the kernel's
+        // own `sched_info` account (`bpf::runqlat`, `VALUE_WAKE_TO_RUN_NS`):
+        // the difference is a cpu coming out of idle for the task it was woken
+        // for, which the kernel counts as blocked time.
+        Attr::uint("wake_to_run_ns", row.wake_to_run_ns),
         Attr::uint("bucket", u64::from(row.bucket)),
         // The interval the row was collected over. Not a denominator: a wait is
         // counted where it ended, so a queue longer than the tick reports
@@ -314,10 +333,22 @@ impl Collector for RunqLatCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(RunqLatProgram::load(self.filter)?);
+        let program = RunqLatProgram::load(self.filter)?;
+        // Said at the start, because `stop` drops the program before the
+        // notes are read.
+        self.notes
+            .extend(program.clock_missing().map(str::to_owned));
+        self.program = Some(program);
         // Optional: without it a row keeps the name its task had when the row
         // was made, which for a launched program's first rows is this tool's.
-        self.renames = match Renames::load(self.filter) {
+        // A process target is followed into the processes it starts, and
+        // those exec: the renames are the machine's then, applied by thread
+        // id to the rows of the window, which are the target's alone.
+        let renamed = match self.filter {
+            Whose::Process(_) => Whose::Any,
+            other => other,
+        };
+        self.renames = match Renames::load(renamed) {
             Ok(renames) => Some(renames),
             Err(reason) => {
                 self.notes.push(format!(
@@ -370,6 +401,14 @@ impl Collector for RunqLatCollector {
 
     fn notes(&self) -> Vec<String> {
         let mut notes = self.notes.clone();
+        if self.unstamped > 0 {
+            notes.push(format!(
+                "{} waits ended with no queue stamp in the kernel's `sched_info`, and are counted \
+                 as no wait, as the task's `schedstat` counts them; their tracepoint wait is in \
+                 `wake_to_run_ns`",
+                self.unstamped
+            ));
+        }
         if self.off_target > 0 {
             notes.push(format!(
                 "{} waits on other cpus were measured and set aside: the programs run on every \
@@ -420,6 +459,7 @@ mod tests {
             bucket: 11,
             count: 42,
             total_ns: 55_000,
+            wake_to_run_ns: 56_000,
             first_ns: 0,
             comm: "spinner".to_owned(),
         }
@@ -549,6 +589,7 @@ mod tests {
             bucket: 4,
             count: 400,
             total_ns: 1_234_567,
+            wake_to_run_ns: 1_234_567,
             first_ns: 0,
             comm: "worker".into(),
         };

@@ -173,6 +173,16 @@ impl SwitchCountCollector {
             );
             self.skipped = skipped;
         }
+        let unfollowed = program.unfollowed();
+        if unfollowed > 0 {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so {} switches are in no row",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "its" } else { "their" },
+            ));
+        }
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;
@@ -218,7 +228,14 @@ impl Collector for SwitchCountCollector {
 
     fn start(&mut self) -> Result<(), String> {
         self.program = Some(SwitchCountProgram::load(self.whose)?);
-        self.renames = match Renames::load(self.whose) {
+        // A process target is followed into the processes it starts, and
+        // those exec: the renames are the machine's then, applied by thread
+        // id to the rows of the window, which are the target's alone.
+        let renamed = match self.whose {
+            Whose::Process(_) => Whose::Any,
+            other => other,
+        };
+        self.renames = match Renames::load(renamed) {
             Ok(renames) => Some(renames),
             Err(reason) => {
                 self.exec_note = Some(format!(

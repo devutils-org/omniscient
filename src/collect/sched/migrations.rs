@@ -239,6 +239,16 @@ impl MigrationCollector {
             );
             self.skipped = skipped;
         }
+        let unfollowed = program.unfollowed();
+        if unfollowed > 0 {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so {} migrations are in no row",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "its" } else { "their" },
+            ));
+        }
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;
@@ -287,7 +297,14 @@ impl Collector for MigrationCollector {
         self.program = Some(MigrationProgram::load(self.filter)?);
         // Optional: without it a row keeps the name its task had when the row
         // was made, which for a launched program's first rows is this tool's.
-        self.renames = match Renames::load(self.filter) {
+        // A process target is followed into the processes it starts, and
+        // those exec: the renames are the machine's then, applied by thread
+        // id to the rows of the window, which are the target's alone.
+        let renamed = match self.filter {
+            Whose::Process(_) => Whose::Any,
+            other => other,
+        };
+        self.renames = match Renames::load(renamed) {
             Ok(renames) => Some(renames),
             Err(reason) => {
                 self.exec_note = Some(format!(

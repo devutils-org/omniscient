@@ -1736,10 +1736,10 @@ impl<'a> Elf<'a> {
                     // calls, not of anything it contains.
                     return None;
                 }
-                let name = read_str(
+                let name = unversioned(read_str(
                     self.bytes,
                     strings.offset as usize + read_u32(self.bytes, at)? as usize,
-                )?;
+                )?);
                 Some(ElfSymbol {
                     value,
                     size: read_u64(self.bytes, at + 16)?,
@@ -1877,10 +1877,25 @@ fn is_local(source: &unwind::SymbolSource) -> bool {
 /// choice down for them would say something their stacks are not.
 pub const UNWOUND_BY_CHOICE: &[(&str, &str)] = &[("cpu.profile", "pmu:sw")];
 
+/// The sources whose stacks the kernel walks and this build names, which read
+/// `--symbols` without unwinding through [`choose`]: the walk is the kernel's
+/// frame-pointer one, and only where the names come from is a choice.
+pub const NAMED_BY_CHOICE: &[&str] = &["sched.offcpu"];
+
 /// Whether `source` names its stacks through a collector that reads
 /// `--symbols` in this build, on any backend.
 pub fn reads_symbols(source: &str) -> bool {
-    UNWOUND_BY_CHOICE.iter().any(|(id, _)| *id == source)
+    UNWOUND_BY_CHOICE.iter().any(|(id, _)| *id == source) || NAMED_BY_CHOICE.contains(&source)
+}
+
+/// Every source [`reads_symbols`] answers yes for, in the order a refusal
+/// lists them.
+pub fn symbol_readers() -> Vec<&'static str> {
+    UNWOUND_BY_CHOICE
+        .iter()
+        .map(|(source, _)| *source)
+        .chain(NAMED_BY_CHOICE.iter().copied())
+        .collect()
 }
 
 /// The unwind choice to record beside a resolved backend, for a collector that
@@ -2500,25 +2515,70 @@ impl Unwinder {
             )),
             _ => {}
         }
-        let origins = self.symbols.origins();
-        if origins.values().any(|origin| {
+        facts.extend(names_fact(
+            self.symbols.origins(),
+            self.symbols.debuginfod.is_some(),
+        ));
+        facts
+    }
+}
+
+/// The facts line that says where a capture's names came from, when there is
+/// something to say: a module named by debuginfod, by a perf map, by its
+/// dynamic symbols only, or not at all -- or debuginfod was asked, whatever it
+/// answered.
+///
+/// Dynamic symbols only is among them because it is the one a reader cannot
+/// infer: a stripped distribution binary names its exported functions and
+/// nothing else, so its internal functions come back as `module+offset`, and a
+/// run whose every module was like that said nothing about why
+/// (`docs/open-findings.md`, the seventeenth wave, stream python). A capture
+/// whose every module was named from its own symbol table has nothing to
+/// explain, and says nothing.
+///
+/// Shared by every collector that symbolizes: `cpu.profile` through its
+/// unwinders and `sched.offcpu` through its symbolizers, so the line reads the
+/// same whichever source a stack came from.
+pub fn names_fact<'a>(
+    origins: impl IntoIterator<Item = (&'a PathBuf, &'a unwind::NameOrigin)>,
+    debuginfod_asked: bool,
+) -> Option<String> {
+    let origins: Vec<(&PathBuf, &unwind::NameOrigin)> = origins.into_iter().collect();
+    let worth_saying = debuginfod_asked
+        || origins.iter().any(|(_, origin)| {
             matches!(
                 origin,
                 unwind::NameOrigin::Debuginfod { .. }
                     | unwind::NameOrigin::None(_)
                     | unwind::NameOrigin::PerfMap { .. }
+                    | unwind::NameOrigin::DynamicSymbols
             )
-        }) || self.symbols.debuginfod.is_some()
-        {
-            let described: Vec<String> = origins
-                .iter()
-                .map(|(path, origin)| format!("{}: {origin}", basename(&path.to_string_lossy())))
-                .collect();
-            if !described.is_empty() {
-                facts.push(format!("names came from -- {}", described.join("; ")));
-            }
-        }
-        facts
+        });
+    if !worth_saying || origins.is_empty() {
+        return None;
+    }
+    let described: Vec<String> = origins
+        .iter()
+        .map(|(path, origin)| format!("{}: {origin}", basename(&path.to_string_lossy())))
+        .collect();
+    Some(format!("names came from -- {}", described.join("; ")))
+}
+
+/// A symbol's name without the version a `.symtab` may append to it.
+///
+/// A library's own `.dynsym` keeps versions in a table of their own, but the
+/// `.symtab` of its debug file -- what debuginfod serves for a stripped
+/// `libc.so.6` -- spells them into the name: `clock_nanosleep@@GLIBC_2.17`,
+/// `__libc_start_main@GLIBC_2.2.5`. The same function named two ways is two
+/// suspects to anything that compares names, which is what the cases found
+/// when `sched.offcpu` began asking debuginfod (`sqlite3-stripped`, both ways
+/// naming `clock_nanosleep` and `clock_nanosleep@@GLIBC_2.17`). No C or
+/// mangled C++ or Rust name contains `@`, so everything from the first one is
+/// the version.
+fn unversioned(name: String) -> String {
+    match name.split_once('@') {
+        Some((base, _)) if !base.is_empty() => base.to_owned(),
+        _ => name,
     }
 }
 
@@ -2537,6 +2597,20 @@ fn executable(pid: i32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_versioned_symbol_is_named_without_its_version() {
+        assert_eq!(
+            unversioned("clock_nanosleep@@GLIBC_2.17".to_owned()),
+            "clock_nanosleep"
+        );
+        assert_eq!(
+            unversioned("__libc_start_main@GLIBC_2.2.5".to_owned()),
+            "__libc_start_main"
+        );
+        assert_eq!(unversioned("sqlite3VdbeExec".to_owned()), "sqlite3VdbeExec");
+        assert_eq!(unversioned("@odd".to_owned()), "@odd");
+    }
 
     /// A callchain as the kernel writes one: a marker, the frames that belong
     /// to it, another marker, the frames that belong to that.

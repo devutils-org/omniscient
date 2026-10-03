@@ -1179,3 +1179,645 @@ fn no_sched_backend_needs_tracefs_before_one_that_does_not() {
          rule this test exists for applies to seven of them"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A process target and the processes it starts
+// ---------------------------------------------------------------------------
+
+/// A program that forks children that each block a known number of times, and
+/// that each write the kernel's own account of their run queue waits when they
+/// are done: `<pid> <run_delay ns> <pcount>` from `/proc/thread-self/schedstat`,
+/// one line each, appended to the file named on the command line.
+///
+/// `children` zero is the program blocking itself. The sleep is 20 us: short
+/// enough that a wait's few hundred nanoseconds of queue are a measurable part
+/// of it, and long enough to leave the cpu every time.
+const FORKING_BLOCKER: &str = r#"
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+static void block(int times, const char *out) {
+    struct timespec pause = {0, 20000};
+    for (int i = 0; i < times; i++) nanosleep(&pause, 0);
+    char text[256] = {0};
+    int stat = open("/proc/thread-self/schedstat", O_RDONLY);
+    if (stat < 0 || read(stat, text, sizeof text - 1) <= 0) exit(2);
+    close(stat);
+    unsigned long long cpu, delay, slices;
+    if (sscanf(text, "%llu %llu %llu", &cpu, &delay, &slices) != 3) exit(3);
+    char line[128];
+    int length = snprintf(line, sizeof line, "%d %llu %llu\n", getpid(), delay, slices);
+    int file = open(out, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (file < 0 || write(file, line, length) != length) exit(4);
+    close(file);
+}
+
+int main(int argc, char **argv) {
+    if (argc != 4) return 1;
+    int children = atoi(argv[1]), times = atoi(argv[2]);
+    if (children == 0) { block(times, argv[3]); return 0; }
+    for (int k = 0; k < children; k++)
+        if (fork() == 0) { block(times, argv[3]); _exit(0); }
+    while (wait(0) > 0) {}
+    return 0;
+}
+"#;
+
+/// Compiles one of this file's C programs into the test's scratch directory,
+/// or says why it could not.
+fn compiled(name: &str, source: &str, flags: &[&str]) -> Option<std::path::PathBuf> {
+    let directory = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let source_path = directory.join(format!("{name}.c"));
+    let binary = directory.join(name);
+    std::fs::write(&source_path, source).ok()?;
+    let status = Command::new("cc")
+        .args(flags)
+        .arg("-o")
+        .arg(&binary)
+        .arg(&source_path)
+        .status()
+        .ok()?;
+    status.success().then_some(binary)
+}
+
+/// Per thread group, the sum of one attribute over every event of one result
+/// of a JSON document, and the sum of the events' weights.
+fn by_process(
+    result: &serde_json::Value,
+    attribute: &str,
+) -> std::collections::BTreeMap<u64, (u64, u64)> {
+    let mut sums = std::collections::BTreeMap::new();
+    for output in result["outputs"].as_array().into_iter().flatten() {
+        for event in output["events"].as_array().into_iter().flatten() {
+            let attr = |name: &str| {
+                event["attrs"]
+                    .as_array()?
+                    .iter()
+                    .find(|attr| attr["name"] == name)?["value"]
+                    .as_u64()
+            };
+            if let (Some(pid), Some(value), Some(weight)) =
+                (attr("pid"), attr(attribute), attr("weight"))
+            {
+                let entry = sums.entry(pid).or_insert((0, 0));
+                entry.0 += value;
+                entry.1 += weight;
+            }
+        }
+    }
+    sums
+}
+
+/// The run queue waits and the blocks of a launched program's children are
+/// measured, and a child's waits are what the kernel says they were.
+///
+/// Two defects, one workload (`docs/open-findings.md`, the seventeenth wave,
+/// stream build). `sched.runqlat` and `sched.offcpu` compared one thread group
+/// written into their programs, so a compiler driver's children -- where a
+/// build's time is -- had no row at all, where `cpu.profile` followed them.
+/// And a wait was timed between the `sched_wakeup` and `sched_switch`
+/// tracepoints, which on this machine is about 1.5 us a wait longer than the
+/// kernel's own `run_delay`: a cpu coming out of idle for the task it was
+/// woken for, which `sched_info` leaves in blocked time. A program blocking
+/// 50 us at a time was 1 630 ns runnable a wait by the tracepoints and 121 ns
+/// by its `schedstat`, ten times over.
+///
+/// The reference is each child's own `schedstat`, read by the child as its
+/// last act: its `run_delay` is every wait it had until then, from its fork.
+/// What a run counts for the child can be no less than that and no more than
+/// that and the waits of its last instructions. The tracepoints' account is
+/// beside it on every row as `wake_to_run_ns`. The bracket alone does not tell
+/// the two clocks apart on a loaded machine, where `run_delay` is large enough
+/// to take in the tracepoints' microsecond a wait as well, so the separation is
+/// asserted on its own: over every child, the kernel's account is nearer the
+/// children's `schedstat` than the tracepoints' is.
+#[test]
+fn a_launched_programs_children_are_followed_and_wait_what_their_schedstat_says() {
+    const CHILDREN: usize = 3;
+    const TIMES: u64 = 3000;
+    /// The waits of a child after it read its `schedstat`: a write and an
+    /// exit, a preemption at most.
+    const AFTER_THE_READ_NS: u64 = 2_000_000;
+    let Some(program) = compiled("omn-forking-blocker", FORKING_BLOCKER, &["-O1"]) else {
+        eprintln!("skipped: no C compiler (`cc`) to build the forking workload with");
+        return;
+    };
+    let reference = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("omn-forking-blocker-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&reference);
+    let launch = serde_json::to_string(&[
+        program.to_str().expect("a utf-8 path"),
+        &CHILDREN.to_string(),
+        &TIMES.to_string(),
+        reference.to_str().expect("a utf-8 path"),
+    ])
+    .expect("a launch line");
+    let session = format!(
+        "name: children\nformat: json\nrequests:\n  - label: runnable\n    source: \
+         sched.runqlat\n    target: &program\n      launch: {launch}\n    mode: trace\n    \
+         emit: [raw]\n  - label: blocked\n    source: sched.offcpu\n    target: *program\n    \
+         mode: trace\n    emit: [raw]\n"
+    );
+    let session_path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("omn-forking-blocker-{}.yml", std::process::id()));
+    std::fs::write(&session_path, session).expect("the session is written");
+    let output = run(&[
+        "-f",
+        session_path.to_str().expect("a utf-8 path"),
+        "--format",
+        "json",
+    ]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    if refused_for_capabilities(&text) {
+        return;
+    }
+    assert!(output.status.success(), "{text}");
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("one json document");
+    let results = document["results"].as_array().expect("results");
+    let labelled = |label: &str| {
+        results
+            .iter()
+            .find(|result| result["label"] == label)
+            .unwrap_or_else(|| panic!("no `{label}` result:\n{text}"))
+    };
+    let waits = by_process(labelled("runnable"), "total_ns");
+    let woken = by_process(labelled("runnable"), "wake_to_run_ns");
+    let queued = by_process(labelled("blocked"), "queued_ns");
+
+    let children: Vec<(u64, u64, u64)> = std::fs::read_to_string(&reference)
+        .expect("every child wrote its schedstat")
+        .lines()
+        .map(|line| {
+            let fields: Vec<u64> = line
+                .split_whitespace()
+                .map(|field| field.parse().expect("a number"))
+                .collect();
+            (fields[0], fields[1], fields[2])
+        })
+        .collect();
+    assert_eq!(children.len(), CHILDREN, "every child wrote its line");
+    let mut kernel_off = 0u64;
+    let mut tracepoints_off = 0u64;
+    for &(pid, run_delay, _) in &children {
+        let measured = waits.get(&pid).map_or(0, |&(measured, _)| measured);
+        let by_tracepoints = woken.get(&pid).map_or(0, |&(sum, _)| sum);
+        kernel_off += measured.abs_diff(run_delay);
+        tracepoints_off += by_tracepoints.abs_diff(run_delay);
+    }
+    for (pid, run_delay, slices) in children {
+        let Some(&(measured, counted)) = waits.get(&pid) else {
+            panic!(
+                "child {pid} of the launched program waited {run_delay} ns on a run queue by its \
+                 own schedstat and has no row: the run did not follow it:\n{waits:?}"
+            );
+        };
+        let (blocked_queue, blocks) = queued.get(&pid).copied().unwrap_or((0, 0));
+        let (by_tracepoints, _) = woken.get(&pid).copied().unwrap_or((0, 0));
+        eprintln!(
+            "child {pid}: {slices} waits, {run_delay} ns by its schedstat; counted {counted} \
+             waits, {measured} ns ({by_tracepoints} ns by the tracepoints); {blocks} blocks, \
+             {blocked_queue} ns of them queued"
+        );
+        assert!(
+            blocks >= TIMES,
+            "child {pid} slept {TIMES} times and {blocks} blocks were counted:\n{queued:?}"
+        );
+        // A wait the kernel stamped on a path neither tracepoint marks, or a
+        // run of a program the kernel skipped on a busy cpu, is a handful in
+        // three thousand; a child not followed is all of them.
+        assert!(
+            counted + slices / 100 + 2 >= slices,
+            "child {pid} had {slices} waits by its schedstat and {counted} were counted"
+        );
+        assert!(
+            measured + run_delay / 50 >= run_delay,
+            "child {pid} waited {run_delay} ns by its schedstat and only {measured} ns were \
+             counted"
+        );
+        assert!(
+            measured <= run_delay + run_delay / 50 + AFTER_THE_READ_NS,
+            "child {pid} waited {run_delay} ns by its schedstat, and {measured} ns were \
+             counted: more than that and its last instructions' waits"
+        );
+        assert!(
+            blocked_queue <= run_delay + run_delay / 50 + AFTER_THE_READ_NS,
+            "child {pid}'s blocks were {blocked_queue} ns queued, more than the {run_delay} ns \
+             it waited on a run queue at all"
+        );
+    }
+    assert!(
+        kernel_off < tracepoints_off,
+        "the waits counted are {kernel_off} ns off the children's schedstat over every child, \
+         and the tracepoints' account is {tracepoints_off} ns off: the rows are not the \
+         kernel's account"
+    );
+    let _ = std::fs::remove_file(&reference);
+    let _ = std::fs::remove_file(&session_path);
+}
+
+/// A program that forks children after a delay; each child moves itself
+/// between cpus 0 and 1 and sleeps a millisecond, over and over, for a set
+/// time, then writes its pid and how many moves it made.
+const FORKING_MOVER: &str = r#"
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <sched.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+static long long now_ms(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec * 1000LL + now.tv_nsec / 1000000;
+}
+
+static void move_and_sleep(int run_ms, const char *out) {
+    struct timespec pause = {0, 1000000};
+    long long end = now_ms() + run_ms;
+    long moves = 0;
+    for (long i = 0; now_ms() < end; i++) {
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        CPU_SET(i % 2, &set);
+        if (sched_setaffinity(0, sizeof set, &set) == 0) moves++;
+        nanosleep(&pause, 0);
+    }
+    char line[64];
+    int length = snprintf(line, sizeof line, "%d %ld\n", getpid(), moves);
+    int file = open(out, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (file < 0 || write(file, line, length) != length) exit(4);
+    close(file);
+}
+
+int main(int argc, char **argv) {
+    if (argc != 5) return 1;
+    int children = atoi(argv[1]), delay_ms = atoi(argv[2]), run_ms = atoi(argv[3]);
+    struct timespec delay = {delay_ms / 1000, (delay_ms % 1000) * 1000000L};
+    nanosleep(&delay, 0);
+    for (int k = 0; k < children; k++)
+        if (fork() == 0) { move_and_sleep(run_ms, argv[4]); _exit(0); }
+    while (wait(0) > 0) {}
+    return 0;
+}
+"#;
+
+/// Per thread group named by `key`, the sum of `value` over every event of a
+/// JSON document's first result.
+fn summed_by(
+    document: &serde_json::Value,
+    key: &str,
+    value: &str,
+) -> std::collections::BTreeMap<u64, u64> {
+    let mut sums = std::collections::BTreeMap::new();
+    for output in document["results"][0]["outputs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        for event in output["events"].as_array().into_iter().flatten() {
+            let attr = |name: &str| {
+                event["attrs"]
+                    .as_array()?
+                    .iter()
+                    .find(|attr| attr["name"] == name)?["value"]
+                    .as_u64()
+            };
+            if let (Some(pid), Some(amount)) = (attr(key), attr(value)) {
+                *sums.entry(pid).or_insert(0) += amount;
+            }
+        }
+    }
+    sums
+}
+
+/// `sched.wakeup`, `sched.switches` (`bpf:raw_tp`) and `sched.migrations`
+/// follow a process target into the processes it starts, as `sched.runqlat`
+/// and `sched.offcpu` do (the test above).
+///
+/// The target is a process that forks three children only after the runs
+/// have attached, so the fork program is what puts them in the set. Each child
+/// moves itself between two cpus and sleeps, a thousand times a second for two
+/// seconds: every iteration is a migration, a block, a wakeup and a switch.
+/// The runs attach a second before the children exist and outlast them, so
+/// every iteration falls inside the window: each child is counted at least
+/// nine in ten of its moves in every source (measured: the move count, to a
+/// handful, in wakeups and migrations, and twice it in switches), and a child
+/// the run did not follow has no row at all. A child pinned to one cpu at a
+/// time moves for no other reason, so migrations are bounded above as well. `sched.switches` is pinned to `bpf:raw_tp` because the
+/// resolver picks `pmu:sw` first, which follows children by inheritance and so
+/// never exercises this.
+#[test]
+fn a_targets_children_are_woken_switched_and_moved_in_its_rows() {
+    const CHILDREN: usize = 3;
+    if std::thread::available_parallelism().map_or(1, |n| n.get()) < 2 {
+        eprintln!("skipped: one cpu, so nothing can be moved between two");
+        return;
+    }
+    let Some(program) = compiled("omn-forking-mover", FORKING_MOVER, &["-O1"]) else {
+        eprintln!("skipped: no C compiler (`cc`) to build the forking workload with");
+        return;
+    };
+    let reference = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("omn-forking-mover-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&reference);
+    let mut target = Command::new(&program)
+        .args([
+            &CHILDREN.to_string(),
+            "1000",
+            "2000",
+            reference.to_str().expect("a utf-8 path"),
+        ])
+        .spawn()
+        .expect("the workload starts");
+    let pid = target.id().to_string();
+    let measure = |args: &[&str]| {
+        Command::new(BINARY)
+            .args(args)
+            .args([
+                "--pid",
+                &pid,
+                "--duration",
+                "4s",
+                "--emit",
+                "raw",
+                "--format",
+                "json",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("omn should run")
+    };
+    let runs = [
+        (
+            "sched.wakeup",
+            "wakee_pid",
+            "count",
+            measure(&["sched.wakeup", "--mode", "trace"]),
+        ),
+        (
+            "sched.switches",
+            "pid",
+            "count",
+            measure(&[
+                "sched.switches",
+                "--backend",
+                "force:bpf:raw_tp",
+                "--mode",
+                "count",
+            ]),
+        ),
+        (
+            "sched.migrations",
+            "pid",
+            "migrations",
+            measure(&["sched.migrations", "--mode", "trace"]),
+        ),
+    ];
+    let outputs: Vec<_> = runs
+        .into_iter()
+        .map(|(source, key, value, run)| {
+            (
+                source,
+                key,
+                value,
+                run.wait_with_output().expect("omn should finish"),
+            )
+        })
+        .collect();
+    let _ = target.wait();
+    let children: Vec<(u64, u64)> = std::fs::read_to_string(&reference)
+        .expect("every child wrote its line")
+        .lines()
+        .map(|line| {
+            let fields: Vec<u64> = line
+                .split_whitespace()
+                .map(|field| field.parse().expect("a number"))
+                .collect();
+            (fields[0], fields[1])
+        })
+        .collect();
+    let _ = std::fs::remove_file(&reference);
+    assert_eq!(children.len(), CHILDREN, "every child wrote its line");
+    if children.iter().any(|&(_, moves)| moves < 100) {
+        eprintln!("skipped: a child could not move itself between cpus 0 and 1: {children:?}");
+        return;
+    }
+    for (source, key, value, output) in outputs {
+        let text = String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr);
+        if refused_for_capabilities(&text) {
+            return;
+        }
+        assert!(output.status.success(), "{source}:\n{text}");
+        let document: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("one json document");
+        let sums = summed_by(&document, key, value);
+        for &(child, moves) in &children {
+            let counted = sums.get(&child).copied().unwrap_or(0);
+            eprintln!("{source}: child {child} moved {moves} times; {counted} counted");
+            assert!(
+                source != "sched.migrations" || counted <= moves + moves / 10 + 10,
+                "{source}: child {child} was moved {moves} times and {counted} migrations \
+                 were counted"
+            );
+            assert!(
+                counted >= moves - moves / 10,
+                "{source}: child {child} of the target moved and slept {moves} times, and \
+                 {counted} were counted: the run did not follow it:\n{sums:?}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A block's stack, named
+// ---------------------------------------------------------------------------
+
+/// A program that blocks once, three static functions below `main`, built with
+/// frame pointers so the kernel's walk reaches them. Stripped, those three are
+/// the names only its symbol table had: the file's dynamic symbols are what it
+/// imports.
+const STATIC_BLOCKER: &str = r#"
+#include <time.h>
+
+static __attribute__((noinline)) void omn_blocks_here(void) {
+    struct timespec pause = {0, 300000000};
+    nanosleep(&pause, 0);
+    __asm__ volatile("");
+}
+
+static __attribute__((noinline)) void omn_calls_the_block(void) {
+    omn_blocks_here();
+    __asm__ volatile("");
+}
+
+int main(void) {
+    omn_calls_the_block();
+    return 0;
+}
+"#;
+
+/// A debuginfod server for one file, on loopback: the real protocol, `GET
+/// /buildid/<hex>/debuginfo`, answered with `debuginfo` for its build id and a
+/// 404 for anything else. Answers with its url and how many times it served
+/// the file.
+fn serve_debuginfo(
+    debuginfo: std::path::PathBuf,
+    build_id: String,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let url = format!("http://{}", listener.local_addr().expect("an address"));
+    let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&served);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = [0u8; 2048];
+            let read = stream.read(&mut request).unwrap_or(0);
+            let request = String::from_utf8_lossy(&request[..read]).into_owned();
+            let path = request.split_whitespace().nth(1).unwrap_or("");
+            if path == format!("/buildid/{build_id}/debuginfo") {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body = std::fs::read(&debuginfo).expect("the unstripped build");
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+            } else {
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+            }
+        }
+    });
+    (url, served)
+}
+
+/// A file's build id, as `readelf -n` prints it.
+fn build_id_of(path: &std::path::Path) -> Option<String> {
+    let output = Command::new("readelf").arg("-n").arg(path).output().ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Build ID: ").map(str::to_owned))
+}
+
+/// `sched.offcpu`'s stacks are named through debuginfod when `--symbols
+/// debuginfod` asks, and a stripped file's names are said to be its dynamic
+/// symbols only when it does not.
+///
+/// The case it was filed from (`docs/open-findings.md`, the seventeenth wave,
+/// stream cases): a stripped `sqlite3`'s block was `clock_nanosleep <-
+/// sqlite3+0x57e9a <- ...`, where `sqliteDefaultBusyCallback` names the cause,
+/// because `--symbols` reached `cpu.profile` alone. Here the program is this
+/// test's own, stripped, and the unstripped build is served by build id from a
+/// server on loopback: the names that come back are the ones only the symbol
+/// table had, and they come from nowhere else.
+///
+/// Measured beside it against a real server on the development machine
+/// (`https://debuginfod.archlinux.org`, `/usr/bin/sleep 0.3`): `sleep+0x2835;
+/// ...;clock_nanosleep` without, `main;xnanosleep;rpl_nanosleep;
+/// clock_nanosleep@@GLIBC_2.17` with, in 1.25 s cold.
+#[test]
+fn a_stripped_blocks_stack_is_named_from_debuginfod_only_when_asked() {
+    let flags = [
+        "-O1",
+        "-fno-omit-frame-pointer",
+        "-fno-inline",
+        "-Wl,--build-id",
+    ];
+    let Some(unstripped) = compiled("omn-static-blocker", STATIC_BLOCKER, &flags) else {
+        eprintln!("skipped: no C compiler (`cc`) to build the blocking workload with");
+        return;
+    };
+    let stripped = unstripped.with_file_name("omn-static-blocker-stripped");
+    let copied = std::fs::copy(&unstripped, &stripped).is_ok()
+        && Command::new("strip")
+            .arg(&stripped)
+            .status()
+            .is_ok_and(|status| status.success());
+    let Some(build_id) = build_id_of(&stripped).filter(|_| copied) else {
+        eprintln!("skipped: no `strip` or `readelf` to make and read a stripped build with");
+        return;
+    };
+    let (url, served) = serve_debuginfo(unstripped.clone(), build_id.clone());
+    let cache = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("omn-offcpu-debuginfod-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    let stripped_path = stripped.to_str().expect("a utf-8 path");
+    let traced = |symbols: Option<&str>, urls: Option<&str>| {
+        let mut command = Command::new(BINARY);
+        command.args(["sched.offcpu", "--emit", "stack"]);
+        if let Some(symbols) = symbols {
+            command.args(["--symbols", symbols]);
+        }
+        command.args(["--", stripped_path]);
+        command.env("DEBUGINFOD_CACHE_PATH", &cache);
+        match urls {
+            Some(urls) => command.env("DEBUGINFOD_URLS", urls),
+            None => command.env_remove("DEBUGINFOD_URLS"),
+        };
+        let output = command.output().expect("omn runs");
+        let text = String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr);
+        (output.status.success(), text)
+    };
+
+    // Not asked, with a server named: nothing is fetched, the static
+    // functions are addresses, and the run says why.
+    let (succeeded, local) = traced(None, Some(&url));
+    if refused_for_capabilities(&local) {
+        return;
+    }
+    assert!(succeeded, "{local}");
+    assert!(
+        local.contains("clock_nanosleep"),
+        "the workload blocked in `clock_nanosleep` and the stack does not say so:\n{local}"
+    );
+    assert!(
+        !local.contains("omn_calls_the_block"),
+        "a stripped build named a static function from nowhere:\n{local}"
+    );
+    assert!(
+        local.contains("names came from") && local.contains("dynamic symbols only"),
+        "a stack named from dynamic symbols only must say so:\n{local}"
+    );
+    assert_eq!(
+        served.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a server was asked without --symbols debuginfod"
+    );
+
+    // Asked: the static functions are named from the file the server holds.
+    let (succeeded, named) = traced(Some("debuginfod"), Some(&url));
+    assert!(succeeded, "{named}");
+    assert!(
+        named.contains("omn_calls_the_block"),
+        "the stripped build's block is not named from debuginfod:\n{named}"
+    );
+    assert!(
+        named.contains(&format!("debuginfod, {url}, build id {build_id}")),
+        "the run does not say its names came from the server:\n{named}"
+    );
+    assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Asked with nowhere to ask: refused before the program runs.
+    let (succeeded, refused) = traced(Some("debuginfod"), None);
+    assert!(!succeeded, "{refused}");
+    assert!(refused.contains("DEBUGINFOD_URLS"), "{refused}");
+    let _ = std::fs::remove_dir_all(&cache);
+}

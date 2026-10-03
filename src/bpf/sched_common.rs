@@ -15,7 +15,15 @@
 //! on -- and a generic version of them would hide exactly what a reader of
 //! those files needs to see.
 
-use super::insn::{Insn, Program};
+use std::os::fd::{AsRawFd, OwnedFd};
+
+use super::btf::Btf;
+use super::insn::{
+    helper, push_task_filter, read_narrow, read_pointer, Insn, Program, Subject, TaskFields, Whose,
+    BPF_DW, BPF_W, R10,
+};
+use super::map::{map_failure, Counters, Hash};
+use super::syscall;
 
 // The fragments these four programs share with every other family now live in
 // `insn.rs`, where one copy decides what every kernel-built histogram in this
@@ -85,6 +93,509 @@ pub fn text_of(bytes: &[u8]) -> String {
         .position(|byte| *byte == 0)
         .unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+/// Where the scheduler keeps its own clock and a task's queue stamp, on this
+/// kernel.
+///
+/// **Why the scheduler's clock and not the tracepoints'.** A wait timed from
+/// `sched_wakeup` to `sched_switch` with `bpf_ktime_get_ns` is a fact about two
+/// instants, and the kernel's own account of the same wait, `sched_info`, is
+/// another: `run_delay` is `rq->clock` when the task arrives on the cpu less
+/// `sched_info.last_queued`, the same clock when it was enqueued. The two parted
+/// by about 1.5 us a wait on this machine (`docs/fixes/w18-sched.md`): a
+/// program sleeping 50 us at a time was 1 630 ns runnable a wait by the
+/// tracepoints and 121 ns by its own `schedstat`, and its blocked time short by
+/// the same amount. Every reference this project's cases hold a decomposition
+/// to is the kernel's `schedstat`, and a row that reads its own clock across a
+/// boundary the kernel draws elsewhere is short of it on every wait, by an
+/// amount no tolerance on a total can name.
+///
+/// So the boundary between blocked and runnable is read where the kernel
+/// draws it: the queue wait of a block is `rq->clock - last_queued`, both read
+/// at the switch that ends it, which is the arithmetic `sched_info_arrive` does
+/// a few instructions later with the same two values. Both are read with the
+/// run queue's lock held by this cpu -- a `sched_switch` program runs inside
+/// `__schedule` -- so neither can move under the read.
+///
+/// The run queue is reached through the task, `task->se.cfs_rq->rq`, which is
+/// the run queue of the cpu the task is on: the one switching it in or out.
+/// A kernel without `CONFIG_SCHED_INFO` or `CONFIG_FAIR_GROUP_SCHED` has no
+/// such fields, and the programs then keep the tracepoints' clock and say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KernelClock {
+    /// `task_struct.se.cfs_rq`, from the start of the task.
+    task_cfs_rq: i32,
+    /// `cfs_rq.rq`.
+    cfs_rq_rq: i32,
+    /// `rq.clock`, which `rq_clock()` returns.
+    rq_clock: i32,
+    /// `task_struct.sched_info.last_queued`, from the start of the task.
+    last_queued: i32,
+    /// `task_struct.sched_info.run_delay`: every wait the kernel has closed.
+    run_delay: i32,
+}
+
+impl KernelClock {
+    pub fn locate(btf: &Btf) -> Result<Self, String> {
+        Ok(Self {
+            task_cfs_rq: btf.member_offset("task_struct", "se")?
+                + btf.member_offset("sched_entity", "cfs_rq")?,
+            cfs_rq_rq: btf.member_offset("cfs_rq", "rq")?,
+            rq_clock: btf.member_offset("rq", "clock")?,
+            last_queued: btf.member_offset("task_struct", "sched_info")?
+                + btf.member_offset("sched_info", "last_queued")?,
+            run_delay: btf.member_offset("task_struct", "sched_info")?
+                + btf.member_offset("sched_info", "run_delay")?,
+        })
+    }
+
+    /// Why a kernel has no scheduler clock to read, in a sentence a note can
+    /// carry.
+    pub fn missing(reason: &str) -> String {
+        format!(
+            "the queue wait is timed between the `sched_wakeup` and `sched_switch` tracepoints \
+             rather than read from the kernel's own `sched_info`, which this kernel does not \
+             expose ({reason}); it differs from the task's `schedstat` by about a microsecond \
+             a wait"
+        )
+    }
+}
+
+/// Reads the clock of the run queue the task in `task_reg` is on into the
+/// eight bytes at `into`, jumping to `fail` when a pointer on the way reads as
+/// null.
+///
+/// Clobbers `r1` to `r5` and the eight bytes at `scratch`.
+pub fn push_rq_clock(
+    program: &mut Program,
+    clock: &KernelClock,
+    task_reg: u8,
+    scratch: i16,
+    into: i16,
+    fail: &'static str,
+) {
+    read_pointer(program, scratch, 4, task_reg, clock.task_cfs_rq);
+    program.jump_to(fail, Insn::jeq_imm(4, 0, 0));
+    read_pointer(program, scratch, 4, 4, clock.cfs_rq_rq);
+    program.jump_to(fail, Insn::jeq_imm(4, 0, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, into, 0));
+    read_field(program, into, 8, 4, clock.rq_clock);
+}
+
+/// Reads `sched_info.last_queued` of the task in `task_reg` into the eight
+/// bytes at `into`: the run queue's clock when the task joined it, or zero
+/// when the kernel holds no stamp.
+///
+/// Clobbers `r1` to `r5`.
+pub fn push_last_queued(program: &mut Program, clock: &KernelClock, task_reg: u8, into: i16) {
+    program.push(Insn::st_imm(BPF_DW, R10, into, 0));
+    read_field(program, into, 8, task_reg, clock.last_queued);
+}
+
+/// Reads `sched_info.run_delay` of the task in `task_reg` into the eight
+/// bytes at `into`: the waits the kernel has already closed.
+///
+/// One wait is not always closed once. A runnable task the load balancer moves
+/// to another cpu is dequeued from the first, and `sched_info_dequeue` adds the
+/// part of the wait spent there to `run_delay` and clears `last_queued`; the
+/// second cpu stamps it again. `rq->clock - last_queued` at the switch is then
+/// only the part on the cpu that ran it. Read when the wait begins and again
+/// when it ends, `run_delay`'s growth is the rest: on this machine under ten
+/// agents' load, the clock and stamp alone were 17 % short of the kernel's
+/// `run_delay`.
+///
+/// Clobbers `r1` to `r5`.
+pub fn push_run_delay(program: &mut Program, clock: &KernelClock, task_reg: u8, into: i16) {
+    program.push(Insn::st_imm(BPF_DW, R10, into, 0));
+    read_field(program, into, 8, task_reg, clock.run_delay);
+}
+
+/// Computes a wait as the kernel's `sched_info` closes it, into `r1`: the
+/// run queue's clock less the queue stamp, both already on the stack, plus
+/// what `run_delay` grew by since the wait began (see [`push_run_delay`]).
+/// Jumps to `unstamped` when there is no stamp, or one ahead of the clock.
+/// `grown` is a label of the call site's own, past the growth.
+pub fn push_kernel_wait(
+    program: &mut Program,
+    [now, queued, delay_then, delay_now]: [i16; 4],
+    unstamped: &'static str,
+    grown: &'static str,
+) {
+    program.push(Insn::ldx(BPF_DW, 1, R10, now));
+    program.push(Insn::ldx(BPF_DW, 2, R10, queued));
+    program.jump_to(unstamped, Insn::jeq_imm(2, 0, 0));
+    program.jump_to(unstamped, Insn::jgt_reg(2, 1, 0));
+    program.push(Insn::sub64_reg(1, 2));
+    program.push(Insn::ldx(BPF_DW, 2, R10, delay_now));
+    program.push(Insn::ldx(BPF_DW, 3, R10, delay_then));
+    // A `run_delay` that did not grow, or that reads lower than it did (it
+    // never decreases; a zero where the read failed would), adds nothing.
+    program.jump_to(grown, Insn::jge_reg(3, 2, 0));
+    program.push(Insn::sub64_reg(2, 3));
+    program.push(Insn::add64_reg(1, 2));
+    program.label(grown);
+}
+
+/// A process target and the processes it starts, followed in the kernel.
+///
+/// `cpu.profile` follows the processes its target forks, and the sched
+/// sources compared one thread group written into the instruction stream:
+/// `make`'s table had `cc1`'s cpu and none of its waits -- no `runnable` row
+/// where the kernel said one compile waited 2 059 ms for its cpu
+/// (`docs/open-findings.md`, the seventeenth wave, stream build).
+///
+/// A program on `sched_process_fork` adds a child's thread group to a map when
+/// its parent's is the target's or already in the map, before the child has
+/// run an instruction: the fork tracepoint fires inside `kernel_clone`, ahead
+/// of `wake_up_new_task`. So a descendant is followed from its first wait, not
+/// from the next drain that finds it. A second program on
+/// `sched_process_free` takes a thread group out again when its leader's
+/// `task_struct` is freed, which is after the last of its threads is gone, so
+/// a pid the machine hands to an unrelated process later is not followed.
+///
+/// The root is not in the map: it is compared as a constant first, which is
+/// the case of every program that starts nothing, and costs the target's own
+/// events no lookup.
+pub struct Descendants {
+    root: u32,
+    followed: Hash,
+    missed: Counters,
+    /// Processes already under the root that the map had no room for.
+    missed_at_start: u64,
+    fork_program: OwnedFd,
+    _fork_link: OwnedFd,
+    free_program: OwnedFd,
+    _free_link: OwnedFd,
+}
+
+/// How many processes one run follows at once beside its root.
+const MAX_DESCENDANTS: u32 = 8192;
+const FOLLOW_KEY: i16 = -8;
+const FOLLOW_VALUE: i16 = -16;
+const FOLLOW_DROP_KEY: i16 = -24;
+const FORK_SIGNATURE: [&str; 2] = ["task_struct *", "task_struct *"];
+const FREE_SIGNATURE: [&str; 1] = ["task_struct *"];
+const FOLLOW_LICENSE: &str = "Dual MIT/GPL";
+
+/// Whose tasks a program keeps: the target as [`Whose`] says, and, for a
+/// process, the map of the processes it started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Followed {
+    pub whose: Whose,
+    /// The descendants map, for a process target.
+    pub descendants: Option<i32>,
+}
+
+impl Followed {
+    /// The target alone, as before the eighteenth wave: what a thread, a
+    /// cgroup or the machine is, and what the instruction tests build.
+    pub fn only(whose: Whose) -> Self {
+        Self {
+            whose,
+            descendants: None,
+        }
+    }
+}
+
+/// Falls through when the task `subject` names is one `followed` keeps, and
+/// jumps to `skip` when it is not.
+///
+/// For a process with descendants, the task's thread group is compared with
+/// the root first and looked up in the map only when it is not the root's.
+/// Clobbers `r0` to `r5` and the sixteen bytes at `scratch`, as
+/// [`push_task_filter`] does. `kept` is the label the root's comparison jumps
+/// to, past the lookup; each call site names its own, because a label is
+/// defined once in a program.
+#[allow(clippy::too_many_arguments)]
+pub fn push_followed_filter(
+    program: &mut Program,
+    fields: &TaskFields,
+    followed: &Followed,
+    subject: Subject,
+    tgid_offset: i32,
+    scratch: i16,
+    skip: &'static str,
+    kept: &'static str,
+) {
+    let (Whose::Process(root), Some(descendants)) = (followed.whose, followed.descendants) else {
+        push_task_filter(program, fields, followed.whose, subject, scratch, skip);
+        return;
+    };
+    let slot = match subject.ids {
+        Some((_, tgid_slot)) => tgid_slot,
+        None => {
+            read_narrow(program, scratch, 4, subject.task_reg, tgid_offset);
+            scratch
+        }
+    };
+    program.push(Insn::ldx(BPF_W, 1, R10, slot));
+    program.jump_to(kept, Insn::jeq_imm(1, root as i32, 0));
+    program.extend(Insn::load_map_fd(1, descendants));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, slot as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to(skip, Insn::jeq_imm(0, 0, 0));
+    program.label(kept);
+}
+
+impl Descendants {
+    /// Loads the two programs for `root`, attaches them, and adds the
+    /// processes `root` already has under it.
+    ///
+    /// Attached before the existing ones are read, so that a fork between the
+    /// read and the attach is not missed: it is seen by the program, and the
+    /// read finds it again, which is harmless.
+    pub fn follow(root: u32) -> Result<Self, String> {
+        let btf = super::kernel_btf()?;
+        let followed = Hash::create(4, 4, MAX_DESCENDANTS, "omn_sched_desc")
+            .map_err(|error| map_failure("descendants map", error))?;
+        let missed = Counters::create(1, "omn_sched_dmiss")
+            .map_err(|error| map_failure("descendants drop counter", error))?;
+        let fork = fork_instructions(btf, root, followed.as_raw_fd(), missed.as_raw_fd())?;
+        let free = free_instructions(btf, followed.as_raw_fd())?;
+        let fork_program = load_raw(&fork, "omn_sched_fork")?;
+        let fork_link =
+            syscall::raw_tracepoint_open("sched_process_fork", fork_program.as_raw_fd()).map_err(
+                |error| format!("cannot attach to the `sched_process_fork` tracepoint: {error}"),
+            )?;
+        let free_program = load_raw(&free, "omn_sched_free")?;
+        let free_link =
+            syscall::raw_tracepoint_open("sched_process_free", free_program.as_raw_fd()).map_err(
+                |error| format!("cannot attach to the `sched_process_free` tracepoint: {error}"),
+            )?;
+        let mut descendants = Self {
+            root,
+            followed,
+            missed,
+            missed_at_start: 0,
+            fork_program,
+            _fork_link: fork_link,
+            free_program,
+            _free_link: free_link,
+        };
+        for tgid in processes_under(root) {
+            if tgid != root {
+                // A process already there that cannot be added is followed by
+                // nobody, and is counted where a fork the map had no room for
+                // is.
+                if update_elem(descendants.followed.as_raw_fd(), tgid).is_err() {
+                    descendants.missed_at_start += 1;
+                }
+            }
+        }
+        Ok(descendants)
+    }
+
+    pub fn map_fd(&self) -> i32 {
+        self.followed.as_raw_fd()
+    }
+
+    pub fn followed(&self, whose: Whose) -> Followed {
+        Followed {
+            whose,
+            descendants: Some(self.map_fd()),
+        }
+    }
+
+    /// The thread groups followed now, the root first.
+    pub fn processes(&self) -> Vec<u32> {
+        let mut processes = vec![self.root];
+        if let Ok((keys, _)) = self.followed.keys() {
+            processes.extend(
+                keys.iter()
+                    .filter_map(|key| key.get(..4)?.try_into().ok())
+                    .map(u32::from_ne_bytes)
+                    .filter(|tgid| *tgid != self.root),
+            );
+        }
+        processes
+    }
+
+    /// Processes the target started that the map had no room for, so whose
+    /// tasks no program here kept.
+    pub fn missed(&self) -> u64 {
+        self.missed.read(0) + self.missed_at_start
+    }
+
+    /// Runs of the two programs the kernel skipped, as every program here
+    /// reports them.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.fork_program, &self.free_program])
+    }
+}
+
+fn load_raw(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
+    syscall::prog_load(
+        syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+        instructions,
+        name,
+        FOLLOW_LICENSE,
+    )
+    .map_err(|error| {
+        if error.is_permission() {
+            super::permission_advice("loading a raw tracepoint program")
+        } else {
+            format!("the kernel refused the `{name}` program: {error}")
+        }
+    })
+}
+
+fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
+    let signature = btf.tracepoint_signature(tracepoint)?;
+    if signature != expected {
+        return Err(format!(
+            "this kernel declares `{tracepoint}({})`, and the program that follows a target's \
+             children is written for `{tracepoint}({})`: it reads tasks out of fixed slots, and \
+             against another prototype those slots hold something else",
+            signature.join(", "),
+            expected.join(", "),
+        ));
+    }
+    Ok(())
+}
+
+/// `sched_process_fork(parent, child)`: the child's thread group joins the map
+/// when the parent's is the root's or is in it.
+///
+/// A new thread is a fork too, with the parent's thread group: it writes the
+/// key that is already there, which changes nothing.
+fn fork_instructions(
+    btf: &Btf,
+    root: u32,
+    followed_fd: i32,
+    missed_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    check_signature(btf, "sched_process_fork", &FORK_SIGNATURE)?;
+    let tgid_offset = btf.member_offset("task_struct", "tgid")?;
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::ldx(BPF_DW, 7, 6, 0));
+    program.push(Insn::ldx(BPF_DW, 8, 6, 8));
+
+    read_narrow(&mut program, FOLLOW_KEY, 4, 7, tgid_offset);
+    program.push(Insn::ldx(BPF_W, 1, R10, FOLLOW_KEY));
+    program.jump_to("parent_followed", Insn::jeq_imm(1, root as i32, 0));
+    program.extend(Insn::load_map_fd(1, followed_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.label("parent_followed");
+
+    read_narrow(&mut program, FOLLOW_KEY, 4, 8, tgid_offset);
+    // A thread of the root is the root.
+    program.push(Insn::ldx(BPF_W, 1, R10, FOLLOW_KEY));
+    program.jump_to("done", Insn::jeq_imm(1, root as i32, 0));
+    program.push(Insn::st_imm(BPF_W, R10, FOLLOW_VALUE, 1));
+    program.extend(Insn::load_map_fd(1, followed_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, FOLLOW_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    // The map is full: this child, and everything it starts, is followed by
+    // nobody, and nothing else would say so.
+    count_drop(&mut program, missed_fd, FOLLOW_DROP_KEY, 0, "done");
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// `sched_process_free(task)`: a thread group leaves the map when its
+/// leader's `task_struct` is freed, which is after every thread of it is.
+fn free_instructions(btf: &Btf, followed_fd: i32) -> Result<Vec<Insn>, String> {
+    check_signature(btf, "sched_process_free", &FREE_SIGNATURE)?;
+    let pid_offset = btf.member_offset("task_struct", "pid")?;
+    let tgid_offset = btf.member_offset("task_struct", "tgid")?;
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::ldx(BPF_DW, 7, 6, 0));
+    read_narrow(&mut program, FOLLOW_VALUE, 4, 7, pid_offset);
+    read_narrow(&mut program, FOLLOW_KEY, 4, 7, tgid_offset);
+    program.push(Insn::ldx(BPF_W, 1, R10, FOLLOW_VALUE));
+    program.push(Insn::ldx(BPF_W, 2, R10, FOLLOW_KEY));
+    // Not the leader: the group is still alive.
+    program.jump_to("done", Insn::jne_reg(1, 2, 0));
+    program.extend(Insn::load_map_fd(1, followed_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// The processes under `root` now, root included: each thread's
+/// `/proc/<tgid>/task/<tid>/children`, walked down.
+fn processes_under(root: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut pending = vec![root];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(tgid) = pending.pop() {
+        if !seen.insert(tgid) {
+            continue;
+        }
+        found.push(tgid);
+        let Ok(threads) = std::fs::read_dir(format!("/proc/{tgid}/task")) else {
+            continue;
+        };
+        for thread in threads.flatten() {
+            let children =
+                std::fs::read_to_string(thread.path().join("children")).unwrap_or_default();
+            pending.extend(
+                children
+                    .split_whitespace()
+                    .filter_map(|pid| pid.parse::<u32>().ok()),
+            );
+        }
+    }
+    found
+}
+
+/// `BPF_MAP_UPDATE_ELEM` of a four-byte key with the value one.
+fn update_elem(map_fd: i32, tgid: u32) -> std::io::Result<()> {
+    #[repr(C)]
+    struct ElemAttr {
+        map_fd: u32,
+        pad: u32,
+        key: u64,
+        value: u64,
+        flags: u64,
+    }
+    const BPF_MAP_UPDATE_ELEM: i64 = 2;
+    let key = tgid.to_ne_bytes();
+    let value = 1u32.to_ne_bytes();
+    let mut attr = ElemAttr {
+        map_fd: map_fd as u32,
+        pad: 0,
+        key: key.as_ptr() as u64,
+        value: value.as_ptr() as u64,
+        flags: 0,
+    };
+    // SAFETY: `attr` is the prefix of `union bpf_attr` the command reads, and
+    // the key and value it points at outlive the call.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_MAP_UPDATE_ELEM,
+            &mut attr as *mut ElemAttr,
+            std::mem::size_of::<ElemAttr>() as u32,
+        )
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
