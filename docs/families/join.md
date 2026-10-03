@@ -1,7 +1,8 @@
 # The join engine and the decomposition
 
-Six waves of the engine's stream are recorded here, the newest first. The
-sixteenth wave bounded the engine's memory, compared an interface by its index
+Seven waves of the engine's stream are recorded here, the newest first. The
+eighteenth wave let a rule choose its tier and paid what the seventeenth filed
+in files nobody owned. The sixteenth wave bounded the engine's memory, compared an interface by its index
 and let an `overlap` rule say which attribute of a drained row is a window. The
 fifteenth wave held the engine to its phase 1, 4 and 5 exit criteria: a
 signed integer that survives a round trip, a row that cannot go without its
@@ -15,6 +16,97 @@ tenth wave found in the engine. Each was a place where the engine said more,
 or less, than it had measured. The eighth wave built the engine's third rung
 (`TEMPORAL`), the decomposition and the chains. Their records follow
 unchanged.
+
+---
+
+# The eighteenth wave — a rule's tier, and what nobody owned
+
+| | |
+|---|---|
+| Delivered | `tier:` on a rule: `agent` (the default), `query` (`join::apply_stored`, over a stored run's `raw` outputs), `kernel` refused with the reason; `join::sources_read`, the sources a run's joins and decompositions read; `Btf::member_offset` through a typedef; the preload shim's clock read only on a call that reports; the reclaim session's `enclosing:` line and its assertion; another namespace's lo as a test |
+| Not delivered | the kernel tier (no match kind has a program); the run skipping a query-tier rule and cloning only what `sources_read` names (`src/main.rs`, filed with the diff, applied, tested and reverted); an `omn` command that applies a rule to a stored run (`src/cli.rs`, filed) |
+| Refused, new | a rule at the kernel tier (`JoinError::KernelTier`); a query-tier rule over a side the session does not collect, or collects without `raw` (`JoinError::NotStored`), at validation; a stored run without one side's `raw` events, at the query |
+| Tests | `src/join.rs` 5 new; `src/bpf/btf.rs` 5 new; `shim/src/lib.rs` 1 new; `tests/join_engine.rs` 3 new; `tests/cross_machine.rs` 1 assertion |
+| Files | `src/join.rs`, `src/bpf/btf.rs`, `shim/src/lib.rs`, `tests/{join_engine,cross_machine}.rs`, `examples/cross-machine-reclaim-io.yml`, `CATALOG.md`, this document |
+| Machine | 24 cpus, kernel 7.2.7, nine other streams building and testing, `CAP_BPF` and `CAP_PERFMON` on the binary after `make` |
+
+## 1. A rule chooses its tier
+
+`ROADMAP.md` phase 5 decided join placement per rule, not globally, and the
+model has to let a join move between tiers without rewriting the collector.
+It now does, for two of the three:
+
+```yaml
+joins:
+  - {id: handles, from: proc.threads, to: proc.fd, via: task, match: eq, tier: query}
+```
+
+- **`agent`**, the default and what every rule was: applied by this process
+  as the run ends, over the run's collections.
+- **`query`**: applied afterwards, over the stored run, by `join::apply_stored`
+  -- the same `apply_merging` over each side's `raw` output, with the run's own
+  merge of two results of one source. The run has to store what the rule will
+  read, so `check_in` refuses, at validation, a query-tier rule whose side is
+  not collected or is collected without `raw`. Where a state still open at a
+  source's close ended is decided as the run decides it: a stored result says
+  when its source watched (`window`) and, in its `stopped_because`, whether it
+  was detached before the run ended (`collect::stopped_at_a_detach`, one
+  spelling for a window's close, a budget's and the escalation's). A detached
+  side ends its states at the detach, any other watched to the end, so the
+  query tier answers what the agent tier did over a run with a window or a
+  detach too (`join::tests::a_stored_side_detached_mid_run_is_closed_where_it_was_detached`).
+- **`kernel`**: refused with the reason (`JoinError::KernelTier`). A kernel
+  tier is a program of `src/bpf/` per match kind; none exists, and the
+  collectors that pair events in the kernel (`io.latency`'s issue and
+  completion, `sched.offcpu`'s switch out and in) do so as their own code.
+
+`join_engine::a_rule_moved_to_the_query_tier_answers_from_the_stored_run_what_the_agent_did`
+is the ground truth: one rule twice in one run, once per tier, and the second
+applied to the run's JSON, read back as `Results`, gives the first's answer
+field for field. Phase 5's first criterion stays `[~]` for the kernel tier
+only.
+
+What is not here: the run still applies a query-tier rule as well (the skip
+is three lines of `src/main.rs`, filed with the diff in
+`docs/fixes/w18-engine.md`), and nothing on the command line applies a rule to
+a stored run (`src/cli.rs`, filed). Until the second lands, the query tier is
+the library's.
+
+## 2. The clone `assemble` makes
+
+`assemble` (`src/main.rs`) clones every collection's events into `merged`
+for the joins and decompositions, whether or not any rule reads them.
+`join::sources_read` names the sources that are read -- each agent-tier
+rule's two sides, each decomposition's whole and parts, and the sides of the
+rule a `paired` part names -- and
+`join::tests::a_decomposition_over_the_sources_it_reads_is_the_one_over_every_source`
+holds that the table read from those alone is the table read from all of
+them. With the diff applied, a three-second `sched.switches` run on the whole
+machine with no join peaked at 0.96, 0.99 and 1.26 KiB of resident memory per
+event; without it, 1.58, 1.57 and 1.92 (event counts from 51 k to 369 k on a
+machine nine other streams were loading, so per event and indicative, not a
+calibration). The clone of what a rule does read stays linear: the
+collections are consumed by `emit::aggregate`.
+
+## 3. What the seventeenth wave filed in files nobody owned
+
+- **`Btf::member_offset` follows a typedef** to the struct or union it names,
+  through qualifiers; structs and unions of the name are searched first.
+  `possible_net_t.net` is read at 0 on this kernel, which is what
+  `net_qdisc::netns_offsets` writes by hand (filed to its owner), and
+  `no_caller_s_type_is_shadowed_by_a_typedef_on_the_running_kernel` checks
+  that no type a caller of `member_offset` names is also a typedef of another,
+  so no caller's answer moved.
+- **The preload shim reads no clock on a call that does not report.**
+  `Timer::start` read `CLOCK_MONOTONIC` on the timed turn before it asked
+  whether the call's class was reported, so every `malloc` under a
+  mutex-only session paid a clock read. The checks now come first; the cost
+  is that they fall outside a timed call's span.
+- **`examples/cross-machine-reclaim-io.yml`** names `enclosing: enclosing_ns`
+  on its 100 ms overlap, and the crossing asserts half the cgroup's pgsteal is
+  credited: 42 314 of 42 314 pages, measured once with the capabilities.
+- **Another namespace's lo** (`another_namespaces_lo_is_not_credited_to_this_ones`):
+  credited 0, uncredited 2000, five rows of the sender's namespace.
 
 ---
 
@@ -36,9 +128,14 @@ unchanged.
 per counter kind (`lo/drops`), so it never met `net.bytes`'s `lo`, and a
 rename made a second key. `KeyValue::iface` now fills an index of 0 from the
 name at the read (`if_nametoindex` on the part before a `/`, which no Linux
-interface name holds), and the identity is `iface#<index>`, the name only when
-the index stayed 0. `between` keeps each reading's baseline on the full key, so
-two series of one interface never difference each other.
+interface name holds), and the identity is `iface#<netns>:<index>`
+(`iface:<netns>:<name>` only when the index stayed 0). The namespace is in it
+because an index is per network namespace and every namespace has a lo of
+index 1: before the seventeenth wave put it there, `net.qdisc` on the whole
+machine credited 2000 packets queued on another namespace's lo to this one's
+(`join_engine::another_namespaces_lo_is_not_credited_to_this_ones`). `between`
+keeps each reading's baseline on the full key, so two series of one interface
+never difference each other.
 
 Two tests, because there are two ways a producer names an interface:
 

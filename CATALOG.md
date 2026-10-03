@@ -228,9 +228,18 @@ refused before the launch where a requirement is missing, served with
 mode unwound it, what `auto` passed over and why, and at a paranoia that
 refuses the kernel, that every mode -- `none` included -- is user-only.
 
-`--symbols debuginfod` (the mechanism is landed, the flag is not yet) names a
-stripped file's frames from `DEBUGINFOD_URLS` by its build id, through
-elfutils' own cache, and never unless asked.
+`--symbols local`, the default, names a frame from the files the target
+mapped (their `.symtab` or `.dynsym`), `/proc/kallsyms` for the kernel half,
+and, for an address in an anonymous executable mapping no file names -- a
+JIT's code, an interpreter's trampolines -- the `/tmp/perf-<pid>.map` the
+target itself wrote, re-read as it grows. That map is a file on this machine,
+so it needs no rung of its own; a frame it named prints `py::<function>:<file>`
+for CPython's map, and the facts line's `names came from --` carries
+`perf-<pid>.map: perf-map, the <n> lines the program wrote for code no file holds`.
+`--symbols debuginfod` reads all of that first, then names a stripped file's
+frames from `DEBUGINFOD_URLS` by its build id, through elfutils' own cache, and
+never unless asked. Each frame says which of them named it (`elf`,
+`kallsyms`, `perf-map`, `debuginfod`).
 
 ---
 

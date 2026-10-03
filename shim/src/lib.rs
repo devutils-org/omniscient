@@ -299,6 +299,8 @@ fn in_hook() -> bool {
 }
 
 fn monotonic_ns() -> u64 {
+    #[cfg(test)]
+    tests::CLOCK_READS.with(|reads| reads.set(reads.get() + 1));
     let mut time = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -377,21 +379,25 @@ pub(crate) struct Timer {
 }
 
 impl Timer {
-    /// The first thing a hook does, so that what it does next is inside the
-    /// timed span: the checks below are part of what the shim costs.
+    /// The first thing a hook does. Whether the call reports is decided
+    /// before any clock is read: a call of a class nobody asked for -- every
+    /// `malloc` under a mutex-only session -- must cost the program a few
+    /// loads, not a `CLOCK_MONOTONIC` read (20 M `malloc`/`free` pairs went
+    /// from 0.12 s bare to 1.07 s when the clock came first). The price is
+    /// that those few loads fall outside a timed call's span, which
+    /// understates the account by a handful of nanoseconds per timed call.
     pub(crate) fn start(class: u8) -> Timer {
-        let until = UNTIL_TIMED.with(Cell::get);
-        let started_ns = if until == 0 { monotonic_ns() } else { 0 };
         if !ring::mapped() || in_hook() || !reporting(class) {
             // Not a reporting call: it neither draws nor spends a turn, and
-            // the clock read above, if any, is the price of a call that
-            // happened to come first.
+            // reads no clock.
             return Timer {
                 started_ns: 0,
                 excluded_ns: 0,
                 class,
             };
         }
+        let until = UNTIL_TIMED.with(Cell::get);
+        let started_ns = if until == 0 { monotonic_ns() } else { 0 };
         UNTIL_TIMED.with(|slot| {
             slot.set(if until == 0 {
                 SAMPLE_EVERY - 1
@@ -961,6 +967,38 @@ pub unsafe extern "C" fn pvalloc(size: usize) -> *mut c_void {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// `CLOCK_MONOTONIC` reads this thread made, counted by `monotonic_ns`.
+        pub(super) static CLOCK_READS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// A call of a class nobody reports must not read the clock, even on the
+    /// turn that would be timed: the clock read was what a mutex-only session
+    /// cost every `malloc` (`docs/open-findings.md`, the seventeenth wave,
+    /// stream build, `shim/src/lib.rs:384`). No ring is mapped in this test
+    /// binary, so nothing reports, and the turn counter is at the timed turn.
+    #[test]
+    fn a_call_that_does_not_report_reads_no_clock() {
+        UNTIL_TIMED.with(|slot| slot.set(0));
+        let before = CLOCK_READS.with(Cell::get);
+        for class in [CLASS_HEAP, CLASS_MUTEX, CLASS_GPU] {
+            let mut timer = Timer::start(class);
+            assert_eq!(timer.started_ns, 0, "an unreported call is not timed");
+            assert_eq!(timer.around(|| 7), 7);
+            drop(timer);
+        }
+        assert_eq!(
+            CLOCK_READS.with(Cell::get),
+            before,
+            "a call that does not report read the clock"
+        );
+        assert_eq!(
+            UNTIL_TIMED.with(Cell::get),
+            0,
+            "an unreported call drew a turn"
+        );
+    }
 
     /// The record layout is an agreement between this library and the reader in
     /// `src/collect/mem/heap/mod.rs`, and nothing in the type system holds the

@@ -250,6 +250,51 @@ pub struct Rule {
     /// How many attributions to report.
     #[serde(default = "default_top")]
     pub top: usize,
+    /// Where the rule is applied: `agent` (the default) as the run ends,
+    /// `query` afterwards over the run's stored events ([`apply_stored`]), or
+    /// `kernel`, which no match kind serves yet and [`check`] refuses with the
+    /// reason. The rule is the same at every tier and so are the collectors:
+    /// moving a join between tiers is this one line.
+    #[serde(default, skip_serializing_if = "Tier::is_agent")]
+    pub tier: Tier,
+}
+
+/// Where a join is applied (`ROADMAP.md` phase 5, "join placement": decided
+/// per rule, not globally).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tier {
+    /// In this process, over the events the run collected, when it ends.
+    #[default]
+    Agent,
+    /// Over a stored run's `raw` events, after it: [`apply_stored`]. The run
+    /// has to keep every event of both sides, which [`check_in`] holds it to.
+    Query,
+    /// In the kernel, as an eBPF program per match kind. None exists: a
+    /// collector that pairs its events in the kernel (`io.latency`'s issue
+    /// and completion, `sched.offcpu`'s switch out and in) does so as its own
+    /// code, not as a rule's.
+    Kernel,
+}
+
+impl Tier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tier::Agent => "agent",
+            Tier::Query => "query",
+            Tier::Kernel => "kernel",
+        }
+    }
+
+    fn is_agent(&self) -> bool {
+        *self == Tier::Agent
+    }
+}
+
+impl std::fmt::Display for Tier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl Rule {
@@ -454,6 +499,21 @@ pub enum JoinError {
         id: String,
         from: String,
         windows: String,
+    },
+    #[error(
+        "rule `{id}` asks for the kernel tier, and no match kind has a program of `src/bpf/` \
+         that applies a rule in the kernel: a collector that pairs its events there does it as \
+         its own code. Apply it with `tier: agent` (the default), as the run ends, or `tier: \
+         query`, over the run's stored events"
+    )]
+    KernelTier { id: String },
+    #[error(
+        "rule `{id}` is applied at the query tier, over the stored run, and `{side}` {reason}"
+    )]
+    NotStored {
+        id: String,
+        side: String,
+        reason: String,
     },
     #[error("decomposition `{id}` {reason}")]
     Decomposition { id: String, reason: String },
@@ -883,6 +943,11 @@ fn finish(finished: &mut Ranked, state: OpenState, closed_ns: Option<u64>, outco
 /// costs the measurement. The engine asks it again for itself, so a caller that
 /// forgets cannot produce a wrong answer, only a late one.
 pub fn check(rule: &Rule) -> Result<(), JoinError> {
+    if rule.tier == Tier::Kernel {
+        return Err(JoinError::KernelTier {
+            id: rule.id.clone(),
+        });
+    }
     if rule.enclosing.is_some() && rule.match_kind != MatchKind::Overlap {
         return Err(JoinError::EnclosingOutsideOverlap {
             id: rule.id.clone(),
@@ -972,6 +1037,9 @@ pub fn check_in(rule: &Rule, requests: &[Request], catalog: &Catalog) -> Result<
             windows: windows.into_iter().collect::<Vec<_>>().join(", "),
         });
     }
+    if rule.tier == Tier::Query {
+        stored_in_full(rule, requests)?;
+    }
     let onto = requests
         .iter()
         .filter(|request| request.source.as_str() == rule.to);
@@ -1059,6 +1127,160 @@ pub fn apply_within(
     windows: &BTreeMap<String, Watched>,
 ) -> Result<Correlation, JoinError> {
     apply_merging(rule, &[events], windows)
+}
+
+/// Whether a run keeps everything a query-tier rule will read: every event of
+/// both sides, for the whole run.
+///
+/// A side the session does not collect, or collects without `raw`, leaves
+/// nothing in the stored run to join. A request with a `window` is not
+/// refused: its stored result says when it watched and, in its
+/// `stopped_because`, whether it stopped at a detach ([`apply_stored`]).
+fn stored_in_full(rule: &Rule, requests: &[Request]) -> Result<(), JoinError> {
+    let refuse = |source: &str, reason: &str| JoinError::NotStored {
+        id: rule.id.clone(),
+        side: source.to_owned(),
+        reason: reason.to_owned(),
+    };
+    for source in [&rule.from, &rule.to] {
+        let collected: Vec<&Request> = requests
+            .iter()
+            .filter(|request| request.source.as_str() == source.as_str())
+            .collect();
+        if collected.is_empty() {
+            return Err(refuse(
+                source,
+                "is not collected by this session, so the stored run will hold none of its events",
+            ));
+        }
+        for request in collected {
+            if !request
+                .emit
+                .iter()
+                .any(|emit| emit.kind() == crate::request::EmitKind::Raw)
+            {
+                return Err(refuse(
+                    source,
+                    "is collected without `raw`, so the stored run will hold what its events \
+                     summed to and none of the events: add `raw` to its `emit`",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The sources a session's joins and decompositions read events of: the only
+/// collections whose events a run needs to keep beside its results once each
+/// has been aggregated. A run with no join and no decomposition reads none.
+pub fn sources_read(joins: &[Rule], decompositions: &[Decomposition]) -> BTreeSet<String> {
+    let mut read = BTreeSet::new();
+    for rule in joins.iter().filter(|rule| rule.tier == Tier::Agent) {
+        read.insert(rule.from.clone());
+        read.insert(rule.to.clone());
+    }
+    for decomposition in decompositions {
+        if let Whole::Measured(measure) = &decomposition.whole {
+            read.insert(measure.from.clone());
+        }
+        for part in &decomposition.parts {
+            read.insert(part.from.clone());
+            // A part joined by a rule (`value: paired`) reads that rule's
+            // sides, whatever tier the rule itself was applied at.
+            if part.value == PAIRED {
+                if let Ok(rule) = paired_rule(decomposition, part, joins) {
+                    read.insert(rule.from.clone());
+                    read.insert(rule.to.clone());
+                }
+            }
+        }
+    }
+    read
+}
+
+/// A rule applied at the query tier: over a stored run's results, after the
+/// run, with the engine the agent tier uses.
+///
+/// Each side's events are its results' `raw` output, which holds every event
+/// the collection had -- what a run's joins walk -- and they are walked in
+/// the order the results are stored, which is the order of the run's
+/// collections. Each source's window is the union of its results' (as the
+/// run merges two requests of one source), closed where its collection was
+/// detached when its `stopped_because` says it was (a window that closed, a
+/// budget, the escalation), and watching to the end of the run otherwise:
+/// the agent tier's own reading, from what the stored run says.
+pub fn apply_stored(rule: &Rule, results: &[Results]) -> Result<Correlation, JoinError> {
+    check(rule)?;
+    let mut streams: Vec<&[Event]> = Vec::new();
+    let mut windows: BTreeMap<String, Watched> = BTreeMap::new();
+    for source in [&rule.from, &rule.to] {
+        let stored: Vec<&Results> = results
+            .iter()
+            .filter(|result| result.source == *source)
+            .collect();
+        if stored.is_empty() {
+            return Err(JoinError::NotStored {
+                id: rule.id.clone(),
+                side: source.clone(),
+                reason: "has no result in the stored run".to_owned(),
+            });
+        }
+        for result in &stored {
+            let raw = result.outputs.iter().find_map(|output| match output {
+                crate::emit::Output::Raw { events } => Some(events),
+                _ => None,
+            });
+            if raw.is_none() {
+                return Err(JoinError::NotStored {
+                    id: rule.id.clone(),
+                    side: source.clone(),
+                    reason: format!(
+                        "was stored without `raw` (result `{}`), so none of its events is there \
+                         to join",
+                        result.label
+                    ),
+                });
+            }
+        }
+        // The run's own union (`assemble` in `src/main.rs`): an attached
+        // window over one never attached, the widest of two attached.
+        let mut watched = stored[0].window;
+        for result in &stored[1..] {
+            match (watched.attached, result.window.attached) {
+                (_, false) => {}
+                (false, true) => watched = result.window,
+                (true, true) => {
+                    watched.opened_ns = watched.opened_ns.min(result.window.opened_ns);
+                    watched.closed_ns = watched.closed_ns.max(result.window.closed_ns);
+                }
+            }
+        }
+        // As the run does, a source that stopped with the run watched to its
+        // end, and one detached before it ended its states at the detach. The
+        // stored result says which in its `stopped_because`.
+        let detached = stored
+            .iter()
+            .any(|result| crate::collect::stopped_at_a_detach(&result.stopped_because));
+        if watched.attached && !detached {
+            watched.closed_ns = u64::MAX;
+        }
+        windows.insert(source.clone(), watched);
+    }
+    // Every stream of either side, in the stored order: one source's two
+    // results stay two streams, as two collections of a run do.
+    for result in results
+        .iter()
+        .filter(|result| result.source == rule.from || result.source == rule.to)
+    {
+        for output in &result.outputs {
+            if let crate::emit::Output::Raw { events } = output {
+                streams.push(events);
+            }
+        }
+    }
+    let mut correlation = apply_merging(rule, &streams, &windows)?;
+    correlation.rule = rule.id.clone();
+    Ok(correlation)
 }
 
 /// `apply_within` over several streams -- one per collection -- merged by the
@@ -3982,6 +4204,7 @@ mod tests {
             window: None,
             capacity: 1000,
             top: 10,
+            tier: Tier::Agent,
         }
     }
 
@@ -4327,6 +4550,7 @@ mod tests {
             window: None,
             capacity: 1000,
             top: 10,
+            tier: Tier::Agent,
         }
     }
 
@@ -4580,6 +4804,7 @@ mod tests {
             window: None,
             capacity: 1000,
             top: 10,
+            tier: Tier::Agent,
         }
     }
 
@@ -4696,6 +4921,7 @@ mod tests {
             window: None,
             capacity: 1000,
             top: 10,
+            tier: Tier::Agent,
         }
     }
 
@@ -5416,6 +5642,7 @@ mod tests {
             window: None,
             capacity: 1000,
             top: 10,
+            tier: Tier::Agent,
         }
     }
 
@@ -6503,5 +6730,260 @@ mod tests {
 
         let unknown = blocked_of_8(result("sched.offcpu", Unit::Ns, 100));
         assert_eq!(unknown.amount, None, "unknown never counts as available");
+    }
+
+    // -- the tier a rule is applied at --
+
+    fn raw_result(source: &str, events: Vec<Event>, window: Watched) -> Results {
+        let mut result = watched_result(source, Unit::Count, window);
+        result.outputs = vec![crate::emit::Output::Raw { events }];
+        result
+    }
+
+    fn to_the_end() -> Watched {
+        Watched {
+            run_opened_ns: 0,
+            opened_ns: 0,
+            closed_ns: 1_000,
+            attached: true,
+            attach_ns: None,
+        }
+    }
+
+    #[test]
+    fn a_rule_is_applied_by_the_agent_unless_it_says_otherwise() {
+        let rule: Rule = serde_norway::from_str(
+            "{id: r, from: proc.threads, to: proc.fd, via: task, match: eq}",
+        )
+        .expect("a rule");
+        assert_eq!(rule.tier, Tier::Agent);
+        let written = serde_json::to_value(&rule).expect("serialisable");
+        assert!(written.get("tier").is_none(), "the default is not written");
+        for tier in ["query", "kernel"] {
+            let rule: Rule = serde_norway::from_str(&format!(
+                "{{id: r, from: proc.threads, to: proc.fd, via: task, match: eq, tier: {tier}}}"
+            ))
+            .expect("a rule");
+            assert_eq!(rule.tier.as_str(), tier);
+        }
+        assert!(serde_norway::from_str::<Rule>(
+            "{id: r, from: proc.threads, to: proc.fd, via: task, match: eq, tier: gpu}"
+        )
+        .is_err());
+    }
+
+    /// No match kind has a kernel program: the rule is refused with the
+    /// reason and the two tiers that serve it, never applied by the agent
+    /// under a name that says kernel.
+    #[test]
+    fn a_rule_at_the_kernel_tier_is_refused_with_the_tiers_that_serve_it() {
+        let rule = Rule {
+            tier: Tier::Kernel,
+            ..eq_rule()
+        };
+        let error = check(&rule).unwrap_err();
+        assert_eq!(
+            error,
+            JoinError::KernelTier {
+                id: rule.id.clone()
+            }
+        );
+        let said = error.to_string();
+        assert!(
+            said.contains("tier: agent") && said.contains("tier: query"),
+            "{said}"
+        );
+        assert!(apply(&rule, &[]).is_err(), "the engine asks again");
+    }
+
+    /// The query tier asks of the session what the stored run must hold: both
+    /// sides collected, with `raw`. A `window` is stored with its close.
+    #[test]
+    fn a_rule_at_the_query_tier_needs_both_sides_stored_in_full() {
+        let rule = Rule {
+            tier: Tier::Query,
+            ..eq_rule()
+        };
+        let both = [
+            request("proc.threads", "poll@10ms"),
+            request("proc.fd", "poll@10ms"),
+        ];
+        check_in(&rule, &both, &catalog()).expect("both sides, raw, the whole run");
+
+        let missing = [request("proc.threads", "poll@10ms")];
+        let error = check_in(&rule, &missing, &catalog()).unwrap_err();
+        assert!(
+            matches!(&error, JoinError::NotStored { side, .. } if side == "proc.fd"),
+            "{error}"
+        );
+
+        let mut summed = both.clone();
+        summed[1] = serde_norway::from_str(
+            "{source: proc.fd, target: {launch: [/bin/true]}, mode: 'poll@10ms', emit: [summary]}",
+        )
+        .expect("a request");
+        let error = check_in(&rule, &summed, &catalog()).unwrap_err();
+        assert!(error.to_string().contains("without `raw`"), "{error}");
+
+        let mut windowed = both.clone();
+        windowed[0] = serde_norway::from_str(
+            "{source: proc.threads, target: {launch: [/bin/true]}, mode: 'poll@10ms', \
+             emit: [raw], window: '1s..'}",
+        )
+        .expect("a request");
+        check_in(&rule, &windowed, &catalog())
+            .expect("a stored result says where its window closed, and whether at a detach");
+
+        // The agent tier asks none of it.
+        check_in(&eq_rule(), &summed, &catalog()).expect("the agent reads the run's events");
+    }
+
+    /// The same rule over the same events answers the same at both tiers:
+    /// the query tier is the engine over the stored `raw` outputs, with the
+    /// run's own merge of two results of one source.
+    #[test]
+    fn a_rule_over_a_stored_run_answers_what_the_run_did() {
+        let opened = vec![threads(10, 7), threads(11, 9), threads(40, 7)];
+        let looked_up = vec![
+            descriptors(20, 7),
+            descriptors(21, 9),
+            descriptors(22, 7),
+            descriptors(23, 11),
+            descriptors(41, 7),
+        ];
+        let more = vec![descriptors(42, 9)];
+        let mut windows = BTreeMap::new();
+        let mut watched = to_the_end();
+        watched.closed_ns = u64::MAX;
+        windows.insert("proc.threads".to_owned(), watched);
+        windows.insert("proc.fd".to_owned(), watched);
+        let ran = apply_merging(&eq_rule(), &[&opened, &looked_up, &more], &windows).unwrap();
+
+        let unrelated = vec![total(15, "cpu.profile", 7, vec![])];
+        let stored = [
+            raw_result("proc.threads", opened, to_the_end()),
+            raw_result("cpu.profile", unrelated, to_the_end()),
+            raw_result("proc.fd", looked_up, to_the_end()),
+            raw_result("proc.fd", more, to_the_end()),
+        ];
+        let rule = Rule {
+            tier: Tier::Query,
+            ..eq_rule()
+        };
+        let queried = apply_stored(&rule, &stored).unwrap();
+        assert_eq!(queried, ran);
+        assert_eq!((queried.matched, queried.unmatched), (5, 1));
+
+        // A stored run without one side's events is refused by name.
+        let error = apply_stored(&rule, &stored[..2]).unwrap_err();
+        assert!(error.to_string().contains("no result"), "{error}");
+        let mut summed = stored.clone();
+        summed[2].outputs.clear();
+        let error = apply_stored(&rule, &summed).unwrap_err();
+        assert!(error.to_string().contains("without `raw`"), "{error}");
+    }
+
+    /// A side whose stored result says it was detached is read as the run
+    /// read it: its window ends at the detach, not at the end of the run.
+    #[test]
+    fn a_stored_side_detached_mid_run_is_closed_where_it_was_detached() {
+        let opened = vec![threads(10, 7), threads(40, 7)];
+        let looked_up = vec![descriptors(20, 7), descriptors(41, 7)];
+        let mut detached_at_30 = to_the_end();
+        detached_at_30.closed_ns = 30;
+        let mut ended = to_the_end();
+        ended.closed_ns = u64::MAX;
+        let mut as_run = BTreeMap::new();
+        as_run.insert("proc.threads".to_owned(), detached_at_30);
+        as_run.insert("proc.fd".to_owned(), ended);
+        let ran = apply_merging(&eq_rule(), &[&opened, &looked_up], &as_run).unwrap();
+        let mut guessed = as_run.clone();
+        guessed.insert("proc.threads".to_owned(), ended);
+        let to_the_end_of_the_run =
+            apply_merging(&eq_rule(), &[&opened, &looked_up], &guessed).unwrap();
+        assert_ne!(
+            ran, to_the_end_of_the_run,
+            "the detach changes the answer, so reading it is what is tested"
+        );
+
+        let mut threads_side = raw_result("proc.threads", opened, detached_at_30);
+        threads_side.stopped_because =
+            "its window closed: detached 0.000 s into the run, as asked".to_owned();
+        let stored = [threads_side, raw_result("proc.fd", looked_up, to_the_end())];
+        let rule = Rule {
+            tier: Tier::Query,
+            ..eq_rule()
+        };
+        assert_eq!(apply_stored(&rule, &stored).unwrap(), ran);
+    }
+
+    /// The events a run keeps for its joins and decompositions are those of
+    /// the sources they read: the table read from those alone is the table
+    /// read from all of them, and a source nothing reads is not among them.
+    #[test]
+    fn a_decomposition_over_the_sources_it_reads_is_the_one_over_every_source() {
+        let spec = decomposition(
+            "{id: one-read, whole: {from: io.syscall, value: total_ns}, parts: [\
+               {state: device, from: io.latency, value: latency_ns},\
+               {state: completion -> wakeup, from: completion-released, value: paired}]}",
+        );
+        let requests = [
+            request("io.syscall", "trace"),
+            request("io.latency", "trace"),
+            request("sched.wakeup", "trace"),
+            request("cpu.profile", "sample@1000hz"),
+        ];
+        let joins = [woke_rule()];
+        let results = [
+            result("io.syscall", Unit::Ns, 100),
+            result("io.latency", Unit::Ns, 100),
+            result("sched.wakeup", Unit::Count, 100),
+            result("cpu.profile", Unit::Count, 100),
+        ];
+        let wakeup = |ts_ns| {
+            total(
+                ts_ns,
+                "sched.wakeup",
+                7,
+                vec![Attr::uint("wakee_tid", 7), Attr::uint("waker_tid", 3)],
+            )
+        };
+        let events = vec![
+            total(9, "io.latency", 7, vec![Attr::uint("latency_ns", 5)]),
+            total(10, "cpu.profile", 7, vec![Attr::uint("samples", 1)]),
+            wakeup(12),
+            total(30, "io.latency", 7, vec![Attr::uint("latency_ns", 5)]),
+            wakeup(39),
+            total(50, "io.syscall", 7, vec![Attr::uint("total_ns", 50)]),
+        ];
+        let read = sources_read(&joins, std::slice::from_ref(&spec));
+        assert!(read.contains("io.syscall") && read.contains("io.latency"));
+        assert!(
+            read.contains("sched.wakeup"),
+            "the paired part's join reads it"
+        );
+        assert!(!read.contains("cpu.profile"), "{read:?}");
+        let kept: Vec<Event> = events
+            .iter()
+            .filter(|event| read.contains(&event.kind))
+            .cloned()
+            .collect();
+        assert_eq!(kept.len(), events.len() - 1);
+        assert_eq!(
+            decompose_with(&spec, &requests, &results, &kept, &joins),
+            decompose_with(&spec, &requests, &results, &events, &joins)
+        );
+        assert!(
+            sources_read(&[], &[]).is_empty(),
+            "a run with no join keeps nothing"
+        );
+        let queried = [Rule {
+            tier: Tier::Query,
+            ..eq_rule()
+        }];
+        assert!(
+            sources_read(&queried, &[]).is_empty(),
+            "a query-tier rule reads the stored run, not the run's events"
+        );
     }
 }
