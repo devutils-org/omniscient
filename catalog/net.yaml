@@ -57,7 +57,7 @@
   summary: "RTT, congestion window and congestion state"
   unit: ns
   backends:
-    - {id: "netlink", requires: ["sock_diag"], cost: free}
+    - {id: "netlink", requires: ["sock_diag"], cost: med}
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:tcp_rcv_established"], cost: low, equivalent: true}
   modes: [poll, trace]
   emits: [timeline, hist, raw, summary]
@@ -194,7 +194,7 @@
   summary: "Accept and SYN queue drops"
   unit: count
   backends:
-    - {id: "fs:proc", requires: ["/proc/net/netstat"], cost: free}
+    - {id: "fs:proc", requires: ["/proc/net/netstat"], cost: low}
   modes: [count, poll, snapshot]
   emits: [timeline, rate, raw, summary]
   targets: {system: native}
@@ -357,7 +357,7 @@
   unit: count
   backends:
     - {id: "netlink", requires: ["ethtool"], cost: free}
-    - {id: "fs:proc", requires: ["/proc/net/dev"], cost: free, degraded: "generic counters only, no driver-specific ones"}
+    - {id: "fs:proc", requires: ["/proc/net/dev"], cost: low, degraded: "generic counters only, no driver-specific ones"}
   modes: [count, poll, snapshot]
   emits: [timeline, rate, raw, summary]
   targets: {iface: native, system: native}

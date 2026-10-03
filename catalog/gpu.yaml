@@ -40,7 +40,7 @@
     - {id: "pmu:i915", requires: ["/sys/bus/event_source/devices/i915"], cost: free}
     - {id: "pmu:xe", requires: ["/sys/bus/event_source/devices/xe"], cost: free, equivalent: true}
     - {id: "pmu:amdgpu", requires: ["/sys/bus/event_source/devices/amdgpu"], cost: free, equivalent: true}
-    - {id: "vendor:nvml", requires: ["nvml"], cost: low,
+    - {id: "vendor:nvml", requires: ["nvml"], cost: med,
        degraded: "one whole-device figure instead of a per-engine breakdown, sampled by the driver over a window it chooses"}
   modes: [count, poll]
   emits: [timeline, summary]
@@ -66,7 +66,7 @@
   backends:
     - {id: "fs:sys:amdgpu", requires: ["/sys/bus/pci/drivers/amdgpu"], cost: free}
     - {id: "fs:sys:i915", requires: ["/sys/bus/pci/drivers/i915"], cost: free, equivalent: true}
-    - {id: "vendor:nvml", requires: ["nvml"], cost: free, equivalent: true}
+    - {id: "vendor:nvml", requires: ["nvml"], cost: high, equivalent: true}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {system: native, launch: native}
@@ -90,7 +90,7 @@
   backends:
     - {id: "fs:sys:amdgpu", requires: ["/sys/bus/pci/drivers/amdgpu", "hwmon:amdgpu"], cost: free,
        degraded: "instantaneous draw sampled by the poller, not an energy counter: short spikes between two reads are invisible"}
-    - {id: "vendor:nvml", requires: ["nvml"], cost: free, equivalent: true}
+    - {id: "vendor:nvml", requires: ["nvml"], cost: high, equivalent: true}
   modes: [count, poll, snapshot]
   emits: [timeline, raw, summary, rate]
   targets: {system: native, launch: native}
@@ -121,7 +121,7 @@
   unit: celsius
   backends:
     - {id: "fs:sys:amdgpu", requires: ["/sys/bus/pci/drivers/amdgpu", "hwmon:amdgpu"], cost: free}
-    - {id: "vendor:nvml", requires: ["nvml"], cost: free, equivalent: true}
+    - {id: "vendor:nvml", requires: ["nvml"], cost: low, equivalent: true}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {system: native, launch: native}
@@ -141,7 +141,7 @@
   unit: bytes
   backends:
     - {id: "fs:sys:amdgpu", requires: ["/sys/bus/pci/drivers/amdgpu"], cost: free}
-    - {id: "vendor:nvml", requires: ["nvml"], cost: free, equivalent: true}
+    - {id: "vendor:nvml", requires: ["nvml"], cost: med, equivalent: true}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {system: native, pid: native, launch: native}

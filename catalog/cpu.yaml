@@ -7,8 +7,8 @@
   summary: "Unhalted CPU cycles"
   unit: count
   backends:
-    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_CPU_CYCLES"], cost: free}
-    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_CLOCK"], cost: free, unit: ns,
+    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_CPU_CYCLES"], cost: low}
+    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_CLOCK"], cost: low, unit: ns,
        degraded: "CPU time, not cycles: blind to DVFS"}
   modes: [count, poll, sample]
   emits: [summary, timeline, rate, hist, topk, stack, raw]
@@ -24,7 +24,7 @@
   summary: "Retired instructions"
   unit: count
   backends:
-    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_INSTRUCTIONS"], cost: free}
+    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_INSTRUCTIONS"], cost: low}
   modes: [count, poll, sample]
   emits: [summary, timeline, rate, hist, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
@@ -43,7 +43,7 @@
   primitive: false
   derived_from: [cpu.instructions, cpu.cycles]
   backends:
-    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_INSTRUCTIONS", "pmu:PERF_COUNT_HW_CPU_CYCLES"], cost: free}
+    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_INSTRUCTIONS", "pmu:PERF_COUNT_HW_CPU_CYCLES"], cost: low}
   modes: [count, poll]
   emits: [summary, timeline, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
@@ -61,7 +61,7 @@
   summary: "Mispredicted branches"
   unit: count
   backends:
-    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_BRANCH_MISSES"], cost: free}
+    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_BRANCH_MISSES"], cost: low}
   modes: [count, poll, sample]
   emits: [summary, timeline, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
@@ -74,7 +74,7 @@
   summary: "Last-level cache misses"
   unit: count
   backends:
-    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_CACHE_MISSES"], cost: free}
+    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_CACHE_MISSES"], cost: low}
   modes: [count, poll, sample]
   emits: [summary, timeline, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
@@ -117,7 +117,7 @@
   unit: count
   backends:
     - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_CPU_CYCLES", "callchain"], cost: low}
-    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_CLOCK", "callchain"], cost: low,
+    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_CLOCK", "callchain"], cost: med,
        degraded: "time-based sampling: blind to phases running at reduced frequency"}
   modes: [sample]
   emits: [stack, topk, hist, raw]
@@ -165,7 +165,7 @@
   summary: "Context switches"
   unit: count
   backends:
-    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CONTEXT_SWITCHES"], cost: free}
+    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CONTEXT_SWITCHES"], cost: low}
   modes: [count, poll, sample]
   emits: [summary, timeline, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
@@ -182,7 +182,7 @@
   summary: "Cross-core migrations"
   unit: count
   backends:
-    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_MIGRATIONS"], cost: free}
+    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CPU_MIGRATIONS"], cost: low}
   modes: [count, poll]
   emits: [summary, timeline, rate, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, launch: native}
@@ -195,7 +195,7 @@
   summary: "CPU utilization by state (user/sys/iowait/idle/steal)"
   unit: ratio
   backends:
-    - {id: "fs:proc", requires: ["/proc/stat"], cost: free,
+    - {id: "fs:proc", requires: ["/proc/stat"], cost: low,
        targets: {system: native, cpu: native}}
     - {id: "fs:cgroup", requires: ["cgroup2:cpu.stat"], cost: free,
        targets: {cgroup: native, container: native}, filter_fields: [],

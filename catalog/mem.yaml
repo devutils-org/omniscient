@@ -8,7 +8,7 @@
   summary: "Resident footprint (pages in RAM, shared ones counted in full)"
   unit: bytes
   backends:
-    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: free}
+    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: med}
     - {id: "fs:proc:statm", requires: ["/proc/[pid]/statm"], cost: free,
        degraded: "resident pages only: no per-VMA breakdown, and no PSS or USS to cross-check against"}
   modes: [poll, snapshot]
@@ -32,8 +32,8 @@
   summary: "Proportional footprint (shared pages divided by the number of mappers)"
   unit: bytes
   backends:
-    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: free}
-    - {id: "fs:proc:smaps", requires: ["/proc/[pid]/smaps"], cost: low,
+    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: med}
+    - {id: "fs:proc:smaps", requires: ["/proc/[pid]/smaps"], cost: med,
        degraded: "walks every VMA: expensive on large address spaces"}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
@@ -51,8 +51,8 @@
   summary: "Private footprint (what dies with the process)"
   unit: bytes
   backends:
-    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: free}
-    - {id: "fs:proc:smaps", requires: ["/proc/[pid]/smaps"], cost: low,
+    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: med}
+    - {id: "fs:proc:smaps", requires: ["/proc/[pid]/smaps"], cost: med,
        degraded: "walks every VMA: expensive on large address spaces"}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
@@ -95,7 +95,7 @@
   summary: "Minor and major page faults"
   unit: count
   backends:
-    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_PAGE_FAULTS"], cost: free}
+    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_PAGE_FAULTS"], cost: low}
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:page_fault_user", "kernel>=5.8"], cost: low,
        degraded: "x86 only for this tracepoint"}
     - {id: "bpf:tp", requires: ["tracepoint:exceptions:page_fault_user", "bpf"], cost: low,
@@ -232,7 +232,7 @@
   summary: "L1 data cache misses"
   unit: count
   backends:
-    - {id: "pmu", requires: ["pmu:L1-dcache-load-misses", "pmu:L1-dcache-loads"], cost: free}
+    - {id: "pmu", requires: ["pmu:L1-dcache-load-misses", "pmu:L1-dcache-loads"], cost: low}
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
@@ -250,7 +250,7 @@
   unit: count
   backends:
     - {id: "pmu", requires: ["pmu:LLC-load-misses", "pmu:LLC-loads"], cost: free}
-    - {id: "pmu:generic", requires: ["pmu:PERF_COUNT_HW_CACHE_MISSES", "pmu:PERF_COUNT_HW_CACHE_REFERENCES"], cost: free,
+    - {id: "pmu:generic", requires: ["pmu:PERF_COUNT_HW_CACHE_MISSES", "pmu:PERF_COUNT_HW_CACHE_REFERENCES"], cost: low,
        degraded: "the architectural cache-miss counter: every last-level access that
          missed, not loads only, and what each vendor puts in it differs"}
   modes: [count, sample]
@@ -272,7 +272,7 @@
   summary: "Data and instruction TLB misses"
   unit: count
   backends:
-    - {id: "pmu", requires: ["pmu:dTLB-load-misses", "pmu:iTLB-load-misses"], cost: free}
+    - {id: "pmu", requires: ["pmu:dTLB-load-misses", "pmu:iTLB-load-misses"], cost: low}
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
@@ -362,7 +362,7 @@
   unit: count
   backends:
     - {id: "pmu", requires: ["pmu:pebs:mem-loads"], cost: med}
-    - {id: "fs:proc", requires: ["/proc/[pid]/numa_maps"], cost: low,
+    - {id: "fs:proc", requires: ["/proc/[pid]/numa_maps"], cost: med,
        targets: {pid: native, tid: native, launch: native}, filter_fields: [comm, node],
        degraded: "page placement, not accesses: a page on the wrong node that is never touched costs nothing, and this cannot tell the two apart"}
   modes: [sample, poll]
@@ -470,8 +470,8 @@
   summary: "Transparent huge pages: promotions and current mode"
   unit: count
   backends:
-    - {id: "fs:sys", requires: ["/sys/kernel/mm/transparent_hugepage/enabled", "/proc/vmstat", "kernel>=6.8"], cost: free}
-    - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free,
+    - {id: "fs:sys", requires: ["/sys/kernel/mm/transparent_hugepage/enabled", "/proc/vmstat", "kernel>=6.8"], cost: low}
+    - {id: "fs:proc", requires: ["/proc/vmstat"], cost: low,
        degraded: "promotion counters only, not the configured mode"}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]

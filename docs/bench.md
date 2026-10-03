@@ -716,6 +716,10 @@ prefetcher bits against the vendors' layouts, the register per vendor and
 family, the cpu identity, the capture against the kernel's own answer, the
 `dynamic-linking` probe and the `hwmon` probe.
 
+Since the eighteenth wave, five more in `tests/bench_bands.rs`: the catalog's
+cost bands against the record of the last table (below, "The bands, corrected
+to the second table").
+
 `#[ignore]`, through `scripts/bench.sh`: the gate, twice; the counts; the
 sweep; the observer effect, twice; the table.
 
@@ -780,6 +784,195 @@ had in that source. What it reads is what `power.throttle`'s `fs:sys` backend
 reads, `thermal_throttle/{core,package}_throttle_count`; on a cpu that
 publishes none (AMD, this machine) the report says a throttled run cannot be
 told from one that was not.
+
+## The bands, corrected to the second table, eighteenth wave
+
+The second table (`scripts/bench.sh`, before the seventeenth wave, 68 minutes,
+documents under `target/bench/backends-1791030430/` on the development
+machine: release build with its capabilities, boost on, load 2.6) flagged 46
+(source, backend) pairs over the band the catalog declared. Each is now either
+corrected to the band it measured -- 43 pairs -- or stands with its reason
+written beside it -- 2 pairs. The 46th, `mem.swap` through `fs:cgroup`, was
+over only on a dilation the workload cannot resolve, and the rule below reads
+it as within.
+
+**The rule a row is judged by.** A row's cost is the larger of two columns:
+the share of the target's cpu the tool reported, and the dilation the workload
+measured of itself, which is where an in-kernel collector's cost is
+(finding 47). That is `harness::judge_band`'s rule, with one change: **a
+dilation no larger than what the gate says the workload resolves reads as
+zero**, because the bench cannot tell it from zero. A negative dilation is
+zero too. Without this, `mem.swap` through `fs:cgroup` -- a cgroup file read
+that cannot reach into the target's timed section -- was "over `free`" on
++0.21 % of a workload that resolves 0.39 %. The harness's own column does not
+apply the floor yet (a request in `docs/fixes/w18-bench.md`).
+
+**What was corrected, and what it says.**
+
+- **The tool's floor is above `free`.** Every perf counter in `count` mode
+  costs about 0.13 to 0.20 % of a target's cpu -- about 240 us on `compute`'s
+  145 ms, 1.1 to 1.2 ms on `memory`'s 355 ms, so it is a rate, not a fixed
+  opening cost -- and so do the system-wide `/proc` and `/sys` polls, the two
+  `proc` raw tracepoints over the `launch` workload, the per-process polls
+  on the 28 ms `syscall` workload and the perf-map reader. `free`'s ceiling is 0.1 %
+  (`Cost::worst_case_percent`); those 27 pairs are `low`. What stays `free`
+  is what measured under it: `cpu.oncpu_time`, `cpu.pressure`, `io.bytes`,
+  `io.iops`, `io.merges`, `mem.cgroup`, `mem.pressure` (both), `mem.rss`
+  through `statm`, `mem.swap` (both), `net.bytes`, `net.hwts`, `net.packets`,
+  `power.energy` and `sched.switches`.
+- **A poll is priced by what it reads.** `smaps` and `smaps_rollup` walk every
+  mapping of a 300 MB process each 100 ms: `mem.pss`, `mem.rss`, `mem.uss` are
+  3.2 to 3.5 %, and `mem.numa` 4.9 % -- `med`. `power.cstate` reads every
+  idle state of 24 cpus: 7.8 %, `high`. NVML is not one price: `gpu.temp`
+  0.5 %, `gpu.mem` 1.5 %, `gpu.engine_busy` 4.2 %, `gpu.power` 12.4 % and
+  `gpu.freq` 14.6 % -- `low`, `med`, `med`, `high`, `high`.
+- **The raw-tracepoint ring has a price per event.** `io.size` drains 2048
+  records in 2.5 ms of a 38 ms target, 6.5 %: `high`. `io.queue` 2.9 %, `med`.
+  `io.latency` in `count` -- the in-kernel histogram -- 3.4 % of the bench's
+  `io` workload: `med`. That workload is far from `null_blk`'s 3 M IOPS, where
+  the histogram's in-target cost was 12 to 24 % before stream io's work on it;
+  whether `med` holds there is the coordinator's `null_blk` run to say.
+- **`cpu.profile` through `pmu:sw`**: 4.9 % at 997 Hz, eight times the tenth
+  wave's 0.61 %: `med`. The band says what it costs; stream profile is making
+  it cost less, and a third table is what lowers the band again.
+- **`net.tcp.rtt` through `netlink`** dumps the socket table on each read,
+  3.2 % with no connection to report: `med`.
+
+**What stands, and why.** `io.fsync` (`high`) and `net.tcp.connect` (`low`)
+through `bpf:fentry` measured 142 % and 39 % of their targets' cpu, and saw no
+event. Both spent about 55 ms -- `io.fsync` on `io`, `net.tcp.connect` on
+`compute`, two targets of different length -- which is the fentry trampoline
+rebuild the eighth wave measured, paid once at attach. A fixed cost is not a
+rate and has no band: on a 10 s target it is 0.5 %. What the target pays, its
+dilation, is +6.3 % and zero, inside each declared band. Both rows are held to
+that: the test fails if their dilation leaves the band, or if their share
+comes back under it and the reason is no longer needed. The fixed cost is
+still the tool's, and still counted by `cost.json` against `--budget`: a short
+run of either under a tight budget stops. That is filed, not hidden.
+
+**Not corrected.** A pair the table did not measure keeps its band, including
+a backend that shares a measured one's mechanism (`bpf:tp` beside a corrected
+`bpf:raw_tp`, the other `pmu` counters). The bands lowered nowhere: a band
+above its measurement may be the source's own case, which the bench's seven
+workloads do not all reach.
+
+**Held by a test.** `tests/bench_bands.rs` reads the record below, in `make
+check`, and fails when the catalog declares another band than a row records
+(so a cost line cannot change without its row), when a row's measurement is
+over its band without a reason, when a reason no longer applies, and when a
+row says `corrected` without a change of band. A new table is pasted here --
+the medians of `table.md`'s `% of target` and `dilation` columns, and the
+gate's `RESOLVES` -- and the test names every band it puts outside.
+
+<!-- bands:begin backends-1791030430 -->
+| workload | resolves |
+|---|---|
+| launch | 0.86 % |
+| compute | 0.23 % |
+| memory | 0.39 % |
+| syscall | 0.84 % |
+| io | 0.85 % |
+| contended | 0.96 % |
+| malloc | 0.89 % |
+
+| source | backend | mode | target | workload | % of target | dilation | was | declared | verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| cpu.branch_misses | pmu | count | launch | compute | 0.17 % | -0.40 % | free | low | corrected |
+| cpu.cache_misses | pmu | count | launch | compute | 0.17 % | -0.41 % | free | low | corrected |
+| cpu.context_switches | pmu:sw | count | launch | compute | 0.20 % | -0.12 % | free | low | corrected |
+| cpu.cycles | pmu | count | launch | compute | 0.17 % | -0.11 % | free | low | corrected |
+| cpu.cycles | pmu:sw | count | launch | compute | 0.17 % | -0.01 % | free | low | corrected |
+| cpu.instructions | pmu | count | launch | compute | 0.17 % | +0.08 % | free | low | corrected |
+| cpu.ipc | pmu | count | launch | compute | 0.15 % | -0.19 % | free | low | corrected |
+| cpu.migrations | pmu:sw | count | launch | compute | 0.20 % | +0.02 % | free | low | corrected |
+| cpu.oncpu_time | fs:proc | poll@100ms | launch | compute | 0.08 % | -0.06 % | free | free | within |
+| cpu.pressure | fs:proc | poll@100ms | system | compute | 0.08 % | - | free | free | within |
+| cpu.profile | pmu:sw | sample@997hz | launch | compute | 4.94 % | +0.34 % | low | med | corrected |
+| cpu.util | fs:proc | poll@100ms | system | compute | 0.22 % | - | free | low | corrected |
+| gpu.api | preload | trace | launch | compute | 0.14 % | +0.16 % | low | low | within |
+| gpu.engine_busy | vendor:nvml | count | launch | compute | 4.20 % | +0.11 % | low | med | corrected |
+| gpu.freq | vendor:nvml | poll@100ms | launch | compute | 14.55 % | -0.03 % | free | high | corrected |
+| gpu.mem | vendor:nvml | poll@100ms | launch | compute | 1.48 % | +0.12 % | free | med | corrected |
+| gpu.power | vendor:nvml | count | launch | compute | 12.39 % | +0.34 % | free | high | corrected |
+| gpu.temp | vendor:nvml | poll@100ms | launch | compute | 0.52 % | -0.16 % | free | low | corrected |
+| io.bytes | fs:proc | count | system | io | 0.05 % | - | free | free | within |
+| io.fs | bpf:fentry | count | launch | io | 0.70 % | +5.53 % | high | high | within |
+| io.fsync | bpf:fentry | trace | launch | io | 142.13 % | +6.31 % | high | high | stands on its dilation: the share is the fentry attach, about 55 ms a run whatever the target (`net.tcp.connect` pays the same on `compute`), over a run that saw no event |
+| io.inflight | fs:proc | poll@100ms | system | io | 0.30 % | - | free | low | corrected |
+| io.iops | fs:proc | count | system | io | 0.08 % | - | free | free | within |
+| io.latency | bpf:raw_tp | count | launch | io | 3.44 % | -0.31 % | low | med | corrected |
+| io.merges | fs:proc | count | system | io | 0.08 % | - | free | free | within |
+| io.pagecache | bpf:raw_tp | count | launch | io | 0.72 % | +0.72 % | med | med | within |
+| io.pressure | fs:proc | poll@100ms | system | io | 0.21 % | - | free | low | corrected |
+| io.queue | bpf:raw_tp | trace | system | io | 2.85 % | - | low | med | corrected |
+| io.readahead | bpf:raw_tp | count | launch | io | 0.72 % | +0.30 % | low | low | within |
+| io.size | bpf:raw_tp | trace | launch | io | 6.45 % | -0.44 % | low | high | corrected |
+| io.syscall | bpf:fentry | count | launch | io | 0.72 % | +2.30 % | med | med | within |
+| io.writeback | bpf:raw_tp | count | system | io | 0.26 % | - | low | low | within |
+| mem.cache_l1 | pmu | count | launch | memory | 0.13 % | +0.17 % | free | low | corrected |
+| mem.cache_llc | pmu:generic | count | launch | memory | 0.12 % | +0.41 % | free | low | corrected |
+| mem.cache_tlb | pmu | count | launch | memory | 0.12 % | +0.20 % | free | low | corrected |
+| mem.cgroup | fs:cgroup | poll@100ms | launch | memory | 0.10 % | +0.09 % | free | free | within |
+| mem.compaction | bpf:raw_tp | count | system | memory | 0.09 % | - | low | low | within |
+| mem.faults | pmu:sw | count | launch | memory | 0.13 % | +0.19 % | free | low | corrected |
+| mem.heap.alloc | preload | trace | launch | malloc | 1483.21 % | +1261.49 % | extreme | extreme | within |
+| mem.heap.live | preload | poll@100ms | launch | malloc | 732.32 % | +1643.40 % | extreme | extreme | within |
+| mem.heap.retained | preload | poll@100ms | launch | malloc | 923.29 % | +1545.40 % | extreme | extreme | within |
+| mem.kmalloc | bpf:raw_tp | count | system | memory | 0.28 % | - | med | med | within |
+| mem.latency | pmu:ibs | sample@997hz | launch | memory | 0.14 % | +0.41 % | med | med | within |
+| mem.numa | fs:proc | poll@100ms | launch | memory | 4.86 % | +0.12 % | low | med | corrected |
+| mem.page_alloc | bpf:raw_tp | count | system | memory | 0.12 % | - | med | med | within |
+| mem.pressure | fs:proc | poll@100ms | system | memory | 0.04 % | - | free | free | within |
+| mem.pressure | fs:cgroup | poll@100ms | launch | memory | 0.05 % | +0.03 % | free | free | within |
+| mem.pss | fs:proc:smaps_rollup | poll@100ms | launch | memory | 3.53 % | +0.14 % | free | med | corrected |
+| mem.pss | fs:proc:smaps | poll@100ms | launch | memory | 3.45 % | +0.16 % | low | med | corrected |
+| mem.reclaim | bpf:raw_tp | count | launch | memory | 0.07 % | +0.19 % | low | low | within |
+| mem.rss | fs:proc:smaps_rollup | poll@100ms | launch | memory | 3.24 % | -0.22 % | free | med | corrected |
+| mem.rss | fs:proc:statm | poll@100ms | launch | memory | 0.04 % | -0.11 % | free | free | within |
+| mem.sharing | pmu:ibs | sample@997hz | launch | memory | 0.15 % | +0.50 % | med | med | within |
+| mem.swap | fs:proc | count | system | memory | 0.03 % | - | free | free | within |
+| mem.swap | fs:cgroup | count | launch | memory | 0.02 % | +0.21 % | free | free | within |
+| mem.thp | fs:sys | poll@100ms | system | memory | 0.21 % | - | free | low | corrected |
+| mem.thp | fs:proc | poll@100ms | system | memory | 0.15 % | - | free | low | corrected |
+| mem.uss | fs:proc:smaps_rollup | poll@100ms | launch | memory | 3.53 % | -0.11 % | free | med | corrected |
+| mem.uss | fs:proc:smaps | poll@100ms | launch | memory | 3.53 % | -0.14 % | low | med | corrected |
+| mem.wss | fs:proc:clear_refs | poll@100ms | launch | memory | 6.39 % | +3.01 % | high | high | within |
+| net.backlog | fs:proc | count | system | compute | 0.17 % | - | free | low | corrected |
+| net.bytes | fs:proc | count | system | compute | 0.06 % | - | free | free | within |
+| net.drops | bpf:raw_tp | count | system | compute | 0.22 % | - | low | low | within |
+| net.hwts | netlink:ethtool | poll@100ms | system | compute | 0.05 % | - | free | free | within |
+| net.iface | fs:proc | count | system | compute | 0.15 % | - | free | low | corrected |
+| net.packets | fs:proc | count | system | compute | 0.08 % | - | free | free | within |
+| net.qdisc | bpf:raw_tp | trace | system | compute | 0.28 % | - | low | low | within |
+| net.socket | bpf:fentry | count | launch | compute | 0.18 % | +0.45 % | low | low | within |
+| net.softirq | bpf:raw_tp | count | system | compute | 0.20 % | - | med | med | within |
+| net.tcp.connect | bpf:fentry | trace | launch | compute | 39.46 % | -0.01 % | low | low | stands on its dilation: the share is the fentry attach, about 55 ms a run whatever the target (`io.fsync` pays the same on `io`), over a run that saw no event |
+| net.tcp.lifetime | bpf:raw_tp | trace | system | compute | 0.29 % | - | low | low | within |
+| net.tcp.retransmit | bpf:raw_tp | count | system | compute | 0.30 % | - | low | low | within |
+| net.tcp.rtt | netlink | trace | launch | compute | 3.21 % | +0.17 % | free | med | corrected |
+| power.cstate | fs:sys | poll@100ms | system | compute | 7.77 % | - | free | high | corrected |
+| power.energy | pmu | count | system | compute | 0.03 % | - | free | free | within |
+| power.freq | fs:sys | poll@100ms | system | compute | 0.91 % | - | free | low | corrected |
+| power.temp | fs:sys | poll@100ms | system | compute | 0.33 % | - | free | low | corrected |
+| proc.exec | bpf:raw_tp | trace | system | launch | 0.46 % | - | free | low | corrected |
+| proc.exit | bpf:raw_tp | trace | system | launch | 0.44 % | - | free | low | corrected |
+| proc.fd | fs:proc | poll@100ms | launch | syscall | 0.68 % | -0.12 % | free | low | corrected |
+| proc.signals | bpf:raw_tp | count | launch | syscall | 0.71 % | -0.35 % | low | low | within |
+| proc.syscall | bpf:raw_tp | count | launch | syscall | 0.46 % | +319.80 % | extreme | extreme | within |
+| proc.threads | fs:proc | poll@100ms | launch | syscall | 0.64 % | -0.09 % | free | low | corrected |
+| runtime.jit | fs:jit-map | trace | launch | compute | 0.17 % | +0.05 % | free | low | corrected |
+| sched.futex | bpf:raw_tp | trace | launch | contended | 0.11 % | -9.56 % | high | high | within |
+| sched.irq | bpf:raw_tp | count | system | contended | 0.35 % | - | med | med | within |
+| sched.lock | bpf:raw_tp | trace | launch | contended | 0.25 % | -31.47 % | med | med | within |
+| sched.migrations | bpf:raw_tp | count | launch | contended | 0.05 % | -1.03 % | low | low | within |
+| sched.mutex | preload | trace | launch | contended | 31.82 % | +640.02 % | extreme | extreme | within |
+| sched.numa_balance | bpf:raw_tp | count | system | contended | 0.07 % | - | low | low | within |
+| sched.offcpu | bpf:raw_tp | trace | launch | contended | 0.11 % | -11.32 % | med | med | within |
+| sched.runqlat | bpf:raw_tp | trace | launch | contended | 0.11 % | -6.90 % | med | med | within |
+| sched.switches | pmu:sw | count | launch | contended | 0.06 % | -9.83 % | free | free | within |
+| sched.switches | bpf:raw_tp | count | launch | contended | 0.05 % | -3.58 % | low | low | within |
+| sched.wakeup | bpf:raw_tp | trace | launch | contended | 3.65 % | +0.38 % | med | med | within |
+<!-- bands:end -->
 
 ## Exit criteria of phase 8
 
