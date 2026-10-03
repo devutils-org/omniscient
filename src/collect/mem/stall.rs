@@ -745,6 +745,37 @@ mod tests {
         assert_eq!(collector.losses().dropped, 0);
     }
 
+    /// A `count` run's row is summed over the whole run and stamped at its
+    /// close, so it has no window that starts at its stamp, and it carries no
+    /// `enclosing_ns`. A rule that names the attribute on it is then refused by
+    /// the join as a missing span (`join`'s test of `enclosing`), rather than
+    /// given a window of zero width.
+    #[test]
+    fn a_counted_row_carries_no_enclosing_window() {
+        let mut collector = StallCollector::new(Stall::Reclaim, Mode::Count, None, None, None);
+        let mut held = row();
+        held.first_ns = 1_000;
+        held.last_ns = 9_000;
+        collector
+            .counted
+            .insert((held.tid, held.cgroup_id, held.bucket, held.scope), held);
+        let events = collector.stop();
+        assert_eq!(events.len(), 1, "the one counted row: {events:?}");
+        assert!(
+            events[0]
+                .attrs
+                .iter()
+                .all(|attr| attr.name != "enclosing_ns"),
+            "a counted row has no enclosing window: {:?}",
+            events[0].attrs
+        );
+        assert!(
+            events[0].attrs.iter().any(|attr| attr.name == "count"),
+            "and it is still a row: {:?}",
+            events[0].attrs
+        );
+    }
+
     /// An aggregated row is stamped where it happened, not where it was read.
     ///
     /// A bucketed source emits one event per row per window, and a join that

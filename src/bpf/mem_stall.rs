@@ -113,10 +113,10 @@ const VALUE_FIRST_NS: i16 = 40;
 /// drained row inside an interval shorter than the drain.
 ///
 /// Written by the program that completed the episode, with a plain store
-/// rather than a compare-and-swap: two cpus ending episodes of the same row at
-/// once can leave the earlier of the two ends here, by the width of that race.
-/// Every end is a real end, so the window still encloses all but the episode
-/// that lost the race, and that one by less than its own duration.
+/// rather than a compare-and-swap or an atomic max, and the plain store is
+/// exact: the row key holds [`KEY_TID`], and one thread is in at most one
+/// episode of a stall at a time, so the ends a row sees are serial and each
+/// store is later than the one before it.
 const VALUE_LAST_NS: i16 = 48;
 const ROW_VALUE_BYTES: usize = 56;
 

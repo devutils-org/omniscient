@@ -324,6 +324,11 @@ impl fmt::Display for KeyValue {
             // The namespace is printed only when it is not this process's:
             // another namespace's `lo` is another interface, and a reader
             // who saw two series called `iface:lo` would add them up.
+            // "This process" is the one printing, not the one that recorded:
+            // a recording rendered from another namespace prints `@netns` on
+            // every interface, the recorder's own included. The identity
+            // (`iface_identity`) carries the namespace either way, so only the
+            // label changes, and it errs towards saying more.
             KeyValue::Iface { netns, name, .. } if *netns != 0 && *netns != own_netns() => {
                 write!(f, "iface:{name}@netns:{netns}")
             }

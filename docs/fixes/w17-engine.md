@@ -27,11 +27,11 @@ streams' builds and tests running on it at the same time.
      the run and stamped at its close, so they have no window that starts at
      the stamp. A rule that names the attribute on them is refused by the
      join (`MissingSpan`) rather than given a zero-length window.
-   - **The plain store can race.** Two cpus that end episodes of the same row
-     at the same moment can leave the earlier of the two ends in the row. Every
-     value stored is a real end, so the window misses only the episode that
-     lost the race, and by less than that episode's own duration. This is
-     written beside the constant.
+   - **The plain store is exact.** The row key holds the thread id, and one
+     thread is in at most one episode of a stall at a time, so the ends a row
+     sees are serial and each store is later than the one before it. This is
+     written beside the constant. (The first round said two cpus could race to
+     end episodes of one row; the review showed they cannot.)
 
    The stall caveat ("an event is one bucket of one window...") had landed
    on `mem.thp` by mistake in `6c259b7`. It now sits on `mem.reclaim` and
@@ -87,6 +87,10 @@ streams' builds and tests running on it at the same time.
     - `a_rows_fields_survive_the_round_trip`: now checks `first_ns` and
       `last_ns`.
     - `a_drained_rows_window_ends_at_its_last_episode_or_else_at_the_drain`.
+    - `a_counted_row_carries_no_enclosing_window` (review round): a `count`
+      run's row, emitted at `stop`, has no `enclosing_ns`. The join's half,
+      that a rule naming a missing `enclosing` attribute is refused as
+      `MissingSpan`, was already tested in `join`.
   - **The 100 ms session, with the follow-up applied and reverted.** I added
     `enclosing: enclosing_ns` to `reclaim-per-pressure-interval` in
     `examples/cross-machine-reclaim-io.yml`, and an assertion that half the
@@ -121,7 +125,16 @@ streams' builds and tests running on it at the same time.
     the decode round trip with the namespace.
   - The integration files that read `iface` keys still pass:
     `join_engine`, `family_net` and `scenario_net`, run after `make`.
-  - **The brief's ground truth, run by hand.** A sender in `unshare -rn` put
+  - **The brief's ground truth, as a test applied and reverted (review
+    round).** The test filed below for `tests/join_engine.rs`,
+    `another_namespaces_lo_is_not_credited_to_this_ones`, was appended to the
+    file, run once after `make`, and reverted: it passed, with their namespace
+    `4026532971`, credited 0, uncredited 2000, 4 rows of theirs, and the
+    as-shipped session keeping none. The reviewer separately ran
+    `a_queued_packet_on_lo_...` with netem on this namespace's lo: 2000 of
+    2000 credited with the in-kernel compare active, so the compare does not
+    drop this namespace's own packets.
+  - **The brief's ground truth, run by hand** (first round). A sender in `unshare -rn` put
     `tc qdisc replace dev lo root netem limit 100000` on its own lo (no
     privilege needed: `sch_netem` was already loaded) and sent 2000 UDP
     datagrams over it. `tc -s` there counted `Sent ... 2000 pkt`.
@@ -138,8 +151,17 @@ streams' builds and tests running on it at the same time.
 
 **Reasoned, not shown:**
 
-- **Concurrent stall rows.** The race on `last_ns` is argued above, not
-  measured.
+- **The last end is exact without an atomic.** Argued from the key (thread id
+  in it) and the begin/end pairing (one in-flight entry per thread), not
+  measured under contention.
+- **The `@netns` label depends on who prints it.** `Display` compares against
+  the namespace of the process printing, not the one that recorded. A recording
+  rendered from another namespace or machine prints `@netns:<inode>` on every
+  interface, the recorder's own included. The identity carries the namespace
+  either way, so joins are unaffected, and the label errs towards saying more.
+  The comment beside `Display` says so. Fixing it means a recording carrying
+  its recorder's namespace, which is `src/encode.rs`'s, and nothing needs it
+  yet.
 - **Namespace reads.**
   - A kernel without `CONFIG_NET_NS` has not been run.
   - The `possible_net_t` offset of 0 is read off `pahole` on this kernel
@@ -195,6 +217,35 @@ listed below.
 
   I am filing it as a flaky candidate with the 256, not fixing it.
 
+### The review round's run
+
+One `make check` on the review round's tree (before its commit), with
+capabilities, at a load of 12 to 24 on 24 cpus with other streams running. It
+stopped at `family_mem::the_working_set_is_what_was_touched_and_not_what_was_held`.
+Then one `cargo test --workspace --no-fail-fast`: 2428 passed, 16 failed,
+11 ignored, summed over the binaries' result lines. Each of the 16 was rerun
+alone once and **all 16 passed**: `triage` (2), `scenario_sched` (4),
+`family_sched` (2), `scenario_io` (2), `unwind` (2), `scenario_runtime`,
+`scenario_proc::defect_2_...`, `scenario_net::every_datagram_...`,
+`scenario_gpu::the_process_figure_...`. `cargo clippy --all-targets -D
+warnings` and `cargo fmt --check` are clean.
+
+- **`family_mem::the_working_set_...`**, not in the flaky tally: after the
+  `make check`, it failed 2 of 12 runs alone on this branch, and passed 6 of 6
+  on `8725ae0` (a scratch worktree, removed afterwards) at the same load. The
+  failures differ: once `mem.wss` had no point because the launched `python3` was gone
+  (8 KB resident, exited) by the first read, so `mem.rss` also carried `task`
+  alone, its `proc_of` finding no namespace link; once the busiest window read
+  191 MB against 278 MB resident, which is the 256 MB allocation inside the
+  window. This branch touches `mem.rss`'s keys only, through two read-only
+  procfs reads at attach, and not `mem.wss`. I read it as load, but 3 in 13
+  against 0 in 6 is not proof, so it is listed here for the merge run.
+- **`scenario_proc::the_only_key_proc_fd_...`** passed in the no-fail-fast
+  run and failed alone, as expected (finding 1). It passes when no event
+  arrives: a 0.1 s `python3` under load can exit before the first 50 ms poll,
+  and the loop then asserts nothing. The diff below does not change that; a
+  `assert!(!events.is_empty())` would.
+
 ## Could not do, and why
 
 - **The 100 ms session's `enclosing:` line, and its assertion.** They go in
@@ -221,6 +272,40 @@ cargo test --test cross_machine a_drained_reclaim_row
 cargo test --lib bpf::net_qdisc bpf::mem_stall
 ```
 
+## Review
+
+The review round (seven findings) and what became of each:
+
+1. **`scenario_proc` is red on the branch alone.** Correct, and known: the
+   test file is not this stream's, and the brief says a request to a file a
+   stream does not own is filed, not made. The diff is below under "Needs from
+   another stream" and **must be applied in the merge commit**, or the merge
+   lands red. Unchanged in this round.
+2. **Neither ground truth is an automated test.** Both tests live in files this
+   stream does not own, so they are still filed rather than landed. What
+   changed: the namespace test is now a complete function, applied, run and
+   reverted (above), and pasted whole below for `tests/join_engine.rs`. The
+   100 ms session's diff was already measured three times. The in-repo guards
+   on the engine side are unit tests only: the window computation
+   (`collect::mem::stall`), the store of the last end (`bpf::mem_stall`), the
+   in-kernel compare's 64-bit register (`bpf::net_qdisc`), and the join's
+   refusal to credit another namespace's index (`join`).
+3. **The `VALUE_LAST_NS` comment's race.** The reviewer is right: the key
+   holds the thread id, so a row's episodes are serial. The comment and the
+   handoff now say the plain store is exact, and why.
+4. **`Display` uses the printing process's namespace.** True. It is documented
+   beside `Display` and under "Reasoned, not shown"; identity is unaffected.
+   Not changed.
+5. **"Refused" in the brief.** The code counts another namespace's key
+   unmatched or uncredited and labels it, which is right for a `--system` run.
+   The decision lines below say "counted unmatched, labelled by namespace",
+   not "refused". `BRIEF.md` is the coordinator's.
+6. **`examples/join-iface-qdisc.yml` and `docs/families/join.md:39`** still
+   describe the identity as the index alone. Neither file is this stream's:
+   both are filed below.
+7. **No test that a `count` run's rows carry no `enclosing_ns`.** Added:
+   `collect::mem::stall::a_counted_row_carries_no_enclosing_window`.
+
 ## For DECISIONS.md
 
 - **The network namespace beside an interface's index** (moves from "Open"
@@ -230,9 +315,12 @@ cargo test --lib bpf::net_qdisc bpf::mem_stall
   - **Which namespace each producer writes.** A producer that reads in this
     process's namespace writes this process's. `net.qdisc` writes the
     device's own, `dev->nd_net.net->ns.inum`, read in the kernel.
-  - **How another namespace's interface shows.** It is another key. A join
-    counts it unmatched or uncredited and prints it
-    `iface:<name>@netns:<inode>`. It is never credited to this namespace's.
+  - **How another namespace's interface shows.** It is another key: counted
+    unmatched or uncredited, labelled by its namespace
+    (`iface:<name>@netns:<inode>`), never credited to this namespace's. It is
+    not refused: a `--system` run legitimately sees every namespace's
+    devices, and the brief's "refused with its reason" reads as "never
+    credited silently".
   - **Why.** An index is per namespace and `net.qdisc` reads every namespace:
     2000 of 2000 packets on another namespace's lo were credited to this
     one's, and are now 2000 uncredited and keyed by their namespace.
@@ -242,8 +330,9 @@ cargo test --lib bpf::net_qdisc bpf::mem_stall
   served, and an exec keeps the namespace.
 - **A drained row's enclosing window is first episode to last end.** The
   plain store of the last end is accepted, and a `count` run's rows carry no
-  window. The reason: the 100 ms session credits 99.5 to 100 % of the cgroup's
-  pages, against 2 % without the enclosure.
+  window. The plain store is exact because a row's thread ends its episodes
+  one at a time. The reason: the 100 ms session credits 99.5 to 100 % of the
+  cgroup's pages, against 2 % without the enclosure.
 
 ## Needs from another stream
 
@@ -277,30 +366,197 @@ wants a sentence for `enclosing:`.
 
 ### To whoever owns `tests/join_engine.rs`: another namespace's lo is not this one's
 
-This is the brief's ground truth as a test. Run the script below under
-`unshare -rn` while the session runs.
-It skips when `unshare -rn` or `tc ... netem` fails, with the machine's reason
-first: the user namespace is restricted, or `sch_netem` is not loaded.
+This is the brief's ground truth as a test. Append it to the file as it is: it
+uses only the file's own `BINARY`, `machine_cannot_serve`,
+`machine_s_reason` and `number`. Applied, run once after `make` and reverted
+in the review round: it passed (credited 0, uncredited 2000). It skips, with
+the machine's reason, when `unshare -rn` or `tc ... netem` fails in the
+sender's namespace (the user namespace restricted, or `sch_netem` not loaded),
+and it needs `python3` there.
 
-```sh
-ip link set lo up
+```rust
+/// The script a sender runs inside `unshare -rn`: a discipline that queues on
+/// its own lo, the namespace's inode on the first line, then 2000 datagrams
+/// over that lo once the session has taken its first readings.
+const OTHER_NAMESPACE_SENDER: &str = r#"
+ip link set lo up || exit 9
 tc qdisc replace dev lo root netem limit 100000 || exit 9
 readlink /proc/self/ns/net
 sleep 1
 python3 -c 'import socket
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); r=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); r.bind(("127.0.0.1",0))
-for _ in range(2000): s.sendto(b"x"*64, r.getsockname())'
+for _ in range(2000): s.sendto(b"x"*64, r.getsockname())' || exit 9
+tc -s qdisc show dev lo
+"#;
+
+/// Runs `session` while a sender in another network namespace queues 2000
+/// packets on that namespace's lo. `None` when the machine cannot make such a
+/// namespace, with the reason printed; otherwise the session's JSON and the
+/// inode of the sender's namespace.
+fn run_beside_another_namespaces_lo(session: &str) -> Option<(serde_json::Value, u64)> {
+    let run = Command::new(BINARY)
+        .args(["-f", session, "--format", "json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    let sender = Command::new("unshare")
+        .args(["-rn", "sh", "-c", OTHER_NAMESPACE_SENDER])
+        .output();
+    let output = run.wait_with_output().expect("omn should finish");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let sender = match sender {
+        Ok(sender) if sender.status.success() => sender,
+        Ok(sender) => {
+            eprintln!(
+                "SKIPPED: this machine cannot queue packets on lo in an unprivileged network \
+                 namespace (`unshare -rn` with `tc qdisc ... netem`; the user namespace may be \
+                 restricted, or `sch_netem` not loaded): {}. It would have checked that \
+                 another namespace's lo is not this one's",
+                String::from_utf8_lossy(&sender.stderr).trim()
+            );
+            return None;
+        }
+        Err(error) => {
+            eprintln!(
+                "SKIPPED: `unshare` could not run: {error}. It would have checked that another \
+                 namespace's lo is not this one's"
+            );
+            return None;
+        }
+    };
+    if !output.status.success() {
+        assert!(
+            machine_cannot_serve(&stderr),
+            "the session failed for a reason that is not the machine's:\n{stderr}"
+        );
+        eprintln!(
+            "SKIPPED: {}. It would have checked that another namespace's lo is not this one's",
+            machine_s_reason(&stderr)
+        );
+        return None;
+    }
+    let said = String::from_utf8_lossy(&sender.stdout);
+    let inode: u64 = said
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("net:["))
+        .and_then(|rest| rest.strip_suffix(']'))
+        .and_then(|inode| inode.parse().ok())
+        .unwrap_or_else(|| panic!("the sender names its namespace first: {said}"));
+    assert!(
+        said.contains("Sent ") && said.contains(" 2000 pkt"),
+        "the discipline in the sender's namespace counted its 2000 packets: {said}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Some((
+        serde_json::from_str(&stdout).expect("a JSON document"),
+        inode,
+    ))
+}
+
+/// An interface index is per network namespace, and every namespace has a lo
+/// of index 1. A sender in an unprivileged namespace (`unshare -rn`) queues
+/// 2000 packets on its own lo while this one's lo is read.
+///
+/// With `net.qdisc` on the whole machine, the discipline sees the 2000 packets
+/// and keys them by the device's own namespace: none is credited to this
+/// namespace's lo, all 2000 are counted uncredited, and every series of them
+/// says whose lo it is (`iface:lo@netns:<inode>`). Before the namespace was in
+/// the key, all 2000 were credited here. And the session as shipped, which
+/// targets lo, has the kernel drop them by their namespace: no row at all.
+#[test]
+fn another_namespaces_lo_is_not_credited_to_this_ones() {
+    let shipped = std::fs::read_to_string("examples/join-iface-qdisc.yml").expect("the session");
+    let narrowed = "    source: net.qdisc\n    target: {iface: lo}\n";
+    assert!(
+        shipped.contains(narrowed),
+        "the session targets lo for net.qdisc"
+    );
+    let whole = shipped.replace(narrowed, "    source: net.qdisc\n    target: system\n");
+    let session =
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("join-iface-qdisc-system.yml");
+    std::fs::write(&session, whole).expect("a session file");
+
+    let Some((document, inode)) = run_beside_another_namespaces_lo(session.to_str().unwrap())
+    else {
+        return;
+    };
+    let join = document["joins"]
+        .as_array()
+        .and_then(|joins| {
+            joins
+                .iter()
+                .find(|join| join["rule"] == "queued-per-link-reading")
+        })
+        .expect("the session's join");
+    let credited = number(&join["readings"]["credited"]);
+    let uncredited = number(&join["readings"]["uncredited"]);
+    let theirs = format!("iface:lo@netns:{inode}");
+    let queued: Vec<String> = document["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|result| result["label"] == "queued")
+        .flat_map(|result| result["outputs"].as_array().into_iter().flatten())
+        .filter(|output| output["emit"] == "raw")
+        .flat_map(|output| output["events"].as_array().into_iter().flatten())
+        .filter_map(|event| {
+            let attrs = event["attrs"].as_array()?;
+            let netns = attrs.iter().find(|attr| attr["name"] == "netns")?;
+            Some(netns["value"].to_string())
+        })
+        .collect();
+    eprintln!(
+        "their namespace {inode}: credited {credited}, uncredited {uncredited}, {} rows of theirs",
+        queued
+            .iter()
+            .filter(|netns| **netns == inode.to_string())
+            .count()
+    );
+    assert_eq!(
+        credited, 0.0,
+        "a packet on another namespace's lo was credited to this one's: {join}"
+    );
+    assert!(
+        uncredited >= 2000.0,
+        "the 2000 packets their discipline counted are counted uncredited here: {join}"
+    );
+    assert!(
+        join["top"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|row| row["key"] != "iface:lo"),
+        "no row of their lo is labelled as this one's: {join}"
+    );
+    assert!(
+        join.to_string().contains(&theirs)
+            || queued.iter().any(|netns| *netns == inode.to_string()),
+        "their rows carry their namespace, {theirs}: {join}"
+    );
+
+    // As shipped, the target is this namespace's lo, and the kernel compares
+    // the namespace: none of theirs is a row.
+    let Some((document, _)) = run_beside_another_namespaces_lo("examples/join-iface-qdisc.yml")
+    else {
+        return;
+    };
+    let join = document["joins"]
+        .as_array()
+        .and_then(|joins| {
+            joins
+                .iter()
+                .find(|join| join["rule"] == "queued-per-link-reading")
+        })
+        .expect("the session's join");
+    assert_eq!(
+        number(&join["readings"]["credited"]) + number(&join["readings"]["uncredited"]),
+        0.0,
+        "a target of this namespace's lo kept a packet of another namespace's: {join}"
+    );
+}
 ```
-
-Assert, against `examples/join-iface-qdisc.yml`:
-
-- with `net.qdisc` on `--system`:
-  - `readings.credited == 0`;
-  - `readings.uncredited == 2000`, which is what `tc -s` in the namespace
-    counted;
-  - every `net.qdisc` series key ends in `@netns:<the inode the sender
-    printed>`.
-- as shipped (`--iface lo`): no `net.qdisc` row at all.
 
 ### To whoever owns `tests/scenario_proc.rs` (the coordinator): `proc.fd` carries `task, proc`
 
@@ -352,3 +608,28 @@ would let the loader check this offset instead of assuming it.
 Series are named by `KeyValue`'s `Display`, so another namespace's interface
 is already its own series (`iface:lo@netns:<inode>`). This is listed so the
 change is not a surprise.
+
+### To whoever owns `examples/join-iface-qdisc.yml`: the header names the namespace
+
+The header says a join compares `iface` "by the kernel's index". It is now the
+namespace and the index:
+
+```diff
+-# of counter (`iface:lo/drops`). A join compares an `iface` key by the kernel's
+-# index -- resolved from the name at the read when a producer has only the
+-# name, and a name's sub-series after `/` is not part of the interface -- so
+-# the two meet on lo, and on nothing else (`docs/keys.md`).
++# of counter (`iface:lo/drops`). A join compares an `iface` key by its network
++# namespace and the kernel's index there -- the index resolved from the name at
++# the read when a producer has only the name, and a name's sub-series after `/`
++# is not part of the interface -- so the two meet on this namespace's lo, and
++# on nothing else; another namespace's lo is another key (`docs/keys.md`).
+```
+
+### To whoever owns `docs/families/join.md`: the identity is `iface#<netns>:<index>`
+
+Line 39 gives the identity as `iface#<index>`. After this wave it is
+`iface#<netns>:<index>` (`iface:<netns>:<name>` when the index stayed 0); a
+sentence after the paragraph could say why: an index is per namespace, and
+`net.qdisc` on the whole machine keyed 2000 packets on another namespace's lo
+as this one's before the namespace was in the key.
