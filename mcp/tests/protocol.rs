@@ -564,11 +564,15 @@ fn a_call_that_would_change_the_machine_is_refused() {
         json!({"session": existing, "duration": "1h", "budget": "5%"}),
     );
     assert!(reason.contains("at most 3s"), "{reason}");
-    let reason = runner.refused(
-        "run_session",
-        json!({"session": existing, "duration": "1s"}),
-    );
-    assert!(reason.contains("budget"), "{reason}");
+    // A budget is optional, but one that is not a percentage is refused
+    // before anything runs.
+    for budget in [json!(5), json!("lots")] {
+        let reason = runner.refused(
+            "run_session",
+            json!({"session": existing, "duration": "1s", "budget": budget}),
+        );
+        assert!(reason.contains("budget"), "{reason}");
+    }
 
     // Reading stays under the directory the server was pointed at.
     for name in ["..", "/etc", "a/../../.."] {
@@ -809,4 +813,207 @@ fn only_a_session_its_owner_approved_launches_a_program() {
         request["cost"]
     );
     assert_eq!(answer["approved"]["name"], "counted.yml");
+}
+
+/// Writes `text` as `name` in a fresh approved directory under `dir`.
+fn approve(dir: &std::path::Path, name: &str, text: &str) -> std::path::PathBuf {
+    let approved = dir.join("approved");
+    std::fs::create_dir_all(&approved).unwrap();
+    std::fs::write(approved.join(name), text).unwrap();
+    approved
+}
+
+/// What a launched program prints on stdout comes back apart from `omn`'s
+/// own document, byte for byte where it is UTF-8, and the whole of it is
+/// written beside the run; and a run asked with no budget says so, and says
+/// what a budget would have been a percentage of.
+///
+/// The program prints twenty known lines and one that is not UTF-8, then
+/// sleeps: a target that waits, whose cpu is a small share of its window.
+/// Its stdout is the pipe `omn` writes its JSON document to, so the
+/// separation is checked against what the program wrote, not against what
+/// the server took out.
+#[test]
+fn a_launched_programs_stdout_comes_back_apart_from_omns_document() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("SKIP: the launched program is a python3 one; this machine has no python3");
+        return;
+    }
+    let dir = scratch("stdout");
+    let text = "requests:\n  - label: descriptors\n    source: proc.fd\n    target:\n      launch:\n        \
+         - python3\n        - -c\n        - |\n          import sys, time\n          \
+         for n in range(20): print('LINE %d' % n)\n          sys.stdout.flush()\n          \
+         sys.stdout.buffer.write(b'NOT UTF-8 \\xff\\n')\n          sys.stdout.buffer.flush()\n          \
+         time.sleep(1.0)\n    mode: poll@50ms\n    emit: [summary]\n";
+    let approved = approve(&dir, "printing.yml", text);
+    let mut client = Client::start(&[
+        "--dir",
+        dir.to_str().unwrap(),
+        "--allow-run",
+        "5s",
+        "--allow-launch",
+        approved.to_str().unwrap(),
+    ]);
+    let answer = client.call(
+        "run_session",
+        json!({"approved": "printing.yml", "duration": "4s"}),
+    );
+    assert_eq!(answer["exit"], 0, "{answer}");
+
+    let mut printed: Vec<u8> = (0..20)
+        .flat_map(|n| format!("LINE {n}\n").into_bytes())
+        .collect();
+    printed.extend_from_slice(b"NOT UTF-8 \xff\n");
+    let stdout = &answer["program_stdout"];
+    assert_eq!(
+        stdout["text"].as_str().unwrap(),
+        String::from_utf8_lossy(&printed),
+        "{stdout}"
+    );
+    assert_eq!(stdout["bytes"], printed.len(), "{stdout}");
+    assert_eq!(stdout["left_out_before_text"], 0, "{stdout}");
+    assert!(
+        stdout["told_apart"].as_str().unwrap().starts_with("yes"),
+        "{stdout}"
+    );
+    let file = std::fs::read(stdout["file"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        file, printed,
+        "the file holds the program's bytes unchanged"
+    );
+    // And the document taken out is the one on disk: the run reads back.
+    assert_eq!(
+        answer["read_back"]["requests"][0]["result"]["label"], "descriptors",
+        "{}",
+        answer["read_back"]
+    );
+
+    // No budget: said, and what one would have been measured against said
+    // too. The program slept most of its window, so the run's cost is a
+    // larger share of the target's cpu than of the window -- the two
+    // denominators, side by side, neither standing in for the other.
+    assert!(
+        answer["bounds"]["budget"]
+            .as_str()
+            .unwrap()
+            .starts_with("none"),
+        "{}",
+        answer["bounds"]
+    );
+    let against = &answer["budget_against"][0];
+    assert_eq!(against["label"], "descriptors", "{against}");
+    let window = against["window_wall_ns"].as_u64().unwrap();
+    let target = against["target_cpu_ns"].as_u64().unwrap();
+    assert!(target < window / 2, "the sleeping program's cpu: {against}");
+    if let (Some(of_target), Some(of_window)) = (
+        against["run_spent_percent_of_target_cpu"].as_f64(),
+        against["run_spent_percent_of_window_on_one_cpu"].as_f64(),
+    ) {
+        assert!(of_target > of_window, "{against}");
+    }
+}
+
+/// One privilege model: a run through the server is `omn`'s run, with the
+/// capabilities on `omn` and none on the server.
+///
+/// `omn-mcp` is never granted a capability (`make` grants `omn` alone), and a
+/// session that needs `CAP_BPF` runs through it on the eBPF backend all the
+/// same, counting the twenty syncs the program made; the same server pointed
+/// at a copy of `omn` without its capabilities does not serve it there.
+#[test]
+fn a_run_through_the_server_is_as_privileged_as_omn() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("SKIP: the launched program is a python3 one; this machine has no python3");
+        return;
+    }
+    let server = std::path::PathBuf::from(env!("CARGO_BIN_EXE_omn-mcp"));
+    let carries = |path: &std::path::Path| {
+        Command::new("getcap")
+            .arg(path)
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).contains("cap_bpf"))
+    };
+    match (carries(&omn()), carries(&server)) {
+        (Ok(true), server_carries) => assert!(
+            !matches!(server_carries, Ok(true)),
+            "{} carries capabilities: one file is to carry them, omn",
+            server.display()
+        ),
+        (Ok(false), _) => {
+            eprintln!(
+                "SKIP: {} carries no CAP_BPF, so there is no privileged run to show; `make` \
+                 grants it",
+                omn().display()
+            );
+            return;
+        }
+        (Err(error), _) => {
+            eprintln!("SKIP: no getcap here ({error}), so whose capabilities are whose is unread");
+            return;
+        }
+    }
+    let dir = scratch("privilege");
+    let text =
+        "requests:\n  - label: syncs\n    source: io.fsync\n    target:\n      launch:\n        \
+         - python3\n        - -c\n        - |\n          import os\n          \
+         fd = os.open('synced.bin', os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)\n          \
+         for _ in range(20): os.write(fd, b'x' * 4096); os.fsync(fd)\n          \
+         os.close(fd); os.remove('synced.bin')\n    mode: trace\n    emit: [summary]\n";
+    let approved = approve(&dir, "syncs.yml", text);
+    let args = |omn: &std::path::Path| {
+        vec![
+            "--dir".to_owned(),
+            dir.to_str().unwrap().to_owned(),
+            "--omn".to_owned(),
+            omn.to_str().unwrap().to_owned(),
+            "--allow-run".to_owned(),
+            "10s".to_owned(),
+            "--allow-launch".to_owned(),
+            approved.to_str().unwrap().to_owned(),
+        ]
+    };
+    let argv = args(&omn());
+    let mut client = Client::start(&argv.iter().map(String::as_str).collect::<Vec<_>>());
+    let plan = client.call("plan_session", json!({"approved": "syncs.yml"}));
+    let backend = &plan["resolution"]["requests"][0]["backend"];
+    if backend != "bpf:fentry" {
+        eprintln!(
+            "SKIP: this machine does not serve io.fsync through bpf:fentry even with the \
+             capabilities: {}",
+            plan["resolution"]
+        );
+        return;
+    }
+    let answer = client.call(
+        "run_session",
+        json!({"approved": "syncs.yml", "duration": "8s"}),
+    );
+    assert_eq!(answer["exit"], 0, "{answer}");
+    assert_eq!(answer["answered_by"]["file_capabilities"]["cap_bpf"], true);
+    let request = &answer["read_back"]["requests"][0];
+    assert_eq!(
+        request["resolved"]["backend"]["id"], "bpf:fentry",
+        "{request}"
+    );
+    let series = &request["result"]["outputs"][0]["series"];
+    let counted: u64 = series
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|one| one["count"].as_u64())
+        .sum();
+    assert_eq!(counted, 20, "{series}");
+    drop(client);
+
+    // The same server over a copy of omn without them: not that backend.
+    let bare = dir.join("omn");
+    std::fs::copy(omn(), &bare).unwrap();
+    let argv = args(&bare);
+    let mut unprivileged = Client::start(&argv.iter().map(String::as_str).collect::<Vec<_>>());
+    let plan = unprivileged.call("plan_session", json!({"approved": "syncs.yml"}));
+    assert_ne!(
+        plan["resolution"]["requests"][0]["backend"], "bpf:fentry",
+        "{}",
+        plan["resolution"]
+    );
 }

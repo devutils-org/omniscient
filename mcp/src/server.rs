@@ -424,10 +424,15 @@ impl Server {
             .get("duration")
             .and_then(Value::as_str)
             .ok_or("`duration` is required: how long the run lasts, at most the server's bound")?;
-        let budget = arguments
-            .get("budget")
-            .and_then(Value::as_str)
-            .ok_or("`budget` is required: the overhead ceiling, as a percentage (`2%`)")?;
+        let budget = match arguments.get("budget") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(text)) => Some(text.as_str()),
+            Some(other) => {
+                return Err(format!(
+                    "`budget` is a percentage written as a string (`2%`), not {other}"
+                ))
+            }
+        };
         let source = Source::from_arguments(
             arguments,
             &std::env::current_dir().unwrap_or_default(),
@@ -636,7 +641,7 @@ fn tools() -> Vec<Value> {
     });
     run_properties["budget"] = json!({
         "type": "string",
-        "description": "The overhead ceiling, a percentage of the observed workload's cpu (`2%`)",
+        "description": "Optional: an overhead ceiling, a percentage of the target's own cpu over the window (`2%`), past which the run steps down or stops. A target that mostly waits has little cpu for it to be a percentage of; the answer's `budget_against` says, per request, what it was measured against. Absent, the run is not stopped for its cost, which is measured all the same",
     });
     vec![
         json!({
@@ -701,11 +706,11 @@ fn tools() -> Vec<Value> {
         json!({
             "name": "run_session",
             "title": "Run one bounded session",
-            "description": "Runs a session through the omn binary for a bounded duration under a budget, and reads the run back. Only when the server was started with --allow-run, only up to the duration it allows. A session that launches a program runs only when it is `approved`: a file of the --allow-launch directory, run as the file states it, from its own directory. Every other session observes targets that already exist.",
+            "description": "Runs a session through the omn binary for a bounded duration, under a budget when one is given, and reads the run back. Only when the server was started with --allow-run, only up to the duration it allows. A session that launches a program runs only when it is `approved`: a file of the --allow-launch directory, run as the file states it, from its own directory; the answer then carries what the program printed on stdout, told apart from omn's document (`program_stdout`). Every other session observes targets that already exist.",
             "inputSchema": {
                 "type": "object",
                 "properties": run_properties,
-                "required": ["duration", "budget"],
+                "required": ["duration"],
             },
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
         }),

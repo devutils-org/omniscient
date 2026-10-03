@@ -438,13 +438,18 @@ pub fn refuse_to_run(session: &Session, source: &Source, launch_allowed: bool) -
 }
 
 /// `run_session`: one bounded run through `omn`, written under `out`.
+///
+/// `budget` is the caller's, and optional: `omn` asked by a person carries
+/// none unless the person asks for one, and a model asking the same question
+/// through this server is asked nothing more. The bound this server holds a
+/// run to is its duration, which is the person's who started it.
 pub fn run(
     catalog: &Catalog,
     binary: &Binary,
     source: &Source,
     limit: RunLimit,
     duration: &str,
-    budget: &str,
+    budget: Option<&str>,
     out: &Path,
 ) -> Result<Value, String> {
     let duration: Duration = duration
@@ -458,9 +463,12 @@ pub fn run(
             limit.longest
         ));
     }
-    let budget: Budget = budget
-        .parse()
-        .map_err(|error| format!("budget `{budget}`: {error}"))?;
+    let budget: Option<Budget> = budget
+        .map(|text| {
+            text.parse()
+                .map_err(|error| format!("budget `{text}`: {error}"))
+        })
+        .transpose()?;
 
     let session = source.load()?;
     if let Some(reason) = refuse_to_run(&session, source, limit.launch_allowed) {
@@ -481,9 +489,14 @@ pub fn run(
         out.display().to_string(),
         "--duration".into(),
         duration.to_string(),
-        "--budget".into(),
-        budget.to_string(),
     ]);
+    if let Some(budget) = budget {
+        args.extend(["--budget".into(), budget.to_string()]);
+    }
+    let launches = session
+        .requests
+        .iter()
+        .any(|request| request.target.kind() == TargetKind::Launch);
     // The duration is the run's own bound; this is the bound on the process,
     // for a run that does not end when it should.
     let bound = StdDuration::from_nanos(duration.as_nanos()) * 2 + StdDuration::from_secs(30);
@@ -503,10 +516,17 @@ pub fn run(
         },
         "bounds": {
             "duration": duration.to_string(),
-            "budget": budget.to_string(),
+            "budget": match budget {
+                Some(budget) => json!(budget.to_string()),
+                None => json!(NO_BUDGET),
+            },
             "longest_this_server_allows": limit.longest.to_string(),
         },
+        "budget_against": budget_against(out, budget.is_some()),
     });
+    if launches {
+        answer["program_stdout"] = program_stdout(&output.stdout_bytes, out);
+    }
     if let Some(after) = output.killed_after {
         answer["killed"] = json!(format!(
             "omn was still running {:.1} s after it started, against a {duration} run, and was \
@@ -515,4 +535,192 @@ pub fn run(
         ));
     }
     Ok(answer)
+}
+
+/// What `bounds.budget` reads when the call passed none.
+const NO_BUDGET: &str = "none: the call asked for no ceiling, so the run was not stopped for what \
+     it cost; what it cost is measured and written anyway (`budget_against`, `cost.json`)";
+
+/// The most of the program's stdout handed back in the answer; the whole of
+/// it is in the run's directory.
+const PROGRAM_STDOUT_IN_ANSWER: usize = 64 * 1024;
+
+/// The file of the run's directory that holds what the program printed.
+const PROGRAM_STDOUT_FILE: &str = "program.stdout";
+
+/// What a launched program printed on stdout, told apart from `omn`'s own
+/// document.
+///
+/// The program inherits `omn`'s stdout (`src/main.rs`, `shared_stdout_warning`),
+/// so the two arrive on one pipe: whatever the program printed, and the run's
+/// document, which `omn` writes once and also to `results.json`. The document
+/// is found there byte for byte -- its last occurrence, since a program still
+/// printing after `omn` wrote it would follow it -- and what is left is the
+/// program's. Nothing is guessed: when the document is not found, the answer
+/// says so and hands the whole stream back as it came.
+///
+/// The whole of it is written beside the run's documents, and the answer
+/// carries its last [`PROGRAM_STDOUT_IN_ANSWER`] bytes, where a program's own
+/// account of what it did usually is, with how many were left out before them.
+pub fn program_stdout(stdout: &[u8], out: &Path) -> Value {
+    let (program, told_apart): (Vec<u8>, Value) = match std::fs::read(out.join("results.json")) {
+        Ok(document) if !document.is_empty() => match find_last(stdout, &document) {
+            Some(at) => {
+                let mut program = stdout[..at].to_vec();
+                program.extend_from_slice(&stdout[at + document.len()..]);
+                (
+                    program,
+                    json!(
+                        "yes: omn's document, the bytes of results.json, was found on the \
+                               shared stdout and taken out; the rest is the program's"
+                    ),
+                )
+            }
+            None => (
+                stdout.to_vec(),
+                json!(
+                    "no: the bytes of results.json are not on the shared stdout, so this \
+                           is the whole stream as it came, omn's document possibly in it"
+                ),
+            ),
+        },
+        _ if out.join("recording.json").is_file() => (
+            stdout.to_vec(),
+            json!(
+                "yes: a recording writes each document to a file of its own under the run's \
+                       directory and none to stdout, so all of it is the program's"
+            ),
+        ),
+        _ => (
+            stdout.to_vec(),
+            json!(
+                "no: omn wrote no results.json to compare with, so this is the whole stream \
+                       as it came, and whether a document of omn's is in it was not checked"
+            ),
+        ),
+    };
+    let file = out.join(PROGRAM_STDOUT_FILE);
+    let written = match std::fs::write(&file, &program) {
+        Ok(()) => json!(file.display().to_string()),
+        Err(error) => json!({"unwritten": format!("{}: {error}", file.display())}),
+    };
+    let cut = program.len().saturating_sub(PROGRAM_STDOUT_IN_ANSWER);
+    json!({
+        "bytes": program.len(),
+        "text": String::from_utf8_lossy(&program[cut..]),
+        "left_out_before_text": cut,
+        "file": written,
+        "told_apart": told_apart,
+        "stderr": "not told apart: the program shares omn's stderr, and its lines are among \
+                   `said_by_omn`",
+    })
+}
+
+/// Where `needle` last occurs in `haystack`.
+fn find_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.len() > haystack.len() {
+        return None;
+    }
+    if haystack.ends_with(needle) {
+        return Some(haystack.len() - needle.len());
+    }
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
+}
+
+/// What a budget is a percentage of, per request, read from the run's
+/// `cost.json`.
+///
+/// `omn`'s budget is a share of the target's own cpu over the window. For a
+/// target that spends its time waiting -- on a disk, on a child, on a socket
+/// -- that is a small number, and a collector's cost that is small against
+/// the window is large against it. Which of the two a run was is not guessed
+/// here: each request says the target's cpu, the window's wall-clock time,
+/// the share of the window the target was on a cpu, and what the run spent
+/// against both denominators, the budget's and the window's.
+pub fn budget_against(out: &Path, asked: bool) -> Value {
+    let costs = match std::fs::read(out.join("cost.json")) {
+        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(Value::Array(costs)) => costs,
+            Ok(_) | Err(_) => {
+                return json!({"unread": "cost.json is not a list of measured costs"});
+            }
+        },
+        Err(error) => return json!({"unread": format!("no cost.json: {error}")}),
+    };
+    let per_request: Vec<Value> = costs.iter().map(|cost| denominator(cost, asked)).collect();
+    json!(per_request)
+}
+
+/// One request's [`budget_against`].
+fn denominator(cost: &Value, asked: bool) -> Value {
+    let overhead = &cost["overhead"];
+    let ns = |field: &str| overhead[field].as_u64();
+    let label = cost["label"].clone();
+    let wall = ns("wall_ns").unwrap_or(0);
+    let spent = ns("attributed_cpu_ns").unwrap_or(0) + ns("in_target_cpu_ns").unwrap_or(0);
+    let budget = if asked {
+        "the budget is a percentage of the target's own cpu over the window"
+    } else {
+        "no budget was asked; had one been, it would be a percentage of the target's own cpu \
+         over the window"
+    };
+    let Some(observed) = ns("observed_cpu_ns") else {
+        return json!({
+            "label": label,
+            "budget_is_a_share_of": budget,
+            "target_cpu_ns": Value::Null,
+            "why": format!(
+                "the target's cpu was not measured ({}), so there is nothing for a budget to be \
+                 a percentage of",
+                overhead["observed_from"].as_str().unwrap_or("no reason given")
+            ),
+            "window_wall_ns": wall,
+        });
+    };
+    let share = |part: u64, of: u64| (of > 0).then(|| 100.0 * part as f64 / of as f64);
+    json!({
+        "label": label,
+        "budget_is_a_share_of": budget,
+        "target_cpu_ns": observed,
+        "target_cpu_from": overhead["observed_from"],
+        "window_wall_ns": wall,
+        "target_on_cpu_percent_of_window": share(observed, wall),
+        "run_spent_ns": spent,
+        "run_spent_percent_of_target_cpu": cost["measured_percent"],
+        "run_spent_percent_of_window_on_one_cpu": share(spent, wall),
+        "reads": "a target on a cpu for a small share of its window has little cpu to be a \
+                  percentage of: the same collector costs far more of it than of the window. \
+                  Both percentages are here, and neither is the other",
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_document_is_found_where_it_last_is() {
+        assert_eq!(find_last(b"ab{doc}", b"{doc}"), Some(2));
+        assert_eq!(find_last(b"{doc}a{doc}b", b"{doc}"), Some(6));
+        assert_eq!(find_last(b"ab", b"{doc}"), None);
+        assert_eq!(find_last(b"{do", b"{doc}"), None);
+    }
+
+    #[test]
+    fn a_program_printing_after_the_document_keeps_both_halves() {
+        let out = std::env::temp_dir().join(format!("omn-mcp-split-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("results.json"), b"{\"r\":1}\n").unwrap();
+        let answer = program_stdout(b"before\n{\"r\":1}\nafter\n", &out);
+        assert_eq!(answer["text"], "before\nafter\n");
+        assert!(answer["told_apart"].as_str().unwrap().starts_with("yes"));
+        // Without the document on disk nothing is taken out, and that is said.
+        std::fs::remove_file(out.join("results.json")).unwrap();
+        let answer = program_stdout(b"before\n{\"r\":1}\n", &out);
+        assert_eq!(answer["text"], "before\n{\"r\":1}\n");
+        assert!(answer["told_apart"].as_str().unwrap().starts_with("no"));
+        std::fs::remove_dir_all(&out).unwrap();
+    }
 }

@@ -9,6 +9,12 @@
 //! a relinked `omn`, one binary over. So the sweep, the resolution and the run
 //! are asked of the binary that would run the session, and every answer says
 //! which binary that was and which capabilities it carried.
+//!
+//! Which is also why this server needs no capability of its own, and is
+//! granted none: everything it collects, `omn` collects. One file carries the
+//! privilege -- `omn`, granted by `make`, by the command `make install` and
+//! `scripts/release.sh` print, and by the sudoers line -- and both ways of
+//! asking, a person's and a model's, run on the machine that file sees.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -28,6 +34,11 @@ pub struct Binary {
 #[derive(Debug)]
 pub struct Output {
     pub status: Option<i32>,
+    /// Everything on stdout, as bytes: a launched program shares it with
+    /// `omn`'s document, and what it prints need not be UTF-8.
+    pub stdout_bytes: Vec<u8>,
+    /// The same, read as text, a byte that is not UTF-8 replaced rather than
+    /// the whole stream lost.
     pub stdout: String,
     pub stderr: String,
     /// Set when the invocation was killed for outliving its bound.
@@ -123,15 +134,18 @@ impl Binary {
         }
         let mut stdout_pipe = child.stdout.take().expect("piped");
         let mut stderr_pipe = child.stderr.take().expect("piped");
+        // Bytes, not `read_to_string`: that one returns nothing at all for a
+        // stream holding one byte that is not UTF-8, and a launched program
+        // writes to these pipes whatever it writes.
         let out_reader = std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = stdout_pipe.read_to_string(&mut text);
-            text
+            let mut bytes = Vec::new();
+            let _ = stdout_pipe.read_to_end(&mut bytes);
+            bytes
         });
         let err_reader = std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = stderr_pipe.read_to_string(&mut text);
-            text
+            let mut bytes = Vec::new();
+            let _ = stderr_pipe.read_to_end(&mut bytes);
+            bytes
         });
 
         let started = Instant::now();
@@ -148,10 +162,13 @@ impl Binary {
                 Err(error) => return Err(format!("waiting for omn: {error}")),
             }
         };
+        let stdout_bytes = out_reader.join().unwrap_or_default();
+        let stderr = err_reader.join().unwrap_or_default();
         Ok(Output {
             status: status.code(),
-            stdout: out_reader.join().unwrap_or_default(),
-            stderr: err_reader.join().unwrap_or_default(),
+            stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+            stdout_bytes,
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
             killed_after,
         })
     }
