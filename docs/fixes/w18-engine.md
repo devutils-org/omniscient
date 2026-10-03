@@ -93,11 +93,11 @@ written when it is the default.
 
 - **`query`**: `join::apply_stored(rule, &[Results])` applies the rule to a
   stored run's `raw` outputs with the same `apply_merging`, each source's
-  window merged the way `assemble` merges it and watched to the end. `check_in`
-  refuses, at validation, a query-tier rule whose side is not collected, is
-  collected without `raw`, or is collected with a `window` (a stored result
-  does not say whether its source stopped at a detach, which decides where an
-  open state ended). `JoinError::NotStored` names the side and the reason.
+  window merged the way `assemble` merges it, closed at its detach when its
+  stored `stopped_because` says it was detached and watched to the end
+  otherwise (the review's round, below). `check_in` refuses, at validation, a
+  query-tier rule whose side is not collected or is collected without `raw`.
+  `JoinError::NotStored` names the side and the reason.
 - **`kernel`**: refused by `check` with the reason and the two tiers that
   serve it (`JoinError::KernelTier`). No match kind has a program of
   `src/bpf/`.
@@ -200,6 +200,28 @@ This stream's own: `cargo test --lib join::` 84 passed, `--lib bpf::` 390,
 `-p omn-preload` 15, `--test join_engine` 26 (one ignored, the hour), the
 reclaim crossing and the namespace test green with the capabilities.
 
+### The review round's run, at `7cc2f79`
+
+`make check` once: the suite red, fail-fast, on
+`cases::every_case_names_its_known_cause_both_ways` alone
+(`sqlite3-durability/commits-that-wait-for-nothing`'s
+`both-ways-name-the-same-suspect`, `_raw_spin_unlock_irqrestore` against
+`bpf_trace_run2`: a flat on-cpu leaf under the load of the other streams, the
+tally's kind). Then `cargo test --workspace --no-fail-fast`: **2198 passed, 9
+failed, 10 ignored**; clippy `-D warnings` and `fmt --check` clean. The nine:
+`cases` (as above, leaves swapped), and the two red on `main`'s sources before
+(`runner::a_profile_s_losses_...`, `triage::a_verdict_read_off_a_lossy_profile_...`);
+the other six each green rerun alone once:
+`budget::the_extra_cpu_a_faster_poll_costs_...`,
+`cross_compute::a_half_blocked_task_decomposes_...`,
+`triage::the_same_program_is_cpu_bound_...`,
+`triage::a_program_waiting_for_a_mutex_...`,
+`unwind::a_stripped_build_is_named_from_debuginfod_...`,
+`scenario_net::every_datagram_sent_to_a_closed_port_...`. While iterating:
+`--lib join::` 85 passed, `--lib collect::tests::a_stored_reason...` and the
+BTF audit green, `--test join_engine another_namespaces` green with the
+capabilities.
+
 ## Privileged runs wanted
 
 None that changes a sysctl or loads a module. Alone, with the capabilities, on
@@ -221,13 +243,63 @@ target's cpu time.
 - **A join rule chooses its tier per rule** (`tier: agent | query | kernel`,
   `agent` by default). `query` applies the same engine to a stored run's `raw`
   events and is refused at validation unless both sides are stored in full
-  (collected, `raw`, no `window`); `kernel` is refused with the reason until a
+  (collected, with `raw`), reading a detach back from each result's
+  `stopped_because`; `kernel` is refused with the reason until a
   match kind has a program. Why: phase 5 decided placement per rule and asked
   that a join move between tiers without rewriting the collector; a tier that
   cannot answer what the agent would have is refused rather than degraded.
 - **`Btf::member_offset` follows typedefs, structs first.** Why: the loader
   should check what `net_qdisc` wrote by hand, and C names a typedef's members
   the way it names a struct's.
+
+## Review
+
+The adversarial review's round, in `7cc2f79`.
+
+- **Defect, the namespace test's skip.** The sender's failure printed
+  "unprivileged network namespace", which neither `.github/expected-skips.txt`
+  nor the stock cell's list matches. The helper now probes `unshare -rn true`
+  before it starts the session and skips with "this needs an unprivileged
+  user namespace and this machine allows none (`unshare -rn`)": the stock
+  cell's existing "an unprivileged user namespace". Each step of the sender
+  exits with its own code; `tc ... netem` failing (exit 8, a kernel without
+  `sch_netem`, which the defaults cell may be) skips with "this machine cannot
+  serve a `netem` discipline ...": the common list's "cannot serve". Any other
+  failure of the sender, inside a namespace the machine let it make, fails
+  the test. Not run on a cell: green's next CI read is what shows it. Nothing
+  under `.github/` changed.
+- **Gap, `apply_stored` and a detach.** Fixed by reading it rather than
+  refusing it: every way a collection is detached (its window, the budget,
+  the escalation) now spells its `stopped_because` through one function,
+  `collect::detached_at`, and `collect::stopped_at_a_detach` reads it back
+  (`collect::tests::a_stored_reason_says_whether_its_collection_was_detached`).
+  `apply_stored` keeps a detached side's stored `closed_ns`, as `assemble` does
+  for a source in its `detached` set, so the query tier answers what the agent
+  tier did over any stored run, the `omn join` command stream names is asked
+  for included. With that, `check_in`'s refusal of a windowed request had no
+  reason left and is gone (a window's start is the stored `opened_ns`, its
+  stop a detach). `join::tests::a_stored_side_detached_mid_run_is_closed_where_it_was_detached`
+  asserts the detach changes the answer for its events and that the stored
+  run gives the run's. The doc comments and `docs/families/join.md` say so.
+- **Nit, the BTF audit.** A caller's name that is only a typedef now fails it
+  (following it would turn a refusal into an offset), and a name absent from
+  the kernel's BTF is printed rather than passed over. Green on 7.2.7, none
+  absent.
+- **Nit, the namespace test's assertions.** The OR is two assertions: a raw
+  row of the queued result carries their `netns`, and the queued result's
+  series is keyed `iface:lo@netns:<inode>` (the join itself names no row of
+  theirs: its `top` is empty and the 2000 are `uncredited`, so the old first
+  branch could never have held; the doc comment's "every series" is the
+  result's). Both halves now assert that `net.qdisc`'s window held the
+  sender's burst, which the sender stamps with `CLOCK_MONOTONIC`: a zero is
+  then about the burst, not about when the session watched. Run with the
+  capabilities: credited 0, uncredited 2000, 3 rows of theirs, both halves
+  green.
+- **Nit, `tests/cross_machine.rs`.** Acknowledged above (section 3); for the
+  coordinator, unchanged.
+- **Nit, `CATALOG.md`.** Now quotes the facts line as `src/unwind.rs` and
+  `src/stack.rs` write it: `names came from -- ... perf-<pid>.map: perf-map,
+  the <n> lines the program wrote for code no file holds`.
 
 ## Needs from another stream
 
@@ -266,7 +338,16 @@ rustfmt may rewrap the `for` line.
 A subcommand, say `omn join -f <session-or-rule.yml> <results.json>`, that
 reads the stored `results` as `Vec<omn::emit::Results>`, applies each
 query-tier rule with `join::apply_stored`, and prints the correlations the
-way a run does. And `man/omn.1`'s description of a join rule wants the
+way a run does. `apply_stored` reads a detach back from each result's
+`stopped_because`, so a stored run with a window or a detach needs no refusal
+of its own there.
+
+### To stream green (`.github/**`): nothing to file
+
+`another_namespaces_lo_is_not_credited_to_this_ones` skips with "an
+unprivileged user namespace" (the stock cell's list) or "cannot serve" (the
+common list); a CI read that shows another wording from it is this stream's
+defect, not a pattern to add. And `man/omn.1`'s description of a join rule wants the
 `tier:` line.
 
 ### To stream profile (`docs/unwind.md`): the perf map under `--symbols local`
