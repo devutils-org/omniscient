@@ -115,14 +115,18 @@ joins:
   # none (`overlap` alone may), and each reclaim episode is laid across the
   # pressure intervals by the share of it that overlaps each: an event of one
   # episode is stamped when it began and lasted `total_ns`. A drained bucket of
-  # several episodes has no one window to place, so its pages are counted
-  # uncredited, not spread. The rows are keyed `machine`. TEMPORAL: a reclaim
-  # and a stall in the same interval share a clock and nothing else.
+  # several episodes has no one window to place by its durations, so
+  # `enclosing:` names the window it was drained over (`enclosing_ns`): a
+  # bucket that window places inside one interval is credited to it whole, and
+  # only one that crosses an interval's edge is counted uncredited, not spread.
+  # The rows are keyed `machine`. TEMPORAL: a reclaim and a stall in the same
+  # interval share a clock and nothing else.
   - id: reclaim-per-pressure-interval
     from: mem.pressure
     to: mem.reclaim
     match: overlap
     value: pages_reclaimed
     span: total_ns
+    enclosing: enclosing_ns
     stamped: start
     top: 100

@@ -1540,9 +1540,22 @@ fn a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_it
         under.overlap_in_brackets,
         under.overlap_uncredited
     );
-    // A drained bucket placed by its enclosing window rather than left over
-    // is `a_drained_reclaim_row_is_credited_whole_inside_one_second_of_pressure`:
-    // against 100 ms readings a 100 ms drain crosses one almost always.
+    // The rule names each drained row's enclosing window (`enclosing:
+    // enclosing_ns`), so a bucket drained inside one 100 ms interval is
+    // credited to it whole: at least half of what the cgroup reclaimed lands
+    // in the intervals the program overlapped. Measured on the engine branch
+    // of the seventeenth wave at 38 967 of 38 967, 42 668 of 42 668 and
+    // 39 388 of 39 572 pages; half is the separation, not that calibration.
+    // The one-second version is
+    // `a_drained_reclaim_row_is_credited_whole_inside_one_second_of_pressure`.
+    assert!(
+        under.overlap_in_brackets >= (capped.pgsteal / 2) as f64,
+        "half the cgroup's pgsteal credited in the program's intervals: {:.0} of {} ({:.0} \
+         uncredited)",
+        under.overlap_in_brackets,
+        capped.pgsteal,
+        under.overlap_uncredited
+    );
     let accounted = under.overlap_credited + under.overlap_uncredited;
     assert!(
         (accounted - under.reclaimed_machine_wide as f64).abs() <= 1.0,
