@@ -36,9 +36,14 @@ unchanged.
 per counter kind (`lo/drops`), so it never met `net.bytes`'s `lo`, and a
 rename made a second key. `KeyValue::iface` now fills an index of 0 from the
 name at the read (`if_nametoindex` on the part before a `/`, which no Linux
-interface name holds), and the identity is `iface#<index>`, the name only when
-the index stayed 0. `between` keeps each reading's baseline on the full key, so
-two series of one interface never difference each other.
+interface name holds), and the identity is `iface#<netns>:<index>`
+(`iface:<netns>:<name>` only when the index stayed 0). The namespace is in it
+because an index is per network namespace and every namespace has a lo of
+index 1: before the seventeenth wave put it there, `net.qdisc` on the whole
+machine credited 2000 packets queued on another namespace's lo to this one's
+(`join_engine::another_namespaces_lo_is_not_credited_to_this_ones`). `between`
+keeps each reading's baseline on the full key, so two series of one interface
+never difference each other.
 
 Two tests, because there are two ways a producer names an interface:
 
