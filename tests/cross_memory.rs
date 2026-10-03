@@ -143,11 +143,13 @@ fn withheld(output: &Output) -> Option<String> {
     }
     // From the line that starts `error:`: the launch's warnings and the
     // sources' caveats come first on stderr, and a caveat that names the
-    // sysctl is not the reason the run was refused.
-    let refusal = message
+    // sysctl is not the reason the run was refused. A failure with no such
+    // line -- a panic, an assert, a signal -- is not a refusal at all, so it
+    // is never a skip: the caller's assert reports it.
+    let (at, _) = message
         .match_indices("error:")
-        .find(|(at, _)| *at == 0 || message[..*at].ends_with('\n'))
-        .map_or(message.as_str(), |(at, _)| &message[at..]);
+        .find(|(at, _)| *at == 0 || message[..*at].ends_with('\n'))?;
+    let refusal = &message[at..];
     let says = |line: &str| {
         line.contains("perf_event_paranoid")
             || line.contains("not readable")
@@ -241,6 +243,19 @@ fn a_served_run_is_not_withheld_by_its_caveat() {
         reason.starts_with("error: `mem.faults` has no viable backend"),
         "the skip line starts at the refusal, not at the caveat: {reason}"
     );
+
+    // A crash prints no `error:` line; the caveat above it is not a reason.
+    let crashed = output(
+        101,
+        "caveat: mem.faults names perf_event_paranoid
+         thread 'main' panicked at src/emit.rs:1:1:\nattempt to add with overflow\n",
+    );
+    assert_eq!(withheld(&crashed), None, "a crash is not the machine's");
+    let killed = Output {
+        status: std::process::ExitStatus::from_raw(9),
+        ..output(0, "caveat: mem.faults names perf_event_paranoid\n")
+    };
+    assert_eq!(withheld(&killed), None, "a signal is not the machine's");
 }
 
 /// The layout the CI's skip gate reads (`docs/open-findings.md`, the
