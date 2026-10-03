@@ -557,8 +557,13 @@ pub struct Symbolizer {
     /// Whether a read for a miss added lines, so that the frames interned
     /// before it are worth naming again.
     perf_map_grew: bool,
-    /// Frames the perf map named.
+    /// Times a frame was named from the perf map: once per symbolization,
+    /// so a frame seen on several new stacks counts once for each. Read only
+    /// as whether the map named anything.
     perf_map_named: u64,
+    /// Whether a frame in anonymous executable memory went unnamed, and so a
+    /// refresh has a reason to read the map again.
+    perf_map_wanted: bool,
 }
 
 /// How often, at most, a frame the perf map does not name sends the
@@ -591,6 +596,7 @@ impl Symbolizer {
             perf_map_reread_ns: 0,
             perf_map_grew: false,
             perf_map_named: 0,
+            perf_map_wanted: false,
         }
     }
 
@@ -767,7 +773,10 @@ impl Symbolizer {
                 }
             }
         }
-        let line = self.perf_map.lookup(addr)?;
+        let Some(line) = self.perf_map.lookup(addr) else {
+            self.perf_map_wanted = true;
+            return None;
+        };
         let found = (line.symbol.clone(), addr - line.address);
         self.perf_map_named += 1;
         self.origins.insert(
@@ -788,6 +797,12 @@ impl Symbolizer {
     /// sampled in them were interned before that.
     pub fn reread_perf_map(&mut self) -> bool {
         self.perf_map.update()
+    }
+
+    /// Whether a frame in anonymous executable memory has gone unnamed, so
+    /// that reading the map again could name something.
+    pub fn perf_map_wanted(&self) -> bool {
+        self.perf_map_wanted
     }
 
     /// Names, from the perf map as it stands, the frames of `table` that fell
@@ -855,17 +870,25 @@ impl Symbolizer {
         }
         if self.perf_map.replaced > 0 {
             notes.push(format!(
-                "{} was replaced while it was read (it shrank): the names it held before are \
-                 gone, and a frame interned before that may carry one the new map does not",
+                "{} was replaced while it was read (it shrank, or another file took its \
+                 place): the names it held before are gone, and a frame interned before that \
+                 may carry one the new map does not",
                 self.perf_map.path.display()
             ));
         }
         notes
     }
 
-    /// The perf map this symbolizer reads, and how many frames it named.
+    /// The perf map this symbolizer reads, and how many times it named a
+    /// frame (see `perf_map_named`).
     pub fn perf_map(&self) -> (&Path, u64) {
         (&self.perf_map.path, self.perf_map_named)
+    }
+
+    /// How much of the perf map, as it stands now, was never read: `None`
+    /// when there is no map.
+    fn perf_map_unread(&self) -> Option<u64> {
+        self.perf_map.unread()
     }
 
     /// Whether the function this address is in sets up a frame pointer.
@@ -1056,8 +1079,13 @@ struct PerfMap {
     lines: u64,
     /// Lines that were not entries.
     undecoded: u64,
-    /// Times the file was found shorter than what was already read.
+    /// Times the file was found replaced: shorter than what was already read,
+    /// or another file at the same path.
     replaced: u64,
+    /// The device and inode of the file read so far: a map written anew at
+    /// the same path -- a recycled pid, a runtime that restarted -- is a
+    /// different file even when it is as long as the old one.
+    identity: Option<(u64, u64)>,
 }
 
 impl PerfMap {
@@ -1081,7 +1109,25 @@ impl PerfMap {
             lines: 0,
             undecoded: 0,
             replaced: 0,
+            identity: None,
         }
+    }
+
+    /// How much of the file, as it stands now, this reader has not taken in:
+    /// bytes appended since the last read, a last line still without its
+    /// newline, or the whole of a file that replaced the one read. `None` when
+    /// there is no file.
+    fn unread(&self) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::metadata(&self.path).ok()?;
+        if self
+            .identity
+            .is_some_and(|identity| identity != (metadata.dev(), metadata.ino()))
+        {
+            return Some(metadata.len());
+        }
+        Some(metadata.len().saturating_sub(self.consumed) + self.partial.len() as u64)
     }
 
     /// Reads what was appended, and says whether it held a line.
@@ -1089,14 +1135,19 @@ impl PerfMap {
     /// A map that does not exist is not an error: most programs write none.
     fn update(&mut self) -> bool {
         use std::io::{Read, Seek, SeekFrom};
+        use std::os::unix::fs::MetadataExt;
 
         let Ok(mut file) = std::fs::File::open(&self.path) else {
             return false;
         };
-        let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
+        let Ok(metadata) = file.metadata() else {
             return false;
         };
-        if length < self.consumed {
+        let length = metadata.len();
+        let identity = (metadata.dev(), metadata.ino());
+        let other_file = self.identity.is_some_and(|held| held != identity);
+        self.identity = Some(identity);
+        if other_file || length < self.consumed {
             // Replaced: a recycled pid, a runtime that restarted its map. The
             // names read so far described the old one.
             self.replaced += 1;
@@ -2166,7 +2217,12 @@ impl Unwinder {
     /// the time its last samples are drained it has often exited. See
     /// [`Symbolizer::refresh`].
     pub fn refresh_symbols(&mut self) -> bool {
-        self.name_from_perf_map();
+        // Only once a frame in anonymous code went unnamed: an unwinder that
+        // never met any -- nearly every one, and in `--cpus` mode one per
+        // recently sampled pid -- does not open `/tmp` each tick for nothing.
+        if self.symbols.perf_map_wanted() {
+            self.name_from_perf_map();
+        }
         let fresh = self.symbols.refresh();
         if fresh {
             if let Some(cfi) = self.cfi.as_mut() {
@@ -2186,14 +2242,14 @@ impl Unwinder {
     /// at its `stop`, after the last drain. The map outlives the process that
     /// wrote it, and a runtime that buffers its writes flushes them at exit --
     /// the last lines are the ones a run that read only during the window
-    /// would never apply. Also done on every [`Unwinder::refresh_symbols`].
+    /// would never apply. Also done on every [`Unwinder::refresh_symbols`]
+    /// once a frame in anonymous code went unnamed.
     pub fn finish(&mut self) -> u64 {
         self.name_from_perf_map()
     }
 
-    /// Only when the map grew and something is waiting for a name: a run
-    /// with no anonymous code, which is nearly every run, pays one `open` that
-    /// fails per tick and nothing else.
+    /// Renames only when the map grew. A refresh calls it only once an
+    /// anonymous frame went unnamed; `finish` calls it once, whatever the run.
     fn name_from_perf_map(&mut self) -> u64 {
         if !self.symbols.reread_perf_map() {
             return 0;
@@ -2370,7 +2426,15 @@ impl Unwinder {
         let anonymous = self.unnamed_anonymous_frames();
         if anonymous > 0 {
             let (path, named) = self.symbols.perf_map();
-            let why = if named > 0 || path.exists() {
+            let unread = self.symbols.perf_map_unread();
+            let why = if let Some(bytes @ 1..) = unread {
+                format!(
+                    "{} holds {bytes} bytes this run never read: lines written after its last \
+                     read of the map (a runtime that buffers its map and flushes it late, at \
+                     exit), which may name them",
+                    path.display()
+                )
+            } else if named > 0 || unread.is_some() {
                 format!(
                     "{} covers none of them: they are code generated after its last line, or \
                      by a part of the runtime that does not write it",
@@ -3066,7 +3130,37 @@ mod tests {
         assert_eq!(map.replaced, 1);
         assert_eq!(map.lookup(0x1050), None);
         assert_eq!(map.lookup(0x9000).unwrap().symbol, "py::fresh:/b.py");
+        assert_eq!(map.unread(), Some(0), "read to its end");
+
+        // Another file renamed into place, longer than the one read: a
+        // restarted runtime's map, not more of the old one.
+        let other = path.with_extension("next");
+        std::fs::write(
+            &other,
+            "a000 10 py::restarted:/c.py\na100 10 py::second:/c.py\n",
+        )
+        .unwrap();
+        std::fs::rename(&other, &path).unwrap();
+        assert_eq!(
+            map.unread(),
+            Some(53),
+            "the whole of the new file is unread"
+        );
+        assert!(map.update());
+        assert_eq!(map.replaced, 2);
+        assert_eq!(map.lookup(0x9000), None);
+        assert_eq!(map.lookup(0xa105).unwrap().symbol, "py::second:/c.py");
+
+        append(&path, "b000 10 py::pending");
+        assert_eq!(map.unread(), Some(19), "appended and not yet read");
+        map.update();
+        assert_eq!(
+            map.unread(),
+            Some(19),
+            "a line without its newline is not read yet"
+        );
         let _ = std::fs::remove_file(&path);
+        assert_eq!(map.unread(), None, "no file, nothing to read");
     }
 
     /// A symbolizer over one anonymous executable mapping and a map of the

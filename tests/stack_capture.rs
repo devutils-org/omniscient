@@ -906,6 +906,10 @@ fn main() {
 
 /// Builds the JIT fixture once per test binary; `None` off x86-64, whose
 /// machine code it is not.
+///
+/// A build that fails on x86-64 fails the test: `rustc` is the toolchain
+/// running this suite, so a fixture it cannot build is a defect of the
+/// fixture, not a property of the machine to skip on.
 fn jit_fixture() -> Option<&'static Path> {
     static BUILT: OnceLock<Option<PathBuf>> = OnceLock::new();
     BUILT
@@ -915,19 +919,24 @@ fn jit_fixture() -> Option<&'static Path> {
             }
             let directory =
                 std::env::temp_dir().join(format!("omn-jit-fixture-{}", std::process::id()));
-            std::fs::create_dir_all(&directory).ok()?;
+            std::fs::create_dir_all(&directory).expect("a scratch directory for the fixture");
             let source = directory.join("jit.rs");
             let binary = directory.join("jit");
-            std::fs::write(&source, JIT_FIXTURE).ok()?;
-            let status = Command::new("rustc")
+            std::fs::write(&source, JIT_FIXTURE).expect("the fixture's source");
+            let output = Command::new("rustc")
                 .args(["--edition", "2021", "-C", "opt-level=0"])
                 .arg("-Cforce-frame-pointers=yes")
                 .arg("-o")
                 .arg(&binary)
                 .arg(&source)
-                .status()
-                .ok()?;
-            status.success().then_some(binary)
+                .output()
+                .expect("rustc runs");
+            assert!(
+                output.status.success(),
+                "the JIT fixture did not build: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Some(binary)
         })
         .as_deref()
 }
@@ -1134,9 +1143,20 @@ fn a_perf_map_written_at_exit_names_the_frames_when_the_run_finishes() {
         "unnamed code is a concession with its reason: {notes:?}"
     );
 
-    // The program exits, and its map is what it leaves behind.
+    // The program exits, and its map is what it leaves behind. Until it is
+    // read, the reason given is that it holds lines the run never read -- not
+    // that it covers none of the frames, which it does.
     jit.child.wait().expect("the fixture exits at its deadline");
     let (start, _, name) = jit.reference();
+    let notes = unwinder.notes();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.contains("anonymous executable memory")
+                && note.contains("this run never read")
+                && !note.contains("covers none")),
+        "a map written after the last read is not one that covers nothing: {notes:?}"
+    );
     assert!(
         unwinder.finish() > 0,
         "the map read at the end named nothing"
@@ -1218,6 +1238,77 @@ fn a_profile_through_omn_names_generated_code_from_its_perf_map() {
         let _ = std::fs::remove_file(Path::new("/tmp").join(path));
     }
     let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A map written only at exit, through `omn`: the collector reads it once
+/// more at its `stop`, after the program has gone, and the frames sampled
+/// before it existed carry its names.
+#[test]
+fn a_perf_map_written_at_exit_names_the_frames_of_an_omn_profile() {
+    let Some(binary) = jit_fixture() else {
+        eprintln!(
+            "skipped: the JIT fixture is x86-64 machine code and this is {}",
+            std::env::consts::ARCH
+        );
+        return;
+    };
+    let out = std::env::temp_dir().join(format!("omn-jit-late-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let output = Command::new(env!("CARGO_BIN_EXE_omn"))
+        .args(["cpu.profile", "--mode", "sample@999hz", "--emit", "stack"])
+        .args(["--format", "json", "-o"])
+        .arg(&out)
+        .arg("--")
+        .arg(binary)
+        .args(["1", "late"])
+        .output()
+        .expect("omn runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        assert!(
+            stderr.contains("perf_event_paranoid") || stderr.contains("not available"),
+            "omn failed for a reason other than the machine refusing to sample: {stderr}"
+        );
+        eprintln!("skipped: this machine withholds cpu.profile: {stderr}");
+        return;
+    }
+    let results: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("results.json")).expect("results.json"),
+    )
+    .expect("json");
+    let result = &results["results"][0];
+    let notes = result["notes"].to_string();
+    for path in notes
+        .split(|c: char| c.is_whitespace() || c == '"' || c == ':')
+        .filter(|word| word.starts_with("perf-") && word.ends_with(".map"))
+    {
+        let _ = std::fs::remove_file(Path::new("/tmp").join(path));
+    }
+    let _ = std::fs::remove_dir_all(&out);
+    let named = result["stacks"]
+        .as_object()
+        .expect("a stack table")
+        .values()
+        .filter(|frames| {
+            frames
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|frame| frame.as_str() == Some("omn_jit_spin"))
+        })
+        .count();
+    assert!(
+        named > 0,
+        "the map written at exit named no stack: {}\n{notes}",
+        result["stacks"]
+    );
+    // The concession for unnamed anonymous code is a degradation, not a note:
+    // looked for anywhere in the result.
+    let everything = result.to_string();
+    assert!(
+        !everything.contains("anonymous executable memory"),
+        "a frame in the generated code was left unnamed: {everything}"
+    );
 }
 
 /// A pure-Python loop under `python3 -X perf`, profiled through `omn`.

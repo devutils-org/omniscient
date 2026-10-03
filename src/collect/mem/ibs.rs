@@ -648,6 +648,11 @@ impl Collector for IbsCollector {
         }
         let mut trailing = Vec::new();
         self.drain_into(&mut trailing, u64::MAX / 2);
+        // The perf map's lines flushed after the last tick (see
+        // `Unwinder::finish`).
+        if let Some(unwinder) = self.unwinder.as_mut() {
+            unwinder.finish();
+        }
         for ring in &self.rings {
             self.losses.undecoded += ring.undecoded();
         }
