@@ -6112,7 +6112,7 @@ fn a_device_with_a_known_latency_puts_every_request_in_its_bucket_in_both_histog
             .as_array()
             .expect("a hist output carries its series")
             .iter()
-            .flat_map(|series| buckets_of(series))
+            .flat_map(buckets_of)
             .fold(BTreeMap::new(), |mut all, (low, count)| {
                 *all.entry(low).or_insert(0) += count;
                 all
