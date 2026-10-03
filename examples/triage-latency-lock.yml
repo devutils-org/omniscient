@@ -1,11 +1,12 @@
 # Why is this slow -- asked of a thread that takes a mutex another holds.
 #
 # A helper thread holds a pthread mutex 2 ms at a time; the main thread takes it
-# 150 times. Its wall clock is almost all `blocked: sleeping`, and the sleep is
-# named by what covers more than half of it: the preload shim's
-# pthread_mutex_lock wait (`sched.mutex`), with `sched.futex` beside it as the
-# evidence any lock would leave. The verdict names the lock, and the mutex's
-# address.
+# 150 times. Its wall clock is almost all `blocked: sleeping`, and this session
+# names the sleep a futex wait (`sched.futex`), the evidence any lock would
+# leave. `omn latency` then asks the question again with the preload shim's
+# pthread_mutex_lock wait (`sched.mutex`) added -- a source that runs inside the
+# target, asked only when a futex sleep needs it -- and the second pass names
+# the lock, and the mutex's address.
 #
 # The program times its own calls to pthread_mutex_lock and prints the sum as
 # `lock_wait_ns`; `tests/triage.rs` holds the shim's figure to it.
@@ -69,19 +70,6 @@ requests:
   keys:
   - task
   label: futex
-- source: sched.mutex
-  target:
-    launch:
-    - target/omn-triage-fixture/workload
-    - lock
-    - '150'
-    - '2000'
-  mode: trace
-  emit:
-  - summary
-  keys:
-  - task
-  label: mutex
 decompose:
 - id: where-the-time-went
   whole: lifetime

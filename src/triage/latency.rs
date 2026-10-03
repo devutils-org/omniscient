@@ -8,7 +8,14 @@
 //! not carry:
 //!
 //! - **Which task.** A program's latency is its main thread's life; the other
-//!   threads are listed, not averaged in.
+//!   threads are listed, not averaged in. When the main thread's largest row
+//!   is a wait other tasks ran in, the answer follows the work: a wait for a
+//!   child (`wait4`, `waitid`, or a block its child ran through) is followed
+//!   into the child that ran during it, whose decomposition takes the wait's
+//!   place; a block other threads of the process ran in names the busiest of
+//!   them beside it, with its own decomposition. Each followed task is read
+//!   the same way, so a driver waiting for a compiler it started is followed
+//!   to the compiler, and the verdict says which task each row is from.
 //! - **What the blocked time was blocked on.** The row is split by the task
 //!   state `sched.offcpu` records at every switch -- `uninterruptible` is
 //!   usually a disk, `sleeping` is waiting for something to happen -- and the
@@ -19,13 +26,22 @@
 //!   residue, the rows' own resolution -- is not a culprit, and the answer
 //!   says undecided and why rather than naming it.
 //!
+//! **The mutex source is asked only when a sleep needs it.** `sched.mutex`
+//! runs inside the target, and on a program that takes a mutex millions of
+//! times a second it doubles what it is asked to explain. So the first pass
+//! runs without it, and only when the row the verdict reads is a futex sleep
+//! -- which a pthread mutex would explain more precisely -- is the question
+//! asked again with it, and the answer read from that second pass. A source
+//! whose measured cost is over [`COST_CRITERION_PERCENT`] is said beside the
+//! verdict.
+//!
 //! The objective decides which run is decomposed. `latency` reads the median
 //! of `--runs`; `tail` reads the slowest *against* the median, and names the
 //! state the slowest run spent more time in. One run has no tail, and an
 //! attached process runs once, so both are refused rather than answered with
 //! the one latency there is.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +52,7 @@ use crate::event::Event;
 use crate::join::{self, Breakdown, Decomposition, Evidence, Kind, Part, Row, Span, Whole};
 use crate::request::{KeyKind, Request, Session, SourceId, StackMode, Target};
 use crate::scalar::Duration;
+use crate::stack::unwind::SymbolSource;
 
 use super::engine::{self, Dropped, Run};
 use super::objective::{Method, Objective, Refusal};
@@ -59,6 +76,23 @@ pub const DECOMPOSITION: &str = "where-the-time-went";
 /// attached, and a request for a thousand is a mistake rather than a tail.
 pub const MAX_RUNS: u32 = 200;
 
+/// How far a wait is followed: a driver, the compiler it started, an
+/// assembler the compiler started, and some room. A chain longer than this is
+/// cut, and the last reading says so by being the one decomposed.
+pub const MAX_FOLLOWED: usize = 8;
+
+/// The share of a block another task has to account for before it is said to
+/// have run in it, when nothing else ties the two -- no wait for a child on
+/// the blocking stack. A quarter: a thread that ran through a quarter of the
+/// main thread's sleep did the program's work for at least that long, and a
+/// helper that woke for a millisecond did not.
+pub const RAN_IN_IT: f64 = 0.25;
+
+/// A source whose measured cost is over this share of the target's cpu is
+/// said beside the verdict: past it, a source dilates what it measures (the
+/// catalog's `extreme` band starts here).
+pub const COST_CRITERION_PERCENT: f64 = 20.0;
+
 /// The fewest runs a tail can be read from: the slowest and the median have to
 /// be two different runs, with at least one other beside them.
 pub const TAIL_RUNS: u32 = 3;
@@ -76,6 +110,10 @@ pub struct Ask {
     pub duration: Option<Duration>,
     /// The profile's rate, whose period is the on-cpu row's resolution.
     pub hz: u32,
+    /// Where stack names come from, set on every request that reads stacks:
+    /// the on-cpu profile and the blocking stacks. `None` is the default,
+    /// `local`.
+    pub symbols: Option<SymbolSource>,
 }
 
 impl Ask {
@@ -146,8 +184,19 @@ impl Ask {
         Ok(())
     }
 
-    /// The session this mode asks the engine for: one run of it.
+    /// The session this mode asks the engine for first: one run of it,
+    /// without `sched.mutex`, which is asked only when a sleep needs splitting
+    /// ([`Ask::split_session`]).
     pub fn session(&self) -> Session {
+        self.session_with(false)
+    }
+
+    /// The session of the second pass: the first, and `sched.mutex`.
+    pub fn split_session(&self) -> Session {
+        self.session_with(true)
+    }
+
+    fn session_with(&self, mutex: bool) -> Session {
         let target = self.target.clone();
         let request = |label: &str, source: &str, mode: &str, emit: &str| Request {
             source: source.parse::<SourceId>().expect("a catalog source"),
@@ -171,15 +220,19 @@ impl Ask {
             "stack",
         );
         on_cpu.stack = Some(StackMode::Fp);
+        on_cpu.symbols = self.symbols;
         let mut blocked = request(BLOCKED, "sched.offcpu", "trace", "stack");
         blocked.stack = Some(StackMode::Fp);
-        let requests = vec![
+        blocked.symbols = self.symbols;
+        let mut requests = vec![
             on_cpu,
             request(RUNNABLE, "sched.runqlat", "trace", "summary"),
             blocked,
             request(FUTEX, "sched.futex", "trace", "summary"),
-            request(MUTEX, "sched.mutex", "trace", "summary"),
         ];
+        if mutex {
+            requests.push(request(MUTEX, "sched.mutex", "trace", "summary"));
+        }
         let whole = match self.target {
             Target::Launch(_) => Whole::Span(Span::Lifetime),
             _ => Whole::Span(Span::Window),
@@ -234,7 +287,8 @@ pub enum Limit {
     /// Asleep on a futex that is not a pthread mutex this run saw: another
     /// runtime's lock, a condition variable, a join.
     Futex,
-    /// Asleep on something that is not a lock: a timer, a pipe, a socket.
+    /// Asleep on something that is not a lock seen here: a timer, a pipe, a
+    /// socket, a lock polled with a sleep between tries, a wait for a child.
     Sleep,
     /// Blocked in a state that is neither: stopped, traced, idle.
     OtherBlock,
@@ -266,7 +320,10 @@ impl Limit {
                 "asleep on a futex that is not a pthread mutex seen here: another runtime's \
                  lock, a condition variable or a join"
             }
-            Limit::Sleep => "asleep on something that is not a lock: a timer, a pipe or a socket",
+            Limit::Sleep => {
+                "asleep on something that is not a lock seen here: a timer, a pipe, a socket, a \
+                 lock polled with a sleep between tries, or a wait for a child process"
+            }
             Limit::OtherBlock => "blocked in a state that is neither sleeping nor uninterruptible",
         }
     }
@@ -334,12 +391,68 @@ pub struct Reading {
     /// Losses, degradations and notes of the sources this reading used.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// The sources whose measured cost was over [`COST_CRITERION_PERCENT`] of
+    /// the target's cpu, one line each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub costly: Vec<String>,
+    /// The task that ran in this one's largest row, when that row is a wait
+    /// other tasks ran in, read the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followed: Option<Box<Followed>>,
+}
+
+/// How a followed task stands to the one whose block it ran in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Relation {
+    /// A process the program started, which ran while it waited: its
+    /// decomposition takes the wait's place, and its whole is the wait.
+    Child,
+    /// Another thread of the same process, which ran while it was blocked:
+    /// its decomposition is named beside the block, and its whole is what
+    /// its own rows account for.
+    Thread,
+}
+
+/// A task followed from the block it ran in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Followed {
+    pub relation: Relation,
+    /// The state of the reading above that it ran in: `blocked: sleeping`.
+    pub during: String,
+    /// That state's amount.
+    pub amount: f64,
+    /// The wait for a child the blocking stack names, `wait4`, when it names
+    /// one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<String>,
+    pub reading: Reading,
 }
 
 impl Reading {
     /// The whole's amount, the wall clock this run is sorted by.
     pub fn wall(&self) -> Option<f64> {
         self.whole.amount
+    }
+
+    /// The largest state read.
+    fn top(&self) -> Option<&State> {
+        self.states
+            .iter()
+            .filter(|state| state.amount.is_some())
+            .max_by(|a, b| a.amount.unwrap_or(0.0).total_cmp(&b.amount.unwrap_or(0.0)))
+    }
+
+    /// This reading and every one followed from it, each with how it was
+    /// reached; the last is the one a verdict decomposes.
+    pub fn chain(&self) -> Vec<(Option<&Followed>, &Reading)> {
+        let mut chain = vec![(None, self)];
+        let mut at = self;
+        while let Some(followed) = at.followed.as_deref() {
+            chain.push((Some(followed), &followed.reading));
+            at = &followed.reading;
+        }
+        chain
     }
 
     fn amount_of(&self, state: &str) -> f64 {
@@ -355,6 +468,10 @@ impl Reading {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Verdict {
     pub objective: Objective,
+    /// The task whose state is named: the program's main thread, or the task
+    /// followed from its wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
     /// Absent when no state is decisive, and `undecided` says why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<Limit>,
@@ -392,6 +509,10 @@ pub struct Answer {
     /// Inputs this method would have liked and did without.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped: Vec<Dropped>,
+    /// Why the question was asked a second time with `sched.mutex`, and what
+    /// the first pass had named. The answer is the second pass's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_pass: Option<String>,
 }
 
 impl Answer {
@@ -406,6 +527,16 @@ impl Answer {
             self.objective, self.target
         );
         let _ = writeln!(out, "\n  {}\n", self.verdict.sentence);
+        let read = &self.runs[self.slowest.unwrap_or(self.median)];
+        for costly in &read.costly {
+            let _ = writeln!(out, "  cost: {costly}");
+        }
+        if let Some(second) = &self.second_pass {
+            let _ = writeln!(out, "  second pass: {second}");
+        }
+        if !read.costly.is_empty() || self.second_pass.is_some() {
+            let _ = writeln!(out);
+        }
         if self.runs.len() > 1 {
             let walls: Vec<String> = self
                 .runs
@@ -440,54 +571,7 @@ impl Answer {
             } else {
                 format!(", the median run (#{})", index + 1)
             };
-            let _ = writeln!(out, "  {}{title}: {}", run.task, run.chosen_because);
-            let _ = writeln!(
-                out,
-                "    {:<27} {:<18} {:<8} {:<9} {:>12} {:>11} {:>7}",
-                "STATE", "SOURCE", "KIND", "EVIDENCE", "AMOUNT", "RESOLUTION", "SHARE"
-            );
-            for state in &run.states {
-                let _ = writeln!(out, "    {}", state_line(state));
-                for naming in &state.named {
-                    let _ = writeln!(
-                        out,
-                        "      -> {} [{} {}]",
-                        naming.says, naming.source, naming.evidence
-                    );
-                }
-                if let Some(missing) = &state.missing {
-                    let _ = writeln!(out, "      not read: {missing}");
-                }
-            }
-            let _ = writeln!(out, "    {}", state_line(&run.whole));
-            if let Some(residue) = run.residue {
-                let _ = writeln!(
-                    out,
-                    "    {:<27} {:<18} {:<8} {:<9} {:>12} {:>11}",
-                    "RESIDUE",
-                    "whole - parts",
-                    "",
-                    "",
-                    span(residue),
-                    run.residue_resolution
-                        .map_or("-".to_owned(), |resolution| format!(
-                            "+-{}",
-                            span(resolution)
-                        ))
-                );
-            }
-            for state in run.states.iter().chain([&run.whole]) {
-                if let Some(short) = &state.short {
-                    let _ = writeln!(out, "    {}: {}", state.state, short.note);
-                }
-            }
-            for other in &run.others {
-                let _ = writeln!(out, "    also: {other}");
-            }
-            for note in &run.notes {
-                let _ = writeln!(out, "    note: {note}");
-            }
-            let _ = writeln!(out);
+            write_reading(&mut out, run, &title, "  ");
         }
         for dropped in &self.dropped {
             let _ = writeln!(
@@ -497,6 +581,72 @@ impl Answer {
             );
         }
         out
+    }
+}
+
+/// One reading's table, and the readings followed from it below it.
+fn write_reading(out: &mut String, run: &Reading, title: &str, indent: &str) {
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "{indent}{}{title}: {}", run.task, run.chosen_because);
+    let _ = writeln!(
+        out,
+        "{indent}  {:<27} {:<18} {:<8} {:<9} {:>12} {:>11} {:>7}",
+        "STATE", "SOURCE", "KIND", "EVIDENCE", "AMOUNT", "RESOLUTION", "SHARE"
+    );
+    for state in &run.states {
+        let _ = writeln!(out, "{indent}  {}", state_line(state));
+        for naming in &state.named {
+            let _ = writeln!(
+                out,
+                "{indent}    -> {} [{} {}]",
+                naming.says, naming.source, naming.evidence
+            );
+        }
+        if let Some(missing) = &state.missing {
+            let _ = writeln!(out, "{indent}    not read: {missing}");
+        }
+    }
+    let _ = writeln!(out, "{indent}  {}", state_line(&run.whole));
+    if let Some(residue) = run.residue {
+        let _ = writeln!(
+            out,
+            "{indent}  {:<27} {:<18} {:<8} {:<9} {:>12} {:>11}",
+            "RESIDUE",
+            "whole - parts",
+            "",
+            "",
+            span(residue),
+            run.residue_resolution
+                .map_or("-".to_owned(), |resolution| format!(
+                    "+-{}",
+                    span(resolution)
+                ))
+        );
+    }
+    for state in run.states.iter().chain([&run.whole]) {
+        if let Some(short) = &state.short {
+            let _ = writeln!(out, "{indent}  {}: {}", state.state, short.note);
+        }
+    }
+    for other in &run.others {
+        let _ = writeln!(out, "{indent}  also: {other}");
+    }
+    for note in &run.notes {
+        let _ = writeln!(out, "{indent}  note: {note}");
+    }
+    let _ = writeln!(out);
+    if let Some(followed) = &run.followed {
+        let how = match followed.relation {
+            Relation::Child => "in its place",
+            Relation::Thread => "beside it",
+        };
+        let _ = writeln!(
+            out,
+            "{indent}  followed from `{}` ({}), {how}:",
+            followed.during,
+            span(followed.amount)
+        );
+        write_reading(out, &followed.reading, "", &format!("{indent}  "));
     }
 }
 
@@ -526,20 +676,92 @@ fn state_line(state: &State) -> String {
 }
 
 /// Runs what `ask` needs and reads the answer.
+///
+/// Twice when the first pass's answer is a futex sleep and `sched.mutex` can
+/// be served: once without the mutex source, which on a program that locks
+/// often costs more than the program, and once with it, to tell a pthread
+/// mutex from the other futex waits. The second pass is the answer, and says
+/// why it was run.
 pub fn answer(
     catalog: &Catalog,
     capabilities: &Capabilities,
     ask: &Ask,
 ) -> Result<Answer, TriageError> {
     ask.check()?;
-    let mut session = ask.session();
-    let dropped = engine::prune(catalog, capabilities, &mut session, &OPTIONAL)?;
+    let mut full = ask.split_session();
+    let dropped = engine::prune(catalog, capabilities, &mut full, &OPTIONAL)?;
+    let asked = |label: &str| {
+        full.requests
+            .iter()
+            .any(|request| request.label.as_deref() == Some(label))
+    };
+    let (mutex, futex) = (asked(MUTEX), asked(FUTEX));
+    let mut first = full.clone();
+    first
+        .requests
+        .retain(|request| request.label.as_deref() != Some(MUTEX));
+    let answer = conclude(
+        ask,
+        run_all(catalog, capabilities, &first, ask)?,
+        dropped.clone(),
+    );
+    if !mutex {
+        return Ok(answer);
+    }
+    let read = &answer.runs[answer.slowest.unwrap_or(answer.median)];
+    let Some(why) = needs_split(read, futex) else {
+        return Ok(answer);
+    };
+    let mut second = conclude(ask, run_all(catalog, capabilities, &full, ask)?, dropped);
+    let window = match ask.target {
+        Target::Launch(_) => format!("a second pass of {} run(s)", ask.runs),
+        _ => "a second window as long as the first".to_owned(),
+    };
+    second.second_pass = Some(format!(
+        "{why}, so `sched.mutex` was asked in {window}, which this answer is read from; the \
+         first pass, without it, said: {}",
+        answer.verdict.sentence
+    ));
+    Ok(second)
+}
+
+fn run_all(
+    catalog: &Catalog,
+    capabilities: &Capabilities,
+    session: &Session,
+    ask: &Ask,
+) -> Result<Vec<Reading>, TriageError> {
     let mut runs = Vec::new();
     for _ in 0..ask.runs {
-        let run = engine::run(catalog, capabilities, &session)?;
+        let run = engine::run(catalog, capabilities, session)?;
         runs.push(read(&run, &ask.target)?);
     }
-    Ok(conclude(ask, runs, dropped))
+    Ok(runs)
+}
+
+/// Why the run the verdict reads needs `sched.mutex` to split a sleep, if it
+/// does: a reading on its way whose largest row is a futex sleep, which a
+/// pthread mutex would name more precisely -- or any sleep, when the futex
+/// source was not there to say which sleeps were futexes.
+pub fn needs_split(run: &Reading, futex_asked: bool) -> Option<String> {
+    run.chain().into_iter().find_map(|(_, reading)| {
+        let top = reading.top()?;
+        let sleeping = top.state == format!("{BLOCKED}: sleeping");
+        match top.limit {
+            Some(Limit::Futex) if sleeping => Some(format!(
+                "{}'s largest row is a futex sleep ({}) that a pthread mutex could explain",
+                reading.task,
+                span(top.amount.unwrap_or(0.0))
+            )),
+            Some(Limit::Sleep) if sleeping && !futex_asked => Some(format!(
+                "{}'s largest row is a sleep ({}), and without `sched.futex` nothing said whether \
+                 it was a lock",
+                reading.task,
+                span(top.amount.unwrap_or(0.0))
+            )),
+            _ => None,
+        }
+    })
 }
 
 /// The verdict over every run, from the readings alone.
@@ -564,7 +786,55 @@ pub fn conclude(ask: &Ask, runs: Vec<Reading>, dropped: Vec<Dropped>) -> Answer 
         slowest: (ask.objective == Objective::Tail).then_some(slowest),
         runs,
         dropped,
+        second_pass: None,
     }
+}
+
+/// How the verdict reached the task it decomposes, one clause a step:
+/// empty when it decomposes the program's main thread.
+fn path_clause(chain: &[(Option<&Followed>, &Reading)]) -> String {
+    let mut clauses = Vec::new();
+    for pair in chain.windows(2) {
+        let (_, above) = pair[0];
+        let (Some(followed), below) = pair[1] else {
+            continue;
+        };
+        let share = above
+            .wall()
+            .filter(|whole| *whole > 0.0)
+            .map_or(String::new(), |whole| {
+                format!(
+                    " ({:.1} % of its wall clock)",
+                    followed.amount / whole * 100.0
+                )
+            });
+        clauses.push(match (followed.relation, &followed.wait) {
+            (Relation::Child, Some(wait)) => format!(
+                "{} waited {}{share} for a child, in `{wait}`, and {}, the child that ran \
+                 during the wait, is decomposed in its place",
+                above.task,
+                span(followed.amount),
+                below.task
+            ),
+            (Relation::Child, None) => format!(
+                "{} was `{}` {}{share} while its child ran, and {}, that child, is decomposed in \
+                 its place",
+                above.task,
+                followed.during,
+                span(followed.amount),
+                below.task
+            ),
+            (Relation::Thread, _) => format!(
+                "{} was `{}` {}{share} while other threads of the process ran, and beside it {}, \
+                 the busiest of them, is decomposed",
+                above.task,
+                followed.during,
+                span(followed.amount),
+                below.task
+            ),
+        });
+    }
+    clauses.join("; ")
 }
 
 /// The largest state, if nothing unread could overtake it.
@@ -575,47 +845,82 @@ fn latency(run: &Reading, runs: usize) -> Verdict {
     } else {
         "the run".to_owned()
     };
-    let mut known: Vec<&State> = run.states.iter().filter(|s| s.amount.is_some()).collect();
+    let chain = run.chain();
+    let path = path_clause(&chain);
+    let (reached, read_one) = *chain.last().expect("a reading");
+    // Who is answered for, as the sentence opens.
+    let (opening, of_what) = match reached.map(|followed| followed.relation) {
+        None => (
+            format!("for latency, {} of {which}", read_one.task),
+            "of its wall clock",
+        ),
+        Some(Relation::Child) => (
+            format!("for latency, in {which}, {path}: it"),
+            "of the wait it ran in",
+        ),
+        Some(Relation::Thread) => (
+            format!("for latency, in {which}, {path}: it"),
+            "of what its rows account for",
+        ),
+    };
+    let mut known: Vec<&State> = read_one
+        .states
+        .iter()
+        .filter(|s| s.amount.is_some())
+        .collect();
     known.sort_by(|a, b| b.amount.unwrap_or(0.0).total_cmp(&a.amount.unwrap_or(0.0)));
     let Some(top) = known.first() else {
         return Verdict {
             objective,
+            task: Some(read_one.task.clone()),
             limit: None,
             state: None,
             amount: None,
-            of: run.wall(),
+            of: read_one.wall(),
             lower_bound: false,
-            sentence: format!("no state of {} could be read for {}", run.task, which),
+            sentence: format!("{opening}: no state could be read"),
             undecided: Some("every row of the decomposition was missing".to_owned()),
         };
     };
     let amount = top.amount.unwrap_or(0.0);
     let second = known.get(1).and_then(|s| s.amount).unwrap_or(0.0);
     let read: f64 = known.iter().filter_map(|s| s.amount).sum();
-    let unread = run.states.iter().any(|s| s.amount.is_none());
+    let unread: Vec<&str> = read_one
+        .states
+        .iter()
+        .filter(|s| s.amount.is_none())
+        .map(|s| s.state.as_str())
+        .collect();
     // What no row read and could still belong to one: the whole less what was
-    // read, when a row is missing, and the rows' resolution either way.
-    let room = match run.wall() {
-        Some(whole) if unread => (whole - read).max(0.0),
-        _ => 0.0,
-    } + run.residue_resolution.unwrap_or(0.0);
+    // read, and the residue's resolution -- the whole's included -- when a
+    // row is missing. When every row was read, nothing is outside them, and
+    // what could still reorder them is their own resolution: the whole's
+    // bracket (a loaded machine's exit seen late) moves the residue, not a
+    // row.
+    let room = match read_one.wall() {
+        Some(whole) if !unread.is_empty() => {
+            (whole - read).max(0.0) + read_one.residue_resolution.unwrap_or(0.0)
+        }
+        _ => known
+            .iter()
+            .filter_map(|state| state.resolution)
+            .sum::<f64>(),
+    };
     let lower_bound = top.short.is_some();
-    let share = run.wall().map(|whole| amount / whole * 100.0);
-    let share_text = share.map_or(String::new(), |share| {
-        format!(" ({share:.1} % of its wall clock)")
-    });
+    let share = read_one.wall().map(|whole| amount / whole * 100.0);
+    let share_text = share.map_or(String::new(), |share| format!(" ({share:.1} % {of_what})"));
     let what = top.limit.map_or("", |limit| limit.describe());
     if amount > second && amount > room {
         Verdict {
             objective,
+            task: Some(read_one.task.clone()),
             limit: top.limit,
             state: Some(top.state.clone()),
             amount: Some(amount),
-            of: run.wall(),
+            of: read_one.wall(),
             lower_bound,
             sentence: format!(
-                "for latency, {} of {which} spent most of its time {what}: {} {}{share_text}{}",
-                run.task,
+                "{opening} spent most of its time {what}: {} {}{share_text}{}",
                 top.state,
                 bounded(amount, lower_bound),
                 naming_suffix(top),
@@ -630,34 +935,71 @@ fn latency(run: &Reading, runs: usize) -> Verdict {
                 span(amount),
                 span(second)
             )
-        } else {
+        } else if unread.is_empty() {
             format!(
-                "`{}` is {}, and {} of the wall clock is in no row that was read: the largest \
-                 row could still be overtaken",
+                "`{}` is {}, within the rows' own resolution ({}) of being overtaken",
                 top.state,
                 span(amount),
                 span(room)
             )
+        } else {
+            format!(
+                "`{}` is {}, and {} of the wall clock is in no row that was read ({}): the \
+                 largest row could still be overtaken",
+                top.state,
+                span(amount),
+                span(room),
+                unread.join(", ")
+            )
+        };
+        let sentence = if reached.is_none() {
+            format!("for latency, {which} names no single state: {why}")
+        } else {
+            format!("{opening} names no single state: {why}")
         };
         Verdict {
             objective,
+            task: Some(read_one.task.clone()),
             limit: None,
             state: None,
             amount: None,
-            of: run.wall(),
+            of: read_one.wall(),
             lower_bound,
-            sentence: format!("for latency, {which} names no single state: {why}"),
+            sentence,
             undecided: Some(why),
         }
     }
 }
 
 /// The state the slowest run spent more time in than the median did.
+///
+/// Read off the tasks the two runs' verdicts decompose when both runs were
+/// followed the same way (a driver to its compiler in both), and off the main
+/// threads otherwise: two different tasks' states do not subtract.
 fn tail(slowest: &Reading, median: &Reading, runs: usize) -> Verdict {
     let objective = Objective::Tail;
     let excess = match (slowest.wall(), median.wall()) {
         (Some(slow), Some(typical)) => slow - typical,
         _ => f64::NAN,
+    };
+    let (slow_chain, median_chain) = (slowest.chain(), median.chain());
+    let same_shape = slow_chain.len() == median_chain.len()
+        && slow_chain
+            .iter()
+            .zip(&median_chain)
+            .all(|((a, _), (b, _))| a.map(|f| f.relation) == b.map(|f| f.relation));
+    let (slowest, median) = if same_shape {
+        (slow_chain.last().unwrap().1, median_chain.last().unwrap().1)
+    } else {
+        (slowest, median)
+    };
+    let in_task = if same_shape && slow_chain.len() > 1 {
+        format!(
+            " (in {}, followed from the main thread's wait)",
+            slowest.task
+        )
+    } else {
+        String::new()
     };
     let mut names: Vec<&str> = slowest
         .states
@@ -699,6 +1041,7 @@ fn tail(slowest: &Reading, median: &Reading, runs: usize) -> Verdict {
     if delta > 0.0 && delta > second && delta > room {
         Verdict {
             objective,
+            task: Some(slowest.task.clone()),
             limit,
             state: Some(state.to_owned()),
             amount: Some(delta),
@@ -706,7 +1049,7 @@ fn tail(slowest: &Reading, median: &Reading, runs: usize) -> Verdict {
             lower_bound,
             sentence: format!(
                 "for the tail, the slowest run took {} more than the median, and {} of it is \
-                 more time {what}: {state}{}{caveat}",
+                 more time {what}{in_task}: {state}{}{caveat}",
                 span(excess),
                 bounded(delta, lower_bound),
                 found.map_or(String::new(), naming_suffix),
@@ -715,8 +1058,8 @@ fn tail(slowest: &Reading, median: &Reading, runs: usize) -> Verdict {
         }
     } else {
         let why = format!(
-            "the slowest run took {} more than the median; the largest state difference is \
-             `{state}` at {}, against {} for the next and {} the rows cannot speak for",
+            "the slowest run took {} more than the median; the largest state difference{in_task} \
+             is `{state}` at {}, against {} for the next and {} the rows cannot speak for",
             span(excess),
             span(delta),
             span(second),
@@ -724,6 +1067,7 @@ fn tail(slowest: &Reading, median: &Reading, runs: usize) -> Verdict {
         );
         Verdict {
             objective,
+            task: Some(slowest.task.clone()),
             limit: None,
             state: None,
             amount: None,
@@ -750,7 +1094,9 @@ fn naming_suffix(state: &State) -> String {
         .map_or(String::new(), |naming| format!("; {}", naming.says))
 }
 
-/// Reads one run's decomposition for the task the answer is about.
+/// Reads one run's decomposition for the task the answer is about, and
+/// follows its largest row into the task that ran in it, when it is a wait
+/// another task ran in.
 pub fn read(run: &Run, target: &Target) -> Result<Reading, TriageError> {
     let output = run
         .output
@@ -778,37 +1124,458 @@ pub fn read(run: &Run, target: &Target) -> Result<Reading, TriageError> {
             ),
         }));
     };
-    let whole = from_row(&table.whole, None, table.whole.amount);
-    let wall = table.whole.amount;
+    let mut reading = read_table(run, table, &task, chosen_because, None, false);
+    reading.others = output
+        .tables
+        .iter()
+        .filter(|other| other.key != task)
+        .map(describe_other)
+        .collect();
+    reading.notes.extend(notes(run));
+    reading.costly = costly(run);
+    let mut tasks = Tasks {
+        run,
+        tables: &output.tables,
+        pid_of: pids(run),
+        seen: BTreeSet::from([task.clone()]),
+        processes: BTreeSet::new(),
+    };
+    let process = tasks
+        .pid_of
+        .get(&task)
+        .copied()
+        .or_else(|| task_number(&task));
+    if let Some(process) = process {
+        tasks.processes.insert(process);
+    }
+    tasks.follow(&mut reading, process, 0);
+    Ok(reading)
+}
+
+/// One task's table, read: the blocked row split by state, the on-cpu row
+/// named by its hottest function.
+///
+/// `whole` replaces the table's whole for a followed task, whose table's
+/// whole is the program's life rather than its own. The residue is then the
+/// difference with that whole, and absent when a row is. `another_process`
+/// is a task outside the launched process, whose zeros are not read as
+/// zeros ([`unwatched`]).
+fn read_table(
+    run: &Run,
+    table: &Breakdown,
+    task: &str,
+    chosen_because: String,
+    whole: Option<GivenWhole>,
+    another_process: bool,
+) -> Reading {
+    let mut whole_state = from_row(&table.whole, None, table.whole.amount);
+    if let Some(given) = &whole {
+        whole_state.amount = Some(given.amount);
+        whole_state.state = given.state.clone();
+        whole_state.source = given.source.clone();
+        whole_state.kind = given.kind;
+        whole_state.resolution = given.resolution;
+        whole_state.short = None;
+        whole_state.share = Some(1.0);
+    }
+    let wall = whole_state.amount;
     let mut states = Vec::new();
-    for row in &table.rows {
+    let mut said = Vec::new();
+    for original in &table.rows {
+        let row = &unwatched(run, original, task, another_process);
+        if original.amount.is_none() && row.amount.is_some() {
+            said.extend(
+                row.note
+                    .as_ref()
+                    .map(|note| format!("[{}] {note}", row.state)),
+            );
+        }
         match row.state.as_str() {
-            BLOCKED => states.extend(split_blocked(run, row, &task, wall)),
+            BLOCKED => states.extend(split_blocked(run, row, task, wall)),
             ON_CPU => {
                 let mut state = from_row(row, Some(Limit::Cpu), wall);
-                state.named.extend(hottest(run, &task));
+                state.named.extend(hottest(run, task));
                 states.push(state);
             }
             RUNNABLE => states.push(from_row(row, Some(Limit::CpuQueue), wall)),
             _ => states.push(from_row(row, None, wall)),
         }
     }
-    let others = output
-        .tables
-        .iter()
-        .filter(|other| other.key != task)
-        .map(describe_other)
-        .collect();
-    Ok(Reading {
-        task,
+    let (residue, residue_resolution) = match whole {
+        None => (table.residue, table.residue_resolution),
+        Some(given) => {
+            let complete = states.iter().all(|state| state.amount.is_some());
+            let parts: f64 = states.iter().filter_map(|state| state.amount).sum();
+            // The rows' resolutions and the given whole's, as the table sums
+            // its own with the program's life.
+            let resolution = table
+                .rows
+                .iter()
+                .map(|row| row.resolution)
+                .chain([given.resolution])
+                .sum::<Option<f64>>();
+            (complete.then_some(given.amount - parts), resolution)
+        }
+    };
+    Reading {
+        task: task.to_owned(),
         chosen_because,
-        whole,
+        whole: whole_state,
         states,
-        residue: table.residue,
-        residue_resolution: table.residue_resolution,
-        others,
-        notes: notes(run),
-    })
+        residue,
+        residue_resolution,
+        others: Vec::new(),
+        notes: said,
+        costly: Vec::new(),
+        followed: None,
+    }
+}
+
+/// The whole a followed task's rows are parts of, which is not its table's:
+/// that one is the program's life.
+struct GivenWhole {
+    amount: f64,
+    state: String,
+    source: String,
+    kind: Kind,
+    resolution: Option<f64>,
+}
+
+/// A row its source has no event of, read for whose task it is.
+///
+/// A source that watches only the launched process reads nothing of a child
+/// it started, and the decomposition writes that as a zero; a zero there is
+/// what the source did not see, not what the child did, so it is unread.
+///
+/// The other way round for the program's own threads, which the sched
+/// sources watch at every switch: no event of a thread that never left its
+/// cpu is the decomposition's "missing", and is a zero -- a spinning thread
+/// never blocked -- as long as the source lost no event (a late drain loses
+/// none). A lossy source's silence stays unread.
+fn unwatched(run: &Run, row: &Row, task: &str, another_process: bool) -> Row {
+    let mut row = row.clone();
+    if row.readings != 0 {
+        return row;
+    }
+    if another_process && row.missing.is_none() {
+        row.missing = Some(format!(
+            "`{}` reported no event of {task}: a source that does not follow the program's \
+             children reads nothing of them, so this is not read as a zero",
+            row.source
+        ));
+        row.amount = None;
+        return row;
+    }
+    let watches_every_switch = matches!(row.state.as_str(), BLOCKED | RUNNABLE);
+    let clean = run
+        .output
+        .results
+        .iter()
+        .find(|results| results.source == row.source)
+        .is_some_and(|results| {
+            // Events lost, not ticks late: a drain that ran late still read
+            // every block the kernel counted.
+            let losses = &results.losses;
+            losses.dropped == 0
+                && losses.failed_reads == 0
+                && losses.undecoded == 0
+                && losses.evicted == 0
+        });
+    if !another_process && watches_every_switch && row.amount.is_none() && clean {
+        row.amount = Some(0.0);
+        row.missing = None;
+        row.note = Some(format!(
+            "`{}` watches every switch of the program's threads and lost no event, and saw \
+             none of {task}'s: zero",
+            row.source
+        ));
+    }
+    row
+}
+
+/// What a task's rows add up to, read ones only.
+fn accounted(table: &Breakdown) -> f64 {
+    table.rows.iter().filter_map(|row| row.amount).sum()
+}
+
+/// A table's amount for one row.
+fn row_amount(table: &Breakdown, state: &str) -> f64 {
+    table
+        .rows
+        .iter()
+        .filter(|row| row.state == state)
+        .filter_map(|row| row.amount)
+        .sum()
+}
+
+/// The thread id a task key names: `task:4242`.
+fn task_number(task: &str) -> Option<u64> {
+    task.strip_prefix("task:")?.parse().ok()
+}
+
+/// The process of every task an event tied to one: the sched sources carry
+/// `pid` beside the task, the profile does not.
+fn pids(run: &Run) -> BTreeMap<String, u64> {
+    let mut pids = BTreeMap::new();
+    for event in &run.events {
+        let (Some(key), Some(pid)) = (event.key(KeyKind::Task), attr(event, "pid")) else {
+            continue;
+        };
+        if pid > 0.0 {
+            pids.entry(key.to_string()).or_insert(pid as u64);
+        }
+    }
+    pids
+}
+
+/// The wait for a child the task's heaviest blocking stack in `state` goes
+/// through, by the function's name: `wait4`, `waitpid`, `waitid`, `wait3`,
+/// `wait`, whatever the C library calls its own copy.
+fn waits_for_child(run: &Run, task: &str, state: &str) -> Option<String> {
+    let results = run.result(BLOCKED)?;
+    let mut by_stack: BTreeMap<u64, f64> = BTreeMap::new();
+    for event in run
+        .events_of("sched.offcpu")
+        .filter(|event| is_task(event, task))
+        .filter(|event| event.attr("state").map(ToString::to_string).as_deref() == Some(state))
+    {
+        if let Some(id) = attr(event, STACK_ID_ATTR) {
+            *by_stack.entry(id as u64).or_default() +=
+                attr(event, "total_ns").unwrap_or(0.0) - attr(event, "queued_ns").unwrap_or(0.0);
+        }
+    }
+    let (id, _) = by_stack.into_iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
+    results
+        .stacks
+        .get(&id)?
+        .iter()
+        .rev()
+        .find_map(|frame| is_wait_for_child(frame).then(|| frame.clone()))
+}
+
+/// Whether a frame is a wait for a child, by its function's name.
+pub fn is_wait_for_child(frame: &str) -> bool {
+    let name = frame
+        .split(['+', '@', ' ', '('])
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('_');
+    let name = name
+        .strip_prefix("GI_")
+        .unwrap_or(name)
+        .trim_start_matches('_');
+    matches!(
+        name,
+        "wait4" | "waitpid" | "waitid" | "wait3" | "wait" | "libc_wait"
+    ) || name.starts_with("wait4")
+        || name.starts_with("waitpid")
+        || name.starts_with("waitid")
+}
+
+/// What the run can tell about which task is which, while a reading is
+/// followed from task to task.
+struct Tasks<'a> {
+    run: &'a Run,
+    tables: &'a [Breakdown],
+    pid_of: BTreeMap<String, u64>,
+    /// Tasks already read, which are never followed into again.
+    seen: BTreeSet<String>,
+    /// Processes already on the way, which a child is never one of.
+    processes: BTreeSet<u64>,
+}
+
+impl Tasks<'_> {
+    /// Follows `reading`'s largest row into the task that ran in it, if it is
+    /// a wait another task ran in, and that task's the same way.
+    ///
+    /// `process` is the reading's own process, when the run said which.
+    fn follow(&mut self, reading: &mut Reading, process: Option<u64>, depth: usize) {
+        if depth >= MAX_FOLLOWED {
+            return;
+        }
+        let Some(top) = reading.top() else {
+            return;
+        };
+        if !top.state.starts_with(BLOCKED)
+            || !matches!(top.limit, Some(Limit::Sleep | Limit::Futex))
+        {
+            return;
+        }
+        let during = top.state.clone();
+        let block = top.amount.unwrap_or(0.0);
+        let (block_kind, block_resolution) = (top.kind, top.resolution);
+        if block <= 0.0 {
+            return;
+        }
+        let state = during
+            .strip_prefix(&format!("{BLOCKED}: "))
+            .unwrap_or("sleeping")
+            .to_owned();
+        let wait = waits_for_child(self.run, &reading.task, &state);
+        let child = self.child(process);
+        let thread = self.busiest_thread(process, &reading.task);
+        let enough = |table: &Breakdown| accounted(table) >= block * RAN_IN_IT;
+        let chosen = match (&wait, child, thread) {
+            (Some(_), Some(child), _) => Some((Relation::Child, child)),
+            (_, _, Some(thread)) if enough(thread) => Some((Relation::Thread, thread)),
+            (_, Some(child), _) if enough(child) => Some((Relation::Child, child)),
+            _ => None,
+        };
+        let Some((relation, table)) = chosen else {
+            return;
+        };
+        let task = table.key.clone();
+        let (whole, because) = match relation {
+            Relation::Child => (
+                GivenWhole {
+                    amount: block,
+                    state: "whole: the wait".to_owned(),
+                    source: reading.task.clone(),
+                    kind: block_kind,
+                    resolution: block_resolution,
+                },
+                match &wait {
+                    Some(wait) => format!(
+                        "the child process that ran longest while {} waited in `{wait}`; its \
+                         whole is that wait",
+                        reading.task
+                    ),
+                    None => format!(
+                        "the child process that ran longest while {} was `{during}`; its whole \
+                         is that block",
+                        reading.task
+                    ),
+                },
+            ),
+            Relation::Thread => (
+                GivenWhole {
+                    amount: accounted(table),
+                    state: "whole: its rows".to_owned(),
+                    source: "the rows, added up".to_owned(),
+                    kind: block_kind,
+                    resolution: table
+                        .rows
+                        .iter()
+                        .map(|row| row.resolution)
+                        .sum::<Option<f64>>(),
+                },
+                format!(
+                    "the busiest other thread of the process while {} was `{during}`; its whole \
+                     is what its own rows account for, a thread's life being no source's row",
+                    reading.task
+                ),
+            ),
+        };
+        let mut followed = read_table(
+            self.run,
+            table,
+            &task,
+            because,
+            Some(whole),
+            relation == Relation::Child,
+        );
+        if relation == Relation::Thread {
+            // A thread of the program is watched by every source: its zeros
+            // stand, and its residue is zero by construction, so none is said.
+            followed.residue = None;
+        }
+        self.seen.insert(task.clone());
+        let below = match relation {
+            Relation::Child => self.pid_of.get(&task).copied(),
+            Relation::Thread => process,
+        };
+        if let Some(below) = below {
+            self.processes.insert(below);
+        }
+        self.follow(&mut followed, below, depth + 1);
+        reading.followed = Some(Box::new(Followed {
+            relation,
+            during,
+            amount: block,
+            wait: if relation == Relation::Child {
+                wait
+            } else {
+                None
+            },
+            reading: followed,
+        }));
+    }
+
+    /// The child that ran longest: the task, among those of processes not on
+    /// the way, whose rows account for the most. A process's main thread
+    /// stands for it when the run saw it. A task no source tied to a process
+    /// is one the sched sources, which watch every thread of the program,
+    /// never saw: by elimination another process.
+    fn child(&self, process: Option<u64>) -> Option<&Breakdown> {
+        let mut best: Option<(&Breakdown, f64)> = None;
+        for table in self.tables {
+            if self.seen.contains(&table.key) {
+                continue;
+            }
+            let representative = match self.pid_of.get(&table.key) {
+                Some(pid) if Some(*pid) == process || self.processes.contains(pid) => continue,
+                Some(pid) => {
+                    let main = format!("task:{pid}");
+                    if table.key != main
+                        && self.tables.iter().any(|other| other.key == main)
+                        && !self.seen.contains(&main)
+                    {
+                        // Its process's main thread stands for it.
+                        continue;
+                    }
+                    table
+                }
+                None => table,
+            };
+            let weight = accounted(representative);
+            if best.is_none_or(|(_, most)| weight > most) {
+                best = Some((representative, weight));
+            }
+        }
+        best.map(|(table, _)| table)
+    }
+
+    /// The busiest other thread of `process`: the most time on a cpu or
+    /// waiting for one.
+    fn busiest_thread(&self, process: Option<u64>, task: &str) -> Option<&Breakdown> {
+        let process = process?;
+        self.tables
+            .iter()
+            .filter(|table| table.key != task && !self.seen.contains(&table.key))
+            .filter(|table| self.pid_of.get(&table.key) == Some(&process))
+            .map(|table| {
+                (
+                    table,
+                    row_amount(table, ON_CPU) + row_amount(table, RUNNABLE),
+                )
+            })
+            .filter(|(_, busy)| *busy > 0.0)
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(table, _)| table)
+    }
+}
+
+/// The sources that cost the target more than [`COST_CRITERION_PERCENT`] of
+/// its cpu, said with the band the catalog declares for them.
+fn costly(run: &Run) -> Vec<String> {
+    run.costs
+        .iter()
+        .filter_map(|cost| {
+            let percent = cost
+                .percent
+                .filter(|percent| *percent > COST_CRITERION_PERCENT)?;
+            Some(format!(
+                "[{}] {} through `{}` cost {percent:.1} % of the target's cpu ({}), over the \
+                 {COST_CRITERION_PERCENT:.0} % past which a source dilates what it measures; \
+                 declared `{}`",
+                cost.label,
+                cost.source,
+                cost.backend,
+                cost.observed_from,
+                cost.declared.as_str()
+            ))
+        })
+        .collect()
 }
 
 /// The task a latency is about.
@@ -1167,6 +1934,7 @@ mod tests {
             runs,
             duration: None,
             hz: 997,
+            symbols: None,
         }
     }
 
@@ -1197,6 +1965,8 @@ mod tests {
             states,
             others: Vec::new(),
             notes: Vec::new(),
+            costly: Vec::new(),
+            followed: None,
         }
     }
 
@@ -1333,6 +2103,253 @@ mod tests {
         let answer = conclude(&ask(Objective::Tail, 3), runs, Vec::new());
         assert_eq!(answer.median, 2);
         assert_eq!(answer.slowest, Some(0));
+    }
+
+    fn followed(
+        relation: Relation,
+        wait: Option<&str>,
+        above: &Reading,
+        below: Reading,
+    ) -> Reading {
+        let mut above = above.clone();
+        let top = above.top().unwrap();
+        above.followed = Some(Box::new(Followed {
+            relation,
+            during: top.state.clone(),
+            amount: top.amount.unwrap(),
+            wait: wait.map(str::to_owned),
+            reading: below,
+        }));
+        above
+    }
+
+    fn of_task(mut reading: Reading, task: &str) -> Reading {
+        reading.task = task.to_owned();
+        reading
+    }
+
+    /// A driver that waited its whole life for a compiler: the compiler's
+    /// decomposition takes the wait's place, and the verdict names the
+    /// compiler's state and its task, never the driver's sleep.
+    #[test]
+    fn a_wait_for_a_child_is_answered_by_the_child_that_ran_during_it() {
+        let driver = reading(
+            100e6,
+            vec![
+                state("on-cpu", Limit::Cpu, Some(1e6)),
+                state("blocked: sleeping", Limit::Sleep, Some(99e6)),
+            ],
+            0.0,
+        );
+        let compiler = of_task(
+            reading(
+                99e6,
+                vec![
+                    state("on-cpu", Limit::Cpu, Some(30e6)),
+                    state("runnable", Limit::CpuQueue, Some(65e6)),
+                    state("blocked: sleeping", Limit::Sleep, Some(1e6)),
+                ],
+                0.0,
+            ),
+            "task:2",
+        );
+        let run = followed(Relation::Child, Some("wait4"), &driver, compiler);
+        let verdict = latency(&run, 1);
+        assert_eq!(verdict.limit, Some(Limit::CpuQueue), "{}", verdict.sentence);
+        assert_eq!(verdict.task.as_deref(), Some("task:2"));
+        assert!(
+            verdict.sentence.contains("`wait4`") && verdict.sentence.contains("task:2"),
+            "{}",
+            verdict.sentence
+        );
+        // Unfollowed, the same driver is named asleep.
+        assert_eq!(latency(&driver, 1).limit, Some(Limit::Sleep));
+    }
+
+    /// A child no sched source watched has its on-cpu row and nothing else:
+    /// the wait it stands in is mostly unread, and the verdict says so rather
+    /// than naming the one row it has.
+    #[test]
+    fn a_child_whose_rows_were_not_watched_is_undecided_rather_than_cpu_bound() {
+        let driver = reading(
+            100e6,
+            vec![state("blocked: sleeping", Limit::Sleep, Some(99e6))],
+            0.0,
+        );
+        let compiler = of_task(
+            reading(
+                99e6,
+                vec![
+                    state("on-cpu", Limit::Cpu, Some(30e6)),
+                    state("runnable", Limit::CpuQueue, None),
+                    state("blocked", Limit::Sleep, None),
+                ],
+                1e6,
+            ),
+            "task:2",
+        );
+        let verdict = latency(&followed(Relation::Child, None, &driver, compiler), 1);
+        assert_eq!(verdict.limit, None, "{}", verdict.sentence);
+        assert!(
+            verdict.sentence.contains("runnable"),
+            "the unread rows are named: {}",
+            verdict.sentence
+        );
+    }
+
+    /// A server's main thread asleep in its accept loop while a connection's
+    /// thread did the work: the thread is named beside the block.
+    #[test]
+    fn a_block_another_thread_ran_in_names_that_thread_beside_it() {
+        let main = reading(
+            100e6,
+            vec![
+                state("on-cpu", Limit::Cpu, Some(2e6)),
+                state("blocked: sleeping", Limit::Sleep, Some(98e6)),
+            ],
+            0.0,
+        );
+        let worker = of_task(
+            reading(
+                90e6,
+                vec![
+                    state("on-cpu", Limit::Cpu, Some(88e6)),
+                    state("runnable", Limit::CpuQueue, Some(2e6)),
+                ],
+                0.0,
+            ),
+            "task:7",
+        );
+        let run = followed(Relation::Thread, None, &main, worker);
+        let verdict = latency(&run, 1);
+        assert_eq!(verdict.limit, Some(Limit::Cpu), "{}", verdict.sentence);
+        assert_eq!(verdict.task.as_deref(), Some("task:7"));
+        assert!(
+            verdict.sentence.contains("beside it"),
+            "{}",
+            verdict.sentence
+        );
+    }
+
+    #[test]
+    fn a_tail_followed_the_same_way_in_both_runs_subtracts_the_followed_tasks() {
+        let driver = |wall: f64| {
+            reading(
+                wall,
+                vec![state("blocked: sleeping", Limit::Sleep, Some(wall))],
+                0.0,
+            )
+        };
+        let compiler = |queued: f64| {
+            of_task(
+                reading(
+                    100e6 + queued,
+                    vec![
+                        state("on-cpu", Limit::Cpu, Some(100e6)),
+                        state("runnable", Limit::CpuQueue, Some(queued)),
+                    ],
+                    0.0,
+                ),
+                "task:2",
+            )
+        };
+        let typical = followed(
+            Relation::Child,
+            Some("wait4"),
+            &driver(101e6),
+            compiler(1e6),
+        );
+        let slow = followed(
+            Relation::Child,
+            Some("wait4"),
+            &driver(200e6),
+            compiler(100e6),
+        );
+        let verdict = tail(&slow, &typical, 5);
+        assert_eq!(verdict.limit, Some(Limit::CpuQueue), "{}", verdict.sentence);
+    }
+
+    #[test]
+    fn only_a_futex_sleep_asks_the_mutex_source_for_a_second_pass() {
+        let run = |limit: Limit| {
+            reading(
+                100e6,
+                vec![
+                    state("on-cpu", Limit::Cpu, Some(10e6)),
+                    state("blocked: sleeping", limit, Some(90e6)),
+                ],
+                0.0,
+            )
+        };
+        assert!(needs_split(&run(Limit::Futex), true).is_some());
+        assert!(needs_split(&run(Limit::Sleep), true).is_none());
+        assert!(needs_split(&run(Limit::Lock), true).is_none());
+        // Without the futex source, a sleep could be a mutex as well as not.
+        assert!(needs_split(&run(Limit::Sleep), false).is_some());
+        let cpu = reading(100e6, vec![state("on-cpu", Limit::Cpu, Some(90e6))], 0.0);
+        assert!(needs_split(&cpu, false).is_none());
+    }
+
+    #[test]
+    fn the_first_pass_asks_no_mutex_and_both_stacks_carry_the_symbols_asked() {
+        let mut asked = ask(Objective::Latency, 1);
+        asked.symbols = Some(SymbolSource::Debuginfod);
+        let first = asked.session();
+        assert!(first
+            .requests
+            .iter()
+            .all(|request| request.label.as_deref() != Some(MUTEX)));
+        let second = asked.split_session();
+        assert!(second
+            .requests
+            .iter()
+            .any(|request| request.label.as_deref() == Some(MUTEX)));
+        for request in &first.requests {
+            let reads_stacks = request.stack.is_some();
+            assert_eq!(
+                request.symbols,
+                reads_stacks.then_some(SymbolSource::Debuginfod),
+                "{:?}",
+                request.label
+            );
+        }
+        assert_eq!(
+            first
+                .requests
+                .iter()
+                .filter(|r| r.symbols.is_some())
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_wait_for_a_child_is_known_by_its_function_s_name() {
+        for frame in [
+            "wait4",
+            "__wait4",
+            "__GI___wait4",
+            "waitpid",
+            "__waitid",
+            "wait",
+        ] {
+            assert!(is_wait_for_child(frame), "{frame}");
+        }
+        for frame in [
+            "epoll_wait",
+            "pthread_cond_wait",
+            "libc.so.6+0xa08f2",
+            "select",
+            "__futex_abstimed_wait_common",
+        ] {
+            assert!(!is_wait_for_child(frame), "{frame}");
+        }
+    }
+
+    #[test]
+    fn the_sleep_sentence_names_a_polled_lock_and_a_wait_for_a_child() {
+        let said = Limit::Sleep.describe();
+        assert!(said.contains("polled") && said.contains("child"), "{said}");
     }
 
     #[test]

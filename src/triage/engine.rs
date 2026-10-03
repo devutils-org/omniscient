@@ -64,6 +64,23 @@ pub struct Run {
     /// What the validator had to say that is not a refusal.
     pub warnings: Vec<String>,
     pub caveats: Vec<String>,
+    /// What each request cost the target, in the order of `served`.
+    pub costs: Vec<Cost>,
+}
+
+/// What one request cost, as the runner measured it: the collectors' cpu and
+/// whatever they spent inside the target, against the target's own cpu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cost {
+    pub label: String,
+    pub source: String,
+    pub backend: String,
+    /// The band the catalog declares for the backend that served.
+    pub declared: crate::catalog::Cost,
+    /// Of the target's cpu. Absent when the target's cpu was not measured.
+    pub percent: Option<f64>,
+    /// Which account the target's cpu was read from.
+    pub observed_from: String,
 }
 
 impl Run {
@@ -221,7 +238,16 @@ pub fn run(
         decompositions: Vec::new(),
     };
     let mut events = Vec::new();
+    let mut costs = Vec::new();
     for (serving, collection) in resolved.iter().zip(collections) {
+        costs.push(Cost {
+            label: label_of(&serving.request),
+            source: serving.request.source.to_string(),
+            backend: serving.backend.id.clone(),
+            declared: serving.backend.cost,
+            percent: collection.overhead.percent(),
+            observed_from: collection.overhead.observed_from.clone(),
+        });
         events.extend(collection.events.iter().cloned());
         let unit = catalog
             .get(&serving.request.source)
@@ -257,5 +283,6 @@ pub fn run(
         served: resolved,
         warnings: report.warnings().map(str::to_owned).collect(),
         caveats: report.caveats().map(str::to_owned).collect(),
+        costs,
     })
 }
