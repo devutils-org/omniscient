@@ -245,6 +245,21 @@ this stream's files green -- `unwind` 17 of 17 included. The four:
   and `triage::a_verdict_read_off_a_lossy_profile_...` (red on base too,
   above): under that load, not rerun.
 
+After the review's round (`65b7b8e`): `cargo test --lib collect::cpu::profile`
+(10 passed), `stack::unwind` (6), clippy and fmt clean. One `make check` at
+load 2 to 15 went red at `runner`'s ring-loss test only. That test is red on
+base, above (a series short by 82 482 against a ring loss counted lower). One
+`cargo test --workspace --no-fail-fast` followed: **2192 passed, 3 failed, 10
+ignored**. Every binary in this stream's files was green. The three failures
+were all known before this round:
+
+- `runner::a_profile_s_losses_land_...`: red on base.
+- `triage::a_verdict_read_off_a_lossy_profile_...`: red on base.
+- `cases::every_case_names_its_known_cause_both_ways`: only the flat-profile
+  suspect comparison already in the tally
+  (`sqlite3-durability/commits-that-wait-for-nothing`, `_raw_spin_unlock_irqrestore`
+  against `bpf_trace_run2`). There was no budget stop this time.
+
 ## Privileged runs wanted
 
 Run alone, by the coordinator, on this machine at paranoid 2, then set back:
