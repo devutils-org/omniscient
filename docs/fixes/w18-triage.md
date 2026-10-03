@@ -32,23 +32,30 @@ As decided before the wave: no `--thread` option, both candidates.
      the wait's place**. Its whole is the wait, not its table's whole, which
      is the program's life (w17-build's "a child's `whole` is the launched
      program's life").
-  2. **another thread of the same process** whose rows account for at least
-     a quarter of the block (`RAN_IN_IT`), the busiest by on-cpu plus
-     runnable: followed **beside** the block. Its whole is what its own rows
+  2. **another thread of the same process** busy -- on a cpu or queued for
+     one, never its sleep -- for at least a quarter of the block
+     (`RAN_IN_IT`), the busiest by on-cpu plus runnable: followed **beside**
+     the block. Its whole is what its own rows
      add up to, since no source carries a thread's life; its residue is not
      stated.
   3. **a child with no wait on the stack** (a pipe read the child closes)
-     that accounts for a quarter of the block: followed in its place.
+     busy for a quarter of the block: followed in its place.
+  4. **a task no source placed in a process** (`unplaced`), busy for a
+     quarter of the block: followed in its place, its silent rows unread,
+     the sentence saying the run cannot tell a thread from a child. With a
+     wait for a child on the stack and no placed child, the busiest unplaced
+     task is taken for the child, and its reason says it was on the stack's
+     word.
 
   A followed task is read the same way, up to `MAX_FOLLOWED` (8) deep, never
   into a task or a process already on the way: a driver waiting for a
   compiler it started is followed to the compiler, make to the job's driver
   to its compiler.
 - **Which process a task is in** comes from the `pid` the sched sources
-  carry beside the task. `cpu.profile` carries none, so a task only the
-  profile saw is, by elimination, not one of the program's threads (which
-  the sched sources watch) -- another process. Section 7 asks profile for the
-  `pid`.
+  carry beside the task. `cpu.profile` carries none, and a thread that never
+  left its cpu gives the sched sources nothing to carry one on, so a task
+  only the profile saw is **unplaced**, not taken for another process (the
+  review's first finding, section 11). Section 7 asks profile for the `pid`.
 - **A child's zeros are not zeros.** The sched sources do not follow the
   target's children yet (stream sched's first bullet), and the decomposition
   writes a source's silence about a task as `0`: cc1's table in w17-build was
@@ -112,8 +119,12 @@ gains `second_pass`. Nothing was renamed or removed.
   sched.mutex through `preload` cost 127.0 % of the target's cpu (...), over
   the 20 % past which a source dilates what it measures; declared
   `extreme`"*. The denominator is the runner's (stream launcher's first
-  bullet); a driver whose children did the work reads thousands of percent
-  until it weighs the descendants.
+  bullet), the launched process's own cpu. When the reading was followed out
+  of the launched process (a child, or an unplaced task), that denominator
+  leaves the work out, so the line is still said but **not held against the
+  criterion**: *"...; the work was in a task outside the launched process,
+  whose cpu that share leaves out, so it is not read against the
+  criterion"*. Once launcher weighs the descendants, that branch can go.
 
 ## 3. `Limit::Sleep` and `--symbols`
 
@@ -192,12 +203,10 @@ the capabilities from `make`, nine other streams running):
     `runnable` (2.1 s against 1.05 s on a cpu) and the `-O2` compile `on-cpu`.
     make goes make -> the shell job's driver -> its cc1, the job that lasts
     99.9 % of the build being the one that accounts for the most.
-- **Without `pid` on profile samples**, a child the sched sources saw is
-  placed in its process, and one only the profile saw is taken as another
-  process by elimination; a thread of the program the sched sources never
-  saw at all (never switched, never queued) would be taken for a child, and
-  followed only if the stack names a wait or it accounts for a quarter of
-  the block.
+- **Without `pid` on profile samples**, a task the sched sources saw is
+  placed in its process, and one only the profile saw is unplaced: followed
+  as such, never called a child process, unless the stack names a wait for a
+  child and no placed task can be it (then its reason says so).
 - **Which child, without parentage**: no source carries a parent pid, so
   "the child" is the process not yet on the way that accounts for the most,
   which for a driver is its compiler and for make its longest job; a sibling
@@ -255,7 +264,7 @@ the capabilities from `make`, nine other streams running):
     and I will.
 - **profile** (`src/collect/cpu/profile.rs`): carry `pid` beside the task on
   every sample, as the sched sources do, so a child the profile alone saw is
-  placed in its process rather than by elimination. And the late discovery:
+  placed in its process rather than left unplaced. And the late discovery:
   a child that ran 300 ms lost 43 ms (14 %) to *"found on a tick after they
   began"*, and a thread 34 ms of 300; the followed task's on-cpu row is short
   by it.
@@ -285,9 +294,10 @@ at `perf_event_paranoid` 2, which the coordinator already lists.
 - **Which task the triage decomposes** (moves from "Open" to settled): the
   main thread, and then the task that ran in its largest row when that row is
   a sleep or a futex wait: a child, in the wait's place, when the blocking
-  stack names a wait for a child or the child accounts for a quarter of the
-  block; another thread of the process, beside the block, when it accounts
-  for a quarter of it. Followed the same way down to eight tasks. No
+  stack names a wait for a child or the child was busy for a quarter of the
+  block; another thread of the process, beside the block, when it was busy
+  (on a cpu or queued) for a quarter of it; a task no source placed in a
+  process, in the block's place, said unplaced rather than guessed. Followed the same way down to eight tasks. No
   `--thread` option. *Why*: it needs nothing from the person asking, and the
   three cases it turns are all one shape -- the program's work in a task its
   main thread waits on. `tests/triage.rs`,
@@ -323,3 +333,56 @@ reading, which `read_cli` does not read yet), `scenario_cpu`, `scenario_gpu`,
 tally; the three `unwind` ones are not, and rerun alone gave a different
 three, and `dwarf_recovers_the_whole_tree_...` alone passed: the load of ten
 streams, in profile's file. Clippy and fmt clean.
+
+## 11. Review round
+
+Fixed on the branch after the adversarial review:
+
+- **A task no sched source saw was filed as a child process** (defect).
+  `child()` took any task without a `pid` as another process by
+  elimination, which a quiet machine turns into the program's own spinning
+  thread being called a child, its rows unread as "does not follow the
+  program's children". Now such a task is `Relation::Unplaced`
+  (`"relation": "unplaced"`): followed in the block's place, its silent rows
+  unread *because no source placed it*, the sentence saying the run cannot
+  tell a thread from a child. `child()` takes only placed tasks; the one
+  exception is a wait for a child on the stack with no placed child, where
+  the busiest unplaced task is taken for it and its `chosen_because` says on
+  whose word. `unwatched` reads silence three ways (`Placed::{Own, Other,
+  Unknown}`), and for the latter two now overrides a decomposition's zero
+  as well as its own missing reason. The thread integration test accepts
+  `unplaced` only when the text says no source placed it.
+- **`RAN_IN_IT` counted a helper's sleep** (defect). The rule now measures
+  busy time (`busy` = on-cpu + runnable) for every relation, and `child()`
+  ranks by it too, so a helper that slept beside the block is not followed,
+  nor through it into the next idle thread.
+- **Ground truth not independent of the tool** (gap). `assert_on_cpu_agrees`
+  in `tests/triage.rs`: the lower bound is the kernel's figure with a fixed
+  allowance (75 %, less three periods and 2 %), and the profile's late-
+  discovery note is itself held against the kernel (row + note <= truth +
+  tolerance + 10 ms for other late-found tasks).
+- **The cost line had no test, and was false for a driver** (gap). Unit
+  test `a_cost_over_the_criterion_is_said_and_not_held_against_it_for_a_child_s_work`;
+  and a reading followed out of the launched process no longer says the
+  source "dilates what it measures" (section 2).
+- **The zero rule and the room rule had no unit test** (gap). Unit tests
+  `a_silent_row_is_zero_only_for_the_program_s_own_threads_from_a_clean_source`
+  and `with_every_row_read_the_room_is_the_rows_resolution_not_the_whole_s`.
+  `follow`, `child`, `busiest_thread` and `unplaced` are now exercised
+  through `read` over runs built by hand: an unplaced worker, a placed
+  thread (clean and lossy), a sleeping helper, a placed child busy enough and
+  not.
+- **Files outside the row** (gap): nothing to change on the branch; both
+  edits are forced (section 6). At the merge: launcher's `src/main.rs`
+  literal takes `symbols: args.symbols` once names' flag lands, and engine's
+  branch must not re-add `sched.mutex` to the four examples (the dump test
+  holds them).
+- **Nit, `needs_split` read one run**: `answer` now asks it of the slowest
+  run and the median, so a tail's futex sleep in either triggers the second
+  pass. Not unit-tested (`answer` runs the program); reasoned.
+- **Nit, python findings 1-3**: unchanged, still filed to names in section 7;
+  the coordinator should assign them, since `latency.rs` is this stream's.
+- **Found while testing**: the lock test read the first pass's `omn-truth`
+  line while the answer is the second pass's (the shim's 158.98 ms against
+  the first run's 148.13 ms). `truth_of` now reads the second half of the
+  lines when the answer is a second pass.

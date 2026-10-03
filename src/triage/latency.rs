@@ -81,11 +81,12 @@ pub const MAX_RUNS: u32 = 200;
 /// cut, and the last reading says so by being the one decomposed.
 pub const MAX_FOLLOWED: usize = 8;
 
-/// The share of a block another task has to account for before it is said to
-/// have run in it, when nothing else ties the two -- no wait for a child on
-/// the blocking stack. A quarter: a thread that ran through a quarter of the
-/// main thread's sleep did the program's work for at least that long, and a
-/// helper that woke for a millisecond did not.
+/// The share of a block another task has to have been busy for -- on a cpu or
+/// waiting for one, never asleep -- before it is said to have run in it, when
+/// nothing else ties the two: no wait for a child on the blocking stack. A
+/// quarter: a thread that ran through a quarter of the main thread's sleep did
+/// the program's work for at least that long, and a helper that slept as long
+/// as the main thread, waking for a millisecond, did not.
 pub const RAN_IN_IT: f64 = 0.25;
 
 /// A source whose measured cost is over this share of the target's cpu is
@@ -412,6 +413,12 @@ pub enum Relation {
     /// its decomposition is named beside the block, and its whole is what
     /// its own rows account for.
     Thread,
+    /// A task no source placed in a process -- `cpu.profile` carries no pid,
+    /// and a thread that never left its cpu gives the sched sources nothing
+    /// to carry one on -- which was busy while the block lasted: a thread of
+    /// the program or a child, the run cannot say which. Decomposed in the
+    /// block's place, its whole the block, and its silent rows unread.
+    Unplaced,
 }
 
 /// A task followed from the block it ran in.
@@ -637,7 +644,7 @@ fn write_reading(out: &mut String, run: &Reading, title: &str, indent: &str) {
     let _ = writeln!(out);
     if let Some(followed) = &run.followed {
         let how = match followed.relation {
-            Relation::Child => "in its place",
+            Relation::Child | Relation::Unplaced => "in its place",
             Relation::Thread => "beside it",
         };
         let _ = writeln!(
@@ -708,8 +715,13 @@ pub fn answer(
     if !mutex {
         return Ok(answer);
     }
-    let read = &answer.runs[answer.slowest.unwrap_or(answer.median)];
-    let Some(why) = needs_split(read, futex) else {
+    // Every run the verdict reads: a tail's median as well as its slowest,
+    // since a futex sleep in either is what the tail subtracts.
+    let read = answer.slowest.into_iter().chain([answer.median]);
+    let Some(why) = read
+        .map(|index| &answer.runs[index])
+        .find_map(|run| needs_split(run, futex))
+    else {
         return Ok(answer);
     };
     let mut second = conclude(ask, run_all(catalog, capabilities, &full, ask)?, dropped);
@@ -832,6 +844,15 @@ fn path_clause(chain: &[(Option<&Followed>, &Reading)]) -> String {
                 span(followed.amount),
                 below.task
             ),
+            (Relation::Unplaced, _) => format!(
+                "{} was `{}` {}{share} while {} ran, a task no source placed in a process -- a \
+                 thread of the program or a child, the run cannot say which -- and it is \
+                 decomposed in the block's place",
+                above.task,
+                followed.during,
+                span(followed.amount),
+                below.task
+            ),
         });
     }
     clauses.join("; ")
@@ -861,6 +882,10 @@ fn latency(run: &Reading, runs: usize) -> Verdict {
         Some(Relation::Thread) => (
             format!("for latency, in {which}, {path}: it"),
             "of what its rows account for",
+        ),
+        Some(Relation::Unplaced) => (
+            format!("for latency, in {which}, {path}: it"),
+            "of the block it ran in",
         ),
     };
     let mut known: Vec<&State> = read_one
@@ -1124,7 +1149,7 @@ pub fn read(run: &Run, target: &Target) -> Result<Reading, TriageError> {
             ),
         }));
     };
-    let mut reading = read_table(run, table, &task, chosen_because, None, false);
+    let mut reading = read_table(run, table, &task, chosen_because, None, Placed::Own);
     reading.others = output
         .tables
         .iter()
@@ -1132,7 +1157,6 @@ pub fn read(run: &Run, target: &Target) -> Result<Reading, TriageError> {
         .map(describe_other)
         .collect();
     reading.notes.extend(notes(run));
-    reading.costly = costly(run);
     let mut tasks = Tasks {
         run,
         tables: &output.tables,
@@ -1149,6 +1173,10 @@ pub fn read(run: &Run, target: &Target) -> Result<Reading, TriageError> {
         tasks.processes.insert(process);
     }
     tasks.follow(&mut reading, process, 0);
+    let elsewhere = reading.chain().iter().any(|(followed, _)| {
+        followed.is_some_and(|followed| followed.relation != Relation::Thread)
+    });
+    reading.costly = costly(run, elsewhere);
     Ok(reading)
 }
 
@@ -1157,8 +1185,8 @@ pub fn read(run: &Run, target: &Target) -> Result<Reading, TriageError> {
 ///
 /// `whole` replaces the table's whole for a followed task, whose table's
 /// whole is the program's life rather than its own. The residue is then the
-/// difference with that whole, and absent when a row is. `another_process`
-/// is a task outside the launched process, whose zeros are not read as
+/// difference with that whole, and absent when a row is. `placed` says
+/// whose process the task is in, which decides whether its silent rows are
 /// zeros ([`unwatched`]).
 fn read_table(
     run: &Run,
@@ -1166,7 +1194,7 @@ fn read_table(
     task: &str,
     chosen_because: String,
     whole: Option<GivenWhole>,
-    another_process: bool,
+    placed: Placed,
 ) -> Reading {
     let mut whole_state = from_row(&table.whole, None, table.whole.amount);
     if let Some(given) = &whole {
@@ -1182,7 +1210,7 @@ fn read_table(
     let mut states = Vec::new();
     let mut said = Vec::new();
     for original in &table.rows {
-        let row = &unwatched(run, original, task, another_process);
+        let row = &unwatched(run, original, task, placed);
         if original.amount.is_none() && row.amount.is_some() {
             said.extend(
                 row.note
@@ -1241,28 +1269,57 @@ struct GivenWhole {
     resolution: Option<f64>,
 }
 
+/// Which process a task is in, as far as the run can say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placed {
+    /// The launched (or attached) process: a thread the sched sources watch
+    /// at every switch.
+    Own,
+    /// Another process, which the sched sources do not follow.
+    Other,
+    /// No source tied it to a process.
+    Unknown,
+}
+
 /// A row its source has no event of, read for whose task it is.
 ///
 /// A source that watches only the launched process reads nothing of a child
 /// it started, and the decomposition writes that as a zero; a zero there is
-/// what the source did not see, not what the child did, so it is unread.
+/// what the source did not see, not what the child did, so it is unread. The
+/// same for a task no source placed in a process: it may be such a child.
 ///
 /// The other way round for the program's own threads, which the sched
 /// sources watch at every switch: no event of a thread that never left its
 /// cpu is the decomposition's "missing", and is a zero -- a spinning thread
 /// never blocked -- as long as the source lost no event (a late drain loses
 /// none). A lossy source's silence stays unread.
-fn unwatched(run: &Run, row: &Row, task: &str, another_process: bool) -> Row {
+fn unwatched(run: &Run, row: &Row, task: &str, placed: Placed) -> Row {
     let mut row = row.clone();
     if row.readings != 0 {
         return row;
     }
-    if another_process && row.missing.is_none() {
-        row.missing = Some(format!(
+    let unread = match placed {
+        Placed::Own => None,
+        Placed::Other => Some(format!(
             "`{}` reported no event of {task}: a source that does not follow the program's \
              children reads nothing of them, so this is not read as a zero",
             row.source
-        ));
+        )),
+        Placed::Unknown => Some(format!(
+            "`{}` reported no event of {task}, and no source placed it in a process: a thread \
+             of the program it watches would be a zero, a child it does not follow is not \
+             read, and the run cannot say which, so this is not read as a zero",
+            row.source
+        )),
+    };
+    if let Some(why) = unread {
+        // Whatever the decomposition said of the silence -- a zero, or
+        // missing for a reason of its own -- this is the reason it stands
+        // unread, and the decomposition's follows it.
+        row.missing = Some(match row.missing.take() {
+            Some(said) => format!("{why} ({said})"),
+            None => why,
+        });
         row.amount = None;
         return row;
     }
@@ -1281,7 +1338,7 @@ fn unwatched(run: &Run, row: &Row, task: &str, another_process: bool) -> Row {
                 && losses.undecoded == 0
                 && losses.evicted == 0
         });
-    if !another_process && watches_every_switch && row.amount.is_none() && clean {
+    if watches_every_switch && row.amount.is_none() && clean {
         row.amount = Some(0.0);
         row.missing = None;
         row.note = Some(format!(
@@ -1296,6 +1353,12 @@ fn unwatched(run: &Run, row: &Row, task: &str, another_process: bool) -> Row {
 /// What a task's rows add up to, read ones only.
 fn accounted(table: &Breakdown) -> f64 {
     table.rows.iter().filter_map(|row| row.amount).sum()
+}
+
+/// How long a task was busy: on a cpu or waiting for one. What it means for
+/// a task to have run in another's block; its sleep does not count.
+fn busy(table: &Breakdown) -> f64 {
+    row_amount(table, ON_CPU) + row_amount(table, RUNNABLE)
 }
 
 /// A table's amount for one row.
@@ -1414,16 +1477,25 @@ impl Tasks<'_> {
         let wait = waits_for_child(self.run, &reading.task, &state);
         let child = self.child(process);
         let thread = self.busiest_thread(process, &reading.task);
-        let enough = |table: &Breakdown| accounted(table) >= block * RAN_IN_IT;
-        let chosen = match (&wait, child, thread) {
-            (Some(_), Some(child), _) => Some((Relation::Child, child)),
-            (_, _, Some(thread)) if enough(thread) => Some((Relation::Thread, thread)),
-            (_, Some(child), _) if enough(child) => Some((Relation::Child, child)),
+        let unplaced = self.unplaced();
+        // Busy -- on a cpu or queued for one -- for a quarter of the block: a
+        // helper that slept beside it did not run in it.
+        let enough = |table: &Breakdown| busy(table) >= block * RAN_IN_IT;
+        let chosen = match (&wait, child, thread, unplaced) {
+            (Some(_), Some(child), _, _) => Some((Relation::Child, child)),
+            // The stack names a wait for a child, and no source placed the
+            // busiest task it could be: taken for the child on the stack's
+            // word, which its reason says.
+            (Some(_), None, _, Some(task)) => Some((Relation::Child, task)),
+            (_, _, Some(thread), _) if enough(thread) => Some((Relation::Thread, thread)),
+            (_, Some(child), _, _) if enough(child) => Some((Relation::Child, child)),
+            (_, _, _, Some(task)) if enough(task) => Some((Relation::Unplaced, task)),
             _ => None,
         };
         let Some((relation, table)) = chosen else {
             return;
         };
+        let is_placed = self.pid_of.contains_key(&table.key);
         let task = table.key.clone();
         let (whole, because) = match relation {
             Relation::Child => (
@@ -1435,6 +1507,11 @@ impl Tasks<'_> {
                     resolution: block_resolution,
                 },
                 match &wait {
+                    Some(wait) if !is_placed => format!(
+                        "the busiest task while {} waited in `{wait}`, which no source placed in \
+                         a process: taken for the child the wait names; its whole is that wait",
+                        reading.task
+                    ),
                     Some(wait) => format!(
                         "the child process that ran longest while {} waited in `{wait}`; its \
                          whole is that wait",
@@ -1465,15 +1542,28 @@ impl Tasks<'_> {
                     reading.task
                 ),
             ),
+            Relation::Unplaced => (
+                GivenWhole {
+                    amount: block,
+                    state: "whole: the block".to_owned(),
+                    source: reading.task.clone(),
+                    kind: block_kind,
+                    resolution: block_resolution,
+                },
+                format!(
+                    "the busiest task while {} was `{during}`, which no source placed in a \
+                     process -- a thread of the program that never left its cpu, or a child; \
+                     its whole is that block",
+                    reading.task
+                ),
+            ),
         };
-        let mut followed = read_table(
-            self.run,
-            table,
-            &task,
-            because,
-            Some(whole),
-            relation == Relation::Child,
-        );
+        let placed = match relation {
+            Relation::Child => Placed::Other,
+            Relation::Thread => Placed::Own,
+            Relation::Unplaced => Placed::Unknown,
+        };
+        let mut followed = read_table(self.run, table, &task, because, Some(whole), placed);
         if relation == Relation::Thread {
             // A thread of the program is watched by every source: its zeros
             // stand, and its residue is zero by construction, so none is said.
@@ -1481,7 +1571,7 @@ impl Tasks<'_> {
         }
         self.seen.insert(task.clone());
         let below = match relation {
-            Relation::Child => self.pid_of.get(&task).copied(),
+            Relation::Child | Relation::Unplaced => self.pid_of.get(&task).copied(),
             Relation::Thread => process,
         };
         if let Some(below) = below {
@@ -1501,38 +1591,48 @@ impl Tasks<'_> {
         }));
     }
 
-    /// The child that ran longest: the task, among those of processes not on
-    /// the way, whose rows account for the most. A process's main thread
-    /// stands for it when the run saw it. A task no source tied to a process
-    /// is one the sched sources, which watch every thread of the program,
-    /// never saw: by elimination another process.
+    /// The child that ran longest: the task, among those a source placed in
+    /// a process not on the way, that was busy the longest. A process's main
+    /// thread stands for it when the run saw it. A task no source placed is
+    /// not one: it may as well be a thread of the program ([`Self::unplaced`]).
     fn child(&self, process: Option<u64>) -> Option<&Breakdown> {
         let mut best: Option<(&Breakdown, f64)> = None;
         for table in self.tables {
             if self.seen.contains(&table.key) {
                 continue;
             }
-            let representative = match self.pid_of.get(&table.key) {
-                Some(pid) if Some(*pid) == process || self.processes.contains(pid) => continue,
-                Some(pid) => {
-                    let main = format!("task:{pid}");
-                    if table.key != main
-                        && self.tables.iter().any(|other| other.key == main)
-                        && !self.seen.contains(&main)
-                    {
-                        // Its process's main thread stands for it.
-                        continue;
-                    }
-                    table
-                }
-                None => table,
+            let Some(pid) = self.pid_of.get(&table.key) else {
+                continue;
             };
-            let weight = accounted(representative);
-            if best.is_none_or(|(_, most)| weight > most) {
-                best = Some((representative, weight));
+            if Some(*pid) == process || self.processes.contains(pid) {
+                continue;
+            }
+            let main = format!("task:{pid}");
+            if table.key != main
+                && self.tables.iter().any(|other| other.key == main)
+                && !self.seen.contains(&main)
+            {
+                // Its process's main thread stands for it.
+                continue;
+            }
+            let weight = busy(table);
+            if weight > 0.0 && best.is_none_or(|(_, most)| weight > most) {
+                best = Some((table, weight));
             }
         }
         best.map(|(table, _)| table)
+    }
+
+    /// The busiest task no source placed in a process, not already read.
+    fn unplaced(&self) -> Option<&Breakdown> {
+        self.tables
+            .iter()
+            .filter(|table| !self.seen.contains(&table.key))
+            .filter(|table| !self.pid_of.contains_key(&table.key))
+            .map(|table| (table, busy(table)))
+            .filter(|(_, busy)| *busy > 0.0)
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(table, _)| table)
     }
 
     /// The busiest other thread of `process`: the most time on a cpu or
@@ -1543,12 +1643,7 @@ impl Tasks<'_> {
             .iter()
             .filter(|table| table.key != task && !self.seen.contains(&table.key))
             .filter(|table| self.pid_of.get(&table.key) == Some(&process))
-            .map(|table| {
-                (
-                    table,
-                    row_amount(table, ON_CPU) + row_amount(table, RUNNABLE),
-                )
-            })
+            .map(|table| (table, busy(table)))
             .filter(|(_, busy)| *busy > 0.0)
             .max_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(table, _)| table)
@@ -1557,16 +1652,32 @@ impl Tasks<'_> {
 
 /// The sources that cost the target more than [`COST_CRITERION_PERCENT`] of
 /// its cpu, said with the band the catalog declares for them.
-fn costly(run: &Run) -> Vec<String> {
+///
+/// `elsewhere` is a reading followed into a task outside the launched
+/// process: its cpu is not in the denominator the runner divides by (the
+/// launched process's own), so a driver whose child did the work reads
+/// hundreds of percent for a source that cost the child little. Then the
+/// cost is still said, against what it was divided by, and not held against
+/// the criterion.
+fn costly(run: &Run, elsewhere: bool) -> Vec<String> {
     run.costs
         .iter()
         .filter_map(|cost| {
             let percent = cost
                 .percent
                 .filter(|percent| *percent > COST_CRITERION_PERCENT)?;
+            let reading = if elsewhere {
+                "; the work was in a task outside the launched process, whose cpu that share \
+                 leaves out, so it is not read against the criterion"
+                    .to_owned()
+            } else {
+                format!(
+                    ", over the {COST_CRITERION_PERCENT:.0} % past which a source dilates what it \
+                     measures"
+                )
+            };
             Some(format!(
-                "[{}] {} through `{}` cost {percent:.1} % of the target's cpu ({}), over the \
-                 {COST_CRITERION_PERCENT:.0} % past which a source dilates what it measures; \
+                "[{}] {} through `{}` cost {percent:.1} % of the target's cpu ({}){reading}; \
                  declared `{}`",
                 cost.label,
                 cost.source,
@@ -2374,5 +2485,395 @@ mod tests {
             Limit::Sleep
         );
         assert_eq!(sleeping_limit(100.0, None, None), Limit::Sleep);
+    }
+
+    // -- `read` over a run built by hand: which task is followed, and how its
+    // silent rows are read.
+
+    use crate::catalog::Unit;
+    use crate::collect::Losses;
+    use crate::encode::RunOutput;
+    use crate::event::{Attr, CollectorId, KeyValue};
+    use crate::join::DecompositionOutput;
+
+    const MS: f64 = 1e6;
+
+    fn row(state: &str, source: &str, amount: Option<f64>, readings: u64) -> Row {
+        Row {
+            state: state.to_owned(),
+            source: source.to_owned(),
+            value: "total_ns".to_owned(),
+            kind: Kind::Traced,
+            evidence: Some(Evidence::Key),
+            amount,
+            resolution: Some(0.0),
+            readings,
+            short: None,
+            missing: amount.is_none().then(|| "no event".to_owned()),
+            note: None,
+            named: None,
+        }
+    }
+
+    /// A task's table: on-cpu, runnable and blocked, `None` for a row its
+    /// source has no event of.
+    fn table(key: &str, on_cpu: f64, runnable: Option<f64>, blocked: Option<f64>) -> Breakdown {
+        let readings = |amount: Option<f64>| u64::from(amount.is_some());
+        let rows = vec![
+            row(ON_CPU, "cpu.profile", Some(on_cpu), 1),
+            row(RUNNABLE, "sched.runqlat", runnable, readings(runnable)),
+            row(BLOCKED, "sched.offcpu", blocked, readings(blocked)),
+        ];
+        let mut whole = row("whole", "program", Some(1000.0 * MS), 0);
+        whole.evidence = None;
+        Breakdown {
+            key: key.to_owned(),
+            whole,
+            rows,
+            parts: None,
+            residue: None,
+            residue_resolution: None,
+        }
+    }
+
+    fn event(kind: &str, tid: i32, attrs: Vec<Attr>) -> Event {
+        Event {
+            ts_ns: 1,
+            ts_err_ns: 0,
+            kind: kind.to_owned(),
+            keys: vec![KeyValue::task(tid)],
+            attrs,
+            collector_id: CollectorId::new("test"),
+            seq: 0,
+        }
+    }
+
+    /// The main thread, task:100 of process 100, asleep for `sleep`.
+    fn main_thread_asleep(sleep: f64) -> Event {
+        event(
+            "sched.offcpu",
+            100,
+            vec![
+                Attr::uint("pid", 100),
+                Attr::uint("tid", 100),
+                Attr::text("state", "sleeping"),
+                Attr::float("total_ns", sleep),
+                Attr::float("queued_ns", 0.0),
+            ],
+        )
+    }
+
+    /// An event that places `tid` in process `pid`, as the sched sources do.
+    fn placing(tid: i32, pid: u64) -> Event {
+        event("sched.runqlat", tid, vec![Attr::uint("pid", pid)])
+    }
+
+    fn results(source: &str, losses: Losses) -> Results {
+        Results {
+            label: source.to_owned(),
+            source: source.to_owned(),
+            unit: Unit::Ns,
+            backend: "test".to_owned(),
+            outputs: Vec::new(),
+            events_seen: 1,
+            observed_ns: 1,
+            window: Default::default(),
+            stopped_because: "test".to_owned(),
+            losses,
+            filtered: None,
+            lifetime: None,
+            unverified: Vec::new(),
+            degradations: Vec::new(),
+            stacks: BTreeMap::new(),
+            notes: Vec::new(),
+            overhead: Default::default(),
+            served_by: Vec::new(),
+            period_ns: None,
+            by_ring: Vec::new(),
+        }
+    }
+
+    fn run_of(tables: Vec<Breakdown>, events: Vec<Event>, lossy: bool) -> Run {
+        let losses = Losses {
+            dropped: u64::from(lossy),
+            ..Losses::default()
+        };
+        Run {
+            output: RunOutput {
+                results: ["cpu.profile", "sched.runqlat", "sched.offcpu"]
+                    .into_iter()
+                    .map(|source| results(source, losses.clone()))
+                    .collect(),
+                joins: Vec::new(),
+                decompositions: vec![DecompositionOutput {
+                    id: DECOMPOSITION.to_owned(),
+                    by: KeyKind::Task,
+                    unit: Unit::Ns,
+                    keys_seen: tables.len(),
+                    tables,
+                }],
+            },
+            events,
+            served: Vec::new(),
+            warnings: Vec::new(),
+            caveats: Vec::new(),
+            costs: Vec::new(),
+        }
+    }
+
+    fn read_launched(run: &Run) -> Reading {
+        read(run, &Target::Launch(vec!["test".to_owned()])).expect("a reading")
+    }
+
+    fn main_table() -> Breakdown {
+        table("task:100", 2.0 * MS, Some(0.0), Some(300.0 * MS))
+    }
+
+    /// The reviewer's case: a worker thread that spun without being preempted
+    /// gives the sched sources no event, so nothing carries its process. It is
+    /// not taken for a child process: it is followed as unplaced, its silent
+    /// rows unread for that reason and not for "does not follow the
+    /// children".
+    #[test]
+    fn a_busy_task_no_source_placed_is_followed_as_unplaced_not_as_a_child() {
+        let run = run_of(
+            vec![main_table(), table("task:101", 280.0 * MS, None, None)],
+            vec![main_thread_asleep(300.0 * MS)],
+            false,
+        );
+        let reading = read_launched(&run);
+        let followed = reading.followed.as_deref().expect("followed");
+        assert_eq!(followed.relation, Relation::Unplaced);
+        assert_eq!(followed.reading.task, "task:101");
+        assert_eq!(followed.reading.whole.amount, Some(300.0 * MS));
+        let runnable = followed
+            .reading
+            .states
+            .iter()
+            .find(|state| state.state == RUNNABLE)
+            .unwrap();
+        assert_eq!(runnable.amount, None);
+        let why = runnable.missing.as_deref().unwrap();
+        assert!(
+            why.contains("no source placed it")
+                && !why.contains("does not follow the program's children"),
+            "{why}"
+        );
+        let verdict = latency(&reading, 1);
+        assert_eq!(verdict.limit, Some(Limit::Cpu), "{}", verdict.sentence);
+        assert!(
+            verdict.sentence.contains("no source placed in a process")
+                && !verdict.sentence.contains("child, in"),
+            "{}",
+            verdict.sentence
+        );
+    }
+
+    /// The same worker, once a sched source placed it in the program's
+    /// process: a thread, beside the block, its silent rows zeros because the
+    /// sources that watch every switch lost nothing -- and unread when they
+    /// lost something.
+    #[test]
+    fn a_placed_thread_is_followed_beside_the_block_and_its_silence_is_zero_only_when_clean() {
+        let tables = || vec![main_table(), table("task:101", 280.0 * MS, None, None)];
+        let events = || vec![main_thread_asleep(300.0 * MS), placing(101, 100)];
+        let reading = read_launched(&run_of(tables(), events(), false));
+        let followed = reading.followed.as_deref().expect("followed");
+        assert_eq!(followed.relation, Relation::Thread);
+        for state in &followed.reading.states {
+            assert!(state.amount.is_some(), "{state:?}");
+        }
+        assert!(
+            followed
+                .reading
+                .notes
+                .iter()
+                .any(|note| note.contains("lost no event") && note.contains(": zero")),
+            "{:?}",
+            followed.reading.notes
+        );
+        let lossy = read_launched(&run_of(tables(), events(), true));
+        let followed = lossy.followed.as_deref().expect("followed");
+        assert!(
+            followed
+                .reading
+                .states
+                .iter()
+                .any(|state| state.state == RUNNABLE && state.amount.is_none()),
+            "a lossy source's silence stays unread: {:?}",
+            followed.reading.states
+        );
+    }
+
+    /// A helper thread that slept as long as the main thread, waking for a
+    /// millisecond, did not run in its sleep: its total is large, its busy
+    /// time is not, and nothing is followed -- nor through it into the next
+    /// idle thread.
+    #[test]
+    fn a_helper_that_slept_beside_the_block_is_not_said_to_have_run_in_it() {
+        let run = run_of(
+            vec![
+                main_table(),
+                table("task:101", 1.0 * MS, Some(0.0), Some(299.0 * MS)),
+                table("task:102", 1.0 * MS, Some(0.0), Some(299.0 * MS)),
+            ],
+            vec![
+                main_thread_asleep(300.0 * MS),
+                placing(101, 100),
+                placing(102, 100),
+            ],
+            false,
+        );
+        let reading = read_launched(&run);
+        assert!(reading.followed.is_none(), "{:?}", reading.followed);
+        assert_eq!(latency(&reading, 1).limit, Some(Limit::Sleep));
+    }
+
+    /// A child process a source placed, with no wait on the stack: followed
+    /// in the block's place when it was busy for a quarter of it, its silent
+    /// rows unread because the sched sources do not follow children; not
+    /// followed when it was busy for less.
+    #[test]
+    fn a_placed_child_is_followed_in_the_block_s_place_only_when_busy_enough() {
+        let child = |on_cpu: f64| {
+            run_of(
+                vec![main_table(), table("task:200", on_cpu, None, None)],
+                vec![main_thread_asleep(300.0 * MS), placing(200, 200)],
+                false,
+            )
+        };
+        let reading = read_launched(&child(200.0 * MS));
+        let followed = reading.followed.as_deref().expect("followed");
+        assert_eq!(followed.relation, Relation::Child);
+        assert!(
+            followed.reading.states.iter().any(|state| state
+                .missing
+                .as_deref()
+                .is_some_and(|why| why.contains("does not follow the program's children"))),
+            "{:?}",
+            followed.reading.states
+        );
+        assert!(read_launched(&child(10.0 * MS)).followed.is_none());
+    }
+
+    #[test]
+    fn a_silent_row_is_zero_only_for_the_program_s_own_threads_from_a_clean_source() {
+        let silent = row(RUNNABLE, "sched.runqlat", None, 0);
+        let clean = run_of(Vec::new(), Vec::new(), false);
+        let lossy = run_of(Vec::new(), Vec::new(), true);
+        assert_eq!(
+            unwatched(&clean, &silent, "task:1", Placed::Own).amount,
+            Some(0.0)
+        );
+        assert_eq!(
+            unwatched(&lossy, &silent, "task:1", Placed::Own).amount,
+            None
+        );
+        // The decomposition's zero from a clean source, and its missing.
+        let mut zero = silent.clone();
+        zero.amount = Some(0.0);
+        zero.missing = None;
+        for (placed, says) in [
+            (Placed::Other, "does not follow the program's children"),
+            (Placed::Unknown, "no source placed it"),
+        ] {
+            for silent in [&silent, &zero] {
+                let read = unwatched(&clean, silent, "task:1", placed);
+                assert_eq!(read.amount, None, "{placed:?}");
+                assert!(
+                    read.missing
+                        .as_deref()
+                        .is_some_and(|why| why.contains(says)),
+                    "{placed:?}: {:?}",
+                    read.missing
+                );
+            }
+        }
+        // A row with events is what it read, whoever's it is.
+        let read = row(RUNNABLE, "sched.runqlat", Some(5.0), 3);
+        assert_eq!(
+            unwatched(&clean, &read, "task:1", Placed::Other).amount,
+            Some(5.0)
+        );
+        // On-cpu is not a row a sched source watches at every switch.
+        let on_cpu = row(ON_CPU, "cpu.profile", None, 0);
+        assert_eq!(
+            unwatched(&clean, &on_cpu, "task:1", Placed::Own).amount,
+            None
+        );
+    }
+
+    /// When every row was read, the room is the rows' own resolution, not the
+    /// residue's -- which carries the whole's bracket.
+    #[test]
+    fn with_every_row_read_the_room_is_the_rows_resolution_not_the_whole_s() {
+        let resolved = |amount: f64, resolution: f64| {
+            let mut one = state("on-cpu", Limit::Cpu, Some(amount));
+            one.resolution = Some(resolution);
+            one
+        };
+        // A wide bracket on the whole does not undecide rows read exactly.
+        let mut decided = reading(100.0, vec![resolved(60.0, 1.0), resolved(30.0, 1.0)], 50.0);
+        decided.states[1].state = "runnable".to_owned();
+        decided.states[1].limit = Some(Limit::CpuQueue);
+        assert_eq!(latency(&decided, 1).limit, Some(Limit::Cpu));
+        // Rows whose own resolution adds up past the largest are undecided.
+        let mut close = reading(100.0, vec![resolved(60.0, 35.0), resolved(30.0, 30.0)], 0.0);
+        close.states[1].state = "runnable".to_owned();
+        let verdict = latency(&close, 1);
+        assert_eq!(verdict.limit, None, "{}", verdict.sentence);
+        assert!(
+            verdict.sentence.contains("within the rows' own resolution"),
+            "{}",
+            verdict.sentence
+        );
+    }
+
+    fn cost(percent: f64) -> engine::Cost {
+        engine::Cost {
+            label: MUTEX.to_owned(),
+            source: "sched.mutex".to_owned(),
+            backend: "preload".to_owned(),
+            declared: crate::catalog::Cost::Extreme,
+            percent: Some(percent),
+            observed_from: "the target's rusage".to_owned(),
+        }
+    }
+
+    /// A cost over the criterion is said against it; one under it is not
+    /// said; and when the work was followed out of the launched process, whose
+    /// cpu alone the share is of, it is said without the criterion.
+    #[test]
+    fn a_cost_over_the_criterion_is_said_and_not_held_against_it_for_a_child_s_work() {
+        let mut run = run_of(Vec::new(), Vec::new(), false);
+        run.costs = vec![cost(127.0), cost(COST_CRITERION_PERCENT - 1.0)];
+        let said = costly(&run, false);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("127.0 %") && said[0].contains("dilates what it measures"),
+            "{}",
+            said[0]
+        );
+        let elsewhere = costly(&run, true);
+        assert_eq!(elsewhere.len(), 1);
+        assert!(
+            !elsewhere[0].contains("dilates") && elsewhere[0].contains("outside the launched"),
+            "{}",
+            elsewhere[0]
+        );
+        // Through `read`: a run followed into a child says it that way.
+        let mut followed = run_of(
+            vec![main_table(), table("task:200", 200.0 * MS, None, None)],
+            vec![main_thread_asleep(300.0 * MS), placing(200, 200)],
+            false,
+        );
+        followed.costs = vec![cost(900.0)];
+        let reading = read_launched(&followed);
+        assert!(reading.followed.is_some());
+        assert!(
+            reading.costly[0].contains("outside the launched"),
+            "{:?}",
+            reading.costly
+        );
     }
 }

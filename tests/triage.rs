@@ -137,9 +137,17 @@ impl Answered {
         self.truth_of(0, name)
     }
 
+    /// The figures of the answer's run `run`. When the answer is a second
+    /// pass, the program ran once per run in each pass and printed a line
+    /// each time: the answer's lines are the second half.
     fn truth_of(&self, run: usize, name: &str) -> f64 {
+        let first = if self.answer["second_pass"].is_string() {
+            self.truths.len() / 2
+        } else {
+            0
+        };
         self.truths
-            .get(run)
+            .get(first + run)
             .and_then(|truth| truth.get(name))
             .and_then(|value| value.parse().ok())
             .unwrap_or_else(|| {
@@ -631,6 +639,31 @@ fn cpu_or_queue(oncpu: f64, queued: f64) -> (&'static str, bool) {
     (expected, close)
 }
 
+/// A followed task's on-cpu row against the kernel's own figure for it.
+///
+/// The profile finds a task the target started on a tick after it began, and
+/// says how much cpu it had used by then; the row is short by that. The bound
+/// below is the kernel's alone, with a fixed allowance for it -- a quarter of
+/// the task's cpu -- so a note claiming more missed cpu does not widen it.
+/// And the note's figure is itself held against the kernel: what the row
+/// read plus what the note says it missed is no more than the kernel's
+/// figure (and 10 ms for the other tasks found late, which spin nothing).
+fn assert_on_cpu_agrees(run: &Answered, task: &str, on_cpu: f64, truth: f64) {
+    let tolerance = 3.0 * PERIOD_NS + truth * 0.02;
+    let missed = run.missed_by_late_discovery();
+    assert!(
+        on_cpu <= truth + tolerance && on_cpu >= truth * 0.75 - tolerance,
+        "{task}'s on-cpu {on_cpu} against the kernel's {truth}:\n{}",
+        run.text
+    );
+    assert!(
+        on_cpu + missed <= truth + tolerance + 10e6,
+        "{task}'s on-cpu {on_cpu} and the {missed} the profile says it found late are more \
+         than the kernel's {truth}:\n{}",
+        run.text
+    );
+}
+
 /// A compiler driver's shape: the program starts a child, which starts the
 /// one that works, and each waits for the next in `waitpid`. The main
 /// thread's life is a wait; the answer is the grandchild's, by name of task,
@@ -678,13 +711,7 @@ fn a_program_whose_work_is_in_its_child_is_answered_by_that_child() {
         .map(amount)
         .unwrap_or_else(|| panic!("no on-cpu row for {task}:\n{}", run.text));
     let truth = run.truth_where("child-worker", "oncpu_ns");
-    let missed = run.missed_by_late_discovery();
-    assert!(
-        on_cpu <= truth + 3.0 * PERIOD_NS + truth * 0.02
-            && on_cpu >= truth - missed - 3.0 * PERIOD_NS - truth * 0.02,
-        "{task}'s on-cpu {on_cpu} against the kernel's {truth}, {missed} of it found late:\n{}",
-        run.text
-    );
+    assert_on_cpu_agrees(&run, &task, on_cpu, truth);
     // When the verdict decides, it decides what the kernel says.
     if let Some(limit) = run.limit() {
         assert_eq!(run.verdict()["task"], task.as_str(), "{}", run.text);
@@ -729,7 +756,17 @@ fn a_program_whose_work_is_in_another_thread_names_that_thread_beside_its_wait()
     let worker = run.truth_where("thread-worker", "tid") as u64;
     let task = format!("task:{worker}");
     let followed = &run.median_run()["followed"];
-    assert_eq!(followed["relation"], "thread", "{}", run.text);
+    // A thread a sched source saw is placed in the program's process; one
+    // that never left its cpu gives them nothing to place it by, and the
+    // profile carries no pid, so it is unplaced -- said so, and never taken
+    // for a child process.
+    let unplaced = followed["relation"] == "unplaced";
+    assert!(
+        followed["relation"] == "thread"
+            || (unplaced && run.text.contains("no source placed it in a process")),
+        "{}",
+        run.text
+    );
     assert_eq!(followed["during"], "blocked: sleeping", "{}", run.text);
     assert_eq!(followed["reading"]["task"], task.as_str(), "{}", run.text);
     assert_eq!(run.verdict()["task"], task.as_str(), "{}", run.text);
@@ -737,7 +774,10 @@ fn a_program_whose_work_is_in_another_thread_names_that_thread_beside_its_wait()
     let (expected, close) = cpu_or_queue(oncpu, run.truth_where("thread-worker", "runq_ns"));
     let limit = run.limit().unwrap_or("undecided");
     assert!(
-        limit == expected || (close && matches!(limit, "cpu" | "cpu-queue")),
+        limit == expected
+            || (close && matches!(limit, "cpu" | "cpu-queue"))
+            // Unplaced, its silent rows are unread, which may undecide it.
+            || (unplaced && limit == "undecided"),
         "{task} is `{limit}`, where the kernel says `{expected}`:\n{}",
         run.text
     );
@@ -748,13 +788,7 @@ fn a_program_whose_work_is_in_another_thread_names_that_thread_beside_its_wait()
         .find(|state| state["state"] == "on-cpu")
         .map(amount)
         .unwrap();
-    let missed = run.missed_by_late_discovery();
-    assert!(
-        on_cpu <= oncpu + 3.0 * PERIOD_NS + oncpu * 0.02
-            && on_cpu >= oncpu - missed - 3.0 * PERIOD_NS - oncpu * 0.02,
-        "{task}'s on-cpu {on_cpu} against the kernel's {oncpu}, {missed} of it found late:\n{}",
-        run.text
-    );
+    assert_on_cpu_agrees(&run, &task, on_cpu, oncpu);
     // The main thread's own sleep is in the answer, not in place of it.
     let sleeping = amount(run.state("blocked: sleeping"));
     assert!(
