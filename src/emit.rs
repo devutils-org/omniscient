@@ -86,9 +86,11 @@ pub const TOTAL_OF_ATTR: &str = "total_of";
 /// layout maps back to that bucket -- so `value * weight` puts every
 /// measurement at the bottom of its bucket, up to a factor of two short. A
 /// sum, a mean, a rate or a ranking built from it is a lower bound that says
-/// nothing of being one. Every emit that adds values up takes this instead
-/// when the row carries it (see `weighed`); the buckets, and `min` and `max`,
-/// stay the bucket bounds they are.
+/// nothing of being one. Every emit that adds values up -- `hist`'s sum,
+/// `summary`'s mean, `rate`, `topk` and `stack` -- takes this instead when the
+/// row carries it (see `weighed`). The buckets and `min` stay the bucket
+/// bounds they are; `max` is raised to a row's exact mean where that is above
+/// its low bound, so it is never below the mean beside it (see `highest`).
 pub const SUM_NS_ATTR: &str = "total_ns";
 
 /// Everything one request produced.
@@ -677,8 +679,15 @@ fn is_zero(value: &u64) -> bool {
 pub struct SeriesSummary {
     pub key: SeriesKey,
     pub count: usize,
+    /// The smallest value seen; over rows bucketed in the kernel, the lowest
+    /// occupied bucket's low bound, which no measurement is below.
     pub min: f64,
+    /// The largest value seen; over rows bucketed in the kernel, a lower
+    /// bound on the largest measurement, as [`SeriesHist::max`] is, and like
+    /// it never below `mean`.
     pub max: f64,
+    /// Exact over rows bucketed in the kernel when they carry
+    /// [`SUM_NS_ATTR`]; see [`SeriesHist::sum`].
     pub mean: f64,
     pub last: f64,
     /// Events that carried no value at all: measured by the collector as
@@ -816,9 +825,11 @@ pub struct SeriesHist {
     /// How many values went into the buckets.
     pub count: usize,
     /// The smallest and largest value seen. Over rows bucketed in the kernel
-    /// these are the low bounds of the lowest and highest occupied buckets:
-    /// the measurements themselves are not up here, and the largest of them
-    /// may be up to the next bucket's low bound.
+    /// the measurements themselves are not up here: `min` is the lowest
+    /// occupied bucket's low bound, and `max` the highest of the rows' low
+    /// bounds and, where a row carries [`SUM_NS_ATTR`], of its measurements'
+    /// exact mean. Both are lower bounds; the largest measurement may be up to
+    /// the next bucket's low bound. `max` is never below `sum / count`.
     pub min: f64,
     pub max: f64,
     /// What the values add up to: exact, including over rows bucketed in the
@@ -857,7 +868,11 @@ fn is_zero_usize(value: &usize) -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StackCount {
     pub stack: u64,
+    /// The events on this stack, as `topk`'s `events` are: a row bucketed in
+    /// the kernel is one event however many measurements it stands for.
     pub events: usize,
+    /// What the measurements on this stack add up to, every row weighed (see
+    /// `weighed`): exact where a kernel-built row carries [`SUM_NS_ATTR`].
     pub total: f64,
 }
 
@@ -1186,12 +1201,18 @@ fn summary_by(
 ) -> Result<Vec<SeriesSummary>, EmitError> {
     let mut summaries = Vec::new();
     for (key, events) in grouped(events, axes) {
-        // (value, weight, what the measurements behind it add up to)
-        let mut values: Vec<(f64, f64, f64)> = Vec::with_capacity(events.len());
+        // (value, weight, what the measurements behind it add up to, the
+        // largest of them it is known to hold)
+        let mut values: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(events.len());
         let mut unmeasured = 0;
         for event in &events {
             match measured(event, attr)? {
-                Some(value) => values.push((value, weight_of(event), weighed(event, attr, value))),
+                Some(value) => values.push((
+                    value,
+                    weight_of(event),
+                    weighed(event, attr, value),
+                    highest(event, attr, value),
+                )),
                 None => unmeasured += 1,
             }
         }
@@ -1214,17 +1235,17 @@ fn summary_by(
         // [`WEIGHT_ATTR`]. `count` is the number of measurements and not the
         // number of events, which is the number a reader of a summary wants
         // and the number `n=` has always claimed to be.
-        let weights: f64 = values.iter().map(|(_, weight, _)| *weight).sum();
+        let weights: f64 = values.iter().map(|(_, weight, _, _)| *weight).sum();
         let count = weights as usize;
         let min = values
             .iter()
-            .map(|(value, _, _)| *value)
+            .map(|(value, _, _, _)| *value)
             .fold(f64::INFINITY, f64::min);
         let max = values
             .iter()
-            .map(|(value, _, _)| *value)
+            .map(|(_, _, _, highest)| *highest)
             .fold(f64::NEG_INFINITY, f64::max);
-        let mean = values.iter().map(|(_, _, sum)| *sum).sum::<f64>() / weights;
+        let mean = values.iter().map(|(_, _, sum, _)| *sum).sum::<f64>() / weights;
         let last = values.last().expect("checked above").0;
         summaries.push(SeriesSummary {
             short: shorts.for_series(&key),
@@ -1270,15 +1291,16 @@ fn hist_by(
             }
             // An event may stand for many measurements; see [`WEIGHT_ATTR`].
             // `min` and `max` need no weight -- every measurement behind a row
-            // is inside its bucket, so the extremes are the row's own value.
-            // The sum is the exact one when the row carries it; see
-            // [`SUM_NS_ATTR`].
+            // is inside its bucket, so the extremes are the row's own value,
+            // raised for `max` to the row's exact mean when it has one (see
+            // `highest`). The sum is the exact one when the row carries it;
+            // see [`SUM_NS_ATTR`].
             let weight = weight_of(event);
             *counts.entry(layout.index(value)).or_insert(0) += weight as usize;
             count += weight as usize;
             sum += weighed(event, attr, value);
             min = min.min(value);
-            max = max.max(value);
+            max = max.max(highest(event, attr, value));
         }
         if count == 0 && unbucketable == 0 && unmeasured == 0 {
             continue;
@@ -1465,9 +1487,11 @@ fn stack_counting(
             unmeasured += 1;
             continue;
         };
+        // A row may stand for many measurements on one stack: the sum of
+        // what they measured, exact when the row carries it; see [`weighed`].
         let entry = by_stack.entry(id).or_insert((0, 0.0));
         entry.0 += 1;
-        entry.1 += value;
+        entry.1 += weighed(event, attr, value);
     }
 
     let mut stacks: Vec<StackCount> = by_stack
@@ -1545,14 +1569,33 @@ fn weighed(event: &Event, attr: &str, value: f64) -> f64 {
     let Some(weight) = declared_weight(event) else {
         return value;
     };
-    if attr != SUM_NS_ATTR && attr.ends_with("_ns") {
-        if let Some(total) = event.attr(SUM_NS_ATTR).and_then(|total| total.as_f64()) {
-            if total.is_finite() && total >= 0.0 {
-                return total;
-            }
-        }
+    exact_sum(event, attr).unwrap_or(value * weight)
+}
+
+/// The exact sum a weighted row carries for `attr`, when it carries one: see
+/// [`weighed`] for which rows and which attributes.
+fn exact_sum(event: &Event, attr: &str) -> Option<f64> {
+    declared_weight(event)?;
+    if attr == SUM_NS_ATTR || !attr.ends_with("_ns") {
+        return None;
     }
-    value * weight
+    let total = event.attr(SUM_NS_ATTR)?.as_f64()?;
+    (total.is_finite() && total >= 0.0).then_some(total)
+}
+
+/// The largest measurement a row is known to hold, given its value of `attr`.
+///
+/// Its value for every row but a kernel-built one with an exact sum, whose
+/// value is its bucket's low bound: there the measurements' own mean is a
+/// tighter lower bound on the largest of them, and the one that keeps `max`
+/// from falling below a `mean` computed from the same sum -- one row of 300
+/// reads in the 16384 ns bucket that took 6 ms in all has a mean of 20 000 ns,
+/// and a max of 16 384 beside it would read as a contradiction.
+fn highest(event: &Event, attr: &str, value: f64) -> f64 {
+    match (exact_sum(event, attr), declared_weight(event)) {
+        (Some(total), Some(weight)) => value.max(total / weight),
+        _ => value,
+    }
 }
 
 /// How many measurements an event's value is the sum of, when it says so.
@@ -1755,11 +1798,11 @@ mod tests {
         let hists = hist(&events, "latency_ns", BucketLayout::Log2, None).expect("a histogram");
         assert_eq!(hists[0].count, 320);
         assert_eq!(hists[0].sum, exact, "the exact sum, not the low bounds'");
+        assert_eq!(hists[0].min, 16_384.0, "the smallest is a bucket bound");
         assert_eq!(
-            hists[0].min, 16_384.0,
-            "the extremes stay the bucket bounds"
+            hists[0].max, 50_000.0,
+            "the largest is at least the top row's exact mean, 1 ms over 20"
         );
-        assert_eq!(hists[0].max, 32_768.0);
         assert_eq!(
             hists[0].buckets.iter().map(|b| b.count).sum::<usize>(),
             320,
@@ -1791,6 +1834,68 @@ mod tests {
         streamed.attrs.push(Attr::uint(SUM_NS_ATTR, 1));
         let hists = hist(&[streamed], "latency_ns", BucketLayout::Log2, None).expect("a histogram");
         assert_eq!(hists[0].sum, 20_000.0);
+    }
+
+    /// One kernel-built row: every measurement in the 16384 ns bucket, 6 ms
+    /// over 300 of them. The mean is the exact 20 000 ns, and a `max` left at
+    /// the bucket's low bound would sit below it.
+    #[test]
+    fn a_kernel_built_row_s_max_is_never_below_its_mean() {
+        let mut row = event(0, 7, 4096);
+        row.attrs.push(Attr::uint("latency_ns", 16_384));
+        row.attrs.push(Attr::uint(WEIGHT_ATTR, 300));
+        row.attrs.push(Attr::uint(SUM_NS_ATTR, 6_000_000));
+        let events = [row];
+
+        let summaries = summary(&events, "latency_ns", None).expect("a summary");
+        assert_eq!(summaries[0].min, 16_384.0);
+        assert!((summaries[0].mean - 20_000.0).abs() < 1e-9);
+        assert_eq!(summaries[0].max, 20_000.0);
+        assert!(summaries[0].min <= summaries[0].mean && summaries[0].mean <= summaries[0].max);
+
+        let hists = hist(&events, "latency_ns", BucketLayout::Log2, None).expect("a histogram");
+        assert_eq!(hists[0].max, 20_000.0);
+        assert!(hists[0].sum / hists[0].count as f64 <= hists[0].max);
+
+        // A row without an exact sum keeps its own value as its largest.
+        let mut plain = event(0, 7, 4096);
+        plain.attrs.push(Attr::uint("latency_ns", 16_384));
+        plain.attrs.push(Attr::uint(WEIGHT_ATTR, 300));
+        assert_eq!(
+            summary(&[plain], "latency_ns", None).unwrap()[0].max,
+            16_384.0
+        );
+    }
+
+    /// `sched.futex`, `sched.lock` and `sched.offcpu` hand up weighted rows
+    /// keyed by stack: a stack's total is what its measurements add up to, the
+    /// exact sum where the row carries it and `value * weight` otherwise --
+    /// never one value per row, which is short by the row's count.
+    #[test]
+    fn a_stack_total_weighs_its_rows() {
+        let row = |stack: u64, low: u64, weight: u64, total: Option<u64>| {
+            let mut event = event(0, 7, 4096);
+            event.attrs.push(Attr::uint(STACK_ID_ATTR, stack));
+            event.attrs.push(Attr::uint("wait_ns", low));
+            event.attrs.push(Attr::uint(WEIGHT_ATTR, weight));
+            if let Some(total) = total {
+                event.attrs.push(Attr::uint(SUM_NS_ATTR, total));
+            }
+            event
+        };
+        let events = vec![
+            row(1, 16_384, 300, Some(6_000_000)),
+            row(1, 32_768, 20, Some(1_000_000)),
+            row(2, 1_000, 50, None),
+        ];
+        let Output::Stack { stacks, .. } = stack(&events, "wait_ns", None).unwrap() else {
+            panic!("stack returns a Stack");
+        };
+        assert_eq!(stacks[0].stack, 1);
+        assert_eq!(stacks[0].total, 7_000_000.0, "the exact sum");
+        assert_eq!(stacks[0].events, 2, "rows, as topk counts them");
+        assert_eq!(stacks[1].stack, 2);
+        assert_eq!(stacks[1].total, 50_000.0, "value * weight without a sum");
     }
 
     /// An event that says nothing about its weight is one measurement, which

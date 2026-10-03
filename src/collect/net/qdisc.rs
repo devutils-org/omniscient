@@ -340,8 +340,10 @@ impl Collector for QdiscCollector {
         if self.packets > 0 {
             notes.push(format!(
                 "{} packet waits are reported as {} rows of a kernel-side log2 histogram, each \
-                 carrying the waits it stands for; a bucket is a factor of two wide, so every \
-                 number derived from `wait_ns` is bucketed and `total_ns` is the exact sum",
+                 carrying the waits it stands for; \
+                 `wait_ns` is its bucket's low bound, a factor of two below the next: the buckets \
+                 and `min` are bucketed and `max` is a lower bound, while the sum, mean, rate, \
+                 topk and stack totals come from `total_ns`, the exact sum",
                 self.packets, self.rows,
             ));
         }
