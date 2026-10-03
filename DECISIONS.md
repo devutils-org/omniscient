@@ -124,7 +124,7 @@ answer from each.
 |---|---|---|
 | The runner closes the window | The last round of `sample` calls is the closing read; `Collector::stop` returns what is already buffered and does not read again | `run_all` reads every collector and *then* asks whether the run is over, so the last round already lands at the end of the window. `net/dev.rs` reads once more in `stop` on the grounds that the last interval would otherwise be dropped, and it is not: measured, what is left for that read to cover is tens of microseconds of a 100 ms tick, and the point it produces sits at the same offset as the previous one with a delta of zero. `io` and `power` refuse to read there for exactly that reason. A `count` window is the exception -- it has no series, and its single measurement *is* the closing read. `the_runner_closes_the_window` measures the leftover rather than asserting the rule. |
 | A throttled period is not a dropped event | `Losses::throttled`, counted apart from `Losses::dropped` | A drop count is a number of events the ring reported losing. A throttle is the kernel declining to deliver for a while, and how many events happened inside that while is not recorded anywhere. `sched.switches` added one to `dropped` per throttle, which states a count nobody has; `mem.faults` ignored throttling entirely, so a throttled run read as complete. Counted apart, a run that hit `kernel.perf_event_max_sample_rate` says it cannot tell how much it lost, which is the true answer. |
-| "Valid, and not built" is exit 3, wherever it is discovered | `NoCollector` and `UnsupportedTarget` both exit 3 | The two exits mean different things to a caller: exit 1 is a problem with this run, and retrying or raising privileges may help; exit 3 is a problem with this build, and neither will. `mem.heap.alloc --pid` is a request the catalog declares -- a uprobe serves it -- and that this build cannot answer, and it exited 1, indistinguishable from a counter that failed to open. The same refusal is also now asked *before* "pass --duration", because advice for a request that cannot work is a dead end. |
+| "Valid, and not built" is exit 3, wherever it is discovered | `NoCollector` and `UnsupportedTarget` both exit 3 | The two exits mean different things to a caller: exit 1 is a problem with this run, and retrying or raising privileges may help; exit 3 is a problem with this build, and neither will. *Seventeenth wave: decided to read "... on a machine that lacks nothing it needs" once a backend both unbuilt and missing a requirement is the machine's on every path; that change is decided and not yet in the code ("Settled in the seventeenth wave").* `mem.heap.alloc --pid` is a request the catalog declares -- a uprobe serves it -- and that this build cannot answer, and it exited 1, indistinguishable from a counter that failed to open. The same refusal is also now asked *before* "pass --duration", because advice for a request that cannot work is a dead end. |
 
 ---
 
@@ -720,8 +720,8 @@ bench's guardrail (runner).
 | Decision | Choice | Reason |
 |---|---|---|
 | A drained row's enclosing window (was open) | **The rule's to name**: an `overlap` rule says `enclosing: <attr>`, the attribute holding a window from the row's stamp that encloses every occurrence. Such a row is credited whole to the one interval holding the window, and stays uncredited when it crosses one. Without it, `span` is a sum and the row is uncredited. A source without the attribute is refused (`MissingSpan`); `enclosing` on another match is refused (`EnclosingOutsideOverlap`). | A drained row carries both numbers, and a rule needs both. `mem.reclaim`'s `window_ns` is such a window today: `cross_machine::a_drained_reclaim_row_is_credited_whole_inside_one_second_of_pressure` credited all of `memory.stat`'s pgsteal in four runs (41 246 to 42 263 pages), against under 1.1 % read as a sum. |
-| What an interface is | **Its index, within one network namespace.** A join compares `iface` by the kernel's index (`iface#<index>`), filled from the name at the read when a producer has only the name; the name is what a row prints, and a sub-series after `/` is not part of the interface. | A rename made a second key, and `net.iface`'s `lo/drops` could not join anything. `join::tests::an_interface_is_one_key_by_its_index_across_a_rename_and_a_sub_series`, `join_engine::two_sources_of_one_interface_join_by_it_and_credit_what_lo_moved` (4 112 000 bytes credited for 4 112 000 counted). The namespace is still open, below. |
-| `proc` | **Stays as vocabulary, with no producer**, the way a source with no collector does; a join `via: proc` is refused by name until a source declares it. | `CATALOG.md`'s container trap: removing the kind and adding it back later costs more than a refusal that names it. The producers are filed. |
+| What an interface is | **Its index, within one network namespace.** A join compares `iface` by the kernel's index (`iface#<index>`), filled from the name at the read when a producer has only the name; the name is what a row prints, and a sub-series after `/` is not part of the interface. | A rename made a second key, and `net.iface`'s `lo/drops` could not join anything. `join::tests::an_interface_is_one_key_by_its_index_across_a_rename_and_a_sub_series`, `join_engine::two_sources_of_one_interface_join_by_it_and_credit_what_lo_moved` (4 112 000 bytes credited for 4 112 000 counted). *Superseded in the seventeenth wave: the namespace is part of the identity (below).* |
+| `proc` | **Stays as vocabulary, with no producer**, the way a source with no collector does; a join `via: proc` is refused by name until a source declares it. | `CATALOG.md`'s container trap: removing the kind and adding it back later costs more than a refusal that names it. *Superseded in the seventeenth wave: the per-process procfs sources carry it (below).* |
 | The engine's memory | **Bounded by its map and its `top`**, plus an index of any input stream that is not in order. A run's collections are handed to it apart (`join::apply_merging`), never laid end to end. | 0.6 MiB beyond a million events walked apart, 15.3 MiB laid end to end; the hour ran at 0.7 MiB a round. `join_engine::a_join_under_load_ends_every_state_it_opened_and_holds_no_more_than_its_map`, `join::tests::streams_walked_apart_meet_in_the_engines_order`. |
 
 **The resolver's answers** (`docs/fixes/w16-cpu.md`, `w16-io.md`):
@@ -751,26 +751,90 @@ bench's guardrail (runner).
 
 ---
 
+## Settled in the seventeenth wave
+
+What was decided before the wave (`docs/briefs/wave-17-programs.md`, "Decided
+before this wave") and what the seven streams settled, from their handoffs
+(`docs/fixes/w17-{symbols,cases,engine,core,python,build,io}.md`). The three
+lines open after the sixteenth wave are among them: the network namespace,
+one order for "unbuilt" and "missing", and the GPL-2.0 text.
+
+**Decided before the wave** (the user, 2026-10-03):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Phase 12 | **Worth doing**, as data: a case is a directory. Case 6's project is the **sqlite amalgamation**, fetched once and cached outside the repository. | Every ground truth until now was a workload written for the test. |
+| Where perf-map symbols land | **First, as their own stream, read under `--symbols local`** (and so `debuginfod`), not behind a new rung. | Without them a CPython case can only check that the verdict says it cannot see; a `/tmp/perf-<pid>.map` is a file the target wrote on this machine and asks nothing of anyone. Landed: `stack_capture::a_python_function_is_named_in_the_profile_under_x_perf`. |
+| The GPL-2.0 text (was open) | **Ships**: `LICENSES/GPL-2.0-only.txt`, installed under `share/doc/omn/LICENSES/` by `make install` and packed by `scripts/release.sh`; the README's licence section names it. | `src/bpf` is `MIT OR GPL-2.0`, and an option whose text is absent is half an offer. `make dist-verify`: exactly the nine paths `release.sh list` names (core). |
+| The network namespace beside an interface's index (was open) | **Part of the identity**, `iface#<netns>:<index>` (`iface:<netns>:<name>` with no index). A producer that reads in this process's namespace writes this one's; `net.qdisc` writes the device's own, `dev->nd_net.net->ns.inum`, read in the kernel. Another namespace's interface is another key: counted unmatched or uncredited and labelled `iface:<name>@netns:<inode>`, never credited to this namespace's, and not refused, since a `--system` run legitimately sees every namespace's devices. | An index is per namespace and `net.qdisc` reads them all: 2000 of 2000 packets on another namespace's lo were credited to this one's, and are now 2000 uncredited and keyed by their namespace (engine; run by hand and as a test applied and reverted, filed for `tests/join_engine.rs`). `join::tests::another_namespaces_interface_of_the_same_index_is_not_credited_to_this_ones`, `bpf::net_qdisc::tests::an_interface_target_is_compared_with_its_namespace`. |
+| One order for "unbuilt" and "missing" (was open) | **The chain's, on every path**: a backend both unbuilt and missing a requirement here is the machine's (exit 1) for the walk, a pin and the key hint alike. *"Valid, and not built" is exit 3* then holds on a machine that lacks nothing the backend needs. **Decided, not yet in the code**: `1aa114f` (core) is reverted on `main` (`4c13181`) until it lands with the eleven tests that pin an unbuilt backend to reach exit 3 (`docs/fixes/w17-core.md`, section 2). | One request exited 1 or 3 by the path that reached it. Until it lands, the forced path still asks the build first, and `scenario_net`'s `net.hwts` test still accepts both codes. |
+
+**Symbols** (`docs/fixes/w17-symbols.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| What a perf map names | **Only addresses in anonymous executable mappings** (unnamed or `[anon:...]`, never `[vdso]` or a deleted file) that no file names, read as the map grows and once more at the end (`Unwinder::finish()`, called by `cpu.profile`'s and `mem.ibs`'s `stop`). | A JIT writes lines as it compiles, and a map written at exit must still name the run. `stack_capture::a_perf_map_written_at_exit_names_the_frames_of_an_omn_profile`. |
+| Where a name came from | **Per frame**: `Frame::named_by`, one of `elf`, `debuginfod`, `kallsyms`, `perf-map`, absent exactly when the frame has no name; the per-module `NameOrigin` stays for the facts line. | One module can be named by two sources and one stack by four. |
+| A later map line over an earlier range | **Wins**; the overlapped line is dropped. | Code freed and generated again at the same place is the new code. |
+
+**The engine** (`docs/fixes/w17-engine.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| `proc` | **Has producers**: `proc.fd`, `proc.threads`, `mem.rss`, `mem.pss` and `mem.uss` carry it after `task`, read once at attach; a process whose namespace link is closed to this user carries `task` alone. No eBPF source writes it yet. | A join on one process across containers is served (`proc.threads` to `mem.rss` `via: proc`: 6 matched, 0 unmatched), and an exec keeps the pid namespace. `collect::proc::status::tests::a_count_carries_the_process_after_the_thread`. |
+| A drained stall row's enclosing window | **First episode to last end** (`last_ns`, stored by a plain `stx`, exact because the row's key holds the thread id and a thread ends its episodes one at a time), or the drain's close where the kernel recorded no end; a `count` run's rows carry no window. | The 100 ms reclaim session credits 99.5 to 100 % of the cgroup's pgsteal with it, 2 % without (three runs, applied and reverted: the session's line is filed). `collect::mem::stall::tests::a_drained_rows_window_ends_at_its_last_episode_or_else_at_the_drain`, `a_counted_row_carries_no_enclosing_window`. |
+
+**The emit layer** (`docs/fixes/w17-core.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A weighted row's sum | **Its exact `total_ns` wins over its bucket bounds** (`emit::SUM_NS_ATTR`): every emit that adds a duration up -- `hist`, `summary`, `rate`, `topk`, `stack` -- takes it where the row declares a weight; the buckets and `min` stay the bucket bounds, and `max` is raised to a row's exact mean so it is never below the mean beside it. | `value * weight` is a lower bound, up to a factor of two short, that nothing marked as one. `emit::tests::a_kernel_built_histogram_sums_what_its_rows_measured_not_their_low_bounds`, `a_stack_total_weighs_its_rows`, `a_kernel_built_row_s_max_is_never_below_its_mean`. |
+
+**The block histogram** (`docs/fixes/w17-io.md`, `docs/scenarios/io.md` defect 19):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| The in-kernel block histogram's programs | **Their own pair**: the open writes only the time, into an entry that outlives its request and is consumed in place (no insert, no delete on the hot path); the close reads only the device and adds to a per-cpu row, summed once at the end. | The shared pair cost 781 ns a request at 3.16 M IOPS (23.57 %, the coordinator's run before the wave), reading fields no row carries, taking two bucket locks and two atomic adds on a line every cpu wrote. `bpf::io::tests::the_histogram_programs_hot_paths_call_only_what_a_row_needs`. The new cost is not measured yet; the criterion it is held to is open, below. |
+
+**Cases** (`docs/fixes/w17-cases.md`, `w17-python.md`, `w17-build.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| What a case is | **`cases/<name>/case.yml`, data; extractors a registry in `tests/cases.rs` keyed by name.** A program whose account has a known shape is a directory; one of a new shape adds one extractor beside the tests, never a line under `src/`. | ROADMAP phase 12: adding a program means adding a directory. Shown by five cases added after the format with no line under `src/` and no extractor. |
+| A case's account of a new shape, from a stream that does not own the registry | **A script in the case's directory that prints `key=value`**, read by the `key-value` extractor; promoted to a registered extractor by the registry's owner when a second case needs it. | A case stays a directory, its parser beside the reference it reads. |
+| How the agent asks | **The question's own session (`--dump-session`), approved into `--allow-launch`, run through `run_session`, read as `docs/mcp.md` says**: the decomposition's biggest row, then the dominant stack of that row's source. | The two ways must ask the same question; the server summarises nothing, so the reading is the model's and is written down. |
+| What "the same suspect" means | **The same dominant state, and the same leaf where both are named**; an address is never compared with a name. | A name against an address is a difference in symbols, checked separately. |
+| A check a case shows failing | **Listed under `open_findings` with where it was filed; printed, not failed, while it fails; a failure once it passes everywhere it was checked.** | No workaround in the case, and a fix elsewhere is noticed by the case that showed it. |
+| A cause the reference says was not there | **A skip with the numbers** (each cause's `holds`). Kept in the case where most machines would make it dominant (`a-cold-file` on a fast NVMe). | That run asked another question; asserting on it would test the machine. |
+| A cause the brief named that does not dominate | **Measured, reported with its numbers, and replaced by one that does** (gcc's cold headers: 45 ms of a 0.86 s compile; replaced by a cpu shared with two competitors). | A case holds the triage to its first suspect. |
+| A program's account on stdout | **Handed to its stderr by `sh -c 'exec "$@" 1>&2'`, the pid unchanged**; `run_session` carrying stdout is filed. | Both ways read stderr, and the program is unchanged. |
+| An interpreter with and without its perf map | **Two cases differing by the one flag** (`cpython-interpreter`, `cpython-perf-map`), helpers shared by symbolic links. | `needs` and `open_findings` are per case, and the two show different findings. |
+| The cProfile reference | **A second run of the same program on the same input, used for which function, never how long.** | cProfile triples the run's time; its shares are robust, its durations are not the measured run's. |
+| A server as a case's target | **Started on port 0, found and stopped by the case's client** (port from `/proc/<pid>/net/tcp`, SIGINT as at a terminal), its requests on one keep-alive connection. | The client is the load and the clock, and one serving thread alive at the end is what lets its `schedstat` be read. |
+| The kernel's account of a task's time | **`/proc/<pid>/task/*/schedstat` of the target and every descendant, read from outside once a millisecond** (`cases/shared/watch.py`), the longest gap between reads its resolution. | The kernel's own split of on a cpu, waiting for one, and the rest, read without touching the target. |
+| Cpu contention without touching the target | **Competitors pinned to cpu 0, the target launched with `taskset -c 0`.** | An affinity given at exec is the target's environment, like a cgroup. |
+| A durability case's storage | **The case's `{cache}`, checked not to be tmpfs.** | A sync on tmpfs returns at once. |
+
+---
+
 ## Open
 
-- **The network namespace beside an interface's index** (engine, filed to
-  the kernel-side `net` producers). An index is per namespace, and
-  `net.qdisc`, `net.capture` and `net.hwts` read every namespace. Leaving it
-  open costs a join on `iface` the right to cross namespaces: 2000 of 2000
-  packets queued on another namespace's lo were credited to this one's
-  (`docs/keys.md` says when such a join is sound).
-- **Which answer first when a backend is both unbuilt and unservable here**
-  (mem, filed to the resolver). The chain path asks the machine first (exit 1),
-  the forced path the build first (exit 3), so one request exits 1 or 3 by the
-  path that reached it; `scenario_net`'s `net.hwts` test accepts both, by the
-  machine. The filing suggests the chain's order.
-- **The GPL-2.0 text** (docs, filed to the coordinator; the user's call).
-  `src/bpf` is `MIT OR GPL-2.0` and declares `Dual MIT/GPL` to the kernel, and
-  the tree and the archive ship only `LICENSE-MIT` and `LICENSE-APACHE`.
-  Leaving it open costs nothing legally (the MIT option is enough to use the
-  code), and costs the second option its text: either ship
-  `LICENSES/GPL-2.0-only.txt` from `scripts/release.sh` and `make install`, or
-  say in the README that the tree carries only the MIT text.
+- **The phase 6 criterion for the in-kernel histogram** (io, pending the
+  coordinator's `null_blk` run of the new program pair). If the run reads
+  above 1 % with the programs' own run time a small part of the per-request
+  cost, the criterion becomes a per-request cost in nanoseconds on that load,
+  since 1 % of a device that does no work is 25 ns for two tracepoint
+  dispatches and two clock reads; if the programs' own time is most of it,
+  `tp_btf` is next (`docs/fixes/w17-io.md`). Leaving it open costs phase 6
+  its last box.
+- **Which task the triage decomposes** (python and build, filed to
+  `src/triage/latency.rs`). Today a program's latency is its main thread's
+  life, and every server, compiler driver and build in phase 12 answers from
+  a thread that waited (`select`, `wait4`) while another thread or a child did
+  the work. The candidates: follow a wait for a child into the child that ran
+  during it, name the busiest other thread's decomposition beside the main
+  one's, or a `--thread` option. Leaving it open costs four of the six cases
+  their first suspect.
 
 A new open line goes here with what it costs to leave it open, which is the
 habit that kept this section honest.

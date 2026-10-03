@@ -467,6 +467,14 @@ Now, and not before: we have three real join types to generalize from.
       reads a second.*
       *Sixteenth wave: unchanged, still waiting on `null_blk`, which this
       wave did not load (`STATE.md`, "Needs privilege", item 1).*
+      *Seventeenth wave: run once by the coordinator before the wave, on
+      `null_blk` at 3.16 M IOPS: 23.57 %, 781 ns a request (bare 3 158 519
+      IOPS, 2 413 950 under the histogram). The histogram now has its own
+      program pair (`src/bpf/io.rs`, `docs/scenarios/io.md` defect 19), and
+      the test asserts the histogram counted fio's reads within 1 % before it
+      trusts the percentage. The new cost is not measured: the run is the
+      coordinator's, alone (`STATE.md`, "Needs privilege"). Whether 1 % is
+      the right criterion is open (`DECISIONS.md`).*
 - [x] Exceeding the budget produces an **announced** degradation, not a loss.
       *The runner checks every 100 ms and, over the ceiling, moves the
       collection onto the next cheaper backend of its chain that this machine
@@ -643,6 +651,14 @@ finally earns its place.
       in the suite). The table was still not rerun: `scripts/bench.sh`
       measures `target/release/omn`, whose capabilities need root (`STATE.md`,
       "Needs privilege"). Left `[~]`.*
+      *Seventeenth wave: the table ran before the wave (2026-10-03,
+      `scripts/bench.sh`, 68 minutes, its test green, documents under
+      `target/bench/backends-1791030430/`). 46 (source, backend) pairs are
+      flagged over their declared band: worst `io.fsync` through
+      `bpf:fentry` at 142 %, `net.tcp.connect` 39 %, `gpu.freq` through
+      `nvml` 14.5 %, `power.cstate` 7.8 %, `cpu.profile` through `pmu:sw`
+      4.9 %. The bands are not yet corrected to it, and the table is not in
+      `docs/bench.md`. Left `[~]` until they are.*
 - [~] The resolver's choices are confirmed by measurement, or corrected.
       *Confirmed for the seven chains with two served backends. The table's
       correction is to the cost bands: an in-kernel collector's cost is in the
@@ -847,20 +863,67 @@ project), which is many short processes rather than one.
 
 ### Exit criteria
 
-- [ ] Six programs, none written for this project, each with at least two known
+*Seventeenth wave: six cases asked both ways by `tests/cases.rs`, each cause
+through `omn latency` and through `omn-mcp` (`docs/cases.md`): `sqlite3-stripped`,
+`sqlite3-durability`, `cpython-interpreter`, `cpython-perf-map`,
+`http-server-stdlib`, `make-sqlite`, and `gcc-shell` held back under
+`cases/held/` until the triage follows a wait for a child. What fails is
+listed under each case's `open_findings` and filed where it lives
+(`docs/open-findings.md`, the seventeenth wave's sections).*
+
+- [~] Six programs, none written for this project, each with at least two known
       causes, one on the CPU and one off it, and for every case the triage's
       first suspect is the known cause, for the objective asked.
-- [ ] Every number a verdict cites agrees with the reference's own account,
+      *Seventeenth wave, partly: six cases over four programs (`sqlite3`
+      twice, CPython twice, `http.server`, `make`; gcc's case held back), each
+      with a cause on the cpu and one off it. The first suspect is the known cause, both ways, for
+      `sqlite3-stripped`, `sqlite3-durability` and both CPython cases. It is
+      not for `http-server-stdlib`'s listing, `make-sqlite` and the held
+      `gcc-shell`: the triage decomposes the launched program's main thread,
+      which waits in `select` or `wait4` while another thread or a child does
+      the work ("a program is its main thread"; `DECISIONS.md`, "Open").
+      `http-server-stdlib`'s cold file skips here with its numbers (the NVMe
+      is faster than the server's copy).*
+- [~] Every number a verdict cites agrees with the reference's own account,
       within that account's resolution.
+      *Seventeenth wave, partly: within the stated slack for `sqlite3-stripped`
+      (the on-cpu row 1 % over `.timer`'s cpu, the blocked row 29 ms over the
+      holder's clock) and the CPython cases (2 % over `process_time`, 7 ms
+      off the writer's clock). Not for `sqlite3-durability`'s `blocked` and
+      `runnable` rows (2 to 3.5 % under the kernel's `schedstat`, runnable
+      twice the run delay), `http-server-stdlib`'s slow client (the main
+      thread's `select`, a second longer than the serving thread's wait), and
+      `make-sqlite`.*
 - [ ] Where the cause is out of the tool's sight (interpreted or JIT frames, a
       closed GPU), the verdict says so by name. No case ends with a confident
       wrong suspect.
-- [ ] One case names a stripped distribution binary's functions from
+      *Seventeenth wave, not met: without a perf map the verdict presents an
+      interpreter C function (`__tls_get_addr`) as the hottest; with one, the
+      Python function is on 99 % of the stacks and never a leaf, so it is not
+      the one named; and the main-thread cases end with a confident wrong
+      suspect (`Limit::Sleep`'s "a timer, a pipe or a socket" for a wait for
+      a child or a polled lock). Each is filed.*
+- [~] One case names a stripped distribution binary's functions from
       debuginfod, and says where each name came from.
+      *Seventeenth wave, the agent's way: `sqlite3-stripped` through
+      `omn-mcp` names `sqlite3VdbeExec` from debuginfod with "names came from
+      -- sqlite3: debuginfod, ... build id 88b37b84..."; each frame says its
+      source (`Frame::named_by`). The person's way cannot: `omn latency` takes
+      no `--symbols`, the verdict drops the names note, and `sched.offcpu`'s
+      stacks are not asked through debuginfod (all filed).*
 - [ ] Every case runs at `perf_event_paranoid` 2 and says what that cost it:
       the stacks it lost, the sources it went without.
-- [ ] Adding a seventh program means adding a directory under `cases/`, and
+      *Seventeenth wave: reasoned (every cause answers, or skips both ways
+      with the machine's reason first), not run; the sysctl is machine-wide
+      and is the coordinator's privileged run (`STATE.md`, "Needs
+      privilege").*
+- [x] Adding a seventh program means adding a directory under `cases/`, and
       zero lines under `src/`.
+      *Seventeenth wave: after the format (`docs/cases.md`), the python and
+      build streams added five case directories with no line under `src/`
+      and no extractor in `tests/cases.rs` (their accounts are `key=value`
+      scripts beside each case); `cases::every_case_is_well_formed`
+      discovers and checks every directory.*
 
 ---
 
