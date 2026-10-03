@@ -7,29 +7,34 @@ Branch `feat/w17-core`, from `main` at `8725ae0`. The files: `src/emit.rs`,
 | Item | State | Commit |
 |---|---|---|
 | A kernel-built histogram's `sum` from `total_ns` | landed | `e9f2fa9` |
+| `stack` weighs its rows; `max` is never below the mean (review) | landed | `223542e` |
 | One order for "unbuilt" and "missing", on the forced path too | **written, then reverted; re-filed** | `1aa114f`, reverted by `4c13181` |
-| `cross-memory-which-allocation.yml` meets a user-mode-only run | landed | `c4985ae` |
+| `cross-memory-which-allocation.yml` meets a user-mode-only run | landed | `c4985ae`, `af14f63` |
 | `docs/portability.md:184`, `sched.switches` on 5.15 | landed | `77488f3` |
 | The GPL-2.0 text, and the README's licence lines | landed | `1f5c1e7` |
 
 ## 1. A kernel-built histogram's `sum` (`src/emit.rs`)
 
-Every weighted row built in the kernel carries its bucket's low bound as the
-value, `weight` = the count, and the exact sum as `total_ns`: `io.latency` (both
-collectors), `proc.syscall`, `sched.runqlat`, `sched.futex`, `sched.lock`,
-`sched.irq`, `sched.offcpu`, `net.qdisc`, `net.softirq`, `mem.stall`. `hist`
+Every weighted row built in the kernel carries `weight` = the count and the
+exact sum as `total_ns`, and as its value its bucket's low bound: `io.latency`
+(both collectors), `proc.syscall`, `sched.runqlat`, `sched.futex`, `sched.lock`,
+`sched.irq`, `net.qdisc`, `net.softirq`, `mem.stall`. `sched.offcpu`'s value is
+the row's mean (`total_ns / blocks`) instead; `weighed` returns `total_ns` for
+it all the same. `hist`
 added up `value * weight`, a lower bound up to a factor of two short, with
 nothing saying so.
 
 **Fix**: a new reserved name, `emit::SUM_NS_ATTR` (`"total_ns"`), and one
 function, `weighed(event, attr, value)`, that every emit adding values up now
-goes through: `hist`'s `sum`, `summary`'s `mean`, `rate`'s `total`, and
-`topk` (both rankings). It takes `total_ns` when the row **declares a valid
+goes through: `hist`'s `sum`, `summary`'s `mean`, `rate`'s `total`, `topk`
+(both rankings) and -- since the review round -- `stack`'s per-stack total. It takes `total_ns` when the row **declares a valid
 weight** and the value attribute is a duration in nanoseconds (`*_ns`) that is
 not `total_ns` itself; otherwise `value * weight` as before. The buckets are
-unchanged, and `min` and `max` stay the bucket bounds -- `SeriesHist`'s doc
-comment now says so (the largest measurement may be up to the next bucket's low
-bound).
+unchanged, and `min` stays the lowest bucket bound. `max` (in `hist` and
+`summary`) is the highest of the rows' low bounds and, for a row carrying
+`total_ns`, of its exact mean (`highest`), so it is never below the mean beside
+it; both stay lower bounds, and `SeriesHist`'s and `SeriesSummary`'s doc
+comments say so.
 
 Wider than the filing on purpose: the filing asked for `hist`, but `summary`'s
 mean, `rate` and `topk` were the same `value * weight`, and leaving them would
@@ -53,7 +58,7 @@ and `key_elsewhere` (the "which backend attaches this key" hint) asks the
 machine first too, so the hint, the walk and the pin give one order. Its own
 tests (`resolve::tests`) were rewritten and pass.
 
-**What blocked it**: twelve tests outside this stream's files pin a backend
+**What blocked it**: eleven tests outside this stream's files pin a backend
 nothing collects in order to reach the build's refusal (exit 3), and on a
 machine where that backend also lacks something -- here, tracefs is mounted
 but not readable by uid 1000, so every `bpf:tp` pin probes missing -- the pin
@@ -74,7 +79,7 @@ unrelated ones that passed alone:
 | `tests/scenario_io.rs:1157` `forcing_a_backend_this_build_has_not_written_names_it_and_exits_three` | `io.bytes` unwritten pin exits 3 | the same branch |
 | `tests/scenario_io.rs:1027` `a_request_keyed_on_what_the_counter_files_do_not_name_is_refused_with_the_backend_that_does` | the key hint names the `bpf` carrier as unwritten | the hint names it as missing here (`KeyElsewhere::Missing`) when its probes fail |
 | `tests/cli.rs:1665` `a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backend_that_does` | the same, through the CLI | the same |
-| `tests/scenario_net.rs` (`net.hwts`, ~2076) | already branches on the machine (exit 1 without a readable PTP clock, 3 with one) | add the pinned twin: `--backend force:so_timestamping` exits the same code as the walk on each branch |
+| `tests/scenario_net.rs` (`net.hwts`, ~2076): a request, not a failing test | already branches on the machine (exit 1 without a readable PTP clock, 3 with one) | add the pinned twin: `--backend force:so_timestamping` exits the same code as the walk on each branch |
 
 These tests are written against `DECISIONS.md`'s settled line *"Valid, and not
 built" is exit 3, wherever it is discovered* (`DECISIONS.md:127`), and
@@ -135,6 +140,47 @@ the caveat is not withheld; a refusal is, from its `error:` line); the whole
 file passes at paranoid -1 here. **Not shown**: a run at paranoid 2 -- see the
 privileged runs below.
 
+## Review
+
+The fix round answered an adversarial review of `418c275`:
+
+- **`withheld` skipped a crash** (defect, fixed in `af14f63`). A failed run
+  with no `error:` line fell back to the whole stderr, where `mem.faults`'s
+  caveat names `perf_event_paranoid` on every run, so a panic or a signal
+  read as the machine withholding a source. Every refusal `omn` prints starts
+  with `error:` (`src/main.rs`); without one, `withheld` now returns `None`
+  and the caller's assert reports the crash. **Shown**:
+  `a_served_run_is_not_withheld_by_its_caveat` gains an exit-101 panic and a
+  SIGKILL, both with the caveat, neither withheld.
+- **`stack` ignored weight** (gap, fixed in `223542e`). `stack_counting`
+  added one value per row, so `sched.futex`, `sched.lock` and `sched.offcpu`
+  stacks were short by each row's count. It now goes through `weighed`;
+  `StackCount::events` stays the row count, as `topk`'s does. The comment in
+  `offcpu.rs` ("adds up, in `rate`, `topk` and `stack`, to exactly
+  `total_ns`") is true from this commit on. **Shown**:
+  `emit::tests::a_stack_total_weighs_its_rows`.
+- **`summary`'s mean above its max** (gap, fixed in `223542e`). With one row
+  of 300 reads in the 16384 ns bucket and 6 ms in all, the mean was 20 000
+  and the max 16 384. `max` is now raised to a row's exact mean where that is
+  higher (`emit::highest`), in `summary` and `hist`. It stays a lower bound on
+  the largest measurement, now never below the mean. **Shown**:
+  `emit::tests::a_kernel_built_row_s_max_is_never_below_its_mean`; the
+  two-bucket test's `hist` max is now 50 000 (the top row's mean), not 32 768.
+- **The run notes overstated the loss** (nit, fixed in `223542e`).
+  `runqlat`, `qdisc`, `softirq`, `syscall` and `stall` now say the value, the
+  buckets and `min` are bucketed, `max` is a lower bound, and the sum, mean,
+  rate, topk and stack totals come from `total_ns`. No test quotes the old
+  wording; `docs/scenarios/sched.md:635` quotes it as an earlier run's output
+  and is left as it was.
+- **The handoff's counts** (nit, fixed here): eleven failing tests, not
+  twelve (the `net.hwts` row is a request); `sched.offcpu`'s value is the
+  row's mean, not a low bound.
+- **`user_mode_only` only labels** (nit, left as it is). Both bounds are
+  asserted on every path on purpose, and the lower bound at paranoid 2 is
+  reasoned, not run (§3). The privileged run below is what turns it into
+  something shown. If it fails there, the fix is the one §3 names: keep only
+  the upper bound when `user_mode_only` is set.
+
 ## 4. `docs/portability.md:184`
 
 `sched.switches` moved out of the "refused below 6.1" row into its own: only
@@ -167,6 +213,32 @@ Over `1aa114f` (before the revert), two more failed and passed alone once each:
 (in the tally) and `unwind::fp_leaf_recovers_the_caller_of_a_frameless_leaf_and_marks_it`
 (not in it; 61 of 2064 samples short of their path, once).
 
+**The fix round** (at `223542e`). `make check` stopped at its first failure,
+`collect::tests::the_runner_closes_the_window` (*"9883201 ns early"*, in the
+tally at `docs/open-findings.md:8046`; `tests/budget.rs::the_extra_cpu_a_faster_poll_costs_...`
+failed beside it, in the tally at `docs/scenarios/io.md:706`), at a load of
+15. The `cargo test --workspace --no-fail-fast` run that followed, at a load of
+21 to 25 with other streams' suites running: **2364 passed, 14 failed, 11
+ignored**; clippy `-D warnings` and `fmt --check` clean. Every failure but one
+passed alone at the first rerun (`family_sched` x2, the second a poisoned cpu
+lock from the first; `scenario_gpu`, `scenario_io` x2, `scenario_net`,
+`scenario_proc`, `scenario_runtime`, `triage` x2, `scenario_sched` x2,
+`unwind` x2). Before that, `collect::mem::footprint::tests::the_rollup_agrees_with_the_per_mapping_walk`
+failed once in `cargo test --lib collect::` and passed alone; it is not in the
+tally.
+
+The one that kept failing,
+`scenario_sched::sharing_one_file_is_the_only_difference_between_these_two_runs`
+(*"the run attributed a wait to pid N, which is not one of the 12 it
+started"*), is two worktrees colliding, not this change: the session filters on
+`comm == omnlockprobe`, and while it ran, `ps` showed `omnlockprobe` writers
+from `omniscient-w17-engine/target/tmp/` and `omniscient-w17-symbols/target/tmp/`
+running the same test. It reads raw events and no emit. **Filed for the
+coordinator**: the probe's comm is fixed, so two checkouts running
+`scenario_sched` at once see each other's writers; a per-run name, or the test
+filtering on the pids it started, would make it hold under parallel streams.
+Run it alone after the merge.
+
 ## Privileged runs wanted
 
 Alone, by the coordinator, after `make` in this worktree:
@@ -191,8 +263,10 @@ upper bound at paranoid 2.
   half an offer.
 - **A weighted row's exact sum wins over its bucket bounds**: when a row
   declares a weight and carries `total_ns`, every emit that adds a duration up
-  takes `total_ns` (`emit::SUM_NS_ATTR`); buckets, `min` and `max` stay the
-  bucket bounds. Because `value * weight` is a lower bound nothing marks as one.
+  (`hist`, `summary`, `rate`, `topk`, `stack`) takes `total_ns`
+  (`emit::SUM_NS_ATTR`); the buckets and `min` stay the bucket bounds, and
+  `max` is raised to a row's exact mean so it is never below the mean. Because
+  `value * weight` is a lower bound nothing marks as one.
 - **One order for "unbuilt" and "missing"** stays in "Open" until `1aa114f`
   lands with its tests (§2). When it does: *a backend both unbuilt and missing
   a requirement here is the machine's (exit 1) on every path -- the walk, a
@@ -202,7 +276,7 @@ upper bound at paranoid 2.
 
 ## Needs from another stream
 
-- **Coordinator** (`src/resolve.rs` re-filed, and the twelve tests in §2,
+- **Coordinator** (`src/resolve.rs` re-filed, and the eleven tests in §2,
   in files no stream of this wave owns, except `tests/scenario_io.rs`, which
   is io's): cherry-pick `1aa114f` with the test changes in one merge.
 - **io** (`tests/scenario_io.rs`): the two rows of §2's table that are yours,
