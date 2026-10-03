@@ -2488,14 +2488,18 @@ fn identity(key: &KeyValue) -> String {
 /// What a row names a state by: the key as a person reads it, less what the
 /// identity leaves out. A block request without its open timestamp, and an
 /// interface by its name -- not the index the identity compares, and not the
-/// sub-series a producer wrote after it.
+/// sub-series a producer wrote after it -- with its network namespace when it
+/// is not this process's.
 fn label_of(key: &KeyValue) -> String {
     match key {
         KeyValue::Blk { .. } => identity(key),
-        KeyValue::Iface { .. } => format!(
-            "iface:{}",
-            key.iface_name().expect("an iface key has a name")
-        ),
+        // Printed as the key prints, so another namespace's `lo` says which.
+        KeyValue::Iface { netns, index, .. } => KeyValue::iface_in(
+            *netns,
+            *index,
+            key.iface_name().expect("an iface key has a name"),
+        )
+        .to_string(),
         other => other.to_string(),
     }
 }
@@ -4426,6 +4430,52 @@ mod tests {
             .collect();
         assert_eq!(keys, vec![("iface:lo", 2), ("iface:veth9", 1)]);
         states_balance(&correlation);
+    }
+
+    /// An index is only an index inside its network namespace: another
+    /// namespace's `lo` -- index 1 there too -- meets nothing of this one's,
+    /// is counted unmatched, and its row says which namespace it is in.
+    #[test]
+    fn another_namespaces_interface_of_the_same_index_is_not_credited_to_this_ones() {
+        let here = crate::event::own_netns();
+        let elsewhere = here + 1;
+        let mut rule = eq_rule();
+        rule.via = Some(KeyKind::Iface);
+        rule.from = "net.iface".to_owned();
+        rule.to = "net.qdisc".to_owned();
+        let events = vec![
+            link(10, "net.iface", KeyValue::iface(1, "lo/drops"), 0),
+            link(20, "net.qdisc", KeyValue::iface_in(here, 1, "lo"), 1),
+            link(21, "net.qdisc", KeyValue::iface_in(elsewhere, 1, "lo"), 1),
+            link(22, "net.qdisc", KeyValue::iface_in(elsewhere, 1, "lo"), 1),
+        ];
+        let correlation = apply(&rule, &events).unwrap();
+        assert_eq!((correlation.matched, correlation.unmatched), (1, 2));
+        let keys: Vec<(&str, u64)> = correlation
+            .top
+            .iter()
+            .map(|row| (row.key.as_str(), row.matched))
+            .collect();
+        assert_eq!(keys, vec![("iface:lo", 1)]);
+        states_balance(&correlation);
+
+        // Opened on the other namespace's side, its row names that namespace.
+        let events = vec![
+            link(
+                10,
+                "net.iface",
+                KeyValue::iface_in(elsewhere, 1, "lo/drops"),
+                0,
+            ),
+            link(20, "net.qdisc", KeyValue::iface_in(elsewhere, 1, "lo"), 1),
+            link(21, "net.qdisc", KeyValue::iface(1, "lo"), 1),
+        ];
+        let correlation = apply(&rule, &events).unwrap();
+        assert_eq!((correlation.matched, correlation.unmatched), (1, 1));
+        assert_eq!(
+            correlation.top[0].key,
+            format!("iface:lo@netns:{elsewhere}")
+        );
     }
 
     /// Under `between`, the states are the interface's and the baseline is the

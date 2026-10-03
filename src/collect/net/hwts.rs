@@ -296,6 +296,8 @@ impl HwtsCollector {
             ts_ns: calibration.monotonic_ns,
             ts_err_ns: (calibration.window_ns / 2).max(1).min(u32::MAX as u64) as u32,
             kind: "net.hwts".to_owned(),
+            // This process's network namespace: the `ethtool` netlink socket
+            // answers for the devices of the namespace it was opened in.
             keys: vec![KeyValue::iface(clocked.ifindex, clocked.name.clone())],
             attrs,
             collector_id: self.id.clone(),

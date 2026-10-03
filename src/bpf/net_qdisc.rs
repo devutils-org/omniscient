@@ -83,7 +83,12 @@ const KEY_IFINDEX: i16 = 0;
 /// question is which one held the packet.
 const KEY_HANDLE: i16 = 4;
 const KEY_BUCKET: i16 = 8;
-const ROW_KEY_BYTES: usize = 12;
+/// The network namespace the device is in, by the inode `/proc/<pid>/ns/net`
+/// names (`dev->nd_net.net->ns.inum`). In the key because an index is only an
+/// index inside one namespace -- `lo` is 1 in every one -- and two
+/// namespaces' devices of one index would otherwise share a row.
+const KEY_NETNS: i16 = 12;
+const ROW_KEY_BYTES: usize = 16;
 
 /// The layout of a row value.
 const VALUE_COUNT: i16 = 0;
@@ -115,6 +120,9 @@ pub struct QdiscWait {
     /// The kernel's interface index, in the network namespace the packet was
     /// queued in -- which is not necessarily this process's.
     pub ifindex: u32,
+    /// The network namespace that index belongs to, by inode. Zero where the
+    /// kernel has no network namespaces to name.
+    pub netns: u64,
     /// The discipline's handle, as `tc` prints its major number.
     pub handle: u32,
     /// The log2 bucket, in `emit::BucketLayout::Log2`'s numbering.
@@ -149,6 +157,7 @@ impl QdiscWait {
             .unwrap_or(name.len());
         Some(Self {
             ifindex: word(key, KEY_IFINDEX as usize),
+            netns: u64::from(word(key, KEY_NETNS as usize)),
             handle: word(key, KEY_HANDLE as usize),
             bucket: word(key, KEY_BUCKET as usize),
             count: long(value, VALUE_COUNT as usize),
@@ -194,18 +203,40 @@ fn enqueue_instructions(btf: &Btf, queued_fd: i32, drops_fd: i32) -> Result<Vec<
 }
 
 /// The program on `qdisc_dequeue`: the discipline has released the packet.
+/// Where a device's network namespace inode is, from the device: the offset
+/// of `net_device.nd_net`, and of `net.ns.inum` from the `struct net` it
+/// points to. `None` on a kernel with no network namespaces, where
+/// `possible_net_t` is empty and there is nothing to read.
+///
+/// `possible_net_t` is a typedef of an anonymous struct whose only member,
+/// under `CONFIG_NET_NS`, is the `net` pointer, so the pointer is at the
+/// member's own offset. `Btf::member_offset` does not follow a typedef, which
+/// is why that zero is written here rather than looked up.
+fn netns_offsets(btf: &Btf) -> Result<Option<(i32, i32)>, String> {
+    if crate::event::own_netns() == 0 {
+        return Ok(None);
+    }
+    let nd_net_at = btf.member_offset("net_device", "nd_net")?;
+    let ns_at = btf.member_offset("net", "ns")?;
+    let inum_at = btf.member_offset("ns_common", "inum")?;
+    Ok(Some((nd_net_at, ns_at + inum_at)))
+}
+
+/// `only` narrows the program to one interface: its network namespace (by
+/// inode, 0 for "do not compare") and its index there.
 fn dequeue_instructions(
     btf: &Btf,
     queued_fd: i32,
     rows_fd: i32,
     drops_fd: i32,
-    only_ifindex: Option<u32>,
+    only: Option<(u64, u32)>,
 ) -> Result<Vec<Insn>, String> {
     expect_signature(btf, "qdisc_dequeue", &[&DEQUEUE_SIGNATURE])?;
     let dev_at = btf.member_offset("netdev_queue", "dev")?;
     let ifindex_at = btf.member_offset("net_device", "ifindex")?;
     let ifname_at = btf.member_offset("net_device", "name")?;
     let handle_at = btf.member_offset("Qdisc", "handle")?;
+    let netns_at = netns_offsets(btf)?;
 
     let mut program = Program::new();
     // r6 keeps the context, r7 whichever structure is being read, r8 the moment
@@ -244,6 +275,7 @@ fn dequeue_instructions(
     program.push(Insn::ldx(BPF_DW, 7, 6, ARG_TXQ));
     read_pointer(&mut program, SCRATCH, 7, 7, dev_at);
     program.push(Insn::st_imm(BPF_W, R10, ROW_KEY + KEY_IFINDEX, 0));
+    program.push(Insn::st_imm(BPF_W, R10, ROW_KEY + KEY_NETNS, 0));
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_IFNAME, 0));
     program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_IFNAME + 8, 0));
     program.jump_to("named", Insn::jeq_imm(7, 0, 0));
@@ -255,14 +287,29 @@ fn dequeue_instructions(
         7,
         ifname_at,
     );
+    // The device's network namespace, last: r7 is the device until here, and
+    // becomes the namespace's `struct net`.
+    if let Some((nd_net_at, inum_at)) = netns_at {
+        read_pointer(&mut program, SCRATCH, 7, 7, nd_net_at);
+        program.jump_to("named", Insn::jeq_imm(7, 0, 0));
+        read_narrow(&mut program, ROW_KEY + KEY_NETNS, 4, 7, inum_at);
+    }
     program.label("named");
 
-    if let Some(ifindex) = only_ifindex {
+    if let Some((netns, ifindex)) = only {
         // A `--iface` target, compared in the kernel: the row is keyed by the
         // interface, so a packet on another one is dropped before it is
-        // counted rather than after it is drained.
+        // counted rather than after it is drained. Another namespace's
+        // interface of the same index is another interface.
         program.push(Insn::ldx(BPF_W, 1, R10, ROW_KEY + KEY_IFINDEX));
         program.jump_to("done", Insn::jne_imm(1, ifindex as i32, 0));
+        if netns != 0 && netns_at.is_some() {
+            // An inode is above `i32::MAX`, so it is compared against a
+            // register: an immediate would be sign-extended.
+            program.push(Insn::ldx(BPF_W, 1, R10, ROW_KEY + KEY_NETNS));
+            program.extend(Insn::ld_imm64(2, netns as i64));
+            program.jump_to("done", Insn::jne_reg(1, 2, 0));
+        }
     }
 
     program.push(Insn::ldx(BPF_DW, 7, 6, ARG_QDISC));
@@ -349,9 +396,10 @@ pub struct QdiscDrain {
 impl QdiscProgram {
     /// Loads and attaches both programs, or says why the kernel refused.
     ///
-    /// `only_ifindex` narrows the measurement to one interface, compared inside
-    /// the program so that a packet on another one is never counted.
-    pub fn load(only_ifindex: Option<u32>) -> Result<Self, String> {
+    /// `only` narrows the measurement to one interface, by its network
+    /// namespace's inode and its index there, compared inside the program so
+    /// that a packet on another one is never counted.
+    pub fn load(only: Option<(u64, u32)>) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
 
         let queued = Hash::create(
@@ -372,7 +420,7 @@ impl QdiscProgram {
             queued.as_raw_fd(),
             rows.as_raw_fd(),
             counters.as_raw_fd(),
-            only_ifindex,
+            only,
         )?;
         let enqueue_program = load(&enqueue, "omn_qd_in")?;
         let dequeue_program = load(&dequeue, "omn_qd_out")?;
@@ -479,6 +527,7 @@ mod tests {
         key[KEY_IFINDEX as usize..][..4].copy_from_slice(&7u32.to_ne_bytes());
         key[KEY_HANDLE as usize..][..4].copy_from_slice(&0x8001_0000u32.to_ne_bytes());
         key[KEY_BUCKET as usize..][..4].copy_from_slice(&26u32.to_ne_bytes());
+        key[KEY_NETNS as usize..][..4].copy_from_slice(&4_026_531_840u32.to_ne_bytes());
         let mut value = vec![0u8; ROW_VALUE_BYTES];
         value[VALUE_COUNT as usize..][..8].copy_from_slice(&5u64.to_ne_bytes());
         value[VALUE_TOTAL_NS as usize..][..8].copy_from_slice(&250_000_000u64.to_ne_bytes());
@@ -486,6 +535,7 @@ mod tests {
 
         let row = QdiscWait::decode(&key, &value).expect("a full row");
         assert_eq!(row.ifindex, 7);
+        assert_eq!(row.netns, 4_026_531_840);
         assert_eq!(row.handle, 0x8001_0000);
         assert_eq!(row.count, 5);
         assert_eq!(row.total_ns, 250_000_000);
@@ -496,7 +546,8 @@ mod tests {
     #[test]
     fn a_row_shorter_than_the_layout_is_refused_rather_than_padded() {
         assert!(QdiscWait::decode(&[0u8; 4], &[0u8; 32]).is_none());
-        assert!(QdiscWait::decode(&[0u8; 12], &[0u8; 8]).is_none());
+        assert!(QdiscWait::decode(&[0u8; 12], &[0u8; ROW_VALUE_BYTES]).is_none());
+        assert!(QdiscWait::decode(&[0u8; ROW_KEY_BYTES], &[0u8; 8]).is_none());
     }
 
     /// Both programs build against this kernel, and the dequeue half is the
@@ -520,10 +571,45 @@ mod tests {
     fn an_interface_target_is_compared_in_the_kernel() {
         let Some(btf) = kernel_btf() else { return };
         let all = dequeue_instructions(btf, 3, 4, 5, None).expect("a program");
-        let one = dequeue_instructions(btf, 3, 4, 5, Some(4242)).expect("a program");
+        let one = dequeue_instructions(btf, 3, 4, 5, Some((0, 4242))).expect("a program");
         assert!(one.iter().any(|insn| insn.imm == 4242));
         assert!(!all.iter().any(|insn| insn.imm == 4242));
         assert_eq!(one.len(), all.len() + 2, "one load and one comparison");
+    }
+
+    /// The namespace is compared too, as a 64-bit constant: an inode is
+    /// above `i32::MAX`, and an immediate would be sign-extended into a
+    /// number no inode is.
+    #[test]
+    fn an_interface_target_is_compared_with_its_namespace() {
+        let Some(btf) = kernel_btf() else { return };
+        if crate::event::own_netns() == 0 {
+            eprintln!("skipped: this kernel has no network namespaces to compare");
+            return;
+        }
+        let netns: u64 = 4_026_531_840;
+        let without = dequeue_instructions(btf, 3, 4, 5, Some((0, 1))).expect("a program");
+        let with = dequeue_instructions(btf, 3, 4, 5, Some((netns, 1))).expect("a program");
+        assert_eq!(
+            with.len(),
+            without.len() + 4,
+            "a load, a wide constant, a comparison"
+        );
+        // `ld_imm64` splits the constant over two instructions' `imm`.
+        let low = netns as u32 as i32;
+        let high = (netns >> 32) as u32 as i32;
+        assert!(
+            with.windows(2)
+                .any(|pair| pair[0].imm == low && pair[1].imm == high),
+            "the namespace's inode is loaded whole"
+        );
+        // And the device's namespace is read into the key in every program.
+        assert!(
+            without
+                .iter()
+                .any(|insn| insn.code == 0x62 && insn.off == ROW_KEY + KEY_NETNS),
+            "the namespace slot is cleared before it is read"
+        );
     }
 
     /// Invariant 6: one clock domain, for both ends of the wait.
@@ -589,7 +675,7 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        for only in [None, Some(7)] {
+        for only in [None, Some((0, 7)), Some((4_026_531_840, 7))] {
             let program = dequeue_instructions(btf, 3, 5, 4, only).expect("a program");
             crate::bpf::map::assert_rows_taken_once(&program, 5);
         }

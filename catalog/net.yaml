@@ -222,7 +222,7 @@
   emits: [hist, raw, summary, timeline]
   targets: {system: native, iface: bpf_only}
   keys: [iface]
-  filter_fields: [iface]
+  filter_fields: [iface, netns]
   determinism: low
   caveats:
     - "An event is one bucket of one window, and it is stamped at the moment the
@@ -231,6 +231,11 @@
        and everything that happened in the same window as the first would fall
        outside the state. `window_ns` beside the value says how wide the window
        was."
+    - "Every network namespace's disciplines are read, and an interface's index
+       is only an index inside its namespace: lo is 1 in each. The key carries
+       the device's namespace, read in the kernel (`netns`, its inode), so
+       another namespace's lo is another interface, printed
+       `iface:lo@netns:<inode>`, and an --iface target is compared by both."
 
 - id: net.softirq
   family: net

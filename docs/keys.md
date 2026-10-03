@@ -12,10 +12,12 @@ Three rules govern how keys are compared, and they come before the list:
   `Display` of `KeyValue` with two exceptions. `blk` drops its open timestamp,
   which `scoped_eq` reads separately as the scope (`join::scope`): although
   printed, it is compared only as a scope, never as part of the identity. And
-  `iface` is compared by the kernel's index (`iface#<index>`,
-  `KeyValue::iface_identity`), by its name only when no index was known at the
-  read, and never by a sub-series written after a `/` in the name. `Display`
-  keeps the name, because the name is what a person reads. A reading's own
+  `iface` is compared by its network namespace and the kernel's index
+  (`iface#<netns>:<index>`, `KeyValue::iface_identity`), by the namespace and
+  its name only when no index was known at the read, and never by a sub-series
+  written after a `/` in the name. `Display` keeps the name, because the name
+  is what a person reads, and adds the namespace only when it is not this
+  process's (`iface:lo@netns:<inode>`). A reading's own
   series -- the baseline `between` differences against -- is still every
   field of the key, so two series of one interface never take each other's
   previous value.
@@ -38,7 +40,7 @@ Three rules govern how keys are compared, and they come before the list:
 | `mem` | `mem:[<base>,<end>)` | allocator (user) to page fault (kernel) | address reuse between a free and the next alloc | a second address space; what a fault fills beyond its address |
 | `gpu` | `gpu:<fence_ctx>+<seqno>` | submitting task, scheduler thread, completion | fence pointer recycling | another fence context (never attached here) |
 | `cgroup` | `cgroup:<id>` | cgroup2 files, a container runtime, kernel programs | tasks moving in and out | deletion and re-creation |
-| `iface` | `iface:<name>`, compared as `iface#<index>` | driver, qdisc, stack, `af_packet`, netlink, `/proc/net/dev` | a rename | deletion and re-creation; another network namespace |
+| `iface` | `iface:<name>`, compared as `iface#<netns>:<index>` | driver, qdisc, stack, `af_packet`, netlink, `/proc/net/dev` | a rename | deletion and re-creation; another network namespace |
 | `dev` | `dev:<major>+<minor>` | diskstats, the block layer, writeback | a device node's name changing | partition against whole disk; btrfs's anonymous device |
 | `cpu` | `cpu:<n>` | per-core counters, idle and frequency, IRQs | the whole run | a task (it does not follow one) |
 | `node` | `node:<n>` | where an allocation landed | the whole run | a page migrated later |
@@ -152,8 +154,9 @@ cgroup2 is also the id a kernel program reads for a task's cgroup
 not a task's, so it survives tasks moving in and out. It does not survive the
 group's deletion: a re-created group of the same path has a new id.
 
-**`iface`, a network interface.** Carries the kernel's index and the name,
-prints the name, and is compared by the index (`iface#<index>`). A producer
+**`iface`, a network interface.** Carries its network namespace, the kernel's
+index and the name, prints the name, and is compared by the namespace and the
+index (`iface#<netns>:<index>`). A producer
 that reads only a name -- `net.bytes` (`src/collect/net/dev.rs`) and
 `net.iface` (`src/collect/net/iface.rs`) read `/proc/net/dev` -- has the index
 filled from the name at the read (`KeyValue::iface`, `if_nametoindex`), while
@@ -173,16 +176,26 @@ A producer that carries the kernel's index (`net.qdisc`, `net.capture`,
 lo is `noqueue` by default -- and so runs only on a machine whose lo was given
 a discipline that queues (`netem`).
 
-**The index is per network namespace**, and the identity does not say which.
-The tool resolves a name in its own namespace, but `net.qdisc` reads the
-packets of every namespace, and lo is 1 in each: measured, 2000 packets queued
-on the lo of an unprivileged namespace were all credited to this namespace's
-`iface:lo`. Until the kernel-side producers carry the namespace beside the
-index (filed, `docs/open-findings.md`, the sixteenth wave, stream engine), a
-join of a machine-wide interface source with a named one is sound only on a
-machine with one network namespace, or with the kernel-side source targeted at
-an interface that exists only in this one. A deleted and re-created interface
-has a new index, so it is a new key.
+**The index is per network namespace**, so the namespace is part of the
+identity: its inode, as `/proc/<pid>/ns/net` names it. A producer that reads
+in this process's namespace -- `/proc/net/dev`, `if_nametoindex`, an
+`AF_PACKET` socket (`net.capture`), the `ethtool` netlink family
+(`net.hwts`) -- carries this process's (`KeyValue::iface`). `net.qdisc` reads
+the packets of every namespace, and carries the device's own,
+`dev->nd_net.net->ns.inum`, read in the kernel (`src/bpf/net_qdisc.rs`,
+`KeyValue::iface_in`); its `--iface` target compares the namespace in the
+kernel beside the index. So another namespace's `lo`, index 1 there too, is
+another interface: a join meets none of this namespace's keys with it, counts
+it unmatched or uncredited, and prints it `iface:lo@netns:<inode>`. Measured:
+2000 datagrams sent over the lo of an unprivileged namespace (`unshare -rn`,
+`tc qdisc replace dev lo root netem limit 100000`), with
+`examples/join-iface-qdisc.yml` running in this one, were 2000 uncredited
+under a `--system` `net.qdisc` and keyed `iface:lo@netns:<that namespace>`,
+and none were counted under the session's own `--iface lo`; before, all 2000
+were credited to this namespace's `iface:lo`. A key with no namespace (0: one
+written by hand, or read back from a file older than the field) meets only
+another such key. A deleted and re-created interface has a new index, so it
+is a new key.
 
 **`dev`, a block device.** The major and minor as `/proc/diskstats` writes
 them (`src/collect/io/diskstats.rs`), as `request.part` holds them in the
