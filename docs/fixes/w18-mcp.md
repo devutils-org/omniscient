@@ -274,3 +274,52 @@ Rerun alone, once each:
   remove, and the `bpf_trace_run2` suspect described in section 3.
 
 `cargo test -p omn-mcp` is green: 9 unit, 12 protocol, 2 walkthrough.
+
+## 10. Review, and the fix round
+
+All four points were right; each is fixed, none disputed.
+
+- **defect, `mcp/src/session.rs`, an unknown in-target cost read as zero.**
+  `budget_against` now carries `in_target_known`, `in_target_cpu_ns` and
+  `in_target_from` per request. Where the in-target part is unknown
+  (`in_target_cpu_ns: null`), `run_spent_ns` and both
+  `run_spent_percent_of_*` are `null`, and the part that is known is given
+  under names that say it is a floor -- `run_spent_at_least_ns`,
+  `run_spent_at_least_percent_of_target_cpu`,
+  `run_spent_at_least_percent_of_window_on_one_cpu` -- with `why_at_least`
+  quoting `in_target_from`. Shown by the unit test
+  `an_unknown_in_target_cost_is_a_floor_and_not_a_zero` (both cases: null
+  and known).
+- **gap, `mcp/tests/protocol.rs`, skips invisible to the gate.** Every skip
+  this branch added, and two older ones whose reasons the CI cell already
+  expects (`python3` missing, which the workflow installs so it rightly stops
+  the job, and the `carries no CAP_BPF` half), now print `skipped:`. The
+  privileged test's skip on CI reads "skipped: .../omn carries no CAP_BPF ...",
+  which `.github/expected-skips.txt`'s existing `CAP_BPF` line already
+  matches: **no new line is needed from stream green**, and the gate now
+  counts it under that class. Still `SKIP:` and so still invisible, left to
+  whoever owns the gate (their reasons are not all in the expected file, so
+  converting them here would turn CI red outside this stream's scope):
+  protocol.rs's 100 kHz profile, `examples/*.yml cannot run here`, IDENTITY
+  not built, `node` missing or silent, and `cpu.profile` withheld.
+- **nit, `docs/install.md`, 51 put on the capabilities alone.** Reproduced at
+  this branch's build: an uncapped copy alone gives 51, the same copy with
+  `libomn_preload.so` beside it 56, `target/debug/omn` 92. The paragraph, the
+  "need nothing more" count (now 56) and the measured table say so: 36 of the
+  41 are the capabilities, 5 the shim.
+- **nit, the stdout test's guarded comparison.** It now asserts
+  `in_target_known` and that both percentages are present (panicking with
+  the answer if not) before comparing them.
+
+`cargo test -p omn-mcp`: 10 unit, 12 protocol, 2 walkthrough, all passed,
+with no skip on this machine (the privileged test ran on `bpf:fentry`).
+
+The fix round's `make check` (66f2e22, load average about 30 from the other
+streams' suites): red only on `cases::every_case_names_its_known_cause_both_ways`,
+the same three `open_findings` entries to remove as in section 9; clippy
+(`omn-mcp`) and `cargo fmt --check` clean. The `--no-fail-fast` rerun was cut
+short by the round's end at 1960 passed, 10 failed: the `cases` one, and nine
+in `budget` (x4), `cross_compute`, `cross_machine`, `encoders`, `runner` and
+`scenario_mem` -- files this branch does not touch (`git diff main -- src
+tests catalog shim` is empty), timing assertions under that load, and the
+`runner` one is the same failure section 9 records on `main`'s code.
