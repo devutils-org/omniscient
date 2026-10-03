@@ -59,13 +59,17 @@ jobs:
 
       # What the tests launch: a C compiler and <sys/sdt.h> for the USDT and
       # vertical-case fixtures, python3 and node for the runtime workloads,
-      # iproute2 for the network scenarios. A skip because one of these is
-      # missing is the workflow's fault, and the gate refuses it.
+      # iproute2 for the network scenarios; for `tests/cases.rs`, the
+      # programs the cases measure and the tools their references use (sqlite3,
+      # strace, unzip; gcc and make are build-essential's, taskset
+      # util-linux's). A skip because one of these is missing is the
+      # workflow's fault, and the gate refuses it.
       - name: Workloads the tests launch
         run: |
           sudo apt-get update -q
           sudo apt-get install -yq --no-install-recommends \
-            build-essential systemtap-sdt-dev python3 nodejs iproute2 util-linux jq
+            build-essential systemtap-sdt-dev python3 nodejs iproute2 util-linux jq \
+            sqlite3 strace unzip
           # bpftool, for `btf.rs`'s cross-check of a variable's type id against
           # the running kernel's own numbering; Ubuntu ships it per kernel.
           sudo apt-get install -yq --no-install-recommends "linux-tools-$(uname -r)" \

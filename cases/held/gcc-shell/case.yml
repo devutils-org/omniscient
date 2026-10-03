@@ -1,0 +1,195 @@
+# Case 5: `gcc` on a known translation unit.
+#
+# HELD BACK: `tests/cases.rs` discovers `cases/<name>/case.yml` only, so this
+# case does not run. One of its checks cannot be made to give the same answer
+# every run (`both-ways-name-the-same-suspect` on the passes, below and in
+# docs/fixes/w17-build.md, "the build stream's review"), and a listed check
+# that passes fails the test as surely as an unlisted one that fails. It goes
+# back to `cases/gcc-shell/` (`git mv`; `{case}/../shared/watch.py` resolves
+# from there) once the triage follows a wait for a child, or the agent's way
+# stops reading whichever table weighs most.
+#
+# ROADMAP phase 12. A compiler is a process tree: the driver `gcc` starts the
+# compiler proper `cc1`, then the assembler `as`, and waits for each. The
+# translation unit is sqlite's `shell.c` (1.2 MB, 155 headers), fetched once
+# with the amalgamation. On the cpu, the cause is the optimisation passes:
+# two builds of the same unit, `-O2` against `-O0`, whose difference is the
+# cause, with gcc's own `-ftime-report` as the account. Off it, the compile
+# shares its cpu with two competitors, and the kernel's `schedstat` of each
+# process, read from outside, is the account. Both causes start the watcher
+# (`cases/shared/watch.py`), which first ends whatever an earlier run of the
+# case left behind: a run the budget stopped leaves its cc1 compiling into the
+# same files. `docs/cases.md` describes every field.
+name: gcc-shell
+about: >-
+  The distribution's gcc compiling one translation unit to an object file:
+  the driver `gcc`, which does nothing itself but start `cc1` and `as` and wait
+  for them, so the program's time is spent in processes its main thread is
+  not.
+
+program:
+  command: gcc
+  obtained: >-
+    the distribution's package (`gcc` 16.2.1 on Arch Linux on the development
+    machine), not rebuilt: the driver and `cc1` stripped, each with a GNU
+    build id; `as` from binutils
+  version: [gcc, --version]
+  stripped: true
+
+needs:
+  - run: [gcc, --version]
+    for: the program under test
+  - run: [unzip, -v]
+    for: unpacking the translation unit from the amalgamation's archive
+  - run: [python3, --version]
+    for: reading gcc's report, and watching and competing with the compile
+  - run: [taskset, -c, '0', 'true']
+    for: the cpu the contended compile and its competitors share (cpu 0)
+  - run: [sh, -c, 'test "$(nproc)" -ge 2']
+    for: a cpu to watch from that is not the contended one
+
+# Names by build id where DEBUGINFOD_URLS is set; nothing here asserts one.
+symbols: debuginfod
+
+# The translation unit: sqlite's own shell, as the amalgamation ships it.
+fetch:
+  - url: https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip
+    sha256: 1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d
+    file: sqlite-amalgamation-3530400.zip
+
+setup:
+  - [unzip, -o, -q, '{cache}/sqlite-amalgamation-3530400.zip', -d, '{dir}']
+
+causes:
+  # ------------------------------------------------------------------ on cpu
+  - name: the-passes-o2-adds
+    on: cpu
+    question: latency
+    objective: latency
+    injection:
+      kind: process
+      about: >-
+        Two builds of the same translation unit that differ by one flag:
+        `-O2`, asked, against `-O0`, run beside it by the reference. The
+        difference is the optimisation passes and the code generation they
+        feed, about eight times the whole `-O0` compile on this unit: all of
+        it `cc1` on a cpu, while the driver waits. The process started beside
+        the compile only watches: it ends what an earlier run left, then
+        reads every task's `schedstat` under the driver, from outside.
+      run: [python3, '{case}/../shared/watch.py', gcc, '{dir}']
+      ready: ready
+    # `-ftime-report` is gcc's own account, on its stderr, handed to a file
+    # by an `exec` that keeps the pid.
+    target: [sh, -c, 'exec "$@" 2>{dir}/o2.report', sh,
+             gcc, -O2, -ftime-report, -c, '{dir}/sqlite-amalgamation-3530400/shell.c',
+             -o, '{dir}/shell-o2.o']
+    reference:
+      - name: watch
+        extractor: key-value
+        from: injection
+      - name: ftime
+        extractor: key-value
+        run: [python3, '{case}/ftime.py', '{dir}/o2.report', --,
+              gcc, -O0, -ftime-report, -c, '{dir}/sqlite-amalgamation-3530400/shell.c',
+              -o, '{dir}/shell-o0.o']
+    holds:
+      - {value: watch.target_seen, at_least: 1, why: the watcher saw the compile}
+      # The -O2 compile ran under the tool (cc1 had 18 % of its samples in the
+      # preload shim) and the -O0 one bare, so part of the ratio of about 8
+      # is the tool's: 3 holds with that taken out.
+      - {value: ftime.ratio, at_least: 3, why: the passes -O2 adds are most of its compile}
+    expect:
+      limit: cpu
+      state: on-cpu
+      # The main thread waits for its child in wait4: not a timer, a pipe or
+      # a socket, which is what the sentence for a sleep says it is.
+      never_says: [a timer, a pipe or a socket]
+      agrees:
+        - row: on-cpu
+          with: ftime.o2_total_ns
+          # The report covers `cc1` from its first phase to its last: the
+          # driver's own start, `as` and the exit are the rest of the life.
+          outside: ftime.o2_total_ns
+          # Printed to the hundredth of a second.
+          slack_ns: 10000000
+          # A time-based sample counts the interrupts on the task's cpu, and
+          # `cc1`'s wall clock its few waits (`cpu.profile`'s caveat).
+          relative: 0.02
+
+  # ----------------------------------------------------------------- off cpu
+  - name: a-cpu-shared-with-two-competitors
+    on: off-cpu
+    question: latency
+    objective: latency
+    injection:
+      kind: process
+      about: >-
+        Two processes that spin on cpu 0, started before the compile; the
+        compile is launched on that cpu (`taskset -c 0`, an affinity given at
+        exec, the program unchanged), so each of its processes runs a third
+        of the time and waits for the cpu the rest. The same process reads
+        every task's `schedstat` under the compile, from outside, once a
+        millisecond.
+      run: [python3, '{case}/../shared/watch.py', gcc, '{dir}', '0', '2']
+      ready: ready
+    target: [taskset, -c, '0', gcc, -O0, -c, '{dir}/sqlite-amalgamation-3530400/shell.c',
+             -o, '{dir}/shell-contended.o']
+    reference:
+      - name: watch
+        extractor: key-value
+        from: injection
+    holds:
+      - {value: watch.target_seen, at_least: 1, why: the watcher saw the compile}
+      - {value: watch.competitors, at_least: 2, why: the competitors were spinning}
+      - {value: watch.longest_waited_share, at_least: 0.5, why: cc1 waited for its cpu longer than it ran}
+    expect:
+      limit: cpu-queue
+      state: runnable
+      never_says: [a timer, a pipe or a socket]
+      agrees:
+        - row: runnable
+          # The compile's critical path is the driver, then cc1, then `as`,
+          # one at a time: every process under the driver, the driver
+          # included (cc1 alone leaves out `as`, a tenth of cc1 here).
+          with: watch.run_delay_ns
+          # A task's last millisecond may be in no read.
+          plus: watch.poll_ns
+          relative: 0.02
+
+open_findings:
+  - check: the-first-suspect-is-the-known-cause
+    filed: >-
+      docs/fixes/w17-build.md, "a program is its main thread, and the compiler driver's
+      waits for its children": the verdict decomposes the launched process's
+      main thread, which spends the run in wait4, and names that sleep; the
+      children that did the work are listed under `also`, and the agent's
+      way reads the heaviest task's table
+  - check: every-cited-number-agrees-with-the-reference
+    filed: >-
+      docs/fixes/w17-build.md, "a program is its main thread": the rows are
+      the main thread's, and a child's table has no `runnable` or `blocked`
+      row at all, since `sched.runqlat` and `sched.offcpu` follow the
+      launched process only
+  - check: the-sentence-claims-nothing-false
+    filed: >-
+      docs/fixes/w17-cases.md, "a polled lock is called not a lock", and
+      docs/fixes/w17-build.md, "a program is its main thread": a wait for a
+      child is called a timer, a pipe or a socket
+  - check: both-ways-name-the-same-suspect
+    filed: >-
+      docs/fixes/w17-build.md, "a budget weighs the launched process alone",
+      and "the build stream's review": on the passes, the person's way names
+      the driver's wait4 and the agent's way reads the heaviest table, the
+      driver's `blocked` (6.8 s) or cc1's `on-cpu` (5 to 7 s): cc1's in 3
+      runs of 4, the fourth the run whose budget held. Not deterministic
+      either way, which is why the case is held back
+  - check: the-person-s-way-says-where-names-came-from
+    filed: >-
+      docs/fixes/w17-cases.md, "the verdict drops where its names came from"
+  - check: the-agent-s-way-answers-within-a-model-s-budget
+    filed: >-
+      docs/fixes/w17-cases.md, "a waiting program exceeds every budget", and
+      docs/fixes/w17-build.md, "a budget weighs the launched process alone":
+      the collectors' cpu is weighed against the main thread's few
+      milliseconds, not the children's seconds they also watched, and the
+      stop kills the main thread and leaves its children running

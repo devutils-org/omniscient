@@ -1,0 +1,169 @@
+# Case 6: `make -j` on the sqlite amalgamation's build.
+#
+# ROADMAP phase 12. A build is many processes, and its wall clock is its
+# critical path: the longest chain of jobs, whatever `-j` allows beside it.
+# The project is sqlite's autoconf release, fetched once, configured once,
+# and rebuilt from its one source file at each run (`-W sqlite3.c`). Its build
+# is two long compiles side by side -- the library's `sqlite3.o`, and the
+# shell's job, which compiles `shell.c` and then `sqlite3.c` again in one
+# driver -- and two short links. On the cpu, the cause is the shape: one job
+# is the build. Off it, the build runs on one cpu shared with two
+# competitors. The account is the kernel's `schedstat` of every process under
+# `make`, read from outside by `cases/shared/watch.py`, which first ends
+# whatever an earlier run of the case left behind: a run the budget stopped
+# leaves its compiles writing the object the next run builds.
+# `docs/cases.md` describes every field.
+name: make-sqlite
+about: >-
+  GNU make running sqlite's own Makefile with `-j8`: it starts each recipe
+  (each a compiler driver, which starts cc1 and as) and waits for them, so the
+  build's time is spent in processes make's main thread is not.
+
+program:
+  command: make
+  obtained: >-
+    the distribution's package (`make` 4.4.1 on Arch Linux on the development
+    machine); the project is sqlite 3.53.4's autoconf release tarball, built
+    at `CFLAGS=-O0` (the release's default `-O2 -g` takes 45 s a build here,
+    `-O0` 5 s, and the shape -- two long compiles, two links -- is the same)
+
+needs:
+  - run: [make, --version]
+    for: the program under test
+  - run: [gcc, --version]
+    for: the compiler the build runs (`cc`)
+  - run: [python3, --version]
+    for: watching the build's processes, and competing with them
+  - run: [taskset, -c, '0', 'true']
+    for: the cpu the contended build and its competitors share (cpu 0)
+  - run: [sh, -c, 'test "$(nproc)" -ge 2']
+    for: a cpu to watch from that is not the contended one
+
+symbols: debuginfod
+
+fetch:
+  - url: https://www.sqlite.org/2026/sqlite-autoconf-3530400.tar.gz
+    sha256: 0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c
+    file: sqlite-autoconf-3530400.tar.gz
+
+# Unpacked, configured (about a hundred short compiler probes, 2 s), and built
+# once, so that every run rebuilds the same thing: what `sqlite3.c` makes.
+setup:
+  - [tar, xzf, '{cache}/sqlite-autoconf-3530400.tar.gz', -C, '{dir}']
+  - [sh, -c, 'cd {dir}/sqlite-autoconf-3530400 && ./configure >/dev/null']
+  - [make, -C, '{dir}/sqlite-autoconf-3530400', -j8, CFLAGS=-O0]
+
+causes:
+  # ------------------------------------------------------------------ on cpu
+  - name: the-critical-path-is-one-job
+    on: cpu
+    question: latency
+    objective: latency
+    injection:
+      kind: process
+      about: >-
+        Nothing is put in front of the build: the cause is its shape. Of its
+        four jobs, the shell's compiles two translation units one after the
+        other in a single driver, and it is the build -- `-j8` has nothing to
+        run beside it for most of it. The process started beside the build
+        only watches: it reads every task's `schedstat` under `make`, from
+        outside, once a millisecond.
+      run: [python3, '{case}/../shared/watch.py', make, '{dir}']
+      ready: ready
+    # make prints each recipe on its stdout, handed to its stderr.
+    target: [make, -C, '{dir}/sqlite-autoconf-3530400', -j8,
+             -W, '{dir}/sqlite-autoconf-3530400/sqlite3.c', CFLAGS=-O0]
+    own_account: stdout
+    reference:
+      - name: watch
+        extractor: key-value
+        from: injection
+    holds:
+      - {value: watch.target_seen, at_least: 1, why: the watcher saw the build}
+      - {value: watch.jobs, at_least: 2, why: the build ran its jobs}
+      - {value: watch.longest_share, at_least: 0.8, why: one job lasted most of the build}
+      - {value: watch.longest_waited_share, at_most: 0.2, why: the job ran rather than waited}
+    expect:
+      limit: cpu
+      state: on-cpu
+      # The main thread waits for its child in wait4: not a timer, a pipe or
+      # a socket, which is what the sentence for a sleep says it is.
+      never_says: [a timer, a pipe or a socket]
+      agrees:
+        - row: on-cpu
+          # What the build's critical path spent on a cpu: the longest job,
+          # every process under it.
+          with: watch.longest_cpu_ns
+          # A task's last millisecond may be in no read.
+          plus: watch.poll_ns
+          # A time-based sample counts the interrupts on the task's cpu.
+          relative: 0.02
+
+  # ----------------------------------------------------------------- off cpu
+  - name: a-cpu-shared-with-two-competitors
+    on: off-cpu
+    question: latency
+    objective: latency
+    injection:
+      kind: process
+      about: >-
+        Two processes that spin on cpu 0, started before the build; the build
+        of the library's object is launched on that cpu (`taskset -c 0`, an
+        affinity given at exec, the program unchanged), so its compile runs a
+        third of the time and waits for the cpu the rest. The same process
+        reads every task's `schedstat` under `make`, from outside, once a
+        millisecond. (The whole build on one cpu takes 20 s a run, its two
+        long compiles sharing it too; the library alone is the same cause in
+        a third of the time.)
+      run: [python3, '{case}/../shared/watch.py', make, '{dir}', '0', '2']
+      ready: ready
+    target: [taskset, -c, '0', make, -C, '{dir}/sqlite-autoconf-3530400', -j8,
+             -W, '{dir}/sqlite-autoconf-3530400/sqlite3.c', CFLAGS=-O0, sqlite3.o]
+    own_account: stdout
+    reference:
+      - name: watch
+        extractor: key-value
+        from: injection
+    holds:
+      - {value: watch.target_seen, at_least: 1, why: the watcher saw the build}
+      - {value: watch.competitors, at_least: 2, why: the competitors were spinning}
+      - {value: watch.longest_waited_share, at_least: 0.5, why: the critical job waited for its cpu longer than it ran}
+    expect:
+      limit: cpu-queue
+      state: runnable
+      never_says: [a timer, a pipe or a socket]
+      agrees:
+        - row: runnable
+          with: watch.longest_run_delay_ns
+          plus: watch.poll_ns
+          relative: 0.02
+
+open_findings:
+  - check: the-first-suspect-is-the-known-cause
+    filed: >-
+      docs/fixes/w17-build.md, "a program is its main thread, and make's
+      waits for its children": the verdict decomposes the launched process's
+      main thread, which spends the run in wait4, and names that sleep; the
+      children that did the work are listed under `also`, and the agent's
+      way reads the heaviest task's table
+  - check: every-cited-number-agrees-with-the-reference
+    filed: >-
+      docs/fixes/w17-build.md, "a program is its main thread": the rows are
+      the main thread's, and a child's table has no `runnable` or `blocked`
+      row at all, since `sched.runqlat` and `sched.offcpu` follow the
+      launched process only
+  - check: the-sentence-claims-nothing-false
+    filed: >-
+      docs/fixes/w17-cases.md, "a polled lock is called not a lock", and
+      docs/fixes/w17-build.md, "a program is its main thread": a wait for a
+      child is called a timer, a pipe or a socket
+  - check: the-person-s-way-says-where-names-came-from
+    filed: >-
+      docs/fixes/w17-cases.md, "the verdict drops where its names came from"
+  - check: the-agent-s-way-answers-within-a-model-s-budget
+    filed: >-
+      docs/fixes/w17-cases.md, "a waiting program exceeds every budget", and
+      docs/fixes/w17-build.md, "a budget weighs the launched process alone":
+      the collectors' cpu is weighed against the main thread's few
+      milliseconds, not the children's seconds they also watched, and the
+      stop kills the main thread and leaves its children running
