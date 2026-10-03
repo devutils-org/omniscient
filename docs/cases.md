@@ -171,9 +171,20 @@ each with its reference:
 | Case | Program | On the cpu | Off it | Reference |
 |---|---|---|---|---|
 | `sqlite3-stripped` | the distribution's `sqlite3`, stripped (names by build id through debuginfod) | a join whose plan scans `t` 200 times instead of searching its index | a second process holding `BEGIN EXCLUSIVE` 1.5 s from the moment the target appears, the target in its busy handler | `EXPLAIN QUERY PLAN`, `.stats`, `.timer`; the holder's clock |
+| `sqlite3-durability` | the distribution's `sqlite3`, stripped, committing single-row INSERTs, each its own commit, on a disk | 50 000 commits in a write-ahead log, `synchronous=NORMAL`: syncs only at checkpoints | 500 commits with a rollback journal, `synchronous=FULL`: four `fdatasync` a commit | `.timer`; the syncs counted by a second, traced run (`strace -c`); the program's `schedstat` (`cases/shared/watch.py`) |
+| `make-sqlite` | GNU make 4.4 rebuilding sqlite's autoconf release from its one source (`-W sqlite3.c`, `-O0`) | the critical path is one job of four, the shell's | the library's object built on cpu 0 beside two spinners pinned there | `watch.py`: per job, its life, its subtree's cpu and wait for a cpu |
+| `cpython-interpreter` | python3 3.14, no perf map | `score`, made dominant by the input | a read of a named pipe written 1.5 s after the target appears | cProfile, the program's clocks; the writer's clock |
+| `cpython-perf-map` | the same under `-X perf`; names from the perf map | as `cpython-interpreter` | as `cpython-interpreter` | as `cpython-interpreter` |
+| `http-server-stdlib` | `python3 -m http.server` | a 30 000-entry listing | a slow client; a cold 256 MiB file, skipped where storage is fast | the client's clock, the serving thread's schedstat, the process's stat |
 
-Measured on the development machine (24 cpus, five other agents running, both
-ways each):
+`cases/held/gcc-shell/` (gcc 16 compiling sqlite's `shell.c`, references by
+`-ftime-report` and `watch.py`) is held back until the triage follows a wait
+for a child (`docs/fixes/w17-build.md`); the test does not run it. Each case's
+measurements are in its handoff: `docs/fixes/w17-build.md`,
+`docs/fixes/w17-python.md`.
+
+`sqlite3-stripped`, measured on the development machine (24 cpus, five other
+agents running, both ways each):
 
 ```
 a-plan-that-scans/cli:     on-cpu 1456.4 ms   .timer cpu 1440.3 ms of real 1452.9 ms   40 M fullscan steps, plan: 2 scans, 0 searches
