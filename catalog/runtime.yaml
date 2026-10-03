@@ -41,7 +41,7 @@
   unit: count
   backends:
     - {id: "bpf:usdt", requires: ["usdt:jit"], cost: low}
-    - {id: "fs:jit-map", requires: ["/tmp"], cost: free,
+    - {id: "fs:jit-map", requires: ["/tmp"], cost: low,
        degraded: "symbol map only: it names the code that was compiled and when it was
          first seen, it does not time the compilation, and it carries no deoptimizations"}
   modes: [trace]

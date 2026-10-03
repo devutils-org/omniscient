@@ -14,11 +14,11 @@
     - id: "bpf:raw_tp"
       requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue(request *)", "raw_tracepoint:block_rq_complete(request *, blk_status_t, unsigned int)|(request *, int, unsigned int)", "kernel>=5.8"]
       join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
-      cost: low
+      cost: med
     - id: "bpf:tp"
       requires: ["tracepoint:block:block_rq_issue", "tracepoint:block:block_rq_complete", "bpf"]
       join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
-      cost: low
+      cost: med
       equivalent: true
     - {id: "fs:tracefs", requires: ["tracefs"], cost: med, targets: {system: native},
        degraded: "no per-task attribution, no pushed-down filter"}
@@ -51,11 +51,11 @@
     - id: "bpf:raw_tp"
       requires: ["bpf", "btf", "raw_tracepoint:block_rq_insert(request *)", "raw_tracepoint:block_rq_issue(request *)", "kernel>=5.8"]
       join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
-      cost: low
+      cost: med
     - id: "bpf:tp"
       requires: ["tracepoint:block:block_rq_insert", "tracepoint:block:block_rq_issue", "bpf"]
       join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
-      cost: low
+      cost: med
       equivalent: true
   modes: [trace]
   emits: [hist, raw, topk, summary]
@@ -143,8 +143,8 @@
   summary: "Request size distribution"
   unit: bytes
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue(request *)", "kernel>=5.8"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low, equivalent: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue(request *)", "kernel>=5.8"], cost: high}
+    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: high, equivalent: true}
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {system: native, cgroup: bpf_only, pid: bpf_only}
@@ -185,7 +185,7 @@
     # /sys/block/<dev>/inflight. Only the first is required: the second is
     # read beside it when it is there, and a device whose file cannot be read
     # is named in the run's notes and reported from the first alone.
-    - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free}
+    - {id: "fs:proc", requires: ["/proc/diskstats"], cost: low}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {system: native}
@@ -390,7 +390,7 @@
   summary: "PSI: I/O stall time"
   unit: ratio
   backends:
-    - {id: "fs:proc", requires: ["/proc/pressure/io"], cost: free, targets: {system: native}}
+    - {id: "fs:proc", requires: ["/proc/pressure/io"], cost: low, targets: {system: native}}
     - {id: "fs:cgroup", requires: ["cgroup2:io.pressure"], cost: free, equivalent: true,
        targets: {cgroup: native, container: native}}
   modes: [poll, snapshot]

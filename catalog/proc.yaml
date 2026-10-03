@@ -29,8 +29,8 @@
   summary: "Process execution events"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exec(task_struct *, pid_t, linux_binprm *)", "kernel>=5.8"], cost: free}
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exec", "bpf"], cost: free, equivalent: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exec(task_struct *, pid_t, linux_binprm *)", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exec", "bpf"], cost: low, equivalent: true}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only}
@@ -43,8 +43,8 @@
   summary: "Process exit events with exit code"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exit(task_struct *, bool)|(task_struct *)", "kernel>=5.8"], cost: free}
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exit", "bpf"], cost: free, equivalent: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exit(task_struct *, bool)|(task_struct *)", "kernel>=5.8"], cost: low}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exit", "bpf"], cost: low, equivalent: true}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only}
@@ -61,7 +61,7 @@
   summary: "Open file descriptors against the limit"
   unit: count
   backends:
-    - {id: "fs:proc", requires: ["/proc/[pid]/fd"], cost: free}
+    - {id: "fs:proc", requires: ["/proc/[pid]/fd"], cost: low}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, launch: native}
@@ -92,7 +92,7 @@
   summary: "Thread count"
   unit: count
   backends:
-    - {id: "fs:proc", requires: ["/proc/[pid]/status"], cost: free}
+    - {id: "fs:proc", requires: ["/proc/[pid]/status"], cost: low}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, launch: native}
