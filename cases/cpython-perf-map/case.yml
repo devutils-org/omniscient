@@ -1,0 +1,168 @@
+# Case 3, with a perf map: CPython 3.14 under `-X perf`.
+#
+# ROADMAP phase 12. The same program, input and causes as
+# `cases/cpython-interpreter` -- one Python function the input makes dominant
+# on the cpu, a read of a pipe nobody writes to yet off it -- asked of the
+# interpreter started with `-X perf`. CPython then runs every Python function
+# through a small trampoline of generated code and writes
+# `/tmp/perf-<pid>.map`, a line per trampoline naming the function
+# (`py::score:/path/hot.py`). `cpu.profile` reads that map (the seventeenth
+# wave's stream symbols), so a stack can carry the Python function, and the
+# verdict must name it: `score` on the cpu, `wait_for_input` under the read.
+#
+# The helpers are links to `cases/cpython-interpreter`'s: the two cases differ
+# by the one flag. References as there: `cProfile` and the program's clocks;
+# the writer's clock. `docs/cases.md` describes every field.
+name: cpython-perf-map
+about: >-
+  CPython 3.14's `python3` as the distribution ships it, started with
+  `-X perf`: the interpreter writes a perf map naming each Python function's
+  trampoline, the only place a Python function has a name a profiler can read.
+  The interpreter itself carries its dynamic symbols only and no frame
+  pointers.
+
+program:
+  command: python3
+  obtained: >-
+    the distribution's package (`python` 3.14.7 on Arch Linux on the
+    development machine), not rebuilt: `/usr/bin/python3` and
+    `libpython3.14.so.1.0`, carrying their dynamic symbols only, built without
+    frame pointers, with the perf trampoline compiled in (`-X perf`, Python
+    3.12 and later on x86-64 and aarch64 Linux)
+  version: [python3, --version]
+
+needs:
+  - run: [python3, -c, 'import sys; hasattr(sys, "activate_stack_trampoline") or sys.exit("this python3 has no perf trampoline (no sys.activate_stack_trampoline): a build without it, or older than 3.12")']
+    for: the perf map `-X perf` writes, which is what this case is about
+
+# The perf map is read under `--symbols local` (DECISIONS.md, stream symbols):
+# a file the target wrote on this machine, asking nothing of anyone.
+symbols: local
+
+fetch: []
+
+# The same input as `cases/cpython-interpreter`, from the same seed.
+setup:
+  - [python3, -c, 'import random; r = random.Random(3);
+      open("{dir}/input.txt", "w").write("".join(f"{r.randrange(3000, 9001)} w{r.randrange(10**9):09d}\n" for _ in range(2000)))']
+
+causes:
+  # ------------------------------------------------------------------ on cpu
+  - name: one-function-dominates
+    on: cpu
+    question: latency
+    objective: latency
+    injection:
+      kind: input
+      about: >-
+        An input whose lines carry weights that make `score`, a pure-Python
+        loop of `weight` steps per line, the program's time: about 12 million
+        steps where reading the file and ranking the result touch each of the
+        2 000 lines once. Nothing about the interpreter or the script
+        changes; only what it is given to read.
+    target: [python3, -X, perf, '{case}/hot.py', '{dir}/input.txt']
+    own_account: stdout
+    reference:
+      - name: account
+        extractor: key-value
+        from: target
+      - name: cprofile
+        extractor: key-value
+        run: [python3, '{case}/cprofile_account.py', '{case}/hot.py', '{dir}/input.txt']
+    holds:
+      - {value: cprofile.score_share, at_least: 0.9, why: cProfile puts nine tenths of the program's own time in `score`}
+    expect:
+      limit: cpu
+      state: on-cpu
+      # The Python function the time is in, as the perf map names it
+      # (`py::score:<path>`). The hottest *leaf* is always one of the
+      # interpreter's C functions -- the trampoline calls the evaluation loop
+      # -- so naming the Python function means reading past the leaf to the
+      # innermost frame the perf map named.
+      leaf: 'py::score:'
+      agrees:
+        - row: on-cpu
+          with: account.cpu_ns
+          # The account covers the three functions only: the interpreter's
+          # start and exit are the slack it leaves.
+          outside: account.real_ns
+          # A time-based sample counts the interrupts that ran on the task's
+          # cpu, which `process_time` (getrusage) leaves out (`cpu.profile`'s
+          # caveat: 0.7 % at 997 Hz on the machine it was measured on).
+          relative: 0.01
+
+  # ----------------------------------------------------------------- off cpu
+  - name: a-blocking-read
+    on: off-cpu
+    question: latency
+    objective: latency
+    injection:
+      kind: process
+      about: >-
+        A second process creates a named pipe, holds it open for writing, and
+        writes one line into it 1.5 s after the target appears. The target
+        first prepares (`prepare`, 3 million steps of a pure-Python loop,
+        about 0.2 s on a cpu), then opens the pipe (at once: a writer is
+        there) and reads it, and the read blocks until the line arrives; the
+        tool never touches either process. The preparation keeps the
+        program's own cpu well above what the tracers spend watching it
+        (`reader.py`).
+      run: [python3, '{case}/writer.py', '{dir}/fifo', '1500', python3]
+      ready: ready
+    target: [python3, -X, perf, '{case}/reader.py', '{dir}/fifo', '3000000']
+    own_account: stdout
+    reference:
+      - name: writer
+        extractor: key-value
+        from: injection
+      - name: account
+        extractor: key-value
+        from: target
+    holds:
+      - {value: writer.target_seen, at_least: 1, why: the writer saw the target and kept the pipe empty in front of it}
+      - {value: account.bytes, at_least: 1, why: the read returned the line the writer wrote}
+    expect:
+      limit: sleep
+      state: blocked
+      # The block's own frame: libc's read(2) wrapper.
+      leaf: __read
+      # The Python function that called it, as the perf map names it.
+      through: 'py::wait_for_input:'
+      agrees:
+        - row: blocked
+          with: writer.held_after_target_ns
+          # The writer starts its clock when it sees the target in /proc;
+          # the target reaches its read `before_read_ns` after its script's
+          # first line, and that line once the interpreter has started, some
+          # 20 to 50 ms after it appeared on a loaded machine. The writer may
+          # also have seen it up to its `poll_ns` (10 to 40 ms) late: 100 ms
+          # covers the two.
+          slack_ns: 100000000
+          plus: account.before_read_ns
+        - row: blocked
+          with: account.read_ns
+          outside: account.read_ns
+
+# Checks this case shows failing, each filed against the file that owns what
+# got it wrong. A listed check that fails is reported as the open finding it
+# is; one that passes fails the test, so the line is removed once it is fixed.
+open_findings:
+  - check: the-dominant-stack-ends-in-the-known-frame
+    filed: >-
+      docs/fixes/w17-python.md, "the hottest leaf is never the Python
+      function": `hottest()` in src/triage/latency.rs, and the agent's
+      reading (docs/mcp.md, `read_mcp` in tests/cases.rs), rank the leaf
+      frame; the perf map names the trampoline, a caller, so the leaf is
+      the interpreter's `__tls_get_addr` while `py::score` is on 99 % of
+      the stacks, as cProfile says it should be
+  - check: the-person-s-way-says-where-names-came-from
+    filed: >-
+      docs/fixes/w17-cases.md, "the verdict drops where its names came from":
+      the profile says `perf-<pid>.map: perf-map` and the verdict does not
+  - check: the-block-s-frames-are-named
+    filed: >-
+      docs/fixes/w17-python.md, "the verdict cuts a block's stack at four
+      frames": `blocking_stack` in src/triage/latency.rs prints the four
+      frames nearest the leaf, `__read` and three of libpython's, and the
+      Python function the perf map names, `py::wait_for_input`, is the fifth;
+      the agent's way, which reads the whole stack, passes

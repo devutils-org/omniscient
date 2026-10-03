@@ -89,6 +89,11 @@ gpu source\(s\) this machine serves have a collector for every backend
 # held long enough for a 20 ms gauge (scenario_io's queue-depth half; the
 # spacing and volume halves still run).
 skipped the depth: the kernel's own reads of /sys/block/[^/]+/inflight
+# The runner's disk serving a cold 256 MiB file faster than `http.server`
+# copies it, so the disk is not the request's time (cases/http-server-stdlib,
+# `a-cold-file`'s `holds`; it skips on an NVMe too). The machine's storage,
+# which the case cannot slow down without root.
+a-cold-file/[a-z]+: the cause was not there to be found: .*the storage was slower than the server's copy
 # A kernel whose root cgroup has no io.stat: `fs:cgroup` resolves onto nothing.
 /sys/fs/cgroup/io.stat does not exist here
 # The kernel's default ceiling (100 000/s) is at or above what this build can
