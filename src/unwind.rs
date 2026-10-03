@@ -476,10 +476,16 @@ pub fn choose_classified(
         } else {
             "stacks are user-only"
         };
+        // What it costs, said where the choice is: the samples shrink with
+        // the program's user time and the tool's work per tick does not, so a
+        // program that lives in system calls pays the most for the least
+        // (`docs/unwind.md`, "What a user-only profile costs").
         choice.degradations.push(format!(
             "perf_event_paranoid is {}, which refuses this user the kernel: {what}, and a \
              sample taken while the task ran in the kernel is not delivered, so time spent \
-             in system calls is missing from this profile",
+             in system calls is missing from this profile; a program that spends most of \
+             its time there yields few samples, and what the profile costs it is then \
+             mostly the tool's work on each tick, which does not shrink with them",
             paranoid(environment)
         ));
     }

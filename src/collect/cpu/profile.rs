@@ -198,10 +198,13 @@ pub struct ProfileCollector {
     /// program, and its stacks are not on-cpu work, so they are counted here
     /// and left out.
     idle: u64,
-    /// The processes that had a sample since the last tick, whose mappings
-    /// are re-read: over a machine, re-reading every process ever sampled on
-    /// every tick would cost more than the profile.
-    recent: BTreeSet<u32>,
+    /// Mapping reads: how many times a process's mappings were re-read
+    /// because a drain held samples of it, and how many drains held none and
+    /// read nothing. See [`ProfileCollector::drain_into`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    refreshes: u64,
+    #[cfg_attr(not(test), allow(dead_code))]
+    idle_drains: u64,
     /// Every process a sample came from.
     processes: BTreeSet<u32>,
     /// One per process samples arrived from, by pid, re-read every tick. A
@@ -257,7 +260,8 @@ impl ProfileCollector {
             cgroup: None,
             throttled: 0,
             idle: 0,
-            recent: BTreeSet::new(),
+            refreshes: 0,
+            idle_drains: 0,
             processes: BTreeSet::new(),
             unwinders,
             stack_ids: BTreeMap::new(),
@@ -287,16 +291,52 @@ impl ProfileCollector {
         spec
     }
 
+    /// Reads what the rings hold and turns each sample into an event.
+    ///
+    /// The records are taken out of the rings first, and only the processes
+    /// they hold samples of have their mappings re-read before any stack is
+    /// interned. Re-reading every process's maps on every tick -- twice for a
+    /// stack mode with CFI, and its executable's link once more -- was most
+    /// of what a profile cost a program that is mostly off the cpu: 0.25 to
+    /// 0.4 ms a tick of a debug build, 25 to 40 ms of this tool's cpu a
+    /// second of wall clock whatever the program did, against `sqlite3`'s
+    /// fsync-bound commits that burn 200 ms a second. A user-only profile
+    /// (`perf_event_paranoid` 2) delivers no sample while the task is in the
+    /// kernel, so a program that lives in system calls left nearly every
+    /// tick empty and still paid for every read. The maps are still read in
+    /// the tick that interns the stacks, while the process is alive.
     fn drain_into(&mut self, events: &mut Vec<Event>, seq: u64) {
         let Some(event) = self.event.as_mut() else {
             return;
         };
+        let mut records = Vec::new();
+        event.drain(|record| records.push(record));
+        let sampled: BTreeSet<u32> = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Sample(sample)
+                    if !(sample.pid == 0 && sample.tid == 0)
+                        && (sample.callchain.is_some() || sample.user_regs.is_some()) =>
+                {
+                    Some(sample.pid)
+                }
+                _ => None,
+            })
+            .collect();
+        if sampled.is_empty() {
+            self.idle_drains += 1;
+        }
+        for pid in &sampled {
+            if let Some(unwinder) = self.unwinders.get_mut(pid) {
+                unwinder.refresh_symbols();
+                self.refreshes += 1;
+            }
+        }
         let id = self.id.clone();
         let unwinders = &mut self.unwinders;
         let stack_ids = &mut self.stack_ids;
         let stack_origins = &mut self.stack_origins;
         let seen = &mut self.sampled_tasks;
-        let recent = &mut self.recent;
         let processes = &mut self.processes;
         let idle = &mut self.idle;
         let mut index = seq;
@@ -305,58 +345,59 @@ impl ProfileCollector {
         let debuginfod = &self.debuginfod;
         let mut dropped = 0u64;
         let mut undecoded = 0u64;
-        event.drain(|record| match record {
-            Record::Sample(sample) if sample.pid == 0 && sample.tid == 0 => *idle += 1,
-            Record::Sample(sample) => {
-                seen.insert(sample.tid as i32);
-                recent.insert(sample.pid);
-                processes.insert(sample.pid);
-                let mut attrs = vec![Attr::uint("count", 1), Attr::uint("ip", sample.ip)];
-                // Symbolized here, while the target is alive, and stored once:
-                // the event carries the identity and the table travels beside
-                // the results.
-                // Only a sample with a stack needs its process's mappings:
-                // over a machine, reading every process's maps for samples
-                // that carry one address each would cost more than they do.
-                let carries_stack = sample.callchain.is_some() || sample.user_regs.is_some();
-                let stack = carries_stack.then(|| {
-                    unwinders
-                        .entry(sample.pid)
-                        .or_insert_with(|| {
-                            Unwinder::new(sample.pid as i32, callchain, debuginfod.clone())
-                        })
-                        .record(&sample)
-                });
-                let stack = stack.flatten();
-                if let Some(stack) = stack {
-                    let run_id = *stack_ids.entry((sample.pid, stack.0)).or_insert_with(|| {
-                        stack_origins.push((sample.pid, stack.0));
-                        stack_origins.len() as u64 - 1
+        for record in records {
+            match record {
+                Record::Sample(sample) if sample.pid == 0 && sample.tid == 0 => *idle += 1,
+                Record::Sample(sample) => {
+                    seen.insert(sample.tid as i32);
+                    processes.insert(sample.pid);
+                    let mut attrs = vec![Attr::uint("count", 1), Attr::uint("ip", sample.ip)];
+                    // Symbolized here, while the target is alive, and stored once:
+                    // the event carries the identity and the table travels beside
+                    // the results.
+                    // Only a sample with a stack needs its process's mappings:
+                    // over a machine, reading every process's maps for samples
+                    // that carry one address each would cost more than they do.
+                    let carries_stack = sample.callchain.is_some() || sample.user_regs.is_some();
+                    let stack = carries_stack.then(|| {
+                        unwinders
+                            .entry(sample.pid)
+                            .or_insert_with(|| {
+                                Unwinder::new(sample.pid as i32, callchain, debuginfod.clone())
+                            })
+                            .record(&sample)
                     });
-                    attrs.push(Attr::uint(STACK_ID_ATTR, run_id));
+                    let stack = stack.flatten();
+                    if let Some(stack) = stack {
+                        let run_id = *stack_ids.entry((sample.pid, stack.0)).or_insert_with(|| {
+                            stack_origins.push((sample.pid, stack.0));
+                            stack_origins.len() as u64 - 1
+                        });
+                        attrs.push(Attr::uint(STACK_ID_ATTR, run_id));
+                    }
+                    let mut keys = vec![KeyValue::task(sample.tid as i32)];
+                    if let Some(cpu) = sample.cpu {
+                        keys.push(KeyValue::cpu(cpu));
+                        attrs.push(Attr::uint("cpu", u64::from(cpu)));
+                    }
+                    keys.extend(cgroup_key.clone());
+                    events.push(Event {
+                        ts_ns: sample.time_ns,
+                        ts_err_ns: 0,
+                        kind: "cpu.profile".to_owned(),
+                        keys,
+                        attrs,
+                        collector_id: id.clone(),
+                        seq: index,
+                    });
+                    index += 1;
                 }
-                let mut keys = vec![KeyValue::task(sample.tid as i32)];
-                if let Some(cpu) = sample.cpu {
-                    keys.push(KeyValue::cpu(cpu));
-                    attrs.push(Attr::uint("cpu", u64::from(cpu)));
-                }
-                keys.extend(cgroup_key.clone());
-                events.push(Event {
-                    ts_ns: sample.time_ns,
-                    ts_err_ns: 0,
-                    kind: "cpu.profile".to_owned(),
-                    keys,
-                    attrs,
-                    collector_id: id.clone(),
-                    seq: index,
-                });
-                index += 1;
+                Record::Lost { count } => dropped += count,
+                // Counted by the sampler itself; see `SampledEvent::throttled`.
+                Record::Throttle { .. } => {}
+                Record::Other { .. } => undecoded += 1,
             }
-            Record::Lost { count } => dropped += count,
-            // Counted by the sampler itself; see `SampledEvent::throttled`.
-            Record::Throttle { .. } => {}
-            Record::Other { .. } => undecoded += 1,
-        });
+        }
         self.ring_losses = match &*event {
             Sampler::Tasks(sampler) => sampler
                 .lost_by_task()
@@ -464,20 +505,8 @@ impl Collector for ProfileCollector {
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        // Before the drain, so that the stacks interned from this tick's
-        // samples are symbolized against mappings read while the target was
-        // alive rather than against whatever was there when it was launched.
-        if self.cpus.is_some() {
-            for pid in std::mem::take(&mut self.recent) {
-                if let Some(unwinder) = self.unwinders.get_mut(&pid) {
-                    unwinder.refresh_symbols();
-                }
-            }
-        } else {
-            for unwinder in self.unwinders.values_mut() {
-                unwinder.refresh_symbols();
-            }
-        }
+        // The mappings are re-read inside the drain, for the processes this
+        // tick's samples came from (`drain_into`).
         if let Some(Sampler::Tasks(event)) = self.event.as_mut() {
             for task in event.discover() {
                 self.found_late += 1;
@@ -946,6 +975,78 @@ mod tests {
                 || frame.contains("main")),
             "no frame of the test binary was symbolized: {:?}",
             &all[..all.len().min(12)]
+        );
+    }
+
+    /// A tick whose drain holds no sample of a process reads nothing of it.
+    ///
+    /// The mappings were re-read for every process on every tick, and that
+    /// was most of what profiling a program that waits on its disk cost
+    /// (`drain_into`). A sleeping child produces no sample, so ten ticks over
+    /// it read its maps no time at all; a burning one is read once in each
+    /// drain that held its samples, and in no other.
+    #[test]
+    fn a_tick_with_no_sample_of_a_process_does_not_reread_its_mappings() {
+        let ticks = 10;
+        let mut sleeper = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("sleep runs");
+        // Both halves where the kernel allows them, the user half where it
+        // does not (`perf_event_paranoid` 2): the path the CI's cell takes.
+        let collector = |pid: u32| {
+            let mut choice = StackChoice::of(crate::request::StackMode::Fp);
+            choice.user_only = !crate::perf::kernel_callchain_allowed();
+            Prepare {
+                mode: "sample@997hz".parse().unwrap(),
+                choice,
+                debuginfod: None,
+            }
+            .collector(pid as i32, true)
+        };
+        let mut idle = collector(sleeper.id());
+        if let Err(error) = idle.start() {
+            let _ = sleeper.kill();
+            let _ = sleeper.wait();
+            eprintln!("skipped: this machine refuses unprivileged perf sampling ({error})");
+            return;
+        }
+        for seq in 0..ticks {
+            std::thread::sleep(StdDuration::from_millis(10));
+            idle.sample(seq).expect("a tick");
+        }
+        idle.stop();
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        // `stop` drains once more.
+        assert_eq!(
+            (idle.refreshes, idle.idle_drains),
+            (0, ticks + 1),
+            "a process that slept through {ticks} ticks and the stop's drain: (mapping reads, \
+             drains that held no sample)"
+        );
+
+        let mut burner = std::process::Command::new("sh")
+            .args(["-c", "while :; do :; done"])
+            .spawn()
+            .expect("sh runs");
+        let mut busy = collector(burner.id());
+        busy.start()
+            .expect("a sleeping child was profiled a moment ago");
+        let mut events = 0;
+        for seq in 0..ticks {
+            std::thread::sleep(StdDuration::from_millis(10));
+            events += busy.sample(seq).expect("a tick").len();
+        }
+        events += busy.stop().len();
+        let _ = burner.kill();
+        let _ = burner.wait();
+        assert!(
+            events > 0 && busy.refreshes > 0 && busy.refreshes + busy.idle_drains == ticks + 1,
+            "{events} samples of a child burning through {ticks} ticks and the stop's drain: \
+             its mappings were read {} times, and {} drains held no sample",
+            busy.refreshes,
+            busy.idle_drains
         );
     }
 
