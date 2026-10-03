@@ -1,0 +1,187 @@
+# Case 1: `sqlite3`, the distribution's stripped binary.
+#
+# ROADMAP phase 12. A program nobody wrote for Omniscient, asked "why is this
+# slow, for latency" twice: once with its time on a cpu, spent by a query whose
+# plan scans a table where an index would have searched it, and once with its
+# time off the cpu, waiting for a lock another process holds. Each cause is
+# known without the tool: the first from sqlite's own account of the query
+# (`EXPLAIN QUERY PLAN`, `.stats`, `.timer`), the second from the clock of the
+# process holding the lock. `docs/cases.md` describes every field.
+name: sqlite3-stripped
+about: >-
+  The sqlite3 command-line shell as the distribution ships it: stripped, one
+  thread, its library linked in. Its own functions have no names in the file,
+  so the profile names them by build id through debuginfod or not at all.
+
+program:
+  command: sqlite3
+  obtained: >-
+    the distribution's package (`sqlite` 3.53.4 on Arch Linux on the
+    development machine), not rebuilt: stripped, built with frame pointers,
+    carrying a GNU build id, the library linked into the shell
+  version: [sqlite3, --version]
+  stripped: true
+
+# What the machine must have before anything runs, each with what it is for.
+# A case whose need is not met skips with this line's reason.
+needs:
+  - run: [sqlite3, --version]
+    for: the program under test
+  - run: [python3, -c, 'import sqlite3']
+    for: the second process that holds the lock (python3 with its sqlite3 module)
+
+# Names come from debuginfod, asked by the binary's build id. Where
+# DEBUGINFOD_URLS is unset, the case runs with the file's own names and the
+# checks that need names say they were not made.
+symbols: debuginfod
+
+# Nothing to fetch: the program is the distribution's.
+fetch: []
+
+# Run once, in the case's own scratch directory (`{dir}`), before any cause.
+# 200 000 rows, `k` indexed; `probe` is 200 of those keys.
+setup:
+  - [sqlite3, '{dir}/db.sqlite', 'DROP TABLE IF EXISTS t; DROP TABLE IF EXISTS probe;
+      CREATE TABLE t(id INTEGER PRIMARY KEY, k INTEGER, v TEXT);
+      WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 200000)
+      INSERT INTO t SELECT x, (x * 7919) % 200000, printf(''%032d'', x) FROM c;
+      CREATE INDEX t_k ON t(k);
+      CREATE TABLE probe AS SELECT k FROM t WHERE id % 1000 = 0;']
+
+causes:
+  # ------------------------------------------------------------------ on cpu
+  - name: a-plan-that-scans
+    on: cpu
+    question: latency
+    objective: latency
+    injection:
+      kind: input
+      about: >-
+        The same data and the same join, written so the index on `t.k` cannot
+        serve it (`t.k + 0 = p.k`): for each of the 200 probes the plan scans
+        all 200 000 rows of `t`, 40 million steps where 200 searches would
+        do. Nothing about the program changes; only the question it is asked.
+    target: [sqlite3, '{dir}/db.sqlite', .timer on, .stats on,
+             'SELECT count(*) FROM probe p CROSS JOIN t ON t.k + 0 = p.k;']
+    # The program writes its own account on stdout; the harness hands it to
+    # the program's stderr, which both ways of asking read back.
+    own_account: stdout
+    reference:
+      - name: timer
+        extractor: sqlite3-timer
+        from: target
+      - name: stats
+        extractor: sqlite3-stats
+        from: target
+      - name: plan
+        extractor: sqlite3-plan
+        run: [sqlite3, '{dir}/db.sqlite',
+              'EXPLAIN QUERY PLAN SELECT count(*) FROM probe p CROSS JOIN t ON t.k + 0 = p.k;']
+      - name: indexed
+        extractor: sqlite3-plan
+        run: [sqlite3, '{dir}/db.sqlite',
+              'EXPLAIN QUERY PLAN SELECT count(*) FROM probe p CROSS JOIN t ON t.k = p.k;']
+    # What the reference must show for this to be the known cause at all.
+    holds:
+      - {value: plan.scans, at_least: 2, why: both loops of the slow query are scans}
+      - {value: plan.searches, at_most: 0, why: the slow query searches nothing}
+      - {value: indexed.searches, at_least: 1, why: the same join written for the index searches it}
+      - {value: stats.fullscan_steps, at_least: 10000000, why: the scan is the 40 million steps}
+    expect:
+      limit: cpu
+      state: on-cpu
+      # The hottest function, by its own samples. Checked where the frame is
+      # named; an address is not compared with a name.
+      leaf: sqlite3VdbeExec
+      agrees:
+        - row: on-cpu
+          with: timer.cpu_ns
+          # The account covers the statement only: the program's life outside
+          # it (exec, opening the database, exit) is the slack it leaves.
+          outside: timer.real_ns
+          # A time-based sample counts the interrupts that ran on the task's
+          # cpu, which getrusage leaves out (`cpu.profile`'s caveat: 0.7 % at
+          # 997 Hz on the machine it was measured on).
+          relative: 0.01
+
+  # ----------------------------------------------------------------- off cpu
+  - name: a-lock-held-elsewhere
+    on: off-cpu
+    question: latency
+    objective: latency
+    injection:
+      kind: process
+      about: >-
+        A second process holds `BEGIN EXCLUSIVE` on the same database for
+        1.5 s from the moment the target appears. The target's read needs a
+        shared lock, so it waits in its busy handler (`.timeout`), which
+        sleeps and retries; the tool never touches either process.
+      run: [python3, '{case}/holder.py', '{dir}/db.sqlite', '1500', sqlite3]
+      ready: held
+    target: [sqlite3, '{dir}/db.sqlite', .timeout 20000, .timer on,
+             'SELECT count(*) FROM t WHERE k = 5;']
+    own_account: stdout
+    reference:
+      - name: holder
+        extractor: key-value
+        from: injection
+      - name: timer
+        extractor: sqlite3-timer
+        from: target
+    holds:
+      - {value: holder.target_seen, at_least: 1, why: the holder saw the target and held the lock against it}
+    expect:
+      limit: sleep
+      state: blocked
+      # The block's own frame: sqlite's busy handler sleeps between retries.
+      leaf: clock_nanosleep
+      # A frame the dominant block's stack passes through, checked where the
+      # frames are named.
+      through: sqliteDefaultBusyCallback
+      # What a sentence about this block must not claim: the sleep is a lock
+      # wait, polled.
+      never_says: [not a lock]
+      agrees:
+        - row: blocked
+          with: holder.held_after_target_ns
+          # sqlite's busy handler sleeps 1, 2, 5, 10, 15, 20, 25, 25, 25, 50,
+          # 50 and then 100 ms between retries, so the target may wake up to
+          # 100 ms after the lock is free; the holder may see the target as
+          # late as its own longest look at /proc.
+          slack_ns: 100000000
+          plus: holder.poll_ns
+        - row: blocked
+          with: timer.off_cpu_ns
+          outside: timer.real_ns
+
+# Checks this case shows failing, each filed against the file that owns what
+# got it wrong. A listed check that fails is reported as the open finding it
+# is; one that passes fails the test, so the line is removed once it is fixed.
+open_findings:
+  - check: the-person-s-way-names-the-hottest-function
+    filed: >-
+      docs/fixes/w17-cases.md, "the triage cannot ask debuginfod":
+      `omn latency` takes no `--symbols`, so a stripped binary's hottest
+      function is an address, ranked per instruction
+  - check: the-person-s-way-says-where-names-came-from
+    filed: >-
+      docs/fixes/w17-cases.md, "the verdict drops where its names came from":
+      the profile's `names came from` note is not among the verdict's notes
+  - check: the-block-s-frames-are-named
+    filed: >-
+      docs/fixes/w17-cases.md, "an off-cpu stack cannot ask debuginfod":
+      `--symbols` is read by `cpu.profile` only, so the busy handler under
+      the sleep is an address. Closed by two fixes: `sched.offcpu` reading
+      `--symbols` (the agent's way asks it as soon as `omn` accepts it), and
+      `omn latency --symbols` setting it on `sched.offcpu` too (the person's
+      way)
+  - check: the-sentence-claims-nothing-false
+    filed: >-
+      docs/fixes/w17-cases.md, "a polled lock is called not a lock": the
+      sentence says the sleep is on "something that is not a lock"
+  - check: the-agent-s-way-answers-within-a-model-s-budget
+    filed: >-
+      docs/fixes/w17-cases.md, "a waiting program exceeds every budget":
+      `run_session` requires a budget, a share of the target's own cpu, and
+      at 100 % the collectors' few milliseconds stop a run whose target
+      waits 1.5 s on a lock and burns one
