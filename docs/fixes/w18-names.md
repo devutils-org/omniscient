@@ -145,7 +145,12 @@ without the patch nothing outside `omn diff` calls the new code, and `omn
 diff` has no integration test among them. They are timing and sampling
 under load (the unwind tests' 300 samples missing a function, `triage`'s
 100 kHz profile leaving 268 ms in no row, `budget` 14 in `docs/flaky.md`).
-The same three `triage` tests fail with the patch applied and without it.
+`tests/triage.rs` fails 3 of 25 either way: with the patch,
+`a_verdict_read_off_a_lossy_profile...` (alone, twice), `a_program_cpu_bound_then_lock_bound...`
+and `an_escalating_run_holds_its_budget...`; without it,
+`a_verdict_read_off_a_lossy_profile...`, `four_threads_on_one_cpu_queue...`
+and `the_same_program_is_cpu_bound_for_latency...`. None of them asserts on a
+name; the first is the undecided limit of a loaded machine in both runs.
 
 **Reasoned, not run**:
 
