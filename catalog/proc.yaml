@@ -30,7 +30,7 @@
   unit: count
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exec(task_struct *, pid_t, linux_binprm *)", "kernel>=5.8"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exec", "bpf"], cost: free, equivalent: true}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exec", "bpf"], cost: low, equivalent: true}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only}
@@ -44,7 +44,7 @@
   unit: count
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_process_exit(task_struct *, bool)|(task_struct *)", "kernel>=5.8"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exit", "bpf"], cost: free, equivalent: true}
+    - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exit", "bpf"], cost: low, equivalent: true}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only}

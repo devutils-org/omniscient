@@ -249,7 +249,7 @@
   summary: "Last-level cache misses"
   unit: count
   backends:
-    - {id: "pmu", requires: ["pmu:LLC-load-misses", "pmu:LLC-loads"], cost: free}
+    - {id: "pmu", requires: ["pmu:LLC-load-misses", "pmu:LLC-loads"], cost: low}
     - {id: "pmu:generic", requires: ["pmu:PERF_COUNT_HW_CACHE_MISSES", "pmu:PERF_COUNT_HW_CACHE_REFERENCES"], cost: low,
        degraded: "the architectural cache-miss counter: every last-level access that
          missed, not loads only, and what each vendor puts in it differs"}

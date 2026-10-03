@@ -18,7 +18,7 @@
     - id: "bpf:tp"
       requires: ["tracepoint:block:block_rq_issue", "tracepoint:block:block_rq_complete", "bpf"]
       join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
-      cost: low
+      cost: med
       equivalent: true
     - {id: "fs:tracefs", requires: ["tracefs"], cost: med, targets: {system: native},
        degraded: "no per-task attribution, no pushed-down filter"}
@@ -55,7 +55,7 @@
     - id: "bpf:tp"
       requires: ["tracepoint:block:block_rq_insert", "tracepoint:block:block_rq_issue", "bpf"]
       join: {key: "blk:rq@open_ts", match: scoped_eq, ttl: 30s}
-      cost: low
+      cost: med
       equivalent: true
   modes: [trace]
   emits: [hist, raw, topk, summary]
@@ -144,7 +144,7 @@
   unit: bytes
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue(request *)", "kernel>=5.8"], cost: high}
-    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low, equivalent: true}
+    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: high, equivalent: true}
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {system: native, cgroup: bpf_only, pid: bpf_only}

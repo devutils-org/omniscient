@@ -57,7 +57,7 @@
        degraded: "which frequency sysfs gives depends on the driver: cpuinfo_avg_freq is the
                   effective one, scaling_cur_freq may be the requested one. Every event names the
                   file it read and whether that is effective or requested"}
-    - {id: "pmu", requires: ["msr:aperf", "msr:mperf"], cost: free, equivalent: true}
+    - {id: "pmu", requires: ["msr:aperf", "msr:mperf"], cost: low, equivalent: true}
   modes: [poll, trace]
   emits: [timeline, hist, raw, summary]
   targets: {system: native, cpu: native}

@@ -809,8 +809,8 @@ apply the floor yet (a request in `docs/fixes/w18-bench.md`).
 
 **What was corrected, and what it says.**
 
-- **The tool's floor is above `free`.** Every perf counter in `count` mode
-  costs about 0.13 to 0.20 % of a target's cpu -- about 240 us on `compute`'s
+- **The tool's floor is above `free`.** Every hardware perf counter in
+  `count` mode costs about 0.13 to 0.20 % of a target's cpu -- about 240 us on `compute`'s
   145 ms, 1.1 to 1.2 ms on `memory`'s 355 ms, so it is a rate, not a fixed
   opening cost -- and so do the system-wide `/proc` and `/sys` polls, the two
   `proc` raw tracepoints over the `launch` workload, the per-process polls
@@ -850,21 +850,47 @@ comes back under it and the reason is no longer needed. The fixed cost is
 still the tool's, and still counted by `cost.json` against `--budget`: a short
 run of either under a tight budget stops. That is filed, not hidden.
 
-**Not corrected.** A pair the table did not measure keeps its band, including
-a backend that shares a measured one's mechanism (`bpf:tp` beside a corrected
-`bpf:raw_tp`, the other `pmu` counters). The bands lowered nowhere: a band
-above its measurement may be the source's own case, which the bench's seven
-workloads do not all reach.
+**An equivalent backend is not cheaper than what it stands in for.** A
+backend declared `equivalent` is the same measurement, and `bpf:tp` beside
+`bpf:raw_tp` is the same tracepoint and the same collector. Raising only the
+measured `bpf:raw_tp` left its sibling a band below, and `--budget` degrades
+onto what is below and declares less: `omn io.size -m trace -e hist --system
+--budget 1%` promised to move onto `bpf:tp` (`low`) and would have kept paying
+about 6.5 %. So no equivalent backend declares a cheaper band than one above
+it in the chain serving a target it serves, and a test holds it. Seven lines
+the table did not measure moved with it: `bpf:tp` to `med` for `io.latency`
+and `io.queue`, to `high` for `io.size`, to `low` for `proc.exec` and
+`proc.exit`; `power.freq` through `pmu` (aperf/mperf) to `low`, under
+`fs:sys`'s; `net.tcp.rtt` through `bpf:fentry` to `med`, under `netlink`'s --
+that one is a different mechanism, a program on every received segment, and
+unmeasured: what a budget may promise for it is not a saving nobody measured.
+`io.pressure`'s `fs:cgroup` stays `free` under `fs:proc`'s `low`: the two
+serve disjoint targets, so no budget moves one request from one to the other.
+`mem.cache_llc` through `pmu` moved to `low` too, beside its measured
+`pmu:generic`: the same counters, read the same way.
+
+**Not corrected.** Any other pair the table did not measure keeps its band.
+Two count-mode counters stay `free` with nothing measured to move them:
+`mem.bandwidth` through `pmu:uncore`, one system-wide uncore counter for which
+no collector is written yet, and `power.energy` through `pmu` (RAPL), which
+measured 0.03 %, under `free`. `sched.switches` through `pmu:sw` measured 0.06 % on
+`contended` and stays `free`; it is the software counter the floor above does
+not reach. The bands lowered nowhere: a band above its measurement may be the
+source's own case, which the bench's seven workloads do not all reach.
 
 **Held by a test.** `tests/bench_bands.rs` reads the record below, in `make
 check`, and fails when the catalog declares another band than a row records
 (so a cost line cannot change without its row), when a row's measurement is
-over its band without a reason, when a reason no longer applies, and when a
-row says `corrected` without a change of band. A new table is pasted here --
+over its band without a reason, when a reason is empty or no longer applies,
+when a standing row's dilation leaves its band, when a row says `corrected`
+without a change of band or anything but `within`, `corrected` or `stands ...:
+<reason>`, when the record holds another number of rows than its
+`bands:begin` marker's `rows=`, and when an equivalent backend declares less
+than one above it. Each of those is shown failing on a synthetic row. A new table is pasted here --
 the medians of `table.md`'s `% of target` and `dilation` columns, and the
 gate's `RESOLVES` -- and the test names every band it puts outside.
 
-<!-- bands:begin backends-1791030430 -->
+<!-- bands:begin backends-1791030430 rows=95 -->
 | workload | resolves |
 |---|---|
 | launch | 0.86 % |

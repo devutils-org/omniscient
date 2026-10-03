@@ -35,12 +35,58 @@ checkout, read there, not copied).
   gate's resolution per workload and all 95 rows of the table (share,
   dilation, the band declared when the table ran, the band declared now, the
   verdict).
-- **`tests/bench_bands.rs`**, five tests in `make check`, none measuring the
+- **`tests/bench_bands.rs`**, five tests in `make check` (eight after the
+  fix round, below), none measuring the
   machine: the catalog declares exactly the band each row records (so a cost
   line cannot change without its row); every row's measurement is inside its
   band or the row says why it stands; a standing row's reason is still needed
   and its dilation is inside the band; `corrected` iff the band changed; and
   the rule on synthetic rows.
+
+## Review
+
+The fix round answers the adversarial review of `6672a46`.
+
+- **Defect: an equivalent `bpf:tp` was a band under its corrected
+  `bpf:raw_tp`** (`io.size`, `io.queue`, `io.latency`, `proc.exec`,
+  `proc.exit`), so `--budget` promised to degrade onto the same tracepoint as
+  if it were cheaper. Fixed both ways the reviewer offered: the siblings are
+  raised (`bpf:tp` to `high`, `med`, `med`, `low`, `low`), and
+  `tests/bench_bands.rs::no_equivalent_backend_declares_less_than_what_it_stands_in_for`
+  refuses an `equivalent` backend declaring less than a backend above it that
+  serves a target it serves. The rule found two more: `power.freq` through
+  `pmu` (aperf/mperf, `free` under `fs:sys`'s `low`) and `net.tcp.rtt` through
+  `bpf:fentry` (`low` under `netlink`'s `med`), both raised -- the second is
+  unmeasured, and a budget must not promise a saving nobody measured.
+  `io.pressure`'s `fs:cgroup` (`free` under `fs:proc`'s `low`) is exempt:
+  the two serve disjoint targets. The reviewer's repro,
+  `omn io.size -m trace -e hist --system --budget 1% --dump-request`, now
+  says nothing below `bpf:raw_tp` declares less, as `main` did. The rule
+  lives in the test, not the catalog loader (a shared layer); filed below.
+- **Gap: the judging logic was not shown failing.** Factored into
+  `record_faults` and `band_faults`, each run on the real record by one test
+  and on synthetic rows by another, one row per way of being wrong: over its
+  band on the share and on the dilation, `corrected` and still over, a
+  `stands` reason empty (three spellings) or no longer needed, a standing
+  row's dilation outside its band, `corrected` with no move, a move with no
+  `corrected`, a verdict that is none of the three, a workload with no
+  resolution, a row twice, a row missing.
+- **Nit: the record's completeness.** The marker is now `<!-- bands:begin
+  backends-1791030430 rows=95 -->` and the test fails when the record holds
+  another count, or when the marker gives none; verdicts are parsed to
+  `within`, `corrected` or `stands ...: <reason>`, anything else fails.
+  Shown: deleting `io.size`'s row fails `the_record_is_whole_and_reads_one_way`;
+  putting `io.size`'s `bpf:tp` back to `low` fails the equivalence test.
+- **Nit: the resolution floor and `CATALOG.md`** are engine's files; the
+  requests below stand, with the seven new lines added to the `CATALOG.md`
+  one.
+- **Nit: count-mode `pmu` left `free`.** `mem.cache_llc` through `pmu` is
+  now `low`, beside its measured `pmu:generic` (the same counters).
+  `power.freq` through `pmu` moved under the equivalence rule. What stays
+  `free`, and why, is in `docs/bench.md`: `sched.switches` through `pmu:sw`
+  measured 0.06 % (so the floor is the hardware counters', and the doc now
+  says so), `power.energy` through RAPL 0.03 %, and `mem.bandwidth` through
+  `pmu:uncore` has no collector to measure.
 
 ## Shown versus reasoned
 
@@ -58,9 +104,10 @@ checkout, read there, not copied).
 - **Reasoned, not measured**: that the two fentry rows' cost on a long target
   is their dilation (no table ran a long target through them); that
   `io.latency`'s `med` holds at `null_blk`'s load (the bench's `io` workload is
-  far from it); that the unmeasured backends sharing a corrected one's
-  mechanism (`bpf:tp` beside `bpf:raw_tp`, other `pmu` counters) cost alike --
-  which is why they were left alone.
+  far from it); that the seven unmeasured lines raised in the fix round cost
+  what their measured neighbour does (same tracepoint, same counters), and,
+  for `net.tcp.rtt` through `bpf:fentry`, no less than `netlink` -- a ceiling
+  chosen so a budget does not promise a saving, not a measurement.
 
 ## What I could not do, and why
 
@@ -109,13 +156,29 @@ most likely to move back down, `io.latency` the most likely to move up.
   Reason: the band's ceiling is a number (`Cost::worst_case_percent`), and
   the measurement is over it on every workload the counters ran on.
 
+- **An equivalent backend declares no cheaper band than what it stands in
+  for** (wave 18, fix round): held by `tests/bench_bands.rs`, for backends
+  serving a common target. Reason: `--budget` degrades onto what is below and
+  declares less, and an equivalent backend is the same measurement -- often
+  the same tracepoint -- so a cheaper band on it promises a saving the move
+  cannot deliver.
+
 ## Needs from another stream
 
 - **engine (`examples/bench/harness.rs`)**: `judge_band` takes the
   workload's resolution and reads a dilation no larger than it as zero, as
   `tests/bench_bands.rs::measured` does, so the table's `band` column and the
   record agree. The gate's resolutions are already in the table's header.
-- **engine (`CATALOG.md`)**: the cost column for the rows whose bands moved:
+- **engine or coordinator (`src/catalog.rs`, the loader)**: if the rule
+  "an `equivalent` backend declares no cheaper band than a backend above it
+  serving a target it serves" belongs with the other chain invariants,
+  move `cheaper_equivalents` from `tests/bench_bands.rs` into the loader's
+  validation. The catalog satisfies it today.
+- **engine (`CATALOG.md`)**: the cost column for the rows whose bands moved,
+  including the fix round's (`io.size`, `io.queue`, `io.latency` through
+  `bpf:tp`; `proc.exec`, `proc.exit` through `bpf:tp`; `power.freq` through
+  `pmu`; `net.tcp.rtt` through `bpf:fentry`, `med`; `mem.cache_llc` through
+  `pmu`, `low`):
   `cpu.cycles`, `cpu.instructions`, `cpu.ipc`, `cpu.branch_misses`,
   `cpu.cache_misses`, `cpu.context_switches`, `cpu.migrations` (`free` to
   `low`); `cpu.profile` (`low-med` stays right); `io.size` (`low` to `high`
