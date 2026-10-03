@@ -224,3 +224,24 @@ On `b753af0`, with ten streams sharing the machine (load average 27 to 37):
 - **While iterating**: `bench_bands` (5), `catalog` unit tests (59),
   `catalog_model` (19), `cli` (26), `budget` (22), `recorder` (8), `runner`
   (28), `scenario_power` (17): green.
+
+On the fix round (`83ec4e4` and its rustfmt follow-up), the machine still
+shared with the other streams (load average 21 to 31):
+
+- **`make check`**: red on its first failure,
+  `budget::the_extra_cpu_a_faster_poll_costs_is_the_extra_cpu_the_shell_observes`,
+  entry 14 of `docs/flaky.md`. Rerun alone once: passes. Clippy
+  (`--all-targets -D warnings`) and `cargo fmt --check`: clean, run apart.
+- **`cargo test --workspace --no-fail-fast`**: 2184 passed, 15 failed, 10
+  ignored. None names a band, a declared cost or the equivalence rule; they
+  are timing and shared-machine traffic (`family_net`'s loopback counters saw
+  2.7 GB for a 16 MiB transfer; `scenario_net`'s drops are other sockets'
+  `SOCKET_RCVBUFF`), in `--lib` (`cpu.profile`), `budget`, `cross_machine`,
+  `family_net`, `recorder`, `runner`, `scenario_net`, `scenario_sched`,
+  `triage`, `unwind`. The two that drive `--budget` on a declared band,
+  `recorder::a_recording_is_held_to_its_budget_over_a_rolling_span_not_the_whole_run`
+  and `triage::an_escalating_run_holds_its_budget_and_names_what_it_let_go`,
+  pass alone; `budget` passes 22 of 22 on its second run alone.
+- **While iterating**: `bench_bands` (8), `cli` (26): green. The reviewer's
+  `--budget` repro on the rebuilt binary, and on `proc.exec` and
+  `net.tcp.rtt`: no rung onto a sibling declaring less.

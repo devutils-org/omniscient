@@ -554,10 +554,14 @@ fn an_equivalent_backend_cheaper_than_what_it_stands_in_for_is_named() {
         entry.backends[1].cost = fallback;
         entry.backends[1].equivalent = equivalent;
         if disjoint {
-            entry.backends[0].targets =
-                Some(BTreeMap::from([(TargetKind::System, TargetSupport::Native)]));
-            entry.backends[1].targets =
-                Some(BTreeMap::from([(TargetKind::Cgroup, TargetSupport::BpfOnly)]));
+            entry.backends[0].targets = Some(BTreeMap::from([(
+                TargetKind::System,
+                TargetSupport::Native,
+            )]));
+            entry.backends[1].targets = Some(BTreeMap::from([(
+                TargetKind::Cgroup,
+                TargetSupport::BpfOnly,
+            )]));
         }
         cheaper_equivalents(&[entry])
     };
