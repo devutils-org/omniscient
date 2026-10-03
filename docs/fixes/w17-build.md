@@ -367,6 +367,14 @@ Nothing in these cases needs `null_blk`, `dmsetup` or a sysctl of its own.
 
 ## 9. The last `make check`
 
+- **After the review round** (`1b8e303`): `make check` green, 2189 passed,
+  0 failed, 10 ignored over 51 test binaries, clippy and fmt clean, `omn`
+  carrying `cap_bpf,cap_perfmon` throughout; `cases` 4 passed in 117 s. The
+  unstable WAL budget line below is gone (section 10), and gcc-shell's is
+  held back with its case.
+
+The round before it, for the record:
+
 - **`make check`** (after the cases' commit, `066332c`): `cases` 4 passed
   (160 s); red on one test outside this stream's files,
   `cross_machine::a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_its_rung`
