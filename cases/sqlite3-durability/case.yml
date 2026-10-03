@@ -1,0 +1,185 @@
+# Case 2: `sqlite3`, durability.
+#
+# ROADMAP phase 12. The same program as case 1, asked about the other thing a
+# database spends its time on: making each commit durable. The same commits,
+# one row each, under two journal settings: a rollback journal with
+# `synchronous=FULL`, where every commit waits for the disk to say its journal
+# and its database are on the platter, and a write-ahead log with
+# `synchronous=NORMAL`, where no commit waits for anything. Each cause is known
+# without the tool: from sqlite's own `.timer`, and from a second run of the
+# same commits counting the syncs they make. `docs/cases.md` describes every
+# field.
+name: sqlite3-durability
+about: >-
+  The sqlite3 command-line shell as the distribution ships it, reading a file
+  of single-row INSERT statements with `.read`: every statement is a
+  transaction of its own, so every statement is a commit, as durable as the
+  database's `journal_mode` and `synchronous` make it.
+
+program:
+  command: sqlite3
+  obtained: >-
+    the distribution's package (`sqlite` 3.53.4 on Arch Linux on the
+    development machine), not rebuilt: stripped, built with frame pointers,
+    carrying a GNU build id, the library linked into the shell
+  version: [sqlite3, --version]
+  stripped: true
+
+needs:
+  - run: [sqlite3, --version]
+    for: the program under test
+  - run: [python3, --version]
+    for: the scripts that write the commits and count their syncs
+  - run: [strace, -V]
+    for: counting the syncs of a second run of the same commits (the measured run is never traced)
+  # A sync on tmpfs returns at once: the case is about one that waits for a
+  # device, so the database lives in the case's cache directory, never in the
+  # temporary one.
+  - run: [sh, -c, 'mkdir -p {cache} && test "$(stat -f -c %T {cache})" != tmpfs']
+    for: a database on storage where a sync waits for a device ({cache} is not on tmpfs)
+
+symbols: debuginfod
+
+fetch: []
+
+# The two databases, emptied, and the two inputs: 500 commits for the run that
+# waits on each, 50 000 for the run that waits on none (enough for its cpu to
+# be seconds rather than milliseconds).
+setup:
+  - [sh, -c, 'mkdir -p {cache}/work && rm -f {cache}/work/delete.db {cache}/work/delete.db-journal
+      {cache}/work/wal.db {cache}/work/wal.db-wal {cache}/work/wal.db-shm']
+  - [sqlite3, '{cache}/work/delete.db',
+     'PRAGMA journal_mode=DELETE; CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);']
+  - [sqlite3, '{cache}/work/wal.db',
+     'PRAGMA journal_mode=WAL; CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);']
+  - [python3, '{case}/commits.py', '{dir}/commits-500.sql', '500']
+  - [python3, '{case}/commits.py', '{dir}/commits-50000.sql', '50000']
+
+causes:
+  # ----------------------------------------------------------------- off cpu
+  - name: every-commit-waits-for-the-disk
+    on: off-cpu
+    question: latency
+    objective: latency
+    injection:
+      kind: process
+      about: >-
+        A rollback journal (`journal_mode=DELETE`) with `synchronous=FULL`: for
+        each of the 500 commits sqlite writes the journal, syncs it, writes the
+        database, syncs it, and deletes the journal -- four syncs a commit on
+        this machine, each one waiting for the device. Nothing about the
+        program changes; only the database's settings. The process started
+        beside it only watches: it reads the program's `schedstat`, from
+        outside, once a millisecond.
+      run: [python3, '{case}/watch.py', sqlite3, '{cache}/work/delete.db']
+      ready: ready
+    target: [sqlite3, '{cache}/work/delete.db', 'PRAGMA synchronous=FULL', .timer on,
+             '.read {dir}/commits-500.sql']
+    own_account: stdout
+    reference:
+      - name: timer
+        extractor: sqlite3-timer
+        from: target
+      - name: watch
+        extractor: key-value
+        from: injection
+      - name: syncs
+        extractor: key-value
+        run: [python3, '{case}/fsyncs.py', '{cache}/work/delete.db', FULL,
+              '{dir}/commits-500.sql']
+    holds:
+      - {value: watch.target_seen, at_least: 1, why: the watcher saw the program}
+      - {value: syncs.wal, at_most: 0, why: the journal is a rollback journal}
+      - {value: syncs.per_commit, at_least: 2, why: every commit syncs its journal and its database}
+    expect:
+      limit: disk
+      state: blocked
+      # The block's own frame: the sync, by its libc name.
+      leaf: fdatasync
+      # The commit, which the stack under the sync passes through: by the
+      # debug file debuginfod serves for this build id, `syncJournal` <-
+      # `sqlite3PagerCommitPhaseOne` <- `sqlite3BtreeCommitPhaseOne`.
+      through: sqlite3PagerCommitPhaseOne
+      # `.timer`'s off-cpu (each statement's wall clock less its cpu) is not
+      # compared: the time the program waited for a cpu is in it, and in the
+      # `runnable` row rather than `blocked` -- up to 18 % of it with five
+      # agents loading the machine. The kernel's account splits the two.
+      agrees:
+        - row: blocked
+          # The program's life, less its cpu and its wait for one, by its
+          # `schedstat`.
+          with: watch.target_blocked_ns
+          # Its last millisecond may be in no read; and the edges the
+          # watcher's life does not hold (the gate to the exec, the exit to
+          # the reap) are a few milliseconds more.
+          plus: watch.poll_ns
+          slack_ns: 5000000
+        - row: runnable
+          with: watch.target_run_delay_ns
+          plus: watch.poll_ns
+          slack_ns: 5000000
+
+  # ------------------------------------------------------------------ on cpu
+  - name: commits-that-wait-for-nothing
+    on: cpu
+    question: latency
+    objective: latency
+    injection:
+      kind: input
+      about: >-
+        The same single-row commits, 50 000 of them, against a write-ahead log
+        with `synchronous=NORMAL`: a commit appends its pages to the log and
+        returns, and only a checkpoint (one per 1000 pages of log) syncs
+        anything. What is left of a commit is its own work, on the cpu: the
+        statement, and the kernel's write path for the log.
+    target: [sqlite3, '{cache}/work/wal.db', 'PRAGMA synchronous=NORMAL', .timer on,
+             '.read {dir}/commits-50000.sql']
+    own_account: stdout
+    reference:
+      - name: timer
+        extractor: sqlite3-timer
+        from: target
+      - name: syncs
+        extractor: key-value
+        run: [python3, '{case}/fsyncs.py', '{cache}/work/wal.db', NORMAL,
+              '{dir}/commits-50000.sql']
+      # The same commits with no tool attached: printed beside the measured
+      # run's own account, which is the run as the tool's collectors left it.
+      # Nothing is asserted on it; the difference is filed in
+      # docs/fixes/w17-build.md, "the triage's mutex shim doubles a real
+      # program's cpu".
+      - name: bare
+        extractor: sqlite3-timer
+        run: [sqlite3, '{cache}/work/wal.db', 'PRAGMA synchronous=NORMAL', .timer on,
+              '.read {dir}/commits-50000.sql']
+    holds:
+      - {value: syncs.wal, at_least: 1, why: the journal is a write-ahead log}
+      - {value: syncs.per_commit, at_most: 0.05, why: no commit syncs; only the checkpoints do}
+    expect:
+      limit: cpu
+      state: on-cpu
+      agrees:
+        - row: on-cpu
+          with: timer.cpu_ns
+          outside: timer.real_ns
+          # A time-based sample counts the interrupts that ran on the task's
+          # cpu, which getrusage leaves out (`cpu.profile`'s caveat); 50 000
+          # statements' worth of `.timer` resolution is in the extractor's.
+          relative: 0.01
+
+open_findings:
+  - check: the-block-s-frames-are-named
+    filed: >-
+      docs/fixes/w17-cases.md, "an off-cpu stack cannot ask debuginfod": the
+      commit under the sync (`sqlite3PagerCommitPhaseOne`) is an address both
+      ways, since `sched.offcpu` reads no `--symbols`
+  - check: every-cited-number-agrees-with-the-reference
+    filed: >-
+      docs/fixes/w17-build.md, "a blocked row called exact is short of the
+      kernel's": over 500 commits, `blocked` is 50 to 60 ms (3 %) under the
+      program's own `schedstat` (life less cpu less wait) and under sqlite's
+      `.timer`, and `runnable` twice the kernel's run delay
+  - check: the-person-s-way-says-where-names-came-from
+    filed: >-
+      docs/fixes/w17-cases.md, "the verdict drops where its names came from":
+      the profile's `names came from` note is not among the verdict's notes
