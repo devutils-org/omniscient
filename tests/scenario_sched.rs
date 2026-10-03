@@ -375,8 +375,10 @@ fn one_known_number_of_round_trips_is_found_by_four_sources() {
     );
 
     // Not the event count: `sched.offcpu` aggregates in the kernel, so its
-    // events are drains and the blocks are on them.
-    let blocks = total_attribute(labelled(&results, "blocks"), "blocks");
+    // events are drains and the blocks are on them. And the driver's, not the
+    // run's: `sched.offcpu` follows the processes the shell starts since the
+    // eighteenth wave, and the responder blocks once a round trip as well.
+    let (_, blocks) = driver_blocks(&results);
     assert!(
         close_to(blocks, ROUND_TRIPS),
         "{ROUND_TRIPS} round trips are {ROUND_TRIPS} blocks, saw {blocks}"
@@ -449,7 +451,7 @@ fn perf_counts_the_blocks_a_raw_tracepoint_counts_and_preemption_besides() {
     let results = results(&output);
 
     let switches = driver_switches(&results);
-    let blocks = total_attribute(labelled(&results, "blocks"), "blocks");
+    let (_, blocks) = driver_blocks(&results);
     // The slack is the handful of blocks still in flight when the run ends,
     // which have no duration yet and are therefore in no total.
     assert!(
@@ -465,20 +467,33 @@ fn perf_counts_the_blocks_a_raw_tracepoint_counts_and_preemption_besides() {
     );
 }
 
-/// The driver's switches in `examples/sched-round-trips.yml`: the series of
-/// the task `sched.offcpu` saw block, which is the driver alone -- its target
-/// is the launched shell's process, and the responder is a process of its own
-/// that `sched.switches`, following what the shell starts, counts beside it.
-fn driver_switches(results: &[Value]) -> u64 {
+/// The driver of `examples/sched-round-trips.yml` and how many times it
+/// blocked: of the tasks `sched.offcpu` saw block -- the driver and the
+/// responder, since it follows the processes the shell starts -- the one that
+/// blocked most among those `sched.switches` has a series for. Either of the
+/// pair blocks once a round trip; what matters is that the two counts compared
+/// are one task's.
+fn driver_blocks(results: &[Value]) -> (u64, u64) {
+    let switched: std::collections::BTreeSet<u64> =
+        outputs(labelled(results, "switches-out"), "summary")
+            .flat_map(|output| output["series"].as_array().expect("series").clone())
+            .filter_map(|series| series["key"].as_str()?.strip_prefix("task:")?.parse().ok())
+            .collect();
     let mut blocked = std::collections::BTreeMap::<u64, u64>::new();
     for event in raw_events(labelled(results, "blocks")) {
         let tid = event["tid"].as_u64().expect("a block names its task");
         *blocked.entry(tid).or_default() += event["blocks"].as_u64().unwrap_or(0);
     }
-    let (driver, _) = blocked
+    blocked
         .into_iter()
+        .filter(|(tid, _)| switched.contains(tid))
         .max_by_key(|(_, blocks)| *blocks)
-        .expect("the driver blocked");
+        .expect("the driver blocked and switched")
+}
+
+/// The switches of [`driver_blocks`]'s task.
+fn driver_switches(results: &[Value]) -> u64 {
+    let (driver, _) = driver_blocks(results);
     outputs(labelled(results, "switches-out"), "summary")
         .flat_map(|output| output["series"].as_array().expect("series").clone())
         .find(|series| series["key"] == format!("task:{driver}"))
@@ -511,8 +526,24 @@ fn a_workload_that_is_half_blocked_measures_as_half_blocked() {
     // Blocked, less the run queue wait after each wakeup: a loaded machine
     // lengthens that wait and the responder's spin with it, and the two halves
     // are equal in cpu time, not in wall time (flaky tally #2's leftover).
-    let blocked_ns = total_attribute(labelled(&results, "blocked"), "blocked_ns");
-    let blocks = total_attribute(labelled(&results, "blocked"), "blocks");
+    //
+    // The driver's: `sched.offcpu` follows the processes the shell starts since
+    // the eighteenth wave, and the responder blocks once a round trip too,
+    // while `cpu.oncpu_time` reads the launched process alone -- whose task is
+    // its series.
+    let driver: u64 = outputs(labelled(&results, "on-cpu"), "summary")
+        .flat_map(|output| output["series"].as_array().expect("series").clone())
+        .find_map(|series| series["key"].as_str()?.strip_prefix("task:")?.parse().ok())
+        .expect("the on-cpu half names the launched task");
+    let of_driver = |attribute: &str| -> u64 {
+        raw_events(labelled(&results, "blocked"))
+            .iter()
+            .filter(|event| event["tid"].as_u64() == Some(driver))
+            .filter_map(|event| event[attribute].as_u64())
+            .sum()
+    };
+    let blocked_ns = of_driver("blocked_ns");
+    let blocks = of_driver("blocks");
     assert!(
         close_to(blocks, HALF_BLOCKED_ROUND_TRIPS),
         "{HALF_BLOCKED_ROUND_TRIPS} round trips are {HALF_BLOCKED_ROUND_TRIPS} blocks, \

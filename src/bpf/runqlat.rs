@@ -36,10 +36,14 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{
-    self, count_drop, helper, push_task_filter, read_field, Insn, Log2Labels, Program, Subject,
-    TaskFields, Whose, BPF_DW, BPF_W, R10,
+    self, count_drop, helper, read_field, Insn, Log2Labels, Program, Subject, TaskFields, Whose,
+    BPF_DW, BPF_W, R10,
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows};
+use super::sched_common::{
+    push_followed_filter, push_kernel_wait, push_last_queued, push_rq_clock, push_run_delay,
+    Descendants, Followed, KernelClock,
+};
 use super::syscall;
 
 /// Arguments of `sched_switch`, in the raw tracepoint's context.
@@ -74,6 +78,9 @@ const MAX_ROWS: u32 = 32768;
 /// Slots of the drop counter, one per thing that can be lost.
 const DROP_QUEUED: u32 = 0;
 const DROP_ROWS: u32 = 1;
+/// Not a loss: waits that ended with no queue stamp in the kernel's
+/// `sched_info`, which it counts as no wait at all and so does this source.
+const COUNT_UNSTAMPED: u32 = 2;
 
 /// Where each map's key and value live on the program's stack.
 ///
@@ -81,16 +88,23 @@ const DROP_ROWS: u32 = 1;
 /// descriptors all come from the same place. Every byte of a key is written
 /// before the key is used: the kernel hashes all of it, and a byte nobody wrote
 /// puts two identical waits in two buckets.
-const ROW_VALUE: i16 = -120;
-const ROW_KEY: i16 = -80;
-const QUEUED_VALUE: i16 = -56;
+const ROW_VALUE: i16 = -136;
+const ROW_KEY: i16 = -88;
+const QUEUED_VALUE: i16 = -64;
 const QUEUED_KEY: i16 = -48;
 const DROP_KEY: i16 = -40;
 /// Where the program keeps the row map it looked up through the generation
 /// slot, once per run; see `map::select_rows`.
-const ROWS_SLOT: i16 = -128;
-/// Sixteen bytes for the target comparison, `insn::push_task_filter`.
-const FILTER_SCRATCH: i16 = -144;
+const ROWS_SLOT: i16 = -144;
+/// Sixteen bytes for the target comparison, `insn::push_task_filter`, and
+/// the eight the scheduler's clock is read through.
+const FILTER_SCRATCH: i16 = -160;
+/// The scheduler's clock now, the task's queue stamp, and its `run_delay` when
+/// the wait began and now, held across the helper calls that read them.
+const CLOCK_NOW: i16 = -168;
+const CLOCK_QUEUED: i16 = -176;
+const CLOCK_DELAY_THEN: i16 = -184;
+const CLOCK_DELAY_NOW: i16 = -192;
 
 /// The layout of a row key, as byte offsets within it.
 const KEY_TID: i16 = 0;
@@ -129,12 +143,26 @@ const VALUE_COMM: i16 = 16;
 /// Written once, where the row is created, which is the first wait of that key
 /// in that window: the rows map is drained and emptied every window.
 const VALUE_FIRST_NS: i16 = 32;
+/// The same waits by the tracepoints: from the `sched_wakeup` (or the
+/// preempting `sched_switch`) to the `sched_switch` that ran the task, by
+/// `bpf_ktime_get_ns`.
+///
+/// The wait a row is bucketed and totalled by is the kernel's own `sched_info`
+/// account where this kernel exposes it (`sched_common::KernelClock`), which is
+/// what `offcpu.rs` subtracts as `queued_ns` and what a task's `schedstat` says.
+/// This is kept beside it because the two part by about a microsecond a wait:
+/// a cpu coming out of idle for the task it was woken for is runnable time by
+/// the tracepoints and not by the kernel. Equal to `total_ns` on a kernel
+/// without that clock.
+const VALUE_WAKE_TO_RUN_NS: i16 = 40;
 const COMM_BYTES: usize = 16;
-const ROW_VALUE_BYTES: usize = 40;
+const ROW_VALUE_BYTES: usize = 48;
 
 /// The queued map: thread id to the moment it joined a run queue.
 const QUEUED_KEY_BYTES: usize = 4;
-const QUEUED_VALUE_BYTES: usize = 8;
+/// When the wait began by the tracepoints, and the task's `run_delay` then.
+const QUEUED_VALUE_BYTES: usize = 16;
+const QUEUED_RUN_DELAY: i16 = 8;
 
 /// `bpf_probe_read_kernel` is GPL-only, and every field these programs read
 /// comes out of a `task_struct` through it.
@@ -157,6 +185,8 @@ pub struct RunqLat {
     pub count: u64,
     /// Their exact total, which the bucket bounds cannot give back.
     pub total_ns: u64,
+    /// The same waits by the tracepoints; see `VALUE_WAKE_TO_RUN_NS`.
+    pub wake_to_run_ns: u64,
     /// When the first wait of this row's window began, which is what the event
     /// is timestamped with. Zero means unknown, and is read as "fall back to
     /// the drain" rather than as the beginning of time.
@@ -203,6 +233,7 @@ impl RunqLat {
             bucket: word(key, KEY_BUCKET as usize),
             count: long(value, VALUE_COUNT as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
+            wake_to_run_ns: long(value, VALUE_WAKE_TO_RUN_NS as usize),
             first_ns: long(value, VALUE_FIRST_NS as usize),
             comm: String::from_utf8_lossy(&comm[..end]).into_owned(),
         })
@@ -219,8 +250,12 @@ struct Enqueue {
     queued_fd: i32,
     drops_fd: i32,
     pid_offset: i32,
+    tgid_offset: i32,
     fields: TaskFields,
-    whose: Whose,
+    followed: Followed,
+    clock: Option<KernelClock>,
+    /// The label the filter's root comparison jumps to, one per call site.
+    kept: &'static str,
 }
 
 /// Writes the moment this task joined a run queue, from a `task_struct` in
@@ -235,8 +270,11 @@ fn enqueue(program: &mut Program, at: &Enqueue, task_reg: u8, ts_reg: u8, resume
         queued_fd,
         drops_fd,
         pid_offset,
+        tgid_offset,
         fields,
-        whose,
+        followed,
+        clock,
+        kept,
     } = at;
     // The whole slot is cleared first: the key is four bytes in an eight-byte
     // slot, and the four the program does not write are still hashed.
@@ -256,16 +294,27 @@ fn enqueue(program: &mut Program, at: &Enqueue, task_reg: u8, ts_reg: u8, resume
     // before the program loads and never changes, so the comparison is
     // written into the instruction stream rather than looked up in a map on a
     // path this hot.
-    push_task_filter(
+    push_followed_filter(
         program,
         &fields,
-        whose,
+        &followed,
         Subject::task(task_reg),
+        tgid_offset,
         FILTER_SCRATCH,
         resume,
+        kept,
     );
 
     program.push(Insn::stx(BPF_DW, R10, QUEUED_VALUE, ts_reg));
+    program.push(Insn::st_imm(
+        BPF_DW,
+        R10,
+        QUEUED_VALUE + QUEUED_RUN_DELAY,
+        0,
+    ));
+    if let Some(clock) = &clock {
+        push_run_delay(program, clock, task_reg, QUEUED_VALUE + QUEUED_RUN_DELAY);
+    }
     program.extend(Insn::load_map_fd(1, queued_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, QUEUED_KEY as i32));
@@ -295,7 +344,8 @@ const LOG2: Log2Labels = [
 /// The program on `sched_wakeup`: a task has just become runnable.
 fn wakeup_instructions(
     btf: &Btf,
-    whose: Whose,
+    followed: Followed,
+    clock: Option<KernelClock>,
     queued_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
@@ -310,7 +360,8 @@ fn wakeup_instructions(
         ));
     }
     let pid_offset = btf.member_offset("task_struct", "pid")?;
-    let fields = TaskFields::locate(btf, whose)?;
+    let tgid_offset = btf.member_offset("task_struct", "tgid")?;
+    let fields = TaskFields::locate(btf, followed.whose)?;
 
     let mut program = Program::new();
     // r6 keeps the context, r7 the task being woken and r8 the timestamp. All
@@ -326,8 +377,11 @@ fn wakeup_instructions(
             queued_fd,
             drops_fd,
             pid_offset,
+            tgid_offset,
             fields,
-            whose,
+            followed,
+            clock,
+            kept: "woken_kept",
         },
         7,
         8,
@@ -351,7 +405,8 @@ fn wakeup_instructions(
 /// only place that wait can be closed.
 fn switch_instructions(
     btf: &Btf,
-    whose: Whose,
+    followed: Followed,
+    clock: Option<KernelClock>,
     queued_fd: i32,
     rows_fd: i32,
     drops_fd: i32,
@@ -369,7 +424,7 @@ fn switch_instructions(
     }
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
-    let fields = TaskFields::locate(btf, whose)?;
+    let fields = TaskFields::locate(btf, followed.whose)?;
     let prio_offset = btf.member_offset("task_struct", "prio")?;
     let comm_offset = btf.member_offset("task_struct", "comm")?;
 
@@ -390,8 +445,11 @@ fn switch_instructions(
             queued_fd,
             drops_fd,
             pid_offset,
+            tgid_offset,
             fields,
-            whose,
+            followed,
+            clock,
+            kept: "preempted_kept",
         },
         7,
         8,
@@ -411,17 +469,49 @@ fn switch_instructions(
     // programs were attached, or it belongs to another process.
     program.jump_to("done", Insn::jeq_imm(0, 0, 0));
     program.push(Insn::ldx(BPF_DW, 9, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 1, 0, QUEUED_RUN_DELAY));
+    program.push(Insn::stx(BPF_DW, R10, CLOCK_DELAY_THEN, 1));
 
     program.extend(Insn::load_map_fd(1, queued_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, QUEUED_KEY as i32));
     program.push(Insn::call(helper::MAP_DELETE_ELEM));
 
-    // r9 = now - when it joined the queue. Computed through r1, which nothing
-    // between here and the next call reads.
+    // r9 = now - when it joined the queue, by the tracepoints. Computed
+    // through r1, which nothing between here and the next call reads.
     program.push(Insn::mov64_reg(1, 8));
     program.push(Insn::sub64_reg(1, 9));
     program.push(Insn::mov64_reg(9, 1));
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_WAKE_TO_RUN_NS, 9));
+
+    // And the wait the row counts: the kernel's own, `rq->clock -
+    // last_queued`, the two values `sched_info_arrive` is about to subtract,
+    // read under the same lock. A wait the kernel holds no stamp for is no
+    // wait to it, and none here; it is counted.
+    if let Some(clock) = &clock {
+        push_last_queued(&mut program, clock, 7, CLOCK_QUEUED);
+        push_run_delay(&mut program, clock, 7, CLOCK_DELAY_NOW);
+        push_rq_clock(
+            &mut program,
+            clock,
+            7,
+            FILTER_SCRATCH,
+            CLOCK_NOW,
+            "unstamped",
+        );
+        push_kernel_wait(
+            &mut program,
+            [CLOCK_NOW, CLOCK_QUEUED, CLOCK_DELAY_THEN, CLOCK_DELAY_NOW],
+            "unstamped",
+            "grown",
+        );
+        program.push(Insn::mov64_reg(9, 1));
+        program.jump_to("stamped", Insn::ja());
+        program.label("unstamped");
+        program.push(Insn::mov64_imm(9, 0));
+        count_drop(&mut program, drops_fd, DROP_KEY, COUNT_UNSTAMPED, "stamped");
+        program.label("stamped");
+    }
 
     // The cpu goes in the key before the bucket does: this call clobbers r1
     // through r5, and the bucket is computed in them.
@@ -451,6 +541,8 @@ fn switch_instructions(
     program.push(Insn::mov64_imm(1, 1));
     program.push(Insn::atomic_add(BPF_DW, 0, VALUE_COUNT, 1));
     program.push(Insn::atomic_add(BPF_DW, 0, VALUE_TOTAL_NS, 9));
+    program.push(Insn::ldx(BPF_DW, 1, R10, ROW_VALUE + VALUE_WAKE_TO_RUN_NS));
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_WAKE_TO_RUN_NS, 1));
     program.jump_to("done", Insn::ja());
 
     program.label("first_wait");
@@ -500,11 +592,20 @@ fn switch_instructions(
 /// Dropping it detaches both: the links, the programs and the maps are file
 /// descriptors, and the kernel unloads a program when the last one closes.
 pub struct RunqLatProgram {
+    /// The processes a process target started, followed in the kernel.
+    descendants: Option<Descendants>,
+    /// Why the wait is not the kernel's own account, on a kernel that does
+    /// not expose it.
+    clock_missing: Option<String>,
     queued: Hash,
     rows: Rows,
     drops: Counters,
     wakeup_program: OwnedFd,
     _wakeup_link: OwnedFd,
+    /// The same program on `sched_wakeup_new`: a task's first wait, from its
+    /// fork to its first run, is on the run queue like any other, and the
+    /// kernel's `run_delay` counts it.
+    _wakeup_new_link: OwnedFd,
     switch_program: OwnedFd,
     _switch_link: OwnedFd,
 }
@@ -526,10 +627,41 @@ impl RunqLatProgram {
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
         crate::bpf::attach::fentry::skipped([&self.wakeup_program, &self.switch_program])
+            + self.descendants.as_ref().map_or(0, Descendants::skipped)
+    }
+
+    /// Processes the target started that no program here followed, because
+    /// the map of them was full.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants.as_ref().map_or(0, Descendants::missed)
+    }
+
+    /// Why the wait is not the kernel's own account, on a kernel that does
+    /// not expose it.
+    pub fn clock_missing(&self) -> Option<&str> {
+        self.clock_missing.as_deref()
+    }
+
+    /// Waits that ended with no queue stamp in the kernel, counted as no wait.
+    pub fn unstamped(&self) -> u64 {
+        self.drops.read(COUNT_UNSTAMPED)
     }
 
     pub fn load(whose: Whose) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
+        let descendants = match whose {
+            Whose::Process(root) => Some(Descendants::follow(root)?),
+            _ => None,
+        };
+        let followed = descendants
+            .as_ref()
+            .map_or(Followed::only(whose), |descendants| {
+                descendants.followed(whose)
+            });
+        let (clock, clock_missing) = match KernelClock::locate(btf) {
+            Ok(clock) => (Some(clock), None),
+            Err(reason) => (None, Some(KernelClock::missing(&reason))),
+        };
 
         let queued = Hash::create(
             QUEUED_KEY_BYTES,
@@ -540,13 +672,15 @@ impl RunqLatProgram {
         .map_err(|error| map_failure("run queue map", error))?;
         let rows = Rows::create(ROW_KEY_BYTES, ROW_VALUE_BYTES, MAX_ROWS, "omn_runq_hist")
             .map_err(|error| map_failure("run queue histogram map", error))?;
-        let drops = Counters::create(2, "omn_runq_drop")
+        let drops = Counters::create(3, "omn_runq_drop")
             .map_err(|error| map_failure("run queue drop counter", error))?;
 
-        let wakeup = wakeup_instructions(btf, whose, queued.as_raw_fd(), drops.as_raw_fd())?;
+        let wakeup =
+            wakeup_instructions(btf, followed, clock, queued.as_raw_fd(), drops.as_raw_fd())?;
         let switch = switch_instructions(
             btf,
-            whose,
+            followed,
+            clock,
             queued.as_raw_fd(),
             rows.as_raw_fd(),
             drops.as_raw_fd(),
@@ -563,15 +697,29 @@ impl RunqLatProgram {
         // duration measured from an uninitialised timestamp.
         let wakeup_link = syscall::raw_tracepoint_open("sched_wakeup", wakeup_program.as_raw_fd())
             .map_err(|error| format!("cannot attach to the `sched_wakeup` tracepoint: {error}"))?;
+        if btf.tracepoint_signature("sched_wakeup_new")? != WAKEUP_SIGNATURE {
+            return Err(
+                "this kernel's `sched_wakeup_new` does not take the task it wakes as its only \
+                 argument, which the wakeup program reads"
+                    .to_owned(),
+            );
+        }
+        let wakeup_new_link =
+            syscall::raw_tracepoint_open("sched_wakeup_new", wakeup_program.as_raw_fd()).map_err(
+                |error| format!("cannot attach to the `sched_wakeup_new` tracepoint: {error}"),
+            )?;
         let switch_link = syscall::raw_tracepoint_open("sched_switch", switch_program.as_raw_fd())
             .map_err(|error| format!("cannot attach to the `sched_switch` tracepoint: {error}"))?;
 
         Ok(Self {
+            descendants,
+            clock_missing,
             queued,
             rows,
             drops,
             wakeup_program,
             _wakeup_link: wakeup_link,
+            _wakeup_new_link: wakeup_new_link,
             switch_program,
             _switch_link: switch_link,
         })
@@ -665,7 +813,15 @@ mod tests {
     }
 
     fn switch_program(btf: &Btf) -> Vec<Insn> {
-        switch_instructions(btf, Whose::Any, 3, 4, 5).expect("a program")
+        switch_instructions(
+            btf,
+            Followed::only(Whose::Any),
+            KernelClock::locate(btf).ok(),
+            3,
+            4,
+            5,
+        )
+        .expect("a program")
     }
 
     /// The kernel's bucketing and the emit layer's must be the same function.
@@ -690,6 +846,7 @@ mod tests {
                 bucket,
                 count: 1,
                 total_ns: 0,
+                wake_to_run_ns: 0,
                 first_ns: 0,
                 comm: String::new(),
             };
@@ -725,7 +882,14 @@ mod tests {
         for (what, instructions) in [
             (
                 "the wakeup program",
-                wakeup_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
+                wakeup_instructions(
+                    &btf,
+                    Followed::only(Whose::Any),
+                    KernelClock::locate(&btf).ok(),
+                    3,
+                    4,
+                )
+                .expect("a program"),
             ),
             ("the switch program", switch_program(&btf)),
         ] {
@@ -794,7 +958,10 @@ mod tests {
             .iter()
             .filter(|insn| insn.code == 0xdb)
             .count();
-        assert_eq!(atomics, 2, "the count of waits and their total, both");
+        assert_eq!(
+            atomics, 3,
+            "the count of waits, their total, and their total by the tracepoints"
+        );
     }
 
     /// The per-cpu idle task leaves the cpu `TASK_RUNNING` every time anything
@@ -807,7 +974,14 @@ mod tests {
         for (what, instructions) in [
             (
                 "the wakeup program",
-                wakeup_instructions(&btf, Whose::Any, 3, 4).expect("a program"),
+                wakeup_instructions(
+                    &btf,
+                    Followed::only(Whose::Any),
+                    KernelClock::locate(&btf).ok(),
+                    3,
+                    4,
+                )
+                .expect("a program"),
             ),
             ("the switch program", switch_program(&btf)),
         ] {
@@ -832,19 +1006,40 @@ mod tests {
     fn the_filter_is_present_only_where_a_task_joins_the_queue() {
         let Some(btf) = kernel_btf() else { return };
         assert!(!switch_program(&btf).iter().any(|insn| insn.imm == 4242));
-        assert!(!wakeup_instructions(&btf, Whose::Any, 3, 4)
-            .expect("a program")
-            .iter()
-            .any(|insn| insn.imm == 4242));
+        assert!(!wakeup_instructions(
+            &btf,
+            Followed::only(Whose::Any),
+            KernelClock::locate(&btf).ok(),
+            3,
+            4
+        )
+        .expect("a program")
+        .iter()
+        .any(|insn| insn.imm == 4242));
 
-        let filtered = switch_instructions(&btf, Whose::Process(4242), 3, 4, 5).expect("a program");
+        let filtered = switch_instructions(
+            &btf,
+            Followed::only(Whose::Process(4242)),
+            KernelClock::locate(&btf).ok(),
+            3,
+            4,
+            5,
+        )
+        .expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             1,
             "a preempted task is filtered where it is enqueued; where it arrives it is already \
              known, because only a task this run enqueued can be found in the map"
         );
-        let filtered = wakeup_instructions(&btf, Whose::Process(4242), 3, 4).expect("a program");
+        let filtered = wakeup_instructions(
+            &btf,
+            Followed::only(Whose::Process(4242)),
+            KernelClock::locate(&btf).ok(),
+            3,
+            4,
+        )
+        .expect("a program");
         assert_eq!(filtered.iter().filter(|insn| insn.imm == 4242).count(), 1);
     }
 
@@ -882,6 +1077,7 @@ mod tests {
             (VALUE_TOTAL_NS, 8),
             (VALUE_FIRST_NS, 8),
             (VALUE_COMM, COMM_BYTES as i16),
+            (VALUE_WAKE_TO_RUN_NS, 8),
         ];
         for (fields, bytes, what) in [
             (&key[..], ROW_KEY_BYTES, "the row key"),
@@ -917,6 +1113,10 @@ mod tests {
             (DROP_KEY, 4, "drop key"),
             (FILTER_SCRATCH, 16, "filter scratch"),
             (ROWS_SLOT, 8, "row map slot"),
+            (CLOCK_NOW, 8, "clock now"),
+            (CLOCK_QUEUED, 8, "queue stamp"),
+            (CLOCK_DELAY_THEN, 8, "run delay then"),
+            (CLOCK_DELAY_NOW, 8, "run delay now"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -957,7 +1157,15 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = switch_instructions(&btf, Whose::Any, 3, 4, 5).expect("a program");
+        let program = switch_instructions(
+            &btf,
+            Followed::only(Whose::Any),
+            KernelClock::locate(&btf).ok(),
+            3,
+            4,
+            5,
+        )
+        .expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

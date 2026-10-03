@@ -24,7 +24,8 @@
 //! intervals it spans would need the kernel to walk its in-flight map on every
 //! drain, which is the cost this whole shape exists to avoid.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use crate::bpf::{OffCpu, OffCpuProgram, Renames, Whose};
@@ -34,6 +35,7 @@ use crate::emit::STACK_ID_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
 use crate::request::{Mode, Target};
+use crate::stack::unwind::Debuginfod;
 use crate::stack::{Frame, RawStack, Symbolizer};
 
 /// How often the totals are drained.
@@ -64,6 +66,11 @@ pub struct Prepare {
     /// events alone, so a predicate this collector ignored would run nowhere
     /// (stream S's finding, `docs/fixes/silent.md`).
     pub filter: Option<FilterExpr>,
+    /// Whether `--symbols debuginfod` asked for a stripped file's names to be
+    /// fetched by build id. The kernel walks these stacks by frame pointer, so
+    /// where the names come from is the only part of the unwind there is to
+    /// choose (`stack::NAMED_BY_CHOICE`).
+    pub debuginfod: bool,
 }
 
 impl Prepared for Prepare {
@@ -78,6 +85,11 @@ impl Prepared for Prepare {
         let filter = super::whose(target, "blocked time is attributed per task")?;
         let mut collector = OffCpuCollector::new(filter, self.wants_stacks);
         collector.predicate = self.filter;
+        // Refused here, before the target has run an instruction, rather than
+        // discovered at the first stack: the same refusal `cpu.profile` gives.
+        if self.debuginfod {
+            collector.debuginfod = Some(Arc::new(Debuginfod::from_env()?));
+        }
         Ok(Box::new(collector))
     }
 }
@@ -115,9 +127,13 @@ pub struct OffCpuCollector {
     /// Blocks whose stack the kernel walked and had no room to keep: the
     /// bucket it hashed to already held another stack.
     crowded_out: u64,
-    /// Blocks whose releasing wakeup this run did not see, so their queue wait
-    /// is unknown rather than zero.
+    /// Blocks whose releasing wakeup this run did not see, so their
+    /// `wake_to_run_ns` is unknown rather than zero.
     blocks_without_a_wakeup: u64,
+    /// Blocks the kernel held no queue stamp for.
+    unstamped: u64,
+    /// Where a stripped file's names are fetched from, when asked.
+    debuginfod: Option<Arc<Debuginfod>>,
     /// Whether the frames behind a stack id will be read by anyone.
     wants_stacks: bool,
     /// The request's predicate, and the blocks it kept and removed.
@@ -145,6 +161,8 @@ impl OffCpuCollector {
             evicted_stacks: 0,
             crowded_out: 0,
             blocks_without_a_wakeup: 0,
+            unstamped: 0,
+            debuginfod: None,
             wants_stacks,
             predicate: None,
             filtered_in: 0,
@@ -191,14 +209,28 @@ impl OffCpuCollector {
                 .note("the off-cpu map held more entries than one drain can walk");
         }
 
-        for (index, entry) in entries.into_iter().enumerate() {
-            // A total with no queue wait at all is a row every one of whose
-            // blocks ended without a wakeup this run saw. Counted per block,
-            // because a row is a `(task, state, stack)` and its blocks are what
-            // the note is about.
-            if entry.queued_ns == 0 {
-                self.blocks_without_a_wakeup += entry.blocks;
+        // A process the target started may have exec'd since its symbolizer
+        // was built, and may exit before the next tick: its maps are read
+        // again now, once per drain, for every process a new stack in this
+        // drain belongs to.
+        if self.wants_stacks {
+            let unresolved: BTreeSet<u32> = entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .stack
+                        .is_some_and(|id| !self.stacks.contains_key(&u64::from(id)))
+                })
+                .map(|entry| entry.tgid)
+                .collect();
+            for tgid in unresolved {
+                self.symbolizer(tgid).refresh();
             }
+        }
+
+        for (index, entry) in entries.into_iter().enumerate() {
+            self.blocks_without_a_wakeup += entry.unwoken;
+            self.unstamped += entry.unstamped;
             let mut attrs = attributes(&entry, window_ns);
             if let Some(id) = self.resolve_stack(&entry) {
                 attrs.push(Attr::uint(STACK_ID_ATTR, u64::from(id)));
@@ -249,19 +281,32 @@ impl OffCpuCollector {
             return;
         }
         // A thread's `/proc/<tid>/maps` is its process's, so a thread target
-        // is symbolised through its own id.
-        let tgid = match self.filter {
-            Whose::Process(id) | Whose::Thread(id) => id,
+        // is symbolised through its own id. A process target is followed into
+        // the processes it starts, and each of those is read too.
+        let mut processes = match self.filter {
+            Whose::Process(id) | Whose::Thread(id) => vec![id],
             Whose::Any | Whose::Cgroup(_) => return,
         };
-        match self.symbolizers.entry(tgid as i32) {
-            std::collections::hash_map::Entry::Occupied(mut held) => {
-                held.get_mut().refresh();
-            }
-            std::collections::hash_map::Entry::Vacant(empty) => {
-                empty.insert(Symbolizer::for_process(tgid as i32));
+        if let Some(program) = self.program.as_ref() {
+            processes.extend(program.processes());
+        }
+        processes.sort_unstable();
+        processes.dedup();
+        for tgid in processes {
+            let fresh = !self.symbolizers.contains_key(&(tgid as i32));
+            let symbolizer = self.symbolizer(tgid);
+            if !fresh {
+                symbolizer.refresh();
             }
         }
+    }
+
+    /// The symbolizer of one process, built the first time it is asked for.
+    fn symbolizer(&mut self, tgid: u32) -> &mut Symbolizer {
+        let debuginfod = self.debuginfod.clone();
+        self.symbolizers
+            .entry(tgid as i32)
+            .or_insert_with(|| Symbolizer::with_debuginfod(tgid as i32, debuginfod))
     }
 
     /// Symbolizes the stack behind an entry, once per distinct id.
@@ -300,10 +345,7 @@ impl OffCpuCollector {
             return None;
         };
         let truncated = addresses.len() >= program.stack_depth();
-        let symbolizer = self
-            .symbolizers
-            .entry(entry.tgid as i32)
-            .or_insert_with(|| Symbolizer::for_process(entry.tgid as i32));
+        let symbolizer = self.symbolizer(entry.tgid);
         // User frames only: `BPF_F_USER_STACK` asked for the task's own, and
         // putting them through kernel symbols would name them after whatever
         // function lives at that offset in the kernel's tables.
@@ -345,6 +387,18 @@ impl OffCpuCollector {
                  upper bound on the target's share, and every total here is a lower bound",
             );
             self.skipped = skipped;
+        }
+        // A process the target started that the map of them had no room for
+        // is a process none of whose blocks is here, and nothing else says so.
+        let unfollowed = program.unfollowed();
+        if unfollowed > 0 {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so {} blocks are in no total",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "its" } else { "their" },
+            ));
         }
         let (in_flight, totals) = program.dropped();
         if in_flight > self.dropped_in_flight {
@@ -394,6 +448,7 @@ fn attributes(entry: &OffCpu, window_ns: u64) -> Vec<Attr> {
         // against `total_ns` changes meaning.
         Attr::uint("queued_ns", entry.queued_ns),
         Attr::uint("blocked_ns", entry.total_ns.saturating_sub(entry.queued_ns)),
+        Attr::uint("wake_to_run_ns", entry.wake_to_run_ns),
         Attr::uint("blocks", entry.blocks),
         // The interval this total was collected over. Not a denominator: a
         // block is credited where it ended, so a wait longer than the tick
@@ -419,10 +474,24 @@ impl Collector for OffCpuCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(OffCpuProgram::load(self.filter)?);
+        let program = OffCpuProgram::load(self.filter)?;
+        // Said at the start, because `stop` drops the program before the
+        // notes are read.
+        self.notes
+            .extend(program.clock_missing().map(str::to_owned));
+        self.notes
+            .extend(program.entries_missing().map(str::to_owned));
+        self.program = Some(program);
         // Optional: without it a row keeps the name its task had when the row
         // was made, which for a launched program's first rows is this tool's.
-        self.renames = match Renames::load(self.filter) {
+        // A process target is followed into the processes it starts, and
+        // those exec: the renames are the machine's then, applied by thread
+        // id to the rows of the window, which are the target's alone.
+        let renamed = match self.filter {
+            Whose::Process(_) => Whose::Any,
+            other => other,
+        };
+        self.renames = match Renames::load(renamed) {
             Ok(renames) => Some(renames),
             Err(reason) => {
                 self.notes.push(format!(
@@ -475,6 +544,21 @@ impl Collector for OffCpuCollector {
         self.stacks.clone()
     }
 
+    /// Where the stacks' names came from, in the words `cpu.profile` uses.
+    fn facts(&self) -> Vec<String> {
+        if !self.wants_stacks {
+            return Vec::new();
+        }
+        let origins: BTreeMap<_, _> = self
+            .symbolizers
+            .values()
+            .flat_map(|symbolizer| symbolizer.origins())
+            .collect();
+        crate::stack::names_fact(origins, self.debuginfod.is_some())
+            .into_iter()
+            .collect()
+    }
+
     fn losses(&self) -> Losses {
         self.losses.clone()
     }
@@ -495,12 +579,21 @@ impl Collector for OffCpuCollector {
         if self.blocks_without_a_wakeup > 0 {
             notes.push(format!(
                 "{} blocks ended without this run having seen the wakeup that released them, so \
-                 their `queued_ns` is zero because it is unknown rather than because there was no \
-                 wait: the task was woken before the programs attached, or by a path that does \
-                 not raise `sched_wakeup`",
+                 their `wake_to_run_ns` is zero because it is unknown rather than because there \
+                 was no wait: the task was woken before the programs attached, or by a path that \
+                 does not raise `sched_wakeup`",
                 self.blocks_without_a_wakeup
             ));
         }
+        if self.unstamped > 0 {
+            notes.push(format!(
+                "{} blocks ended with no queue stamp in the kernel's `sched_info`, so their \
+                 `queued_ns` is zero as the kernel counts it: the wait after their wakeup is in \
+                 `blocked_ns`, as it is in the task's `schedstat`",
+                self.unstamped
+            ));
+        }
+
         if self.crowded_out > 0 {
             notes.push(format!(
                 "{} blocks were walked and their stack not kept: the kernel's stack map holds one \
@@ -545,6 +638,7 @@ mod tests {
             },
             wants_stacks: false,
             filter: None,
+            debuginfod: false,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a sampled mode must be refused");
@@ -558,6 +652,7 @@ mod tests {
             mode: Mode::Trace,
             wants_stacks: false,
             filter: None,
+            debuginfod: false,
         });
         let Err(error) = prepared.attach(&Target::Iface("eth0".to_owned())) else {
             panic!("an interface names no task to attribute blocked time to");
@@ -577,6 +672,9 @@ mod tests {
             bucket: 10,
             total_ns: 1_000,
             queued_ns: 0,
+            wake_to_run_ns: 0,
+            unstamped: 0,
+            unwoken: 0,
             blocks: 2,
             comm: "sleep".to_owned(),
             stack: None,
@@ -611,6 +709,9 @@ mod tests {
             bucket: 1,
             total_ns: 1,
             queued_ns: 0,
+            wake_to_run_ns: 0,
+            unstamped: 0,
+            unwoken: 0,
             blocks: 1,
             comm: "kworker".to_owned(),
             stack: None,

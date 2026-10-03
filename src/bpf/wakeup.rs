@@ -28,11 +28,11 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{
-    helper, push_current_filter, push_task_filter, Insn, Program, Subject, TaskFields, Whose,
-    BPF_DW, BPF_W, R10,
+    helper, push_current_filter, Insn, Program, Subject, TaskFields, Whose, BPF_DW, BPF_W, R10,
 };
 use super::map::{map_failure, Counters};
 use super::ring::{ring_bytes, RingBuffer};
+use super::sched_common::{push_followed_filter, Descendants, Followed};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 
 /// One wakeup, as the program writes it and userspace reads it.
@@ -197,10 +197,11 @@ const FILTER_SCRATCH: i16 = DROP_KEY - 16;
 fn instructions(
     btf: &Btf,
     preempt: Option<PreemptCount>,
-    whose: Whose,
+    followed: Followed,
     ring_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
+    let whose = followed.whose;
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
     let comm_offset = btf.member_offset("task_struct", "comm")?;
@@ -267,26 +268,30 @@ fn instructions(
     // time it ends for others. An interrupt's wakeup has a waker of 0 by now
     // and is kept only as received.
     if whose != Whose::Any {
-        push_task_filter(
+        push_followed_filter(
             &mut program,
             &fields,
-            whose,
+            &followed,
             Subject::with_ids(7, WAKEE_TID, WAKEE_PID),
+            tgid_offset,
             FILTER_SCRATCH,
             "not_the_wakee",
+            "wakee_kept",
         );
         program.jump_to("emit", Insn::ja());
         program.label("not_the_wakee");
         match whose {
             // The waker's ids are on the stack already, and zero for an
             // interrupt, which no target's ids are.
-            Whose::Process(_) | Whose::Thread(_) => push_task_filter(
+            Whose::Process(_) | Whose::Thread(_) => push_followed_filter(
                 &mut program,
                 &fields,
-                whose,
+                &followed,
                 Subject::with_ids(7, WAKER_TID, WAKER_PID),
+                tgid_offset,
                 FILTER_SCRATCH,
                 "done",
+                "waker_kept",
             ),
             // The waker is the current task, whose cgroup one helper answers
             // for -- except in an interrupt, where the current task is only
@@ -338,6 +343,8 @@ fn instructions(
 /// Dropping it detaches: the link, the program and the maps are file
 /// descriptors, and the kernel unloads the program when the last one closes.
 pub struct WakeupProgram {
+    /// The processes a process target started, followed in the kernel.
+    descendants: Option<Descendants>,
     /// Whether the program can tell an interrupt's wakeup from a task's.
     interrupts_told_apart: bool,
     ring: RingBuffer,
@@ -362,6 +369,13 @@ impl WakeupProgram {
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
         crate::bpf::attach::fentry::skipped([&self.program])
+            + self.descendants.as_ref().map_or(0, Descendants::skipped)
+    }
+
+    /// Processes the target started that no program here followed, because
+    /// the map of them was full.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants.as_ref().map_or(0, Descendants::missed)
     }
 
     /// Loads and attaches the program, or says why the kernel refused.
@@ -375,8 +389,22 @@ impl WakeupProgram {
             .map_err(|error| map_failure("drop counter", error))?;
 
         let preempt = PreemptCount::locate(btf);
-        let instructions =
-            instructions(btf, preempt, whose, ring_map.as_raw_fd(), drops.as_raw_fd())?;
+        let descendants = match whose {
+            Whose::Process(root) => Some(Descendants::follow(root)?),
+            _ => None,
+        };
+        let followed = descendants
+            .as_ref()
+            .map_or(Followed::only(whose), |descendants| {
+                descendants.followed(whose)
+            });
+        let instructions = instructions(
+            btf,
+            preempt,
+            followed,
+            ring_map.as_raw_fd(),
+            drops.as_raw_fd(),
+        )?;
         let program = syscall::prog_load(
             syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
             &instructions,
@@ -398,6 +426,7 @@ impl WakeupProgram {
             .map_err(|error| format!("cannot map the wakeup ring buffer: {error}"))?;
 
         Ok(Self {
+            descendants,
             interrupts_told_apart: preempt.is_some(),
             ring,
             drops,
@@ -494,8 +523,14 @@ mod tests {
             eprintln!("skipped: this kernel publishes no BTF");
             return;
         };
-        let program = instructions(&btf, PreemptCount::locate(&btf), Whose::Process(1), 3, 4)
-            .expect("a program");
+        let program = instructions(
+            &btf,
+            PreemptCount::locate(&btf),
+            Followed::only(Whose::Process(1)),
+            3,
+            4,
+        )
+        .expect("a program");
         let called = helpers_called(&program);
         assert!(
             called.contains(&helper::KTIME_GET_NS),
@@ -515,8 +550,14 @@ mod tests {
     #[test]
     fn the_program_calls_only_the_helpers_it_needs() {
         let Ok(btf) = Btf::from_kernel() else { return };
-        let program = instructions(&btf, PreemptCount::locate(&btf), Whose::Process(1), 3, 4)
-            .expect("a program");
+        let program = instructions(
+            &btf,
+            PreemptCount::locate(&btf),
+            Followed::only(Whose::Process(1)),
+            3,
+            4,
+        )
+        .expect("a program");
         let called = helpers_called(&program);
         let expected = [
             helper::KTIME_GET_NS,
@@ -549,14 +590,26 @@ mod tests {
     #[test]
     fn the_filter_is_present_only_when_a_process_was_named() {
         let Ok(btf) = Btf::from_kernel() else { return };
-        let machine_wide =
-            instructions(&btf, PreemptCount::locate(&btf), Whose::Any, 3, 4).expect("a program");
+        let machine_wide = instructions(
+            &btf,
+            PreemptCount::locate(&btf),
+            Followed::only(Whose::Any),
+            3,
+            4,
+        )
+        .expect("a program");
         assert!(
             !machine_wide.iter().any(|insn| insn.imm == 4242),
             "a machine-wide program compares against no process"
         );
-        let filtered = instructions(&btf, PreemptCount::locate(&btf), Whose::Process(4242), 3, 4)
-            .expect("a program");
+        let filtered = instructions(
+            &btf,
+            PreemptCount::locate(&btf),
+            Followed::only(Whose::Process(4242)),
+            3,
+            4,
+        )
+        .expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             2,
@@ -570,8 +623,14 @@ mod tests {
     #[test]
     fn the_published_record_is_exactly_the_size_of_the_struct() {
         let Ok(btf) = Btf::from_kernel() else { return };
-        let program =
-            instructions(&btf, PreemptCount::locate(&btf), Whose::Any, 3, 4).expect("a program");
+        let program = instructions(
+            &btf,
+            PreemptCount::locate(&btf),
+            Followed::only(Whose::Any),
+            3,
+            4,
+        )
+        .expect("a program");
         let output_at = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -593,10 +652,22 @@ mod tests {
             eprintln!("skipped: this kernel publishes no BTF");
             return;
         };
-        let filtered = instructions(&btf, PreemptCount::locate(&btf), Whose::Process(4242), 3, 4)
-            .expect("a program");
-        let machine_wide =
-            instructions(&btf, PreemptCount::locate(&btf), Whose::Any, 3, 4).expect("a program");
+        let filtered = instructions(
+            &btf,
+            PreemptCount::locate(&btf),
+            Followed::only(Whose::Process(4242)),
+            3,
+            4,
+        )
+        .expect("a program");
+        let machine_wide = instructions(
+            &btf,
+            PreemptCount::locate(&btf),
+            Followed::only(Whose::Any),
+            3,
+            4,
+        )
+        .expect("a program");
         assert!(
             filtered.len() > machine_wide.len(),
             "the filtered program carries the comparisons the machine-wide one does not"
@@ -726,8 +797,14 @@ mod tests {
             eprintln!("skipped: this kernel's preempt count is not a per-cpu variable");
             return;
         };
-        let program =
-            instructions(&btf, Some(preempt), Whose::Process(4242), 3, 4).expect("a program");
+        let program = instructions(
+            &btf,
+            Some(preempt),
+            Followed::only(Whose::Process(4242)),
+            3,
+            4,
+        )
+        .expect("a program");
         let load = program
             .iter()
             .position(|insn| {

@@ -12,7 +12,7 @@
   unit: count
   backends:
     - id: "bpf:raw_tp"
-      requires: ["bpf", "btf", "raw_tracepoint:sched_waking", "kernel>=5.8"]
+      requires: ["bpf", "btf", "raw_tracepoint:sched_waking", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=5.8"]
       join: {key: "task:tid", match: wakeup}
       cost: med
     - id: "bpf:tp"
@@ -37,6 +37,9 @@
     - "A wakeup is not a latency. The pair `waking -> on cpu` is the run queue
        wait and belongs to `sched.runqlat`; this source says who made a task
        runnable, and when."
+    - "A process target is followed into every process it starts, as
+       `cpu.profile` follows it, both as wakee and as waker: a program on
+       `sched_process_fork` adds a child to the set before it has run."
     - "A wakeup issued from a hard interrupt, a served softirq or an NMI has the
        interrupt as its waker -- `waker_tid` 0 and `waker_context` naming which
        -- and a target keeps it only as its wakee. A softirq served in a task's
@@ -59,7 +62,7 @@
     # is what lets a `wakeup` join be refused before the run rather than
     # credit a hundred waits to the last wakeup before the drain.
     - id: "bpf:raw_tp"
-      requires: ["bpf", "btf", "raw_tracepoint:sched_wakeup(task_struct *)", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "kernel>=6.1"]
+      requires: ["bpf", "btf", "raw_tracepoint:sched_wakeup(task_struct *)", "raw_tracepoint:sched_wakeup_new(task_struct *)", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"]
       join: {key: "task:tid", match: eq, ttl: 10s}
       cost: med
       drained: true
@@ -81,6 +84,20 @@
        the context switch changes the lock's convoy. A lock measurement describes
        the run it perturbed, and is read beside that run rather than against an
        untraced one."
+    - "A wait is the kernel's own account of it, read from the task's
+       `sched_info` at the switch that ends it: `rq->clock` less the queue
+       stamp, plus what `run_delay` grew by if the task was moved between cpus
+       while it waited. So the waits of a task add up to what its `schedstat`
+       says, and to `sched.offcpu`'s `queued_ns`. The tracepoints' account,
+       `sched_wakeup` (or the preempting switch) to the switch that ran the
+       task, is beside it as `wake_to_run_ns`: about a microsecond a wait
+       more, a cpu coming out of idle for the task it was woken for, which the
+       kernel counts as blocked. A task's first wait, from its fork, is
+       counted (`sched_wakeup_new`)."
+    - "A process target is followed into every process it starts, as
+       `cpu.profile` follows it: a program on `sched_process_fork` adds a
+       child to the set before it has run, so a build's compilers have their
+       waits here from the first one."
 
 - id: sched.offcpu
   family: sched
@@ -94,7 +111,7 @@
     # BPF_RAW_TRACEPOINT_OPEN, which needs a name and BTF where the classic
     # path needs a numeric id out of tracefs. Ordered ahead of it for the
     # reason DECISIONS.md settled: strictly fewer requirements, same events.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_wakeup(task_struct *)", "kernel>=6.1"], cost: med, drained: true,
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_wakeup(task_struct *)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"], cost: med, drained: true,
        degraded: "user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the task state"}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: med, drained: true,
        degraded: "no stacks: tells you how long, not where"}
@@ -141,9 +158,28 @@
        `sched.runqlat` reports. Every event carries it as `queued_ns`, with
        `blocked_ns = total_ns - queued_ns` beside it, so a decomposition can add
        this source to `sched.runqlat` without counting the same nanoseconds
-       twice. A `queued_ns` of zero on a block whose wakeup the run did not see
-       means unknown rather than none, and the run says how many blocks that
-       is."
+       twice.
+
+       `queued_ns` is the kernel's own account of that wait, read from the
+       task's `sched_info` at the switch that ends it -- `rq->clock` less the
+       queue stamp, plus what `run_delay` grew by if the task was moved between
+       cpus while it waited -- so it is what the task's `schedstat` says it
+       waited, wait for wait. The tracepoints' account of the same wait,
+       `sched_wakeup` to the switch, is beside it as `wake_to_run_ns`: the two
+       part by about a microsecond a wait, a cpu coming out of idle for the
+       task it was woken for, which the kernel leaves in blocked time and so
+       does `blocked_ns`. A block begins where `__schedule` was entered rather
+       than at the switch, after the next task was picked: that is where the
+       kernel stops the task's cpu account (`sched_entry_tp`, 6.16; earlier
+       kernels keep the switch and say so). A block whose wakeup the run did
+       not see has a `wake_to_run_ns` of zero meaning unknown, and the run says
+       how many blocks that is."
+    - "A process target is followed into every process it starts, as
+       `cpu.profile` follows it: a program on `sched_process_fork` adds a
+       child to the set before it has run, so a compiler driver's or a build's
+       children have their blocks here from the first one. A process whose
+       stacks are asked for is named against its own mappings, read again on
+       every drain it blocked in."
     - "A task still blocked when the run ends is in no total: its block has no
        end yet. The count of them is reported with the run, because a program
        that spends its life waiting would otherwise show almost nothing."
@@ -173,7 +209,7 @@
     # involuntary one by the kernel's own rule, for anyone who forces it.
     # `count` only: `trace` is a per-switch event, which the `woke` join from
     # `sched.wakeup` needs, and `pmu:sw` records.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "kernel>=6.1"], cost: low,
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"], cost: low,
        modes: [count], targets: {system: native, pid: native, tid: native, launch: native, cgroup: native},
        filter_fields: [comm, pid], equivalent: true, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low,
@@ -199,7 +235,7 @@
   summary: "Task migrations between cores"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_migrate_task(task_struct *, int)", "kernel>=5.8"], cost: low, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_migrate_task(task_struct *, int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=5.8"], cost: low, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_migrate_task", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
   emits: [rate, topk, raw, summary]

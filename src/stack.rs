@@ -1877,10 +1877,25 @@ fn is_local(source: &unwind::SymbolSource) -> bool {
 /// choice down for them would say something their stacks are not.
 pub const UNWOUND_BY_CHOICE: &[(&str, &str)] = &[("cpu.profile", "pmu:sw")];
 
+/// The sources whose stacks the kernel walks and this build names, which read
+/// `--symbols` without unwinding through [`choose`]: the walk is the kernel's
+/// frame-pointer one, and only where the names come from is a choice.
+pub const NAMED_BY_CHOICE: &[&str] = &["sched.offcpu"];
+
 /// Whether `source` names its stacks through a collector that reads
 /// `--symbols` in this build, on any backend.
 pub fn reads_symbols(source: &str) -> bool {
-    UNWOUND_BY_CHOICE.iter().any(|(id, _)| *id == source)
+    UNWOUND_BY_CHOICE.iter().any(|(id, _)| *id == source) || NAMED_BY_CHOICE.contains(&source)
+}
+
+/// Every source [`reads_symbols`] answers yes for, in the order a refusal
+/// lists them.
+pub fn symbol_readers() -> Vec<&'static str> {
+    UNWOUND_BY_CHOICE
+        .iter()
+        .map(|(source, _)| *source)
+        .chain(NAMED_BY_CHOICE.iter().copied())
+        .collect()
 }
 
 /// The unwind choice to record beside a resolved backend, for a collector that
@@ -2500,26 +2515,53 @@ impl Unwinder {
             )),
             _ => {}
         }
-        let origins = self.symbols.origins();
-        if origins.values().any(|origin| {
+        facts.extend(names_fact(
+            self.symbols.origins(),
+            self.symbols.debuginfod.is_some(),
+        ));
+        facts
+    }
+}
+
+/// The facts line that says where a capture's names came from, when there is
+/// something to say: a module named by debuginfod, by a perf map, by its
+/// dynamic symbols only, or not at all -- or debuginfod was asked, whatever it
+/// answered.
+///
+/// Dynamic symbols only is among them because it is the one a reader cannot
+/// infer: a stripped distribution binary names its exported functions and
+/// nothing else, so its internal functions come back as `module+offset`, and a
+/// run whose every module was like that said nothing about why
+/// (`docs/open-findings.md`, the seventeenth wave, stream python). A capture
+/// whose every module was named from its own symbol table has nothing to
+/// explain, and says nothing.
+///
+/// Shared by every collector that symbolizes: `cpu.profile` through its
+/// unwinders and `sched.offcpu` through its symbolizers, so the line reads the
+/// same whichever source a stack came from.
+pub fn names_fact<'a>(
+    origins: impl IntoIterator<Item = (&'a PathBuf, &'a unwind::NameOrigin)>,
+    debuginfod_asked: bool,
+) -> Option<String> {
+    let origins: Vec<(&PathBuf, &unwind::NameOrigin)> = origins.into_iter().collect();
+    let worth_saying = debuginfod_asked
+        || origins.iter().any(|(_, origin)| {
             matches!(
                 origin,
                 unwind::NameOrigin::Debuginfod { .. }
                     | unwind::NameOrigin::None(_)
                     | unwind::NameOrigin::PerfMap { .. }
+                    | unwind::NameOrigin::DynamicSymbols
             )
-        }) || self.symbols.debuginfod.is_some()
-        {
-            let described: Vec<String> = origins
-                .iter()
-                .map(|(path, origin)| format!("{}: {origin}", basename(&path.to_string_lossy())))
-                .collect();
-            if !described.is_empty() {
-                facts.push(format!("names came from -- {}", described.join("; ")));
-            }
-        }
-        facts
+        });
+    if !worth_saying || origins.is_empty() {
+        return None;
     }
+    let described: Vec<String> = origins
+        .iter()
+        .map(|(path, origin)| format!("{}: {origin}", basename(&path.to_string_lossy())))
+        .collect();
+    Some(format!("names came from -- {}", described.join("; ")))
 }
 
 /// The target's executable as its maps name it, while it is alive.

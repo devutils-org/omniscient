@@ -27,10 +27,10 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{
-    count_drop, helper, push_task_filter, read_field, Insn, Program, Subject, TaskFields, Whose,
-    BPF_DW, BPF_W, R10,
+    count_drop, helper, read_field, Insn, Program, Subject, TaskFields, Whose, BPF_DW, BPF_W, R10,
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
+use super::sched_common::{push_followed_filter, Descendants, Followed};
 use super::syscall;
 
 /// Arguments of `sched_migrate_task`, in the raw tracepoint's context.
@@ -113,7 +113,13 @@ impl Migration {
     }
 }
 
-fn instructions(btf: &Btf, whose: Whose, rows_fd: i32, drops_fd: i32) -> Result<Vec<Insn>, String> {
+fn instructions(
+    btf: &Btf,
+    followed: Followed,
+    rows_fd: i32,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let whose = followed.whose;
     let signature = btf.tracepoint_signature("sched_migrate_task")?;
     if signature != SIGNATURE {
         return Err(format!(
@@ -142,13 +148,15 @@ fn instructions(btf: &Btf, whose: Whose, rows_fd: i32, drops_fd: i32) -> Result<
     // A run observes one process or one cgroup. Which is known before the
     // program loads and never changes, so the comparison is in the instruction
     // stream rather than in a map.
-    push_task_filter(
+    push_followed_filter(
         &mut program,
         &fields,
-        whose,
+        &followed,
         Subject::with_ids(7, ROW_KEY + KEY_TID, ROW_KEY + KEY_TGID),
+        tgid_offset,
         FILTER_SCRATCH,
         "done",
+        "moved_kept",
     );
     // The last four bytes of the key, so every byte of it is written: the
     // kernel hashes all twelve, and one nobody wrote puts two identical
@@ -218,6 +226,8 @@ fn instructions(btf: &Btf, whose: Whose, rows_fd: i32, drops_fd: i32) -> Result<
 
 /// A loaded, attached migration program and the map it fills.
 pub struct MigrationProgram {
+    /// The processes a process target started, followed in the kernel.
+    descendants: Option<Descendants>,
     rows: Rows,
     drops: Counters,
     program: OwnedFd,
@@ -232,6 +242,13 @@ impl MigrationProgram {
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
         crate::bpf::attach::fentry::skipped([&self.program])
+            + self.descendants.as_ref().map_or(0, Descendants::skipped)
+    }
+
+    /// Processes the target started that no program here followed, because
+    /// the map of them was full.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants.as_ref().map_or(0, Descendants::missed)
     }
 
     pub fn load(whose: Whose) -> Result<Self, String> {
@@ -241,7 +258,16 @@ impl MigrationProgram {
         let drops = Counters::create(1, "omn_migr_drop")
             .map_err(|error| map_failure("migration drop counter", error))?;
 
-        let instructions = instructions(btf, whose, rows.as_raw_fd(), drops.as_raw_fd())?;
+        let descendants = match whose {
+            Whose::Process(root) => Some(Descendants::follow(root)?),
+            _ => None,
+        };
+        let followed = descendants
+            .as_ref()
+            .map_or(Followed::only(whose), |descendants| {
+                descendants.followed(whose)
+            });
+        let instructions = instructions(btf, followed, rows.as_raw_fd(), drops.as_raw_fd())?;
         let program = syscall::prog_load(
             syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
             &instructions,
@@ -261,6 +287,7 @@ impl MigrationProgram {
             })?;
 
         Ok(Self {
+            descendants,
             rows,
             drops,
             program,
@@ -315,7 +342,7 @@ mod tests {
     #[test]
     fn the_count_is_accumulated_atomically() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, Whose::Any, 3, 4).expect("a program");
+        let program = instructions(&btf, Followed::only(Whose::Any), 3, 4).expect("a program");
         assert_eq!(
             program.iter().filter(|insn| insn.code == 0xdb).count(),
             1,
@@ -330,7 +357,7 @@ mod tests {
     #[test]
     fn the_program_reads_no_clock_because_it_measures_no_duration() {
         let Some(btf) = kernel_btf() else { return };
-        let called: Vec<i32> = instructions(&btf, Whose::Any, 3, 4)
+        let called: Vec<i32> = instructions(&btf, Followed::only(Whose::Any), 3, 4)
             .expect("a program")
             .iter()
             .filter(|insn| insn.code == 0x85)
@@ -344,12 +371,12 @@ mod tests {
     #[test]
     fn the_filter_is_present_only_when_a_process_was_named() {
         let Some(btf) = kernel_btf() else { return };
-        assert!(!instructions(&btf, Whose::Any, 3, 4)
+        assert!(!instructions(&btf, Followed::only(Whose::Any), 3, 4)
             .expect("a program")
             .iter()
             .any(|insn| insn.imm == 4242));
         assert_eq!(
-            instructions(&btf, Whose::Process(4242), 3, 4)
+            instructions(&btf, Followed::only(Whose::Process(4242)), 3, 4)
                 .expect("a program")
                 .iter()
                 .filter(|insn| insn.imm == 4242)
@@ -366,7 +393,7 @@ mod tests {
                 .expect("a prototype"),
             SIGNATURE
         );
-        assert!(instructions(&btf, Whose::Any, 3, 4).is_ok());
+        assert!(instructions(&btf, Followed::only(Whose::Any), 3, 4).is_ok());
     }
 
     /// The kernel hashes every byte of a key, so one the program never writes
@@ -444,7 +471,7 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, Whose::Any, 3, 4).expect("a program");
+        let program = instructions(&btf, Followed::only(Whose::Any), 3, 4).expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 3);
     }
 }

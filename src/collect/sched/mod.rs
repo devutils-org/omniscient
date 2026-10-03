@@ -69,6 +69,8 @@ pub fn factories() -> Vec<Factory> {
                 wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
                 // Applied per drained row; see `offcpu::Prepare`.
                 filter: resolved.request.filter.clone(),
+                debuginfod: resolved.request.symbols
+                    == Some(crate::stack::unwind::SymbolSource::Debuginfod),
             }))
         }),
         Factory::new("sched.runqlat", "bpf:raw_tp", |resolved| {

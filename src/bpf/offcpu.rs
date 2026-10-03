@@ -41,10 +41,14 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{
-    self, count_drop, helper, push_task_filter, read_field, Insn, Log2Labels, Program, Subject,
-    TaskFields, Whose, BPF_DW, BPF_W, R10,
+    self, count_drop, helper, read_field, Insn, Log2Labels, Program, Subject, TaskFields, Whose,
+    BPF_DW, BPF_W, R10,
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows, StackTraces};
+use super::sched_common::{
+    push_followed_filter, push_kernel_wait, push_last_queued, push_rq_clock, push_run_delay,
+    Descendants, Followed, KernelClock,
+};
 use super::syscall;
 
 /// This program's own labels for the shared unrolled log2.
@@ -83,6 +87,13 @@ const WAKEUP_SIGNATURE: [&str; 1] = ["task_struct *"];
 /// word instead of eight addresses.
 const BPF_F_USER_STACK: i32 = 1 << 8;
 
+/// How old a `__schedule` entry stamp may be and still be the entry of the
+/// switch reading it. Between the two the scheduler picks the next task, which
+/// on a newly idle cpu includes a load balance bounded by the migration cost
+/// (half a millisecond by default); anything older is a stamp a skipped run
+/// left behind.
+const ENTRY_STALE_NS: i32 = 1_000_000;
+
 /// `TASK_RUNNING`: the task left the cpu and is still runnable, which is
 /// preemption and belongs to `sched.runqlat`.
 const TASK_RUNNING: i32 = 0;
@@ -115,17 +126,27 @@ const DROP_TOTALS: u32 = 1;
 /// reads and the map descriptors all come from the same place. Every byte of
 /// each is written before it is handed to a helper: an uninitialised byte in a
 /// key makes two identical blocks land in two different buckets.
-const TOTAL_VALUE: i16 = -104;
+const TOTAL_VALUE: i16 = -136;
 /// Twenty bytes of key in a twenty-four-byte slot.
-const TOTAL_KEY: i16 = -64;
-const IN_FLIGHT_VALUE: i16 = -40;
+const TOTAL_KEY: i16 = -72;
+const IN_FLIGHT_VALUE: i16 = -48;
 const IN_FLIGHT_KEY: i16 = -8;
-const DROP_KEY: i16 = -112;
+const DROP_KEY: i16 = -144;
 /// Where the program keeps the row map it looked up through the generation
 /// slot, once per run; see `map::select_rows`.
-const ROWS_SLOT: i16 = -120;
-/// Sixteen bytes for the target comparison, `insn::push_task_filter`.
-const FILTER_SCRATCH: i16 = -136;
+const ROWS_SLOT: i16 = -152;
+/// Sixteen bytes for the target comparison, `insn::push_task_filter`, and
+/// the eight the scheduler's clock is read through.
+const FILTER_SCRATCH: i16 = -168;
+/// The scheduler's clock now and the task's queue stamp, held across the
+/// helper calls that read them; and the key of the per-cpu slot the
+/// `__schedule` entry stamp is in.
+const CLOCK_NOW: i16 = -176;
+const CLOCK_QUEUED: i16 = -184;
+const ENTRY_KEY: i16 = -192;
+/// `sched_info.run_delay` when the block began and when it ended.
+const CLOCK_DELAY_THEN: i16 = -200;
+const CLOCK_DELAY_NOW: i16 = -208;
 
 /// The layout of a totals key, as byte offsets within it.
 ///
@@ -178,7 +199,24 @@ const COMM_BYTES: usize = 16;
 /// off cpu of which 77 ms was queue wait, and a decomposition adding the two
 /// sources counted those 77 ms twice with nothing saying so.
 const VALUE_QUEUED_NS: i16 = 32;
-const TOTAL_VALUE_BYTES: usize = 40;
+/// The tracepoints' account of the same wait: `sched_wakeup` to the
+/// `sched_switch` that ran the task, by `bpf_ktime_get_ns`.
+///
+/// `queued_ns` is the kernel's own `sched_info` account where this kernel
+/// exposes it (`sched_common::KernelClock`), and this is kept beside it because
+/// the two part by about a microsecond a wait and the difference is a fact
+/// about the machine -- a cpu coming out of idle to run the task it was woken
+/// for -- that the kernel's account leaves in blocked time. Equal to
+/// `queued_ns` on a kernel without that clock.
+const VALUE_WAKE_TO_RUN_NS: i16 = 40;
+/// Blocks the kernel held no queue stamp for (`sched_info.last_queued` zero, or
+/// a run queue that could not be reached), whose `queued_ns` is then zero as
+/// `sched_info` counts it.
+const VALUE_UNSTAMPED: i16 = 48;
+/// Blocks whose releasing wakeup this run did not see, whose `wake_to_run_ns`
+/// is then zero because it is unknown.
+const VALUE_UNWOKEN: i16 = 56;
+const TOTAL_VALUE_BYTES: usize = 64;
 
 /// The in-flight map: thread id to when it left the cpu and in what state.
 ///
@@ -204,8 +242,11 @@ const IN_FLIGHT_STACK: i16 = 16;
 /// the one closest to the switch-in. `sched.runqlat` does the same with the
 /// same tracepoint, so the two agree about what the wait was.
 const IN_FLIGHT_WOKEN: i16 = 24;
+/// `sched_info.run_delay` as the task left the cpu; see
+/// `sched_common::push_run_delay`.
+const IN_FLIGHT_RUN_DELAY: i16 = 32;
 const IN_FLIGHT_KEY_BYTES: usize = 4;
-const IN_FLIGHT_VALUE_BYTES: usize = 32;
+const IN_FLIGHT_VALUE_BYTES: usize = 40;
 
 /// One `(task, state)` pair's blocked time over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +266,15 @@ pub struct OffCpu {
     /// `sched.runqlat` also reports, which is what makes adding the two sources
     /// a double count unless one of them subtracts it.
     pub queued_ns: u64,
+    /// The wait from the wakeup to the switch by the tracepoints, which
+    /// `queued_ns` is not where the kernel exposes its own account; see
+    /// `VALUE_WAKE_TO_RUN_NS`.
+    pub wake_to_run_ns: u64,
+    /// Blocks the kernel held no queue stamp for, whose queue wait is zero as
+    /// `sched_info` counts it.
+    pub unstamped: u64,
+    /// Blocks whose releasing wakeup this run did not see.
+    pub unwoken: u64,
     /// How many separate blocks that time was spread over.
     pub blocks: u64,
     pub comm: String,
@@ -292,6 +342,9 @@ impl OffCpu {
             bucket: word(key, KEY_BUCKET as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
             queued_ns: long(value, VALUE_QUEUED_NS as usize),
+            wake_to_run_ns: long(value, VALUE_WAKE_TO_RUN_NS as usize),
+            unstamped: long(value, VALUE_UNSTAMPED as usize),
+            unwoken: long(value, VALUE_UNWOKEN as usize),
             blocks: long(value, VALUE_BLOCKS as usize),
             comm: String::from_utf8_lossy(&comm[..end]).into_owned(),
             // Signed on the wire: `bpf_get_stackid` answers with an id or
@@ -310,9 +363,15 @@ impl OffCpu {
 }
 
 /// Builds the program for a target, or for the whole machine.
+///
+/// `clock` is where the scheduler's own clock is on this kernel, when it is;
+/// see `sched_common::KernelClock`.
+#[allow(clippy::too_many_arguments)]
 fn instructions(
     btf: &Btf,
-    whose: Whose,
+    followed: Followed,
+    clock: Option<KernelClock>,
+    entries_fd: Option<i32>,
     in_flight_fd: i32,
     totals_fd: i32,
     drops_fd: i32,
@@ -332,7 +391,7 @@ fn instructions(
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
     let comm_offset = btf.member_offset("task_struct", "comm")?;
-    let fields = TaskFields::locate(btf, whose)?;
+    let fields = TaskFields::locate(btf, followed.whose)?;
 
     let mut program = Program::new();
     // r6 keeps the context, r7 whichever task is being looked at and r8 the
@@ -377,14 +436,58 @@ fn instructions(
     // out of three was exactly that, and it read as "no user stack to walk".
     // It also walked every blocking stack on the machine to keep one
     // process's.
-    push_task_filter(
+    push_followed_filter(
         &mut program,
         &fields,
-        whose,
+        &followed,
         Subject::task(7),
+        tgid_offset,
         FILTER_SCRATCH,
         "left",
+        "leaving_kept",
     );
+
+    program.push(Insn::st_imm(
+        BPF_DW,
+        R10,
+        IN_FLIGHT_VALUE + IN_FLIGHT_RUN_DELAY,
+        0,
+    ));
+    if let Some(clock) = &clock {
+        push_run_delay(
+            &mut program,
+            clock,
+            7,
+            IN_FLIGHT_VALUE + IN_FLIGHT_RUN_DELAY,
+        );
+    }
+
+    // When the block began: where `__schedule` was entered on this cpu, which
+    // is where the kernel stops the task's cpu account and its blocked time
+    // begins, rather than here, after the next task was picked. Between the
+    // two the cpu looked for work for itself -- a newly idle cpu balances --
+    // and on this machine that was 0.65 us a block missing from every blocked
+    // row. Read and cleared, so a stamp is used by the switch it belongs to
+    // and no other; one older than `ENTRY_STALE_NS` is not this switch's.
+    if let Some(entries_fd) = entries_fd {
+        program.push(Insn::st_imm(BPF_W, R10, ENTRY_KEY, 0));
+        program.extend(Insn::load_map_fd(1, entries_fd));
+        program.push(Insn::mov64_reg(2, R10));
+        program.push(Insn::add64_imm(2, ENTRY_KEY as i32));
+        program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+        program.jump_to("entry_read", Insn::jeq_imm(0, 0, 0));
+        program.push(Insn::ldx(BPF_DW, 1, 0, 0));
+        program.push(Insn::st_imm(BPF_DW, 0, 0, 0));
+        program.jump_to("entry_read", Insn::jeq_imm(1, 0, 0));
+        // Later than now: not a stamp of this cpu's past.
+        program.jump_to("entry_read", Insn::jgt_reg(1, 8, 0));
+        program.push(Insn::mov64_reg(2, 8));
+        program.push(Insn::sub64_reg(2, 1));
+        program.push(Insn::mov64_imm(3, ENTRY_STALE_NS));
+        program.jump_to("entry_read", Insn::jgt_reg(2, 3, 0));
+        program.push(Insn::stx(BPF_DW, R10, IN_FLIGHT_VALUE + IN_FLIGHT_TS, 1));
+        program.label("entry_read");
+    }
 
     // The stack of the task that is leaving, taken here because here is the
     // only place it exists. `sched_switch` runs in the outgoing task's context
@@ -444,23 +547,75 @@ fn instructions(
     // r1 through r5 and there is no callee-saved register left to hold it.
     program.push(Insn::ldx(BPF_W, 3, 0, IN_FLIGHT_STACK));
     program.push(Insn::stx(BPF_W, R10, TOTAL_KEY + KEY_STACK, 3));
-    // The wakeup stamp, and the queue wait it makes measurable. The slot it
-    // lands in is the same one the first-block template writes from, so both
-    // paths below read one place.
+    program.push(Insn::ldx(BPF_DW, 3, 0, IN_FLIGHT_RUN_DELAY));
+    program.push(Insn::stx(BPF_DW, R10, CLOCK_DELAY_THEN, 3));
+    // The wakeup stamp, and the wait from it to here by the tracepoints. The
+    // slots it lands in are the ones the first-block template writes from, so
+    // both paths below read one place.
     program.push(Insn::ldx(BPF_DW, 4, 0, IN_FLIGHT_WOKEN));
     program.jump_to("no_wakeup", Insn::jeq_imm(4, 0, 0));
     program.push(Insn::mov64_reg(5, 8));
     program.push(Insn::sub64_reg(5, 4));
-    program.push(Insn::stx(BPF_DW, R10, TOTAL_VALUE + VALUE_QUEUED_NS, 5));
-    program.jump_to("queued_known", Insn::ja());
+    program.push(Insn::stx(
+        BPF_DW,
+        R10,
+        TOTAL_VALUE + VALUE_WAKE_TO_RUN_NS,
+        5,
+    ));
+    program.push(Insn::st_imm(BPF_DW, R10, TOTAL_VALUE + VALUE_UNWOKEN, 0));
+    program.jump_to("woken_known", Insn::ja());
     program.label("no_wakeup");
     // A block whose wakeup this run did not see contributes nothing to the
-    // queue wait rather than an estimate of one. The collector counts these and
-    // says so, because a zero that means "not seen" and a zero that means "no
-    // wait" are different facts.
-    program.push(Insn::st_imm(BPF_DW, R10, TOTAL_VALUE + VALUE_QUEUED_NS, 0));
-    program.label("queued_known");
+    // wait rather than an estimate of one, and is counted, because a zero that
+    // means "not seen" and a zero that means "no wait" are different facts.
+    program.push(Insn::st_imm(
+        BPF_DW,
+        R10,
+        TOTAL_VALUE + VALUE_WAKE_TO_RUN_NS,
+        0,
+    ));
+    program.push(Insn::st_imm(BPF_DW, R10, TOTAL_VALUE + VALUE_UNWOKEN, 1));
+    program.label("woken_known");
 
+    // The queue wait. Where the kernel exposes its clock, it is `sched_info`'s
+    // own: `rq->clock - last_queued`, the two values `sched_info_arrive` is
+    // about to subtract, read under the same lock. Otherwise the tracepoints'.
+    program.push(Insn::ldx(
+        BPF_DW,
+        1,
+        R10,
+        TOTAL_VALUE + VALUE_WAKE_TO_RUN_NS,
+    ));
+    program.push(Insn::stx(BPF_DW, R10, TOTAL_VALUE + VALUE_QUEUED_NS, 1));
+    program.push(Insn::st_imm(BPF_DW, R10, TOTAL_VALUE + VALUE_UNSTAMPED, 0));
+    if let Some(clock) = &clock {
+        program.push(Insn::st_imm(BPF_DW, R10, TOTAL_VALUE + VALUE_QUEUED_NS, 0));
+        program.push(Insn::st_imm(BPF_DW, R10, TOTAL_VALUE + VALUE_UNSTAMPED, 1));
+        push_last_queued(&mut program, clock, 7, CLOCK_QUEUED);
+        push_run_delay(&mut program, clock, 7, CLOCK_DELAY_NOW);
+        push_rq_clock(
+            &mut program,
+            clock,
+            7,
+            FILTER_SCRATCH,
+            CLOCK_NOW,
+            "kernel_done",
+        );
+        push_kernel_wait(
+            &mut program,
+            [CLOCK_NOW, CLOCK_QUEUED, CLOCK_DELAY_THEN, CLOCK_DELAY_NOW],
+            "kernel_done",
+            "kernel_grown",
+        );
+        program.push(Insn::stx(BPF_DW, R10, TOTAL_VALUE + VALUE_QUEUED_NS, 1));
+        program.push(Insn::st_imm(BPF_DW, R10, TOTAL_VALUE + VALUE_UNSTAMPED, 0));
+        program.label("kernel_done");
+    }
+
+    program.extend(Insn::load_map_fd(1, in_flight_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, IN_FLIGHT_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
     program.extend(Insn::load_map_fd(1, in_flight_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, IN_FLIGHT_KEY as i32));
@@ -490,6 +645,10 @@ fn instructions(
     program.push(Insn::atomic_add(BPF_DW, 0, VALUE_TOTAL_NS, 9));
     program.push(Insn::ldx(BPF_DW, 1, R10, TOTAL_VALUE + VALUE_QUEUED_NS));
     program.push(Insn::atomic_add(BPF_DW, 0, VALUE_QUEUED_NS, 1));
+    for field in [VALUE_WAKE_TO_RUN_NS, VALUE_UNSTAMPED, VALUE_UNWOKEN] {
+        program.push(Insn::ldx(BPF_DW, 1, R10, TOTAL_VALUE + field));
+        program.push(Insn::atomic_add(BPF_DW, 0, field, 1));
+    }
     program.push(Insn::mov64_imm(1, 1));
     program.push(Insn::atomic_add(BPF_DW, 0, VALUE_BLOCKS, 1));
     program.jump_to("done", Insn::ja());
@@ -582,11 +741,74 @@ fn wakeup_instructions(btf: &Btf, in_flight_fd: i32) -> Result<Vec<Insn>, String
     Ok(instructions)
 }
 
+/// The program on `sched_entry_tp`: `__schedule` was entered on this cpu.
+///
+/// It writes the moment into this cpu's slot and does nothing else; the
+/// `sched_switch` program reads and clears it. The tracepoint is a bare one
+/// (no trace event), added for the scheduler's runtime verification monitors
+/// in 6.16; a kernel without it keeps the switch as the block's start.
+fn entry_instructions(entries_fd: i32) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::mov64_reg(8, 0));
+    program.push(Insn::st_imm(BPF_W, R10, -8, 0));
+    program.extend(Insn::load_map_fd(1, entries_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, -8));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::stx(BPF_DW, 0, 0, 8));
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// The `__schedule` entry stamps: a per-cpu slot, the program that writes
+/// it, and its link.
+struct Entries {
+    stamps: Counters,
+    program: OwnedFd,
+    _link: OwnedFd,
+}
+
+impl Entries {
+    fn attach(btf: &Btf) -> Result<Self, String> {
+        btf.tracepoint_signature("sched_entry_tp")?;
+        let stamps = Counters::create(1, "omn_offcpu_ent")
+            .map_err(|error| map_failure("off-cpu entry stamps", error))?;
+        let instructions = entry_instructions(stamps.as_raw_fd())?;
+        let program = syscall::prog_load(
+            syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+            &instructions,
+            "omn_offcpu_ent",
+            LICENSE,
+        )
+        .map_err(|error| format!("the kernel refused the off-cpu entry program: {error}"))?;
+        let link = syscall::raw_tracepoint_open("sched_entry_tp", program.as_raw_fd())
+            .map_err(|error| format!("cannot attach to `sched_entry_tp`: {error}"))?;
+        Ok(Self {
+            stamps,
+            program,
+            _link: link,
+        })
+    }
+}
+
 /// A loaded, attached off-cpu program and the maps it fills.
 ///
 /// Dropping it detaches: the link, the program and the maps are file
 /// descriptors, and the kernel unloads the program when the last one closes.
 pub struct OffCpuProgram {
+    /// The processes a process target started, followed in the kernel.
+    descendants: Option<Descendants>,
+    /// Why the scheduler's clock could not be read on this kernel.
+    clock_missing: Option<String>,
+    /// Where `__schedule` was entered, per cpu, and why not when it is not.
+    entries: Option<Entries>,
+    entries_missing: Option<String>,
     in_flight: Hash,
     totals: Rows,
     drops: Counters,
@@ -619,10 +841,65 @@ impl OffCpuProgram {
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
         crate::bpf::attach::fentry::skipped([&self.program, &self.wakeup_program])
+            + self.descendants.as_ref().map_or(0, Descendants::skipped)
+            + self.entries.as_ref().map_or(0, |entries| {
+                crate::bpf::attach::fentry::skipped([&entries.program])
+            })
+    }
+
+    /// The processes followed now, the target's first; empty unless the
+    /// target is a process.
+    pub fn processes(&self) -> Vec<u32> {
+        self.descendants
+            .as_ref()
+            .map_or_else(Vec::new, Descendants::processes)
+    }
+
+    /// Processes the target started that no program here followed, because
+    /// the map of them was full.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants.as_ref().map_or(0, Descendants::missed)
+    }
+
+    /// Why the queue wait is not the kernel's own account, on a kernel that
+    /// does not expose it.
+    pub fn clock_missing(&self) -> Option<&str> {
+        self.clock_missing.as_deref()
+    }
+
+    /// Why a block begins at the switch rather than at `__schedule`'s entry,
+    /// on a kernel without the tracepoint for it.
+    pub fn entries_missing(&self) -> Option<&str> {
+        self.entries_missing.as_deref()
     }
 
     pub fn load(whose: Whose) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
+        let descendants = match whose {
+            Whose::Process(root) => Some(Descendants::follow(root)?),
+            _ => None,
+        };
+        let followed = descendants
+            .as_ref()
+            .map_or(Followed::only(whose), |descendants| {
+                descendants.followed(whose)
+            });
+        let (clock, clock_missing) = match KernelClock::locate(btf) {
+            Ok(clock) => (Some(clock), None),
+            Err(reason) => (None, Some(KernelClock::missing(&reason))),
+        };
+        let (entries, entries_missing) = match Entries::attach(btf) {
+            Ok(entries) => (Some(entries), None),
+            Err(reason) => (
+                None,
+                Some(format!(
+                    "a block begins at the `sched_switch` that took the task off, after the \
+                     next task was picked, rather than where `__schedule` was entered ({reason}); \
+                     each blocked row is short of the kernel's by what the picks took, under a \
+                     microsecond a block"
+                )),
+            ),
+        };
 
         let in_flight = Hash::create(
             IN_FLIGHT_KEY_BYTES,
@@ -645,7 +922,9 @@ impl OffCpuProgram {
 
         let instructions = instructions(
             btf,
-            whose,
+            followed,
+            clock,
+            entries.as_ref().map(|entries| entries.stamps.as_raw_fd()),
             in_flight.as_raw_fd(),
             totals.as_raw_fd(),
             drops.as_raw_fd(),
@@ -686,6 +965,10 @@ impl OffCpuProgram {
             .map_err(|error| format!("cannot attach to the `sched_wakeup` tracepoint: {error}"))?;
 
         Ok(Self {
+            descendants,
+            clock_missing,
+            entries,
+            entries_missing,
             in_flight,
             totals,
             drops,
@@ -787,6 +1070,9 @@ mod tests {
             (VALUE_BLOCKS, 8),
             (VALUE_COMM, COMM_BYTES as i16),
             (VALUE_QUEUED_NS, 8),
+            (VALUE_WAKE_TO_RUN_NS, 8),
+            (VALUE_UNSTAMPED, 8),
+            (VALUE_UNWOKEN, 8),
         ];
         for (fields, bytes, what) in [
             (&key[..], TOTAL_KEY_BYTES, "the totals key"),
@@ -826,6 +1112,11 @@ mod tests {
             (IN_FLIGHT_KEY, 8, "in-flight key slot"),
             (ROWS_SLOT, 8, "row map slot"),
             (FILTER_SCRATCH, 16, "filter scratch"),
+            (CLOCK_NOW, 8, "clock now"),
+            (CLOCK_QUEUED, 8, "queue stamp"),
+            (ENTRY_KEY, 4, "entry stamp key"),
+            (CLOCK_DELAY_THEN, 8, "run delay then"),
+            (CLOCK_DELAY_NOW, 8, "run delay now"),
         ];
         for (at, size, name) in regions {
             assert!(at >= -512 && at + size <= 0, "`{name}` is off the frame");
@@ -851,6 +1142,20 @@ mod tests {
         }
     }
 
+    /// The program as it is loaded on this kernel, for a target alone.
+    fn built(btf: &Btf, whose: Whose) -> Result<Vec<Insn>, String> {
+        instructions(
+            btf,
+            Followed::only(whose),
+            KernelClock::locate(btf).ok(),
+            Some(7),
+            3,
+            4,
+            5,
+            6,
+        )
+    }
+
     fn helpers_called(instructions: &[Insn]) -> Vec<i32> {
         instructions
             .iter()
@@ -868,8 +1173,7 @@ mod tests {
     fn a_narrowed_run_walks_only_the_targets_stacks() {
         const TGID: i32 = 4242;
         let Some(btf) = kernel_btf() else { return };
-        let program =
-            instructions(&btf, Whose::Process(TGID as u32), 3, 4, 5, 6).expect("a program");
+        let program = built(&btf, Whose::Process(TGID as u32)).expect("a program");
         let compared = program
             .iter()
             .position(|insn| insn.imm == TGID)
@@ -885,7 +1189,7 @@ mod tests {
 
         // And a machine-wide run still walks every stack, with nothing to
         // compare against.
-        let everything = instructions(&btf, Whose::Any, 3, 4, 5, 6).expect("a program");
+        let everything = built(&btf, Whose::Any).expect("a program");
         assert!(!everything.iter().any(|insn| insn.imm == TGID));
         assert!(helpers_called(&everything).contains(&helper::GET_STACKID));
     }
@@ -920,8 +1224,7 @@ mod tests {
     #[test]
     fn the_program_reads_the_monotonic_clock_and_no_other() {
         let Some(btf) = kernel_btf() else { return };
-        let called =
-            helpers_called(&instructions(&btf, Whose::Process(1), 3, 4, 5, 6).expect("a program"));
+        let called = helpers_called(&built(&btf, Whose::Process(1)).expect("a program"));
         const KTIME_GET_BOOT_NS: i32 = 125;
         assert!(called.contains(&helper::KTIME_GET_NS));
         assert!(!called.contains(&KTIME_GET_BOOT_NS));
@@ -942,7 +1245,7 @@ mod tests {
     #[test]
     fn the_duration_is_a_difference_and_not_a_timestamp() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, Whose::Any, 3, 4, 5, 6).expect("a program");
+        let program = built(&btf, Whose::Any).expect("a program");
         assert!(
             program.iter().any(|insn| *insn == Insn::sub64_reg(9, 1)),
             "the program must subtract the moment the task left from the moment it came back"
@@ -955,7 +1258,7 @@ mod tests {
     #[test]
     fn a_runnable_or_dying_task_is_not_recorded_as_blocked() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, Whose::Any, 3, 4, 5, 6).expect("a program");
+        let program = built(&btf, Whose::Any).expect("a program");
         assert!(
             program
                 .iter()
@@ -977,20 +1280,21 @@ mod tests {
     #[test]
     fn the_totals_are_accumulated_atomically() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, Whose::Any, 3, 4, 5, 6).expect("a program");
+        let program = built(&btf, Whose::Any).expect("a program");
         let atomics = program.iter().filter(|insn| insn.code == 0xdb).count();
         assert_eq!(
-            atomics, 3,
-            "the blocked nanoseconds, the queue wait inside them, and the block count"
+            atomics, 6,
+            "the blocked nanoseconds, the queue wait inside them, the same wait by the \
+             tracepoints, the block count, and the blocks without a stamp or a wakeup"
         );
     }
 
     #[test]
     fn the_filter_is_present_only_when_a_process_was_named() {
         let Some(btf) = kernel_btf() else { return };
-        let machine_wide = instructions(&btf, Whose::Any, 3, 4, 5, 6).expect("a program");
+        let machine_wide = built(&btf, Whose::Any).expect("a program");
         assert!(!machine_wide.iter().any(|insn| insn.imm == 4242));
-        let filtered = instructions(&btf, Whose::Process(4242), 3, 4, 5, 6).expect("a program");
+        let filtered = built(&btf, Whose::Process(4242)).expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             1,
@@ -1005,7 +1309,7 @@ mod tests {
     fn a_kernel_with_another_prototype_is_refused_rather_than_read_wrong() {
         let Some(btf) = kernel_btf() else { return };
         assert!(
-            instructions(&btf, Whose::Any, 3, 4, 5, 6).is_ok(),
+            built(&btf, Whose::Any).is_ok(),
             "this kernel's prototype is the one the program is written for"
         );
         assert_eq!(
@@ -1052,7 +1356,7 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = instructions(&btf, Whose::Process(1), 3, 4, 5, 6).expect("a program");
+        let program = built(&btf, Whose::Process(1)).expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

@@ -183,6 +183,16 @@ impl WakeupCollector {
             );
             self.skipped = skipped;
         }
+        let unfollowed = program.unfollowed();
+        if unfollowed > 0 {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so {} wakeups are not here",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "its" } else { "their" },
+            ));
+        }
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;
