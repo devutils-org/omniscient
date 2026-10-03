@@ -561,7 +561,7 @@ three new ones open.
    | `budget::a_budget_takes_no_mode_rung_...`, the bin's `tests::a_sampled_rung_...` | green, as rewritten for the weighed collector (a budgeted `raw` exit 2, a `hist` degrading) | `SKIP:` |
    | `budget::a_target_that_burns_under_a_tick_per_check_...` (un-ignored) | green, reasoned: `mem.rss` polled through `fs:proc`, no privilege | green, the same |
    | `join_engine::the_resident_size_...`, `two_sources_of_one_interface_...`, the load test; `resolve`, `request`, `collect::task`, `bench_harness` | green | green |
-   | **the skip gate** | **red**, on the four skips whose reason is not the machine's (filed, not landed: `tests/cli.rs` net.hwts, `scenario_cpu`'s container `note:`, `scenario_mem`'s `json` warning, `unwind`'s bare permission denied); and if the workflow's link does not find bpftool, its line | green, unless the bpftool line |
+   | **the skip gate** | green over a paranoid-2, capability-less run here (2026-10-03), the four skips answered and the throttle skip a pattern (`docs/open-findings.md`); red only if the workflow's link does not find bpftool, its line | green, unless the bpftool line |
 
    And once, **a sweep from an installed tree** (still not done; "Needs
    privilege", item 5).
@@ -604,9 +604,10 @@ three new ones open.
      the buckets' low bounds (io).
    - **`src/resolve.rs`**: one order for "unbuilt" and "missing" on both paths
      (mem; `DECISIONS.md`, "Open").
-   - **Tests**: the four skips whose reason is not the machine's, which keep
-     the skip gate red on `defaults` (io); `tests/cross_memory.rs` meeting a
-     user-mode-only run on `defaults` (mem).
+   - **Tests**: `tests/cross_memory.rs` meeting a user-mode-only run on
+     `defaults` (mem); at paranoid 2 here it skips with *"this machine
+     withholds a source it needs"*. (The four skips whose reason was not the
+     machine's: answered 2026-10-03.)
    - **The repository root**: the GPL-2.0 text `src/bpf` names, a decision
      (docs; `DECISIONS.md`, "Open").
    - **`docs/portability.md:184`**: `sched.switches` is usable on 5.15
@@ -753,6 +754,14 @@ sources and put the capability advice where the failure actually is.
 ---
 
 ## Needs privilege
+
+**Since 2026-10-03, `/etc/sudoers.d/omniscient-privileged` grants the exact
+commands of items 2, 3, 4, 6 and 7 below without a password**, so an agent can
+run them itself; item 1's `setcap` was already granted. Done that day: item 2
+(the listed tests green at paranoid 2 with a capability-less binary), 5 (92
+usable from `/usr/local/bin/omn`), 6 (the advice right, and no longer printed
+twice -- 8424b23) and 7 (`cost:` reads 39.7 us inside the target over 202
+runs, where it said unknown).
 
 Everything this machine cannot run as uid 1000, collected from the six
 sixteenth-wave handoffs and what is still open from the fifteenth, with the

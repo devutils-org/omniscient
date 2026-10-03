@@ -9796,6 +9796,16 @@ test is ever to require it.
 
 ### To the owners of four tests: skips whose reason is not the machine's (not added to `.github/expected-skips.txt`)
 
+**Answered, 2026-10-03.** `tests/cli.rs`: asserted as the request's refusal
+(exit 2), no longer a skip (d3fdbf0). `scenario_cpu`: already on `main` in
+9a404f3 (`machine_s_reason` puts the `error:` line first). `scenario_mem`: the
+skip starts at the `error:` line, and a user-mode-only count is asserted
+within bounds instead (843b46f). `unwind`: already on `main` in 9a404f3. Shown
+at `perf_event_paranoid` 2 with a capability-less binary on the development
+machine; the gate over that run then failed on one more line, scenario_cpu's
+throttle skip (*"perf_event_max_sample_rate is 100000, at or above the 100000
+asked"*), which is now a pattern in `.github/expected-skips.txt`.
+
 The gate of the run at `37f17c8` (both cells) failed on these, and each is a
 test that quotes something other than what the cell lacks:
 

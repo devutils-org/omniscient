@@ -91,3 +91,8 @@ gpu source\(s\) this machine serves have a collector for every backend
 skipped the depth: the kernel's own reads of /sys/block/[^/]+/inflight
 # A kernel whose root cgroup has no io.stat: `fs:cgroup` resolves onto nothing.
 /sys/fs/cgroup/io.stat does not exist here
+# The kernel's default ceiling (100 000/s) is at or above what this build can
+# ask through the cpu clock, so nothing is throttled to assert on: the throttle
+# half of scenario_cpu's ceiling test needs a lowered sysctl or the `pmu`
+# collector (shown at paranoid 2 here, 2026-10-03).
+perf_event_max_sample_rate is [0-9]+, at or above the [0-9]+ asked
