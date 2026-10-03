@@ -33,6 +33,10 @@ none, hence *"8581.01 % of the target's cpu time"*.
   reading it has given (`HighWater`, equal to any other so `read_each` still
   pairs meters of one target), so that a short walk does not shrink the
   denominator.
+- `Meter::read_each` gives a meter equal to an earlier one that one's
+  reading **and** raises its own high-water mark to it (`Meter::agree`), so
+  every `Launched` meter of one target holds the mark taken before the stop,
+  not only the first.
 - `Spending::read_before_the_stop`: when the run kills a program that outlived
   it, every meter is read once more just before the kill, the last moment the
   tree's processes can be read; after the kill they are reaped by whoever
@@ -69,11 +73,19 @@ was reparented to init or a subreaper) that also left the group. Reasoned.
 Every path that terminates goes through it: the duration, a budget stop, a
 failed attach, and `Drop`.
 
+A descendant the walk found but the kill could not signal (`EPERM`: a setuid
+child) is counted, `Lifetime::left_running` (in the results' JSON when not
+zero), and the run says so on stderr: `warning: the stop left N process(es)
+the program started running`. A count rather than the pids because
+`Lifetime` is `Copy` and `src/join.rs` (stream engine's) relies on it.
+
 ### 1.3 A stopped run says so on its own line
 
 - `collect::OVER_ITS_CEILING` ("against a ceiling of") is what both budget
   stops of `Spending::check` say, and `collect::stopped_by_budget(reason,
-  source)` recognises them, for a fixed window or a rolling span (`main.rs`'s
+  source, ceiling)` recognises them -- the request's own ceiling included, so
+  of two requests of one source under 1 % and 50 % only the 1 % one is
+  marked as having stopped the run -- for a fixed window or a rolling span (`main.rs`'s
   `over_budget` is now that plus `ROLLING_BUDGET`).
 - `MeasuredCost::stopped_by_budget` (in `cost.json` when true) and
   `MeasuredCost::stop`: one line, printed **before** the cost and verdict
@@ -104,7 +116,7 @@ Leaving it out would have regressed the mode rung the sixteenth wave landed:
 the ladder would pass over `pmu:sw` in `sample` again. One line; the
 coordinator may move it if a stream claims the file.
 
-### 1.5 `tests/runner.rs`: a skip where the profile cannot place a throttled loss
+### 1.5 `tests/runner.rs`: a throttled profile's loss fails, and says why
 
 `a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`
 failed on `main` too (checked with this stream's changes stashed:
@@ -112,10 +124,13 @@ failed on `main` too (checked with this stream's changes stashed:
 kernel throttles the 50 kHz sampler (3961 to 4600 times a run here),
 `cpu.profile`'s `losses_by_ring` carries each ring's drops and no throttles,
 so `emit.rs`'s `placed` finds the rings' throttles (0) unequal to the run's
-and marks every series with the run's loss. The test now skips, loudly, with
-the numbers, when the run's throttles exceed the rings'; filed for stream
-profile below. It is not in the flaky tally because it is not flaky: it fails
-whenever the machine is loaded enough to throttle.
+and marks every series with the run's loss. The first round made it skip
+there; the review (section 7) showed that hid a gap in the tool behind a
+`SKIP:` line the CI's skip gate does not read. It now **fails**, as on
+`main`, and its assertion messages end with the throttle numbers and where
+the fix is filed (stream profile, section 6). It is not in the flaky tally
+because it is not flaky: it fails whenever the machine is loaded enough to
+throttle, until `losses_by_ring` carries throttles.
 
 ---
 
@@ -144,7 +159,22 @@ whenever the machine is loaded enough to throttle.
 - `collect::tests::a_collector_that_weighs_its_samples_serves_both_modes_and_mem_faults_does`,
   and `tests/budget.rs`'s two mode-rung tests still pass through the registry.
 
+- `collect::tests::a_budget_stop_belongs_to_the_request_whose_ceiling_it_names`
+  (fix round): the reason of a 1 % stop is the 1 % request's and not the
+  50 % one's of the same source.
+- `collect::tests::equal_launched_meters_keep_the_same_high_water` (fix
+  round): both meters' marks equal the shared reading; without `agree` the
+  second's is 0.
+- `tests/runner.rs::a_profile_s_losses_land_...` (fix round): fails on this
+  machine with *"the kernel throttled this profile 4327 times and its rings
+  account for 0 of them, so `emit.rs` could not place the loss per ring"*.
+
 **Reasoned, not shown**:
+
+- The `left_running` count and its warning: provoking `EPERM` needs a setuid
+  descendant under the launched program, which an unprivileged test cannot
+  set up portably. The `ESRCH` case (already gone) is excluded and is what
+  every existing stop test exercises.
 
 - That the gcc driver of `make-sqlite` / `gcc-shell` now reads a sane
   percentage. The mechanism is the one the shell test shows; the cases run in
@@ -185,7 +215,8 @@ stream's code:
   program's stdout in the answer) is `mcp/src/**`, stream mcp's.
 - **A wall-clock denominator for a target that burns nothing**
   (`docs/open-findings.md` #32): not asked of this stream, still open.
-- **Orphans that left the group** before a stop are not found (section 1.2).
+- **Orphans that left the group** before a stop are not found (section 1.2),
+  and therefore not counted in `left_running` either.
   Catching them needs this process to be a child subreaper
   (`PR_SET_CHILD_SUBREAPER`), which then has to reap every orphan itself and
   makes their cpu land in its own `RUSAGE_CHILDREN`; and in the in-process
@@ -259,3 +290,30 @@ take a stopped run for a complete one.
 - `docs/open-findings.md`, the seventeenth wave's "a run the budget stopped
   says the budget held" and build's "a budget weighs the launched process
   alone": landed here.
+
+---
+
+## 7. Review
+
+The adversarial review's five findings, and what came of each:
+
+1. **`tests/runner.rs`, the throttle skip** (defect): agreed. A skip for a
+   gap in the tool, printed `SKIP:` where the skip gate reads only `skipped`
+   / `SKIPPED`, turned a red test green and invisible to the CI. Reverted to
+   a failure, with the cause in the assertion message (section 1.5). The
+   suite is therefore red on this test on a loaded machine until stream
+   profile's `losses_by_ring` carries throttles; the coordinator should file
+   it in `docs/open-findings.md` if that fix does not land in this wave.
+2. **`stopped_by_budget` ignores the ceiling** (nit): fixed; it takes the
+   request's ceiling and matches `against a ceiling of {ceiling} %`, which is
+   the request's `budget.percent()` formatted the same way the reason is.
+   Two requests of one source under the *same* ceiling are still
+   indistinguishable, and their stop lines are then identical, so
+   `report_budgets` says it once.
+3. **`read_each` and later equal meters' high water** (nit): fixed with
+   `Meter::agree` (section 1.1), and a test.
+4. **`src/collect/mem/mod.rs` outside the row** (nit): unchanged; still the
+   coordinator's to accept (section 6).
+5. **A process the stop cannot signal is silently left** (nit): now counted
+   and said (section 1.2). The orphan that left the group is still not found;
+   that stays a decision line and section 3's open item.

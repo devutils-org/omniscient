@@ -1399,6 +1399,18 @@ fn announce(session: &Session, report: &Report, defaulted: &Defaulted) {
 /// is asking to be trusted about the one number it never shows.
 fn report_costs(costs: &[MeasuredCost], run: &encode::RunOutput) {
     report_budgets(costs);
+    // Every collection carries the one program's lifetime; said once.
+    let left = run
+        .results
+        .iter()
+        .find_map(|results| results.lifetime)
+        .map_or(0, |life| life.left_running);
+    if left > 0 {
+        eprintln!(
+            "warning: the stop left {left} process(es) the program started running: they \
+             could not be signalled (a setuid child refuses this process's signals)"
+        );
+    }
     if let Some(comparison) = compare_backends(costs, &run.results) {
         eprint!("{comparison}");
     }
@@ -1542,8 +1554,8 @@ fn record(
             // Weighed over a rolling span, so the whole window's figure is
             // not what held or broke the budget: the run's own stop is.
             cost.weighed_over_ns = Some(recorded.budget_interval_ns);
-            if cost.budget_percent.is_some() {
-                let over = over_budget(&recorded.stopped_because, &cost.source);
+            if let Some(ceiling) = cost.budget_percent {
+                let over = over_budget(&recorded.stopped_because, &cost.source, ceiling);
                 cost.within_budget = Some(!over);
                 cost.stopped_by_budget = over;
                 if over {
@@ -1591,9 +1603,10 @@ fn record(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Whether a recording ended because `source` was over its rolling budget.
-fn over_budget(stopped_because: &str, source: &str) -> bool {
-    collect::stopped_by_budget(stopped_because, source)
+/// Whether a recording ended because the request of `source` under `ceiling`
+/// was over its rolling budget.
+fn over_budget(stopped_because: &str, source: &str, ceiling: f64) -> bool {
+    collect::stopped_by_budget(stopped_because, source, ceiling)
         && stopped_because.contains(collect::ROLLING_BUDGET)
 }
 
@@ -1817,11 +1830,13 @@ fn measured_cost(
         own_percent: collection.overhead.own_percent(),
         overhead: collection.overhead.clone(),
         stopped_because: collection.stopped_because.clone(),
-        stopped_by_budget: budget_percent.is_some()
-            && collect::stopped_by_budget(
+        stopped_by_budget: budget_percent.is_some_and(|ceiling| {
+            collect::stopped_by_budget(
                 &collection.stopped_because,
                 resolved.request.source.as_str(),
-            ),
+                ceiling,
+            )
+        }),
         notes: collection.notes.clone(),
         weighed_over_ns: None,
     }

@@ -68,6 +68,16 @@ pub struct Lifetime {
     /// Absent when the program has not been reaped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_ns: Option<u64>,
+    /// How many processes the program started the stop found and could not
+    /// signal (a setuid child: `EPERM`), and which are therefore still
+    /// running: the tool says what it left behind rather than claim it left
+    /// nothing.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub left_running: u32,
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 /// User plus system cpu of one `rusage`, in nanoseconds.
@@ -96,6 +106,8 @@ pub struct Gated {
     terminated: bool,
     /// The child's own cpu accounting, taken from the reap.
     cpu_ns: Option<u64>,
+    /// What the stop could not signal ([`Lifetime::left_running`]).
+    left_running: u32,
 }
 
 impl Gated {
@@ -181,7 +193,13 @@ impl Gated {
                 libc::kill(-self.pid, libc::SIGKILL);
             }
             for descendant in &tree {
-                libc::kill(*descendant, libc::SIGKILL);
+                if libc::kill(*descendant, libc::SIGKILL) != 0 {
+                    let error = std::io::Error::last_os_error();
+                    // Gone already is what the kill was for.
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        self.left_running += 1;
+                    }
+                }
             }
             libc::kill(self.pid, libc::SIGKILL);
             let mut status = 0;
@@ -211,6 +229,7 @@ impl Gated {
             exited_err_ns,
             terminated: self.terminated,
             cpu_ns: self.cpu_ns,
+            left_running: self.left_running,
         })
     }
 }
@@ -373,6 +392,7 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
         alive_ns: 0,
         exited: None,
         terminated: false,
+        left_running: 0,
     })
 }
 

@@ -1324,16 +1324,30 @@ impl Meter {
     /// that one's reading rather than its own. Two collections of one target
     /// are weighed against one denominator: read twice, a running target's
     /// nanosecond clock (`task::process_cpu`) moves between the two reads.
+    ///
+    /// The meter that took an earlier one's reading keeps it as its own high
+    /// water too, so that a later [`Meter::read`] of it alone (a collection
+    /// detached, or read after the program was killed) is not short of what
+    /// the first one saw.
     fn read_each(meters: &[Meter]) -> Vec<Option<u64>> {
         let mut read: Vec<Option<u64>> = Vec::with_capacity(meters.len());
         for (index, meter) in meters.iter().enumerate() {
             let earlier = meters[..index].iter().position(|other| other == meter);
             read.push(match earlier {
-                Some(earlier) => read[earlier],
+                Some(earlier) => meter.agree(read[earlier]),
                 None => meter.read(),
             });
         }
         read
+    }
+
+    /// Takes `read`, an equal meter's reading, as this one's: a launched
+    /// program's meter keeps it as its high water and gives the kept value.
+    fn agree(&self, read: Option<u64>) -> Option<u64> {
+        match (self, read) {
+            (Meter::Launched(_, high), Some(read)) => Some(high.keep(read)),
+            _ => read,
+        }
     }
 
     /// The cumulative cpu time of the target, to be differenced against a
@@ -4221,11 +4235,14 @@ pub const ROLLING_BUDGET: &str = "the span a run with no fixed end is weighed ov
 /// tell such a stop from the deadline's or the program's whatever the source.
 pub const OVER_ITS_CEILING: &str = "against a ceiling of";
 
-/// Whether a run ended because `source` was over its budget: the reason a
-/// stop of [`Spending::check`] gives, for a fixed window or a rolling span.
-pub fn stopped_by_budget(stopped_because: &str, source: &str) -> bool {
+/// Whether a run ended because the request of `source` under `ceiling` (its
+/// budget, in percent) was over it: the reason a stop of [`Spending::check`]
+/// gives, for a fixed window or a rolling span. The ceiling is part of the
+/// match because two requests of one source can carry two budgets, and the
+/// one under the higher ceiling did not stop the run the lower one stopped.
+pub fn stopped_by_budget(stopped_because: &str, source: &str, ceiling: f64) -> bool {
     stopped_because.starts_with(&format!("`{source}` spent"))
-        && stopped_because.contains(OVER_ITS_CEILING)
+        && stopped_because.contains(&format!("{OVER_ITS_CEILING} {ceiling} %"))
 }
 
 /// How often a recording looks for events past its retention, as a fraction
@@ -5949,6 +5966,49 @@ mod tests {
         let read = Meter::read_each(&meters);
         assert!(read[0].is_some(), "this process keeps a cpu account");
         assert_eq!(read[0], read[2], "one target, one reading");
+    }
+
+    /// A launched program's meters of one target share their high water: the
+    /// second takes the first's reading as its own mark, so a later read of
+    /// it alone (after the kill) is not short of what the first one saw.
+    #[test]
+    fn equal_launched_meters_keep_the_same_high_water() {
+        let me = std::process::id() as i32;
+        let meters = [
+            Meter::Launched(me, HighWater::default()),
+            Meter::Launched(me, HighWater::default()),
+        ];
+        let deadline = monotonic_ns() + 2_000_000;
+        while monotonic_ns() < deadline {}
+        let read = Meter::read_each(&meters);
+        let marks: Vec<u64> = meters
+            .iter()
+            .map(|meter| match meter {
+                Meter::Launched(_, high) => high.0.get(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert!(read[0].is_some_and(|read| read > 0), "{read:?}");
+        assert_eq!(read[0], read[1], "one target, one reading");
+        assert_eq!(marks, vec![read[0].unwrap(); 2], "and one mark");
+    }
+
+    /// A stop is the budget's of the request whose ceiling it names: two
+    /// requests of one source under two budgets, and only the one under the
+    /// lower ceiling stopped the run.
+    #[test]
+    fn a_budget_stop_belongs_to_the_request_whose_ceiling_it_names() {
+        let reason = format!(
+            "`mem.rss` spent 3.70 % of the target's cpu time {OVER_ITS_CEILING} 1 %, and \
+             nothing cheaper than `fs:proc:statm` is available"
+        );
+        assert!(stopped_by_budget(&reason, "mem.rss", 1.0));
+        assert!(!stopped_by_budget(&reason, "mem.rss", 50.0));
+        assert!(!stopped_by_budget(&reason, "mem.rss", 10.0));
+        assert!(!stopped_by_budget(&reason, "cpu.profile", 1.0));
+        let fractional = format!("`mem.rss` spent 0.07 % {OVER_ITS_CEILING} 0.05 %, and ...");
+        assert!(stopped_by_budget(&fractional, "mem.rss", 0.05));
+        assert!(!stopped_by_budget(&fractional, "mem.rss", 0.5));
     }
 
     /// The cpu time of a target that keeps no cpu account is absent, not zero.
