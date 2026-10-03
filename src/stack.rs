@@ -13,7 +13,9 @@
 //! without the mapping it fell in: the same number is a different function in
 //! two processes, and in one process after a `dlopen`. [`Symbolizer`] reads the
 //! target's own `/proc/<pid>/maps` and the symbol tables of the files behind
-//! it, and `/proc/kallsyms` for the kernel half.
+//! it, `/proc/kallsyms` for the kernel half, and -- for code that no file
+//! holds, a JIT's or an interpreter's trampolines -- the `/tmp/perf-<pid>.map`
+//! the target wrote. Each frame says which of them named it ([`NamedBy`]).
 //!
 //! Finally, a profile of ten thousand samples holds a few dozen distinct
 //! stacks. [`StackTable`] stores each one once and hands back a [`StackId`];
@@ -182,6 +184,50 @@ pub struct Frame {
     /// same evidence.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recovered: bool,
+    /// Where `symbol` came from: the file's own tables, a debug file fetched by
+    /// build id, the kernel's table, or the perf map the target wrote. `None`
+    /// exactly when `symbol` is: a frame with no name has no source for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_by: Option<NamedBy>,
+}
+
+/// Where one frame's name came from.
+///
+/// Per frame rather than per module because one stack can hold all four: a
+/// JIT's code named by its map, called from an interpreter named by
+/// debuginfod, over a libc named by its own `.dynsym`, under a kernel named by
+/// `/proc/kallsyms`. A verdict that names a suspect says how it knows the name,
+/// and the module-level record ([`unwind::NameOrigin`]) cannot say which of
+/// two sources inside one file a given name was read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NamedBy {
+    /// The mapped file's own `.symtab` or `.dynsym`.
+    Elf,
+    /// A debug file found by the mapped file's build id.
+    Debuginfod,
+    /// `/proc/kallsyms`.
+    Kallsyms,
+    /// `/tmp/perf-<pid>.map`, the file a JIT writes for code that exists in
+    /// no file.
+    PerfMap,
+}
+
+impl NamedBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NamedBy::Elf => "elf",
+            NamedBy::Debuginfod => "debuginfod",
+            NamedBy::Kallsyms => "kallsyms",
+            NamedBy::PerfMap => "perf-map",
+        }
+    }
+}
+
+impl fmt::Display for NamedBy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// What a recovered frame's label ends with.
@@ -203,6 +249,7 @@ impl Frame {
             mangled: None,
             offset: 0,
             recovered: false,
+            named_by: None,
         }
     }
 
@@ -213,6 +260,7 @@ impl Frame {
         module: Option<String>,
         name: String,
         offset: u64,
+        named_by: NamedBy,
     ) -> Self {
         let (symbol, mangled) = match demangle(&name) {
             Some(readable) => (readable, Some(name)),
@@ -226,6 +274,7 @@ impl Frame {
             mangled,
             offset,
             recovered: false,
+            named_by: Some(named_by),
         }
     }
 
@@ -500,7 +549,22 @@ pub struct Symbolizer {
     debuginfod: Option<Arc<unwind::Debuginfod>>,
     /// Where each module's names came from, by the path the map named.
     origins: BTreeMap<PathBuf, unwind::NameOrigin>,
+    /// `/tmp/perf-<pid>.map`, read as the target appends to it.
+    perf_map: PerfMap,
+    /// When the perf map was last re-read for a miss, on the monotonic clock;
+    /// zero after a refresh.
+    perf_map_reread_ns: u64,
+    /// Whether a read for a miss added lines, so that the frames interned
+    /// before it are worth naming again.
+    perf_map_grew: bool,
+    /// Frames the perf map named.
+    perf_map_named: u64,
 }
+
+/// How often, at most, a frame the perf map does not name sends the
+/// symbolizer back to the map for lines appended since. The cadence
+/// `runtime.jit` reads the same file at.
+const PERF_MAP_REREAD_NS: u64 = 10_000_000;
 
 /// How many times a symbolizer goes back to a `/proc/<pid>/maps` that gave it
 /// nothing before it stops asking.
@@ -523,6 +587,10 @@ impl Symbolizer {
             failed_rereads: 0,
             debuginfod: None,
             origins: BTreeMap::new(),
+            perf_map: PerfMap::of(pid),
+            perf_map_reread_ns: 0,
+            perf_map_grew: false,
+            perf_map_named: 0,
         }
     }
 
@@ -559,6 +627,9 @@ impl Symbolizer {
     /// is a process caught mid-`execve`, or one that has exited, and replacing
     /// a usable snapshot with it is the same defect from the other end.
     pub fn refresh(&mut self) -> bool {
+        // A new tick may find lines the last one did not: the perf map is
+        // worth one more look per refresh, however many misses came before.
+        self.perf_map_reread_ns = 0;
         let fresh = read_maps(self.pid);
         if fresh.is_empty() {
             return false;
@@ -605,7 +676,14 @@ impl Symbolizer {
             .filter(|symbols| symbols.is_usable())
             .and_then(|symbols| symbols.lookup(addr));
         match named {
-            Some((symbol, offset)) => Frame::named(addr, Context::Kernel, None, symbol, offset),
+            Some((symbol, offset)) => Frame::named(
+                addr,
+                Context::Kernel,
+                None,
+                symbol,
+                offset,
+                NamedBy::Kallsyms,
+            ),
             None => Frame::unresolved(addr, Context::Kernel),
         }
     }
@@ -625,24 +703,169 @@ impl Symbolizer {
         // object at, which is the whole difference between a symbolized
         // position-independent executable and a page of addresses.
         let file_offset = addr - region.start + region.offset;
+        let anonymous = is_anonymous(&name, path.as_deref());
         let symbol = path.and_then(|path| {
             self.module(&path)
                 .and_then(|module| module.lookup(file_offset))
         });
         match symbol {
-            Some((symbol, symbol_offset)) => {
-                Frame::named(addr, Context::User, Some(name), symbol, symbol_offset)
-            }
-            None => Frame {
+            Some((symbol, symbol_offset, named_by)) => Frame::named(
                 addr,
-                context: Context::User,
-                module: Some(name),
-                symbol: None,
-                mangled: None,
-                offset: file_offset,
-                recovered: false,
-            },
+                Context::User,
+                Some(name),
+                symbol,
+                symbol_offset,
+                named_by,
+            ),
+            None => {
+                // Code that exists in no file -- a JIT's, an interpreter's
+                // trampolines -- is named, when it is named at all, by the map
+                // the program wrote for it.
+                let mapped = anonymous.then(|| self.perf_map_name(addr)).flatten();
+                match mapped {
+                    Some((symbol, symbol_offset)) => Frame::named(
+                        addr,
+                        Context::User,
+                        Some(name),
+                        symbol,
+                        symbol_offset,
+                        NamedBy::PerfMap,
+                    ),
+                    None => Frame {
+                        addr,
+                        context: Context::User,
+                        module: Some(name),
+                        symbol: None,
+                        mangled: None,
+                        offset: file_offset,
+                        recovered: false,
+                        named_by: None,
+                    },
+                }
+            }
         }
+    }
+
+    /// The perf map's name for an address, reading what the target appended
+    /// since the last read if nothing it held so far covers it.
+    ///
+    /// Re-read at most once per [`PERF_MAP_REREAD_NS`], and once after each
+    /// [`Symbolizer::refresh`]: an address the map does not cover is, most of
+    /// the time, code from a runtime that writes no map at all, and an `open`
+    /// per unnamed frame would be paid for every new stack of a JVM run
+    /// without its agent. Timed rather than tied to the refreshes alone,
+    /// because the symbolizers of the off-cpu sources never refresh.
+    fn perf_map_name(&mut self, addr: u64) -> Option<(String, u64)> {
+        if self.perf_map.lookup(addr).is_none() {
+            let now = crate::clock::monotonic_ns();
+            if self.perf_map_reread_ns == 0
+                || now.saturating_sub(self.perf_map_reread_ns) >= PERF_MAP_REREAD_NS
+            {
+                self.perf_map_reread_ns = now.max(1);
+                if self.perf_map.update() {
+                    self.perf_map_grew = true;
+                }
+            }
+        }
+        let line = self.perf_map.lookup(addr)?;
+        let found = (line.symbol.clone(), addr - line.address);
+        self.perf_map_named += 1;
+        self.origins.insert(
+            self.perf_map.path.clone(),
+            unwind::NameOrigin::PerfMap {
+                lines: self.perf_map.lines,
+            },
+        );
+        Some(found)
+    }
+
+    /// Reads whatever the target appended to its perf map, and says whether
+    /// that added a line.
+    ///
+    /// Called by [`Unwinder::finish`] at the end of a run, when the target may
+    /// have exited and its map is still there: a JIT that buffers its writes
+    /// names its last code objects only once it has flushed, and the stacks
+    /// sampled in them were interned before that.
+    pub fn reread_perf_map(&mut self) -> bool {
+        self.perf_map.update()
+    }
+
+    /// Names, from the perf map as it stands, the frames of `table` that fell
+    /// in anonymous executable memory and were left unnamed when they were
+    /// interned. Returns how many it named.
+    pub fn rename_from_perf_map(&mut self, table: &mut StackTable) -> u64 {
+        let mut named = 0;
+        for stack in &mut table.stacks {
+            for frame in &mut stack.frames {
+                if frame.symbol.is_some() || frame.context != Context::User {
+                    continue;
+                }
+                let anonymous = frame
+                    .module
+                    .as_deref()
+                    .is_some_and(|module| is_anonymous(module, None));
+                if !anonymous {
+                    continue;
+                }
+                let Some(line) = self.perf_map.lookup(frame.addr) else {
+                    continue;
+                };
+                let renamed = Frame::named(
+                    frame.addr,
+                    Context::User,
+                    frame.module.clone(),
+                    line.symbol.clone(),
+                    frame.addr - line.address,
+                    NamedBy::PerfMap,
+                );
+                *frame = Frame {
+                    recovered: frame.recovered,
+                    ..renamed
+                };
+                named += 1;
+            }
+        }
+        if named > 0 {
+            self.perf_map_named += named;
+            self.origins.insert(
+                self.perf_map.path.clone(),
+                unwind::NameOrigin::PerfMap {
+                    lines: self.perf_map.lines,
+                },
+            );
+        }
+        named
+    }
+
+    /// Whether a read of the perf map since the last call added a line.
+    fn take_perf_map_grew(&mut self) -> bool {
+        std::mem::take(&mut self.perf_map_grew)
+    }
+
+    /// What reading the perf map gave up: lines that were not entries, and a
+    /// map replaced under the reader.
+    pub fn perf_map_notes(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        if self.perf_map.undecoded > 0 {
+            notes.push(format!(
+                "{} lines of {} are not `<hex address> <hex size> <symbol>` and name nothing",
+                self.perf_map.undecoded,
+                self.perf_map.path.display()
+            ));
+        }
+        if self.perf_map.replaced > 0 {
+            notes.push(format!(
+                "{} was replaced while it was read (it shrank): the names it held before are \
+                 gone, and a frame interned before that may carry one the new map does not",
+                self.perf_map.path.display()
+            ));
+        }
+        notes
+    }
+
+    /// The perf map this symbolizer reads, and how many frames it named.
+    pub fn perf_map(&self) -> (&Path, u64) {
+        (&self.perf_map.path, self.perf_map_named)
     }
 
     /// Whether the function this address is in sets up a frame pointer.
@@ -759,6 +982,187 @@ fn parse_map_line(line: &str) -> Option<Region> {
     })
 }
 
+/// Whether a mapping holds code that no file backs: an anonymous mapping, or
+/// one a runtime named with `PR_SET_VMA_ANON_NAME` (`[anon:...]`).
+///
+/// `[vdso]`, `[vsyscall]` and the other bracketed pseudo-files are the
+/// kernel's, named already, and a file that was deleted while mapped is still
+/// a file: neither is what a perf map describes.
+fn is_anonymous(name: &str, path: Option<&Path>) -> bool {
+    if path.is_some() {
+        return false;
+    }
+    // `parse_map_line` writes an unnamed mapping as its start address.
+    name.starts_with("0x") || name.starts_with("[anon:")
+}
+
+/// One line of a perf map: `<hex address> <hex size> <symbol>`.
+///
+/// The convention a JIT follows to name code that exists in no file: Node with
+/// `--perf-basic-prof`, CPython with `-X perf`, a JVM with an agent. Read here
+/// for names and by `runtime.jit` for compilations; one parser for both, so
+/// the two can never disagree about what a line says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PerfMapLine {
+    pub address: u64,
+    pub size: u64,
+    /// Everything after the size, which may hold spaces: V8 writes
+    /// `JS:~name file:line:column`.
+    pub symbol: String,
+}
+
+impl PerfMapLine {
+    /// A line, or `None` when it is not one. A caller counts the `None`s: a
+    /// map in a format nobody knows would otherwise read as a program that
+    /// compiled nothing.
+    pub fn parse(line: &str) -> Option<Self> {
+        let mut fields = line.splitn(3, ' ');
+        let address = u64::from_str_radix(fields.next()?.trim(), 16).ok()?;
+        let size = u64::from_str_radix(fields.next()?.trim(), 16).ok()?;
+        let symbol = fields.next()?.trim();
+        if symbol.is_empty() {
+            return None;
+        }
+        Some(Self {
+            address,
+            size,
+            symbol: symbol.to_owned(),
+        })
+    }
+
+    fn contains(&self, addr: u64) -> bool {
+        // A zero-sized line names its address and nothing after it.
+        addr == self.address
+            || (self.address..self.address.saturating_add(self.size)).contains(&addr)
+    }
+}
+
+/// A target's `/tmp/perf-<pid>.map`, read as it grows.
+///
+/// The file is append-only by convention, and a runtime writes a line as it
+/// generates the code, so each read takes only the bytes that appeared since
+/// the last one. A later line over an address an earlier one covered wins:
+/// code freed and generated again at the same place is the new code.
+#[derive(Debug)]
+struct PerfMap {
+    path: PathBuf,
+    /// How much of the file has been read.
+    consumed: u64,
+    /// A line that arrived without its newline yet.
+    partial: String,
+    /// By start address, never overlapping.
+    lines_by_start: BTreeMap<u64, PerfMapLine>,
+    /// Lines read, over the run.
+    lines: u64,
+    /// Lines that were not entries.
+    undecoded: u64,
+    /// Times the file was found shorter than what was already read.
+    replaced: u64,
+}
+
+impl PerfMap {
+    /// The map pid `pid` writes; pid zero, as everywhere here, is this
+    /// process.
+    fn of(pid: i32) -> Self {
+        let pid = if pid <= 0 {
+            std::process::id() as i32
+        } else {
+            pid
+        };
+        Self::at(PathBuf::from(format!("/tmp/perf-{pid}.map")))
+    }
+
+    fn at(path: PathBuf) -> Self {
+        Self {
+            path,
+            consumed: 0,
+            partial: String::new(),
+            lines_by_start: BTreeMap::new(),
+            lines: 0,
+            undecoded: 0,
+            replaced: 0,
+        }
+    }
+
+    /// Reads what was appended, and says whether it held a line.
+    ///
+    /// A map that does not exist is not an error: most programs write none.
+    fn update(&mut self) -> bool {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let Ok(mut file) = std::fs::File::open(&self.path) else {
+            return false;
+        };
+        let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
+            return false;
+        };
+        if length < self.consumed {
+            // Replaced: a recycled pid, a runtime that restarted its map. The
+            // names read so far described the old one.
+            self.replaced += 1;
+            self.consumed = 0;
+            self.partial.clear();
+            self.lines_by_start.clear();
+        }
+        if length == self.consumed || file.seek(SeekFrom::Start(self.consumed)).is_err() {
+            return false;
+        }
+        let mut appended = Vec::new();
+        let Ok(read) = file.read_to_end(&mut appended) else {
+            return false;
+        };
+        self.consumed += read as u64;
+        self.partial.push_str(&String::from_utf8_lossy(&appended));
+        // A line without its newline is one the runtime is still writing.
+        let Some(last) = self.partial.rfind('\n') else {
+            return false;
+        };
+        let complete: String = self.partial.drain(..=last).collect();
+        let mut added = false;
+        for text in complete.lines() {
+            if text.trim().is_empty() {
+                continue;
+            }
+            match PerfMapLine::parse(text) {
+                Some(line) => {
+                    self.insert(line);
+                    self.lines += 1;
+                    added = true;
+                }
+                None => self.undecoded += 1,
+            }
+        }
+        added
+    }
+
+    /// Adds a line, removing whatever earlier lines it overlaps.
+    fn insert(&mut self, line: PerfMapLine) {
+        let end = line.address.saturating_add(line.size.max(1));
+        // The ranges held never overlap, so only the one line that starts
+        // before this one can reach into it.
+        let before = self
+            .lines_by_start
+            .range(..line.address)
+            .next_back()
+            .filter(|(_, held)| held.address.saturating_add(held.size.max(1)) > line.address)
+            .map(|(start, _)| *start);
+        let inside: Vec<u64> = self
+            .lines_by_start
+            .range(line.address..end)
+            .map(|(start, _)| *start)
+            .collect();
+        for start in before.into_iter().chain(inside) {
+            self.lines_by_start.remove(&start);
+        }
+        self.lines_by_start.insert(line.address, line);
+    }
+
+    fn lookup(&self, addr: u64) -> Option<&PerfMapLine> {
+        let (_, line) = self.lines_by_start.range(..=addr).next_back()?;
+        line.contains(addr).then_some(line)
+    }
+}
+
 /// The kernel's own symbol table, read at most once for the whole run.
 ///
 /// `/proc/kallsyms` is 395 318 lines on the development machine, and parsing it
@@ -865,6 +1269,9 @@ struct Function {
     /// first few bytes of it can say. `None` where the question cannot be
     /// answered on this architecture.
     frame_pointer: Option<bool>,
+    /// Read from a debug file debuginfod gave, rather than from the mapped
+    /// file itself.
+    from_debuginfo: bool,
 }
 
 impl Module {
@@ -909,6 +1316,7 @@ impl Module {
                         offset,
                         size: symbol.size,
                         name: symbol.name,
+                        from_debuginfo: false,
                     });
                 }
             }
@@ -934,6 +1342,7 @@ impl Module {
                                                 offset,
                                                 size: symbol.size,
                                                 name: symbol.name,
+                                                from_debuginfo: true,
                                             });
                                         }
                                     }
@@ -967,9 +1376,18 @@ impl Module {
         (Some(Self { functions }), origin)
     }
 
-    fn lookup(&self, file_offset: u64) -> Option<(String, u64)> {
+    fn lookup(&self, file_offset: u64) -> Option<(String, u64, NamedBy)> {
         let function = self.function_at(file_offset)?;
-        Some((function.name.clone(), file_offset - function.offset))
+        let named_by = if function.from_debuginfo {
+            NamedBy::Debuginfod
+        } else {
+            NamedBy::Elf
+        };
+        Some((
+            function.name.clone(),
+            file_offset - function.offset,
+            named_by,
+        ))
     }
 
     fn frame_pointer(&self, file_offset: u64) -> Option<bool> {
@@ -1596,6 +2014,17 @@ impl Unwinder {
     /// `None` when the sample carries no stack, which is what every sample of
     /// an event opened with [`Callchain::Off`] looks like.
     pub fn record(&mut self, sample: &Sample) -> Option<StackId> {
+        let id = self.record_unnamed_later(sample);
+        // A read of the perf map for this stack found lines that were not
+        // there when earlier stacks were interned: those stacks may hold code
+        // the new lines name.
+        if self.symbols.take_perf_map_grew() {
+            self.symbols.rename_from_perf_map(&mut self.table);
+        }
+        id
+    }
+
+    fn record_unnamed_later(&mut self, sample: &Sample) -> Option<StackId> {
         if let Callchain::CopiedStack { .. } = self.callchain {
             return Some(self.record_copied(sample));
         }
@@ -1737,6 +2166,7 @@ impl Unwinder {
     /// the time its last samples are drained it has often exited. See
     /// [`Symbolizer::refresh`].
     pub fn refresh_symbols(&mut self) -> bool {
+        self.name_from_perf_map();
         let fresh = self.symbols.refresh();
         if fresh {
             if let Some(cfi) = self.cfi.as_mut() {
@@ -1749,12 +2179,52 @@ impl Unwinder {
         fresh
     }
 
+    /// Reads the perf map once more and names, from it, the frames interned
+    /// before their line was there.
+    ///
+    /// A collector calls this when its target has stopped producing samples:
+    /// at its `stop`, after the last drain. The map outlives the process that
+    /// wrote it, and a runtime that buffers its writes flushes them at exit --
+    /// the last lines are the ones a run that read only during the window
+    /// would never apply. Also done on every [`Unwinder::refresh_symbols`].
+    pub fn finish(&mut self) -> u64 {
+        self.name_from_perf_map()
+    }
+
+    /// Only when the map grew and something is waiting for a name: a run
+    /// with no anonymous code, which is nearly every run, pays one `open` that
+    /// fails per tick and nothing else.
+    fn name_from_perf_map(&mut self) -> u64 {
+        if !self.symbols.reread_perf_map() {
+            return 0;
+        }
+        self.symbols.rename_from_perf_map(&mut self.table)
+    }
+
     pub fn table(&self) -> &StackTable {
         &self.table
     }
 
     pub fn into_table(self) -> StackTable {
         self.table
+    }
+
+    /// Frames, over the distinct stacks, that fell in anonymous executable
+    /// memory and carry no name.
+    fn unnamed_anonymous_frames(&self) -> u64 {
+        self.table
+            .stacks
+            .iter()
+            .flat_map(|stack| &stack.frames)
+            .filter(|frame| {
+                frame.symbol.is_none()
+                    && frame.context == Context::User
+                    && frame
+                        .module
+                        .as_deref()
+                        .is_some_and(|module| is_anonymous(module, None))
+            })
+            .count() as u64
     }
 
     /// Where each module's names came from.
@@ -1897,6 +2367,29 @@ impl Unwinder {
                 self.symbols.unmapped()
             ));
         }
+        let anonymous = self.unnamed_anonymous_frames();
+        if anonymous > 0 {
+            let (path, named) = self.symbols.perf_map();
+            let why = if named > 0 || path.exists() {
+                format!(
+                    "{} covers none of them: they are code generated after its last line, or \
+                     by a part of the runtime that does not write it",
+                    path.display()
+                )
+            } else {
+                format!(
+                    "{} does not exist: a runtime writes it only when asked (`python3 -X perf`, \
+                     `node --perf-basic-prof`, a JVM agent)",
+                    path.display()
+                )
+            };
+            notes.push(format!(
+                "{anonymous} frames of the distinct stacks fell in anonymous executable memory -- code a JIT or \
+                 an interpreter generated, which no file names -- and are reported by address: \
+                 {why}"
+            ));
+        }
+        notes.extend(self.symbols.perf_map_notes());
         // Asked only of a run that walked into the kernel. The answer costs a
         // parse of `/proc/kallsyms`, and a run with no kernel frames is not
         // degraded by names it was never going to print.
@@ -1947,7 +2440,9 @@ impl Unwinder {
         if origins.values().any(|origin| {
             matches!(
                 origin,
-                unwind::NameOrigin::Debuginfod { .. } | unwind::NameOrigin::None(_)
+                unwind::NameOrigin::Debuginfod { .. }
+                    | unwind::NameOrigin::None(_)
+                    | unwind::NameOrigin::PerfMap { .. }
             )
         }) || self.symbols.debuginfod.is_some()
         {
@@ -2084,10 +2579,18 @@ mod tests {
             Some("/tmp/w".to_owned()),
             "_ZN2ns6Widget4spinEi".to_owned(),
             4,
+            NamedBy::Elf,
         );
         assert_eq!(frame.symbol.as_deref(), Some("ns::Widget::spin(int)"));
         assert_eq!(frame.mangled.as_deref(), Some("_ZN2ns6Widget4spinEi"));
-        let plain = Frame::named(0x1000, Context::Kernel, None, "schedule".to_owned(), 0);
+        let plain = Frame::named(
+            0x1000,
+            Context::Kernel,
+            None,
+            "schedule".to_owned(),
+            0,
+            NamedBy::Kallsyms,
+        );
         assert_eq!(
             (plain.symbol.as_deref(), plain.mangled),
             (Some("schedule"), None)
@@ -2104,6 +2607,7 @@ mod tests {
             mangled: None,
             offset: 0x20,
             recovered: false,
+            named_by: Some(NamedBy::Elf),
         };
         let stack = Stack {
             frames: vec![
@@ -2134,6 +2638,7 @@ mod tests {
             mangled: None,
             offset: 0x1234,
             recovered: false,
+            named_by: None,
         };
         assert_eq!(frame.label(), "libfoo.so+0x1234");
         assert_eq!(frame.to_string(), "+0x1234 (libfoo.so)");
@@ -2479,5 +2984,168 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn a_perf_map_line_is_an_address_a_size_and_the_rest_of_the_line() {
+        assert_eq!(
+            PerfMapLine::parse("7f41ff0ced8 2a JS:~Writable.write node:internal:504:36"),
+            Some(PerfMapLine {
+                address: 0x7f41ff0ced8,
+                size: 0x2a,
+                symbol: "JS:~Writable.write node:internal:504:36".to_owned(),
+            })
+        );
+        assert!(PerfMapLine::parse("7f0000 10").is_none(), "no symbol");
+        assert!(PerfMapLine::parse("nonsense here too").is_none());
+        assert!(PerfMapLine::parse("").is_none());
+    }
+
+    #[test]
+    fn only_code_no_file_holds_is_anonymous() {
+        assert!(is_anonymous("0x7f0000001000", None));
+        assert!(is_anonymous("[anon:v8 code]", None));
+        assert!(!is_anonymous("[vdso]", None));
+        assert!(!is_anonymous("/usr/lib/libc.so.6 (deleted)", None));
+        assert!(!is_anonymous(
+            "/usr/lib/libc.so.6",
+            Some(Path::new("/usr/lib/libc.so.6"))
+        ));
+    }
+
+    /// A perf map at a path of the test's own, and the text to append to it.
+    fn scratch_map(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("omn-perf-map-{}-{name}.map", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    fn append(path: &Path, text: &str) {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("the test owns this file")
+            .write_all(text.as_bytes())
+            .expect("appending to the map");
+    }
+
+    #[test]
+    fn a_perf_map_is_read_as_it_grows_and_a_later_line_wins() {
+        let path = scratch_map("grows");
+        let mut map = PerfMap::at(path.clone());
+        assert!(!map.update(), "a map that does not exist names nothing");
+
+        append(&path, "1000 100 py::first:/a.py\n1100 10 py::half");
+        assert!(map.update());
+        assert_eq!(map.lookup(0x1080).unwrap().symbol, "py::first:/a.py");
+        assert_eq!(map.lookup(0x1100), None, "half a line is not a line yet");
+        assert_eq!(map.lookup(0x0fff), None);
+
+        append(&path, "way:/a.py\nnot a line\n");
+        assert!(map.update());
+        assert_eq!(map.lookup(0x1105).unwrap().symbol, "py::halfway:/a.py");
+        assert_eq!(map.undecoded, 1);
+
+        // Code freed and generated again over part of the first object.
+        append(&path, "1040 20 py::again:/a.py\n");
+        assert!(map.update());
+        assert_eq!(map.lookup(0x1050).unwrap().symbol, "py::again:/a.py");
+        assert_eq!(
+            map.lookup(0x1000),
+            None,
+            "the line it overlapped no longer describes what is there"
+        );
+        assert_eq!(map.lines, 3);
+
+        // A shorter file at the same path was replaced, and forgets the old one.
+        std::fs::write(&path, "9000 10 py::fresh:/b.py\n").unwrap();
+        assert!(map.update());
+        assert_eq!(map.replaced, 1);
+        assert_eq!(map.lookup(0x1050), None);
+        assert_eq!(map.lookup(0x9000).unwrap().symbol, "py::fresh:/b.py");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A symbolizer over one anonymous executable mapping and a map of the
+    /// test's own.
+    fn anonymous_symbolizer(path: &Path) -> Symbolizer {
+        let mut symbols = Symbolizer::for_process(0);
+        symbols.regions = vec![
+            parse_map_line("7f0000000000-7f0000001000 r-xp 00000000 00:00 0 ")
+                .expect("an anonymous executable mapping"),
+        ];
+        symbols.perf_map = PerfMap::at(path.to_path_buf());
+        // Never re-read: the regions are the test's, not this process's.
+        symbols.remapped = true;
+        symbols
+    }
+
+    #[test]
+    fn an_address_in_anonymous_code_takes_the_name_its_map_line_gives() {
+        let path = scratch_map("names");
+        append(&path, "7f0000000100 80 py::spin:/loop.py\n");
+        let mut symbols = anonymous_symbolizer(&path);
+
+        let raw = RawStack::split(&[PERF_CONTEXT_USER, 0x7f00_0000_0140], CpuMode::User);
+        let stack = symbols.symbolize(&raw);
+        let frame = &stack.frames[0];
+        assert_eq!(frame.symbol.as_deref(), Some("py::spin:/loop.py"));
+        assert_eq!(frame.offset, 0x40);
+        assert_eq!(frame.named_by, Some(NamedBy::PerfMap));
+        assert!(matches!(
+            symbols.origins().get(&path),
+            Some(unwind::NameOrigin::PerfMap { lines: 1 })
+        ));
+
+        // An address the map does not cover stays an address.
+        let raw = RawStack::split(&[PERF_CONTEXT_USER, 0x7f00_0000_0800], CpuMode::User);
+        let frame = &symbols.symbolize(&raw).frames[0];
+        assert_eq!((frame.symbol.as_deref(), frame.named_by), (None, None));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A stack interned before the runtime wrote the line that names it is
+    /// named when the map is read again -- during the run, or at its end.
+    #[test]
+    fn a_frame_interned_before_its_line_is_named_when_the_map_is_read_again() {
+        let path = scratch_map("later");
+        let mut symbols = anonymous_symbolizer(&path);
+        let mut table = StackTable::new();
+        let id = table.intern(
+            &[PERF_CONTEXT_USER, 0x7f00_0000_0200],
+            CpuMode::User,
+            &mut symbols,
+        );
+        assert_eq!(table.get(id).unwrap().frames[0].symbol, None);
+
+        append(&path, "7f0000000200 40 JS:~late a.js:1:1\n");
+        assert!(symbols.reread_perf_map());
+        assert_eq!(symbols.rename_from_perf_map(&mut table), 1);
+        let frame = &table.get(id).unwrap().frames[0];
+        assert_eq!(frame.symbol.as_deref(), Some("JS:~late a.js:1:1"));
+        assert_eq!(frame.named_by, Some(NamedBy::PerfMap));
+        assert_eq!(symbols.perf_map().1, 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_name_says_where_it_came_from_and_no_name_says_nothing() {
+        let named = |by| Frame::named(1, Context::User, None, "f".to_owned(), 0, by);
+        for (by, spelled) in [
+            (NamedBy::Elf, "\"elf\""),
+            (NamedBy::Debuginfod, "\"debuginfod\""),
+            (NamedBy::Kallsyms, "\"kallsyms\""),
+            (NamedBy::PerfMap, "\"perf-map\""),
+        ] {
+            assert_eq!(serde_json::to_string(&by).unwrap(), spelled);
+            assert_eq!(format!("\"{by}\""), spelled);
+            let json = serde_json::to_string(&named(by)).unwrap();
+            assert!(json.contains(&format!("\"named_by\":{spelled}")), "{json}");
+        }
+        let json = serde_json::to_string(&Frame::unresolved(1, Context::User)).unwrap();
+        assert!(!json.contains("named_by"), "{json}");
     }
 }
