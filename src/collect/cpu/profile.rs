@@ -201,6 +201,9 @@ pub struct ProfileCollector {
     /// Mapping reads: how many times a process's mappings were re-read
     /// because a drain held samples of it, and how many drains held none and
     /// read nothing. See [`ProfileCollector::drain_into`].
+    /// The processes the last drain held samples of, re-read before the
+    /// next one (`drain_into`).
+    recent: BTreeSet<u32>,
     #[cfg_attr(not(test), allow(dead_code))]
     refreshes: u64,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -260,6 +263,7 @@ impl ProfileCollector {
             cgroup: None,
             throttled: 0,
             idle: 0,
+            recent: BTreeSet::new(),
             refreshes: 0,
             idle_drains: 0,
             processes: BTreeSet::new(),
@@ -293,22 +297,41 @@ impl ProfileCollector {
 
     /// Reads what the rings hold and turns each sample into an event.
     ///
-    /// The records are taken out of the rings first, and only the processes
-    /// they hold samples of have their mappings re-read before any stack is
-    /// interned. Re-reading every process's maps on every tick -- twice for a
-    /// stack mode with CFI, and its executable's link once more -- was most
-    /// of what a profile cost a program that is mostly off the cpu: 0.25 to
-    /// 0.4 ms a tick of a debug build, 25 to 40 ms of this tool's cpu a
-    /// second of wall clock whatever the program did, against `sqlite3`'s
+    /// Only the processes being sampled have their mappings re-read.
+    /// Re-reading every process's maps on every tick -- twice for a stack mode
+    /// with CFI, and its executable's link once more -- was most of what a
+    /// profile cost a program that is mostly off the cpu: 0.25 to 0.4 ms a
+    /// tick of a debug build, whatever the program did, against `sqlite3`'s
     /// fsync-bound commits that burn 200 ms a second. A user-only profile
     /// (`perf_event_paranoid` 2) delivers no sample while the task is in the
-    /// kernel, so a program that lives in system calls left nearly every
-    /// tick empty and still paid for every read. The maps are still read in
-    /// the tick that interns the stacks, while the process is alive.
+    /// kernel, so a program that lives in system calls left nearly every tick
+    /// empty and still paid for every read.
+    ///
+    /// A process the last drain held samples of is re-read before this one,
+    /// as every process used to be, and so is one no drain has held samples
+    /// of yet: the maps are then those of the interval the samples come from,
+    /// which matters across an `execve` -- a launched program's first samples
+    /// are this tool's own code in the child calling `execve`, and maps read
+    /// after the drain name them against the new image and lose them (82 to
+    /// 172 frames in no mapping at 100 kHz, against 7 to 54). A process with
+    /// no sample in the last drain is re-read after this one's records are
+    /// out of the rings and before any of its stacks is interned, and only
+    /// when they hold samples of it.
     fn drain_into(&mut self, events: &mut Vec<Event>, seq: u64) {
         let Some(event) = self.event.as_mut() else {
             return;
         };
+        // Before the drain: a process the last drain held samples of, and
+        // one no drain has held samples of yet -- a launched program waiting
+        // at the gate, whose maps change under its first samples.
+        let mut before = BTreeSet::new();
+        for (pid, unwinder) in self.unwinders.iter_mut() {
+            if self.recent.contains(pid) || !self.processes.contains(pid) {
+                unwinder.refresh_symbols();
+                self.refreshes += 1;
+                before.insert(*pid);
+            }
+        }
         let mut records = Vec::new();
         event.drain(|record| records.push(record));
         let sampled: BTreeSet<u32> = records
@@ -326,12 +349,13 @@ impl ProfileCollector {
         if sampled.is_empty() {
             self.idle_drains += 1;
         }
-        for pid in &sampled {
+        for pid in sampled.difference(&before) {
             if let Some(unwinder) = self.unwinders.get_mut(pid) {
                 unwinder.refresh_symbols();
                 self.refreshes += 1;
             }
         }
+        self.recent = sampled;
         let id = self.id.clone();
         let unwinders = &mut self.unwinders;
         let stack_ids = &mut self.stack_ids;
@@ -978,75 +1002,73 @@ mod tests {
         );
     }
 
-    /// A tick whose drain holds no sample of a process reads nothing of it.
+    /// A tick whose drain holds no sample of a process reads nothing of it,
+    /// once a drain has held samples of it.
     ///
     /// The mappings were re-read for every process on every tick, and that
     /// was most of what profiling a program that waits on its disk cost
-    /// (`drain_into`). A sleeping child produces no sample, so ten ticks over
-    /// it read its maps no time at all; a burning one is read once in each
-    /// drain that held its samples, and in no other.
+    /// (`drain_into`). A child that burns, then `exec`s `sleep`: until its
+    /// first samples, and in each drain that holds samples of it or follows
+    /// one that did, it is read once; in the drains of its sleep, never. The
+    /// old rule read it once a drain, every drain.
     #[test]
     fn a_tick_with_no_sample_of_a_process_does_not_reread_its_mappings() {
-        let ticks = 10;
-        let mut sleeper = std::process::Command::new("sleep")
-            .arg("5")
+        use std::io::Write;
+        let ticks: u64 = 80;
+        // It waits for a line before it burns: opening a profile with a
+        // kernel half reads the kernel's symbols first, which takes longer
+        // than the burn.
+        let mut child = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "read go; i=0; while [ $i -lt 100000 ]; do i=$((i+1)); done; exec sleep 5",
+            ])
+            .stdin(std::process::Stdio::piped())
             .spawn()
-            .expect("sleep runs");
+            .expect("sh runs");
         // Both halves where the kernel allows them, the user half where it
         // does not (`perf_event_paranoid` 2): the path the CI's cell takes.
-        let collector = |pid: u32| {
-            let mut choice = StackChoice::of(crate::request::StackMode::Fp);
-            choice.user_only = !crate::perf::kernel_callchain_allowed();
-            Prepare {
-                mode: "sample@997hz".parse().unwrap(),
-                choice,
-                debuginfod: None,
-            }
-            .collector(pid as i32, true)
-        };
-        let mut idle = collector(sleeper.id());
-        if let Err(error) = idle.start() {
-            let _ = sleeper.kill();
-            let _ = sleeper.wait();
+        let mut choice = StackChoice::of(crate::request::StackMode::Fp);
+        choice.user_only = !crate::perf::kernel_callchain_allowed();
+        let mut collector = Prepare {
+            mode: "sample@997hz".parse().unwrap(),
+            choice,
+            debuginfod: None,
+        }
+        .collector(child.id() as i32, true);
+        if let Err(error) = collector.start() {
+            let _ = child.kill();
+            let _ = child.wait();
             eprintln!("skipped: this machine refuses unprivileged perf sampling ({error})");
             return;
         }
+        let _ = child.stdin.take().expect("a pipe").write_all(b"go\n");
+        let mut before_first = None;
+        let mut sampled = 0;
         for seq in 0..ticks {
             std::thread::sleep(StdDuration::from_millis(10));
-            idle.sample(seq).expect("a tick");
+            if !collector.sample(seq).expect("a tick").is_empty() {
+                before_first.get_or_insert(seq);
+                sampled += 1;
+            }
         }
-        idle.stop();
-        let _ = sleeper.kill();
-        let _ = sleeper.wait();
-        // `stop` drains once more.
-        assert_eq!(
-            (idle.refreshes, idle.idle_drains),
-            (0, ticks + 1),
-            "a process that slept through {ticks} ticks and the stop's drain: (mapping reads, \
-             drains that held no sample)"
+        collector.stop();
+        let _ = child.kill();
+        let _ = child.wait();
+        let said = format!(
+            "{ticks} ticks and the stop's drain over a child that burns and then sleeps: {} \
+             drains held no sample, {sampled} held samples (the first at tick {before_first:?}), \
+             and the mappings were read {} times",
+            collector.idle_drains, collector.refreshes
         );
-
-        let mut burner = std::process::Command::new("sh")
-            .args(["-c", "while :; do :; done"])
-            .spawn()
-            .expect("sh runs");
-        let mut busy = collector(burner.id());
-        busy.start()
-            .expect("a sleeping child was profiled a moment ago");
-        let mut events = 0;
-        for seq in 0..ticks {
-            std::thread::sleep(StdDuration::from_millis(10));
-            events += busy.sample(seq).expect("a tick").len();
-        }
-        events += busy.stop().len();
-        let _ = burner.kill();
-        let _ = burner.wait();
+        eprintln!("{said}");
+        let Some(first) = before_first else {
+            panic!("the child's burn was never sampled: {said}");
+        };
+        assert!(collector.idle_drains >= 10, "the child never slept: {said}");
         assert!(
-            events > 0 && busy.refreshes > 0 && busy.refreshes + busy.idle_drains == ticks + 1,
-            "{events} samples of a child burning through {ticks} ticks and the stop's drain: \
-             its mappings were read {} times, and {} drains held no sample",
-            busy.refreshes,
-            busy.idle_drains
+            collector.refreshes <= first + 1 + 2 * sampled && collector.refreshes + 10 <= ticks + 1,
+            "{said}"
         );
     }
 
