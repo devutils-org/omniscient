@@ -35,7 +35,7 @@ stripped `sqlite3`. Everything here is in `cases/**`, `tests/cases.rs` and
     `docs/mcp.md` tells a model to: the biggest row of the decomposition, and
     the dominant stack of the request that row came from (by its leaf's own
     samples for `cpu.profile`, by its total for a block).
-  - Nine named checks per answer (`docs/cases.md`, "What a case checks"). A
+  - Ten named checks per answer (`docs/cases.md`, "What a case checks"). A
     check listed under `open_findings` prints `FINDING` with where it was
     filed while it fails, and **fails the test once it passes** everywhere it
     was checked, so a fix elsewhere removes the line and a regression of a
@@ -72,9 +72,13 @@ a-lock-held-elsewhere/cli: blocked 1530.2 ms (limit sleep, leaf clock_nanosleep)
 a-lock-held-elsewhere/mcp: blocked 1529.2 ms (leaf clock_nanosleep); holder 1500.1 ms; .timer off-cpu 1529.4 ms
 ```
 
-- Both ways name the known cause first, and the same suspect; the leaves are
-  compared where both are named (the lock: `clock_nanosleep` both ways; the
-  scan: the person's leaf is an address, finding 1).
+- Both ways name the known cause first. **The same suspect is shown for the
+  lock only** (`blocked`, `clock_nanosleep` both ways). For the scan the
+  states agree and the leaves are not compared -- the person's leaf is an
+  address, and an unnamed binary's hottest leaf is an instruction that moves
+  from run to run (`sqlite3+0x70564` is `btreeParseCellPtrIndex`, `+0x94d85`
+  and `+0x90183` are `sqlite3VdbeExec`), so `both-ways-name-the-same-suspect`
+  prints `unchecked` with both leaves until finding 1 is fixed.
 - Every cited row agrees with its reference within the stated slack: the
   on-cpu row runs about 1 % over `.timer`'s cpu (a time-based sample counts
   the interrupts on the task's cpu, which getrusage leaves out -- the
@@ -139,10 +143,25 @@ the coordinator.**
 with exit 3, so the block's stack is `clock_nanosleep <- sqlite3+0x57e9a <-
 sqlite3+0x120142 <- sqlite3+0x70880`: the busy handler that names the cause
 (`sqliteDefaultBusyCallback`, resolved by hand above) is there and unnamed.
-Ask: `sched.offcpu`'s user stacks named through the same `Symbolizer` with a
-debuginfod client. Check: `the-block-s-frames-are-named`. **For stream
-symbols** (it owns `src/stack.rs`), with the collector side
-(`src/collect/sched/offcpu*`) for the coordinator.
+Ask, in two parts, both needed before the line comes out:
+
+1. `sched.offcpu`'s user stacks named through the same `Symbolizer` with a
+   debuginfod client (`UNWOUND_BY_CHOICE`/`reads_symbols` accepting it).
+   **For stream symbols** (it owns `src/stack.rs`), with the collector side
+   (`src/collect/sched/offcpu*`) for the coordinator. The agent's way needs
+   nothing more: `approved_session` asks `symbols` of every request and takes
+   it back from each source `omn -f --dump-resolved` refuses it for (exit 3),
+   so the day `sched.offcpu` reads it, its stack is asked through debuginfod.
+2. `omn latency --symbols` (finding 1) setting it on the `sched.offcpu`
+   request as well as on `cpu.profile`'s: the person's way asks only what the
+   triage sets. **For the coordinator.**
+
+Check: `the-block-s-frames-are-named`, both ways. With part 1 alone the
+agent's way passes and the person's still fails, so the line stays listed
+(a check passes as an open finding only where it passes everywhere). Where
+`DEBUGINFOD_URLS` is unset the check is `unchecked` both ways, with the
+reason and the frames, so closing the line does not turn such a machine
+red.
 
 ### "a polled lock is called not a lock" -- `src/triage/latency.rs:269`
 
@@ -164,10 +183,16 @@ five collectors spend 6 to 11 ms each, so at `--budget 100%` the run stopped
 at 254.7 ms (*"budget: [cpu.profile] --budget 100% was exceeded: 146.32 %
 measured over the whole window"*), the target killed before its wait was over:
 the agent's way answered another question than the person's, which asks with
-no budget. `tests/cases.rs` passes `100000%` (`UNBOUNDED_BUDGET`, with this
-reason). Ask: either `budget` optional in `run_session` (bounded by the
+no budget. Ask: either `budget` optional in `run_session` (bounded by the
 server's `--allow-run` duration), or a budget whose denominator is the wall
-clock for a target that waits. **For the coordinator.**
+clock for a target that waits. **For the coordinator.** Check:
+`the-agent-s-way-answers-within-a-model-s-budget`. The agent's way asks
+`run_session` with no budget, then, where the server requires one, with
+`100%` (`MODEL_BUDGET`); only a run that ceiling stopped is asked again with
+`100000%` (`UNBOUNDED_BUDGET`) and a fresh injection, so the other checks
+still answer the person's question. Either fix passes the check, and the
+cpu cause passes it today (the collectors cost a few percent of a 1.4 s
+scan).
 
 ### Not filed as a check: the agent's way cannot read the program's stdout
 
@@ -214,6 +239,16 @@ or the launch in `-o` mode): hand the program's stdout back as its own field.
   lost 65 % of a 100 kHz profile with five other agents running): load, not
   this branch.
 
+- The review round: `cargo test --test cases` with `DEBUGINFOD_URLS` set
+  (4 passed, 15 s; the findings above as `FINDING`, the scan's same-suspect
+  `unchecked`) and with it empty (green; the naming checks `unchecked` both
+  ways). One `make check`: red on `tests/budget.rs`'s poll test as in the first
+  round; a `--no-fail-fast` run whose log another agent wrote into too (its
+  numbers are not evidence; of the failures it named, each rerun alone passed
+  except `scenario_sched::sharing_one_file...`, already in the first round's
+  tally); then one `make check` to a log of its own: **green**, 2165 passed,
+  0 failed, 10 ignored, clippy and fmt clean (7 min 54 s).
+
 ## 6. Privileged runs wanted (the coordinator, alone)
 
 ```console
@@ -242,14 +277,21 @@ sudo -n /usr/bin/sysctl kernel.perf_event_paranoid=-1 && make
 ## 8. Needs from another stream
 
 - **symbols** (`src/stack.rs`): an off-cpu stack named through debuginfod
-  ("an off-cpu stack cannot ask debuginfod"). When it lands, remove
-  `the-block-s-frames-are-named` from `cases/sqlite3-stripped/case.yml`.
+  ("an off-cpu stack cannot ask debuginfod", part 1). The agent's way then
+  asks it with no change to `tests/cases.rs`. The line
+  `the-block-s-frames-are-named` comes out of
+  `cases/sqlite3-stripped/case.yml` only once part 2 has landed too
+  (`omn latency --symbols` reaching `sched.offcpu`): until then the person's
+  way still fails it, and the case keeps printing the finding.
 - **coordinator** (`src/cli.rs`, `src/triage/latency.rs`,
-  `src/triage/saturate.rs`): `--symbols` on the triage; the names note in the
-  verdict; the `Limit::Sleep` sentence. Each, when it lands, removes its line
+  `src/triage/saturate.rs`): `--symbols` on the triage, set on every request
+  that reads it (`cpu.profile`, and `sched.offcpu` once symbols' part lands);
+  the names note in the verdict; the `Limit::Sleep` sentence. Each, when it lands, removes its line
   from the case's `open_findings` (the test fails until it is removed).
 - **coordinator** (`mcp/src/server.rs`, `mcp/src/session.rs`): the budget
-  for a waiting target; the program's stdout in `run_session`'s answer.
+  for a waiting target (removes
+  `the-agent-s-way-answers-within-a-model-s-budget`); the program's stdout in
+  `run_session`'s answer.
 - **coordinator** (`.github/workflows/ci.yml`): install `sqlite3` (and
   python3's `sqlite3` module, normally present) on the runner, and run
   `cargo test --test cases` in the cell.
@@ -259,3 +301,47 @@ sudo -n /usr/bin/sysctl kernel.perf_event_paranoid=-1 && make
   `tests/cases.rs`'s registry, which this stream owns: send me, or the
   coordinator at the merge, the function). `fetch` is implemented for build's
   sqlite amalgamation (`curl`, sha256-checked, into `{cache}`).
+
+## 9. Review
+
+The adversarial review's seven points, each fixed in `tests/cases.rs` unless
+said otherwise.
+
+- **Defect: the off-cpu names could not be closed as the handoff said.**
+  Right on both halves. `approved_session` set `symbols` on `cpu.profile`
+  only, and the `Unchecked` branch of the `through` check required
+  `On::Cpu`, which no `through` has. Now the session asks `symbols` of every
+  request and takes it back where `omn -f --dump-resolved` refuses it (exit 3,
+  the source named), so `sched.offcpu` is asked the day it reads it; and the
+  `through` check is `unchecked`, with the reason and the frames, wherever
+  names were not asked for and a frame is an address, on or off the cpu.
+  Section 3 ("an off-cpu stack cannot ask debuginfod") and section 8 now say
+  the line needs both the symbols stream's part and the triage's `--symbols`
+  reaching `sched.offcpu`. Shown: with `DEBUGINFOD_URLS` set the check is
+  `FINDING` both ways; with it empty, `unchecked` both ways, the test green.
+- **Gap: "the same suspect" printed `ok` for the scan on the state alone.**
+  Right, and the reviewer's `addr2line` is the reason it matters: the
+  person's per-instruction leaf is sometimes outside `sqlite3VdbeExec`. The
+  check is now `unchecked` when the states agree and a leaf is an address,
+  with both leaves; `ok` only where both are named and equal (or neither has
+  one). Section 2 corrected: the same suspect is shown for the lock only.
+- **Gap: `UNBOUNDED_BUDGET` was an invisible workaround.** Right. A tenth
+  check, `the-agent-s-way-answers-within-a-model-s-budget`, listed under
+  `open_findings`: the agent asks with no budget, then `100%`; only a run
+  that stopped is asked again unbounded. Shown: `FINDING` on the lock
+  (*"`budget` is required ...; asked with `budget: 100%`, the run stopped
+  ...: 215.08 % measured"*), `ok` on the scan.
+- **Nit: `the-verdict-says-how-it-knows` required something unseen.** Right:
+  always met here, and inverted. Dropped from the check; what each answer
+  could not see is printed under its line (`could not see: ...`) instead.
+- **Nit: a withheld way waited out the holder's 60 s.** Fixed:
+  `around_injection` reads the injection's account only with an answer; a
+  withheld or budget-stopped run drops it, which kills it. Reasoned, not
+  run (needs a binary without the capabilities).
+- **Nit: `Mcp::request` took the first line as the reply.** Fixed: it reads
+  until the message carrying its id, and says so when the server closes its
+  output; a JSON-RPC `error` is now a refusal rather than an empty result.
+- **Nit: `has_symtab` could panic and misread big-endian files.** Fixed:
+  every read is bounds-checked and the byte order is taken from `EI_DATA`;
+  `a_truncated_elf_file_has_no_answer` cuts the test binary at 3, 6, 64 and
+  65 bytes (each `None`) and reads the whole one (`Some(true)`).

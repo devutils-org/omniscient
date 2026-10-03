@@ -29,13 +29,14 @@ Each answer is held to named checks:
 |---|---|
 | `the-first-suspect-is-the-known-cause` | the dominant state (and, for the person's way, the verdict's `limit`) is the cause the case put there |
 | `the-dominant-stack-ends-in-the-known-frame` | the hottest function on a cpu, or the frame the dominant block began in off it, is the one the case names -- compared only where the frame is named, never a name against an address |
-| `the-block-s-frames-are-named` | the dominant stack passes through the frame the case names under `through` |
+| `the-block-s-frames-are-named` | the dominant stack passes through the frame the case names under `through`; unchecked where names were not asked for and a frame is an address |
 | `every-cited-number-agrees-with-the-reference` | each row the case lists under `agrees` is within the two resolutions of the reference's figure |
-| `the-verdict-says-how-it-knows` | the method, the evidence level of every row, the unwind mode, what it could not see (losses, degradations, missing rows), and for the agent's way where its names came from |
+| `the-verdict-says-how-it-knows` | the method, the evidence level of every row, the unwind mode, and for the agent's way where its names came from. What it could not see (losses, degradations, missing rows) is printed under the run's line, not required: a run that lost nothing is not a worse answer |
 | `the-person-s-way-names-the-hottest-function` | where the case asks for names, the verdict's hottest function is one |
 | `the-person-s-way-says-where-names-came-from` | the verdict's notes say where its names came from |
 | `the-sentence-claims-nothing-false` | the verdict's sentence contains none of the case's `never_says` |
-| `both-ways-name-the-same-suspect` | the two answers name the same state and, where both are named, the same leaf |
+| `both-ways-name-the-same-suspect` | the two answers name the same state and the same leaf; unchecked, with both leaves, when the states agree and a leaf is an address |
+| `the-agent-s-way-answers-within-a-model-s-budget` | `run_session` answers the question asked with no budget, or, where it requires one, at `100%` (the collectors may spend as much cpu as the program); a run that ceiling stopped is asked again with an unbounded one, so the other checks still answer the person's question |
 
 A check is **ok**, **failed**, or **unchecked** with the reason (names that were
 not asked for, a leaf that is an address). A cause whose reference says the
@@ -189,8 +190,18 @@ to the 100 ms sqlite's busy handler sleeps between its last retries.
 What the case shows wrong is in `docs/fixes/w17-cases.md`, each with the check
 that fails: the person's way cannot ask debuginfod and ranks a stripped
 binary's instructions rather than its functions; its verdict drops where its
-names came from; an off-cpu stack cannot be named by debuginfod; and the
-sentence calls sqlite's polled lock "something that is not a lock".
+names came from; an off-cpu stack cannot be named by debuginfod; the
+sentence calls sqlite's polled lock "something that is not a lock"; and
+`run_session`'s required budget, a share of the target's own cpu, stops the
+lock's run at 100 %.
+
+**Names, the agent's way.** Where the case asks for `symbols: debuginfod`, the
+agent's session asks it of every request, and takes it back from each source
+`omn` refuses it for (`omn -f <session> --dump-resolved`, exit 3, *"is not
+implemented for `<source>`"*). The sources that read `--symbols` are `omn`'s
+to say: one that starts to is asked without a line of the harness changing.
+The person's way passes `--symbols` as soon as `omn latency --help` lists it,
+and asks whatever the triage sets it on.
 
 ## Adding a case
 

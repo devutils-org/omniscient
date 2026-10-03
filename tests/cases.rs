@@ -46,13 +46,22 @@ use serde_json::{json, Value};
 
 const OMN: &str = env!("CARGO_BIN_EXE_omn");
 
-/// The budget the agent's way passes to `run_session`, which requires one.
-/// The person's way asks with none, and a budget is a share of the target's
-/// own cpu: a program that waits 1.5 s on a lock burns a millisecond, the
-/// collectors several, and any ceiling a model would pick stops the run
-/// before the wait is over -- the question answered would be another one.
-/// Filed in `docs/fixes/w17-cases.md`, "a waiting program exceeds every
-/// budget".
+/// The ceiling the agent's way gives `run_session` when the server requires
+/// one: the collectors may spend as much cpu as the program they watch, the
+/// most generous ceiling that still means something.
+///
+/// The person's way asks with no budget, and a budget is a share of the
+/// target's own cpu: a program that waits 1.5 s on a lock burns a millisecond,
+/// the collectors several, and this ceiling stops the run before the wait is
+/// over. That is the check [`BUDGET`], filed in `docs/fixes/w17-cases.md`, "a
+/// waiting program exceeds every budget": the agent asks with no budget, then
+/// with this one, and only a run this one stopped is asked again with
+/// [`UNBOUNDED_BUDGET`], so the rest of its checks answer the person's
+/// question and the finding is printed on every run until it is fixed.
+const MODEL_BUDGET: &str = "100%";
+
+/// The ceiling no collector reaches: what the agent's way is asked again with
+/// when [`MODEL_BUDGET`] stopped the run (above).
 const UNBOUNDED_BUDGET: &str = "100000%";
 
 /// How long a cause's run may last, either way, before it is a failure.
@@ -878,10 +887,11 @@ const CLI_NAMES: &str = "the-person-s-way-names-the-hottest-function";
 const CLI_ORIGINS: &str = "the-person-s-way-says-where-names-came-from";
 const BLOCK_NAMED: &str = "the-block-s-frames-are-named";
 const NOTHING_FALSE: &str = "the-sentence-claims-nothing-false";
+const BUDGET: &str = "the-agent-s-way-answers-within-a-model-s-budget";
 
 /// Every check this file knows, so a case cannot list one that does not
 /// exist.
-const CHECKS: [&str; 9] = [
+const CHECKS: [&str; 10] = [
     SAME_SUSPECT,
     KNOWN_CAUSE,
     KNOWN_LEAF,
@@ -891,6 +901,7 @@ const CHECKS: [&str; 9] = [
     CLI_ORIGINS,
     BLOCK_NAMED,
     NOTHING_FALSE,
+    BUDGET,
 ];
 
 #[derive(Debug)]
@@ -998,8 +1009,13 @@ fn check_answer(
             .any(|f| f.starts_with(through.as_str()))
         {
             Outcome::Pass
-        } else if cause.on == On::Cpu && naming.unavailable.is_some() {
-            Outcome::Unchecked(naming.unavailable.clone().unwrap())
+        } else if let (Some(why), true) = (&naming.unavailable, named < answer.frames.len()) {
+            // A frame no name reaches is not a frame that is missing.
+            Outcome::Unchecked(format!(
+                "{why}; {named} of {} frames named: {}",
+                answer.frames.len(),
+                answer.frames.join(" <- ")
+            ))
         } else {
             Outcome::Fail(format!(
                 "the dominant stack does not pass through `{through}` ({named} of {} frames named): {}",
@@ -1100,9 +1116,6 @@ fn check_answer(
     if answer.way == "mcp" && how.names.is_none() {
         lacking.push("where the names came from".to_owned());
     }
-    if how.unseen.is_empty() {
-        lacking.push("what it could not see (no loss, degradation or missing row)".to_owned());
-    }
     report.pass_or(at, HOW, lacking.is_empty(), || {
         format!("the answer does not say {}", lacking.join(", "))
     });
@@ -1130,6 +1143,9 @@ fn latency_args(cause: &Cause, naming: &Naming) -> Vec<String> {
 enum Asked {
     Answer(Box<Answer>, String),
     Withheld(String),
+    /// `run_session` stopped the run on [`MODEL_BUDGET`] before the program
+    /// was done: what it said, for [`BUDGET`].
+    OverBudget(String),
 }
 
 /// Runs an injection (if the cause has one) around `ask`, and returns the
@@ -1148,9 +1164,12 @@ fn around_injection(
         _ => None,
     };
     let asked = ask()?;
-    let said = match injected {
-        Some(injected) => injected.finish()?,
-        None => String::new(),
+    let said = match (injected, &asked) {
+        // Its account is read only with an answer: a run the machine refused
+        // or a budget stopped never reaches the end it waits for, and
+        // dropping it ends it now rather than at its own deadline.
+        (Some(injected), Asked::Answer(..)) => injected.finish()?,
+        _ => String::new(),
     };
     Ok((asked, said))
 }
@@ -1233,18 +1252,36 @@ impl Mcp {
         self.next += 1;
         let id = self.next;
         self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))?;
-        let mut line = String::new();
-        self.stdout
-            .read_line(&mut line)
-            .map_err(|error| format!("omn-mcp said nothing: {error}"))?;
-        let reply: Value = serde_json::from_str(&line)
-            .map_err(|error| format!("not a JSON-RPC line ({error}): {line}"))?;
-        Ok(reply)
+        // The reply is the message carrying this request's id; a notification
+        // or a log message the server sends first is not it.
+        loop {
+            let mut line = String::new();
+            let read = self
+                .stdout
+                .read_line(&mut line)
+                .map_err(|error| format!("omn-mcp said nothing: {error}"))?;
+            if read == 0 {
+                return Err(format!(
+                    "omn-mcp closed its output before answering `{method}`"
+                ));
+            }
+            let message: Value = serde_json::from_str(&line)
+                .map_err(|error| format!("not a JSON-RPC line ({error}): {line}"))?;
+            if message["id"] == id {
+                return Ok(message);
+            }
+        }
     }
 
     /// A tool call: its structured content, or its refusal.
     fn call(&mut self, tool: &str, arguments: Value) -> Result<Value, String> {
         let reply = self.request("tools/call", json!({"name": tool, "arguments": arguments}))?;
+        if !reply["error"].is_null() {
+            return Err(format!(
+                "{tool} was refused by the protocol: {}",
+                reply["error"]
+            ));
+        }
         let result = &reply["result"];
         if result["isError"] == true {
             return Err(format!(
@@ -1284,17 +1321,66 @@ fn approved_session(cause: &Cause, places: &Places, naming: &Naming) -> Result<S
     let mut session: serde_norway::Value = serde_norway::from_slice(&output.stdout)
         .map_err(|error| format!("the dumped session is not YAML: {error}"))?;
     session["format"] = "json".into();
-    if let (Some(symbols), false) = (&naming.symbols, naming.cli_flag) {
-        for request in session["requests"].as_sequence_mut().into_iter().flatten() {
-            if request["source"].as_str() == Some("cpu.profile") {
-                request["symbols"] = symbols.clone().into();
+    if let Some(symbols) = &naming.symbols {
+        // Names on every request whose collector reads them in this build:
+        // asked of every request, and taken back from each source the build
+        // refuses it for (`omn` names the first such source, exit 3). So the
+        // sources that read `--symbols` are `omn`'s to say, and one that
+        // starts to -- `sched.offcpu`'s stacks -- is asked without a line
+        // changing here.
+        let probe = places.dir.join(format!("symbols-{}.yml", cause.name));
+        let mut refused: BTreeSet<String> = BTreeSet::new();
+        loop {
+            for request in session["requests"].as_sequence_mut().into_iter().flatten() {
+                let source = request["source"].as_str().unwrap_or("").to_owned();
+                if refused.contains(&source) {
+                    if let Some(map) = request.as_mapping_mut() {
+                        map.remove("symbols");
+                    }
+                } else if request.get("symbols").is_none() {
+                    request["symbols"] = symbols.clone().into();
+                }
+            }
+            let text_of = serde_norway::to_string(&session).map_err(|error| error.to_string())?;
+            std::fs::write(&probe, &text_of).map_err(|error| error.to_string())?;
+            let output = run(
+                &[
+                    OMN.to_owned(),
+                    "-f".to_owned(),
+                    probe.to_string_lossy().into_owned(),
+                    "--dump-resolved".to_owned(),
+                ],
+                &places.dir,
+                Duration::from_secs(30),
+            )?;
+            let said = text(&output.stderr);
+            let not_read = (output.status.code() == Some(3))
+                .then(|| said.split("is not implemented for `").nth(1))
+                .flatten()
+                .and_then(|rest| rest.split('`').next())
+                .map(str::to_owned);
+            match not_read {
+                Some(source) if refused.insert(source.clone()) => {}
+                Some(source) => {
+                    return Err(format!(
+                        "`--symbols` is still refused for `{source}` once taken back out: {said}"
+                    ))
+                }
+                None => break,
             }
         }
     }
     serde_norway::to_string(&session).map_err(|error| error.to_string())
 }
 
-fn ask_mcp(cause: &Cause, places: &Places, naming: &Naming) -> Result<Asked, String> {
+/// `budget`: `None` asks as a model would ([`MODEL_BUDGET`]); `Some` is the
+/// ceiling to ask with.
+fn ask_mcp(
+    cause: &Cause,
+    places: &Places,
+    naming: &Naming,
+    budget: Option<&str>,
+) -> Result<Asked, String> {
     let approved = places.dir.join(format!("approved-{}", cause.name));
     let runs = places.dir.join(format!("runs-{}", cause.name));
     std::fs::create_dir_all(&approved).map_err(|e| e.to_string())?;
@@ -1337,14 +1423,27 @@ fn ask_mcp(cause: &Cause, places: &Places, naming: &Naming) -> Result<Asked, Str
         }
         return Err(format!("the approved session does not resolve: {entry}"));
     }
-    let ran = mcp.call(
-        "run_session",
-        json!({
-            "approved": file,
-            "duration": format!("{}s", RUN_CEILING.as_secs()),
-            "budget": UNBOUNDED_BUDGET,
-        }),
-    )?;
+    let mut arguments = json!({
+        "approved": file,
+        "duration": format!("{}s", RUN_CEILING.as_secs()),
+    });
+    let mut required = None;
+    let ran = match budget {
+        Some(budget) => {
+            arguments["budget"] = budget.into();
+            mcp.call("run_session", arguments)?
+        }
+        // As a model asks: with no ceiling, the person's question has none;
+        // with the generous one where the server insists on a ceiling.
+        None => match mcp.call("run_session", arguments.clone()) {
+            Err(refused) if refused.contains("`budget` is required") => {
+                required = Some(refused);
+                arguments["budget"] = MODEL_BUDGET.into();
+                mcp.call("run_session", arguments)?
+            }
+            other => other?,
+        },
+    };
     let said = match &ran["said_by_omn"] {
         Value::Array(lines) => lines
             .iter()
@@ -1353,6 +1452,21 @@ fn ask_mcp(cause: &Cause, places: &Places, naming: &Naming) -> Result<Asked, Str
             .join("\n"),
         other => other.as_str().unwrap_or("").to_owned(),
     };
+    if budget.is_none() {
+        if let Some(stopped) = said
+            .lines()
+            .find(|line| line.contains("--budget") && line.contains("was exceeded"))
+        {
+            return Ok(Asked::OverBudget(format!(
+                "{}; asked with `budget: {MODEL_BUDGET}`, the run stopped before the program \
+                 was done: {}",
+                required
+                    .as_deref()
+                    .unwrap_or("run_session asked for no budget"),
+                stopped.trim()
+            )));
+        }
+    }
     if ran["exit"] != 0 {
         if let Some(reason) = withheld(ran["exit"].as_i64().map(|code| code as i32), &said) {
             return Ok(Asked::Withheld(reason));
@@ -1442,27 +1556,41 @@ fn fetched(case: &Case, places: &Places) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether a file carries a `.symtab`, from its section headers' names.
+/// Whether a file carries a `.symtab`, from its section headers' names:
+/// `None` for anything that is not a well-formed 64-bit ELF file, of either
+/// byte order.
 fn has_symtab(path: &Path) -> Option<bool> {
     let bytes = std::fs::read(path).ok()?;
-    if bytes.get(..4)? != b"\x7fELF" || bytes[4] != 2 {
+    if bytes.get(..4)? != b"\x7fELF" || *bytes.get(4)? != 2 {
         return None;
     }
-    let u16_at = |at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap()) as usize;
-    let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap()) as usize;
+    let little = match *bytes.get(5)? {
+        1 => true,
+        2 => false,
+        _ => return None,
+    };
+    let int = |at: usize, width: usize| -> Option<usize> {
+        let field = bytes.get(at..at.checked_add(width)?)?;
+        let value = (0..width).fold(0u64, |value, index| {
+            let byte = if little {
+                field[width - 1 - index]
+            } else {
+                field[index]
+            };
+            value << 8 | u64::from(byte)
+        });
+        usize::try_from(value).ok()
+    };
     let (shoff, shentsize, shnum, shstrndx) =
-        (u64_at(0x28), u16_at(0x3a), u16_at(0x3c), u16_at(0x3e));
-    let section = |index: usize| shoff + index * shentsize;
-    let names = u64_at(section(shstrndx) + 0x18);
-    Some((0..shnum).any(|index| {
-        let name = names
-            + u32::from_le_bytes(
-                bytes[section(index)..section(index) + 4]
-                    .try_into()
-                    .unwrap(),
-            ) as usize;
-        bytes.get(name..name + 8) == Some(b".symtab\0")
-    }))
+        (int(0x28, 8)?, int(0x3a, 2)?, int(0x3c, 2)?, int(0x3e, 2)?);
+    let section = |index: usize| shoff.checked_add(index.checked_mul(shentsize)?);
+    let names = int(section(shstrndx)?.checked_add(0x18)?, 8)?;
+    let mut found = false;
+    for index in 0..shnum {
+        let name = names.checked_add(int(section(index)?, 4)?)?;
+        found |= bytes.get(name..name.checked_add(8)?) == Some(b".symtab\0".as_slice());
+    }
+    Some(found)
 }
 
 fn which(command: &str) -> Option<PathBuf> {
@@ -1587,10 +1715,25 @@ fn run_case(case_dir: &Path, case: &Case, report: &mut Report) {
         let mut answers: Vec<Answer> = Vec::new();
         for way in ["cli", "mcp"] {
             let at = format!("{}/{}/{way}", case.name, cause.name);
-            let asked = around_injection(cause, &places, || match way {
+            let mut asked = around_injection(cause, &places, || match way {
                 "cli" => ask_cli(cause, &places, &naming),
-                _ => ask_mcp(cause, &places, &naming),
+                _ => ask_mcp(cause, &places, &naming, None),
             });
+            match &asked {
+                Ok((Asked::OverBudget(why), _)) => {
+                    report.add(&at, BUDGET, Outcome::Fail(why.clone()));
+                    // Asked again, unbounded, so the other checks answer the
+                    // person's question; a fresh injection, since the first
+                    // one's cause was spent on the stopped run.
+                    asked = around_injection(cause, &places, || {
+                        ask_mcp(cause, &places, &naming, Some(UNBOUNDED_BUDGET))
+                    });
+                }
+                Ok((Asked::Answer(..), _)) if way == "mcp" => {
+                    report.add(&at, BUDGET, Outcome::Pass)
+                }
+                _ => {}
+            }
             let (answer, said, injection_said) = match asked {
                 Ok((Asked::Answer(answer, said), injection_said)) => {
                     (*answer, said, injection_said)
@@ -1598,6 +1741,14 @@ fn run_case(case_dir: &Path, case: &Case, report: &mut Report) {
                 Ok((Asked::Withheld(reason), _)) => {
                     eprintln!(
                         "SKIPPED case {at}: this machine withholds a source it needs: {reason}"
+                    );
+                    continue;
+                }
+                Ok((Asked::OverBudget(why), _)) => {
+                    report.add(
+                        &at,
+                        KNOWN_CAUSE,
+                        Outcome::Fail(format!("stopped even at {UNBOUNDED_BUDGET}: {why}")),
                     );
                     continue;
                 }
@@ -1645,20 +1796,41 @@ fn run_case(case_dir: &Path, case: &Case, report: &mut Report) {
                     .collect::<Vec<_>>()
                     .join(" ")
             );
+            for unseen in &answer.how.unseen {
+                eprintln!("    could not see: {unseen}");
+            }
             check_answer(report, &at, cause, &answer, &accounts, &naming);
             answers.push(answer);
         }
         if let [cli, mcp] = &answers[..] {
             let at = format!("{}/{}", case.name, cause.name);
-            let leaves_comparable =
-                matches!((&cli.leaf, &mcp.leaf), (Some(a), Some(b)) if is_named(a) && is_named(b));
-            let same = cli.state == mcp.state && (!leaves_comparable || cli.leaf == mcp.leaf);
-            report.pass_or(&at, SAME_SUSPECT, same, || {
+            // The same state, and the same leaf where both are named. A leaf
+            // that is an address is not compared with anything -- an unnamed
+            // binary's hottest leaf is an instruction, and moves from run to
+            // run -- so that half is said to be unchecked, not passed.
+            let differ = || {
                 format!(
                     "the person's way names {} at {:?}, the agent's {} at {:?}",
                     cli.state, cli.leaf, mcp.state, mcp.leaf
                 )
-            });
+            };
+            let outcome = match (&cli.leaf, &mcp.leaf) {
+                _ if cli.state != mcp.state => Outcome::Fail(differ()),
+                (Some(a), Some(b)) if is_named(a) && is_named(b) => {
+                    if a == b {
+                        Outcome::Pass
+                    } else {
+                        Outcome::Fail(differ())
+                    }
+                }
+                (None, None) => Outcome::Pass,
+                (a, b) => Outcome::Unchecked(format!(
+                    "both name `{}`; the leaves were not compared, an address is not a name: \
+                     the person's way's is {a:?}, the agent's {b:?}",
+                    cli.state
+                )),
+            };
+            report.add(&at, SAME_SUSPECT, outcome);
         }
     }
 }
@@ -1801,6 +1973,27 @@ fn every_case_is_well_formed() {
             }
         }
     }
+}
+
+/// `has_symtab` answers for a well-formed file and says nothing, rather than
+/// panicking, for a truncated one.
+#[test]
+fn a_truncated_elf_file_has_no_answer() {
+    let me = std::env::current_exe().unwrap();
+    assert_eq!(
+        has_symtab(&me),
+        Some(true),
+        "a test binary keeps its symbols"
+    );
+    let bytes = std::fs::read(&me).unwrap();
+    let dir = std::env::temp_dir().join(format!("omn-cases-elf-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for keep in [3, 6, 0x40, 0x41] {
+        let cut = dir.join(format!("cut-{keep}"));
+        std::fs::write(&cut, &bytes[..keep]).unwrap();
+        assert_eq!(has_symtab(&cut), None, "the first {keep} bytes");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The extractors, on text the programs print.
