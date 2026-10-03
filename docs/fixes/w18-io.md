@@ -244,3 +244,22 @@ One `make check` at load 26 stopped red on
 (after one redundant closure in the new test). `scenario_io`'s queue,
 two-histogram and known-count scenarios, and `cargo test --lib -- bpf::io
 collect::io`, green.
+
+### After the review round (`5e653c7`)
+
+One `make check` at load 27 stopped red on `cases::every_case_names_its_known_cause_both_ways`
+(`cpython-interpreter/one-function-dominates`: the person's way named no
+state where the agent's named `on-cpu`; a load-sensitive case, no io file on
+its path). Then one `cargo test --workspace --no-fail-fast` at load 21 to 28
+(other streams running): **2183 passed, 9 failed, 11 ignored**, eight targets:
+`cross_compute` (three states), `cross_io`
+(`every_completion_is_paired_with_the_wakeup_that_released_its_reader`, "a
+table for the reader"; **passed rerun alone**), `family_sched` (task moved
+between two cpus), `runner` and `triage` (the two `cpu.profile` loss tests
+already filed above, plus `a_layer_this_run_cannot_serve_...`),
+`scenario_net` (closed-port datagrams), `scenario_proc` (defect 1's first
+reading), `unwind` (dwarf). None touches `src/collect/io/diskstats.rs`,
+`src/bpf/io.rs` or `catalog/io.yaml`'s `io.inflight`; `scenario_io` was green
+in that run, and `cargo test --lib collect::io::diskstats` (17) and
+`bpf::io` (36) green. Clippy and fmt were not reached by the red `make check`;
+`cargo fmt` was applied before the commit.
