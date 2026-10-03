@@ -143,6 +143,7 @@ fn eq_rule() -> Rule {
         window: None,
         capacity: 1000,
         top: 10,
+        tier: join::Tier::Agent,
     }
 }
 
@@ -272,6 +273,7 @@ fn wakeup_rule() -> Rule {
         window: None,
         capacity: 1000,
         top: 10,
+        tier: join::Tier::Agent,
     }
 }
 
@@ -3097,4 +3099,111 @@ fn another_namespaces_lo_is_not_credited_to_this_ones() {
         0.0,
         "a target of this namespace's lo kept a packet of another namespace's: {join}"
     );
+}
+
+// ------------------------------------------------ the tier a rule is applied at
+
+/// One rule twice in one run, once at the agent tier and once at the query
+/// tier: the second applied afterwards to the run's stored JSON, by the same
+/// engine, gives the first's answer. Moving a join from one tier to the other
+/// is the rule's `tier:` line, and nothing of the collectors.
+#[test]
+fn a_rule_moved_to_the_query_tier_answers_from_the_stored_run_what_the_agent_did() {
+    const SESSION: &str = "\
+name: one rule at two tiers
+format: json
+requests:
+  - label: threads
+    source: proc.threads
+    target: &target {launch: [/bin/sh, -c, 'sleep 0.4']}
+    mode: poll@50ms
+    emit: [raw]
+  - label: descriptors
+    source: proc.fd
+    target: *target
+    mode: poll@50ms
+    emit: [raw]
+joins:
+  - {id: at-the-agent, from: proc.threads, to: proc.fd, via: task, match: eq}
+  - {id: at-the-query, from: proc.threads, to: proc.fd, via: task, match: eq, tier: query}
+";
+    let output = written_session(SESSION, &["--input-format", "yaml"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        assert!(
+            machine_cannot_serve(&stderr),
+            "the session failed for a reason that is not the machine's:\n{stderr}"
+        );
+        eprintln!(
+            "SKIPPED: {}. It would have checked that the query tier answers what the agent did",
+            machine_s_reason(&stderr)
+        );
+        return;
+    }
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("a JSON document");
+    let results: Vec<omn::emit::Results> =
+        serde_json::from_value(document["results"].clone()).expect("the stored results");
+    let at_the_agent: join::Correlation = serde_json::from_value(
+        document["joins"]
+            .as_array()
+            .and_then(|joins| joins.iter().find(|join| join["rule"] == "at-the-agent"))
+            .cloned()
+            .expect("the agent tier's join"),
+    )
+    .expect("a correlation");
+    let rule: Rule = serde_norway::from_str(
+        "{id: at-the-query, from: proc.threads, to: proc.fd, via: task, match: eq, tier: query}",
+    )
+    .expect("the rule");
+    let queried = join::apply_stored(&rule, &results).expect("the stored run holds both sides");
+    assert!(
+        at_the_agent.matched > 0,
+        "the descriptors of the launched shell are its own task's: {at_the_agent:?}"
+    );
+    assert_eq!(
+        join::Correlation {
+            rule: at_the_agent.rule.clone(),
+            ..queried
+        },
+        at_the_agent,
+        "the query tier over the stored run and the agent tier over the run disagree"
+    );
+}
+
+/// A rule at the kernel tier, which no match kind serves, and one at the
+/// query tier whose side the run would not store, are refused before the run
+/// with what to do instead.
+#[test]
+fn a_tier_the_run_cannot_serve_is_refused_before_anything_is_attached() {
+    let (code, said) = validate(
+        "kernel-tier",
+        &format!(
+            "requests:\n\
+             \x20 - {{source: proc.threads, target: {LAUNCH}, mode: 'poll@50ms', emit: [raw]}}\n\
+             \x20 - {{source: proc.fd, target: {LAUNCH}, mode: 'poll@50ms', emit: [raw]}}\n\
+             joins:\n\
+             \x20 - {{id: in-kernel, from: proc.threads, to: proc.fd, via: task, match: eq, \
+             tier: kernel}}\n"
+        ),
+    );
+    assert_eq!(code, Some(2), "{said}");
+    assert!(
+        said.contains("kernel tier") && said.contains("tier: query"),
+        "{said}"
+    );
+
+    let (code, said) = validate(
+        "query-tier-summed",
+        &format!(
+            "requests:\n\
+             \x20 - {{source: proc.threads, target: {LAUNCH}, mode: 'poll@50ms', emit: [raw]}}\n\
+             \x20 - {{source: proc.fd, target: {LAUNCH}, mode: 'poll@50ms', emit: [summary]}}\n\
+             joins:\n\
+             \x20 - {{id: later, from: proc.threads, to: proc.fd, via: task, match: eq, \
+             tier: query}}\n"
+        ),
+    );
+    assert_eq!(code, Some(2), "{said}");
+    assert!(said.contains("without `raw`"), "{said}");
 }
