@@ -150,6 +150,11 @@ requires; its whole is the window rather than a lifetime, and it has no tail.
 .BI \-\-hz " HZ"
 is the profile's rate (default 997), whose period is the on-cpu row's
 resolution.
+.BI \-\-symbols " SOURCE"
+is where the stacks' names come from, as for a single source: set on every
+request of the question whose collector reads it (\fBcpu.profile\fR in this
+build), and on no other, so that \fBdebuginfod\fR names a stripped binary's
+hottest function rather than ranking it by instruction.
 .TP
 .B saturate \-\-objective \fIobjective\fR [\fIoptions\fR] \fB\-\-\fR \fIprogram\fR
 What does this queue for. The USE method \(em utilization, saturation and
@@ -158,6 +163,10 @@ arithmetic.
 .BI \-\-objective " throughput" "\fR|\fP" tail "\fR|\fP" energy
 is required. See
 .BR TRIAGE .
+.BI \-\-symbols " SOURCE"
+is accepted as \fBomn latency\fR's is, and set on every request whose
+collector reads it; the USE method names resources, not functions, so none of
+its requests reads it today, and the answer says so when it is given.
 .TP
 .B diff \fIbefore after\fR
 Two profiles and a subtraction. Each is a run's output directory (written with
@@ -686,6 +695,22 @@ source that covers more than half of it: \fBsched.mutex\fR (\fIlock\fR), then
 \fBsched.futex\fR (\fIfutex\fR), else \fIsleep\fR with the stack it began
 from; \fIuninterruptible\fR is \fIdisk\fR.
 .PP
+What a verdict names, and how it knows the name. The hottest function is the
+one the task's cpu samples were charged to most: a sample's leaf frame, or,
+where a perf map named a frame of its stack, the innermost such frame \(em
+under \fBpython3 \-X perf\fR or \fBnode \-\-perf\-basic\-prof\fR the
+leaf is always the runtime's, and the program's function is the frame the map
+named; the sentence says which. The maps are the ones the profile's names note
+cites, read back from \fI/tmp\fR; one that is gone is said. A profile of an
+interpreter (python, node, a JVM, ruby, perl, php, lua, by the program or its
+library) in which no frame of the program's own is named and no function holds
+half the samples is said to be spread over the interpreter's own functions,
+with what would write a perf map, and no C function is presented as the
+suspect. A block's stack is printed leaf first to the program's own frame
+(one a perf map named, or one in its executable): at least four frames, at
+most sixteen. The verdict's notes carry each profile's \fInames came from\fR
+line under its request's label.
+.PP
 \fBomn saturate\fR reads, per resource, the workload's side: cpus busy with it
 and tasks waiting for a cpu; requests in flight at the device, tasks blocked on
 it, and requests that failed; a mutex's hold time and its waiters; its
@@ -699,7 +724,8 @@ is the answer for a program waiting on one synchronous write at a time.
 .PP
 \fBomn diff\fR compares absolute costs, not shares: when one function doubles,
 every other function's share falls without any of them changing. A function
-is the difference when its own (leaf) cost moved beyond three standard
+is the difference when its own cost \(em its leaf samples, or under a perf
+map the samples whose innermost named frame it is \(em moved beyond three standard
 deviations of Poisson noise, \fI|b \- a| / sqrt(a + b)\fR; the inclusive table
 shows what carried it. A folded file carries no loss accounting and no rate,
 and the answer says it could not check either.

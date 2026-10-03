@@ -123,6 +123,45 @@ attaching `profile`*, and `futex` says it was never attached because `lock`
 was never named. **That is the answer to "what dominates its time"**, with the
 evidence level of every row beside it.
 
+### Naming what dominates: the function, and how its name is known
+
+A row says *where* the time went; a profile's stacks say *in what*. The
+answer hands both over as written -- `result.stacks` maps each stack id to its
+frames, root first, as labels; each `stack` event carries its id -- and
+naming the function is the model's reading. Read it the way `omn latency`
+does (`src/triage/diff.rs`, `charged_to` and `hottest`), or the two ways name
+different functions for the same run:
+
+- **Charge each sample to its leaf, unless a perf map named a frame of its
+  stack.** Then charge it to the innermost such frame. A runtime that writes
+  `/tmp/perf-<pid>.map` (`python3 -X perf`, `node --perf-basic-prof`, a JVM
+  agent) runs the program's functions through code only the map names, and
+  that code calls the runtime: under `-X perf` the leaf of every sample is one
+  of the interpreter's C functions (`__tls_get_addr`, 9 %) while
+  `py::score:/path/hot.py` is under it on 99 % of them. Which frames the map
+  named is not in the labels; the profile's note says which maps named any
+  (`names came from -- ...; perf-4242.map: perf-map, the 57 lines ...`), and
+  the map is a file on this machine whose third field, per line, is the
+  symbol a label then spells.
+- **A flat profile of an interpreter is said as one.** When the program is an
+  interpreter (python, node, a JVM, ruby, perl, php, lua -- by its name or by
+  a frame's module, `libpython3.14.so.1.0+0x2ebff6`), no frame of the
+  program's own is named, and no function holds half the samples, the time is
+  in the interpreter's own work, which every program it runs spends. Say that
+  and what would write a perf map; do not present the first of its C
+  functions as the suspect.
+- **A block's stack, to the program's own frame.** Read a blocking stack leaf
+  first as far as the innermost frame a perf map named or that lies in the
+  program's executable (`sqlite3+0x70880`), at least four frames and at most
+  sixteen: under an interpreter the program's function is the fifth
+  (`__read <- libpython x3 <- py::wait_for_input`).
+- **Say where the names came from.** Copy the `names came from` note of the
+  request whose stacks you name. A frame printed as `module+0x...` was not
+  named, and a stripped binary's are named only when the session's request
+  carries `symbols: debuginfod` (`omn latency --symbols debuginfod` sets it on
+  every request whose collector reads it); the note says which modules had
+  only their dynamic symbols.
+
 ### 5. Comparing two runs: the spread is the model's to compute, and here is how
 
 Run the same approved session N times; each answer is a whole document with
