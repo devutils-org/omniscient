@@ -7,9 +7,12 @@
 # is two long compiles side by side -- the library's `sqlite3.o`, and the
 # shell's job, which compiles `shell.c` and then `sqlite3.c` again in one
 # driver -- and two short links. On the cpu, the cause is the shape: one job
-# is the build. Off it, the build runs on one cpu shared with a competitor.
-# The account is the kernel's `schedstat` of every process under `make`, read
-# from outside. `docs/cases.md` describes every field.
+# is the build. Off it, the build runs on one cpu shared with two
+# competitors. The account is the kernel's `schedstat` of every process under
+# `make`, read from outside by `cases/shared/watch.py`, which first ends
+# whatever an earlier run of the case left behind: a run the budget stopped
+# leaves its compiles writing the object the next run builds.
+# `docs/cases.md` describes every field.
 name: make-sqlite
 about: >-
   GNU make running sqlite's own Makefile with `-j8`: it starts each recipe
@@ -32,7 +35,9 @@ needs:
   - run: [python3, --version]
     for: watching the build's processes, and competing with them
   - run: [taskset, -c, '0', 'true']
-    for: the cpu the contended build and its competitor share (cpu 0)
+    for: the cpu the contended build and its competitors share (cpu 0)
+  - run: [sh, -c, 'test "$(nproc)" -ge 2']
+    for: a cpu to watch from that is not the contended one
 
 symbols: debuginfod
 
@@ -63,7 +68,7 @@ causes:
         run beside it for most of it. The process started beside the build
         only watches: it reads every task's `schedstat` under `make`, from
         outside, once a millisecond.
-      run: [python3, '{case}/watch.py', make, '{dir}']
+      run: [python3, '{case}/../shared/watch.py', make, '{dir}']
       ready: ready
     # make prints each recipe on its stdout, handed to its stderr.
     target: [make, -C, '{dir}/sqlite-autoconf-3530400', -j8,
@@ -110,7 +115,7 @@ causes:
         millisecond. (The whole build on one cpu takes 20 s a run, its two
         long compiles sharing it too; the library alone is the same cause in
         a third of the time.)
-      run: [python3, '{case}/watch.py', make, '{dir}', '0', '2']
+      run: [python3, '{case}/../shared/watch.py', make, '{dir}', '0', '2']
       ready: ready
     target: [taskset, -c, '0', make, -C, '{dir}/sqlite-autoconf-3530400', -j8,
              -W, '{dir}/sqlite-autoconf-3530400/sqlite3.c', CFLAGS=-O0, sqlite3.o]

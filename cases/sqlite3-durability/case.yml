@@ -7,8 +7,11 @@
 # and its database are on the platter, and a write-ahead log with
 # `synchronous=NORMAL`, where no commit waits for anything. Each cause is known
 # without the tool: from sqlite's own `.timer`, and from a second run of the
-# same commits counting the syncs they make. `docs/cases.md` describes every
-# field.
+# same commits counting the syncs they make. Every run starts from a fresh
+# copy of an empty database, in a directory of its own run's: the ways and
+# the references measure the same commits on the same empty table, and two
+# checkouts running the case at once never share a file.
+# `docs/cases.md` describes every field.
 name: sqlite3-durability
 about: >-
   The sqlite3 command-line shell as the distribution ships it, reading a file
@@ -33,8 +36,8 @@ needs:
   - run: [strace, -V]
     for: counting the syncs of a second run of the same commits (the measured run is never traced)
   # A sync on tmpfs returns at once: the case is about one that waits for a
-  # device, so the database lives in the case's cache directory, never in the
-  # temporary one.
+  # device, so the databases live under the case's cache directory, never in
+  # the temporary one.
   - run: [sh, -c, 'mkdir -p {cache} && test "$(stat -f -c %T {cache})" != tmpfs']
     for: a database on storage where a sync waits for a device ({cache} is not on tmpfs)
 
@@ -42,18 +45,26 @@ symbols: debuginfod
 
 fetch: []
 
-# The two databases, emptied, and the two inputs: 500 commits for the run that
+# This run's directory on storage, `{dir}/work`: a directory under
+# `{cache}/work` named after the run's scratch directory (which holds the
+# test's pid), linked from it. A directory whose run's scratch directory is
+# gone is an earlier run's, and is removed here. In it, the two empty
+# databases every run copies; and the two inputs: 500 commits for the run that
 # waits on each, 50 000 for the run that waits on none (enough for its cpu to
-# be seconds rather than milliseconds).
+# be seconds rather than milliseconds), each row's text 1000 characters wide
+# there (below).
 setup:
-  - [sh, -c, 'mkdir -p {cache}/work && rm -f {cache}/work/delete.db {cache}/work/delete.db-journal
-      {cache}/work/wal.db {cache}/work/wal.db-wal {cache}/work/wal.db-shm']
-  - [sqlite3, '{cache}/work/delete.db',
+  - [sh, -c, 'work="{cache}/work" run="$(basename "{dir}")" scratch="$(dirname "{dir}")";
+      mkdir -p "$work" &&
+      for old in "$work"/*; do
+        [ -e "$old" ] || continue; [ -d "$scratch/${old##*/}" ] || rm -rf "$old"; done &&
+      rm -rf "$work/$run" && mkdir "$work/$run" && ln -s "$work/$run" "{dir}/work"']
+  - [sqlite3, '{dir}/work/delete.empty.db',
      'PRAGMA journal_mode=DELETE; CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);']
-  - [sqlite3, '{cache}/work/wal.db',
+  - [sqlite3, '{dir}/work/wal.empty.db',
      'PRAGMA journal_mode=WAL; CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);']
   - [python3, '{case}/commits.py', '{dir}/commits-500.sql', '500']
-  - [python3, '{case}/commits.py', '{dir}/commits-50000.sql', '50000']
+  - [python3, '{case}/commits.py', '{dir}/commits-50000.sql', '50000', '1000']
 
 causes:
   # ----------------------------------------------------------------- off cpu
@@ -71,9 +82,13 @@ causes:
         program changes; only the database's settings. The process started
         beside it only watches: it reads the program's `schedstat`, from
         outside, once a millisecond.
-      run: [python3, '{case}/watch.py', sqlite3, '{cache}/work/delete.db']
+      run: [python3, '{case}/../shared/watch.py', sqlite3, '{dir}/work/delete.db']
       ready: ready
-    target: [sqlite3, '{cache}/work/delete.db', 'PRAGMA synchronous=FULL', .timer on,
+    # A fresh copy of the empty database, then sqlite3 by an `exec` that keeps
+    # the pid: what the watcher reads is sqlite3's alone.
+    target: [sh, -c, 'cd {dir}/work && rm -f delete.db delete.db-journal &&
+               cp delete.empty.db delete.db && exec "$@"', sh,
+             sqlite3, '{dir}/work/delete.db', 'PRAGMA synchronous=FULL', .timer on,
              '.read {dir}/commits-500.sql']
     own_account: stdout
     reference:
@@ -85,7 +100,7 @@ causes:
         from: injection
       - name: syncs
         extractor: key-value
-        run: [python3, '{case}/fsyncs.py', '{cache}/work/delete.db', FULL,
+        run: [python3, '{case}/fsyncs.py', '{dir}/work/delete.empty.db', FULL,
               '{dir}/commits-500.sql']
     holds:
       - {value: watch.target_seen, at_least: 1, why: the watcher saw the program}
@@ -131,8 +146,15 @@ causes:
         with `synchronous=NORMAL`: a commit appends its pages to the log and
         returns, and only a checkpoint (one per 1000 pages of log) syncs
         anything. What is left of a commit is its own work, on the cpu: the
-        statement, and the kernel's write path for the log.
-    target: [sqlite3, '{cache}/work/wal.db', 'PRAGMA synchronous=NORMAL', .timer on,
+        statement, and the kernel's write path for the log. Each row is 1000
+        characters wide: the thread-safe shell takes a mutex on every call,
+        the triage's mutex shim reports each one, and with 64-character rows
+        its collector's cpu was 92 to 99 % of the statements' (once 104 %,
+        over the agent's budget); 1000 characters is more work a commit for
+        the same locks, and 74 %.
+    target: [sh, -c, 'cd {dir}/work && rm -f wal.db wal.db-wal wal.db-shm &&
+               cp wal.empty.db wal.db && exec "$@"', sh,
+             sqlite3, '{dir}/work/wal.db', 'PRAGMA synchronous=NORMAL', .timer on,
              '.read {dir}/commits-50000.sql']
     own_account: stdout
     reference:
@@ -141,7 +163,7 @@ causes:
         from: target
       - name: syncs
         extractor: key-value
-        run: [python3, '{case}/fsyncs.py', '{cache}/work/wal.db', NORMAL,
+        run: [python3, '{case}/fsyncs.py', '{dir}/work/wal.empty.db', NORMAL,
               '{dir}/commits-50000.sql']
       # The same commits with no tool attached: printed beside the measured
       # run's own account, which is the run as the tool's collectors left it.
@@ -150,7 +172,9 @@ causes:
       # program's cpu".
       - name: bare
         extractor: sqlite3-timer
-        run: [sqlite3, '{cache}/work/wal.db', 'PRAGMA synchronous=NORMAL', .timer on,
+        run: [sh, -c, 'cd {dir}/work && rm -f bare.db bare.db-wal bare.db-shm &&
+                cp wal.empty.db bare.db && exec "$@"', sh,
+              sqlite3, '{dir}/work/bare.db', 'PRAGMA synchronous=NORMAL', .timer on,
               '.read {dir}/commits-50000.sql']
     holds:
       - {value: syncs.wal, at_least: 1, why: the journal is a write-ahead log}

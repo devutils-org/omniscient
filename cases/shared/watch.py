@@ -2,7 +2,8 @@
 
     python3 watch.py PROGRAM MARKER [CPU COMPETITORS]
 
-A reference for a case whose program is many processes (`case.yml`): it
+A reference for a case whose program is many processes (`case.yml`), kept
+here once for every case that calls it (`{case}/../shared/watch.py`). It
 waits for a process whose program is PROGRAM and whose command line names
 MARKER -- the target, once the tool has released it from its gate -- and
 from then on reads, every millisecond, the `/proc/<pid>/task/*/schedstat` of
@@ -10,11 +11,21 @@ the target and of every process under it (`/proc/<pid>/task/*/children`):
 the kernel's own account of each task's time on a cpu and time waiting for
 one. It never touches any of them.
 
-With CPU and COMPETITORS, it first starts COMPETITORS processes that spin on
+Before anything else it ends what an earlier run left behind: every process
+whose command line names MARKER, or whose working directory is under it,
+other than this one and its ancestors. A run the tool's budget stopped ends
+the target's main process and leaves its children running (`ps -C cc1`
+after the stop); they would compete for the contended cpu, write the objects
+and reports the next run writes, and be found here as the next run's target.
+MARKER is the case's scratch directory, which holds the test's pid, so
+nothing of another run or another checkout is touched.
+
+With CPU and COMPETITORS, it then starts COMPETITORS processes that spin on
 cpu CPU and nothing else, and keeps itself off that cpu: the injection of a
 case whose cause is a cpu shared with others. The target is launched on that
 cpu by the case (`taskset -c CPU`), an affinity given at exec, the program
-unchanged. The competitors die with this process.
+unchanged. The competitors die with this process. It refuses to run where
+CPU is the only cpu it may use: it would be a third competitor, uncounted.
 
 It says `ready` once the competitors spin, and when the target is gone it
 prints its account on one line:
@@ -29,9 +40,12 @@ over the target's, `longest_waited_share` its waiting over its waiting and
 running. `target_*` is the target's own process: its life from the first
 read to the last, its cpu, its wait for a cpu, and `target_blocked_ns`, the
 rest of its life, neither on a cpu nor waiting for one. `cpu_ns` and
-`run_delay_ns` add up every task seen, the target's own included. `poll_ns` is the longest gap between two reads: a figure here
-is short of the truth by at most what a task did in its last such gap, and a
-process that lived less than one may not be here at all.
+`run_delay_ns` add up every task seen, the target's own included: for a
+target that runs one child at a time (a compiler driver), `run_delay_ns` is
+the whole chain's wait for a cpu. `swept` is how many processes of an
+earlier run were ended first. `poll_ns` is the longest gap between two
+reads: a figure here is short of the truth by at most what a task did in its
+last such gap, and a process that lived less than one may not be here at all.
 """
 
 import ctypes
@@ -48,8 +62,62 @@ me = os.getpid()
 PR_SET_PDEATHSIG = 1
 libc = ctypes.CDLL(None, use_errno=True)
 
+
+
+def ancestors(pid):
+    found = set()
+    while pid > 1:
+        found.add(pid)
+        try:
+            with open(f"/proc/{pid}/stat") as file:
+                pid = int(file.read().rpartition(")")[2].split()[1])
+        except (OSError, IndexError, ValueError):
+            break
+    return found
+
+
+def leftover(pid):
+    """A process of an earlier run: it names MARKER, or works under it."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as file:
+            if marker.encode() in file.read():
+                return True
+        cwd = os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return False
+    return cwd == marker or cwd.startswith(marker.rstrip("/") + "/")
+
+
+def alive(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as file:
+            return file.read().rpartition(")")[2].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+mine = ancestors(me)
+swept = [
+    int(entry)
+    for entry in os.listdir("/proc")
+    if entry.isdigit() and int(entry) not in mine and leftover(entry)
+]
+for pid in swept:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+gone_by = time.monotonic() + 10
+while any(alive(pid) for pid in swept):
+    if time.monotonic() > gone_by:
+        sys.exit(f"processes of an earlier run outlived SIGKILL: {swept}")
+    time.sleep(0.01)
+
 spinning = []
 if cpu is not None:
+    elsewhere = os.sched_getaffinity(0) - {cpu}
+    if not elsewhere:
+        sys.exit(f"cpu {cpu} is the only cpu this process may use: watching from it would compete")
     for _ in range(competitors):
         child = os.fork()
         if child == 0:
@@ -60,9 +128,7 @@ if cpu is not None:
             while True:
                 pass
         spinning.append(child)
-    elsewhere = os.sched_getaffinity(0) - {cpu}
-    if elsewhere:
-        os.sched_setaffinity(0, elsewhere)
+    os.sched_setaffinity(0, elsewhere)
 print("ready", flush=True)
 
 
@@ -173,6 +239,7 @@ account = {
     "jobs": len(jobs),
     "poll_ns": poll_ns,
     "competitors": len(spinning),
+    "swept": len(swept),
     "cpu_ns": sum(entry[3] for entry in seen.values()),
     "run_delay_ns": sum(entry[4] for entry in seen.values()),
 }

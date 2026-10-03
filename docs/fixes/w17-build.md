@@ -1,8 +1,9 @@
 # Stream build, seventeenth wave: durability, a compiler and a build
 
 ROADMAP phase 12, cases 2, 5 and 6. Everything here is in
-`cases/sqlite3-durability/`, `cases/gcc-shell/` and `cases/make-sqlite/`;
-nothing under `src/`, `tests/` or `docs/` other than this file changed.
+`cases/sqlite3-durability/`, `cases/held/gcc-shell/` (held back, section 10),
+`cases/make-sqlite/` and `cases/shared/watch.py`; outside `cases/`, only this
+file and the CI's workload step (section 10) changed.
 
 ---
 
@@ -10,8 +11,10 @@ nothing under `src/`, `tests/` or `docs/` other than this file changed.
 
 - **Case 2, `cases/sqlite3-durability/`**: the distribution's stripped
   `sqlite3` reading a file of single-row INSERTs with `.read`, each its own
-  commit, in a database under `{cache}/work/` (a need refuses a `{cache}` on
-  tmpfs, where a sync returns at once).
+  commit, in a database under `{cache}/work/<the run's scratch directory>/`,
+  linked from `{dir}/work` (a need refuses a `{cache}` on tmpfs, where a sync
+  returns at once). Every run -- each way, each reference -- starts from a
+  fresh copy of an empty database.
   - Off the cpu, `every-commit-waits-for-the-disk`: a rollback journal with
     `synchronous=FULL`, 500 commits, four `fdatasync` a commit. Expected:
     `blocked`, limit `disk`, leaf `fdatasync`, through
@@ -19,15 +22,16 @@ nothing under `src/`, `tests/` or `docs/` other than this file changed.
     build id, the dominant stack is `fdatasync <- syncJournal <-
     sqlite3PagerCommitPhaseOne <- sqlite3BtreeCommitPhaseOne`).
   - On it, `commits-that-wait-for-nothing`: a write-ahead log with
-    `synchronous=NORMAL`, 50 000 commits, 0.003 syncs a commit (the
-    checkpoints'). Expected: `on-cpu`, limit `cpu`.
+    `synchronous=NORMAL`, 50 000 commits of 1000-character rows, 0.005 syncs
+    a commit (the checkpoints'). Expected: `on-cpu`, limit `cpu`.
   - References: `.timer` (`sqlite3-timer`, from the target); `fsyncs.py`, a
     second run of the same commits under `strace -f --seccomp-bpf -c`,
     counting `fsync` and `fdatasync` (the measured run is never traced);
     `watch.py`, the program's own `/proc/<pid>/task/*/schedstat` read from
     outside once a millisecond; and `bare`, the same 50 000 commits with no
     tool attached, printed beside the measured run and asserted on nothing.
-- **Case 5, `cases/gcc-shell/`**: the distribution's gcc 16 compiling sqlite's
+- **Case 5, `cases/held/gcc-shell/`, held back** (section 10): the
+  distribution's gcc 16 compiling sqlite's
   `shell.c` (1.2 MB, 155 headers) from the amalgamation, fetched once into
   `{cache}` and sha256-checked.
   - On the cpu, `the-passes-o2-adds`: two builds, `-O2` asked and `-O0` run
@@ -37,7 +41,9 @@ nothing under `src/`, `tests/` or `docs/` other than this file changed.
   - Off it, `a-cpu-shared-with-two-competitors`: two processes spinning on
     cpu 0, the compile launched on cpu 0 (`taskset -c 0`, an affinity given at
     exec); the reference is `watch.py`'s `schedstat` of every process under
-    the driver. Measured: cc1 ran 1.05 s and waited 2.10 s for its cpu.
+    the driver, the whole chain's wait for a cpu (`run_delay_ns`: the
+    driver, cc1 and `as`). Measured: cc1 ran 1.05 s and waited 2.10 s for
+    its cpu; the chain waited 2.24 s.
 - **Case 6, `cases/make-sqlite/`**: GNU make 4.4 on sqlite 3.53.4's autoconf
   release, fetched once, configured and built once in setup, then rebuilt
   from its one source at every run (`-W sqlite3.c`, `CFLAGS=-O0`: the
@@ -51,8 +57,10 @@ nothing under `src/`, `tests/` or `docs/` other than this file changed.
     cpu, the longest job's share of the build.
 - **The helpers print `key=value` lines** read by the existing `key-value`
   extractor, so no extractor was added to `tests/cases.rs` (which this stream
-  does not own). `watch.py` is the same file in the three directories; a
-  shared home for it is a request below.
+  does not own). `watch.py` is one file, `cases/shared/watch.py`, which the
+  cases call as `{case}/../shared/watch.py` (`cases/shared/` has no
+  `case.yml`, so it is not a case). Before it watches, it ends every process
+  an earlier run of the case left (section 10).
 
 ## 2. Shown, and reasoned
 
@@ -147,16 +155,27 @@ still running, reparented to the user's subreaper, three seconds later
 (`ps -C cc1`: `ppid 1523`, `etime 00:00`, `00:01`, `00:02`).
 
 The second effect reaches the cases: the harness asks a stopped run again,
-unbounded, while the first run's cc1 is still compiling and writing to the
-same `-ftime-report` file. On the passes, the agent's answer was the
-driver's `wait4` when the first run held its budget and cc1's on-cpu
-(`[vdso]+0xd4c`, its table missing both sched rows: *"sched.runqlat lost
-events, so its absence is not a zero"*) when it had been asked again, 3 runs
-of 3. Ask: the budget's denominator includes the cpu of the target's
-descendants that the collectors watched; a stop ends the target's process
-group (or every descendant it started), not its main thread. Checks:
-`the-agent-s-way-answers-within-a-model-s-budget` (cases 5 and 6),
-`both-ways-name-the-same-suspect` (case 5, see section 4 on its instability).
+unbounded, and whatever the stopped run had started is still running --
+pinned to the contended cpu by `taskset -c 0` it inherited, so a fourth
+competitor the reference does not count; in make-sqlite, still writing
+`sqlite3.o` while the retry builds and links the same object; in gcc-shell,
+still writing its `-ftime-report` into the `o2.report` the retry truncates,
+where a stale `TOTAL` line can survive and `ftime.py` reads the last one.
+The cases now end those processes themselves before each run (section 10);
+the harness should too, for a case without a watcher. On the passes, the
+agent's answer was the driver's `wait4` when the first run held its budget
+and cc1's on-cpu (`[vdso]+0xd4c`, its table missing both sched rows:
+*"sched.runqlat lost events, so its absence is not a zero"*) when it had
+been asked again: 3 runs of 4, the last one after the retry had ended every
+leftover (none was found: the stop had come before cc1 started), so the
+leftover cc1 is not what made the agent name cc1 -- the agent reads the
+heaviest table, and the driver's `blocked` and cc1's `on-cpu` weigh about
+the same (section 3, "not filed as a check"). Ask: the budget's denominator
+includes the cpu of the target's descendants that the collectors watched; a
+stop ends the target's process group (or every descendant it started), not
+its main thread. Checks: `the-agent-s-way-answers-within-a-model-s-budget`
+(cases 5 and 6), `both-ways-name-the-same-suspect` (case 5, held back for
+it, section 10).
 
 ### "the triage's mutex shim doubles a real program's cpu" -- `src/triage/latency.rs` (`OPTIONAL`), `shim/src/lib.rs:384`; for the coordinator
 
@@ -240,15 +259,21 @@ poll and 5 ms for the gate and reap edges).
   not make; the build itself has four jobs. Both cases use a cpu shared with
   competitors instead, the draft's "cpu contention" injection, and say why in
   their `about`.
-- **A deterministic `both-ways-name-the-same-suspect` in `gcc-shell`.** It is
-  listed, and on the passes it disagrees exactly when the agent's first run
-  was stopped by its budget (section 3); a run whose budget held agrees, and
-  then, since the contended cause always agrees, the test fails asking for the
-  line to be removed. That happened in 1 run of 3 here. Not listing it fails
-  the other 2. Either fix in section 3 (the budget's denominator, or the stop
-  ending the process group) makes it deterministic; until then the line is in
-  the flaky tally's territory, and I would rather the coordinator decide
-  whether it merges listed (as now) or with `gcc-shell` held back.
+- **A deterministic `both-ways-name-the-same-suspect` in `gcc-shell`.** On
+  the passes the agent's way names whichever of two tables weighs more, and
+  they weigh about the same; nothing in the case decides it. So the case is
+  held back (section 10), not merged as a coin.
+- **Two references the brief named.** Case 2's `/proc/<pid>/io`: its
+  counters are bytes and calls (`wchar`, `syscw`, `write_bytes`), and the
+  verdict cites time; nothing it holds is compared with a number the tool
+  says, and what it would establish -- that each commit reaches the device --
+  is said more directly by `fsyncs.py`'s count of the syncs themselves (four
+  a commit) beside the kernel's own split of the program's life
+  (`schedstat`, `target_blocked_ns`). Case 6's `make --trace` timings: GNU
+  make's `--trace` prints why each target is remade and the recipe, with no
+  time at all (make 4.4 has no timing output), so the timings are the
+  kernel's, per job, from `watch.py`, which is the account the critical
+  path needs (each job's life, cpu and wait for a cpu).
 - **Extractors in `tests/cases.rs`.** Not this stream's file. The new
   accounts are read by scripts in each case's directory that print
   `key=value`; the same parsers as registered extractors are a request below.
@@ -267,6 +292,11 @@ poll and 5 ms for the gate and reap edges).
   13 s) are each run three times a cause (the person's way, the agent's, and
   the agent's again after the budget stopped it). The budget fix in section 3
   takes a third of it back.
+- **The review round**: `cargo test --test cases` three times with every
+  change in (the first still with gcc-shell in `cases/`): 155 s, then 114 s
+  and 114 s with it held back, all three green; the WAL cause's agent budget
+  held every time, every watcher's `swept=0`, and after the third only that
+  run's directory was left under `{cache}/work/`.
 - Before the last commit, one `make check`: result in section 9.
 
 ## 6. Privileged runs wanted (the coordinator, alone)
@@ -301,8 +331,9 @@ Nothing in these cases needs `null_blk`, `dmsetup` or a sysctl of its own.
   wait for a child; the sentence for such a wait; `sched.mutex` asked only
   when needed or its cost said ("a program is its main thread", "the
   triage's mutex shim doubles a real program's cpu"). Each removes lines
-  from `cases/gcc-shell/case.yml` and `cases/make-sqlite/case.yml` (the test
-  fails until they are removed).
+  from `cases/make-sqlite/case.yml` (the test fails until they are removed)
+  and from `cases/held/gcc-shell/case.yml`, which goes back to
+  `cases/gcc-shell/` with the first of them (section 10).
 - **coordinator** (the sched collectors, `src/collect/sched/`, their eBPF
   programs): follow the target's descendants as `cpu.profile` does; the
   per-wait bias between `blocked` and `runnable` ("a blocked row called exact
@@ -314,17 +345,25 @@ Nothing in these cases needs `null_blk`, `dmsetup` or a sysctl of its own.
 - **coordinator** (`shim/src/lib.rs:384`): no clock read on a call that does
   not report.
 - **cases** (`tests/cases.rs`): after a budget stop, wait for (or kill) the
-  stopped run's descendants before asking again -- the first run's cc1 is
-  still compiling into the same report file when the second starts.
-  Optionally, `watch.py` in a shared helper directory the three cases call
-  (it is the same file three times), and the three accounts as registered
-  extractors (`gcc-time-report`, `strace-summary`, `schedstat-tree`) if the
-  owner prefers them to `key-value` scripts.
-- **cases** (`docs/cases.md`): the three cases in "The cases" table, and the
-  `schedstat` watcher and `taskset` plus competitors in the injection table.
-- **coordinator** (`.github/workflows/ci.yml`): install `strace`, `unzip`,
-  `gcc`, `make` and util-linux's `taskset` on the runner (python3 and curl are
-  there), so the three cases run rather than skip on a missing workload.
+  stopped run's descendants before asking again. The cases that call
+  `watch.py` now do it themselves; a case without a watcher would not.
+  Optionally, the three accounts as registered extractors
+  (`gcc-time-report`, `strace-summary`, `schedstat-tree`) if the owner
+  prefers them to `key-value` scripts; and a way to hold a case back that the
+  well-formedness test still reads (a `held:` field), so
+  `cases/held/gcc-shell/` is checked while it waits.
+- **cases** (`docs/cases.md`): cases 2 and 6 in "The cases" table (case 5
+  as held back), the `schedstat` watcher and `taskset` plus competitors in
+  the injection table, and `cases/shared/` as the home of a helper more than
+  one case calls.
+- **coordinator**, for the merge: this branch adds `sqlite3`, `strace` and
+  `unzip` to the CI's workload step (`.github/workflows/ci.yml`; gcc and make
+  are build-essential's, `taskset` util-linux's, all three installed
+  already). It has to land with the cases or before them: a case whose
+  `needs` fails prints `SKIPPED case ...: this machine cannot run ...`, which
+  no pattern in `.github/expected-skips.txt` matches, and the skip gate goes
+  red. If the merge takes the cases without the workflow change, it takes
+  that red too.
 
 ## 9. The last `make check`
 
@@ -349,3 +388,79 @@ Nothing in these cases needs `null_blk`, `dmsetup` or a sysctl of its own.
     unstable line beside `gcc-shell`'s, for the coordinator to weigh at the
     merge. The `sched.mutex` fix in section 3 removes it.
 - Clippy and fmt: no Rust changed on this branch.
+
+## 10. Review
+
+The adversarial review's findings, and what became of each.
+
+- **Defect: two nondeterministic lines in `cargo test --test cases`.**
+  - *gcc-shell's `both-ways-name-the-same-suspect`*: **held back**. The case
+    moved to `cases/held/gcc-shell/`, which the harness does not discover
+    (it reads `cases/<name>/case.yml`), with a header saying why and when it
+    returns. Making the line deterministic from the case was tried first:
+    the watcher now ends every process an earlier run left (below), and in
+    the run after that change the agent's retry found nothing to end
+    (`watch.swept=0`) and still named cc1's `on-cpu` (5093 ms against the
+    driver's `blocked` 6836 ms). The agent reads the heaviest table, and the
+    two weigh about the same: nothing the case controls decides it. It
+    returns with `git mv cases/held/gcc-shell cases/gcc-shell` once the
+    triage follows a wait for a child (the agent then reads the critical
+    path) or the budget stops weighing the driver alone.
+  - *sqlite3-durability's agent budget on the WAL cause*: **made
+    deterministic**. The ratio the budget checks is the mutex collector's
+    cpu over the program's, and both scale with the commits, so it is a
+    property of a commit's shape: with 64-character rows, 92 to 99 %
+    (`omn -f <the dumped session> --budget 100%`, four runs), once 103.77 %.
+    With 1000-character rows a commit does more work for the same locks:
+    74.2, 73.9, 73.9, 75.7 % (2000 characters: 62 to 67 %, but the
+    checkpoints' syncs reach 10 % of the life). The cause still waits for
+    nothing (0.0046 syncs a commit) and is still on the cpu; the 1000 are in
+    the cause's `about`, with the 64-character figures. The dilation itself
+    stays filed ("the triage's mutex shim doubles a real program's cpu") and
+    printed by the `bare` reference.
+- **Defect: case 2's databases in shared, writable state.** Now
+  `{cache}/work/<the run's scratch directory's name>/`, which holds the
+  test's pid, linked from `{dir}/work`; every command and the watcher's
+  marker name `{dir}/work/...`, so two checkouts never share a file or a
+  watcher's target. Setup removes a directory whose run's scratch directory
+  is gone (an earlier run's); a run's own stays until the next run, since a
+  case has no teardown.
+- **Gap: gcc's off-cpu ground truth was cc1 alone.** The `runnable` row is
+  now compared with `watch.run_delay_ns`, every process under the driver and
+  the driver itself (2.24 s in the run above, against cc1's 2.01 s): the
+  critical path of a driver that runs one child at a time. `watch.py`'s
+  docstring says so. `longest_waited_share` stays as the hold (cc1 waited
+  more than it ran).
+- **Gap: references the brief named and the handoff did not explain.**
+  Section 4, "two references the brief named": `/proc/<pid>/io` holds bytes
+  and calls where the verdict cites time, and `make --trace` prints no
+  timings at all (checked: `update target 'a' due to: target does not
+  exist`, then the recipe).
+- **Gap: the retry after a budget stop runs beside the stopped run.**
+  Section 3 now lists everything it reaches (the inherited `taskset`, the
+  object make-sqlite rebuilds, gcc's report file). And `watch.py`, before it
+  watches, ends every process whose command line names the case's scratch
+  directory or whose working directory is under it, other than itself and
+  its ancestors, and waits for them to be gone (`swept=N` in its account).
+  Every cause of make-sqlite and case 5 starts it (case 5's passes now have
+  the watcher as their injection, which also gives them `target_seen`); the
+  harness-side fix stays a request to stream cases (section 8), for a case
+  without a watcher.
+- **Gap: the CI request missed `sqlite3`.** This branch now adds `sqlite3`,
+  `strace` and `unzip` to the CI's workload step itself, so the merge brings
+  the packages with the cases; section 8 says why they must land together.
+- **Nit: case 2's database grew across the run.** Every run, each way and
+  each reference (`bare`, `fsyncs.py`), starts from a fresh copy of an empty
+  database: the target is `sh -c 'cd {dir}/work && rm -f ... && cp
+  wal.empty.db wal.db && exec "$@"' sh sqlite3 ...`, the `exec` keeping the
+  pid, so the watcher reads sqlite3's `schedstat` alone; `fsyncs.py` takes
+  the empty database and copies it to `fsyncs.db` beside it. The copy is an
+  8 KB file, under the tool, before the program.
+- **Nit: make-sqlite's header said one competitor.** Two.
+- **Nit: `ftime.ratio` compares a compile under the tool with a bare one.**
+  Said beside the hold: part of the ratio of about 8 is the tool's, and 3
+  holds with it taken out. The `about` now says eight, not ten.
+- **Nit: `watch.py` three times, and a one-cpu machine.** One file,
+  `cases/shared/watch.py`. It exits with the reason when the contended cpu
+  is the only one it may use, and both contention cases need
+  `test "$(nproc)" -ge 2`, so such a machine skips them with that line.

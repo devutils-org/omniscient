@@ -1,10 +1,11 @@
 """Counts the syncs a run of the same commits makes, in a run of its own.
 
-    python3 fsyncs.py DATABASE SYNCHRONOUS FILE
+    python3 fsyncs.py EMPTY SYNCHRONOUS FILE
 
 The reference of case 2's causes (`case.yml`) for what each commit asks of
 the disk. It runs the same commits as the measured run -- `sqlite3 DATABASE
-'PRAGMA synchronous=SYNCHRONOUS' '.read FILE'` -- under `strace -f -c`,
+'PRAGMA synchronous=SYNCHRONOUS' '.read FILE'`, on a fresh copy of the empty
+database EMPTY beside it, as the measured run is -- under `strace -f -c`,
 counting only `fsync` and `fdatasync` (with `--seccomp-bpf`, so no other call
 stops), and prints one line:
 
@@ -18,11 +19,21 @@ is never traced.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 
-database, synchronous, script = sys.argv[1], sys.argv[2], sys.argv[3]
+empty, synchronous, script = sys.argv[1], sys.argv[2], sys.argv[3]
+# Beside the empty one, so on the same storage, and fresh: the measured run's
+# database is never this one, and every run of this script starts as empty.
+database = os.path.join(os.path.dirname(empty), "fsyncs.db")
+for leftover in ("", "-journal", "-wal", "-shm"):
+    try:
+        os.remove(database + leftover)
+    except FileNotFoundError:
+        pass
+shutil.copyfile(empty, database)
 
 mode = subprocess.run(
     ["sqlite3", database, "PRAGMA journal_mode;"],
