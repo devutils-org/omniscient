@@ -490,27 +490,38 @@ fn explain_withheld(probe: Probe) -> Probe {
         if !(reason.contains("CAP_BPF") || reason.contains("CAP_PERFMON")) {
             return reason;
         }
-        let Some(withheld) = withheld_file_capabilities() else {
-            return reason;
-        };
-        const ADVICE: &str = "Grant them to the binary with";
-        match reason.find(ADVICE) {
-            Some(at) => {
-                let rest = &reason[at..];
-                let after = rest
-                    .find("sudo. ")
-                    .map_or("", |end| &rest[end + "sudo. ".len()..]);
-                format!("{}{withheld}. {after}", &reason[..at])
-                    .trim_end()
-                    .to_owned()
-            }
-            None => format!("{reason}; {withheld}"),
+        match withheld_file_capabilities() {
+            Some(withheld) => rewrite_withheld(reason, &withheld),
+            None => reason,
         }
     };
     match probe {
         Probe::Missing(reason) => Probe::Missing(rewrite(reason)),
         Probe::Unknown(reason) => Probe::Unknown(rewrite(reason)),
         available => available,
+    }
+}
+
+/// [`explain_withheld`] over one reason: the `setcap` advice replaced by why
+/// the grant did not take effect, or that reason appended -- unless the reason
+/// already says it, as [`crate::bpf::permission_advice`] has since the
+/// sixteenth wave, which would otherwise print it twice.
+fn rewrite_withheld(reason: String, withheld: &str) -> String {
+    if reason.contains(withheld) {
+        return reason;
+    }
+    const ADVICE: &str = "Grant them to the binary with";
+    match reason.find(ADVICE) {
+        Some(at) => {
+            let rest = &reason[at..];
+            let after = rest
+                .find("sudo. ")
+                .map_or("", |end| &rest[end + "sudo. ".len()..]);
+            format!("{}{withheld}. {after}", &reason[..at])
+                .trim_end()
+                .to_owned()
+        }
+        None => format!("{reason}; {withheld}"),
     }
 }
 
@@ -2564,6 +2575,26 @@ mod tests {
     /// Whether a path's mount is `nosuid` is read from `mountinfo`, and the
     /// kernel answers the same question through another call: `statvfs`'s
     /// `ST_NOSUID`. The two agree for every mount a binary could be on here.
+    /// The bpf layer's advice already says why the grant did not reach this
+    /// process; the probe's rewrite must not say it a second time.
+    #[test]
+    fn a_reason_that_already_says_why_the_grant_was_withheld_is_left_as_it_is() {
+        let withheld = "The binary /mnt/omn carries CAP_BPF and CAP_PERFMON, but this process \
+                        was not given them: the filesystem at /mnt is mounted nosuid";
+        let said = format!("loading a tracing program needs CAP_BPF and CAP_PERFMON. {withheld}.");
+        assert_eq!(rewrite_withheld(said.clone(), withheld), said);
+
+        let granted = "x needs CAP_BPF and CAP_PERFMON. Grant them to the binary with `sudo \
+                       setcap cap_bpf,cap_perfmon+ep $(which omn)`, or run it under sudo. This \
+                       is the privilege model.";
+        let rewritten = rewrite_withheld(granted.to_owned(), withheld);
+        assert_eq!(rewritten.matches(withheld).count(), 1, "{rewritten}");
+        assert!(!rewritten.contains("setcap"), "{rewritten}");
+
+        let bare = rewrite_withheld("bpf: CAP_BPF missing".to_owned(), withheld);
+        assert_eq!(bare, format!("bpf: CAP_BPF missing; {withheld}"));
+    }
+
     #[test]
     fn a_mount_is_nosuid_exactly_when_statvfs_says_so() {
         let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
