@@ -56,15 +56,15 @@ const DROP_UNPAIRED: u32 = 2;
 const DROP_SLOTS: u32 = 3;
 
 /// Where each map's key and value live on the program's stack.
-const ROW_VALUE: i16 = -48;
-const ROW_KEY: i16 = -80;
-const PID_TGID: i16 = -88;
-const START_KEY: i16 = -96;
-const START_VALUE: i16 = -104;
-const DROP_KEY: i16 = -108;
+const ROW_VALUE: i16 = -56;
+const ROW_KEY: i16 = -88;
+const PID_TGID: i16 = -96;
+const START_KEY: i16 = -104;
+const START_VALUE: i16 = -112;
+const DROP_KEY: i16 = -116;
 /// Where the program keeps the row map it looked up through the generation
 /// slot, once per run; see `map::select_rows`.
-const ROWS_SLOT: i16 = -120;
+const ROWS_SLOT: i16 = -128;
 
 /// The layout of a row key.
 const KEY_TID: i16 = 0;
@@ -107,7 +107,18 @@ const VALUE_COMM: i16 = 24;
 /// of that key in that window: the rows map is drained and emptied every
 /// window, so a row that exists is a row this window opened.
 const VALUE_FIRST_NS: i16 = 40;
-const ROW_VALUE_BYTES: usize = 48;
+/// When the last episode of this row's window *ended*: with
+/// [`VALUE_FIRST_NS`], a window that encloses every episode the row counts,
+/// which is what an `overlap` rule's `enclosing:` attribute needs to credit a
+/// drained row inside an interval shorter than the drain.
+///
+/// Written by the program that completed the episode, with a plain store
+/// rather than a compare-and-swap: two cpus ending episodes of the same row at
+/// once can leave the earlier of the two ends here, by the width of that race.
+/// Every end is a real end, so the window still encloses all but the episode
+/// that lost the race, and that one by less than its own duration.
+const VALUE_LAST_NS: i16 = 48;
+const ROW_VALUE_BYTES: usize = 56;
 
 /// The in-flight map: thread id to the moment it entered.
 const START_KEY_BYTES: usize = 4;
@@ -333,6 +344,9 @@ pub struct StallRow {
     /// there are none today, and it is read as "unknown, fall back to the
     /// drain" rather than as the beginning of time.
     pub first_ns: u64,
+    /// When the last episode of this row ended. Zero is "unknown", as for
+    /// `first_ns`, and the reader falls back to the drain's close.
+    pub last_ns: u64,
     pub comm: String,
 }
 
@@ -358,6 +372,7 @@ impl StallRow {
             total_ns: long(value, VALUE_TOTAL_NS as usize),
             yielded: long(value, VALUE_YIELD as usize),
             first_ns: long(value, VALUE_FIRST_NS as usize),
+            last_ns: long(value, VALUE_LAST_NS as usize),
             comm: comm(value, VALUE_COMM as usize),
         })
     }
@@ -487,6 +502,8 @@ fn end_instructions(
     if stall.yields().is_some() {
         program.push(Insn::atomic_add(BPF_DW, 0, VALUE_YIELD, 9));
     }
+    // r8 is this episode's end, the reading taken at the top of the program.
+    program.push(Insn::stx(BPF_DW, 0, VALUE_LAST_NS, 8));
     program.jump_to("done", Insn::ja());
 
     program.label("first");
@@ -498,6 +515,7 @@ fn end_instructions(
     program.push(Insn::mov64_reg(1, 8));
     program.push(Insn::sub64_reg(1, 7));
     program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_FIRST_NS, 1));
+    program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_LAST_NS, 8));
     if stall.yields().is_some() {
         program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_YIELD, 9));
     } else {
@@ -930,6 +948,7 @@ mod tests {
             (VALUE_COUNT, 8),
             (VALUE_TOTAL_NS, 8),
             (VALUE_FIRST_NS, 8),
+            (VALUE_LAST_NS, 8),
             (VALUE_YIELD, 8),
             (VALUE_COMM, COMM_BYTES as i16),
         ];
@@ -997,8 +1016,13 @@ mod tests {
             .copy_from_slice(&7_000_000u64.to_ne_bytes());
         value[VALUE_YIELD as usize..VALUE_YIELD as usize + 8]
             .copy_from_slice(&1234u64.to_ne_bytes());
+        value[VALUE_FIRST_NS as usize..VALUE_FIRST_NS as usize + 8]
+            .copy_from_slice(&1_000u64.to_ne_bytes());
+        value[VALUE_LAST_NS as usize..VALUE_LAST_NS as usize + 8]
+            .copy_from_slice(&9_000u64.to_ne_bytes());
         value[VALUE_COMM as usize..VALUE_COMM as usize + 4].copy_from_slice(b"hog\0");
         let row = StallRow::decode(&key, &value).expect("a full record");
+        assert_eq!((row.first_ns, row.last_ns), (1_000, 9_000));
         assert_eq!(row.tid, 77);
         assert_eq!(row.scope, SCOPE_CGROUP);
         assert_eq!(row.count, 5);
@@ -1007,6 +1031,26 @@ mod tests {
         assert_eq!(row.comm, "hog");
         // Bucket 21 starts at 2^20 nanoseconds, just over a millisecond.
         assert_eq!(row.duration_ns(), 1 << 20);
+    }
+
+    /// The last end is written on both paths -- a row this episode created and
+    /// a row it added to -- and from r8, the clock reading taken at the top of
+    /// the program, which is the episode's end.
+    #[test]
+    fn the_last_end_is_written_on_a_new_row_and_on_an_existing_one() {
+        let program = end_instructions(Stall::Reclaim, SCOPE_GLOBAL, 3, 4, 5).expect("a program");
+        // BPF_STX | BPF_MEM | BPF_DW
+        let stores: Vec<(u8, u8)> = program
+            .iter()
+            .filter(|insn| insn.code == 0x7b)
+            .filter(|insn| insn.off == VALUE_LAST_NS || insn.off == ROW_VALUE + VALUE_LAST_NS)
+            .map(|insn| (insn.regs & 0x0f, insn.regs >> 4))
+            .collect();
+        assert_eq!(
+            stores,
+            vec![(0, 8), (R10, 8)],
+            "one store into the existing row through r0, one into the new row on the stack"
+        );
     }
 
     /// The row map is found through the generation slot once per run, and the

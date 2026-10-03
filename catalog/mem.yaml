@@ -428,6 +428,17 @@
   keys: [task, cgroup]
   filter_fields: [comm]
   determinism: medium
+  caveats:
+    - "An event is one bucket of one window, and it is stamped at the moment the
+       window's first episode began rather than at the drain that read it. That
+       matters for one thing: a join that *opens* on this source would otherwise
+       open at the window's close, and everything that happened in the same
+       window as the first episode would fall outside the state. `window_ns`
+       beside the value says how wide the drain's window was, and
+       `enclosing_ns` how long after the stamp the row's last episode ended:
+       the window that encloses every episode the row counts, which an
+       `overlap` rule names as `enclosing:` to credit the row whole. A `count`
+       run's rows are added up over the run and carry no `enclosing_ns`."
 
 - id: mem.compaction
   family: mem
@@ -442,6 +453,17 @@
   keys: []
   filter_fields: []
   determinism: low
+  caveats:
+    - "An event is one bucket of one window, and it is stamped at the moment the
+       window's first episode began rather than at the drain that read it. That
+       matters for one thing: a join that *opens* on this source would otherwise
+       open at the window's close, and everything that happened in the same
+       window as the first episode would fall outside the state. `window_ns`
+       beside the value says how wide the drain's window was, and
+       `enclosing_ns` how long after the stamp the row's last episode ended:
+       the window that encloses every episode the row counts, which an
+       `overlap` rule names as `enclosing:` to credit the row whole. A `count`
+       run's rows are added up over the run and carry no `enclosing_ns`."
 
 - id: mem.thp
   family: mem
@@ -458,12 +480,6 @@
   filter_fields: []
   determinism: low
   caveats:
-    - "An event is one bucket of one window, and it is stamped at the moment the
-       window's first episode began rather than at the drain that read it. That
-       matters for one thing: a join that *opens* on this source would otherwise
-       open at the window's close, and everything that happened in the same
-       window as the first reclaim would fall outside the state. `window_ns`
-       beside the value says how wide the window was."
     - "The THP mode must be frozen and logged just like clock frequencies."
     - "This is the PMD-sized huge page, and every event says how large that is.
        Recent kernels also allocate smaller multi-size huge pages and count each
