@@ -1,0 +1,202 @@
+diff --git a/src/main.rs b/src/main.rs
+index 35e8033..1c1a76e 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -2205,6 +2205,7 @@ fn latency(args: LatencyArgs) -> anyhow::Result<ExitCode> {
+         runs: args.runs,
+         duration: args.duration,
+         hz: args.hz,
++        symbols: args.symbols,
+     };
+     if let Err(refusal) = ask.check() {
+         return Ok(refuse_triage(&refusal));
+@@ -2251,6 +2252,7 @@ fn saturate(args: SaturateArgs) -> anyhow::Result<ExitCode> {
+         objective,
+         target,
+         duration: args.duration,
++        symbols: args.symbols,
+     };
+     if let Err(refusal) = ask.check() {
+         return Ok(refuse_triage(&refusal));
+diff --git a/src/triage/latency.rs b/src/triage/latency.rs
+index ab51c8b..4b8d955 100644
+--- a/src/triage/latency.rs
++++ b/src/triage/latency.rs
+@@ -76,6 +76,8 @@ pub struct Ask {
+     pub duration: Option<Duration>,
+     /// The profile's rate, whose period is the on-cpu row's resolution.
+     pub hz: u32,
++    /// `--symbols`, set on every request whose collector reads it.
++    pub symbols: Option<crate::stack::unwind::SymbolSource>,
+ }
+ 
+ impl Ask {
+@@ -173,13 +175,14 @@ impl Ask {
+         on_cpu.stack = Some(StackMode::Fp);
+         let mut blocked = request(BLOCKED, "sched.offcpu", "trace", "stack");
+         blocked.stack = Some(StackMode::Fp);
+-        let requests = vec![
++        let mut requests = vec![
+             on_cpu,
+             request(RUNNABLE, "sched.runqlat", "trace", "summary"),
+             blocked,
+             request(FUTEX, "sched.futex", "trace", "summary"),
+             request(MUTEX, "sched.mutex", "trace", "summary"),
+         ];
++        super::diff::ask_symbols(&mut requests, self.symbols);
+         let whole = match self.target {
+             Target::Launch(_) => Whole::Span(Span::Lifetime),
+             _ => Whole::Span(Span::Window),
+@@ -1029,35 +1032,41 @@ fn short_of(results: &Results) -> Option<Shortfall> {
+     Shortfall::of(&results.losses, results.events_seen as u64, false)
+ }
+ 
+-/// The function the task's cpu samples landed in most, by leaf frame.
++/// The function the task's cpu samples landed in most: by leaf frame, or by
++/// the innermost frame a perf map named (`diff::hottest`).
+ fn hottest(run: &Run, task: &str) -> Option<Naming> {
+     let results = run.result(ON_CPU)?;
+-    let mut by_leaf: BTreeMap<&str, u64> = BTreeMap::new();
+-    let mut samples = 0u64;
+-    for event in run
++    let perf = super::diff::PerfMapNames::of_run(&run.output.results);
++    let samples = run
+         .events_of("cpu.profile")
+         .filter(|event| is_task(event, task))
+-    {
+-        samples += 1;
+-        let leaf = attr(event, STACK_ID_ATTR)
+-            .and_then(|id| results.stacks.get(&(id as u64)))
+-            .and_then(|frames| frames.last())
+-            .map_or("[no stack]", String::as_str);
+-        *by_leaf.entry(leaf).or_default() += 1;
+-    }
+-    let (leaf, count) = by_leaf.into_iter().max_by_key(|(_, count)| *count)?;
++        .map(|event| {
++            attr(event, STACK_ID_ATTR)
++                .and_then(|id| results.stacks.get(&(id as u64)))
++                .map(Vec::as_slice)
++        });
++    let says = super::diff::hottest(samples, &perf, program(run).as_deref())?;
+     Some(Naming {
+         source: results.source.clone(),
+         evidence: Evidence::Key,
+         amount: None,
+-        says: format!(
+-            "hottest function `{leaf}`, {count} of {samples} samples ({:.0} %)",
+-            count as f64 / samples as f64 * 100.0
+-        ),
++        says,
+         short: None,
+     })
+ }
+ 
++/// The launched program's name, as its executable's frames are spelled.
++fn program(run: &Run) -> Option<String> {
++    run.served
++        .iter()
++        .find_map(|served| match &served.request.target {
++            Target::Launch(argv) => argv
++                .first()
++                .map(|first| first.rsplit('/').next().unwrap_or(first).to_owned()),
++            _ => None,
++        })
++}
++
+ /// Where the task's blocks in one state began, by the heaviest stack.
+ fn blocking_stack(run: &Run, task: &str, state: &str) -> Option<Naming> {
+     let results = run.result(BLOCKED)?;
+@@ -1079,7 +1088,8 @@ fn blocking_stack(run: &Run, task: &str, state: &str) -> Option<Naming> {
+     let total: f64 = by_stack.values().sum();
+     let (id, amount) = by_stack.into_iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
+     let frames = results.stacks.get(&id)?;
+-    let leafward: Vec<&str> = frames.iter().rev().take(4).map(String::as_str).collect();
++    let perf = super::diff::PerfMapNames::of_run(&run.output.results);
++    let leafward = super::diff::leafward(frames, &perf, program(run).as_deref());
+     Some(Naming {
+         source: results.source.clone(),
+         evidence: Evidence::Key,
+@@ -1153,6 +1163,7 @@ pub fn notes(run: &Run) -> Vec<String> {
+             notes.push(format!("[{}] degraded: {degradation}", results.label));
+         }
+     }
++    notes.extend(super::diff::names_notes(&run.output.results));
+     notes
+ }
+ 
+@@ -1167,6 +1178,7 @@ mod tests {
+             runs,
+             duration: None,
+             hz: 997,
++            symbols: None,
+         }
+     }
+ 
+diff --git a/src/triage/saturate.rs b/src/triage/saturate.rs
+index d213607..f6dfbbb 100644
+--- a/src/triage/saturate.rs
++++ b/src/triage/saturate.rs
+@@ -51,6 +51,7 @@ use crate::event::Event;
+ use crate::join::Evidence;
+ use crate::request::{KeyKind, Request, Session, SourceId, Target};
+ use crate::scalar::Duration;
++use crate::stack::unwind::SymbolSource;
+ 
+ use super::engine::{self, Dropped, Run};
+ use super::latency::notes;
+@@ -91,6 +92,8 @@ pub struct Ask {
+     pub objective: Objective,
+     pub target: Target,
+     pub duration: Option<Duration>,
++    /// `--symbols`, set on every request whose collector reads it.
++    pub symbols: Option<SymbolSource>,
+ }
+ 
+ impl Ask {
+@@ -185,6 +188,7 @@ impl Ask {
+                 "summary",
+             ));
+         }
++        super::diff::ask_symbols(&mut requests, self.symbols);
+         Session {
+             name: Some(format!("omn saturate --objective {}", self.objective)),
+             duration: self.duration,
+@@ -507,6 +511,14 @@ fn p99(results: &Results, what: &str) -> Option<Percentile> {
+ pub fn read(ask: &Ask, run: &Run, dropped: Vec<Dropped>) -> Answer {
+     let window = window_of(run);
+     let mut notes = notes(run);
++    if let Some(symbols) = ask.symbols {
++        if super::diff::ask_symbols(&mut ask.session().requests, Some(symbols)).is_empty() {
++            notes.push(format!(
++                "`--symbols {symbols}` names stacks, and no request of `omn saturate` reads one: \
++                 the USE method names resources, not functions. `omn latency` names them"
++            ));
++        }
++    }
+     let mut resources = Vec::new();
+ 
+     // ---------------------------------------------------------------- cpu
+@@ -1159,6 +1171,7 @@ mod tests {
+             objective,
+             target: Target::Launch(vec!["true".to_owned()]),
+             duration: None,
++            symbols: None,
+         }
+     }
+ 
+@@ -1183,6 +1196,7 @@ mod tests {
+             objective: Objective::Throughput,
+             target: Target::Pid(vec![1]),
+             duration: Some("1s".parse().unwrap()),
++            symbols: None,
+         };
+         crate::validate::validate_session(&catalog, &attached.session())
+             .unwrap_or_else(|rejections| panic!("{rejections:?}"));
+@@ -1194,6 +1208,7 @@ mod tests {
+             objective: Objective::Throughput,
+             target: Target::Pid(vec![1]),
+             duration: None,
++            symbols: None,
+         };
+         assert!(ask.check().is_err());
+     }
