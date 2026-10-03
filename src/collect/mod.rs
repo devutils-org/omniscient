@@ -1244,15 +1244,48 @@ fn cgroup_directory(path: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
+/// The highest cumulative reading a meter has given, so that it never goes
+/// back: a cumulative account read as a sum over several processes can come
+/// out short for one read (`task::tree_cpu`), and a denominator that shrank
+/// would make the tool's cost jump for no reason of its own.
+///
+/// Equal to every other: two meters of the same target are the same meter
+/// whatever each has read so far (`Meter::read_each`).
+#[derive(Default)]
+struct HighWater(std::cell::Cell<u64>);
+
+impl HighWater {
+    fn keep(&self, read: u64) -> u64 {
+        let kept = self.0.get().max(read);
+        self.0.set(kept);
+        kept
+    }
+}
+
+impl PartialEq for HighWater {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
 /// Reads the cpu time of whatever is being observed, so that the tool's own
 /// cost can be a fraction of something real.
 #[derive(PartialEq)]
 enum Meter {
-    /// A program this tool launched. While it runs, its own `/proc` entry says
-    /// what it has spent; once it has been reaped its entry is gone and the
-    /// kernel has rolled its usage into this process's children account, which
-    /// is the same number `time` prints and is read from there instead.
-    Launched(i32),
+    /// A program this tool launched, and the processes it started. While it
+    /// runs, its own `/proc` entry and its descendants' say what the tree has
+    /// spent (`task::tree_cpu`); once it has been reaped its entry is gone and
+    /// the kernel has rolled its usage, and that of every child it reaped,
+    /// into this process's children account, which is the same number `time`
+    /// prints and is read from there instead.
+    ///
+    /// The tree, not the launched process alone: a compiler driver that spent
+    /// 4 ms in `wait4` while `cc1` spent seconds made a budget read 8581 % of
+    /// "the target's cpu" (`docs/fixes/w17-build.md`), and the collectors that
+    /// follow a target's children were watching `cc1` the whole time. A
+    /// child's cpu was already in the denominator once it was reaped; this
+    /// counts it while it runs.
+    Launched(i32, HighWater),
     /// Processes the request named.
     Tasks(Vec<i32>),
     /// Threads the request named, each weighed on its own account.
@@ -1268,7 +1301,7 @@ impl Meter {
     fn of(target: &Target, launched: Option<i32>) -> Meter {
         match target {
             Target::Launch(_) => match launched {
-                Some(pid) => Meter::Launched(pid),
+                Some(pid) => Meter::Launched(pid, HighWater::default()),
                 None => Meter::Nothing("the program was never launched"),
             },
             Target::Pid(pids) => Meter::Tasks(pids.clone()),
@@ -1291,25 +1324,43 @@ impl Meter {
     /// that one's reading rather than its own. Two collections of one target
     /// are weighed against one denominator: read twice, a running target's
     /// nanosecond clock (`task::process_cpu`) moves between the two reads.
+    ///
+    /// The meter that took an earlier one's reading keeps it as its own high
+    /// water too, so that a later [`Meter::read`] of it alone (a collection
+    /// detached, or read after the program was killed) is not short of what
+    /// the first one saw.
     fn read_each(meters: &[Meter]) -> Vec<Option<u64>> {
         let mut read: Vec<Option<u64>> = Vec::with_capacity(meters.len());
         for (index, meter) in meters.iter().enumerate() {
             let earlier = meters[..index].iter().position(|other| other == meter);
             read.push(match earlier {
-                Some(earlier) => read[earlier],
+                Some(earlier) => meter.agree(read[earlier]),
                 None => meter.read(),
             });
         }
         read
     }
 
+    /// Takes `read`, an equal meter's reading, as this one's: a launched
+    /// program's meter keeps it as its high water and gives the kept value.
+    fn agree(&self, read: Option<u64>) -> Option<u64> {
+        match (self, read) {
+            (Meter::Launched(_, high), Some(read)) => Some(high.keep(read)),
+            _ => read,
+        }
+    }
+
     /// The cumulative cpu time of the target, to be differenced against a
     /// baseline taken when the window opened.
     fn read(&self) -> Option<u64> {
         match self {
-            Meter::Launched(pid) => {
-                Some(task_cpu_ns(*pid).unwrap_or_else(|| rusage_ns(libc::RUSAGE_CHILDREN)))
-            }
+            Meter::Launched(pid, high) => Some(
+                high.keep(
+                    task::tree_cpu(*pid)
+                        .map(|read| read.ns)
+                        .unwrap_or_else(|| rusage_ns(libc::RUSAGE_CHILDREN)),
+                ),
+            ),
             Meter::Tasks(pids) => {
                 let mut total = 0;
                 let mut any = false;
@@ -1334,12 +1385,14 @@ impl Meter {
     /// What to record beside the number, so a reader knows which account it is.
     fn describes(&self) -> String {
         match self {
-            Meter::Launched(pid) => format!(
-                "the launched program's own cpu time ({} of {pid} while it ran, \
-                 getrusage(RUSAGE_CHILDREN) once it was reaped)",
-                task::process_cpu(*pid)
-                    .map_or(task::CpuGrain::Ticks, |read| read.grain)
-                    .says(),
+            Meter::Launched(pid, _) => format!(
+                "the launched program's cpu time and its descendants' ({}, of {pid} and of \
+                 every process it started while they ran, and getrusage(RUSAGE_CHILDREN) in \
+                 microseconds once it was reaped)",
+                task::tree_cpu(*pid).map_or(
+                    "the scheduler's own nanoseconds, or clock ticks where it could not be read",
+                    |read| read.grain.says()
+                ),
             ),
             Meter::Tasks(pids) => format!(
                 "the cpu time of {} ({}, children reaped included)",
@@ -1711,6 +1764,9 @@ pub struct Factory {
     /// key.
     pub backend: &'static str,
     build: fn(&ResolvedRequest) -> Result<Box<dyn Prepared>, String>,
+    /// Each event it emits in `sample` mode carries the period it stands for
+    /// as [`crate::emit::WEIGHT_ATTR`] ([`Factory::weighing_its_samples`]).
+    weighs_its_samples: bool,
 }
 
 impl Factory {
@@ -1723,8 +1779,37 @@ impl Factory {
             source,
             backend,
             build,
+            weighs_its_samples: false,
         }
     }
+
+    /// Declares that this collector weighs each sampled event by the period it
+    /// stands for, so a budget may move its series from `trace` to `sample`
+    /// and the totals after the move are still the task's ([`weighs_its_samples`]).
+    ///
+    /// Declared by the collector, beside the code that attaches the weight,
+    /// rather than listed where the budget is built: a list kept elsewhere is
+    /// one nobody updates when a collector starts or stops weighing. A
+    /// collector that declares it is held to a workload's own count across
+    /// the move (`tests/budget.rs`).
+    pub fn weighing_its_samples(mut self) -> Self {
+        self.weighs_its_samples = true;
+        self
+    }
+}
+
+/// Whether the collector of `source` on `backend` weighs each sampled event
+/// by its period ([`Factory::weighing_its_samples`]).
+///
+/// A series the budget moves from `trace` to `sample` is one answer only if
+/// every sampled event after the move is weighed by its period; one that
+/// counts once where it stood for a hundred makes every total after the move
+/// short by that factor, so the budget's ladder passes over a rung whose
+/// collector does not.
+pub fn weighs_its_samples(source_id: &str, backend: &str) -> bool {
+    registry().iter().any(|factory| {
+        factory.source == source_id && factory.backend == backend && factory.weighs_its_samples
+    })
 }
 
 /// Every collector in this build.
@@ -2406,9 +2491,12 @@ fn run_core(
     }
 
     // A launched program that outlived the duration is stopped: the tool does
-    // not leave behind processes it started.
+    // not leave behind processes it started. Its tree is read first, the last
+    // moment the processes it started can be: what they spent is in nobody's
+    // account once they are killed, since whoever inherits them reaps them.
     if let Some(child) = child.as_mut() {
         if child.finished().is_none() {
+            spending.read_before_the_stop();
             child.terminate();
         }
     }
@@ -3167,7 +3255,7 @@ impl<'a> Spending<'a> {
                     Err(why) => {
                         stop = Some(format!(
                             "`{source}` spent {percent:.2} % of the target's cpu time{inside}\
-                             {window} against a ceiling of {ceiling} %, and the cheaper backend \
+                             {window} {OVER_ITS_CEILING} {ceiling} %, and the cheaper backend \
                              could not be started: {why}"
                         ));
                         break;
@@ -3176,7 +3264,7 @@ impl<'a> Spending<'a> {
                 None => {
                     let reason = format!(
                         "`{source}` spent {percent:.2} % of the target's cpu time{inside}{window} \
-                         against a ceiling of {ceiling} %, and nothing cheaper than `{was}` is \
+                         {OVER_ITS_CEILING} {ceiling} %, and nothing cheaper than `{was}` is \
                          available"
                     );
                     if self.sheddable[index] {
@@ -3310,6 +3398,17 @@ impl<'a> Spending<'a> {
             &in_target,
             closed_ns,
         ));
+    }
+
+    /// Reads every meter once more, just before the launched program and the
+    /// processes it started are killed, so that a meter keeping its highest
+    /// reading holds what the tree spent up to the stop (`HighWater`): read
+    /// after the kill, a launched program's account is only what it reaped.
+    fn read_before_the_stop(&mut self) {
+        let entered_cpu_ns = thread_cpu_ns();
+        let _ = Meter::read_each(&self.meters);
+        self.measurements += 1;
+        self.measurement_ns += thread_cpu_ns().saturating_sub(entered_cpu_ns);
     }
 
     /// The account of a collection that ran for the whole of the run.
@@ -4132,6 +4231,20 @@ const RECORDING_BUDGET_FLOOR: StdDuration = StdDuration::from_secs(2);
 /// reason can tell it from a stop over the whole window.
 pub const ROLLING_BUDGET: &str = "the span a run with no fixed end is weighed over";
 
+/// How every stop the budget made says the ceiling it broke, so a caller can
+/// tell such a stop from the deadline's or the program's whatever the source.
+pub const OVER_ITS_CEILING: &str = "against a ceiling of";
+
+/// Whether a run ended because the request of `source` under `ceiling` (its
+/// budget, in percent) was over it: the reason a stop of [`Spending::check`]
+/// gives, for a fixed window or a rolling span. The ceiling is part of the
+/// match because two requests of one source can carry two budgets, and the
+/// one under the higher ceiling did not stop the run the lower one stopped.
+pub fn stopped_by_budget(stopped_because: &str, source: &str, ceiling: f64) -> bool {
+    stopped_because.starts_with(&format!("`{source}` spent"))
+        && stopped_because.contains(&format!("{OVER_ITS_CEILING} {ceiling} %"))
+}
+
 /// How often a recording looks for events past its retention, as a fraction
 /// of the bound: evicting on every round of a busy stream would walk the whole
 /// buffer each time, and the buffer holds at most this fraction more than the
@@ -4935,6 +5048,32 @@ mod tests {
                 factory.backend
             );
         }
+    }
+
+    /// A collector that declares it weighs its samples is one a budget can
+    /// move from `trace` to `sample`, so its backend has to serve both modes;
+    /// and `mem.faults` on `pmu:sw`, whose weighed series `tests/budget.rs`
+    /// holds to the task's own count across the move, declares it.
+    #[test]
+    fn a_collector_that_weighs_its_samples_serves_both_modes_and_mem_faults_does() {
+        use crate::request::ModeKind;
+        let catalog = Catalog::embedded().unwrap();
+        for factory in registry()
+            .iter()
+            .filter(|factory| factory.weighs_its_samples)
+        {
+            let entry = catalog.get(&factory.source.parse().unwrap()).unwrap();
+            let modes = entry.backend_modes(entry.backend(factory.backend).unwrap());
+            assert!(
+                modes.contains(&ModeKind::Trace) && modes.contains(&ModeKind::Sample),
+                "`{}` on `{}` declares it weighs its samples, and serves {modes:?}",
+                factory.source,
+                factory.backend
+            );
+        }
+        assert!(weighs_its_samples("mem.faults", "pmu:sw"));
+        assert!(!weighs_its_samples("mem.faults", "no-such-backend"));
+        assert!(!weighs_its_samples("mem.rss", "fs:proc:statm"));
     }
 
     #[test]
@@ -5827,6 +5966,49 @@ mod tests {
         let read = Meter::read_each(&meters);
         assert!(read[0].is_some(), "this process keeps a cpu account");
         assert_eq!(read[0], read[2], "one target, one reading");
+    }
+
+    /// A launched program's meters of one target share their high water: the
+    /// second takes the first's reading as its own mark, so a later read of
+    /// it alone (after the kill) is not short of what the first one saw.
+    #[test]
+    fn equal_launched_meters_keep_the_same_high_water() {
+        let me = std::process::id() as i32;
+        let meters = [
+            Meter::Launched(me, HighWater::default()),
+            Meter::Launched(me, HighWater::default()),
+        ];
+        let deadline = monotonic_ns() + 2_000_000;
+        while monotonic_ns() < deadline {}
+        let read = Meter::read_each(&meters);
+        let marks: Vec<u64> = meters
+            .iter()
+            .map(|meter| match meter {
+                Meter::Launched(_, high) => high.0.get(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert!(read[0].is_some_and(|read| read > 0), "{read:?}");
+        assert_eq!(read[0], read[1], "one target, one reading");
+        assert_eq!(marks, vec![read[0].unwrap(); 2], "and one mark");
+    }
+
+    /// A stop is the budget's of the request whose ceiling it names: two
+    /// requests of one source under two budgets, and only the one under the
+    /// lower ceiling stopped the run.
+    #[test]
+    fn a_budget_stop_belongs_to_the_request_whose_ceiling_it_names() {
+        let reason = format!(
+            "`mem.rss` spent 3.70 % of the target's cpu time {OVER_ITS_CEILING} 1 %, and \
+             nothing cheaper than `fs:proc:statm` is available"
+        );
+        assert!(stopped_by_budget(&reason, "mem.rss", 1.0));
+        assert!(!stopped_by_budget(&reason, "mem.rss", 50.0));
+        assert!(!stopped_by_budget(&reason, "mem.rss", 10.0));
+        assert!(!stopped_by_budget(&reason, "cpu.profile", 1.0));
+        let fractional = format!("`mem.rss` spent 0.07 % {OVER_ITS_CEILING} 0.05 %, and ...");
+        assert!(stopped_by_budget(&fractional, "mem.rss", 0.05));
+        assert!(!stopped_by_budget(&fractional, "mem.rss", 0.5));
     }
 
     /// The cpu time of a target that keeps no cpu account is absent, not zero.

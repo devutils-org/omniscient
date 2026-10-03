@@ -602,26 +602,15 @@ fn rungs(catalog: &Catalog, resolved: &ResolvedRequest, ceiling: f64) -> Vec<Run
     rungs
 }
 
-/// The collectors whose sampled events each carry the period they stand for
-/// as [`omn::emit::WEIGHT_ATTR`], by source and backend.
-///
-/// A series the budget moves from `trace` to `sample` is one answer only if
-/// every sampled event after the move is weighed by its period; one that
-/// counts once where it stood for a hundred makes every total after the move
-/// short by that factor. Such a rung is passed over -- named, with the
-/// reason, in the budget's note -- rather than taken and flagged after the
-/// fact. `mem.faults` on `pmu:sw`, the only source whose chain declares both
-/// `trace` and `sample`, weighs each sampled fault by its period
-/// (`src/collect/mem/page_faults.rs`). A collector that does is added here,
-/// with the test that holds its weighed series to a workload's own count.
-const WEIGHS_ITS_SAMPLES: &[(&str, &str)] = &[("mem.faults", "pmu:sw")];
-
 /// Whether the collector of `source` on `backend` weighs each sampled event
-/// by its period ([`WEIGHS_ITS_SAMPLES`]).
+/// by its period: declared by the collector in the registry
+/// (`collect::Factory::weighing_its_samples`), and read here, so that the
+/// ladder passes over a `trace` -> `sample` rung whose sampled events would
+/// each count once where they stood for their period -- named, with the
+/// reason, in the budget's note -- rather than taking it and flagging it
+/// after the fact.
 fn weighs_its_samples(source: &str, backend: &str) -> bool {
-    WEIGHS_ITS_SAMPLES
-        .iter()
-        .any(|(weighed, by)| *weighed == source && *by == backend)
+    collect::weighs_its_samples(source, backend)
 }
 
 /// The mode rungs a budget passes over because the collector's sampled events
@@ -960,6 +949,11 @@ struct MeasuredCost {
     own_percent: Option<f64>,
     overhead: collect::Overhead,
     stopped_because: String,
+    /// The budget of this source is what ended the run: the stop is said on
+    /// a line of its own (`MeasuredCost::stop`), whatever the whole window's
+    /// figure came to.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stopped_by_budget: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notes: Vec<String>,
     /// Set for a recording, whose budget is weighed over a rolling span
@@ -1039,6 +1033,36 @@ impl MeasuredCost {
         )
     }
 
+    /// The line that says the budget ended the run, naming the source and
+    /// the percentage that broke the ceiling.
+    ///
+    /// On its own line because the verdict is about the whole window, and a
+    /// run stopped part way through can come out under the ceiling over the
+    /// window, or not checkable whole, while the check that stopped it was
+    /// over: a run ended 941 ms in was reported as `held` and `could not be
+    /// checked whole` with nothing saying it had been stopped
+    /// (`docs/fixes/w17-python.md`).
+    fn stop(&self) -> Option<String> {
+        let budget = self.budget_percent?;
+        self.stopped_by_budget.then(|| {
+            format!(
+                "[{}] --budget {budget}% was exceeded, and the run was stopped there, before \
+                 its own end: {}",
+                self.source, self.stopped_because
+            )
+        })
+    }
+
+    /// The reason the run stopped, as the verdict's tail: nothing when the
+    /// budget stopped it, which [`MeasuredCost::stop`] says on its own line.
+    fn stopped_tail(&self) -> &str {
+        if self.stopped_by_budget {
+            "the run was stopped by this budget, as the line above says"
+        } else {
+            &self.stopped_because
+        }
+    }
+
     /// What the ceiling made of it, when there was one.
     fn verdict(&self) -> Option<String> {
         let budget = self.budget_percent?;
@@ -1048,7 +1072,8 @@ impl MeasuredCost {
                 (Some(false), _) => format!(
                     "[{}] --budget {budget}% was exceeded over a {over} span, which is what a \
                      recording is weighed over: {}",
-                    self.source, self.stopped_because
+                    self.source,
+                    self.stopped_tail()
                 ),
                 (_, Some(percent)) => format!(
                     "[{}] --budget {budget}% held over every {over} span the run checked; \
@@ -1073,8 +1098,9 @@ impl MeasuredCost {
             ),
             (Some(false), Some(percent)) => format!(
                 "[{}] --budget {budget}% was exceeded: {percent:.2} % measured over the whole \
-                 window. {}",
-                self.source, self.stopped_because
+                 window; {}",
+                self.source,
+                self.stopped_tail()
             ),
             _ => format!(
                 "[{}] --budget {budget}% could not be checked: {}",
@@ -1372,14 +1398,40 @@ fn announce(session: &Session, report: &Report, defaulted: &Defaulted) {
 /// asked. A tool that reports what a program spends and never its own price
 /// is asking to be trusted about the one number it never shows.
 fn report_costs(costs: &[MeasuredCost], run: &encode::RunOutput) {
+    report_budgets(costs);
+    // Every collection carries the one program's lifetime; said once.
+    let left = run
+        .results
+        .iter()
+        .find_map(|results| results.lifetime)
+        .map_or(0, |life| life.left_running);
+    if left > 0 {
+        eprintln!(
+            "warning: the stop left {left} process(es) the program started running: they \
+             could not be signalled (a setuid child refuses this process's signals)"
+        );
+    }
+    if let Some(comparison) = compare_backends(costs, &run.results) {
+        eprint!("{comparison}");
+    }
+}
+
+/// Each collection's cost and verdict, and the budget's stop on a line of its
+/// own when the budget ended the run: said once, before the verdicts, however
+/// many collections of the source that stopped it there were.
+fn report_budgets(costs: &[MeasuredCost]) {
+    let mut said: Vec<String> = Vec::new();
+    for stop in costs.iter().filter_map(MeasuredCost::stop) {
+        if !said.contains(&stop) {
+            eprintln!("budget: {stop}");
+            said.push(stop);
+        }
+    }
     for cost in costs {
         eprintln!("cost: {}", cost.line());
         if let Some(verdict) = cost.verdict() {
             eprintln!("budget: {verdict}");
         }
-    }
-    if let Some(comparison) = compare_backends(costs, &run.results) {
-        eprint!("{comparison}");
     }
 }
 
@@ -1502,18 +1554,18 @@ fn record(
             // Weighed over a rolling span, so the whole window's figure is
             // not what held or broke the budget: the run's own stop is.
             cost.weighed_over_ns = Some(recorded.budget_interval_ns);
-            if cost.budget_percent.is_some() {
-                cost.within_budget = Some(!over_budget(&recorded.stopped_because, &cost.source));
+            if let Some(ceiling) = cost.budget_percent {
+                let over = over_budget(&recorded.stopped_because, &cost.source, ceiling);
+                cost.within_budget = Some(!over);
+                cost.stopped_by_budget = over;
+                if over {
+                    cost.stopped_because = recorded.stopped_because.clone();
+                }
             }
             cost
         })
         .collect();
-    for cost in &costs {
-        eprintln!("cost: {}", cost.line());
-        if let Some(verdict) = cost.verdict() {
-            eprintln!("budget: {verdict}");
-        }
-    }
+    report_budgets(&costs);
     eprint!("{}", encode::recorded_text(&recorded));
     for caveat in report.caveats() {
         eprintln!("caveat: {caveat}");
@@ -1551,9 +1603,10 @@ fn record(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Whether a recording ended because `source` was over its rolling budget.
-fn over_budget(stopped_because: &str, source: &str) -> bool {
-    stopped_because.starts_with(&format!("`{source}` spent"))
+/// Whether a recording ended because the request of `source` under `ceiling`
+/// was over its rolling budget.
+fn over_budget(stopped_because: &str, source: &str, ceiling: f64) -> bool {
+    collect::stopped_by_budget(stopped_because, source, ceiling)
         && stopped_because.contains(collect::ROLLING_BUDGET)
 }
 
@@ -1777,6 +1830,13 @@ fn measured_cost(
         own_percent: collection.overhead.own_percent(),
         overhead: collection.overhead.clone(),
         stopped_because: collection.stopped_because.clone(),
+        stopped_by_budget: budget_percent.is_some_and(|ceiling| {
+            collect::stopped_by_budget(
+                &collection.stopped_because,
+                resolved.request.source.as_str(),
+                ceiling,
+            )
+        }),
         notes: collection.notes.clone(),
         weighed_over_ns: None,
     }

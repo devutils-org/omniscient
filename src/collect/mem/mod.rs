@@ -72,7 +72,8 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("mem.faults", "pmu:sw", |resolved| {
             Ok(Box::new(page_faults::Prepare(resolved.request.mode)))
-        }),
+        })
+        .weighing_its_samples(),
         Factory::new("mem.heap.alloc", "preload", |resolved| {
             Ok(Box::new(heap::HeapPrepared::new(
                 Which::Alloc,

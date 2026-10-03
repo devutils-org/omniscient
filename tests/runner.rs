@@ -1950,6 +1950,27 @@ fn a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed() {
         );
         return;
     }
+    // A run the kernel throttled is placed per ring only when the rings say
+    // whose throttles they were (`emit.rs`, `placed`). `cpu.profile`'s rings
+    // carry their drops and not their throttles yet, so on a loaded machine,
+    // where the kernel throttles a 50 kHz sampler, every series is marked
+    // with the run's loss and this test fails. That is a gap in the tool, not
+    // in the machine, so it fails rather than skips, and says which it is.
+    // Filed for stream profile (`docs/fixes/w18-launcher.md`).
+    let throttled = result["losses"]["throttled"].as_u64().unwrap_or(0);
+    let throttled_by_ring: u64 = rings
+        .iter()
+        .map(|ring| ring["losses"]["throttled"].as_u64().unwrap_or(0))
+        .sum();
+    let why = if throttled > throttled_by_ring {
+        format!(
+            "; the kernel throttled this profile {throttled} times and its rings account for \
+             {throttled_by_ring} of them, so `emit.rs` could not place the loss per ring \
+             (`cpu.profile`'s `losses_by_ring` carries no throttles: filed for stream profile)"
+        )
+    } else {
+        String::new()
+    };
     let series = result["outputs"][0]["series"]
         .as_array()
         .expect("a ranking of tasks");
@@ -1959,7 +1980,10 @@ fn a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed() {
         let lost = lost_by_task.get(key).copied().unwrap_or(0);
         match one["short"]["dropped"].as_u64() {
             Some(short) => {
-                assert_eq!(short, lost, "{key} is short by its own ring's loss: {one}");
+                assert_eq!(
+                    short, lost,
+                    "{key} is short by its own ring's loss: {one}{why}"
+                );
                 marked += 1;
             }
             None => assert_eq!(lost, 0, "{key} lost {lost} and is not marked: {one}"),
@@ -1967,7 +1991,7 @@ fn a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed() {
     }
     assert!(
         marked > 0 && marked < series.len(),
-        "the loss lands on the task that overflowed and not on the other: {series:?}"
+        "the loss lands on the task that overflowed and not on the other: {series:?}{why}"
     );
 }
 

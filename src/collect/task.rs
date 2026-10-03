@@ -284,9 +284,193 @@ pub fn thread_cpu(tid: i32) -> Option<CpuRead> {
     }
 }
 
+/// The children of one process, every thread's: a child belongs to the thread
+/// that forked it, so a process whose worker threads spawn has children under
+/// each of them. Zombies are included, since their cpu is in no parent's
+/// account until they are reaped.
+///
+/// `/proc/<pid>/task/<tid>/children` (`CONFIG_PROC_CHILDREN`); `None` where
+/// the kernel does not publish it, so the caller can tell "no children" from
+/// "cannot be asked this way".
+fn children_of(pid: i32) -> Option<Vec<i32>> {
+    let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).ok()?;
+    let mut children = Vec::new();
+    let mut published = false;
+    for task in tasks.flatten() {
+        let Ok(text) = std::fs::read_to_string(task.path().join("children")) else {
+            continue;
+        };
+        published = true;
+        children.extend(
+            text.split_whitespace()
+                .filter_map(|pid| pid.parse::<i32>().ok()),
+        );
+    }
+    published.then_some(children)
+}
+
+/// The parent of every process, from one pass over `/proc`: the fallback for
+/// a kernel without `CONFIG_PROC_CHILDREN`, and as costly as the machine has
+/// processes, which is why it is not the first way asked.
+fn parents() -> Vec<(i32, i32)> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+        .filter_map(|pid| {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            // After the parenthesised name: the state, then the parent.
+            let parent = stat[stat.rfind(')')? + 1..]
+                .split_whitespace()
+                .nth(1)?
+                .parse()
+                .ok()?;
+            Some((pid, parent))
+        })
+        .collect()
+}
+
+/// Every live (or not yet reaped) descendant of `pid`, each parent before its
+/// children.
+///
+/// A program is often not one process: a compiler driver waits in `wait4`
+/// while `cc1` does the work, `make` while its jobs do. What such a program
+/// spends, and what has to end when it is stopped, is the tree it started.
+/// A descendant that has been orphaned -- its parent exited first, and it was
+/// reparented to a subreaper or to init -- is no longer in that tree, and is
+/// not found.
+pub fn descendants(pid: i32) -> Vec<i32> {
+    let mut found: Vec<i32> = Vec::new();
+    if children_of(pid).is_some() {
+        let mut next = 0;
+        let mut frontier = vec![pid];
+        while let Some(&parent) = frontier.get(next) {
+            next += 1;
+            for child in children_of(parent).unwrap_or_default() {
+                // A pid seen twice is a cycle only a reused pid can make, and
+                // walking it again would never end.
+                if child != pid && !found.contains(&child) {
+                    found.push(child);
+                    frontier.push(child);
+                }
+            }
+        }
+        return found;
+    }
+    let parents = parents();
+    let mut next = 0;
+    let mut frontier = vec![pid];
+    while let Some(&parent) = frontier.get(next) {
+        next += 1;
+        for (child, _) in parents.iter().filter(|(_, of)| *of == parent) {
+            if *child != pid && !found.contains(child) {
+                found.push(*child);
+                frontier.push(*child);
+            }
+        }
+    }
+    found
+}
+
+/// The cpu a launched program's whole tree has spent: its own
+/// ([`process_cpu`], its reaped children included), and every live or
+/// unreaped descendant's ([`descendants`]), each with the children it reaped
+/// in turn.
+///
+/// Each nanosecond is in exactly one of those accounts at any one instant: a
+/// descendant is counted on its own clock until its parent reaps it, and from
+/// then on in that parent's `cutime`. Between two reads of one walk it can be
+/// in neither -- the parent read before the reap, the child gone by its turn
+/// -- so a walk can come out short by one process, never long, and the caller
+/// keeps the highest it has read. The grain is the coarsest of the reads.
+pub fn tree_cpu(pid: i32) -> Option<CpuRead> {
+    let mut total = process_cpu(pid)?;
+    for descendant in descendants(pid) {
+        if let Some(read) = process_cpu(descendant) {
+            total.ns += read.ns;
+            if read.grain == CpuGrain::Ticks {
+                total.grain = CpuGrain::Ticks;
+            }
+        }
+    }
+    Some(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shell whose child burns the cpu while the shell itself waits: the
+    /// tree's account holds the child's work while it runs, which the shell's
+    /// own account cannot until it reaps it.
+    #[test]
+    fn a_waiting_parent_s_tree_holds_the_cpu_its_running_child_spends() {
+        const BURN: &str = "python3 -c 'import time\nt = time.process_time()\n\
+             while time.process_time() - t < 0.3: pass\ntime.sleep(30)'; :";
+        let mut shell = std::process::Command::new("/bin/sh")
+            .args(["-c", BURN])
+            .spawn()
+            .expect("a shell");
+        let pid = shell.id() as i32;
+        // Wait for the child to appear and burn its 300 ms, however loaded the
+        // machine is.
+        let mut child_cpu = 0;
+        for _ in 0..500 {
+            std::thread::sleep(Duration::from_millis(20));
+            child_cpu = descendants(pid)
+                .iter()
+                .filter_map(|child| process_cpu(*child))
+                .map(|read| read.ns)
+                .sum();
+            if child_cpu >= 300_000_000 {
+                break;
+            }
+        }
+        let own = process_cpu(pid).map(|read| read.ns);
+        let tree = tree_cpu(pid).map(|read| read.ns);
+        let found = descendants(pid);
+        for child in &found {
+            // SAFETY: signalling a process this test's shell started.
+            unsafe { libc::kill(*child, libc::SIGKILL) };
+        }
+        let _ = shell.kill();
+        let _ = shell.wait();
+        if child_cpu < 300_000_000 {
+            eprintln!("skipped: no python3 child burnt its 300 ms ({found:?})");
+            return;
+        }
+        let (own, tree) = (own.unwrap(), tree.unwrap());
+        assert!(
+            own < 100_000_000,
+            "the shell itself only waited, so its own account is small: {own} ns"
+        );
+        assert!(
+            tree >= own + 300_000_000,
+            "the tree holds the child's 300 ms beside the shell's {own} ns: {tree} ns \
+             ({found:?})"
+        );
+    }
+
+    /// A child this process started is among its descendants, and a pid that
+    /// cannot exist has none and no cpu.
+    #[test]
+    fn a_child_is_a_descendant_and_a_missing_process_has_none() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep");
+        let mine = descendants(std::process::id() as i32);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            mine.contains(&(child.id() as i32)),
+            "a child this process started is among its descendants: {mine:?}"
+        );
+        assert!(descendants(i32::MAX).is_empty());
+        assert_eq!(tree_cpu(i32::MAX), None);
+    }
 
     /// Ground truth from the other side: the kernel is asked what this thread
     /// is called, and the answer has to be the name the test binary set.
