@@ -72,6 +72,9 @@ no capability was granted. Without them the eBPF and per-cpu perf backends
 report what they need instead of collecting; to grant them:
 
     sudo setcap cap_bpf,cap_perfmon+ep /home/you/.local/bin/omn
+
+and `omn list` says what this machine then serves. On omn alone: omn-mcp
+collects through the omn beside it and needs none. docs/install.md has why.
 ```
 
 It builds with `--release --workspace --locked` (the shim is a workspace
@@ -113,8 +116,9 @@ and not one `make install` can take for you.
 ## The two capabilities, and why
 
 `omn` reads part of what it serves from files anyone can read (`/proc`, `/sys`,
-cgroups) and from `perf_event_open` on the program you launched: 51 of the 92
-sources the development machine serves need nothing more. The rest come from
+cgroups) and from `perf_event_open` on the program you launched: 56 of the 92
+sources the development machine serves need nothing more (51 if the preload
+shim is not beside `omn` either). The rest come from
 eBPF programs it loads into the kernel, and loading one needs two
 capabilities. The tool asks for exactly those:
 
@@ -122,6 +126,21 @@ capabilities. The tool asks for exactly those:
 |---|---|
 | `CAP_BPF` | `bpf()` itself: loading a program, creating its maps. With `kernel.unprivileged_bpf_disabled` at 1 or 2, as it is here (2, measured) and on every distribution named here **(read from their documentation)**, no program loads without it. |
 | `CAP_PERFMON` | attaching a tracing program, and `perf_event_open` past what `perf_event_paranoid` allows an ordinary user: a whole cpu, the kernel's side of a stack, any counter at paranoid 3 and 4. |
+
+**Grant them to `omn`, and to nothing else.** `omn-mcp` collects nothing
+itself: every question about the machine -- the capability sweep, a plan's
+resolution, a run -- it asks of the `omn` beside it (or the one `--omn PATH`
+names), and every answer it gives names that binary and the capabilities it
+carries (`answered_by`). So one file carries the privilege, and a person
+asking through `omn` and a model asking through `omn-mcp` are answered by the
+same machine. Shown on the development machine: the server's sweep is the
+92 sources `omn` serves, and 51 when `--omn` names a copy without the
+capabilities and without `libomn_preload.so` beside it -- 56 with the shim
+beside the copy, so 36 of the 41 are the capabilities and 5 the shim the copy
+was moved away from (measured at 69729b7); and a session needing `CAP_BPF` runs through `run_session` on
+its eBPF backend with no capability on `omn-mcp` at all
+(`mcp/tests/protocol.rs`, `a_run_through_the_server_is_as_privileged_as_omn`).
+A grant on `omn-mcp` would change nothing, and is never made.
 
 Root has both, so `sudo omn ...` works too; the capabilities are the narrower
 way of saying the same thing (`DECISIONS.md`, "Privileges"). They do not
@@ -275,7 +294,8 @@ What the first line said, measured:
 | Machine | Usable of 101 |
 |---|---|
 | development machine, capabilities granted, in `target/` (37f17c8, 2026-10-02) | 92 |
-| development machine, none (a copy of the same binary, 37f17c8) | 51 |
+| development machine, none (a copy of the same binary with no shim beside it, 37f17c8) | 51 |
+| development machine, none, the shim beside the copy (69729b7) | 56 |
 | Ubuntu 24.04 hosted runner, none, paranoid 2 | 38 |
 | Ubuntu 24.04 hosted runner, none, paranoid 4 as shipped | 32 |
 
@@ -313,7 +333,7 @@ never against what the tool computed another way:
 | `mem.rss` on a launched program | a program that writes 64 MiB and holds it peaks at 64 MiB or more; the same program without the write peaks below |
 | `mem.heap.alloc` through the installed shim | a program making one allocation of 64 MiB, then one of 32 MiB: the largest the shim saw is that size, plus at most 64 KiB of the interpreter's header |
 | the shim's path | with the shim moved away, the refusal names `PREFIX/bin/libomn_preload.so` |
-| `omn-mcp` | its capability sweep is answered by `PREFIX/bin/omn` |
+| `omn-mcp` | its capability sweep is answered by `PREFIX/bin/omn`, and serves as many sources as `omn` does: one privilege model, carried by `omn` |
 
 A number a check prints carries the run's losses beside it when the run had
 any, on a pass as on a failure. A tree without its shim fails three of them,

@@ -91,10 +91,15 @@ release:
 # So it succeeds silently when sudo is already available, and otherwise prints
 # the one command to run. To stop needing it at all, one narrowly scoped line
 # under `visudo -f /etc/sudoers.d/omniscient`, permitting exactly this command
-# on exactly these paths -- the checkout and the per-stream worktrees beside it,
-# since a sudoers `*` does not cross a `/`:
+# on exactly these paths -- the debug and release builds of the checkout and of
+# the per-stream worktrees beside it, since a sudoers `*` does not cross a `/`:
 #
-#   <user> ALL=(root) NOPASSWD: /usr/bin/setcap cap_bpf\,cap_perfmon+ep /path/to/omniscient*/target/debug/omn
+#   <user> ALL=(root) NOPASSWD: /usr/bin/setcap cap_bpf\,cap_perfmon+ep /path/to/omniscient*/target/debug/omn, /usr/bin/setcap cap_bpf\,cap_perfmon+ep /path/to/omniscient*/target/release/omn
+#
+# One file, `omn`, and never `omn-mcp`: the server collects nothing itself, it
+# runs the `omn` beside it for every question about the machine
+# (mcp/src/binary.rs), so a grant on `omn` is a grant on both ways of asking
+# and a second grant would only be a second thing to forget after a relink.
 #
 # The comma is escaped because sudoers reads a bare one as the end of the
 # command, and the path is absolute because sudo matches arguments literally
@@ -192,7 +197,8 @@ install:
 	@echo
 	@echo "    sudo setcap cap_bpf,cap_perfmon+ep $(BINDIR)/omn"
 	@echo
-	@echo "and \`omn list\` says what this machine then serves. docs/install.md has why."
+	@echo "and \`omn list\` says what this machine then serves. On omn alone: omn-mcp"
+	@echo "collects through the omn beside it and needs none. docs/install.md has why."
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/omn $(DESTDIR)$(BINDIR)/omn-mcp $(DESTDIR)$(BINDIR)/libomn_preload.so

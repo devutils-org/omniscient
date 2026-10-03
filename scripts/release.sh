@@ -25,7 +25,8 @@
 # It grants no capability. A file capability is an extended attribute of one
 # file on one filesystem: tar does not carry it by default, and a user who
 # extracts an archive as themselves could not set it anyway. The user grants
-# it on the installed path, and docs/install.md says with what.
+# it on the installed path, and docs/install.md says with what -- on `omn`
+# alone, since `omn-mcp` collects through the `omn` beside it.
 
 set -euo pipefail
 
@@ -333,6 +334,22 @@ check() {
     [[ "$answer" == *"$omn"* ]] \
         && pass "omn-mcp's capability sweep was answered by $omn" \
         || fail "omn-mcp's capability sweep does not name $omn: $(echo "$answer" | head -c 300)"
+
+    # 7. One privilege model: the server's sweep is the one `omn` gives, so
+    #    whatever was granted to $omn -- and only to it -- serves both ways of
+    #    asking. A difference here is two machines in one tree.
+    local direct through
+    direct="$(run "$omn" list --format json 2>/dev/null | python3 -c '
+import json, sys
+print(sum(1 for row in json.load(sys.stdin) if row["here"]["availability"] == "ready"))' || true)"
+    through="$(echo "$answer" | python3 -c '
+import json, sys
+print(json.load(sys.stdin)["result"]["structuredContent"]["totals"]["available"])' 2>/dev/null || true)"
+    if [[ -n "$direct" && "$direct" == "$through" ]]; then
+        pass "omn-mcp serves the $through sources $omn serves: one privilege model, on $omn"
+    else
+        fail "omn serves ${direct:-?} sources and omn-mcp ${through:-?}: the two ways of asking run on different machines"
+    fi
 
     if (( failures )); then
         echo "$failures check(s) failed on $prefix"
