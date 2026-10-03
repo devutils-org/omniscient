@@ -357,6 +357,15 @@ pub struct LatencyArgs {
     #[arg(long, value_name = "HZ", default_value_t = 997)]
     pub hz: u32,
 
+    /// Where the stacks' names come from: `local` (default), or `debuginfod`
+    /// -- the servers in DEBUGINFOD_URLS, asked by build id for a stripped
+    /// file. Set on every request of the question that names its stacks
+    /// through a collector reading it (`cpu.profile`'s today); the others
+    /// keep their own names, and the verdict's notes say where each name
+    /// came from.
+    #[arg(long, value_name = "SOURCE")]
+    pub symbols: Option<crate::stack::unwind::SymbolSource>,
+
     /// Output format: text, json or yaml.
     #[arg(long, value_name = "FORMAT", default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
@@ -389,6 +398,14 @@ pub struct SaturateArgs {
     /// How long to observe: required with --pid, a ceiling on a launched program.
     #[arg(short = 'd', long, value_name = "DURATION")]
     pub duration: Option<Duration>,
+
+    /// Where stack names come from: `local` (default), or `debuginfod`. The
+    /// same flag as `omn latency`'s, so one command line can ask both
+    /// questions; set on every request of this mode whose collector reads it.
+    /// The USE method names resources, not functions: no request it writes
+    /// today names a stack, and the answer says so when this is given.
+    #[arg(long, value_name = "SOURCE")]
+    pub symbols: Option<crate::stack::unwind::SymbolSource>,
 
     /// Output format: text, json or yaml.
     #[arg(long, value_name = "FORMAT", default_value_t = OutputFormat::Text)]
@@ -821,6 +838,56 @@ mod tests {
         ]);
         let error = to_session(&args, &catalog()).unwrap_err();
         assert!(error.message().contains("needs a target"), "{error}");
+    }
+
+    /// `--symbols` is a flag of both questions, read into their arguments,
+    /// and refuses a source nobody serves, as `omn trace`'s does.
+    #[test]
+    fn both_questions_take_symbols() {
+        use crate::stack::unwind::SymbolSource;
+        let latency = Cli::try_parse_from([
+            "omn",
+            "latency",
+            "--objective",
+            "latency",
+            "--symbols",
+            "debuginfod",
+            "--",
+            "true",
+        ])
+        .expect("arguments should parse");
+        match latency.command {
+            Command::Latency(args) => assert_eq!(args.symbols, Some(SymbolSource::Debuginfod)),
+            other => panic!("expected latency, got {other:?}"),
+        }
+        let saturate = Cli::try_parse_from([
+            "omn",
+            "saturate",
+            "--objective",
+            "throughput",
+            "--symbols",
+            "local",
+            "--",
+            "true",
+        ])
+        .expect("arguments should parse");
+        match saturate.command {
+            Command::Saturate(args) => assert_eq!(args.symbols, Some(SymbolSource::Local)),
+            other => panic!("expected saturate, got {other:?}"),
+        }
+        for command in ["latency", "saturate"] {
+            assert!(Cli::try_parse_from([
+                "omn",
+                command,
+                "--objective",
+                "latency",
+                "--symbols",
+                "everywhere",
+                "--",
+                "true",
+            ])
+            .is_err());
+        }
     }
 
     #[test]
