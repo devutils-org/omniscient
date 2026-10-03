@@ -261,5 +261,5 @@ already filed above, plus `a_layer_this_run_cannot_serve_...`),
 reading), `unwind` (dwarf). None touches `src/collect/io/diskstats.rs`,
 `src/bpf/io.rs` or `catalog/io.yaml`'s `io.inflight`; `scenario_io` was green
 in that run, and `cargo test --lib collect::io::diskstats` (17) and
-`bpf::io` (36) green. Clippy and fmt were not reached by the red `make check`;
-`cargo fmt` was applied before the commit.
+`bpf::io` (36) green. Clippy (`-D warnings`) and `cargo fmt --check` clean, run
+separately since the red `make check` stopped before them.
