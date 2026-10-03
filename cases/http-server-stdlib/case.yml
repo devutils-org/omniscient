@@ -1,0 +1,199 @@
+# Case 4: `python3 -m http.server`, under a client of the case's own.
+#
+# ROADMAP phase 12. CPython's standard-library file server, as anyone starts
+# it, asked "why is this slow, for latency" where the latency is a request's:
+# the client is both the load and the clock (no load generator is installed).
+# Three causes, each known without the tool: on the cpu, a directory listing
+# large enough that building its page is the request's time; off it, a client
+# that reads slowly so the server's writes wait for it; and off it again, a
+# file served from a cold page cache. The references are the client's own
+# clock and the server's own accounts, read by the client from /proc: the
+# serving thread's `schedstat` and the process's `stat`.
+#
+# `http.server` serves each connection on a thread of its own and waits for
+# the next one on its main thread, so the request's time is in a thread that
+# is not the main one. `docs/cases.md` describes every field.
+name: http-server-stdlib
+about: >-
+  CPython 3.14's `http.server` module run as `python3 -m http.server`: a
+  threading server whose main thread waits in `select` for connections and
+  starts one thread per connection to serve it. The interpreter carries its
+  dynamic symbols only and no frame pointers; no perf map.
+
+program:
+  command: python3
+  obtained: >-
+    the distribution's package (`python` 3.14.7 on Arch Linux on the
+    development machine), not rebuilt; `http.server` from its standard
+    library, started as `python3 -m http.server -p HTTP/1.1 --bind 127.0.0.1
+    --directory ROOT 0` (any free port, which the client reads from the
+    kernel)
+  version: [python3, --version]
+
+needs:
+  - run: [python3, -c, 'import http.server, http.client, ctypes, mmap, os; os.posix_fadvise']
+    for: the server, and the client that asks it (http.client, mincore through ctypes, posix_fadvise)
+
+symbols: local
+
+fetch: []
+
+# The served trees. In `{dir}` (the system's temporary directory): a
+# directory of 30 000 empty files whose names need escaping, and a 16 MiB
+# file. In `{cache}`, on a disk rather than in memory, a 256 MiB file of
+# random bytes, written once and kept: a page cache can only be cold for a
+# file a disk holds.
+setup:
+  - [python3, -c, 'import os; os.makedirs("{dir}/www/big", exist_ok=True);
+      [open(f"{dir}/www/big/entry-{i:05d}-<&>.txt", "w").close() for i in range(30000)];
+      open("{dir}/www/payload.bin", "wb").write(os.urandom(16 << 20))']
+  - [python3, -c, 'import os; path = "{cache}/www/cold.bin"; os.makedirs("{cache}/www", exist_ok=True);
+      ok = os.path.exists(path) and os.path.getsize(path) == 256 << 20;
+      ok or [open(path, "wb").write(b"".join(os.urandom(1 << 20) for _ in range(256)))]']
+
+causes:
+  # ------------------------------------------------------------------ on cpu
+  - name: a-large-listing
+    on: cpu
+    question: latency
+    objective: latency
+    injection:
+      kind: process
+      about: >-
+        Ten requests for a directory of 30 000 entries, one after the other
+        on one connection: `http.server` lists, sorts, escapes and quotes
+        every name into a 2.3 MB page for each, a pure-Python path that is
+        the request's time. The server is not changed; only what it is asked.
+      run: [python3, '{case}/client.py', '{dir}/www', /big/, '10']
+      ready: ready
+    target: [python3, -m, http.server, -p, HTTP/1.1, --bind, 127.0.0.1, --directory, '{dir}/www', '0']
+    reference:
+      - name: client
+        extractor: key-value
+        from: injection
+    holds:
+      - {value: client.requests, at_least: 10, why: every request was answered}
+      - {value: client.handler_off_share, at_most: 0.2, why: the serving thread spent the requests on a cpu}
+    expect:
+      limit: cpu
+      state: on-cpu
+      # The main thread's accept loop is not why a request was slow.
+      never_says: [select.cpython]
+      agrees:
+        - row: on-cpu
+          # The serving thread's own nanoseconds on a cpu, by the scheduler.
+          with: client.handler_run_ns
+          # The rest of the server's life: the interpreter's start, the
+          # module's import, the main thread's loop.
+          outside: client.latency_ns
+          # `cpu.profile`'s caveat: interrupts that ran on the task's cpu.
+          relative: 0.01
+
+  # ----------------------------------------------------------------- off cpu
+  - name: a-slow-client
+    on: off-cpu
+    question: latency
+    objective: latency
+    injection:
+      kind: process
+      about: >-
+        One request for the 16 MiB file from a client that reads 256 KiB at a
+        time with a receive buffer of that size and sleeps 20 ms between
+        reads: once the socket's buffers are full the server's writes wait
+        for the client, about 1.3 s in all. The tool never touches either.
+      run: [python3, '{case}/client.py', '{dir}/www', /payload.bin, '1', --pace, '262144', '20']
+      ready: ready
+    target: [python3, -m, http.server, -p, HTTP/1.1, --bind, 127.0.0.1, --directory, '{dir}/www', '0']
+    reference:
+      - name: client
+        extractor: key-value
+        from: injection
+    holds:
+      - {value: client.bytes, at_least: 16777216, why: the whole file was served}
+      - {value: client.handler_off_share, at_least: 0.8, why: the serving thread spent the request waiting for the client}
+    expect:
+      limit: sleep
+      state: blocked
+      # Where the serving thread's block began is the socket module's send;
+      # the main thread's `select` is where it waits for the next connection,
+      # which is not why this one was slow.
+      never_says: [select.cpython]
+      agrees:
+        - row: blocked
+          # The serving thread's time neither on a cpu nor runnable, from its
+          # schedstat against the client's clock.
+          with: client.handler_off_ns
+          outside: client.latency_ns
+          plus: client.poll_ns
+
+  - name: a-cold-file
+    on: off-cpu
+    question: latency
+    objective: latency
+    injection:
+      # A cold cache, put in place by the client before each request: the
+      # client is the process that runs.
+      kind: process
+      about: >-
+        Five requests for the 256 MiB file, one after the other, each after
+        the client dropped the file from the page cache
+        (`posix_fadvise(POSIX_FADV_DONTNEED)` on its own descriptor) and
+        counted with mincore(2) that none of it was left: every request
+        reads the file from the disk. On storage faster than the server can
+        copy, the disk is not the request's time, and the cause is not there
+        to be found (`holds`).
+      run: [python3, '{case}/client.py', '{cache}/www', /cold.bin, '5', --cold, '{cache}/www/cold.bin']
+      ready: ready
+    target: [python3, -m, http.server, -p, HTTP/1.1, --bind, 127.0.0.1, --directory, '{cache}/www', '0']
+    reference:
+      - name: client
+        extractor: key-value
+        from: injection
+    holds:
+      - {value: client.resident, at_most: 0, why: no page of the file was left in the cache before a request}
+      - {value: client.handler_off_share, at_least: 0.5, why: "the serving thread spent most of the requests off the cpu: the disk's time, not the copy's"}
+    expect:
+      limit: disk
+      state: blocked
+      never_says: [select.cpython]
+      agrees:
+        - row: blocked
+          with: client.handler_off_ns
+          outside: client.latency_ns
+          plus: client.poll_ns
+
+# Checks this case shows failing, each filed against the file that owns what
+# got it wrong. A listed check that fails is reported as the open finding it
+# is; one that passes fails the test, so the line is removed once it is fixed.
+open_findings:
+  - check: the-first-suspect-is-the-known-cause
+    filed: >-
+      docs/fixes/w17-python.md, "a server's request is not its main thread's
+      life": `main_task` in src/triage/latency.rs decomposes the launched
+      program's main thread, which waits in `select` for connections, while
+      the 4.2 s of the listing are on the thread serving the connection; the
+      verdict says `sleep` for a request that was 99 % on a cpu
+  - check: every-cited-number-agrees-with-the-reference
+    filed: >-
+      docs/fixes/w17-python.md, "a server's request is not its main thread's
+      life": the on-cpu row is the main thread's 70 ms, against the serving
+      thread's 4.2 s by its own schedstat
+  - check: the-sentence-claims-nothing-false
+    filed: >-
+      docs/fixes/w17-python.md, "a server's request is not its main thread's
+      life": the block the sentence names is the accept loop's `select`, for
+      the listing and for the slow client alike
+  - check: the-person-s-way-says-where-names-came-from
+    filed: >-
+      docs/fixes/w17-cases.md, "the verdict drops where its names came from",
+      and docs/fixes/w17-python.md, "dynamic symbols only is not said"
+  - check: the-verdict-says-how-it-knows
+    filed: >-
+      docs/fixes/w17-python.md, "dynamic symbols only is not said":
+      `facts()` in src/stack.rs is silent when every module carries its
+      dynamic symbols only
+  - check: the-agent-s-way-answers-within-a-model-s-budget
+    filed: >-
+      docs/fixes/w17-python.md, "the triage's mutex source doubles a
+      threaded interpreter's time": `sched.mutex` through `preload` costs
+      more than the listing's own cpu, so `--budget 100%` stops the run
