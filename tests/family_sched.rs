@@ -1291,9 +1291,11 @@ fn by_process(
 /// last act: its `run_delay` is every wait it had until then, from its fork.
 /// What a run counts for the child can be no less than that and no more than
 /// that and the waits of its last instructions. The tracepoints' account is
-/// beside it on every row as `wake_to_run_ns`, and that it is larger is the
-/// separation: three thousand waits at a microsecond each is outside the
-/// bracket by itself.
+/// beside it on every row as `wake_to_run_ns`. The bracket alone does not tell
+/// the two clocks apart on a loaded machine, where `run_delay` is large enough
+/// to take in the tracepoints' microsecond a wait as well, so the separation is
+/// asserted on its own: over every child, the kernel's account is nearer the
+/// children's `schedstat` than the tracepoints' is.
 #[test]
 fn a_launched_programs_children_are_followed_and_wait_what_their_schedstat_says() {
     const CHILDREN: usize = 3;
@@ -1361,6 +1363,14 @@ fn a_launched_programs_children_are_followed_and_wait_what_their_schedstat_says(
         })
         .collect();
     assert_eq!(children.len(), CHILDREN, "every child wrote its line");
+    let mut kernel_off = 0u64;
+    let mut tracepoints_off = 0u64;
+    for &(pid, run_delay, _) in &children {
+        let measured = waits.get(&pid).map_or(0, |&(measured, _)| measured);
+        let by_tracepoints = woken.get(&pid).map_or(0, |&(sum, _)| sum);
+        kernel_off += measured.abs_diff(run_delay);
+        tracepoints_off += by_tracepoints.abs_diff(run_delay);
+    }
     for (pid, run_delay, slices) in children {
         let Some(&(measured, counted)) = waits.get(&pid) else {
             panic!(
@@ -1402,8 +1412,232 @@ fn a_launched_programs_children_are_followed_and_wait_what_their_schedstat_says(
              it waited on a run queue at all"
         );
     }
+    assert!(
+        kernel_off < tracepoints_off,
+        "the waits counted are {kernel_off} ns off the children's schedstat over every child, \
+         and the tracepoints' account is {tracepoints_off} ns off: the rows are not the \
+         kernel's account"
+    );
     let _ = std::fs::remove_file(&reference);
     let _ = std::fs::remove_file(&session_path);
+}
+
+/// A program that forks children after a delay; each child moves itself
+/// between cpus 0 and 1 and sleeps a millisecond, over and over, for a set
+/// time, then writes its pid and how many moves it made.
+const FORKING_MOVER: &str = r#"
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <sched.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+static long long now_ms(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec * 1000LL + now.tv_nsec / 1000000;
+}
+
+static void move_and_sleep(int run_ms, const char *out) {
+    struct timespec pause = {0, 1000000};
+    long long end = now_ms() + run_ms;
+    long moves = 0;
+    for (long i = 0; now_ms() < end; i++) {
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        CPU_SET(i % 2, &set);
+        if (sched_setaffinity(0, sizeof set, &set) == 0) moves++;
+        nanosleep(&pause, 0);
+    }
+    char line[64];
+    int length = snprintf(line, sizeof line, "%d %ld\n", getpid(), moves);
+    int file = open(out, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (file < 0 || write(file, line, length) != length) exit(4);
+    close(file);
+}
+
+int main(int argc, char **argv) {
+    if (argc != 5) return 1;
+    int children = atoi(argv[1]), delay_ms = atoi(argv[2]), run_ms = atoi(argv[3]);
+    struct timespec delay = {delay_ms / 1000, (delay_ms % 1000) * 1000000L};
+    nanosleep(&delay, 0);
+    for (int k = 0; k < children; k++)
+        if (fork() == 0) { move_and_sleep(run_ms, argv[4]); _exit(0); }
+    while (wait(0) > 0) {}
+    return 0;
+}
+"#;
+
+/// Per thread group named by `key`, the sum of `value` over every event of a
+/// JSON document's first result.
+fn summed_by(
+    document: &serde_json::Value,
+    key: &str,
+    value: &str,
+) -> std::collections::BTreeMap<u64, u64> {
+    let mut sums = std::collections::BTreeMap::new();
+    for output in document["results"][0]["outputs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        for event in output["events"].as_array().into_iter().flatten() {
+            let attr = |name: &str| {
+                event["attrs"]
+                    .as_array()?
+                    .iter()
+                    .find(|attr| attr["name"] == name)?["value"]
+                    .as_u64()
+            };
+            if let (Some(pid), Some(amount)) = (attr(key), attr(value)) {
+                *sums.entry(pid).or_insert(0) += amount;
+            }
+        }
+    }
+    sums
+}
+
+/// `sched.wakeup`, `sched.switches` (`bpf:raw_tp`) and `sched.migrations`
+/// follow a process target into the processes it starts, as `sched.runqlat`
+/// and `sched.offcpu` do (the test above).
+///
+/// The target is a process that forks three children only after the runs
+/// have attached, so the fork program is what puts them in the set. Each child
+/// moves itself between two cpus and sleeps, a thousand times a second for two
+/// seconds: every iteration is a migration, a block, a wakeup and a switch.
+/// The runs attach a second before the children exist and outlast them, so
+/// every iteration falls inside the window: each child is counted at least
+/// nine in ten of its moves in every source (measured: the move count, to a
+/// handful, in wakeups and migrations, and twice it in switches), and a child
+/// the run did not follow has no row at all. A child pinned to one cpu at a
+/// time moves for no other reason, so migrations are bounded above as well. `sched.switches` is pinned to `bpf:raw_tp` because the
+/// resolver picks `pmu:sw` first, which follows children by inheritance and so
+/// never exercises this.
+#[test]
+fn a_targets_children_are_woken_switched_and_moved_in_its_rows() {
+    const CHILDREN: usize = 3;
+    if std::thread::available_parallelism().map_or(1, |n| n.get()) < 2 {
+        eprintln!("skipped: one cpu, so nothing can be moved between two");
+        return;
+    }
+    let Some(program) = compiled("omn-forking-mover", FORKING_MOVER, &["-O1"]) else {
+        eprintln!("skipped: no C compiler (`cc`) to build the forking workload with");
+        return;
+    };
+    let reference = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("omn-forking-mover-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&reference);
+    let mut target = Command::new(&program)
+        .args([
+            &CHILDREN.to_string(),
+            "1000",
+            "2000",
+            reference.to_str().expect("a utf-8 path"),
+        ])
+        .spawn()
+        .expect("the workload starts");
+    let pid = target.id().to_string();
+    let measure = |args: &[&str]| {
+        Command::new(BINARY)
+            .args(args)
+            .args([
+                "--pid",
+                &pid,
+                "--duration",
+                "4s",
+                "--emit",
+                "raw",
+                "--format",
+                "json",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("omn should run")
+    };
+    let runs = [
+        (
+            "sched.wakeup",
+            "wakee_pid",
+            "count",
+            measure(&["sched.wakeup", "--mode", "trace"]),
+        ),
+        (
+            "sched.switches",
+            "pid",
+            "count",
+            measure(&[
+                "sched.switches",
+                "--backend",
+                "force:bpf:raw_tp",
+                "--mode",
+                "count",
+            ]),
+        ),
+        (
+            "sched.migrations",
+            "pid",
+            "migrations",
+            measure(&["sched.migrations", "--mode", "trace"]),
+        ),
+    ];
+    let outputs: Vec<_> = runs
+        .into_iter()
+        .map(|(source, key, value, run)| {
+            (
+                source,
+                key,
+                value,
+                run.wait_with_output().expect("omn should finish"),
+            )
+        })
+        .collect();
+    let _ = target.wait();
+    let children: Vec<(u64, u64)> = std::fs::read_to_string(&reference)
+        .expect("every child wrote its line")
+        .lines()
+        .map(|line| {
+            let fields: Vec<u64> = line
+                .split_whitespace()
+                .map(|field| field.parse().expect("a number"))
+                .collect();
+            (fields[0], fields[1])
+        })
+        .collect();
+    let _ = std::fs::remove_file(&reference);
+    assert_eq!(children.len(), CHILDREN, "every child wrote its line");
+    if children.iter().any(|&(_, moves)| moves < 100) {
+        eprintln!("skipped: a child could not move itself between cpus 0 and 1: {children:?}");
+        return;
+    }
+    for (source, key, value, output) in outputs {
+        let text = String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr);
+        if refused_for_capabilities(&text) {
+            return;
+        }
+        assert!(output.status.success(), "{source}:\n{text}");
+        let document: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("one json document");
+        let sums = summed_by(&document, key, value);
+        for &(child, moves) in &children {
+            let counted = sums.get(&child).copied().unwrap_or(0);
+            eprintln!("{source}: child {child} moved {moves} times; {counted} counted");
+            assert!(
+                source != "sched.migrations" || counted <= moves + moves / 10 + 10,
+                "{source}: child {child} was moved {moves} times and {counted} migrations \
+                 were counted"
+            );
+            assert!(
+                counted >= moves - moves / 10,
+                "{source}: child {child} of the target moved and slept {moves} times, and \
+                 {counted} were counted: the run did not follow it:\n{sums:?}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

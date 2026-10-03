@@ -1807,12 +1807,14 @@ fn lock_session(name: &str) -> Output {
         example.replace(&shared, &format!("comm == '{name}'")),
     )
     .expect("the session copy is written");
-    omn(&[
+    let output = omn(&[
         "-f",
         path.to_str().expect("a utf-8 path"),
         "--format",
         "json",
-    ])
+    ]);
+    let _ = std::fs::remove_file(&path);
+    output
 }
 
 /// One machine, two scenarios that start processes under the same name.
@@ -1844,10 +1846,10 @@ fn scratch(name: &str) -> PathBuf {
 /// exec'd. A workload that ran as `sh` could not be told apart from every other
 /// shell on the machine, and a `--system` measurement of the machine's own
 /// contention is exactly what this scenario must not accidentally assert.
-fn lock_probe(name: &str) -> Option<PathBuf> {
+fn lock_probe(name: &str) -> Option<LockProbe> {
     let path = scratch(name);
     if path.exists() {
-        return Some(path);
+        return Some(LockProbe(path));
     }
     let shell = Path::new("/bin/sh");
     if !shell.exists() {
@@ -1861,7 +1863,25 @@ fn lock_probe(name: &str) -> Option<PathBuf> {
         permissions.set_mode(0o755);
     }
     std::fs::set_permissions(&path, permissions).ok()?;
-    Some(path)
+    Some(LockProbe(path))
+}
+
+/// The copy `lock_probe` made, removed when the scenario that made it is done:
+/// its name is per process, so nothing else would ever remove it.
+struct LockProbe(PathBuf);
+
+impl std::ops::Deref for LockProbe {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for LockProbe {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// Starts the writers and returns them, with the pids they were given.

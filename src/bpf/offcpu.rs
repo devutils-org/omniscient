@@ -616,10 +616,6 @@ fn instructions(
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, IN_FLIGHT_KEY as i32));
     program.push(Insn::call(helper::MAP_DELETE_ELEM));
-    program.extend(Insn::load_map_fd(1, in_flight_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, IN_FLIGHT_KEY as i32));
-    program.push(Insn::call(helper::MAP_DELETE_ELEM));
 
     // The thread id is already on the stack from the lookup just done.
     program.push(Insn::ldx(BPF_W, 1, R10, IN_FLIGHT_KEY));
@@ -895,8 +891,8 @@ impl OffCpuProgram {
                 Some(format!(
                     "a block begins at the `sched_switch` that took the task off, after the \
                      next task was picked, rather than where `__schedule` was entered ({reason}); \
-                     each blocked row is short of the kernel's by what the picks took, under a \
-                     microsecond a block"
+                     each blocked row is short of the kernel's by what the picks took: about \
+                     0.7 us a block on a quiet machine, about 2 us under load (measured on 7.2)"
                 )),
             ),
         };

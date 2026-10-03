@@ -25,6 +25,7 @@
 //! drain, which is the cost this whole shape exists to avoid.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -35,7 +36,7 @@ use crate::emit::STACK_ID_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
 use crate::request::{Mode, Target};
-use crate::stack::unwind::Debuginfod;
+use crate::stack::unwind::{Debuginfod, NameOrigin};
 use crate::stack::{Frame, RawStack, Symbolizer};
 
 /// How often the totals are drained.
@@ -120,6 +121,13 @@ pub struct OffCpuCollector {
     /// One symbolizer per process seen, built lazily. A system-wide run sees
     /// many, and each carries that process's own mappings.
     symbolizers: HashMap<i32, Symbolizer>,
+    /// Processes the target started that were no longer followed at the last
+    /// tick: their symbolizers are dropped at this one, after the drain that
+    /// held their last blocks has named them.
+    leaving: BTreeSet<i32>,
+    /// Where the names of the dropped symbolizers' modules came from, kept for
+    /// the facts line.
+    left_origins: BTreeMap<PathBuf, NameOrigin>,
     /// Blocks whose stack the kernel could not walk, and blocks whose id it had
     /// evicted by the time it was asked. Different failures, counted apart.
     unwalkable: u64,
@@ -157,6 +165,8 @@ impl OffCpuCollector {
             window_opened_ns: 0,
             stacks: BTreeMap::new(),
             symbolizers: HashMap::new(),
+            leaving: BTreeSet::new(),
+            left_origins: BTreeMap::new(),
             unwalkable: 0,
             evicted_stacks: 0,
             crowded_out: 0,
@@ -292,6 +302,7 @@ impl OffCpuCollector {
         }
         processes.sort_unstable();
         processes.dedup();
+        self.retire_symbolizers(&processes);
         for tgid in processes {
             let fresh = !self.symbolizers.contains_key(&(tgid as i32));
             let symbolizer = self.symbolizer(tgid);
@@ -299,6 +310,36 @@ impl OffCpuCollector {
                 symbolizer.refresh();
             }
         }
+    }
+
+    /// Drops the symbolizers of processes that have left the followed set.
+    ///
+    /// A build starts thousands of short-lived processes, and each symbolizer
+    /// holds the parsed symbol tables of every file its process mapped, so
+    /// keeping them all grows with every process the run ever followed. A
+    /// process leaves the set when its leader is freed, after its last switch,
+    /// so its last blocks are in the drain of the tick that first sees it gone;
+    /// its symbolizer is dropped at the tick after, and where its names came
+    /// from is kept for the facts line.
+    fn retire_symbolizers(&mut self, followed: &[u32]) {
+        for tgid in std::mem::take(&mut self.leaving) {
+            if followed.contains(&(tgid as u32)) {
+                continue;
+            }
+            if let Some(symbolizer) = self.symbolizers.remove(&tgid) {
+                for (path, origin) in symbolizer.origins() {
+                    self.left_origins
+                        .entry(path.clone())
+                        .or_insert_with(|| origin.clone());
+                }
+            }
+        }
+        self.leaving = self
+            .symbolizers
+            .keys()
+            .copied()
+            .filter(|tgid| !followed.contains(&(*tgid as u32)))
+            .collect();
     }
 
     /// The symbolizer of one process, built the first time it is asked for.
@@ -550,9 +591,13 @@ impl Collector for OffCpuCollector {
             return Vec::new();
         }
         let origins: BTreeMap<_, _> = self
-            .symbolizers
-            .values()
-            .flat_map(|symbolizer| symbolizer.origins())
+            .left_origins
+            .iter()
+            .chain(
+                self.symbolizers
+                    .values()
+                    .flat_map(|symbolizer| symbolizer.origins()),
+            )
             .collect();
         crate::stack::names_fact(origins, self.debuginfod.is_some())
             .into_iter()
@@ -625,6 +670,29 @@ impl Collector for OffCpuCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A process that leaves the followed set keeps its symbolizer for one
+    /// more tick, for the drain that holds its last blocks, and loses it at
+    /// the next; the target itself never does.
+    #[test]
+    fn a_process_that_left_is_forgotten_a_tick_after_it_left() {
+        let mut collector = OffCpuCollector::new(Whose::Process(1), true);
+        for tgid in [1, 2, 3] {
+            collector.symbolizer(tgid);
+        }
+        collector.retire_symbolizers(&[1, 2]);
+        assert_eq!(collector.symbolizers.len(), 3, "kept for this tick's drain");
+        collector.retire_symbolizers(&[1, 2]);
+        let mut kept: Vec<i32> = collector.symbolizers.keys().copied().collect();
+        kept.sort_unstable();
+        assert_eq!(kept, vec![1, 2]);
+        collector.retire_symbolizers(&[1]);
+        collector.retire_symbolizers(&[1]);
+        assert_eq!(
+            collector.symbolizers.keys().copied().collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
 
     /// A mode that cannot mean anything here is refused with the reason. A
     /// sampled block is a block whose beginning or end was not seen, and a

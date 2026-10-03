@@ -161,7 +161,8 @@ responder blocks once per round trip too.
 
 ## 3. Tests
 
-- `tests/family_sched.rs`: two new tests (above). All 16 pass.
+- `tests/family_sched.rs`: two new tests (above), and a third in the fix
+  round (see Review). All 17 pass.
   `tasks_sharing_one_cpu_wait_the_share_the_scheduler_owes_them` (flaky
   tally #6) failed once in the file's run at load average 50 and passed
   alone.
@@ -287,11 +288,24 @@ These `filed:` lines should now pass, and come out when they do:
   `__schedule` (`sched_entry_tp`). The switch programs read four more
   fields per switch of a followed task. Their measured bands may move.
 
-### To stream engine (`CATALOG.md`)
+### To stream engine (`CATALOG.md`, `examples/**`)
 
 - The sched section can say that a process target is followed into its
   children, and that a wait is `sched_info`'s account (the catalog caveats
   carry both).
+- `examples/sched-round-trips.yml`'s header says `sched.offcpu` finds "N
+  blocks" and `sched.runqlat` "N run queue waits" for N round trips. Both
+  now follow the shell's responder subshell too, which blocks and waits once
+  per round trip as well: the driver's row (`keys: [task]`) is still N, and
+  the run's totals are about 2N. Suggested wording: "N blocks on the
+  driver's row, and about N more on the responder's, which the run follows
+  as a child of the target". The same for `sched.runqlat`. `sched.wakeup`'s
+  2N is unchanged: both ends were already in it.
+- `examples/sched-half-blocked.yml`'s "the driver was blocked 182.5 ms
+  across 605 blocks" is the driver's row and stays true of it, but the
+  run's `sched.offcpu` total now includes the responder's blocks. It can say
+  "on the driver's row". `scenario_sched` reads the driver's row in both
+  (`driver_blocks`, and the half-blocked tid filter).
 
 ### To the coordinator
 
@@ -301,6 +315,50 @@ These `filed:` lines should now pass, and come out when they do:
 - The flaky tally (`docs/flaky.md`, stream green's file): #6 and #1 each
   failed once under load average 50 and passed when rerun, as section 3
   says.
+
+## Review
+
+The fix round answered the adversarial review of `133e0d6`:
+
+- **Stale example comments, no request filed** (gap): filed to stream
+  engine in section 7; `examples/**` is engine's.
+- **Only runqlat and offcpu were held to following children** (gap): new
+  test `a_targets_children_are_woken_switched_and_moved_in_its_rows`
+  (`tests/family_sched.rs`). A `--pid` target forks three children a second
+  after the runs attach, so the fork program is what adds them; each child
+  moves itself between cpus 0 and 1 and sleeps 1 ms, for two seconds.
+  `sched.wakeup`, `sched.switches` pinned to `force:bpf:raw_tp` (the
+  scenarios only reach `pmu:sw`) and `sched.migrations` each must count at
+  least nine tenths of each child's moves; migrations are also bounded
+  above. Measured: 1 840 moves a child, counted 1 840 to 1 845 wakeups,
+  3 684 to 3 687 switches, 1 840 to 1 841 migrations.
+- **Two identical `MAP_DELETE_ELEM` calls** at switch-in
+  (`src/bpf/offcpu.rs`): one removed.
+- **The fallback note understated the bias** without `sched_entry_tp`:
+  it now says about 0.7 us a block on a quiet machine and about 2 us under
+  load, the figures of section 2.
+- **The separation of the two clocks was not asserted**
+  (`a_launched_programs_children_are_followed_...`): summed over the
+  children, the kernel account's distance from `schedstat` must be smaller
+  than the tracepoints'. Measured: about 25 us against 17.6 ms over three children, so the
+  assertion holds with three orders of magnitude to spare; the doc comment
+  says the bracket alone does not separate them under load.
+- **Symbolizers were never pruned** (`src/collect/sched/offcpu.rs`): a
+  process that has left the followed set (its leader freed) has its
+  symbolizer dropped one tick after the tick that first saw it gone. Its
+  last blocks are in that tick's drain, because the switch that writes a
+  row precedes the free. Where its modules' names came from is kept for the
+  facts line. Unit test
+  `a_process_that_left_is_forgotten_a_tick_after_it_left`. What is left,
+  and not measured: the per-tick cost still grows with the *live* set (one
+  `/proc/<pid>/maps` read and one key walk per followed process), and a
+  machine-wide run (`Whose::Any`) still keeps one symbolizer per process
+  that ever blocked, as before this wave.
+- **The lock scenarios left a copy of `/bin/sh` and a `.yml` per process**
+  (`tests/scenario_sched.rs`): the session copy is removed after its run,
+  and the probe is a `LockProbe` that removes itself when the scenario that
+  made it ends (the three scenarios take the lock before making it, so none
+  removes another's).
 
 ## 8. The last `make check`
 
@@ -339,3 +397,17 @@ Earlier in the session, at load average 50, `tests/triage.rs` also failed
 (`sched.futex` measured at 10.3 % against a 5 % budget) and
 `a_join_from_a_held_source_...`. These are budgets and escalations measured
 on a saturated machine, and they did not fail in the no-fail-fast run.
+
+After the fix round: `make check` stopped on `tests/cases.rs` alone
+(`every_case_names_its_known_cause_both_ways`, the two `open_findings` lines
+of section 7, to stream cases); clippy and fmt clean. The `cargo test
+--workspace --no-fail-fast` that followed, at load average 3 to 13: 2193
+passed in the integration and doc binaries summed, 3 failed, 10 ignored. The
+three: that `cases` test, and
+`runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`
+and `triage::a_verdict_read_off_a_lossy_profile_says_its_amount_is_a_lower_bound`.
+Those two still fail alone on a near-quiet machine, and **fail the same way
+on `main` at `9cd5409`** (a scratch worktree, built with `make`, each run
+once): a 100 kHz `cpu.profile` throttled by the kernel, so the series is
+short by more than its ring's loss and the triage verdict names no state.
+Not this stream's; the coordinator should file them with stream cpu.
