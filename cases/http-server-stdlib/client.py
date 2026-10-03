@@ -169,7 +169,11 @@ connection = http.client.HTTPConnection("127.0.0.1", port)
 connection.sock = sock
 
 latency = received = left = paced = 0
-for _ in range(count):
+
+
+def ask():
+    """One request, read to its end; its latency by the client's clock."""
+    global received, left, paced
     if cold is not None:
         drop(cold)
         left += resident(cold)
@@ -185,9 +189,17 @@ for _ in range(count):
             before = time.monotonic_ns()
             time.sleep(pace[1] / 1000)
             paced += time.monotonic_ns() - before
-    latency += time.monotonic_ns() - start
     if response.status != 200:
         sys.exit(f"GET {path} answered {response.status}")
+    return time.monotonic_ns() - start
+
+
+for _ in range(count):
+    try:
+        latency += ask()
+    except (http.client.HTTPException, OSError) as error:
+        # The server was stopped under the request (a run a budget ended).
+        sys.exit(f"the server stopped answering GET {path}: {error!r}")
 
 handler_run = handler_wait = 0
 for tid in os.listdir(f"/proc/{pid}/task"):
