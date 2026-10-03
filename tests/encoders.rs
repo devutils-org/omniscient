@@ -772,12 +772,20 @@ fn a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made() {
     // allocation, read from its own `/proc/self/status`: that is the step the
     // trace has to show. The nominal 64 MiB is not -- on the CI's first run the
     // process grew by 56.6 MiB of it, and the trace was right.
+    //
+    // It ends with `os._exit`, so that it holds the allocation until its
+    // address space goes. Left to exit normally, the interpreter frees the
+    // `bytearray` while it finalizes, and a poll landing then reads the
+    // process back at its size before the allocation: measured, 24 of 50
+    // runs at `poll@5ms` ended on such a point, 0 of 50 with `os._exit`, and
+    // at this test's 25 ms it failed 2 of 30 runs here as *"9981952 before,
+    // 10444800 after"* -- the trace was right, the program had shrunk.
     let own = scratch("chrome-allocation").join("own-rss");
-    let program = "import sys, time\n\
+    let program = "import os, sys, time\n\
         rss = lambda: int(next(l for l in open('/proc/self/status') \
         if l.startswith('VmRSS')).split()[1]) * 1024\n\
         time.sleep(0.3)\nbefore = rss()\nb = bytearray(64 * 1024 * 1024)\nafter = rss()\n\
-        open(sys.argv[1], 'w').write(f'{before} {after}')\ntime.sleep(0.3)";
+        open(sys.argv[1], 'w').write(f'{before} {after}')\ntime.sleep(0.3)\nos._exit(0)";
     let own_arg = own.display().to_string();
     let output = run(&[
         "mem.rss",
@@ -793,7 +801,23 @@ fn a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made() {
         program,
         &own_arg,
     ]);
-    assert!(output.status.success(), "{}", stderr(&output));
+    // Whether the program got as far as its allocation says which side ended
+    // a failed run: a program that never reported was cut short, or never
+    // ran, before its first `sleep` was over. The CI's one *"no event arrived
+    // in the window"* (run 37155975223, `stock`) came 49 ms into the test --
+    // the run ended at its first reads. A `smaps_rollup` read straddling the
+    // program's `execve` would do that; it is suspected, not shown
+    // (`docs/flaky.md`, #27).
+    assert!(
+        output.status.success(),
+        "{}\n(the program {} its own sizes)",
+        stderr(&output),
+        if own.exists() {
+            "had reported"
+        } else {
+            "never reported"
+        }
+    );
     let document: serde_json::Value =
         serde_json::from_str(&stdout(&output)).expect("chrome's own JSON");
     check_trace(&document);

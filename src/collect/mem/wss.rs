@@ -135,9 +135,18 @@ impl WorkingSet {
 
     /// Bytes of this process referenced since the last clear, and the resident
     /// set they are a part of.
+    ///
+    /// Read twice when the first answer is ESRCH from a process that is still
+    /// running. `smaps_rollup` is bound at its open to the address space the
+    /// process had then, and an `execve` between the open and the read leaves
+    /// it bound to one that no longer exists: the read answers ESRCH although
+    /// the process is alive and has a new address space to measure. A
+    /// launched program is in `execve` right when the run's first reads are
+    /// taken -- the gate releases it as the window opens -- and a read that
+    /// straddled it ended the run as *"process exited"* with nothing
+    /// measured. A fresh open is bound to the new address space.
     fn read(&self) -> Result<(u64, Option<u64>), SampleError> {
-        let text = std::fs::read_to_string(&self.rollup)
-            .map_err(|error| self.gone_or_transient(&self.rollup, error))?;
+        let text = self.rollup_text(|| std::fs::read_to_string(&self.rollup))?;
         let field = |name: &str| {
             text.lines()
                 .find_map(|line| line.strip_prefix(name))
@@ -155,15 +164,54 @@ impl WorkingSet {
         Ok((referenced, field("Rss:")))
     }
 
+    /// The rollup's text, from `open_and_read` (a fresh open each call):
+    /// once, and once more when the first answer is ESRCH from a process
+    /// that is still running. A second failure is the first's verdict:
+    /// transient from a running process, the end from a gone one.
+    fn rollup_text(
+        &self,
+        open_and_read: impl Fn() -> std::io::Result<String>,
+    ) -> Result<String, SampleError> {
+        match open_and_read() {
+            Ok(text) => Ok(text),
+            Err(error) if replaced_under_the_read(&error, self.pid) => {
+                open_and_read().map_err(|error| self.gone_or_transient(&self.rollup, error))
+            }
+            Err(error) => Err(self.gone_or_transient(&self.rollup, error)),
+        }
+    }
+
+    /// The end of the run only when the process is gone; an ESRCH from one
+    /// that is still running is a read that failed, counted as one.
     fn gone_or_transient(&self, path: &Path, error: std::io::Error) -> SampleError {
         let gone = error.kind() == std::io::ErrorKind::NotFound
-            || error.raw_os_error() == Some(libc::ESRCH);
+            || (error.raw_os_error() == Some(libc::ESRCH) && !still_running(self.pid));
         if gone {
             SampleError::TargetGone(format!("process {} exited", self.pid))
         } else {
             SampleError::Transient(format!("{}: {error}", path.display()))
         }
     }
+}
+
+/// Whether `error` is the ESRCH of a file opened on an address space the
+/// process has since replaced, rather than of a process that has gone.
+fn replaced_under_the_read(error: &std::io::Error, pid: i32) -> bool {
+    error.raw_os_error() == Some(libc::ESRCH) && still_running(pid)
+}
+
+/// Whether `pid` is a process with an address space: present in procfs and
+/// neither a zombie nor dead. A zombie's `smaps_rollup` answers ESRCH too,
+/// and that one is the end of the run.
+fn still_running(pid: i32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The state is the first field after the command, which is in
+    // parentheses and may itself hold spaces and parentheses.
+    stat.rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .is_some_and(|state| !matches!(state, "Z" | "X" | "x"))
 }
 
 impl Collector for WorkingSet {
@@ -307,20 +355,31 @@ mod tests {
     /// *holds* a lot of memory and *touches* very little of it must report a
     /// working set that is the small number, not the large one.
     ///
-    /// The child maps 256 MiB and writes every page of it, so its resident set
-    /// is 256 MiB and the kernel's referenced bits are set across all of it.
-    /// It then spends the rest of its life touching only the first 16 MiB. The
-    /// collector clears the bits, waits, and reads back: what comes back has to
-    /// be the 16 MiB that is being used, while the resident set it reports
-    /// beside it is still the 256 MiB that is merely held.
+    /// The child maps 1 GiB and writes every page of it, so its resident set
+    /// is 1 GiB and the kernel's referenced bits are set across all of it.
+    /// It then spends the rest of its life touching only the first 128 MiB.
+    /// The collector clears the bits, waits, and reads back: what comes back
+    /// has to be the 128 MiB that is being used, while the resident set it
+    /// reports beside it is still the 1 GiB that is merely held.
     ///
     /// Nothing here is the collector's own arithmetic. The two numbers are
     /// chosen by the test, maintained by the kernel in two different places,
-    /// and differ by a factor of sixteen.
+    /// and differ by a factor of eight.
+    ///
+    /// The working set is larger than any TLB can map, on purpose. A clear
+    /// does not flush the TLB, and a page whose translation the TLB still
+    /// holds is touched without a page-table walk, so its bit stays clear
+    /// (the source's first caveat). With 16 MiB of small pages -- 4 096 of
+    /// them -- the CI's runner read 8 351 744 bytes, half (run 37155975223,
+    /// `defaults`): its cpu kept about 2 000 of the translations across the
+    /// clear. Here, a Ryzen 9 3900X read 64 small pages back as 2 %, 1 024
+    /// as 37 to 99 %, and 4 096 and more in full, the same walk each time.
+    /// 32 768 pages are eight times a 4 096-entry second-level TLB, and more
+    /// than twice one that coalesces four pages per entry.
     #[test]
     fn a_process_that_holds_much_and_touches_little_reports_the_little() {
-        const RESIDENT: u64 = 256 * 1024 * 1024;
-        const WORKING: u64 = 16 * 1024 * 1024;
+        const RESIDENT: u64 = 1024 * 1024 * 1024;
+        const WORKING: u64 = 128 * 1024 * 1024;
 
         let mut child = Toucher::walker(RESIDENT, WORKING);
         let mut collector = WorkingSet::new(child.pid(), Duration::ZERO);
@@ -377,8 +436,199 @@ mod tests {
         );
         assert!(
             working < 0.25 * resident,
-            "the child touches a sixteenth of what it holds, and the working set came back as \
+            "the child touches an eighth of what it holds, and the working set came back as \
              {working} of {resident} resident"
+        );
+    }
+
+    /// The kernel fact the second read rests on, shown rather than assumed: a
+    /// `smaps_rollup` opened before an `execve` and read after it answers
+    /// ESRCH from a process that is still running, and a fresh open reads the
+    /// new address space. Which way the collector takes that ESRCH is the
+    /// next tests'. The straddling read is then handed to the collector as
+    /// its first answer, so the second read is the collector's own.
+    #[test]
+    fn a_rollup_opened_across_an_exec_answers_esrch_from_a_running_process() {
+        use std::io::Read;
+
+        let program = std::ffi::CString::new("/bin/sleep").unwrap();
+        let seconds = std::ffi::CString::new("5").unwrap();
+        let argv = [program.as_ptr(), seconds.as_ptr(), std::ptr::null()];
+        let mut gate = [0i32; 2];
+        // SAFETY: two descriptors into an array this test owns.
+        assert_eq!(unsafe { libc::pipe(gate.as_mut_ptr()) }, 0);
+        // SAFETY: the child reads, execs and exits, all async-signal-safe.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork must succeed");
+        if pid == 0 {
+            // SAFETY: the child's own descriptors and the argv built above.
+            unsafe {
+                let mut go = 0u8;
+                libc::read(gate[0], (&mut go as *mut u8).cast(), 1);
+                libc::execv(program.as_ptr(), argv.as_ptr());
+                libc::_exit(127);
+            }
+        }
+        let rollup = format!("/proc/{pid}/smaps_rollup");
+        let mut early = std::fs::File::open(&rollup).expect("the child's rollup opens");
+        // SAFETY: one byte to the gate this test made.
+        unsafe { libc::write(gate[1], b"x".as_ptr().cast(), 1) };
+        let exe = std::path::PathBuf::from("/bin/sleep")
+            .canonicalize()
+            .unwrap_or_else(|_| "/bin/sleep".into());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::fs::read_link(format!("/proc/{pid}/exe")).ok().as_ref() != Some(&exe) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never became {}",
+                exe.display()
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let mut text = String::new();
+        let straddled = early.read_to_string(&mut text);
+        let straddled_errno = straddled.as_ref().err().and_then(|e| e.raw_os_error());
+        let collector = WorkingSet::new(pid, Duration::ZERO);
+        let calls = std::cell::Cell::new(0);
+        let first = std::cell::RefCell::new(Some(straddled.map(|_| text.clone())));
+        let outcome = collector
+            .rollup_text(|| {
+                calls.set(calls.get() + 1);
+                match first.borrow_mut().take() {
+                    Some(answer) => answer,
+                    None => std::fs::read_to_string(&collector.rollup),
+                }
+            })
+            .and_then(|_| collector.read());
+        // SAFETY: ending and reaping a child of this test.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, std::ptr::null_mut(), 0);
+            libc::close(gate[0]);
+            libc::close(gate[1]);
+        }
+
+        assert_eq!(
+            straddled_errno,
+            Some(libc::ESRCH),
+            "a rollup opened before the exec and read after it must answer ESRCH"
+        );
+        let (_, resident) = outcome.expect("the collector's second, fresh open reads");
+        assert_eq!(calls.get(), 2, "the straddling ESRCH is read once more");
+        assert!(resident.is_some_and(|bytes| bytes > 0), "{resident:?}");
+    }
+
+    /// ESRCH ends the run only from a process that is gone: from a running
+    /// one it is a failed read, and from a zombie the end.
+    #[test]
+    fn an_esrch_ends_the_run_only_when_the_process_is_gone() {
+        let esrch = || std::io::Error::from_raw_os_error(libc::ESRCH);
+        let alive = WorkingSet::new(std::process::id() as i32, Duration::ZERO);
+        assert!(
+            matches!(
+                alive.gone_or_transient(Path::new("x"), esrch()),
+                SampleError::Transient(_)
+            ),
+            "this process is running"
+        );
+
+        // SAFETY: the child only exits.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork must succeed");
+        if pid == 0 {
+            // SAFETY: the only call the child makes.
+            unsafe { libc::_exit(0) };
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while still_running(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never exited"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let zombie = WorkingSet::new(pid, Duration::ZERO);
+        let verdict = zombie.gone_or_transient(Path::new("x"), esrch());
+        // SAFETY: reaping a child of this test.
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+        assert!(
+            matches!(verdict, SampleError::TargetGone(_)),
+            "a zombie has no address space left: {verdict:?}"
+        );
+    }
+
+    /// The second read, driven: an ESRCH from a running process is read once
+    /// more and the second answer stands; an ESRCH that persists is a failed
+    /// read, not the end, and is not read a third time; from a gone process
+    /// it is the end at once, with no second read.
+    #[test]
+    fn an_esrch_from_a_running_process_is_read_once_more_and_never_ends_the_run() {
+        let esrch = || std::io::Error::from_raw_os_error(libc::ESRCH);
+        let alive = WorkingSet::new(std::process::id() as i32, Duration::ZERO);
+
+        let calls = std::cell::Cell::new(0);
+        let text = alive.rollup_text(|| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Err(esrch())
+            } else {
+                Ok("Rss: 4 kB\nReferenced: 4 kB\n".to_string())
+            }
+        });
+        assert_eq!(
+            calls.get(),
+            2,
+            "an ESRCH from a running process is read again"
+        );
+        assert!(text.is_ok_and(|t| t.contains("Referenced")));
+
+        calls.set(0);
+        let verdict = alive.rollup_text(|| {
+            calls.set(calls.get() + 1);
+            Err(esrch())
+        });
+        assert_eq!(calls.get(), 2, "read twice, not more");
+        assert!(
+            matches!(verdict, Err(SampleError::Transient(_))),
+            "a persisting ESRCH from a running process is a failed read: {verdict:?}"
+        );
+
+        calls.set(0);
+        let other = alive.rollup_text(|| {
+            calls.set(calls.get() + 1);
+            Err(std::io::Error::from_raw_os_error(libc::EIO))
+        });
+        assert_eq!(calls.get(), 1, "only ESRCH is read again");
+        assert!(matches!(other, Err(SampleError::Transient(_))), "{other:?}");
+
+        // SAFETY: the child only exits.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork must succeed");
+        if pid == 0 {
+            // SAFETY: the only call the child makes.
+            unsafe { libc::_exit(0) };
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while still_running(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never exited"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let zombie = WorkingSet::new(pid, Duration::ZERO);
+        calls.set(0);
+        let verdict = zombie.rollup_text(|| {
+            calls.set(calls.get() + 1);
+            Err(esrch())
+        });
+        // SAFETY: reaping a child of this test.
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+        assert_eq!(calls.get(), 1, "a zombie is not read again");
+        assert!(
+            matches!(verdict, Err(SampleError::TargetGone(_))),
+            "{verdict:?}"
         );
     }
 
