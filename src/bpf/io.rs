@@ -1046,7 +1046,8 @@ pub struct BlockProgram {
     counters: Counters,
     inflight: Option<Hash>,
     open_program: Option<OwnedFd>,
-    _open_link: Option<OwnedFd>,
+    /// Taken by [`BlockProgram::detach`], with `close_link`.
+    open_link: Option<OwnedFd>,
     close_program: OwnedFd,
     /// Taken when the histogram is read, so the read is of a map nothing
     /// writes any more.
@@ -1211,7 +1212,7 @@ impl BlockProgram {
             counters,
             inflight,
             open_program,
-            _open_link: open_link,
+            open_link,
             close_program,
             close_link: Some(close_link),
             histogram,
@@ -1243,6 +1244,21 @@ impl BlockProgram {
     /// Whether the closing program counts into a kernel-side histogram.
     pub fn is_histogram(&self) -> bool {
         self.histogram.is_some()
+    }
+
+    /// Detaches both programs and keeps them loaded.
+    ///
+    /// What the kernel has counted of a program's runs (`run_time_ns` and
+    /// `run_cnt`, under `kernel.bpf_stats_enabled`) is read from its
+    /// descriptor, and the run reads it when it closes its accounts, after
+    /// every collector has stopped. A stop that closed the programs left that
+    /// read nothing to find: the coordinator's `null_blk` run printed *"the
+    /// programs ran 0 times for 0 ns"* beside a histogram of 26 838 511
+    /// requests. Detached, they run no more; loaded, their account stays
+    /// readable until the collector is dropped.
+    pub fn detach(&mut self) {
+        self.open_link = None;
+        self.close_link = None;
     }
 
     /// The kernel-side histogram, read once, at the end.

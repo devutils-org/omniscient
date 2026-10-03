@@ -1586,6 +1586,68 @@ fn a_burst_of_writes_shows_up_as_a_queue_on_the_device_that_took_it() {
         );
     }
 
+    // A floor that owes nothing to /sys/block/<dev>/inflight. The gauge now
+    // reads that file too (`docs/scenarios/io.md`, defect 20), so the kernel's
+    // reads above only show that the tool reads what the test reads. The
+    // workload's own records do not: at each poll's instant, by the writers'
+    // clock against the window's stamps (both `CLOCK_MONOTONIC`), how many of
+    // the direct writes had begun and not returned. A direct write is a
+    // request at the device for nearly all of its syscall, so at an instant
+    // when half the writers are inside theirs, the device holding none of
+    // them is the gap between a syscall's entry and its bio for every one of
+    // four threads at once. Over ten such polls or more, a maximum of 0 is a
+    // gauge that does not see the queue.
+    let depth_result = result(&document, "queue depth");
+    let depth_opened = depth_result["window"]["opened_ns"]
+        .as_u64()
+        .expect("the window's opening");
+    let instants: Vec<u64> = output_of(depth_result, "timeline")["series"]
+        .as_array()
+        .expect("the queue depth has series")
+        .iter()
+        .filter(|series| series["key"] == device.key.as_str())
+        .flat_map(|series| series["points"].as_array().cloned().unwrap_or_default())
+        .filter_map(|point| point["offset_ns"].as_u64())
+        .map(|offset| depth_opened + offset)
+        .collect();
+    let outstanding = |at: u64| {
+        written
+            .iter()
+            .filter(|(began, returned)| *began <= at && at < *returned)
+            .count()
+    };
+    let held = instants
+        .iter()
+        .filter(|at| outstanding(**at) >= WRITERS / 2)
+        .count();
+    if held >= 10 {
+        eprintln!(
+            "the workload's floor: {held} of the {} polls on {} found at least {} of its direct \
+             writes outstanding by its own clock; the session's maximum was {}",
+            instants.len(),
+            device.leaf,
+            WRITERS / 2,
+            depth["max"]
+        );
+        assert!(
+            number(&depth["max"]) >= 1.0,
+            "at {held} of the {} polls on {}, the workload's own clock had at least {} of its \
+             {WRITERS} direct writes in their syscalls, and the gauge never read a queue: \
+             {depth}",
+            instants.len(),
+            device.leaf,
+            WRITERS / 2
+        );
+    } else {
+        eprintln!(
+            "the workload's floor not held: only {held} of the {} polls on {} found at least {} \
+             of its direct writes outstanding by its own clock",
+            instants.len(),
+            device.leaf,
+            WRITERS / 2
+        );
+    }
+
     // The series has to have the spacing the request asked for. Two seconds at
     // 20 ms is a hundred reads, and a session whose points are counted in tens
     // is one whose interval was decided by something other than the request.
@@ -5820,6 +5882,7 @@ fn latency_by_request(result: &serde_json::Value) -> BTreeMap<(u64, u64), u64> {
 /// ```console
 /// sudo modprobe null_blk queue_mode=2 irqmode=0 completion_nsec=0 nr_devices=1 \
 ///     gb=4 bs=4096 hw_queue_depth=256 submit_queues=8
+/// udevadm settle --timeout=10   # udev applies its rule after modprobe returns
 /// sudo chmod a+r /dev/nullb0
 /// cargo test --test scenario_io -- --ignored --exact \
 ///     the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent --nocapture
@@ -5829,13 +5892,21 @@ fn latency_by_request(result: &serde_json::Value) -> BTreeMap<(u64, u64), u64> {
 /// sudo sysctl kernel.bpf_stats_enabled=0
 /// sudo rmmod null_blk
 /// ```
+///
+/// The `udevadm settle` is not ceremony: `modprobe` returns before udev has
+/// applied its rule to the new node, and the rule sets its mode, so a `chmod`
+/// made at once is undone a moment later and the test finds `/dev/nullb0` at
+/// 0600 (twice in one session, the coordinator's after the seventeenth wave).
 #[test]
 #[ignore = "needs null_blk (root): see the doc comment for the commands"]
 fn the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent() {
     const DEVICE: &str = "/dev/nullb0";
     const JOBS: f64 = 8.0;
     if std::fs::File::open(DEVICE).is_err() {
-        panic!("{DEVICE} is not there or not readable: load null_blk as the doc comment says");
+        panic!(
+            "{DEVICE} is not there or not readable: load null_blk as the doc comment says, and \
+             `udevadm settle` before the `chmod`, or udev resets the node to 0600 after it"
+        );
     }
     if let Some(reason) = no_bpf_here() {
         panic!("{reason}");
@@ -5957,4 +6028,173 @@ fn the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent() {
         "the in-kernel histogram cost {overhead:.2} % of a {bare:.0} IOPS load \
          ({per_request_ns:.0} ns per request)"
     );
+}
+
+/// A device that takes a latency chosen in advance, and both histograms put
+/// every request in the bucket that latency is in.
+///
+/// `null_blk` with `irqmode=2` completes each request from a high-resolution
+/// timer `completion_nsec` after the driver took it, so every request's
+/// interval between `block_rq_issue` and `block_rq_complete` is at least that
+/// and only a timer's slack more. The value read from the module's own
+/// parameters is the ground truth, and the doc comment's 3 ms is the middle of
+/// the log2 bucket `[2^21, 2^22)` ns: 0.9 ms from the edge below and 1.2 ms
+/// from the one above, against the few hundred nanoseconds two program sets
+/// read the clock apart (`docs/scenarios/io.md`, defect 16). So no request can
+/// be an edge-crosser, and the in-kernel histogram and the streamed one must
+/// agree bucket for bucket and request for request -- the bit equality
+/// `a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make`
+/// cannot ask of a real disk's spread of latencies.
+///
+/// ```console
+/// sudo modprobe null_blk queue_mode=2 irqmode=2 completion_nsec=3000000 nr_devices=1 \
+///     gb=1 bs=4096
+/// udevadm settle --timeout=10
+/// sudo chmod a+r /dev/nullb0
+/// cargo test --test scenario_io -- --ignored --exact \
+///     a_device_with_a_known_latency_puts_every_request_in_its_bucket_in_both_histograms \
+///     --nocapture
+/// sudo rmmod null_blk
+/// ```
+#[test]
+#[ignore = "needs null_blk (root) with a timer completion: see the doc comment"]
+fn a_device_with_a_known_latency_puts_every_request_in_its_bucket_in_both_histograms() {
+    const DEVICE: &str = "/dev/nullb0";
+    const READS: u64 = 64;
+    let parameter = |name: &str| -> Option<u64> {
+        std::fs::read_to_string(format!("/sys/module/null_blk/parameters/{name}"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    let (Some(2), Some(latency)) = (parameter("irqmode"), parameter("completion_nsec")) else {
+        panic!(
+            "null_blk is not loaded with a timer completion (irqmode {:?}, completion_nsec \
+             {:?}): load it as the doc comment says",
+            parameter("irqmode"),
+            parameter("completion_nsec")
+        );
+    };
+    if std::fs::File::open(DEVICE).is_err() {
+        panic!(
+            "{DEVICE} is not there or not readable: `udevadm settle` before the `chmod`, or \
+             udev resets the node to 0600 after it"
+        );
+    }
+    if let Some(reason) = no_bpf_here() {
+        panic!("{reason}");
+    }
+    let low = 1u64 << latency.ilog2();
+    let high = low * 2;
+    // A quarter of the bucket on either side: far more than any skew between
+    // two program sets, or a timer's slack, on a machine that is not starved.
+    assert!(
+        latency >= low + low / 4 && latency + low / 4 <= high,
+        "completion_nsec={latency} is within a quarter bucket of an edge of [{low}, {high}): \
+         choose one nearer the middle, as 3000000 is"
+    );
+    let launch = format!(
+        "[dd, if={DEVICE}, of=/dev/null, bs=4096, count={READS}, iflag=direct, status=none]"
+    );
+    let session = format!(
+        "name: a known latency\n\
+         requests:\n\
+         \x20 - label: in-kernel\n\
+         \x20   source: io.latency\n\
+         \x20   target: {{launch: {launch}}}\n\
+         \x20   mode: trace\n\
+         \x20   emit: [hist]\n\
+         \x20 - label: streamed\n\
+         \x20   source: io.latency\n\
+         \x20   target: {{launch: {launch}}}\n\
+         \x20   mode: trace\n\
+         \x20   emit: [raw, hist]\n"
+    );
+    let session_path = scratch("io-known-latency.yml");
+    std::fs::write(&session_path, session).expect("the session");
+    let output = run(&[
+        "-f",
+        session_path.to_str().expect("a path"),
+        "--format",
+        "json",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document = json(&output);
+    let (kernel, streamed) = (
+        result(&document, "in-kernel"),
+        result(&document, "streamed"),
+    );
+    // The `hist`-only request must have counted in the kernel: had it quietly
+    // run on the streaming path, the two histograms would agree trivially and
+    // the in-kernel one would not be held to the known latency at all.
+    let said = |result: &serde_json::Value| result["notes"].to_string();
+    assert!(
+        said(kernel).contains("the histogram was built in the kernel"),
+        "the `hist`-only request did not say it was built in the kernel: {}",
+        said(kernel)
+    );
+    assert!(
+        !said(streamed).contains("built in the kernel"),
+        "the streamed request says it was built in the kernel: {}",
+        said(streamed)
+    );
+    for result in [kernel, streamed] {
+        assert_eq!(
+            losses(result)["dropped"].as_u64().unwrap_or(0),
+            0,
+            "the `{}` path dropped requests: {}",
+            result["label"],
+            losses(result)
+        );
+    }
+
+    // Every streamed request: one of dd's, and its interval the device's
+    // latency and a timer's slack, inside the bucket.
+    let events = raw_events(streamed);
+    assert_eq!(
+        events.len() as u64,
+        READS,
+        "dd made {READS} direct reads of 4 KiB, and the stream carried {} requests",
+        events.len()
+    );
+    let mut latencies: Vec<u64> = events
+        .iter()
+        .map(|attrs| attrs["latency_ns"].as_u64().expect("a latency"))
+        .collect();
+    latencies.sort_unstable();
+    eprintln!(
+        "completion_nsec {latency}: the stream measured {} to {} ns (median {}) over {READS} \
+         requests, in [{low}, {high})",
+        latencies[0],
+        latencies[latencies.len() - 1],
+        latencies[latencies.len() / 2]
+    );
+    assert!(
+        latencies[0] >= latency,
+        "a request completed in {} ns on a device that takes {latency}",
+        latencies[0]
+    );
+    assert!(
+        latencies[latencies.len() - 1] < high,
+        "a request took {} ns on a device that takes {latency}, past the bucket's edge at \
+         {high}",
+        latencies[latencies.len() - 1]
+    );
+
+    // Both histograms: one bucket, every request in it, nothing elsewhere.
+    let only = |result: &serde_json::Value| -> BTreeMap<u64, u64> {
+        output_of(result, "hist")["series"]
+            .as_array()
+            .expect("a hist output carries its series")
+            .iter()
+            .flat_map(buckets_of)
+            .fold(BTreeMap::new(), |mut all, (low, count)| {
+                *all.entry(low).or_insert(0) += count;
+                all
+            })
+    };
+    let expected = BTreeMap::from([(low, READS)]);
+    assert_eq!(only(streamed), expected, "the streamed histogram");
+    assert_eq!(only(kernel), expected, "the histogram built in the kernel");
 }

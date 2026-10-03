@@ -181,6 +181,10 @@
   summary: "Device queue depth"
   unit: count
   backends:
+    # Two kernel accounts per device: /proc/diskstats' ninth column and
+    # /sys/block/<dev>/inflight. Only the first is required: the second is
+    # read beside it when it is there, and a device whose file cannot be read
+    # is named in the run's notes and reported from the first alone.
     - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
@@ -193,6 +197,14 @@
        and drains between two polls leaves no trace, and a poll interval close
        to the device's service time aliases: the series then describes the
        sampling, not the device."
+    - "The kernel counts what is outstanding twice, and the two can part: the
+       I/O accounting in /proc/diskstats (scheduler queue included) and the
+       requests the driver holds in /sys/block/<dev>/inflight. On one 6.17
+       kernel the disk's diskstats line read 0 under a queue of 199
+       (docs/scenarios/io.md, defect 20; the cause is still open). `inflight`
+       is the larger of the two, each a count of requests really outstanding;
+       `diskstats_inflight` and `sysfs_inflight` carry each, and
+       `sysfs_inflight` is absent, not zero, where the file could not be read."
 
 - id: io.syscall
   family: io

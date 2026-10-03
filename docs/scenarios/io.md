@@ -1299,3 +1299,134 @@ the open program refuses, the close finds the old time and counts a long
 interval. The ring pair has the same shape (the entry stays until the pointer's
 next open). Reasoned from the code, not seen; bounded by the skip count, which
 the run reports as an upper bound on loss.
+
+
+## The eighteenth wave
+
+### 20. The polled queue depth read 0 on the CI's nvme while the kernel's other file read 199 — **worked around in the source; the cause still open**
+
+`a_burst_of_writes_shows_up_as_a_queue_on_the_device_that_took_it`, both CI
+cells at `b37a925` (6.17.0-1022-azure): the test's own reads of
+`/sys/block/nvme0n1/inflight` found the queue non-empty for 2.37 s of 2.38 s,
+deepest 199, and `io.inflight`'s 101 polls of `/proc/diskstats` read 0 every
+time on the same device (`dev:259+0`). Not the polling interval -- the queue
+never emptied -- and not the wrong device: the key and the sysfs path are the
+same disk.
+
+The two files are two accounts. The ninth column of `/proc/diskstats` is the
+block layer's I/O accounting, kept per partition and per disk; on recent
+kernels `/sys/block/<dev>/inflight` on a multi-queue device walks the requests
+the driver holds instead, whichever partition they came through, and leaves
+out those still in the scheduler. The runner's file system is on a partition,
+so the likeliest reading -- reasoned, there is no 6.17 source or machine here
+-- is that its kernel left the accounting on the partition's line and never
+added it to the disk's. This machine (7.2.7) does not: under eight `dd
+oflag=direct` writers to `nvme0n1p6`, `nvme0n1`'s column and the partition's
+read the same (8 and 8, 79 and 81, 178 and 177), and sysfs the same order.
+
+The fix is in the source (`src/collect/io/diskstats.rs`): the gauge reads both
+accounts for each device the run reports and takes the larger. Each counts
+requests really outstanding, so the larger is still never more than the device
+held, and each event carries both (`diskstats_inflight`, `sysfs_inflight`), so
+a kernel on which they part shows it in the output. A device whose sysfs file
+cannot be read is reported from the diskstats column alone -- the very account
+that read 0 -- and the run's notes name it. The catalog entry's caveats say
+the same.
+
+This is a workaround, not the cause. **Why 6.17's disk line read 0 is still
+open**: the partition explanation is reasoned without a 6.17 source or
+machine, and it did not reproduce on 7.2. The headline `inflight` no longer
+shows the divergence; `diskstats_inflight` and `sysfs_inflight` still do, and
+a CI log that carries them is what would settle it.
+
+Since the gauge now reads `/sys/block/<dev>/inflight` too, the test's own
+reads of that file are no longer independent of the tool: a green run against
+them shows only that the tool reads what the test reads. So the scenario got a
+second floor that owes nothing to the file: at each poll's instant, the
+workload's own clock counts the direct writes that had begun and not
+returned, and when at least half of the eight writers were inside their
+syscalls at ten polls or more, the gauge must have read a queue at least
+once. Here: 101 of 101 polls with four or more writes outstanding, maximum 25.
+Held also by `diskstats::tests::a_queue_one_account_misses_is_read_from_the_other`
+(the CI's shape, 0 against 199, and the other way round) and
+`queue_depth_is_reported_as_it_stands` (the note when the file is missing).
+Shown green here; **whether the CI's cells go green is the next CI run's to
+show**.
+
+### 21. The program statistics read 0 runs while the histogram counted 26.8 M — **fixed for `io.latency`; the rest filed**
+
+The coordinator's `null_blk` run with `kernel.bpf_stats_enabled=1` printed
+*"the programs ran 0 times for 0 ns"* beside a histogram of 26 838 511
+requests. The run reads each collection's programs through its own
+descriptors (`/proc/self/fdinfo`'s `run_time_ns` and `run_cnt`), and reads
+them in `Spending::close`, after every collector's `stop()`. Without a
+`--budget` nothing reads them earlier, and `BlockCollector::stop` ended with
+`self.program = None`: by the time of the read, the descriptors were closed,
+and the meter's last reading was its first, zero.
+
+`BlockProgram::detach` now drops the two links and keeps the programs: they
+run no more after the stop, and their account stays readable until the
+collector is dropped, which is after the close. The same `self.program = None`
+ends the stop of other eBPF collectors (`io.fsync`, `io.pagecache` and
+`io.writeback` here, nineteen places outside this family), whose programs' types live
+in files this stream does not own; and the place that would fix all of them at
+once -- reading the meters before the stops -- is `src/collect/mod.rs`. Both
+are filed in `docs/fixes/w18-io.md`. Reasoned, not shown: this machine's
+`bpf_stats_enabled` is 0, and turning it on is machine wide.
+
+### 19, continued: is the 348 ns the programs or the dispatch? (reasoned)
+
+The coordinator's run after the seventeenth wave read 12.03 %, **348 ns** a
+request against a 1 % budget of 25.5 ns (was 781 ns on the shared pair).
+Until the corrected statistics are read, the split is reasoned from what each
+request now runs:
+
+| per request | what | rough cost |
+|---|---|---|
+| dispatch | two raw-tracepoint runs (`__bpf_trace_run`: recursion guard, run context, RCU, an indirect call) | 30 to 60 ns |
+| open | `bpf_ktime_get_ns`, the in-flight map's inlined lookup, one store | 30 to 100 ns, the lookup a cache miss in a 65 536-entry map |
+| close | `bpf_ktime_get_ns`, the same lookup, two `probe_read_kernel`, the bucket, the per-cpu row's inlined lookup and two adds | 80 to 200 ns |
+
+That puts most of the 348 ns in the programs' own run time, not in the
+dispatch, and that is the way this stream expects the numbers to point: `Q`,
+the run time per request counted, at 150 to 300 ns. The statistics run adds
+two clock reads to each program run (about 40 to 80 ns a request), so `Q`
+from the second run is an upper bound on the first run's programs. If `Q` is
+most of `N`, there is still something to take out, in this order:
+
+1. **The two `probe_read_kernel`** become two loads under a BTF-typed
+   tracepoint (`tp_btf`), a program type `src/bpf/syscall.rs` does not load.
+2. **The open program and the in-flight map** go entirely if the close reads
+   the request's own start stamp (`rq->io_start_time_ns`) -- which the kernel
+   writes only when the queue keeps statistics (`QUEUE_FLAG_STATS`), so it is
+   a backend with a requirement, not a replacement.
+
+If `Q` is a small part of `N`, the dispatch and the cache are the cost of any
+pair of programs on two tracepoints, and the criterion to keep is the
+per-request cost the test prints, not a percentage of a device that does no
+work (the seventeenth wave's argument, unchanged).
+
+### 22. A known set of device latencies for the edge-crossers — **written; the run is the coordinator's**
+
+`a_device_with_a_known_latency_puts_every_request_in_its_bucket_in_both_histograms`
+(ignored; `null_blk` with `irqmode=2 completion_nsec=3000000`). The device
+completes each request from a timer 3 ms after the driver took it, which is
+the middle of `[2^21, 2^22)` ns: 0.9 ms from one edge, 1.2 ms from the other,
+against a skew between two program sets of a few hundred nanoseconds (defect
+16). So no request can cross an edge, and the in-kernel histogram and the
+streamed one are held to the same single bucket holding all 64 of `dd`'s
+direct reads -- the bit equality the real-disk test cannot ask -- and every
+streamed interval to at least the configured latency. The latency is read from
+the module's own parameters, and the test refuses one within a quarter bucket
+of an edge. Not run here: loading `null_blk` is machine wide.
+
+### Not done this wave
+
+- **A known number of merges**: not written. A merge the test could count in
+  advance needs bios that the plug is certain to merge -- contiguous reads in
+  one submission, on a queue with `nomerges` 0 -- and whether `fio`'s batched
+  io_uring submission plugs them depends on whether it submits inline or from
+  a worker, which this stream could not hold to a number without a run of its
+  own on `null_blk`.
+- **One program for both `io.latency` histograms**: not started; it was
+  optional, and the two items above came first.
