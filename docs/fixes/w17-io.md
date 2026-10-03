@@ -28,8 +28,15 @@ histogram's 23.6 % at 3 M IOPS (`BRIEF.md`, "io"). The defect's account is in
     parameter, since the ring is now its only sink.
 - **`tests/scenario_io.rs`**: the cost test prints the per-request cost
   (`jobs * (1/measured - 1/bare)`) beside the percentage, and under
-  `kernel.bpf_stats_enabled=1` each program's own `run_time_ns / run_cnt`,
-  read from `/proc/<omn>/fdinfo` while the tool runs. The 1 % assertion stays.
+  `kernel.bpf_stats_enabled=1` the programs' own run time as the tool reports
+  it (`overhead.in_target_cpu_ns` / `in_target_runs`, both programs summed),
+  or the tool's reason when it is not known. It asserts that the histogram
+  counted fio's completed reads within 1 % before it trusts the percentage.
+  The 1 % assertion stays.
+- **`src/bpf/io.rs`, `src/collect/io/block.rs`**: `still_in_flight` says when
+  it does not know (a failed key walk or lookup) and when its count is a lower
+  bound (a walk cut short), and the note says so, instead of reporting either
+  as none in flight.
 - **`docs/scenarios/io.md`**: defect 19, with the arithmetic, where the cost
   was, what changed, and the argument about the criterion.
 
@@ -46,8 +53,10 @@ Shown, on this machine, with the capabilities:
   green.
 - The hot paths, counted in the instruction stream by
   `bpf::io::tests::the_histogram_programs_hot_paths_call_only_what_a_row_needs`:
-  open 2 helper calls (3 under a process filter) where it was 6; close 5
-  where it was 11; no `MAP_DELETE_ELEM`, no atomic
+  open 2 `call` instructions (3 under a process filter) where it was 6;
+  close 5 where it was 11; no `MAP_DELETE_ELEM`, no atomic. Calls in the
+  bytecode, not helpers run: the map lookups among them are inlined by the
+  verifier, which leaves 1 (2) on the open and at most 3 on the close
   (`a_histogram_close_writes_no_record_and_counts_its_row_without_an_atomic`).
   The per-cpu sum by `a_rows_per_cpu_copies_sum_into_one_value`.
 
@@ -70,6 +79,30 @@ Reasoned, not measured:
   skipped leaves its entry's time unconsumed, and if the pointer's next
   request belongs to a task the open refuses, the close counts the old time.
   Same shape in the ring pair. Bounded by `skipped`, which is reported.
+
+## Review
+
+The fix round answered four points from the adversarial review.
+
+- **Defect: the second run could not print per-program run times.** Right.
+  `omn` carries file capabilities, so the kernel makes it non-dumpable at exec
+  and its `/proc/<pid>/fdinfo` is closed to the unprivileged test; the helper
+  swallowed the error into an empty list. The test no longer reads another
+  process's descriptors: it reads the run time the tool reports about its own
+  programs (`overhead.in_target_*`, which it reads through `/proc/self`), and
+  prints the tool's reason when that is unknown. What comes back is the two
+  programs summed, not each one; that is enough for the decision, which turns
+  on the programs' share of the per-request cost.
+- **Gap: a pass did not show the histogram measured anything.** Right, and
+  shown: `fio` with `direct=1` on a `tmpfs` file did 1 580 431 reads and the
+  histogram counted 46. The test now asserts the histogram counted fio's
+  completed reads within 1 % (plus the 512 a stop may leave in flight). The
+  parsing was checked against a run on a file on the NVMe disk: 782 587 reads,
+  782 587 counted.
+- **Nit: `still_in_flight` reported unknown as none.** Fixed (above).
+- **Nit: helper counts mixed calls with helpers run.** Restated as `call`
+  instructions, with the count the verifier leaves after inlining the lookups,
+  here and in defect 19.
 
 ## What I could not do, and why
 
@@ -101,8 +134,11 @@ sudo -n /usr/bin/rmmod null_blk
 ```
 
 What to read: the line `bare ... IOPS, under the in-kernel histogram ...:
-X %, N ns per request against a 1 % budget of B ns`, and in the second run
-the two `program <id>: ... ns per run` lines (the open and the close). For
+X %, N ns per request against a 1 % budget of B ns; the histogram counted C
+requests of fio's R reads`, and in the second run the line `the programs ran
+... times for ... ns: P ns per run, Q ns per request counted` (open and close
+summed; Q against N is the split the decision below needs). If that line
+reads "not known" instead, it carries the tool's reason. For
 comparison, the same first command on `main` read 23.57 % (781 ns).
 
 ## Decision lines for DECISIONS.md
@@ -133,13 +169,12 @@ comparison, the same first command on `main` read 23.57 % (781 ns).
 
 ## The suite
 
-One `make check`: red on `tests/triage.rs::a_verdict_read_off_a_lossy_profile_says_its_amount_is_a_lower_bound`.
-Then one `cargo test --workspace --no-fail-fast`: 2189 passed, 2 failed, 10
-ignored. The two failures were
-`budget::the_extra_cpu_a_faster_poll_costs_is_the_extra_cpu_the_shell_observes`
-(in the flaky tally, this file) and
-`triage::a_join_from_a_held_source_counts_what_fell_outside_its_window`
-(in `docs/open-findings.md`'s tally); the `make check` red passed in that run.
-Each of the three, rerun alone once: passed. None is in this stream's files
-or exercises the block programs. `cargo clippy --all-targets -- -D warnings`
-and `cargo fmt --check` clean.
+After the fix round: one `make check`, red on
+`scenario_sched::one_known_number_of_round_trips_is_found_by_four_sources`
+(2513 waits for 2000 round trips; in `docs/open-findings.md`'s tally). Rerun
+alone once: passed. Then one `cargo test --workspace --no-fail-fast`: 2191
+passed, 0 failed, 10 ignored. `cargo clippy --workspace --all-targets -- -D
+warnings` and `cargo fmt --all --check` clean. Touched while iterating:
+`cargo test --lib bpf::io` 36 passed, `--lib collect::io::block` 14 passed,
+`--test scenario_io` 41 passed, 1 ignored (the cost test, which needs
+`null_blk`).

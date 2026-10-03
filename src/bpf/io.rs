@@ -1333,24 +1333,29 @@ impl BlockProgram {
     ///
     /// A histogram's entries outlive their requests, so there it is the
     /// entries whose open time was not consumed, not every entry.
-    pub fn still_in_flight(&self) -> usize {
+    ///
+    /// The count, and whether it is a lower bound because the key walk was cut
+    /// short; or why it could not be read, which is not the same as none.
+    pub fn still_in_flight(&self) -> Result<(usize, bool), String> {
         let Some(map) = self.inflight.as_ref() else {
-            return 0;
+            return Ok((0, false));
         };
+        let (keys, truncated) = map
+            .keys()
+            .map_err(|error| format!("walking the in-flight map failed: {error}"))?;
         if self.histogram.is_none() {
-            return map.len().unwrap_or(0);
+            return Ok((keys.len(), truncated));
         }
-        let Ok((keys, _)) = map.keys() else {
-            return 0;
-        };
-        keys.iter()
-            .filter_map(|key| {
-                syscall::map_lookup(map.as_raw_fd(), key, HIST_ENTRY_VALUE_BYTES)
-                    .ok()
-                    .flatten()
-            })
-            .filter(|value| value.iter().any(|byte| *byte != 0))
-            .count()
+        let mut open = 0;
+        for key in &keys {
+            let value = syscall::map_lookup(map.as_raw_fd(), key, HIST_ENTRY_VALUE_BYTES)
+                .map_err(|error| format!("reading an in-flight entry failed: {error}"))?;
+            // An entry removed between the walk and the read is not in flight.
+            if value.is_some_and(|value| value.iter().any(|byte| *byte != 0)) {
+                open += 1;
+            }
+        }
+        Ok((open, truncated))
     }
 }
 

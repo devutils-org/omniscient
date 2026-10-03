@@ -1236,8 +1236,14 @@ holding them moves on nearly every completion.
   run of the same program on its cpu. The copies are summed once, at the end,
   after the detach and the grace period, exactly as the shared rows were read.
 
-Per request on the path every paired completion takes: open 2 helpers (3 under
-a process filter) where it was 6, close 5 where it was 11, no lock, no atomic.
+Per request on the path every paired completion takes, counted as `call`
+instructions in the bytecode: open 2 (3 under a process filter) where it was 6,
+close 5 where it was 11, no lock, no atomic. A count of calls is not a count of
+helpers run: the verifier inlines a map lookup on a hash or per-cpu hash map
+into plain instructions, and those lookups are one of the new open's calls and
+two of each close's (old and new). Counting only the calls the verifier leaves
+as calls, the open goes from 6 to 1 (2 under a filter) and the close from at most
+9 to at most 3.
 Held by `bpf::io::tests::the_histogram_programs_hot_paths_call_only_what_a_row_needs`
 and `a_histogram_close_writes_no_record_and_counts_its_row_without_an_atomic`.
 The histogram's answer is unchanged: `scenario_io` and `family_io` green,
@@ -1246,12 +1252,29 @@ including `a_histogram_built_in_the_kernel_is_the_one_the_streamed_requests_make
 
 **What is not known yet: the new percentage.** It needs the run this wave's
 stream could not make. The test now prints the per-request cost beside the
-percentage and, under `kernel.bpf_stats_enabled=1`, each program's own run
-time per run, read from the tool's descriptors while it runs -- which splits
+percentage and, under `kernel.bpf_stats_enabled=1`, the programs' own run time
+(`overhead.in_target_cpu_ns` over `in_target_runs`, both programs summed, per
+run and per request counted) as the tool reports it in its JSON -- which splits
 what is left between the programs and what any pair of programs costs (the
-tracepoints' dispatch, the cache misses on the request). Keeping those
+tracepoints' dispatch, the cache misses on the request). The tool reads that
+from its own descriptors. A first version of the test read them from
+`/proc/<omn>/fdinfo` itself and would have printed nothing: `make` gives `omn`
+file capabilities, the kernel marks a process that gains them at exec
+non-dumpable, and a non-dumpable process's `fdinfo` is closed to an
+unprivileged reader -- an error the helper turned into an empty list. When the
+run time is not known, the test now prints the tool's reason. Keeping those
 statistics costs two clock reads per run, so the percentage is the run made
 without them.
+
+The test also checks that the histogram measured the load before it trusts the
+percentage: the requests it counted must be fio's completed reads within 1 %
+(plus at most the 512 a stop leaves in flight). The process filter now runs
+before the clock, so I/O from a context it refuses would cost one call and
+leave an empty histogram behind a passing 0 %. Shown on this machine with
+`fio` (io_uring, `direct=1`, 2 jobs) on a file on the NVMe disk: 782 587 reads,
+782 587 counted. The same `fio` on a `tmpfs` file read 1 580 431 times and the
+histogram counted 46 -- `direct=1` on `tmpfs` never reaches the block layer --
+which is the shape of pass the check now refuses.
 
 **Whether 1 % is the right criterion** (reasoned, not measured). 25 ns per
 request has to pay for two raw-tracepoint dispatches (`__bpf_trace_run`: a
