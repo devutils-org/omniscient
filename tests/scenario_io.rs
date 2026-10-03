@@ -5795,25 +5795,52 @@ fn latency_by_request(result: &serde_json::Value) -> BTreeMap<(u64, u64), u64> {
 /// ground truth, measured the same way both times. `1 %` is the criterion's
 /// number; a loaded machine widens the noise, so this runs alone.
 ///
+/// The percentage is also printed as what it is made of: nanoseconds per
+/// request, `jobs * (1/measured - 1/bare)`. With `irqmode=0` the completion
+/// runs inline in the submitting thread, so both programs run in a job's own
+/// time and that difference is their cost. And when the kernel is keeping
+/// program statistics (`kernel.bpf_stats_enabled=1`, machine wide, granted),
+/// the tool reports its programs' own run time (`overhead.in_target_cpu_ns`
+/// and `in_target_runs`, summed over the programs it loaded) -- the part of
+/// the cost that is the programs, apart from the tracepoints' dispatch and the
+/// cache. It is the tool that reads it, from its own descriptors: a test
+/// process cannot, because `make` gives `omn` file capabilities and the
+/// kernel then makes it non-dumpable, which closes its `/proc/<pid>/fdinfo`
+/// to anyone unprivileged. When the run time is not known, the tool's own
+/// reason (`in_target_from`) is printed instead. Keeping the statistics costs
+/// two clock reads per run, so the percentage is read from a run without them
+/// and the run time from a second run with them.
+///
+/// A pass is only evidence if the histogram measured the load: the process
+/// filter runs before the clock, so I/O the filter refused would cost one
+/// helper call and leave an empty histogram behind a 0 %. The requests the
+/// histogram counted are therefore checked against fio's own count of the
+/// reads it completed.
+///
 /// ```console
 /// sudo modprobe null_blk queue_mode=2 irqmode=0 completion_nsec=0 nr_devices=1 \
 ///     gb=4 bs=4096 hw_queue_depth=256 submit_queues=8
 /// sudo chmod a+r /dev/nullb0
 /// cargo test --test scenario_io -- --ignored --exact \
 ///     the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent --nocapture
+/// sudo sysctl kernel.bpf_stats_enabled=1   # then again, for the programs' own time
+/// cargo test --test scenario_io -- --ignored --exact \
+///     the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent --nocapture
+/// sudo sysctl kernel.bpf_stats_enabled=0
 /// sudo rmmod null_blk
 /// ```
 #[test]
 #[ignore = "needs null_blk (root): see the doc comment for the commands"]
 fn the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent() {
     const DEVICE: &str = "/dev/nullb0";
+    const JOBS: f64 = 8.0;
     if std::fs::File::open(DEVICE).is_err() {
         panic!("{DEVICE} is not there or not readable: load null_blk as the doc comment says");
     }
     if let Some(reason) = no_bpf_here() {
         panic!("{reason}");
     }
-    let fio = |under: Option<&str>| -> f64 {
+    let fio = |under: Option<&str>| -> (f64, u64, Option<serde_json::Value>) {
         let job = [
             "fio",
             "--name=omn-iops",
@@ -5831,46 +5858,103 @@ fn the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent() {
             "--runtime=10",
             "--output-format=json",
         ];
-        let output = match under {
-            None => Command::new(job[0]).args(&job[1..]).output(),
-            Some(emit) => Command::new(BINARY)
-                .args([
-                    "io.latency",
-                    "-m",
-                    "trace",
-                    "-e",
-                    emit,
-                    "--format",
-                    "json",
-                    "--",
-                ])
-                .args(job)
-                .output(),
-        }
-        .expect("fio runs (is it installed?)");
-        assert!(output.status.success(), "{}", stderr(&output));
+        let mut command = match under {
+            None => {
+                let mut command = Command::new(job[0]);
+                command.args(&job[1..]);
+                command
+            }
+            Some(emit) => {
+                let mut command = Command::new(BINARY);
+                command
+                    .args([
+                        "io.latency",
+                        "-m",
+                        "trace",
+                        "-e",
+                        emit,
+                        "--format",
+                        "json",
+                        "--",
+                    ])
+                    .args(job);
+                command
+            }
+        };
+        let output = command.output().expect("fio runs (is it installed?)");
         let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         // Under omn, fio's own document comes first on stdout, then omn's.
         let start = text.find('{').expect("fio printed json");
-        let report: serde_json::Value = serde_json::Deserializer::from_str(&text[start..])
-            .into_iter()
-            .next()
-            .expect("a document")
-            .expect("fio's json parses");
-        report["jobs"][0]["read"]["iops"]
-            .as_f64()
-            .expect("fio reports iops")
+        let mut documents = serde_json::Deserializer::from_str(&text[start..])
+            .into_iter::<serde_json::Value>()
+            .map(|document| document.expect("the json parses"));
+        let report = documents.next().expect("fio's document");
+        let read = &report["jobs"][0]["read"];
+        let iops = read["iops"].as_f64().expect("fio reports iops");
+        let ios = read["total_ios"].as_u64().expect("fio reports its reads");
+        let omn = under.map(|_| documents.next().expect("omn's document after fio's"));
+        (iops, ios, omn)
     };
-    let bare = fio(None);
+    let (bare, _, _) = fio(None);
     assert!(
         bare >= 2_000_000.0,
         "the device answered {bare:.0} IOPS bare, short of the 2 M the criterion is about"
     );
-    let measured = fio(Some("hist"));
+    let (measured, reads, omn) = fio(Some("hist"));
+    let omn = omn.expect("a run under omn");
+    let result = &omn["results"][0];
+    let counted: u64 = output_of(result, "hist")["series"]
+        .as_array()
+        .expect("a hist output carries its series")
+        .iter()
+        .filter_map(|series| series["count"].as_u64())
+        .sum();
     let overhead = (bare - measured) / bare * 100.0;
-    eprintln!("bare {bare:.0} IOPS, under the in-kernel histogram {measured:.0}: {overhead:.2} %");
+    let per_request_ns = JOBS * (1.0 / measured - 1.0 / bare) * 1e9;
+    let budget_ns = JOBS / bare * 1e9 / 100.0;
+    eprintln!(
+        "bare {bare:.0} IOPS, under the in-kernel histogram {measured:.0}: {overhead:.2} %, \
+         {per_request_ns:.0} ns per request against a 1 % budget of {budget_ns:.1} ns; the \
+         histogram counted {counted} requests of fio's {reads} reads"
+    );
+    let inside = &result["overhead"];
+    match (
+        inside["in_target_cpu_ns"].as_u64(),
+        inside["in_target_runs"].as_u64(),
+    ) {
+        (Some(ns), runs) => {
+            let runs = runs.unwrap_or(0);
+            eprintln!(
+                "the programs ran {runs} times for {ns} ns: {:.1} ns per run, {:.1} ns per \
+                 request counted",
+                ns as f64 / runs.max(1) as f64,
+                ns as f64 / counted.max(1) as f64
+            );
+        }
+        (None, _) => eprintln!(
+            "the programs' own run time is not known: {}",
+            inside["in_target_from"]
+                .as_str()
+                .unwrap_or("omn gave no reason")
+        ),
+    }
+    // Requests still in flight when fio stops are counted by the histogram
+    // and not by fio, up to its 8 jobs times queue depth 64; the rest must
+    // match within 1 %.
+    let in_flight = 8 * 64;
+    assert!(
+        counted * 100 >= reads * 99 && counted <= reads + reads / 100 + in_flight,
+        "the histogram counted {counted} requests of fio's {reads} reads: the cost below is \
+         not the cost of measuring this load"
+    );
     assert!(
         overhead < 1.0,
-        "the in-kernel histogram cost {overhead:.2} % of a {bare:.0} IOPS load"
+        "the in-kernel histogram cost {overhead:.2} % of a {bare:.0} IOPS load \
+         ({per_request_ns:.0} ns per request)"
     );
 }

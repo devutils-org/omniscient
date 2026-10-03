@@ -235,7 +235,9 @@ pub struct BlockCollector {
     events: u64,
     /// Requests still open when the run ended, read while the map was still
     /// there: `notes` is asked after `stop`, and by then it is closed.
-    still_in_flight: usize,
+    /// Requests opened and not closed, and whether that is a lower bound; or
+    /// why it is not known.
+    still_in_flight: Result<(usize, bool), String>,
     /// The `count` mode accumulation: how many requests, and their total.
     counted: u64,
     counted_total: u64,
@@ -286,7 +288,7 @@ impl BlockCollector {
             own_scope: 0,
             no_device: 0,
             events: 0,
-            still_in_flight: 0,
+            still_in_flight: Ok((0, false)),
             counted: 0,
             counted_total: 0,
             opened_ns: 0,
@@ -808,17 +810,22 @@ impl Collector for BlockCollector {
             ));
         }
 
-        if self.still_in_flight > 0 {
-            notes.push(format!(
-                "{} request{} still in flight when the run ended; the interval it is in has no \
-                 end yet and is in no event",
-                self.still_in_flight,
-                if self.still_in_flight == 1 {
+        match &self.still_in_flight {
+            Ok((0, false)) => {}
+            Ok((count, truncated)) => notes.push(format!(
+                "{}{count} request{} still in flight when the run ended; the interval it is in \
+                 has no end yet and is in no event",
+                if *truncated { "at least " } else { "" },
+                if *count == 1 && !truncated {
                     " was"
                 } else {
                     "s were"
                 }
-            ));
+            )),
+            Err(why) => notes.push(format!(
+                "how many requests were still in flight when the run ended is not known ({why}); \
+                 their intervals have no end yet and are in no event"
+            )),
         }
 
         if self.status_is_errno && self.measure == Measure::Latency {
