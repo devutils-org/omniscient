@@ -146,14 +146,7 @@ impl WorkingSet {
     /// straddled it ended the run as *"process exited"* with nothing
     /// measured. A fresh open is bound to the new address space.
     fn read(&self) -> Result<(u64, Option<u64>), SampleError> {
-        let text = match std::fs::read_to_string(&self.rollup) {
-            Ok(text) => text,
-            Err(error) if replaced_under_the_read(&error, self.pid) => {
-                std::fs::read_to_string(&self.rollup)
-                    .map_err(|error| self.gone_or_transient(&self.rollup, error))?
-            }
-            Err(error) => return Err(self.gone_or_transient(&self.rollup, error)),
-        };
+        let text = self.rollup_text(|| std::fs::read_to_string(&self.rollup))?;
         let field = |name: &str| {
             text.lines()
                 .find_map(|line| line.strip_prefix(name))
@@ -169,6 +162,23 @@ impl WorkingSet {
             ))
         })?;
         Ok((referenced, field("Rss:")))
+    }
+
+    /// The rollup's text, from `open_and_read` (a fresh open each call):
+    /// once, and once more when the first answer is ESRCH from a process
+    /// that is still running. A second failure is the first's verdict:
+    /// transient from a running process, the end from a gone one.
+    fn rollup_text(
+        &self,
+        open_and_read: impl Fn() -> std::io::Result<String>,
+    ) -> Result<String, SampleError> {
+        match open_and_read() {
+            Ok(text) => Ok(text),
+            Err(error) if replaced_under_the_read(&error, self.pid) => {
+                open_and_read().map_err(|error| self.gone_or_transient(&self.rollup, error))
+            }
+            Err(error) => Err(self.gone_or_transient(&self.rollup, error)),
+        }
     }
 
     /// The end of the run only when the process is gone; an ESRCH from one
@@ -435,7 +445,8 @@ mod tests {
     /// `smaps_rollup` opened before an `execve` and read after it answers
     /// ESRCH from a process that is still running, and a fresh open reads the
     /// new address space. Which way the collector takes that ESRCH is the
-    /// next test's; the race itself is too narrow to drive through `read`.
+    /// next tests'. The straddling read is then handed to the collector as
+    /// its first answer, so the second read is the collector's own.
     #[test]
     fn a_rollup_opened_across_an_exec_answers_esrch_from_a_running_process() {
         use std::io::Read;
@@ -477,8 +488,19 @@ mod tests {
 
         let mut text = String::new();
         let straddled = early.read_to_string(&mut text);
+        let straddled_errno = straddled.as_ref().err().and_then(|e| e.raw_os_error());
         let collector = WorkingSet::new(pid, Duration::ZERO);
-        let outcome = collector.read();
+        let calls = std::cell::Cell::new(0);
+        let first = std::cell::RefCell::new(Some(straddled.map(|_| text.clone())));
+        let outcome = collector
+            .rollup_text(|| {
+                calls.set(calls.get() + 1);
+                match first.borrow_mut().take() {
+                    Some(answer) => answer,
+                    None => std::fs::read_to_string(&collector.rollup),
+                }
+            })
+            .and_then(|_| collector.read());
         // SAFETY: ending and reaping a child of this test.
         unsafe {
             libc::kill(pid, libc::SIGKILL);
@@ -487,13 +509,13 @@ mod tests {
             libc::close(gate[1]);
         }
 
-        let error = straddled.expect_err("a rollup opened before the exec reads after it");
         assert_eq!(
-            error.raw_os_error(),
+            straddled_errno,
             Some(libc::ESRCH),
-            "the straddling read failed some other way: {error}"
+            "a rollup opened before the exec and read after it must answer ESRCH"
         );
-        let (_, resident) = outcome.expect("a fresh open reads the new address space");
+        let (_, resident) = outcome.expect("the collector's second, fresh open reads");
+        assert_eq!(calls.get(), 2, "the straddling ESRCH is read once more");
         assert!(resident.is_some_and(|bytes| bytes > 0), "{resident:?}");
     }
 
@@ -533,6 +555,80 @@ mod tests {
         assert!(
             matches!(verdict, SampleError::TargetGone(_)),
             "a zombie has no address space left: {verdict:?}"
+        );
+    }
+
+    /// The second read, driven: an ESRCH from a running process is read once
+    /// more and the second answer stands; an ESRCH that persists is a failed
+    /// read, not the end, and is not read a third time; from a gone process
+    /// it is the end at once, with no second read.
+    #[test]
+    fn an_esrch_from_a_running_process_is_read_once_more_and_never_ends_the_run() {
+        let esrch = || std::io::Error::from_raw_os_error(libc::ESRCH);
+        let alive = WorkingSet::new(std::process::id() as i32, Duration::ZERO);
+
+        let calls = std::cell::Cell::new(0);
+        let text = alive.rollup_text(|| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Err(esrch())
+            } else {
+                Ok("Rss: 4 kB\nReferenced: 4 kB\n".to_string())
+            }
+        });
+        assert_eq!(
+            calls.get(),
+            2,
+            "an ESRCH from a running process is read again"
+        );
+        assert!(text.is_ok_and(|t| t.contains("Referenced")));
+
+        calls.set(0);
+        let verdict = alive.rollup_text(|| {
+            calls.set(calls.get() + 1);
+            Err(esrch())
+        });
+        assert_eq!(calls.get(), 2, "read twice, not more");
+        assert!(
+            matches!(verdict, Err(SampleError::Transient(_))),
+            "a persisting ESRCH from a running process is a failed read: {verdict:?}"
+        );
+
+        calls.set(0);
+        let other = alive.rollup_text(|| {
+            calls.set(calls.get() + 1);
+            Err(std::io::Error::from_raw_os_error(libc::EIO))
+        });
+        assert_eq!(calls.get(), 1, "only ESRCH is read again");
+        assert!(matches!(other, Err(SampleError::Transient(_))), "{other:?}");
+
+        // SAFETY: the child only exits.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork must succeed");
+        if pid == 0 {
+            // SAFETY: the only call the child makes.
+            unsafe { libc::_exit(0) };
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while still_running(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never exited"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let zombie = WorkingSet::new(pid, Duration::ZERO);
+        calls.set(0);
+        let verdict = zombie.rollup_text(|| {
+            calls.set(calls.get() + 1);
+            Err(esrch())
+        });
+        // SAFETY: reaping a child of this test.
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+        assert_eq!(calls.get(), 1, "a zombie is not read again");
+        assert!(
+            matches!(verdict, Err(SampleError::TargetGone(_))),
+            "{verdict:?}"
         );
     }
 

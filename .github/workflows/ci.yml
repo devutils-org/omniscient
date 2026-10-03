@@ -79,8 +79,8 @@ jobs:
       # 37f17c8 and 37155975223, both cells). The source is upstream's own
       # static build, pinned by version and checksum: one binary, no library
       # it could miss, and dumping a BTF blob does not depend on the kernel
-      # it was built beside. Ubuntu's builds are tried after it, in case the
-      # download fails. Whichever answers `btf dump file` of this kernel's
+      # it was built beside. Ubuntu's builds are tried after it, when the
+      # download fails or what it brought cannot dump. Whichever answers `btf dump file` of this kernel's
       # BTF -- what `btf.rs` asks of it -- goes first on PATH; when none
       # does, the job stops here, rather than as a skip in the suite.
       - name: bpftool
@@ -89,7 +89,20 @@ jobs:
           BPFTOOL_SHA256: 09150596f09356b0ff632dd7f9856e0ea86bf96b269e9bc94278d9a9432a268c
         run: |
           vmlinux=/sys/kernel/btf/vmlinux
-          candidates=()
+          tried=()
+          chosen=
+          # The first of `$@` that dumps this kernel's BTF, into `chosen`.
+          first_that_dumps() {
+            for candidate in "$@"; do
+              tried+=("$candidate")
+              if said=$("$candidate" btf dump file "$vmlinux" format raw 2>&1 >/dev/null); then
+                chosen=$candidate
+                return 0
+              fi
+              echo "$candidate does not dump $vmlinux: $(printf '%s' "$said" | head -n 1)"
+            done
+            return 1
+          }
           archive="$RUNNER_TEMP/bpftool.tar.gz"
           if curl -fsSL --retry 3 -o "$archive" \
               "https://github.com/libbpf/bpftool/releases/download/$BPFTOOL_VERSION/bpftool-$BPFTOOL_VERSION-amd64.tar.gz" \
@@ -97,25 +110,24 @@ jobs:
             mkdir -p "$RUNNER_TEMP/bpftool"
             tar -xzf "$archive" -C "$RUNNER_TEMP/bpftool"
             chmod +x "$RUNNER_TEMP/bpftool/bpftool"
-            candidates+=("$RUNNER_TEMP/bpftool/bpftool")
+            first_that_dumps "$RUNNER_TEMP/bpftool/bpftool" \
+              || echo "::warning::upstream bpftool $BPFTOOL_VERSION does not dump $vmlinux"
           else
             echo "::warning::upstream bpftool $BPFTOOL_VERSION did not download or did not match its checksum"
+          fi
+          # Ubuntu's builds, whenever upstream's did not serve: not
+          # downloaded, or downloaded and unable to dump.
+          if [ -z "$chosen" ]; then
             sudo apt-get install -yq --no-install-recommends "linux-tools-$(uname -r)" linux-tools-generic \
               || echo "::warning::Ubuntu's linux-tools did not install"
+            ubuntu=()
             for path in /usr/lib/linux-tools/*/bpftool /usr/lib/linux-tools-*/bpftool; do
-              [ -x "$path" ] && candidates+=("$path")
+              [ -x "$path" ] && ubuntu+=("$path")
             done
+            first_that_dumps "${ubuntu[@]}" || true
           fi
-          chosen=
-          for candidate in "${candidates[@]}"; do
-            if said=$("$candidate" btf dump file "$vmlinux" format raw 2>&1 >/dev/null); then
-              chosen=$candidate
-              break
-            fi
-            echo "$candidate does not dump $vmlinux: $(printf '%s' "$said" | head -n 1)"
-          done
           if [ -z "$chosen" ]; then
-            echo "::error::no bpftool here dumps $vmlinux (tried: ${candidates[*]:-none}); btf.rs's cross-check would skip"
+            echo "::error::no bpftool here dumps $vmlinux (tried: ${tried[*]:-none}); btf.rs's cross-check would skip"
             exit 1
           fi
           sudo install -m 0755 "$chosen" /usr/local/bin/bpftool

@@ -392,17 +392,6 @@ mod tests {
     /// touching; what it touched by then is what a test judges.
     const THROTTLED_FOR: Duration = Duration::from_secs(60);
 
-    /// A `<name>  <n> kB` field of a `smaps_rollup`, in bytes; zero when
-    /// absent.
-    fn rollup_bytes(rollup: &str, name: &str) -> u64 {
-        rollup
-            .lines()
-            .find_map(|line| line.strip_prefix(name))
-            .and_then(|rest| rest.split_whitespace().next())
-            .and_then(|value| value.parse::<u64>().ok())
-            .map_or(0, |kilobytes| kilobytes * 1024)
-    }
-
     fn poll() -> Mode {
         Mode::Poll {
             interval: Mode::DEFAULT_POLL_INTERVAL,
@@ -605,6 +594,9 @@ mod tests {
         collector.sample(0).expect("the baseline read");
         let mut child = scratch.spawn_throttled_toucher(TOUCHED, THROTTLED_FOR);
         let finished = child.finished_touching();
+        // Read before the counters, so that it is a floor on what the child
+        // had written by the time they were read.
+        let written = child.bytes_written();
 
         // The swap-out happens while the child faults; the counter is read
         // after it has finished touching, so the window contains all of it.
@@ -628,19 +620,26 @@ mod tests {
         child.stop();
 
         // What had to leave the cgroup: everything past the limit of what the
-        // child touched, which is all of it once the child finished, and
-        // otherwise what the process itself says it holds, resident or out.
-        let touched = if finished {
-            TOUCHED
-        } else {
-            let held = rollup_bytes(&rollup, "Rss:") + rollup_bytes(&rollup, "Swap:");
+        // child wrote inside it, which is all of it once the child finished,
+        // and otherwise what the child itself says it had written. Not its
+        // `smaps_rollup`: that also holds the pages it inherited from this
+        // test binary, which are charged elsewhere.
+        let touched = if finished { TOUCHED } else { written };
+        if touched < 2 * LIMIT {
             eprintln!(
-                "the child was still touching its {TOUCHED} bytes after {THROTTLED_FOR:?} over a \
-                 {LIMIT}-byte {PUSHED_BY}, throttled by reclaim; it had touched {held}, and that \
-                 is what is judged"
+                "skipped: the child wrote {touched} of its {TOUCHED} bytes in {THROTTLED_FOR:?} \
+                 over a {LIMIT}-byte {PUSHED_BY}, throttled by reclaim, which is too little \
+                 past the limit to judge a swap-out by"
             );
-            held.min(TOUCHED)
-        };
+            return;
+        }
+        if !finished {
+            eprintln!(
+                "the child was still writing its {TOUCHED} bytes after {THROTTLED_FOR:?} over a \
+                 {LIMIT}-byte {PUSHED_BY}, throttled by reclaim; it had written {touched}, and \
+                 that is what is judged"
+            );
+        }
         let expected = touched.saturating_sub(LIMIT) as f64;
         assert!(
             out_bytes >= 0.5 * expected,

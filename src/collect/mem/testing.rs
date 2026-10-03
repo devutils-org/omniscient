@@ -312,8 +312,19 @@ impl Toucher {
                     libc::madvise(block, bytes as usize, libc::MADV_NOHUGEPAGE);
                 }
                 if block != libc::MAP_FAILED {
-                    // Every page written, not just mapped.
-                    std::ptr::write_bytes(block.cast::<u8>(), fill, bytes as usize);
+                    // Every page written, not just mapped, a mebibyte at a
+                    // time, and how far it got published in the handshake
+                    // page's third word: a child throttled under a limit is
+                    // judged on what it wrote, said by itself.
+                    let written = handshake.cast::<u64>().add(2);
+                    let chunk = 1usize << 20;
+                    let mut done = 0usize;
+                    while done < bytes as usize {
+                        let step = chunk.min(bytes as usize - done);
+                        std::ptr::write_bytes(block.cast::<u8>().add(done), fill, step);
+                        done += step;
+                        written.write_volatile(done as u64);
+                    }
                 }
                 handshake.cast::<u8>().write_volatile(1);
                 match working {
@@ -382,6 +393,15 @@ impl Toucher {
         // SAFETY: the first byte of our own shared mapping, which only the
         // child writes.
         unsafe { self.handshake.cast::<u8>().read_volatile() != 0 }
+    }
+
+    /// How many bytes of its block the child has written so far, as it
+    /// publishes them: every byte below this was written from this child,
+    /// inside the cgroup it joined first.
+    pub fn bytes_written(&self) -> u64 {
+        // SAFETY: the third word of our own shared mapping, which only the
+        // child writes.
+        unsafe { self.handshake.cast::<u64>().add(2).read_volatile() }
     }
 
     /// How many times a walker has walked its working set.

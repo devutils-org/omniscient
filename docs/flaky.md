@@ -43,11 +43,13 @@ wave's, from `BRIEF.md`'s table. "nobody" means the file is not listed there.
 | 24 | `scenario_gpu::a_resident_kernel_separates_from_an_idle_device_on_occupancy_and_on_power` | tests/scenario_gpu.rs:938 | a | V | Re-check `device_to_ourselves()` after the busy run and skip with the numbers, or assert per-process NVML utilisation, not device-wide |
 | 25 | `cross_io::the_crossing_sessions_run_and_say_what_they_found` | tests/cross_io.rs:1493 | b | nobody | Replace `LEAD_IN` (1 s) with a readiness signal, and run the two sessions one after the other rather than side by side on one disk |
 | 26 | `join_engine::the_resident_size_decomposes_into_live_and_retained_with_the_residue_the_program_predicts` | tests/join_engine.rs:732 | d | nobody | Log the heap requests' `losses.dropped` and the last reading's time against `ARENA`. A shim drop, or a late last poll, would decide it |
-| 27 | `encoders::a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made` | tests/encoders.rs:695 | b, then c | nobody | The 300 ms split was replaced by the series' largest rise. Its new failure (*"no event arrived in the window"*, CI) is a tool defect: an ESRCH from a `smaps_rollup` that straddled the program's `execve` ends the run. See the eighteenth wave below |
+| 27 | `encoders::a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made` | tests/encoders.rs:695 | b, then a (fixed), and d (CI; c suspected) | nobody | The 300 ms split was replaced by the series' largest rise. Eighteenth wave: a local red (2 of 30) was the program freeing its allocation as the interpreter finalized, fixed with `os._exit`. The CI's *"no event arrived in the window"* is **suspected**, not shown, to be a tool defect (an ESRCH from a `smaps_rollup` read straddling the program's `execve`); open. See the eighteenth wave below |
+| 28 | `encoders::a_woke_join_reads_the_same_in_text_as_in_its_json` | tests/encoders.rs:1642 | a | nobody | *"every read blocks until it is woken: 304 paired of 598"* for 300 reads (1 of 30 here, load 27): the completions counted are the device's, other processes' I/O included. Count and pair only the reader's own requests (its pid, or its file's sectors) |
 
-**Count: (a) 13, (b) 8, (c) 4, (d) 2**, after the coordinator's measurement of #19. Of the 27, two are already fixed (#4 and
-#22), and #2's recorded half is fixed in the test, though the tool defect behind it
-(finding 48) is not.
+**Count: (a) 12, (b) 7, (c) 6, (d) 3**, one class per row, after the eighteenth wave
+(#23 to (c); #27 to (d) until its CI failure is shown; #28 new). Of
+the 28, #3, #4, #21 and #22 are closed or fixed, and #2's recorded half is fixed in
+the test, though the tool defect behind it (finding 48) is not.
 
 ---
 
@@ -462,18 +464,39 @@ machine (Ryzen 9 3900X, 24 cpus, ten streams working).
   (`docs/fixes/w18-green.md`).
 - **#27, `encoders::a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made`**
   (`stock`: *"a timeline was asked for and no event arrived in the window"*).
-  The test panicked 49 ms after its binary started (the log's timestamps), so
-  the run ended before the program's first `sleep(0.3)` could: `mem.rss`
-  stopped at its first reads. Shown here: a `smaps_rollup` opened before an
-  `execve` and read after it answers ESRCH from a process that is alive
-  (`wss::tests::a_rollup_opened_across_an_exec_answers_esrch_from_a_running_process`),
-  and `src/collect/mem/footprint.rs` reads any ESRCH as *"process exited"*,
-  which ends the run. The launched program is in `execve` exactly when the
-  window opens. Reasoned, not reproduced: 600 runs of the same request here
-  under 40-way parallelism never hit the window between the open and the read.
-  `wss.rs` now reads again where the process is still running; the same
-  change to `footprint.rs` is filed (`docs/fixes/w18-green.md`). The test is
-  unchanged: it is right to fail on that run.
+  Two failures, one fixed, one open.
+  - **Here, fixed (a test defect).** 2 runs of 30 of `tests/encoders.rs`
+    (load 27), captured: *"the allocation is not the step in the trace:
+    9981952 before, 10444800 after, and the program itself grew by
+    67506176"*. The program exited normally, and the interpreter frees its
+    `bytearray` while it finalizes; a poll landing then reads the process
+    back at its size before the allocation, and that point is in the
+    "after" side's floor. Measured with the same program at `poll@5ms`: the
+    series ended below 50 MB in 24 of 50 runs, and in 0 of 50 once the
+    program ends with `os._exit(0)`, which the test now does. Then 30 runs
+    of the file (results in `docs/fixes/w18-green.md`).
+  - **On the CI, suspected, not shown.** The test panicked 49 ms after its
+    binary started (the log's timestamps), so the run ended before the
+    program's first `sleep(0.3)` could: `mem.rss` stopped at its first
+    reads. Shown here: a `smaps_rollup` opened before an `execve` and read
+    after it answers ESRCH from a process that is alive
+    (`wss::tests::a_rollup_opened_across_an_exec_answers_esrch_from_a_running_process`),
+    and `src/collect/mem/footprint.rs` reads any ESRCH as *"process
+    exited"*, which ends the run. Not shown: that this is what ended the CI
+    run. 600 runs of the same request here under 40-way parallelism never
+    hit the window between the open and the read, and no other path that
+    ends a run that early with no event was found. `wss.rs` now reads again
+    where the process is still running; the same change to `footprint.rs`
+    is filed (`docs/fixes/w18-green.md`), and until it lands and a CI run
+    reads green, this failure is open. The test's failure message now says
+    whether the program had reported its own sizes, which tells a run cut
+    short from a trace that is wrong.
+- **#28, `encoders::a_woke_join_reads_the_same_in_text_as_in_its_json`**,
+  new, seen once in the same 30 runs: *"every read blocks until it is woken:
+  304 paired of 598"*, for 300 reads. 598 completions for 300 reads are the
+  device's, other streams' I/O included; the test's "reads reached the
+  device" skip compares the same count. Not fixed: class (a), filed with its
+  fix in the table.
 - **The two swap tests** (`defaults`: *"the child died before it finished
   touching its memory ... oom 1 oom_kill 1"*) were not flaky and not a runner
   without swap: the runner has a swap file with room (both passed the swap

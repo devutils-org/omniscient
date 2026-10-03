@@ -15,7 +15,7 @@ Every red of that run, and where it went:
 | `defaults` | skip: *"no ancestor of /omn-ci/job delegates the memory controller"* | two tests of `tests/cross_machine.rs` make one cgroup name at once, and the cell had one delegating level to fall back to | section 2, worked around in the workflow; the test's defect filed |
 | `defaults` | `swap::memory_pushed_out_of_a_limited_cgroup_is_counted_as_swap`, `swap::the_machines_counter_sees_at_least_what_one_cgroup_did` | `memory.max` OOM-kills when written pages wait on a cloud disk; the runner **has** swap | section 3, fixed in the tests |
 | `defaults` | `wss::a_process_that_holds_much_and_touches_little_reports_the_little` | a clear of the referenced bits does not flush the TLB; 4 096 small pages fit the runner's | section 4, fixed in the test, caveat corrected |
-| `stock` | `encoders::a_known_allocation_lands_on_the_chrome_trace_...` | an ESRCH from a `smaps_rollup` read straddling the program's `execve` ends the run | section 5, fixed in `wss.rs`; `footprint.rs`'s fix filed |
+| `stock` | `encoders::a_known_allocation_lands_on_the_chrome_trace_...` | **suspected**, not shown: an ESRCH from a `smaps_rollup` read straddling the program's `execve` ends the run | section 5; open. The same read fixed in `wss.rs`, `footprint.rs`'s fix filed. A second, local failure of the same test found and fixed |
 | both | `scenario_io::a_burst_of_writes_shows_up_as_a_queue_...` | stream io's | not here |
 
 ---
@@ -32,10 +32,12 @@ found for kernel 6.17.0-1022"*. The workflow's new `bpftool` step:
   `.sha256sum`, checked here). It is a static binary: no library to miss,
   which matters -- this machine's own `/usr/bin/bpftool` fails with
   *"libLLVM.so.23.1: cannot open shared object file"*;
-- only if that fails, installs `linux-tools-$(uname -r)` and
-  `linux-tools-generic` and tries every `/usr/lib/linux-tools*/*/bpftool`;
-- takes the first candidate that answers `btf dump file
-  /sys/kernel/btf/vmlinux`, installs it as `/usr/local/bin/bpftool`, checks
+- takes it if it answers `btf dump file /sys/kernel/btf/vmlinux`;
+- otherwise -- not downloaded, checksum wrong, or downloaded and unable to
+  dump (fix round) -- installs `linux-tools-$(uname -r)` and
+  `linux-tools-generic` and takes the first `/usr/lib/linux-tools*/*/bpftool`
+  that dumps;
+- installs the one taken as `/usr/local/bin/bpftool`, checks
   it is the one on `PATH` (ahead of the wrapper in `/usr/sbin`), and checks
   the dump has the line the cross-check reads (`[<id>] VAR 'runqueues' `);
 - **fails the job** with `::error::` when no candidate dumps, or the dump has
@@ -109,8 +111,13 @@ and moved to `memory.high`, and passed in this run.
 `the_machines_counter_sees_at_least_what_one_cgroup_did` now set
 `memory.high` (`PUSHED_BY`) and spawn a throttled toucher given 60 s
 (`THROTTLED_FOR`). A child still touching then is not a failure: the first
-test judges what it had touched by its own `smaps_rollup` (`Rss` + `Swap`,
-capped at the 192 MiB asked) and says so on stderr -- a note, not a skip. The
+test judges what the child says it had written (`Toucher::bytes_written`,
+fix round: the child fills its block a MiB at a time and publishes the count
+in the handshake page), read before the counters, and says so on stderr. Not
+the child's `smaps_rollup`, which held the pages it inherited from the test
+binary, charged elsewhere. A child that wrote less than twice the limit
+leaves too little to judge and the test prints a `skipped:` line, which the
+CI's skip gate surfaces. The
 zero-page test keeps `memory.max`, which passed. Swap checks before the limit
 were already there and are unchanged.
 
@@ -178,15 +185,40 @@ was the other candidate, and nothing on that cell makes `python3` fail.
 a process still running (`/proc/<pid>/stat` present, state not `Z`/`X`) is
 read once more with a fresh open; an ESRCH that persists from a running
 process is a counted failed read, not the end; from a zombie, the end
-(`an_esrch_ends_the_run_only_when_the_process_is_gone`). The same change for
+(`an_esrch_ends_the_run_only_when_the_process_is_gone`). In the fix round
+the retry became `WorkingSet::rollup_text`, which takes the open-and-read as
+a closure, so it is driven:
+`an_esrch_from_a_running_process_is_read_once_more_and_never_ends_the_run`
+checks a first ESRCH is read again and the second answer stands, a
+persisting ESRCH is `Transient` after exactly two reads, EIO is not read
+again, and a zombie's ESRCH is `TargetGone` with no second read; and
+`a_rollup_opened_across_an_exec_...` now hands the kernel's real straddling
+ESRCH to `rollup_text` as its first answer and checks the collector made the
+second, fresh read itself. Dropping the re-read, or turning the second
+ESRCH into `TargetGone`, fails both. The same change for
 `footprint.rs` is filed below; that file is nobody's this wave.
 
-`tests/encoders.rs`: the test is right to fail on that run and is unchanged,
-except that its failure now says whether the program had reported its own
-sizes, which tells "cut short before it ran" from "ran and the trace is
-wrong". The file passed 13 of 14 runs here; the one red was not captured
-(an untimed `cargo test --test encoders` right after a build), so it is not
-known which test it was.
+`tests/encoders.rs` on that CI run: the test is right to fail, and only
+its failure message changed -- it now says whether the program had
+reported its own sizes, which tells "cut short before it ran" from "ran and
+the trace is wrong". **The CI failure stays open** until `footprint.rs`
+reads past the ESRCH and a CI run reads green; its cause is suspected, not
+established (`docs/flaky.md` #27 says so).
+
+**The local red, captured and fixed.** The first round's one uncaptured red
+(13 of 14) was chased in the fix round: 30 runs of `cargo test --test
+encoders` at load 27, every log kept, gave two reds of this test, both
+*"the allocation is not the step in the trace: 9981952 before, 10444800
+after, and the program itself grew by 67506176"* -- not the CI's failure.
+The trace was right: the program exits normally, the interpreter frees its
+`bytearray` while it finalizes, and a poll landing then reads the process at
+its size before the allocation, inside the "after" side. The same program
+under `omn mem.rss -m poll@5ms -e timeline --format chrome`: the series
+ended below 50 MB in 24 of 50 runs, and in 0 of 50 once the program ends
+with `os._exit(0)`, which the test's program now does. The same 30 runs
+also failed `encoders::a_woke_join_reads_the_same_in_text_as_in_its_json`
+once (*"304 paired of 598"* completions for 300 reads: the device's other
+I/O counted), filed as `docs/flaky.md` #28, not fixed here.
 
 ---
 
@@ -197,11 +229,18 @@ known which test it was.
   logs with the two skips removed; the TLB table; the ESRCH across `execve`;
   the swap, wss and encoders tests green (`cargo test --lib
   collect::mem::{swap,wss}`, `cargo test --test encoders`).
+- **Shown in the fix round:** the `wss.rs` re-read driven through
+  `rollup_text`; the local encoders red captured, its cause measured (24 of
+  50 against 0 of 50), and 30 of 30 runs of `tests/encoders.rs` green after;
+  the bpftool fallback taken when upstream's binary cannot dump; the swap
+  and mem collector tests green (`cargo test --lib collect::mem::`, 127).
 - **Reasoned from the CI log:** the `cross_machine` name collision (which test
   made the cgroup, which did not); that the runner has swap (both data tests
   passed the swap checks, the zero-page test passed); the 49 ms.
 - **Reasoned, not shown:** that `memory.high` keeps the two swap children
-  alive on the runner; that the ESRCH race is what ended the `stock` run;
+  alive on the runner; that the ESRCH race is what ended the `stock` run (suspected, open);
+  that a throttled swap child's own count is a floor on what left the cgroup
+  (the unfinished branch never ran here: the children finish);
   that 128 MiB is beyond the runner's TLB.
 
 ## What only a CI run shows
@@ -212,6 +251,34 @@ the swap children finishing (or the stderr note saying how far they got)
 under `memory.high` on the cloud disk; the walker reading at least half of
 128 MiB on the runner's cpu. `scenario_io`'s polled queue stays red on both
 cells until stream io lands.
+
+## Review (fix round)
+
+The adversarial review's six points, and what became of them:
+
+1. **#27's cause stated as fact; the local red not read.** Agreed. The
+   tally and this handoff now say *suspected* for the CI failure and keep it
+   open. The local red was chased: captured (2 of 30), a different failure,
+   a test defect (the interpreter freeing the allocation at exit), fixed and
+   30 of 30 green after. Section 5.
+2. **The `wss.rs` re-read never driven by a test.** Agreed; `rollup_text`
+   and two tests now drive it. Section 5.
+3. **The unfinished swap child judged by a rollup that held inherited
+   pages; a vacuous floor.** Agreed; the child's own count, and a `skipped:`
+   line below twice the limit. Section 3.
+4. **`docs/flaky.md`'s count line stale.** Fixed: (a) 12, (b) 7, (c) 6,
+   (d) 3 over 28 rows (#28 new, #27 counted (d) until shown).
+5. **The bpftool fallback only on a failed download.** Fixed: upstream's
+   binary that cannot dump falls back too. Driven with a shimmed `curl`
+   serving a checksummed binary that cannot dump: *"does not dump"*, the
+   fallback's `apt-get` tried, *"::error::no bpftool here dumps ... (tried:
+   .../bpftool)"*, exit 1; and the real v7.7.0 download taken (the run
+   reached the install, which the shimmed `sudo` refused).
+6. **Two delegating levels serve exactly two colliding callers.** Agreed,
+   and left: it is a workaround for `tests/cross_machine.rs`'s shared name,
+   whose fix (a per-call name, `EEXIST` read as "taken") is filed below. A
+   third caller, or a per-pid name elsewhere, would skip with a reason that
+   is not the machine's, and the skip gate would name it.
 
 ## The suite, at the end
 
