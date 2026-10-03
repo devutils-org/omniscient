@@ -34,6 +34,7 @@ use crate::collect::task::Comm;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::Target;
+use crate::stack::PerfMapLine;
 
 /// How often the map is read.
 ///
@@ -326,14 +327,16 @@ struct Entry {
 }
 
 impl Entry {
+    /// The line as [`PerfMapLine`] reads it -- the same parser the symbolizer
+    /// names frames with, so a compilation this source counts and a frame a
+    /// profile names can never be read from one line two ways -- and the kind
+    /// of code V8 says it is.
     fn parse(line: &str) -> Option<Self> {
-        let mut fields = line.splitn(3, ' ');
-        let address = u64::from_str_radix(fields.next()?.trim(), 16).ok()?;
-        let size = u64::from_str_radix(fields.next()?.trim(), 16).ok()?;
-        let symbol = fields.next()?.trim();
-        if symbol.is_empty() {
-            return None;
-        }
+        let PerfMapLine {
+            address,
+            size,
+            symbol,
+        } = PerfMapLine::parse(line)?;
         // V8 puts what kind of code it is before the first colon: `JS:~name
         // file:line`, `Builtin:Name`, `RegExp:pattern`. Only the kinds it is
         // known to write are read as kinds -- a JVM agent writes
@@ -348,7 +351,7 @@ impl Entry {
         Some(Self {
             address,
             size,
-            symbol: symbol.to_owned(),
+            symbol,
             kind,
         })
     }

@@ -495,6 +495,12 @@ impl Collector for ProfileCollector {
             let _ = event.disable();
         }
         self.drain_into(&mut trailing, u64::MAX / 2);
+        // The perf map outlives its writer, and a runtime that buffers it
+        // flushes at exit: the lines written after the last tick name frames
+        // interned before them.
+        for unwinder in self.unwinders.values_mut() {
+            unwinder.finish();
+        }
         if let Some(event) = self.event.as_ref() {
             self.losses.undecoded += event.undecoded();
         }

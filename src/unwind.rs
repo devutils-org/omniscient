@@ -856,8 +856,10 @@ fn module(_region: &Region, _path: &Path) -> Option<()> {
 /// Where a stack's names are looked for: `--symbols`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum SymbolSource {
-    /// The files the target mapped, and nothing else. The default: it asks
-    /// nothing of anyone.
+    /// The files the target mapped, and the perf map it wrote for code no
+    /// file holds (`/tmp/perf-<pid>.map`), and nothing else. The default: it
+    /// asks nothing of anyone -- the map is a file the target itself wrote on
+    /// this machine, which is why it needs no rung of its own.
     #[default]
     Local,
     /// Those files first, then the servers in `DEBUGINFOD_URLS` for a file
@@ -917,6 +919,13 @@ pub enum NameOrigin {
     },
     /// No names at all: an unreadable file, or none in it.
     None(String),
+    /// The target's `/tmp/perf-<pid>.map`, for code in anonymous executable
+    /// memory: what a JIT or an interpreter's trampolines say they generated.
+    /// Keyed by the map's own path, since the code it names has no file.
+    PerfMap {
+        /// Lines the map held when it last named a frame.
+        lines: u64,
+    },
 }
 
 impl fmt::Display for NameOrigin {
@@ -935,6 +944,10 @@ impl fmt::Display for NameOrigin {
                 server: None,
             } => write!(f, "the debuginfod cache, build id {build_id}"),
             NameOrigin::None(reason) => write!(f, "no names: {reason}"),
+            NameOrigin::PerfMap { lines } => write!(
+                f,
+                "perf-map, the {lines} lines the program wrote for code no file holds"
+            ),
         }
     }
 }

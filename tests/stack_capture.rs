@@ -842,3 +842,593 @@ fn a_rust_stack_comes_back_in_the_names_its_source_wrote() {
 fn a_cpp_stack_comes_back_in_the_names_its_source_wrote() {
     a_named_chain_reads_as_its_source(false, CPP_CHAIN);
 }
+
+/// A program that generates code no file holds, the way a JIT does, and
+/// publishes its name the way a JIT does.
+///
+/// It maps an anonymous page, writes a counted loop into it, makes it
+/// executable, and calls it until its deadline -- so the samples land in an
+/// address no `/proc/<pid>/maps` path explains. It names the page in
+/// `/tmp/perf-<pid>.map` before it starts (or, with `late`, only once it is
+/// done, as a runtime that buffers its map flushes at exit), and announces the
+/// address and size it chose, which is the line it wrote.
+///
+/// x86-64 machine code, because the bytes are the fixture: `mov rcx, rdi;
+/// 1: dec rcx; jnz 1b; ret`.
+const JIT_FIXTURE: &str = r#"
+use std::io::Write;
+use std::time::{Duration, Instant};
+
+extern "C" {
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn mprotect(addr: *mut u8, len: usize, prot: i32) -> i32;
+}
+
+const CODE: [u8; 9] = [0x48, 0x89, 0xf9, 0x48, 0xff, 0xc9, 0x75, 0xfb, 0xc3];
+
+fn publish(line: &str) {
+    let path = format!("/tmp/perf-{}.map", std::process::id());
+    let mut map = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("the perf map");
+    map.write_all(line.as_bytes()).expect("a map line");
+}
+
+fn main() {
+    let mut args = std::env::args().skip(1);
+    let seconds: u64 = args.next().and_then(|a| a.parse().ok()).unwrap_or(5);
+    let late = args.next().as_deref() == Some("late");
+    let page = 4096;
+    let code = unsafe { mmap(std::ptr::null_mut(), page, 1 | 2, 0x02 | 0x20, -1, 0) };
+    assert!(code as isize != -1, "mmap");
+    unsafe {
+        std::ptr::copy_nonoverlapping(CODE.as_ptr(), code, CODE.len());
+        assert_eq!(mprotect(code, page, 1 | 4), 0, "mprotect");
+    }
+    let spin: extern "C" fn(u64) = unsafe { std::mem::transmute(code) };
+    let line = format!("{:x} {:x} omn_jit_spin\n", code as usize, CODE.len());
+    if !late {
+        publish(&line);
+    }
+    println!("ready {:x} {:x}", code as usize, CODE.len());
+    std::io::stdout().flush().expect("stdout");
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while Instant::now() < deadline {
+        spin(1 << 22);
+    }
+    if late {
+        publish(&line);
+    }
+}
+"#;
+
+/// Builds the JIT fixture once per test binary; `None` off x86-64, whose
+/// machine code it is not.
+///
+/// A build that fails on x86-64 fails the test: `rustc` is the toolchain
+/// running this suite, so a fixture it cannot build is a defect of the
+/// fixture, not a property of the machine to skip on.
+fn jit_fixture() -> Option<&'static Path> {
+    static BUILT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            if !cfg!(target_arch = "x86_64") {
+                return None;
+            }
+            let directory =
+                std::env::temp_dir().join(format!("omn-jit-fixture-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("a scratch directory for the fixture");
+            let source = directory.join("jit.rs");
+            let binary = directory.join("jit");
+            std::fs::write(&source, JIT_FIXTURE).expect("the fixture's source");
+            let output = Command::new("rustc")
+                .args(["--edition", "2021", "-C", "opt-level=0"])
+                .arg("-Cforce-frame-pointers=yes")
+                .arg("-o")
+                .arg(&binary)
+                .arg(&source)
+                .output()
+                .expect("rustc runs");
+            assert!(
+                output.status.success(),
+                "the JIT fixture did not build: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Some(binary)
+        })
+        .as_deref()
+}
+
+/// The fixture running, and the code range it announced.
+struct Jit {
+    child: Child,
+    start: u64,
+    size: u64,
+}
+
+impl Jit {
+    fn spawn(binary: &Path, seconds: &str, late: bool) -> Self {
+        let mut command = Command::new(binary);
+        command.arg(seconds);
+        if late {
+            command.arg("late");
+        }
+        let mut child = command
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("the fixture was just built, so it runs");
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().expect("piped"))
+            .read_line(&mut line)
+            .expect("the fixture announces itself");
+        let mut fields = line.split_whitespace();
+        assert_eq!(fields.next(), Some("ready"), "{line}");
+        let mut hex = || u64::from_str_radix(fields.next().expect(&line), 16).expect(&line);
+        let (start, size) = (hex(), hex());
+        Self { child, start, size }
+    }
+
+    fn pid(&self) -> i32 {
+        self.child.id() as i32
+    }
+
+    fn map_path(&self) -> PathBuf {
+        PathBuf::from(format!("/tmp/perf-{}.map", self.pid()))
+    }
+
+    /// The line the program wrote, read back from its map: the reference.
+    fn reference(&self) -> (u64, u64, String) {
+        let text = std::fs::read_to_string(self.map_path()).expect("the program wrote its map");
+        let line = text.lines().next().expect("one line");
+        let mut fields = line.splitn(3, ' ');
+        let start = u64::from_str_radix(fields.next().unwrap(), 16).unwrap();
+        let size = u64::from_str_radix(fields.next().unwrap(), 16).unwrap();
+        (start, size, fields.next().unwrap().to_owned())
+    }
+
+    fn contains(&self, addr: u64) -> bool {
+        (self.start..self.start + self.size).contains(&addr)
+    }
+}
+
+impl Drop for Jit {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(self.map_path());
+    }
+}
+
+/// Samples a running process's user stacks for a while.
+///
+/// User half only, which is the half a perf map names and the half a machine
+/// at `perf_event_paranoid` 2 still allows.
+fn sample_user_stacks(pid: i32, for_ms: u64) -> Option<Vec<Sample>> {
+    let mut event = SampledEvent::open_software_with(
+        CPU_CLOCK,
+        1_000_000,
+        Scope::Process(pid),
+        64,
+        Callchain::BOTH_HALVES.user_only(),
+    )
+    .ok()?;
+    event.enable().expect("enable");
+    std::thread::sleep(Duration::from_millis(for_ms));
+    event.disable().expect("disable");
+    let mut samples = Vec::new();
+    event.drain(|record| {
+        if let Record::Sample(sample) = record {
+            samples.push(sample);
+        }
+    });
+    Some(samples)
+}
+
+/// The leaf frames of the stacks recorded, by address.
+fn leaves(unwinder: &Unwinder, ids: &[omn::stack::StackId]) -> Vec<omn::stack::Frame> {
+    ids.iter()
+        .filter_map(|id| unwinder.table().get(*id))
+        .filter_map(|stack| stack.frames_in(Context::User).next().cloned())
+        .collect()
+}
+
+/// Code in anonymous memory takes the name the program's perf map gives it,
+/// and the frame says that is where the name came from. The reference is the
+/// map itself, read back here: the line names a range, and every sample in
+/// that range must carry that line's name, at its distance from the start.
+#[test]
+fn code_a_program_generated_is_named_by_the_perf_map_it_wrote() {
+    let Some(binary) = jit_fixture() else {
+        eprintln!(
+            "skipped: the JIT fixture is x86-64 machine code and this is {}, so no perf map \
+             was checked",
+            std::env::consts::ARCH
+        );
+        return;
+    };
+    let jit = Jit::spawn(binary, "5", false);
+    let mut unwinder = Unwinder::for_process(jit.pid());
+    let Some(samples) = sample_user_stacks(jit.pid(), 400) else {
+        eprintln!(
+            "skipped: this machine refuses to sample another process, so no perf map was checked"
+        );
+        return;
+    };
+    let ids: Vec<_> = samples.iter().filter_map(|s| unwinder.record(s)).collect();
+    let (start, size, name) = jit.reference();
+    assert_eq!(
+        (start, size),
+        (jit.start, jit.size),
+        "the map is the line announced"
+    );
+
+    let leaves = leaves(&unwinder, &ids);
+    let in_code: Vec<_> = leaves
+        .iter()
+        .filter(|leaf| jit.contains(leaf.addr))
+        .collect();
+    assert!(
+        in_code.len() * 2 > leaves.len(),
+        "the program spends its time in the generated code, yet {} of {} samples landed there",
+        in_code.len(),
+        leaves.len()
+    );
+    for leaf in &in_code {
+        assert_eq!(leaf.symbol.as_deref(), Some(name.as_str()), "{leaf:?}");
+        assert_eq!(
+            leaf.named_by,
+            Some(omn::stack::NamedBy::PerfMap),
+            "{leaf:?}"
+        );
+        assert_eq!(leaf.offset, leaf.addr - start, "{leaf:?}");
+    }
+    let facts = unwinder.facts();
+    assert!(
+        facts
+            .iter()
+            .any(|fact| fact.contains("perf-map") && fact.contains(&format!("perf-{}", jit.pid()))),
+        "where the names came from is stated: {facts:?}"
+    );
+    assert!(
+        !unwinder
+            .notes()
+            .iter()
+            .any(|note| note.contains("anonymous")),
+        "every anonymous frame was named: {:?}",
+        unwinder.notes()
+    );
+}
+
+/// A runtime that writes its map only when it exits leaves the frames
+/// sampled before then unnamed while the run goes on -- and the run says why
+/// -- and names them when the map is read at the end.
+#[test]
+fn a_perf_map_written_at_exit_names_the_frames_when_the_run_finishes() {
+    let Some(binary) = jit_fixture() else {
+        eprintln!(
+            "skipped: the JIT fixture is x86-64 machine code and this is {}, so no perf map \
+             was checked",
+            std::env::consts::ARCH
+        );
+        return;
+    };
+    let mut jit = Jit::spawn(binary, "1", true);
+    let mut unwinder = Unwinder::for_process(jit.pid());
+    let Some(samples) = sample_user_stacks(jit.pid(), 400) else {
+        eprintln!(
+            "skipped: this machine refuses to sample another process, so no perf map was checked"
+        );
+        return;
+    };
+    let ids: Vec<_> = samples.iter().filter_map(|s| unwinder.record(s)).collect();
+    let unnamed = leaves(&unwinder, &ids)
+        .into_iter()
+        .filter(|leaf| jit.contains(leaf.addr))
+        .count();
+    assert!(unnamed > 0, "no sample landed in the generated code");
+    assert!(
+        leaves(&unwinder, &ids)
+            .iter()
+            .all(|leaf| !jit.contains(leaf.addr) || leaf.symbol.is_none()),
+        "named before any map existed"
+    );
+    let notes = unwinder.notes();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.contains("anonymous executable memory")
+                && note.contains("does not exist")),
+        "unnamed code is a concession with its reason: {notes:?}"
+    );
+
+    // The program exits, and its map is what it leaves behind. Until it is
+    // read, the reason given is that it holds lines the run never read -- not
+    // that it covers none of the frames, which it does.
+    jit.child.wait().expect("the fixture exits at its deadline");
+    let (start, _, name) = jit.reference();
+    let notes = unwinder.notes();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.contains("anonymous executable memory")
+                && note.contains("this run never read")
+                && !note.contains("covers none")),
+        "a map written after the last read is not one that covers nothing: {notes:?}"
+    );
+    assert!(
+        unwinder.finish() > 0,
+        "the map read at the end named nothing"
+    );
+    for leaf in leaves(&unwinder, &ids)
+        .iter()
+        .filter(|leaf| jit.contains(leaf.addr))
+    {
+        assert_eq!(leaf.symbol.as_deref(), Some(name.as_str()), "{leaf:?}");
+        assert_eq!(leaf.named_by, Some(omn::stack::NamedBy::PerfMap));
+        assert_eq!(leaf.offset, leaf.addr - start);
+    }
+    assert!(!unwinder
+        .notes()
+        .iter()
+        .any(|note| note.contains("anonymous")));
+}
+
+/// The same through `omn` itself, as a person runs it: the profile's stacks
+/// name the generated code, and its notes say the name came from the map.
+#[test]
+fn a_profile_through_omn_names_generated_code_from_its_perf_map() {
+    let Some(binary) = jit_fixture() else {
+        eprintln!(
+            "skipped: the JIT fixture is x86-64 machine code and this is {}",
+            std::env::consts::ARCH
+        );
+        return;
+    };
+    let out = std::env::temp_dir().join(format!("omn-jit-profile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let output = Command::new(env!("CARGO_BIN_EXE_omn"))
+        .args(["cpu.profile", "--mode", "sample@999hz", "--emit", "stack"])
+        .args(["--format", "json", "-o"])
+        .arg(&out)
+        .arg("--")
+        .arg(binary)
+        .arg("1")
+        .output()
+        .expect("omn runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        assert!(
+            stderr.contains("perf_event_paranoid") || stderr.contains("not available"),
+            "omn failed for a reason other than the machine refusing to sample: {stderr}"
+        );
+        eprintln!("skipped: this machine withholds cpu.profile: {stderr}");
+        return;
+    }
+    let results: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("results.json")).expect("results.json"),
+    )
+    .expect("json");
+    let result = &results["results"][0];
+    let named = result["stacks"]
+        .as_object()
+        .expect("a stack table")
+        .values()
+        .filter(|frames| {
+            frames
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|frame| frame.as_str() == Some("omn_jit_spin"))
+        })
+        .count();
+    assert!(
+        named > 0,
+        "no stack names the generated code: {}",
+        result["stacks"]
+    );
+    let notes = result["notes"].to_string();
+    assert!(notes.contains("perf-map"), "{notes}");
+    // The launched program's pid is not known here; its map is in the notes.
+    for path in notes
+        .split(|c: char| c.is_whitespace() || c == '"' || c == ':')
+        .filter(|word| word.starts_with("perf-") && word.ends_with(".map"))
+    {
+        let _ = std::fs::remove_file(Path::new("/tmp").join(path));
+    }
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A map written only at exit, through `omn`: the collector reads it once
+/// more at its `stop`, after the program has gone, and the frames sampled
+/// before it existed carry its names.
+#[test]
+fn a_perf_map_written_at_exit_names_the_frames_of_an_omn_profile() {
+    let Some(binary) = jit_fixture() else {
+        eprintln!(
+            "skipped: the JIT fixture is x86-64 machine code and this is {}",
+            std::env::consts::ARCH
+        );
+        return;
+    };
+    let out = std::env::temp_dir().join(format!("omn-jit-late-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let output = Command::new(env!("CARGO_BIN_EXE_omn"))
+        .args(["cpu.profile", "--mode", "sample@999hz", "--emit", "stack"])
+        .args(["--format", "json", "-o"])
+        .arg(&out)
+        .arg("--")
+        .arg(binary)
+        .args(["1", "late"])
+        .output()
+        .expect("omn runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        assert!(
+            stderr.contains("perf_event_paranoid") || stderr.contains("not available"),
+            "omn failed for a reason other than the machine refusing to sample: {stderr}"
+        );
+        eprintln!("skipped: this machine withholds cpu.profile: {stderr}");
+        return;
+    }
+    let results: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("results.json")).expect("results.json"),
+    )
+    .expect("json");
+    let result = &results["results"][0];
+    let notes = result["notes"].to_string();
+    for path in notes
+        .split(|c: char| c.is_whitespace() || c == '"' || c == ':')
+        .filter(|word| word.starts_with("perf-") && word.ends_with(".map"))
+    {
+        let _ = std::fs::remove_file(Path::new("/tmp").join(path));
+    }
+    let _ = std::fs::remove_dir_all(&out);
+    let named = result["stacks"]
+        .as_object()
+        .expect("a stack table")
+        .values()
+        .filter(|frames| {
+            frames
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|frame| frame.as_str() == Some("omn_jit_spin"))
+        })
+        .count();
+    assert!(
+        named > 0,
+        "the map written at exit named no stack: {}\n{notes}",
+        result["stacks"]
+    );
+    // The concession for unnamed anonymous code is a degradation, not a note:
+    // looked for anywhere in the result.
+    let everything = result.to_string();
+    assert!(
+        !everything.contains("anonymous executable memory"),
+        "a frame in the generated code was left unnamed: {everything}"
+    );
+}
+
+/// A pure-Python loop under `python3 -X perf`, profiled through `omn`.
+///
+/// The interpreter publishes a trampoline per Python function it enters, in
+/// anonymous memory, and a line naming it (`py::<function>:<file>`) in its
+/// perf map. The profile must carry the loop's function by that name; the
+/// reference is the map the interpreter wrote, which must hold the same line.
+#[test]
+fn a_python_function_is_named_in_the_profile_under_x_perf() {
+    let trampoline = Command::new("python3")
+        .args([
+            "-c",
+            "import sys; sys.exit(0 if hasattr(sys, 'activate_stack_trampoline') else 3)",
+        ])
+        .status();
+    match trampoline.map(|status| status.code()) {
+        Ok(Some(0)) => {}
+        Ok(_) => {
+            eprintln!(
+                "skipped: this python3 has no sys.activate_stack_trampoline (a build without \
+                 perf trampoline support, or older than 3.12), so `-X perf` writes no map and no \
+                 Python name was checked"
+            );
+            return;
+        }
+        Err(error) => {
+            eprintln!(
+                "skipped: python3 cannot be run here ({error}), so no Python name was checked"
+            );
+            return;
+        }
+    }
+    let directory = std::env::temp_dir().join(format!("omn-python-perf-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let script = directory.join("hot.py");
+    std::fs::write(
+        &script,
+        "import time\n\
+         def omn_hot_loop(deadline):\n\
+         \x20   total = 0\n\
+         \x20   while time.monotonic() < deadline:\n\
+         \x20       for i in range(10000):\n\
+         \x20           total = (total * 31 + i) & 0xffffffff\n\
+         \x20   return total\n\
+         omn_hot_loop(time.monotonic() + 1)\n",
+    )
+    .expect("the script");
+    let out = directory.join("out");
+    let output = Command::new(env!("CARGO_BIN_EXE_omn"))
+        .args(["cpu.profile", "--mode", "sample@999hz", "--emit", "stack"])
+        .args(["--format", "json", "-o"])
+        .arg(&out)
+        .args(["--", "python3", "-X", "perf"])
+        .arg(&script)
+        .output()
+        .expect("omn runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        assert!(
+            stderr.contains("perf_event_paranoid") || stderr.contains("not available"),
+            "omn failed for a reason other than the machine refusing to sample: {stderr}"
+        );
+        eprintln!("skipped: this machine withholds cpu.profile: {stderr}");
+        return;
+    }
+    let results: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("results.json")).expect("results.json"),
+    )
+    .expect("json");
+    let result = &results["results"][0];
+    let notes = result["notes"].to_string();
+    let maps: Vec<PathBuf> = notes
+        .split(|c: char| c.is_whitespace() || c == '"' || c == ':')
+        .filter(|word| word.starts_with("perf-") && word.ends_with(".map"))
+        .map(|word| Path::new("/tmp").join(word))
+        .collect();
+    let expected = format!("py::omn_hot_loop:{}", script.display());
+    let reference = maps
+        .iter()
+        .filter_map(|map| std::fs::read_to_string(map).ok())
+        .any(|text| {
+            text.lines()
+                .any(|line| line.ends_with(&format!(" {expected}")))
+        });
+    for map in &maps {
+        let _ = std::fs::remove_file(map);
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+
+    assert!(
+        reference,
+        "the interpreter's own map names {expected}, and the notes name that map: {notes}"
+    );
+    // Weighed by samples, not by distinct stacks: the interpreter's start-up
+    // is a few dozen distinct stacks of one sample each.
+    let table = &result["stacks"];
+    let carries = |id: &serde_json::Value| {
+        table[id.as_u64().expect("a stack id").to_string()]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|frame| frame.as_str() == Some(expected.as_str()))
+    };
+    let (mut carrying, mut total) = (0.0, 0.0);
+    for row in result["outputs"][0]["stacks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let events = row["events"].as_f64().expect("a sample count");
+        total += events;
+        if carries(&row["stack"]) {
+            carrying += events;
+        }
+    }
+    assert!(
+        carrying * 2.0 > total,
+        "the loop is where the program spends its time, yet {carrying} of {total} samples carry \
+         {expected}"
+    );
+}
