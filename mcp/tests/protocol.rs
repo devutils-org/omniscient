@@ -409,7 +409,7 @@ fn the_sweep_is_the_one_the_binary_that_runs_gives() {
     // and the answer says why rather than reading like a different machine.
     if !carries {
         eprintln!(
-            "SKIP (half): {} carries no CAP_BPF, so there is no privileged sweep to separate \
+            "skipped (half): {} carries no CAP_BPF, so there is no privileged sweep to separate \
              from an unprivileged one; `make` grants it",
             omn().display()
         );
@@ -668,7 +668,7 @@ fn a_bounded_run_over_an_existing_process_reads_back_what_the_process_reports() 
 #[test]
 fn only_a_session_its_owner_approved_launches_a_program() {
     if Command::new("python3").arg("--version").output().is_err() {
-        eprintln!("SKIP: the launched program is a python3 one; this machine has no python3");
+        eprintln!("skipped: the launched program is a python3 one; this machine has no python3");
         return;
     }
     let dir = scratch("launch");
@@ -836,7 +836,7 @@ fn approve(dir: &std::path::Path, name: &str, text: &str) -> std::path::PathBuf 
 #[test]
 fn a_launched_programs_stdout_comes_back_apart_from_omns_document() {
     if Command::new("python3").arg("--version").output().is_err() {
-        eprintln!("SKIP: the launched program is a python3 one; this machine has no python3");
+        eprintln!("skipped: the launched program is a python3 one; this machine has no python3");
         return;
     }
     let dir = scratch("stdout");
@@ -905,12 +905,17 @@ fn a_launched_programs_stdout_comes_back_apart_from_omns_document() {
     let window = against["window_wall_ns"].as_u64().unwrap();
     let target = against["target_cpu_ns"].as_u64().unwrap();
     assert!(target < window / 2, "the sleeping program's cpu: {against}");
-    if let (Some(of_target), Some(of_window)) = (
-        against["run_spent_percent_of_target_cpu"].as_f64(),
-        against["run_spent_percent_of_window_on_one_cpu"].as_f64(),
-    ) {
-        assert!(of_target > of_window, "{against}");
-    }
+    // proc.fd reads from outside the target, so what it spent there is known
+    // (zero) and both percentages are figures, not floors: absent is a defect
+    // here, not a pass.
+    assert_eq!(against["in_target_known"], true, "{against}");
+    let of_target = against["run_spent_percent_of_target_cpu"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("no percentage of the target's cpu: {against}"));
+    let of_window = against["run_spent_percent_of_window_on_one_cpu"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("no percentage of the window: {against}"));
+    assert!(of_target > of_window, "{against}");
 }
 
 /// One privilege model: a run through the server is `omn`'s run, with the
@@ -923,7 +928,7 @@ fn a_launched_programs_stdout_comes_back_apart_from_omns_document() {
 #[test]
 fn a_run_through_the_server_is_as_privileged_as_omn() {
     if Command::new("python3").arg("--version").output().is_err() {
-        eprintln!("SKIP: the launched program is a python3 one; this machine has no python3");
+        eprintln!("skipped: the launched program is a python3 one; this machine has no python3");
         return;
     }
     let server = std::path::PathBuf::from(env!("CARGO_BIN_EXE_omn-mcp"));
@@ -941,14 +946,16 @@ fn a_run_through_the_server_is_as_privileged_as_omn() {
         ),
         (Ok(false), _) => {
             eprintln!(
-                "SKIP: {} carries no CAP_BPF, so there is no privileged run to show; `make` \
+                "skipped: {} carries no CAP_BPF, so there is no privileged run to show; `make` \
                  grants it",
                 omn().display()
             );
             return;
         }
         (Err(error), _) => {
-            eprintln!("SKIP: no getcap here ({error}), so whose capabilities are whose is unread");
+            eprintln!(
+                "skipped: no getcap here ({error}), so whose capabilities are whose is unread"
+            );
             return;
         }
     }
@@ -978,7 +985,7 @@ fn a_run_through_the_server_is_as_privileged_as_omn() {
     let backend = &plan["resolution"]["requests"][0]["backend"];
     if backend != "bpf:fentry" {
         eprintln!(
-            "SKIP: this machine does not serve io.fsync through bpf:fentry even with the \
+            "skipped: this machine does not serve io.fsync through bpf:fentry even with the \
              capabilities: {}",
             plan["resolution"]
         );

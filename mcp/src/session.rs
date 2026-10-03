@@ -659,7 +659,11 @@ fn denominator(cost: &Value, asked: bool) -> Value {
     let ns = |field: &str| overhead[field].as_u64();
     let label = cost["label"].clone();
     let wall = ns("wall_ns").unwrap_or(0);
-    let spent = ns("attributed_cpu_ns").unwrap_or(0) + ns("in_target_cpu_ns").unwrap_or(0);
+    // What the collector spent inside the target is unknown, never zero
+    // (`in_target_cpu_ns: null`, with `in_target_from` saying why). Where it
+    // is unknown, the run's spend is only known from below, and is said so.
+    let attributed = ns("attributed_cpu_ns").unwrap_or(0);
+    let inside = ns("in_target_cpu_ns");
     let budget = if asked {
         "the budget is a percentage of the target's own cpu over the window"
     } else {
@@ -680,25 +684,103 @@ fn denominator(cost: &Value, asked: bool) -> Value {
         });
     };
     let share = |part: u64, of: u64| (of > 0).then(|| 100.0 * part as f64 / of as f64);
-    json!({
+    let mut answer = json!({
         "label": label,
         "budget_is_a_share_of": budget,
         "target_cpu_ns": observed,
         "target_cpu_from": overhead["observed_from"],
         "window_wall_ns": wall,
         "target_on_cpu_percent_of_window": share(observed, wall),
-        "run_spent_ns": spent,
-        "run_spent_percent_of_target_cpu": cost["measured_percent"],
-        "run_spent_percent_of_window_on_one_cpu": share(spent, wall),
+        "in_target_known": inside.is_some(),
+        "in_target_cpu_ns": inside,
+        "in_target_from": overhead["in_target_from"],
         "reads": "a target on a cpu for a small share of its window has little cpu to be a \
                   percentage of: the same collector costs far more of it than of the window. \
                   Both percentages are here, and neither is the other",
-    })
+    });
+    let fields = answer.as_object_mut().expect("built as an object");
+    match inside {
+        Some(inside) => {
+            let spent = attributed + inside;
+            fields.insert("run_spent_ns".into(), json!(spent));
+            fields.insert(
+                "run_spent_percent_of_target_cpu".into(),
+                cost["measured_percent"].clone(),
+            );
+            fields.insert(
+                "run_spent_percent_of_window_on_one_cpu".into(),
+                json!(share(spent, wall)),
+            );
+        }
+        None => {
+            // Null where the figure is not known, and the part that is known
+            // under a name that says it is a floor.
+            fields.insert("run_spent_ns".into(), Value::Null);
+            fields.insert("run_spent_percent_of_target_cpu".into(), Value::Null);
+            fields.insert("run_spent_percent_of_window_on_one_cpu".into(), Value::Null);
+            fields.insert("run_spent_at_least_ns".into(), json!(attributed));
+            fields.insert(
+                "run_spent_at_least_percent_of_target_cpu".into(),
+                cost["measured_percent"].clone(),
+            );
+            fields.insert(
+                "run_spent_at_least_percent_of_window_on_one_cpu".into(),
+                json!(share(attributed, wall)),
+            );
+            fields.insert(
+                "why_at_least".into(),
+                json!(format!(
+                    "what the collector spent inside the target is unknown ({}), so the run's \
+                     spend is known only from below: the tool's own share",
+                    overhead["in_target_from"]
+                        .as_str()
+                        .unwrap_or("no reason given")
+                )),
+            );
+        }
+    }
+    answer
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unknown_in_target_cost_is_a_floor_and_not_a_zero() {
+        let cost = |inside: Value| {
+            json!({
+                "label": "x",
+                "measured_percent": 2.0,
+                "overhead": {
+                    "wall_ns": 1000, "observed_cpu_ns": 500, "observed_from": "rusage",
+                    "attributed_cpu_ns": 10, "in_target_cpu_ns": inside,
+                    "in_target_from": "program stats lost",
+                },
+            })
+        };
+        let unknown = denominator(&cost(Value::Null), false);
+        assert_eq!(unknown["in_target_known"], false);
+        assert_eq!(unknown["in_target_from"], "program stats lost");
+        assert!(unknown["run_spent_ns"].is_null());
+        assert!(unknown["run_spent_percent_of_target_cpu"].is_null());
+        assert!(unknown["run_spent_percent_of_window_on_one_cpu"].is_null());
+        assert_eq!(unknown["run_spent_at_least_ns"], 10);
+        assert_eq!(
+            unknown["run_spent_at_least_percent_of_window_on_one_cpu"],
+            1.0
+        );
+        assert!(unknown["why_at_least"]
+            .as_str()
+            .unwrap()
+            .contains("program stats lost"));
+
+        let known = denominator(&cost(json!(40)), true);
+        assert_eq!(known["in_target_known"], true);
+        assert_eq!(known["run_spent_ns"], 50);
+        assert_eq!(known["run_spent_percent_of_window_on_one_cpu"], 5.0);
+        assert!(known.get("run_spent_at_least_ns").is_none());
+    }
 
     #[test]
     fn the_document_is_found_where_it_last_is() {
