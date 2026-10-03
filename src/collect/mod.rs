@@ -1246,6 +1246,7 @@ fn cgroup_directory(path: &std::path::Path) -> std::path::PathBuf {
 
 /// Reads the cpu time of whatever is being observed, so that the tool's own
 /// cost can be a fraction of something real.
+#[derive(PartialEq)]
 enum Meter {
     /// A program this tool launched. While it runs, its own `/proc` entry says
     /// what it has spent; once it has been reaped its entry is gone and the
@@ -1284,6 +1285,22 @@ impl Meter {
                  read, which is not built yet",
             ),
         }
+    }
+
+    /// Every meter's [`Meter::read`], a meter equal to an earlier one taking
+    /// that one's reading rather than its own. Two collections of one target
+    /// are weighed against one denominator: read twice, a running target's
+    /// nanosecond clock (`task::process_cpu`) moves between the two reads.
+    fn read_each(meters: &[Meter]) -> Vec<Option<u64>> {
+        let mut read: Vec<Option<u64>> = Vec::with_capacity(meters.len());
+        for (index, meter) in meters.iter().enumerate() {
+            let earlier = meters[..index].iter().position(|other| other == meter);
+            read.push(match earlier {
+                Some(earlier) => read[earlier],
+                None => meter.read(),
+            });
+        }
+        read
     }
 
     /// The cumulative cpu time of the target, to be differenced against a
@@ -2887,9 +2904,9 @@ impl<'a> Spending<'a> {
             .collect();
         let opened_ns = monotonic_ns();
         let self_cpu_opened_ns = rusage_ns(libc::RUSAGE_SELF);
-        let observed_opened: Vec<u64> = meters
-            .iter()
-            .map(|meter| meter.read().unwrap_or(0))
+        let observed_opened: Vec<u64> = Meter::read_each(&meters)
+            .into_iter()
+            .map(|read| read.unwrap_or(0))
             .collect();
         Self {
             meters,
@@ -3313,7 +3330,7 @@ impl<'a> Spending<'a> {
     fn close(&mut self) -> Vec<Overhead> {
         let entered_cpu_ns = thread_cpu_ns();
         let self_cpu_ns = rusage_ns(libc::RUSAGE_SELF);
-        let observed_cpu_ns: Vec<Option<u64>> = self.meters.iter().map(Meter::read).collect();
+        let observed_cpu_ns = Meter::read_each(&self.meters);
         let in_target: Vec<Result<Inside, String>> =
             self.inside.iter_mut().map(InsideMeter::read).collect();
         self.measurements += 1;
@@ -5793,6 +5810,23 @@ mod tests {
             "the window has to be the window: {}",
             overhead.wall_ns
         );
+    }
+
+    /// Two collections of one target share one reading of it: this process,
+    /// burning between the reads, would otherwise give each its own.
+    #[test]
+    fn two_meters_of_one_target_are_read_once() {
+        let me = std::process::id() as i32;
+        let meters = [
+            Meter::Tasks(vec![me]),
+            Meter::Cpus(None),
+            Meter::Tasks(vec![me]),
+        ];
+        let deadline = monotonic_ns() + 2_000_000;
+        while monotonic_ns() < deadline {}
+        let read = Meter::read_each(&meters);
+        assert!(read[0].is_some(), "this process keeps a cpu account");
+        assert_eq!(read[0], read[2], "one target, one reading");
     }
 
     /// The cpu time of a target that keeps no cpu account is absent, not zero.
