@@ -296,6 +296,20 @@ test. Those four rerun alone once: `cross_machine`, `scenario_mem`,
 `scenario_net` green, `budget` red once (21 of 22) and green on the next
 run. The lib's 1 422 unit tests, `encoders` and the `mem` tests passed.
 
+**Fix round, at 09da5de** (load average 18 to 30): `make check` red at
+`tests/cross_compute.rs`
+(`a_wakeup_join_onto_drained_totals_is_refused_because_each_event_holds_many_blocks`:
+*"528 blocks in 76 events"*), not this stream's. Then one `cargo test
+--workspace --no-fail-fast`: 2 177 passed, 7 failed, in 5 binaries, none
+this stream's -- `cross_io` (`the_crossing_sessions_run_...`, tally #25),
+`runner` (the ring-overflow losses test, as in the first round), `scenario_net`
+(`every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`), `triage`
+(the lossy profile, as before), `unwind` (three, as before). `encoders`,
+`family_mem`, and the lib's unit tests (the `wss` and `swap` ones among
+them) passed; clippy and fmt clean. (A second copy of that run, started by
+the shell when the first outlived its timeout, wrote into the same log at
+the same time; it is not counted.)
+
 ## Privileged runs wanted
 
 None for this stream's changes. The CI run itself, on the merged branch, is
