@@ -83,6 +83,7 @@ request to a file you do not own is filed there, not made.
 | **core** | `src/emit.rs`, `src/resolve.rs`, `tests/cross_memory.rs`, `docs/portability.md`, `LICENSES/`, `scripts/release.sh`, `Makefile` (install), `README.md` (licence lines) | -- |
 | **python** | `cases/cpython-*`, `cases/http-server-*` | symbols, cases |
 | **build** | `cases/sqlite3-durability`, `cases/gcc-*`, `cases/make-*` | cases |
+| **io** | `src/bpf/io.rs`, `src/bpf/request.rs`, `src/collect/io/{block,histogram}.rs`, `tests/scenario_io.rs`, `docs/scenarios/io.md` | engine, core (rebases on them) |
 
 `DECISIONS.md` and `STATE.md` are the coordinator's. A stream writes its
 decision lines into its handoff, and the coordinator moves them.
@@ -189,6 +190,25 @@ cache; reference `-ftime-report` and the process tree gcc -> cc1 -> as. Case 6,
 serial job, and many short processes; reference `make --trace` timings and
 per-process `schedstat`.
 
+### io -- the in-kernel histogram costs 23.6 % at 3 M IOPS
+
+Found by the coordinator before this wave, running the privileged list:
+`scenario_io::the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent`
+on `null_blk` (the doc comment's commands, granted by the sudoers file) reads
+*"bare 3158519 IOPS, under the in-kernel histogram 2413950: 23.57 %"* against
+phase 6's 1 %. The bench agrees in kind: `io.latency` through `bpf:raw_tp` at
+3.44 % of the target's cpu against `low`'s 1 %, `io.size` 6.45 %, `io.queue`
+2.85 %. Find where the cost is -- the programs' own run time
+(`sysctl kernel.bpf_stats_enabled`, granted, is machine wide: ask the
+coordinator), the map updates per request, a per-request lookup that a
+per-cpu array would avoid, the issue/complete pairing, or the attach points --
+measure it, and bring it under the criterion or say, with numbers, why the
+criterion is the wrong one. The test needs `null_blk`, which is machine wide:
+**ask the coordinator to run it** with your branch, alone, rather than loading
+the module while the other streams build. You may use
+`sudo -n /usr/bin/modprobe null_blk ...` yourself only for a functional check
+at low load.
+
 ---
 
 ## Exit criteria for the wave
@@ -200,5 +220,6 @@ per-process `schedstat`.
 - Both ways of asking name the same suspect.
 - Every case runs at `perf_event_paranoid` 2 in the CI's `defaults` cell or
   skips there with the machine's reason first.
+- The in-kernel histogram under 1 % at 2 M IOPS, or the criterion argued.
 - The engine and core filings landed or re-filed with what blocked them.
 - `make check` green at the merge.
