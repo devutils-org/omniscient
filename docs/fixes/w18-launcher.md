@@ -317,3 +317,25 @@ The adversarial review's five findings, and what came of each:
 5. **A process the stop cannot signal is silently left** (nit): now counted
    and said (section 1.2). The orphan that left the group is still not found;
    that stays a decision line and section 3's open item.
+
+### The suite after the fix round
+
+One `make check`: red in the library tests on two load-dependent tests
+outside this stream's files (`cpu::profile::...finds_this_thread_for_the_cpu_it_burned`,
+284 samples where 199 were expected; `perf::...an_ibs_sample_says_which_level_answered_the_load`,
+too few samples), at a load average of 37. Then one `cargo test --workspace
+--no-fail-fast`: **2193 passed, 5 failed** (the two above passed there):
+
+- `runner::a_profile_s_losses_land_...`: the expected failure of section 1.5.
+- `budget::the_extra_cpu_a_faster_poll_costs_...` (flaky tally #14),
+  `scenario_proc::defect_1_the_first_reading_...` and
+  `scenario_mem::a_walk_that_fits_in_l1_...` (both in the tally): each
+  passed rerun once alone.
+- `triage::a_verdict_read_off_a_lossy_profile_says_its_amount_is_a_lower_bound`:
+  failed again alone. `limit` is null because `on-cpu` is 127.51 ms of a
+  300 ms burn and 403.48 ms of the wall clock is in no row read: at load 37
+  the fixture waited for a cpu the run did not account for. Not this
+  stream's code (the launcher's changes do not touch the triage's rows);
+  for stream triage, on a quieter machine.
+
+`cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`, run on their own: clean.
