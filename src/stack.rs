@@ -1736,10 +1736,10 @@ impl<'a> Elf<'a> {
                     // calls, not of anything it contains.
                     return None;
                 }
-                let name = read_str(
+                let name = unversioned(read_str(
                     self.bytes,
                     strings.offset as usize + read_u32(self.bytes, at)? as usize,
-                )?;
+                )?);
                 Some(ElfSymbol {
                     value,
                     size: read_u64(self.bytes, at + 16)?,
@@ -2564,6 +2564,24 @@ pub fn names_fact<'a>(
     Some(format!("names came from -- {}", described.join("; ")))
 }
 
+/// A symbol's name without the version a `.symtab` may append to it.
+///
+/// A library's own `.dynsym` keeps versions in a table of their own, but the
+/// `.symtab` of its debug file -- what debuginfod serves for a stripped
+/// `libc.so.6` -- spells them into the name: `clock_nanosleep@@GLIBC_2.17`,
+/// `__libc_start_main@GLIBC_2.2.5`. The same function named two ways is two
+/// suspects to anything that compares names, which is what the cases found
+/// when `sched.offcpu` began asking debuginfod (`sqlite3-stripped`, both ways
+/// naming `clock_nanosleep` and `clock_nanosleep@@GLIBC_2.17`). No C or
+/// mangled C++ or Rust name contains `@`, so everything from the first one is
+/// the version.
+fn unversioned(name: String) -> String {
+    match name.split_once('@') {
+        Some((base, _)) if !base.is_empty() => base.to_owned(),
+        _ => name,
+    }
+}
+
 /// The target's executable as its maps name it, while it is alive.
 fn executable(pid: i32) -> Option<String> {
     let who = if pid <= 0 {
@@ -2579,6 +2597,20 @@ fn executable(pid: i32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_versioned_symbol_is_named_without_its_version() {
+        assert_eq!(
+            unversioned("clock_nanosleep@@GLIBC_2.17".to_owned()),
+            "clock_nanosleep"
+        );
+        assert_eq!(
+            unversioned("__libc_start_main@GLIBC_2.2.5".to_owned()),
+            "__libc_start_main"
+        );
+        assert_eq!(unversioned("sqlite3VdbeExec".to_owned()), "sqlite3VdbeExec");
+        assert_eq!(unversioned("@odd".to_owned()), "@odd");
+    }
 
     /// A callchain as the kernel writes one: a marker, the frames that belong
     /// to it, another marker, the frames that belong to that.
