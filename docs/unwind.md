@@ -602,3 +602,103 @@ The three items filed above for R and P are closed; the handoff is
   `tests/scenario_cpu.rs` asserts; the change is filed. Held by
   `tests/unwind.rs::a_choice_the_run_refuses_is_refused_by_the_dump_with_the_same_reason`,
   against the run's own refusal of the same request.
+
+## The eighteenth wave: what a profile costs (stream "profile")
+
+The handoff is `docs/fixes/w18-profile.md`. The finding was the coordinator's
+(`docs/open-findings.md`, "a user-mode-only profile costs 280 % of the
+target"): at `perf_event_paranoid` 2 without `CAP_PERFMON`, `cpu.profile`
+over `sqlite3`'s commits spent 266 % of the target's cpu and the agent's way of
+`tests/cases.rs` was stopped by its 100 % budget.
+
+### What a user-only profile costs
+
+**Which mode, and why that is not the question.** The triage asks for
+`cpu.profile` at `sample@997hz` with `--stack fp` forced
+(`src/triage/latency.rs`), so no ladder is walked: at paranoid 2 the choice is
+`fp`, user-only. Reproduced on this machine (paranoid -1) by a build whose
+`kernel_callchain_allowed` answered no -- the patch is in the handoff, not
+committed -- because a capability-less copy of `omn` at paranoid -1 still has
+the kernel's half: the brief's suggested reproduction does not take the
+user-only path here. Over the case's two workloads, debug build, beside nine
+other streams:
+
+| run | both halves | user-only |
+|---|---|---|
+| 500 fsync-bound commits, `--symbols debuginfod`, `--budget 100%` | stopped at 0.1 s: 129 to 179 % | stopped at 0.1 s: 116 to 131 %, once ran out at 9 % |
+| the same, no debuginfod, whole run | 20 to 33 % before, 20 to 30 % after | 15 to 21 % before, **6 to 10 % after** |
+| 50 000 commits on a WAL, whole run, before | 7.8 % | 4.1 % |
+
+Two costs, neither of them the mode's:
+
+1. **Every tick re-read every process's mappings**, whatever the drain held:
+   `/proc/<pid>/maps` twice for a mode with CFI (`Symbolizer::refresh`,
+   `Cfi::refresh`), and the executable's link once more. Measured with a
+   temporary counter: 0.25 to 0.4 ms a tick of a debug build, 55 to 150 ms of
+   `omn` over a 2.4 s run in which the target burnt 0.5 s. A user-only profile
+   of a program that lives in system calls gets few samples (21 to 55 against
+   500 to 640 with both halves, the same commits) and paid for every tick
+   anyway. **Fixed**: `ProfileCollector::drain_into` takes the records out of
+   the rings first and re-reads the mappings of the processes those records
+   hold samples of, and of no other, still in the tick that interns their
+   stacks. Over the same three pairs, user-only, run alternately: 21.2 / 15.4
+   / 17.2 % before, 9.6 / 6.9 / 6.0 % after. Both halves did not move
+   measurably: there the drain itself dominates, about 150 µs a sample of a
+   debug build, most of it naming kernel frames (`src/stack.rs`, filed).
+   Held by `a_tick_with_no_sample_of_a_process_does_not_reread_its_mappings`:
+   a sleeping child over ten ticks is read no time at all, and a burning one
+   once per drain that held its samples.
+2. **The first sample in a module named from debuginfod loads that module's
+   symbols**, about 25 ms of a debug build for `sqlite3`'s debug file, inside
+   the window. The budget's first check, 0.1 s in, weighs it against a target
+   that has burnt 13 to 21 ms by then: 116 to 179 %, **both halves and
+   user-only alike**. This is the 266 %: what paranoid 2 changes is not the
+   cost but which run happened to be stopped. Not fixed here: the load is
+   `src/stack.rs`'s, and whether a first check may stop a run on a one-time
+   cost against a few milliseconds of target is the budget's
+   (`src/collect/mod.rs`); both filed in the handoff.
+
+**What paranoid 2 would add** that this machine cannot show: the kernel's own
+refusal path (`probe_open` refused, rather than told no), and a target whose
+denominator is unchanged -- the budget reads the scheduler's nanoseconds,
+which count the target's kernel time whether the profile may sample it or
+not. Reasoned, not run.
+
+**The declared band.** `pmu:sw` declares `low` (under 1 %). The bench
+measured 0.61 % for a compute-bound launch; against a program that waits on
+its disk, the tool's per-tick work is a share of very little, and a debug
+build's measures 6 to 30 % here. The `cost:` line is the bench's; the numbers
+are filed there. The choice says it: the user-only degradation now ends
+*"a program that spends most of its time there yields few samples, and what
+the profile costs it is then mostly the tool's work on each tick, which does
+not shrink with them"*.
+
+### The tool's own figure, held whole
+
+`each_mode_copies_what_it_declares_...` held `collector_cpu_ns` only as a lower
+bound (fourteenth wave: 26 ms said where `wait4` counted 986 ms). The cost
+record has carried `before_window_cpu_ns` and `after_window_cpu_ns` beside it
+since the sixteenth wave, and their sum is now held to the kernel's count from
+both sides: never above it, and at least half of it. Measured: 1169.9 ms said
+against 1178.1 ms counted (`fp`), 1150.9 against 1159.5 (`dwarf`); the window
+alone, 55.5 and 72.3 ms.
+
+### The stripped build's second shape
+
+`a_stripped_build_is_named_from_debuginfod_...`: the unstripped reference
+missing the whole `compare` branch, seen once in the sixteenth wave. Not
+reproduced in 22 more runs at load 22 to 27 beside nine other streams (40 in
+all since). Left to the flaky tally; the failure message already carries every
+stack with its count.
+
+### `mem.faults`' sampled rung where paranoid 2 serves it
+
+The budget's ladder moves `mem.faults` from `trace` to `sample` on weighed
+samples, and `tests/budget.rs` holds the move where the kernel's half is
+allowed, which neither CI cell is. The rung itself on the paranoid-2 path is
+now held in `page_faults.rs`:
+`sampled_in_user_mode_the_weighed_samples_are_the_faults_the_thread_took`
+samples one fault in 16, user mode only, over 4096 pages this thread stores
+to, and the weighed samples are the thread's own `RUSAGE_THREAD` fault count
+within two periods. Measured three times: 256 samples weighing 4096 faults,
+where the thread took 4096.
