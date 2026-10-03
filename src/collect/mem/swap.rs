@@ -372,6 +372,37 @@ mod tests {
     use crate::collect::mem::testing::Scratch;
     use std::time::Duration;
 
+    /// The limit that pushes a child's written pages out to swap.
+    ///
+    /// `memory.high`, not `memory.max`. Both make the kernel reclaim from the
+    /// cgroup as it grows, but `max` calls the OOM killer when reclaim falls
+    /// behind, and reclaim of a written page waits for the swap device. On
+    /// the CI's `defaults` cell -- a swap file on a cloud disk, with 320 MiB
+    /// free and more, so past every swap check above -- `max` killed both
+    /// children that wrote their pages (run 37155975223: `memory.events`
+    /// *"max 387 oom 1 oom_kill 1"* and *"max 154 oom 1 oom_kill 1"*), while
+    /// the zero-filled child of the same cell, whose pages need no write,
+    /// passed under the same `max`. `pressure.rs` met the same kill first and
+    /// moved to `high` for it. Over `high`, a child that outruns reclaim is
+    /// throttled instead, and [`THROTTLED_FOR`] bounds how long it is waited
+    /// for.
+    const PUSHED_BY: &str = "memory.high";
+
+    /// How long a child throttled over [`PUSHED_BY`] is given to finish
+    /// touching; what it touched by then is what a test judges.
+    const THROTTLED_FOR: Duration = Duration::from_secs(60);
+
+    /// A `<name>  <n> kB` field of a `smaps_rollup`, in bytes; zero when
+    /// absent.
+    fn rollup_bytes(rollup: &str, name: &str) -> u64 {
+        rollup
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .map_or(0, |kilobytes| kilobytes * 1024)
+    }
+
     fn poll() -> Mode {
         Mode::Poll {
             interval: Mode::DEFAULT_POLL_INTERVAL,
@@ -522,6 +553,8 @@ mod tests {
     /// The last is the strongest of the three: it is the same fact counted by a
     /// different subsystem, through a different file, keyed on the process
     /// rather than on the cgroup.
+    ///
+    /// The limit is `memory.high`, not `memory.max` (see [`PUSHED_BY`]).
     #[test]
     fn memory_pushed_out_of_a_limited_cgroup_is_counted_as_swap() {
         const LIMIT: u64 = 32 * 1024 * 1024;
@@ -567,10 +600,11 @@ mod tests {
             eprintln!("skipped: {reason}");
             return;
         }
-        assert!(scratch.write("memory.max", &LIMIT.to_string()));
+        assert!(scratch.write(PUSHED_BY, &LIMIT.to_string()));
         counted.sample(0).expect("the counted run's opening read");
         collector.sample(0).expect("the baseline read");
-        let mut child = scratch.spawn_toucher(TOUCHED);
+        let mut child = scratch.spawn_throttled_toucher(TOUCHED, THROTTLED_FOR);
+        let finished = child.finished_touching();
 
         // The swap-out happens while the child faults; the counter is read
         // after it has finished touching, so the window contains all of it.
@@ -593,10 +627,24 @@ mod tests {
             .unwrap_or_default();
         child.stop();
 
-        let expected = TOUCHED.saturating_sub(LIMIT) as f64;
+        // What had to leave the cgroup: everything past the limit of what the
+        // child touched, which is all of it once the child finished, and
+        // otherwise what the process itself says it holds, resident or out.
+        let touched = if finished {
+            TOUCHED
+        } else {
+            let held = rollup_bytes(&rollup, "Rss:") + rollup_bytes(&rollup, "Swap:");
+            eprintln!(
+                "the child was still touching its {TOUCHED} bytes after {THROTTLED_FOR:?} over a \
+                 {LIMIT}-byte {PUSHED_BY}, throttled by reclaim; it had touched {held}, and that \
+                 is what is judged"
+            );
+            held.min(TOUCHED)
+        };
+        let expected = touched.saturating_sub(LIMIT) as f64;
         assert!(
             out_bytes >= 0.5 * expected,
-            "a cgroup limited to {LIMIT} bytes with {TOUCHED} touched inside it has to page out \
+            "a cgroup limited to {LIMIT} bytes with {touched} touched inside it has to page out \
              about {expected} bytes; this run counted {out_bytes}"
         );
         assert!(
@@ -770,7 +818,8 @@ mod tests {
     /// subset of the other: whatever the limited cgroup pushed out is part of
     /// what `/proc/vmstat` saw, and the rest of the machine can only add to it.
     /// A backend that read the wrong field, or scaled pages by the wrong
-    /// number, breaks this inequality immediately.
+    /// number, breaks this inequality immediately. The limit is
+    /// [`PUSHED_BY`], for the reason given there.
     #[test]
     fn the_machines_counter_sees_at_least_what_one_cgroup_did() {
         const LIMIT: u64 = 32 * 1024 * 1024;
@@ -804,10 +853,10 @@ mod tests {
             eprintln!("skipped: {reason}");
             return;
         }
-        assert!(scratch.write("memory.max", &LIMIT.to_string()));
+        assert!(scratch.write(PUSHED_BY, &LIMIT.to_string()));
         machine.sample(0).expect("vmstat reads");
         cgroup.sample(0).expect("memory.stat reads");
-        let mut child = scratch.spawn_toucher(TOUCHED);
+        let mut child = scratch.spawn_throttled_toucher(TOUCHED, THROTTLED_FOR);
         std::thread::sleep(Duration::from_millis(50));
         let by_cgroup = cgroup.sample(1).expect("a second read");
         let by_machine = machine.sample(1).expect("a second read");

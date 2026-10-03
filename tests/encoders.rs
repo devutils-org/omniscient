@@ -793,7 +793,22 @@ fn a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made() {
         program,
         &own_arg,
     ]);
-    assert!(output.status.success(), "{}", stderr(&output));
+    // Whether the program got as far as its allocation says which side ended
+    // a failed run: a program that never reported was cut short, or never
+    // ran, before its first `sleep` was over. The CI's one *"no event arrived
+    // in the window"* (run 37155975223, `stock`) came 49 ms into the test --
+    // the run ended at its first reads, which a `smaps_rollup` read straddling
+    // the program's `execve` does (`docs/flaky.md`, #27).
+    assert!(
+        output.status.success(),
+        "{}\n(the program {} its own sizes)",
+        stderr(&output),
+        if own.exists() {
+            "had reported"
+        } else {
+            "never reported"
+        }
+    );
     let document: serde_json::Value =
         serde_json::from_str(&stdout(&output)).expect("chrome's own JSON");
     check_trace(&document);

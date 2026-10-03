@@ -39,11 +39,11 @@ wave's, from `BRIEF.md`'s table. "nobody" means the file is not listed there.
 | 20 | `scenario_mem::every_mode_and_emit_of_the_sampled_sources_is_served_or_refused_by_the_right_code` | tests/scenario_mem.rs:3175 | c | D (test); R (`src/emit.rs`) | `emit::stack` calls `value_of` where it should call `measured`, so an untimed IBS load is `NotNumeric` (exit 1). Count it as `unmeasured` |
 | 21 | `scenario_mem::both_huge_page_backends_read_the_same_promotion_counter` | tests/scenario_mem.rs:1265 | c, **closed** | D | Closed in the sixteenth wave (stream mem): it failed alone with the same gap every round, a tool defect -- `fs:sys` counted PTE-mapped huge folios as whole; it now reads the PMD-mapped count where the kernel keeps it (`docs/scenarios/mem.md` D15) |
 | 22 | `scenario_mem::compaction_is_seen_where_the_kernel_says_it_happened_and_skipped_loudly_where_it_did_not` | tests/scenario_mem.rs:2703 | a, fixed | D | Already fixed (a kcompactd wake is no longer taken as compaction). Off the tally |
-| 23 | `collect::mem::wss::tests::a_process_that_holds_much_and_touches_little_reports_the_little` | src/collect/mem/wss.rs:321 | a | D | The walker counts its walks in the handshake page. Wait for two walks after the clear instead of sleeping 300 ms |
+| 23 | `collect::mem::wss::tests::a_process_that_holds_much_and_touches_little_reports_the_little` | src/collect/mem/wss.rs:321 | ~~a~~ c | D | Fixed twice: the walk count (twelfth wave), then, eighteenth wave, a working set larger than any TLB -- a clear does not flush the TLB, and 4 096 small pages read as half on the CI's cpu. See the eighteenth wave below |
 | 24 | `scenario_gpu::a_resident_kernel_separates_from_an_idle_device_on_occupancy_and_on_power` | tests/scenario_gpu.rs:938 | a | V | Re-check `device_to_ourselves()` after the busy run and skip with the numbers, or assert per-process NVML utilisation, not device-wide |
 | 25 | `cross_io::the_crossing_sessions_run_and_say_what_they_found` | tests/cross_io.rs:1493 | b | nobody | Replace `LEAD_IN` (1 s) with a readiness signal, and run the two sessions one after the other rather than side by side on one disk |
 | 26 | `join_engine::the_resident_size_decomposes_into_live_and_retained_with_the_residue_the_program_predicts` | tests/join_engine.rs:732 | d | nobody | Log the heap requests' `losses.dropped` and the last reading's time against `ARENA`. A shim drop, or a late last poll, would decide it |
-| 27 | `encoders::a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made` | tests/encoders.rs:695 | b | nobody | The workload prints its own `CLOCK_MONOTONIC` at the allocation, and the test splits the series there, not at 300 ms after the run began |
+| 27 | `encoders::a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made` | tests/encoders.rs:695 | b, then c | nobody | The 300 ms split was replaced by the series' largest rise. Its new failure (*"no event arrived in the window"*, CI) is a tool defect: an ESRCH from a `smaps_rollup` that straddled the program's `execve` ends the run. See the eighteenth wave below |
 
 **Count: (a) 13, (b) 8, (c) 4, (d) 2**, after the coordinator's measurement of #19. Of the 27, two are already fixed (#4 and
 #22), and #2's recorded half is fixed in the test, though the tool defect behind it
@@ -438,3 +438,47 @@ Two CI failures of the same stream's files that looked like this and were not:
 had its child OOM-killed under `memory.max` on the CI's `defaults` cell (now
 `memory.high`, which throttles rather than kills), and the counter-source sweep's
 ten `mem.faults` refusals were a tool defect (`docs/scenarios/mem.md`, D14).
+
+## The eighteenth wave: the CI's two, read to their cause
+
+Stream green, from the logs of run 37155975223 and measurements on this
+machine (Ryzen 9 3900X, 24 cpus, ten streams working).
+
+- **#23, `wss::a_process_that_holds_much_and_touches_little_reports_the_little`**
+  (`defaults`: *"touches 16777216 bytes every few milliseconds and the working
+  set reads 8351744"*). Not load: the TLB. Writing `1` to `clear_refs` clears
+  the referenced bits and flushes no translation, and a page whose translation
+  the TLB still holds is touched without a page-table walk, so its bit is never
+  set again. A child walking N small pages, three walks after each clear, read
+  back here: 64 pages as 2 % and 8 %, 512 as 103 to 132 %, 1 024 as 37 % and
+  99 %, 2 048, 4 096 and 16 384 in full. The runner's cpu kept about half of
+  4 096. The test's working set is now 128 MiB of small pages (32 768) inside
+  1 GiB held, beyond any TLB's reach; five runs green alone. Class (c) in the
+  sense that the source cannot see a working set the TLB holds -- which its
+  caveat now says for small pages too (`catalog/mem.yaml`, `mem.wss`).
+  `family_mem::the_working_set_is_what_was_touched_and_not_what_was_held`
+  walks the same 16 MiB, from a Python `bytearray` that THP `always` may put on
+  eight huge pages, and is filed with the mechanism
+  (`docs/fixes/w18-green.md`).
+- **#27, `encoders::a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made`**
+  (`stock`: *"a timeline was asked for and no event arrived in the window"*).
+  The test panicked 49 ms after its binary started (the log's timestamps), so
+  the run ended before the program's first `sleep(0.3)` could: `mem.rss`
+  stopped at its first reads. Shown here: a `smaps_rollup` opened before an
+  `execve` and read after it answers ESRCH from a process that is alive
+  (`wss::tests::a_rollup_opened_across_an_exec_answers_esrch_from_a_running_process`),
+  and `src/collect/mem/footprint.rs` reads any ESRCH as *"process exited"*,
+  which ends the run. The launched program is in `execve` exactly when the
+  window opens. Reasoned, not reproduced: 600 runs of the same request here
+  under 40-way parallelism never hit the window between the open and the read.
+  `wss.rs` now reads again where the process is still running; the same
+  change to `footprint.rs` is filed (`docs/fixes/w18-green.md`). The test is
+  unchanged: it is right to fail on that run.
+- **The two swap tests** (`defaults`: *"the child died before it finished
+  touching its memory ... oom 1 oom_kill 1"*) were not flaky and not a runner
+  without swap: the runner has a swap file with room (both passed the swap
+  checks, and the zero-page test passed under the same `memory.max`). A
+  written page has to reach the cloud disk before reclaim can free it, and
+  `memory.max` kills when reclaim falls behind. They now push with
+  `memory.high`, as `pressure.rs` already does after the same kill.
+

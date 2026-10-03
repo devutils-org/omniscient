@@ -397,10 +397,13 @@
   determinism: medium
   caveats:
     - "A working set the TLB holds is not seen. The referenced bit is set when
-       the cpu walks the page tables, and a clear does not evict what the TLB
+       the cpu walks the page tables, and a clear does not flush what the TLB
        already caches: sixteen mebibytes in eight huge pages, walked twice right
-       after a clear, read as 4 KiB. The same walk over small pages, which do
-       not fit, reads in full. Short windows over huge pages undercount."
+       after a clear, read as 4 KiB. Small pages are not exempt, only harder to
+       cache: 64 of them read as 2 % and 1 024 as 37 to 99 % on a Ryzen 9
+       3900X, and 4 096 in full there but as half on a cloud runner's cpu. The
+       undercount is of the hottest pages, and is largest for a small working
+       set over short windows."
     - "This measurement changes what it measures. Clearing the referenced bits
        is process-wide and visible to anything else reading them, and it is the
        kernel's own input to reclaim: for as long as it takes the process to

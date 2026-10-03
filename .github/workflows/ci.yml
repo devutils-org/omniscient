@@ -70,36 +70,68 @@ jobs:
           sudo apt-get install -yq --no-install-recommends \
             build-essential systemtap-sdt-dev python3 nodejs iproute2 util-linux jq \
             sqlite3 strace unzip
-          # bpftool, for `btf.rs`'s cross-check of a variable's type id against
-          # the running kernel's own numbering; Ubuntu ships it per kernel.
-          sudo apt-get install -yq --no-install-recommends "linux-tools-$(uname -r)" \
-            || echo "::warning::no linux-tools package for $(uname -r), so no bpftool"
-          # Ubuntu's /usr/sbin/bpftool is a wrapper that looks for the binary
-          # under the kernel's version without its flavour, and on the azure
-          # kernel it answers "WARNING: bpftool not found for kernel
-          # 6.17.0-1022" with the package installed (run 37f17c8, both
-          # cells). The binary the package did install goes first on PATH:
-          # the one built for this kernel's version, or else any the image
-          # carries -- dumping a BTF blob does not depend on which kernel the
-          # tool was built with. The step then dumps the running kernel's own
-          # BTF, which is what `btf.rs` asks of it, so a link that does not
-          # work is said here rather than as a skip in the suite.
-          found=$(find /usr/lib -name bpftool \( -type f -o -type l \) 2>/dev/null | sort)
-          real=$(printf '%s\n' "$found" | grep -F "$(uname -r | cut -d- -f1-2)" | head -n 1)
-          [ -n "$real" ] || real=$(printf '%s\n' "$found" | head -n 1)
-          if [ -n "$real" ]; then
-            echo "bpftool candidates: $(printf '%s ' $found)"
-            sudo ln -sf "$real" /usr/local/bin/bpftool
-            hash -r
-            bpftool version | head -n 1
-            if bpftool btf dump file /sys/kernel/btf/vmlinux format raw >/dev/null; then
-              echo "bpftool dumps /sys/kernel/btf/vmlinux"
-            else
-              echo "::warning::$real cannot dump /sys/kernel/btf/vmlinux"
-            fi
+
+      # bpftool, for `btf.rs`'s cross-check of a variable's type id against the
+      # running kernel's own numbering. Ubuntu's packages are not a source for
+      # it on this runner: `linux-tools-$(uname -r)` for the azure kernel
+      # installs no bpftool binary at all, and /usr/sbin/bpftool is a wrapper
+      # that answers "WARNING: bpftool not found for kernel 6.17.0-1022" (runs
+      # 37f17c8 and 37155975223, both cells). The source is upstream's own
+      # static build, pinned by version and checksum: one binary, no library
+      # it could miss, and dumping a BTF blob does not depend on the kernel
+      # it was built beside. Ubuntu's builds are tried after it, in case the
+      # download fails. Whichever answers `btf dump file` of this kernel's
+      # BTF -- what `btf.rs` asks of it -- goes first on PATH; when none
+      # does, the job stops here, rather than as a skip in the suite.
+      - name: bpftool
+        env:
+          BPFTOOL_VERSION: v7.7.0
+          BPFTOOL_SHA256: 09150596f09356b0ff632dd7f9856e0ea86bf96b269e9bc94278d9a9432a268c
+        run: |
+          vmlinux=/sys/kernel/btf/vmlinux
+          candidates=()
+          archive="$RUNNER_TEMP/bpftool.tar.gz"
+          if curl -fsSL --retry 3 -o "$archive" \
+              "https://github.com/libbpf/bpftool/releases/download/$BPFTOOL_VERSION/bpftool-$BPFTOOL_VERSION-amd64.tar.gz" \
+            && echo "$BPFTOOL_SHA256  $archive" | sha256sum -c -; then
+            mkdir -p "$RUNNER_TEMP/bpftool"
+            tar -xzf "$archive" -C "$RUNNER_TEMP/bpftool"
+            chmod +x "$RUNNER_TEMP/bpftool/bpftool"
+            candidates+=("$RUNNER_TEMP/bpftool/bpftool")
           else
-            echo "::warning::linux-tools-$(uname -r) installed no bpftool binary under /usr/lib"
+            echo "::warning::upstream bpftool $BPFTOOL_VERSION did not download or did not match its checksum"
+            sudo apt-get install -yq --no-install-recommends "linux-tools-$(uname -r)" linux-tools-generic \
+              || echo "::warning::Ubuntu's linux-tools did not install"
+            for path in /usr/lib/linux-tools/*/bpftool /usr/lib/linux-tools-*/bpftool; do
+              [ -x "$path" ] && candidates+=("$path")
+            done
           fi
+          chosen=
+          for candidate in "${candidates[@]}"; do
+            if said=$("$candidate" btf dump file "$vmlinux" format raw 2>&1 >/dev/null); then
+              chosen=$candidate
+              break
+            fi
+            echo "$candidate does not dump $vmlinux: $(printf '%s' "$said" | head -n 1)"
+          done
+          if [ -z "$chosen" ]; then
+            echo "::error::no bpftool here dumps $vmlinux (tried: ${candidates[*]:-none}); btf.rs's cross-check would skip"
+            exit 1
+          fi
+          sudo install -m 0755 "$chosen" /usr/local/bin/bpftool
+          hash -r
+          # Ahead of Ubuntu's wrapper in /usr/sbin, which is what the suite
+          # found before.
+          if [ "$(command -v bpftool)" != /usr/local/bin/bpftool ]; then
+            echo "::error::bpftool on PATH is $(command -v bpftool), not the one installed"
+            exit 1
+          fi
+          echo "bpftool on PATH: /usr/local/bin/bpftool, from $chosen"
+          bpftool version | head -n 1
+          # The line the cross-check reads, so a dump that holds no variable is
+          # said here too.
+          bpftool btf dump file "$vmlinux" | grep -m 1 -E "^\[[0-9]+\] VAR 'runqueues' " \
+            || { echo "::error::bpftool dumped $vmlinux with no VAR 'runqueues'"; exit 1; }
 
       # The cell is a stock kernel's defaults with no capabilities, which the
       # hosted image is not in three places, each set back here and printed by
@@ -119,26 +151,46 @@ jobs:
       # - the job runs in root's service cgroup, which delegates nothing. A
       #   systemd user session delegates its subtree to its user, which is
       #   where the cgroup scenarios make their cgroups on a workstation; the
-      #   step below makes the same shape by hand: `omn-ci`, owned by the
-      #   runner's user with the controllers enabled below it, and the job's
-      #   shell in its leaf `omn-ci/job` (a cgroup with processes cannot hand
-      #   controllers down, so the leaf holds them). GITHUB_ENV cannot move a
-      #   process, so every later step moves its own shell first -- with sudo,
-      #   because a move is checked against the cgroup both places share, and
-      #   that is the root.
+      #   step below makes the same shape by hand, two delegating levels deep
+      #   as a session is (`user@<uid>.service`, then `app.slice`, then the
+      #   scope that holds the shell): `omn-ci` and `omn-ci/app`, owned by the
+      #   runner's user with every controller the tests ask enabled below
+      #   each, and the job's shell in the leaf `omn-ci/app/job`. The leaf
+      #   itself cannot hand anything down -- a cgroup that holds processes
+      #   may not enable a controller below it -- so a test that makes a
+      #   cgroup walks up to the nearest ancestor that does. One level was not
+      #   enough: two tests of `tests/cross_machine.rs` make the same
+      #   `omn-cross-machine-<pid>.scope` at once, the second finds it taken
+      #   under `omn-ci` and, with no other delegating ancestor to fall back
+      #   to, skipped as *"no ancestor of /omn-ci/job delegates the memory
+      #   controller"* (run 37155975223), where a workstation's second level
+      #   answered it. That collision is filed with the test's owner.
+      #   GITHUB_ENV cannot move a process, so every later step moves its own
+      #   shell first -- with sudo, because a move is checked against the
+      #   cgroup both places share, and that is the root.
       - name: Configure the cell
         if: matrix.cell == 'defaults'
         run: |
           sudo sysctl -w kernel.perf_event_paranoid=2
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          sudo mkdir -p /sys/fs/cgroup/omn-ci/job
-          for controller in cpu memory io pids; do
-            echo "+$controller" | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null || true
-            echo "+$controller" | sudo tee /sys/fs/cgroup/omn-ci/cgroup.subtree_control >/dev/null || true
+          sudo mkdir -p /sys/fs/cgroup/omn-ci/app/job
+          for level in /sys/fs/cgroup /sys/fs/cgroup/omn-ci /sys/fs/cgroup/omn-ci/app; do
+            for controller in cpu memory io pids; do
+              echo "+$controller" | sudo tee "$level/cgroup.subtree_control" >/dev/null || true
+            done
           done
-          echo "omn-ci delegates: $(cat /sys/fs/cgroup/omn-ci/cgroup.subtree_control)"
+          for level in omn-ci omn-ci/app; do
+            delegated=$(cat "/sys/fs/cgroup/$level/cgroup.subtree_control")
+            echo "$level delegates: $delegated"
+            for controller in cpu memory io pids; do
+              case " $delegated " in
+                *" $controller "*) ;;
+                *) echo "::error::$level does not hand the $controller controller down"; exit 1 ;;
+              esac
+            done
+          done
           sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/omn-ci
-          echo "OMN_CI_CGROUP=/sys/fs/cgroup/omn-ci/job/cgroup.procs" >> "$GITHUB_ENV"
+          echo "OMN_CI_CGROUP=/sys/fs/cgroup/omn-ci/app/job/cgroup.procs" >> "$GITHUB_ENV"
 
       - name: fmt
         run: cargo fmt --check
