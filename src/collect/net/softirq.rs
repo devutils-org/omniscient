@@ -513,9 +513,10 @@ impl Collector for SoftIrqCollector {
         if self.handlers > 0 {
             facts.push(format!(
                 "{} softirq handler runs were drained as {} rows of a kernel-side log2 \
-                 histogram, each carrying the runs it stands for; a bucket is a factor of two \
-                 wide, so every number derived from `duration_ns` is bucketed and `total_ns` is \
-                 the exact sum",
+                 histogram, each carrying the runs it stands for; \
+                 `duration_ns` is its bucket's low bound, a factor of two below the next: the buckets \
+                 and `min` are bucketed and `max` is a lower bound, while the sum, mean, rate, \
+                 topk and stack totals come from `total_ns`, the exact sum",
                 self.handlers, self.rows,
             ));
         }

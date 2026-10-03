@@ -181,7 +181,8 @@ and every difference is a requirement the catalog wrote, answered by name:
 
 | Source | Below | Why the listing changed |
 |---|---|---|
-| `sched.runqlat`, `sched.offcpu`, `sched.switches`, `sched.lock` | 6.1 | `kernel>=6.1: missing: kernel 5.15 is older than 6.1` -- the floor, refused by name as `DECISIONS.md` says |
+| `sched.runqlat`, `sched.offcpu`, `sched.lock` | 6.1 | `kernel>=6.1: missing: kernel 5.15 is older than 6.1` -- the floor, refused by name as `DECISIONS.md` says |
+| `sched.switches` | 6.1 | its `bpf:raw_tp` backend only: `kernel>=6.1` is that backend's requirement, not the source's. `pmu:sw` and the `bpf:tp` count program below it name no kernel, and the sixteenth wave's sweep found the source usable on 5.15 through `pmu:sw` ("The sixteenth wave's sweep", below). Listed here as refused at first, which read a backend's refusal as the source's |
 | `io.pagecache` | 7.2 | `raw_tracepoint:mm_filemap_get_pages: missing: this kernel defines no mm_filemap_get_pages tracepoint; it is absent from its own BTF` |
 | `io.readahead` | 7.2 | the same tracepoint, and it takes its `bpf:fentry` backend instead |
 | `mem.thp` | 6.8 | `kernel>=6.8` on `fs:sys`; `fs:proc` answers |

@@ -480,8 +480,10 @@ impl Collector for StallCollector {
         if self.episodes > 0 {
             notes.push(format!(
                 "{} episodes are reported as {} rows of a kernel-side log2 histogram, each \
-                 carrying the episodes it stands for; a bucket is a factor of two wide, so every \
-                 number derived from `stall_ns` is bucketed and `total_ns` is the exact sum",
+                 carrying the episodes it stands for; \
+                 `stall_ns` is its bucket's low bound, a factor of two below the next: the buckets \
+                 and `min` are bucketed and `max` is a lower bound, while the sum, mean, rate, \
+                 topk and stack totals come from `total_ns`, the exact sum",
                 self.episodes, self.rows,
             ));
         }

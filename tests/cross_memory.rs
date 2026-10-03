@@ -124,18 +124,55 @@ fn has_python() -> bool {
 /// A missing shim is not one of the reasons. It is a build that was not run
 /// through `make`, and letting it skip would mean the heap half of the crossing
 /// measures nothing on exactly the machine where it matters.
+///
+/// And a run that exited 0 was served: the machine's limit is looked for in a
+/// refusal, never in the caveats of a run that worked. `mem.faults` names
+/// `perf_event_paranoid` in its caveat on every run, so at paranoid 2 -- where
+/// it is served, in user mode only -- reading the caveat as a refusal skipped
+/// a run that had answered (*"this machine withholds a source it needs:
+/// caveat: ..."*). The tests branch on the run's own note instead
+/// ([`faults_in_user_mode_only`]).
 fn withheld(output: &Output) -> Option<String> {
     let message = stderr(output);
     assert!(
         !message.contains("shim was not found"),
         "the heap sources need the preload shim: build with `make`, not `cargo build`\n{message}"
     );
+    if output.status.success() {
+        return None;
+    }
+    // From the line that starts `error:`: the launch's warnings and the
+    // sources' caveats come first on stderr, and a caveat that names the
+    // sysctl is not the reason the run was refused. A failure with no such
+    // line -- a panic, an assert, a signal -- is not a refusal at all, so it
+    // is never a skip: the caller's assert reports it.
+    let (at, _) = message
+        .match_indices("error:")
+        .find(|(at, _)| *at == 0 || message[..*at].ends_with('\n'))?;
+    let refusal = &message[at..];
     let says = |line: &str| {
         line.contains("perf_event_paranoid")
             || line.contains("not readable")
             || line.contains("no such file")
     };
-    says(&message).then(|| skip_reason(&message, says))
+    says(refusal).then(|| skip_reason(refusal, says))
+}
+
+/// Whether the run says it took page faults in user mode only: the
+/// `perf_event_paranoid` 2 path, where a fault the kernel takes on the
+/// program's behalf -- a `read()` into a fresh buffer -- is not in the
+/// samples. The sampled path's note and the counted path's, as
+/// `scenario_mem` reads them.
+fn faults_in_user_mode_only(result: &serde_json::Value) -> bool {
+    result["notes"].as_array().is_some_and(|notes| {
+        notes
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|note| {
+                note.contains("page faults in user mode only")
+                    || note.contains("would only open `mem.faults` for user mode")
+            })
+    })
 }
 
 /// A refusal laid out for a skip line: the line that says why first, so it
@@ -176,6 +213,49 @@ fn measured(name: &str) -> Option<Output> {
         stderr(&output)
     );
     Some(output)
+}
+
+/// A run that was served is never a skip, whatever its caveats name; a
+/// refusal is, from its `error:` line. The served stderr is the shape
+/// `mem.faults` writes at perf_event_paranoid 2, where it answers in user mode
+/// only.
+#[test]
+fn a_served_run_is_not_withheld_by_its_caveat() {
+    use std::os::unix::process::ExitStatusExt;
+    let output = |code: i32, stderr: &str| Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: Vec::new(),
+        stderr: stderr.as_bytes().to_vec(),
+    };
+    let served = output(
+        0,
+        "caveat: mem.faults: at perf_event_paranoid 2 page faults are sampled in user mode only\n",
+    );
+    assert_eq!(withheld(&served), None);
+
+    let refused = output(
+        1,
+        "caveat: mem.faults names perf_event_paranoid\n\
+         error: `mem.faults` has no viable backend: perf_event_paranoid is 4\n",
+    );
+    let reason = withheld(&refused).expect("a refusal for the machine's limit");
+    assert!(
+        reason.starts_with("error: `mem.faults` has no viable backend"),
+        "the skip line starts at the refusal, not at the caveat: {reason}"
+    );
+
+    // A crash prints no `error:` line; the caveat above it is not a reason.
+    let crashed = output(
+        101,
+        "caveat: mem.faults names perf_event_paranoid
+         thread 'main' panicked at src/emit.rs:1:1:\nattempt to add with overflow\n",
+    );
+    assert_eq!(withheld(&crashed), None, "a crash is not the machine's");
+    let killed = Output {
+        status: std::process::ExitStatus::from_raw(9),
+        ..output(0, "caveat: mem.faults names perf_event_paranoid\n")
+    };
+    assert_eq!(withheld(&killed), None, "a signal is not the machine's");
 }
 
 /// The layout the CI's skip gate reads (`docs/open-findings.md`, the
@@ -366,6 +446,14 @@ fn every_large_allocation_is_found_with_its_fate_and_the_faults_the_kernel_count
     );
 
     let faults_lost = lossy(result(&run, "faults"));
+    // At perf_event_paranoid 2 the faults are sampled in user mode only. What
+    // the user-mode half can hold is all of this test: every byte of a large
+    // block is written by `memset` in the program's own code, so every fault
+    // inside a range is one its user mode took, and the kernel's count across
+    // the write bounds the join from both sides as it does on a full run. A
+    // fault the kernel took on the program's behalf could only fall outside
+    // the ranges, where nothing here counts it.
+    let user_mode_only = faults_in_user_mode_only(result(&run, "faults"));
     let ranges = join["top"].as_array().expect("attributions");
     let mut table = Vec::new();
     for block in &program {
@@ -432,7 +520,15 @@ fn every_large_allocation_is_found_with_its_fate_and_the_faults_the_kernel_count
              the join is a lower bound and only its upper bound was held: {losses}"
         );
     }
-    eprintln!("the eight large ranges, evidence KEY\n{}", table.join("\n"));
+    eprintln!(
+        "the eight large ranges, evidence KEY{}\n{}",
+        if user_mode_only {
+            ", faults sampled in user mode only (perf_event_paranoid 2)"
+        } else {
+            ""
+        },
+        table.join("\n")
+    );
 }
 
 /// The resident size moves by the bytes the program wrote, in the interval the

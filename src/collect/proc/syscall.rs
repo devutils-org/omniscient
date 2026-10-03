@@ -552,8 +552,10 @@ impl Collector for SyscallCollector {
             // measurement and this one does not.
             notes.push(format!(
                 "{} calls are reported as {} rows of a kernel-side log2 histogram, each carrying \
-                 the calls it stands for; a bucket is a factor of two wide, so every number \
-                 derived from `lat_ns` is bucketed and `total_ns` is the exact sum",
+                 the calls it stands for; \
+                 `lat_ns` is its bucket's low bound, a factor of two below the next: the buckets \
+                 and `min` are bucketed and `max` is a lower bound, while the sum, mean, rate, \
+                 topk and stack totals come from `total_ns`, the exact sum",
                 self.calls, self.rows,
             ));
         }

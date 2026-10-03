@@ -59,6 +59,7 @@ share/doc/omn/README.md
 share/doc/omn/install.md
 share/doc/omn/LICENSE-MIT
 share/doc/omn/LICENSE-APACHE
+share/doc/omn/LICENSES/GPL-2.0-only.txt
 EOF
 }
 
@@ -73,6 +74,7 @@ source_of() {
         share/doc/omn/install.md) echo docs/install.md ;;
         share/doc/omn/LICENSE-MIT) echo LICENSE-MIT ;;
         share/doc/omn/LICENSE-APACHE) echo LICENSE-APACHE ;;
+        share/doc/omn/LICENSES/GPL-2.0-only.txt) echo LICENSES/GPL-2.0-only.txt ;;
         *) echo "release.sh: no source for $1" >&2; return 1 ;;
     esac
 }
