@@ -1853,6 +1853,12 @@ fn the_unwind_modes_are_read_from_the_catalog_directory_they_sit_in() {
 /// runs, rather than "this machine cannot serve it", which sent a reader after
 /// privileges no machine would have made enough. The pairs are read from the
 /// catalog's own declarations, backend by backend.
+///
+/// The validator refuses the pair before resolution (`check_pair`), and the
+/// resolver's `NoBackendDeclares` stays behind it for a chain the validator
+/// let through. Either is the same refusal, the request's, and both say "no
+/// backend of its chain declares": whichever answers is asserted, never
+/// skipped on, since no machine could make it go away.
 #[test]
 fn a_target_and_mode_no_backend_declares_together_is_refused_as_the_request_s() {
     use omn::catalog::TargetSupport;
@@ -1875,9 +1881,13 @@ fn a_target_and_mode_no_backend_declares_together_is_refused_as_the_request_s() 
             }
         }
     }
+    // The catalog, not the machine, decides whether such a pair exists: an
+    // empty list is this test losing its subject, which a skip would hide.
     let Some((source, kind, mode, emit)) = pairs.first() else {
-        eprintln!("skipped: every pair an entry declares has a backend that serves it");
-        return;
+        panic!(
+            "every pair an entry declares now has a backend that serves it: \
+             this test has no request left to refuse, replace or remove it"
+        );
     };
     let mode = match mode.as_str() {
         "poll" => "poll@50ms".to_owned(),
@@ -1897,21 +1907,24 @@ fn a_target_and_mode_no_backend_declares_together_is_refused_as_the_request_s() 
     args.extend(["-m", &mode, "-e", emit, "-d", "100ms", "--dump-resolved"]);
     let output = run(&args);
     let message = stderr(&output);
-    // A validator's refusal of the emit or the shape is exit 2 as well, and
-    // says something else: only this refusal is under test.
-    if !message.contains("no backend of its chain declares the two together") {
-        assert_ne!(
-            output.status.code(),
-            Some(EXIT_UNAVAILABLE),
-            "`{}`: a pair no backend declares was answered as the machine's: {message}",
-            args.join(" ")
-        );
-        eprintln!(
-            "skipped: the validator refused `{}` first: {message}",
-            args.join(" ")
-        );
-        return;
-    }
-    assert_eq!(output.status.code(), Some(EXIT_REJECTED), "{message}");
+    assert_ne!(
+        output.status.code(),
+        Some(EXIT_UNAVAILABLE),
+        "`{}`: a pair no backend declares was answered as the machine's: {message}",
+        args.join(" ")
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_REJECTED),
+        "`{}`: {message}",
+        args.join(" ")
+    );
+    // A refusal of the emit or the shape is exit 2 as well, and says
+    // something else: only the pair's refusal is under test.
+    assert!(
+        message.contains("no backend of its chain declares"),
+        "`{}` was refused, but not for its pair: {message}",
+        args.join(" ")
+    );
     assert!(stdout(&output).is_empty(), "{}", stdout(&output));
 }
