@@ -698,7 +698,11 @@ impl Collector for BlockCollector {
             });
         }
 
-        self.program = None;
+        // Detached, not dropped: the run reads what the programs spent from
+        // their descriptors after every collector has stopped.
+        if let Some(program) = self.program.as_mut() {
+            program.detach();
+        }
         trailing
     }
 
