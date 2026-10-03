@@ -5802,13 +5802,17 @@ fn latency_by_request(result: &serde_json::Value) -> BTreeMap<(u64, u64), u64> {
 /// program statistics (`kernel.bpf_stats_enabled=1`, machine wide, granted),
 /// each program's own run time per run is read from the tool's descriptors
 /// while it runs -- the part of the cost that is the programs, apart from the
-/// tracepoints' dispatch and the cache.
+/// tracepoints' dispatch and the cache. Keeping them costs two clock reads
+/// per run, so the percentage is read from a run without them and the run
+/// times from a second run with them.
 ///
 /// ```console
 /// sudo modprobe null_blk queue_mode=2 irqmode=0 completion_nsec=0 nr_devices=1 \
 ///     gb=4 bs=4096 hw_queue_depth=256 submit_queues=8
 /// sudo chmod a+r /dev/nullb0
-/// sudo sysctl kernel.bpf_stats_enabled=1   # optional: the programs' own time
+/// cargo test --test scenario_io -- --ignored --exact \
+///     the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent --nocapture
+/// sudo sysctl kernel.bpf_stats_enabled=1   # then again, for the programs' own time
 /// cargo test --test scenario_io -- --ignored --exact \
 ///     the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent --nocapture
 /// sudo sysctl kernel.bpf_stats_enabled=0

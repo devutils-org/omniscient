@@ -1249,7 +1249,9 @@ stream could not make. The test now prints the per-request cost beside the
 percentage and, under `kernel.bpf_stats_enabled=1`, each program's own run
 time per run, read from the tool's descriptors while it runs -- which splits
 what is left between the programs and what any pair of programs costs (the
-tracepoints' dispatch, the cache misses on the request).
+tracepoints' dispatch, the cache misses on the request). Keeping those
+statistics costs two clock reads per run, so the percentage is the run made
+without them.
 
 **Whether 1 % is the right criterion** (reasoned, not measured). 25 ns per
 request has to pay for two raw-tracepoint dispatches (`__bpf_trace_run`: a
