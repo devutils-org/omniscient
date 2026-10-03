@@ -42,14 +42,16 @@ fetch: []
 # directory of 30 000 empty files whose names need escaping, and a 16 MiB
 # file. In `{cache}`, on a disk rather than in memory, a 256 MiB file of
 # random bytes, written once and kept: a page cache can only be cold for a
-# file a disk holds.
+# file a disk holds. It is written back (fsync) before the run, so its pages
+# are clean and the client's drop can take them all.
 setup:
   - [python3, -c, 'import os; os.makedirs("{dir}/www/big", exist_ok=True);
       [open(f"{dir}/www/big/entry-{i:05d}-<&>.txt", "w").close() for i in range(30000)];
       open("{dir}/www/payload.bin", "wb").write(os.urandom(16 << 20))']
   - [python3, -c, 'import os; path = "{cache}/www/cold.bin"; os.makedirs("{cache}/www", exist_ok=True);
       ok = os.path.exists(path) and os.path.getsize(path) == 256 << 20;
-      ok or [open(path, "wb").write(b"".join(os.urandom(1 << 20) for _ in range(256)))]']
+      ok or [open(path, "wb").write(b"".join(os.urandom(1 << 20) for _ in range(256)))];
+      fd = os.open(path, os.O_RDONLY); os.fsync(fd); os.close(fd)']
 
 causes:
   # ------------------------------------------------------------------ on cpu
@@ -100,8 +102,11 @@ causes:
         One request for the 16 MiB file from a client that reads 256 KiB at a
         time with a receive buffer of that size and sleeps 20 ms between
         reads: once the socket's buffers are full the server's writes wait
-        for the client, about 1.3 s in all. The tool never touches either.
-      run: [python3, '{case}/client.py', '{dir}/www', /payload.bin, '1', --pace, '262144', '20']
+        for the client, about 1.3 s in all. The client connects 1 s after
+        the server listens, so the server's main thread has waited a second
+        longer than the serving thread has lived. The tool never touches
+        either.
+      run: [python3, '{case}/client.py', '{dir}/www', /payload.bin, '1', --pace, '262144', '20', --idle, '1000']
       ready: ready
     target: [python3, -m, http.server, -p, HTTP/1.1, --bind, 127.0.0.1, --directory, '{dir}/www', '0']
     reference:
@@ -121,9 +126,17 @@ causes:
       agrees:
         - row: blocked
           # The serving thread's time neither on a cpu nor runnable, from its
-          # schedstat against the client's clock.
+          # schedstat against the client's clock. Not `outside:
+          # client.latency_ns`: that would credit the server's whole life
+          # outside the request, the second the client idled included, and
+          # the main thread's `select` would agree as well as the serving
+          # thread's send. The serving thread lives only for the connection;
+          # what it spends blocked outside the request is the client's
+          # reading of /proc after the last response, a few milliseconds,
+          # and 50 ms covers it on a loaded machine. The main thread's row
+          # is a second longer.
           with: client.handler_off_ns
-          outside: client.latency_ns
+          slack_ns: 50000000
           plus: client.poll_ns
 
   - name: a-cold-file
@@ -139,10 +152,12 @@ causes:
         the client dropped the file from the page cache
         (`posix_fadvise(POSIX_FADV_DONTNEED)` on its own descriptor) and
         counted with mincore(2) that none of it was left: every request
-        reads the file from the disk. On storage faster than the server can
-        copy, the disk is not the request's time, and the cause is not there
-        to be found (`holds`).
-      run: [python3, '{case}/client.py', '{cache}/www', /cold.bin, '5', --cold, '{cache}/www/cold.bin']
+        reads the file from the disk. The client connects 1 s after the
+        server listens, as for the slow client. On storage faster than the
+        server can copy, the disk is not the request's time, and the cause
+        is not there to be found (`holds`): it skips with the line
+        `.github/expected-skips.txt` names.
+      run: [python3, '{case}/client.py', '{cache}/www', /cold.bin, '5', --cold, '{cache}/www/cold.bin', --idle, '1000']
       ready: ready
     target: [python3, -m, http.server, -p, HTTP/1.1, --bind, 127.0.0.1, --directory, '{cache}/www', '0']
     reference:
@@ -151,15 +166,19 @@ causes:
         from: injection
     holds:
       - {value: client.resident, at_most: 0, why: no page of the file was left in the cache before a request}
-      - {value: client.handler_off_share, at_least: 0.5, why: "the serving thread spent most of the requests off the cpu: the disk's time, not the copy's"}
+      # The wording of this `why` is matched by `.github/expected-skips.txt`:
+      # change both together.
+      - {value: client.handler_off_share, at_least: 0.5, why: "the storage was slower than the server's copy: the serving thread spent most of the requests off the cpu, the disk's time"}
     expect:
       limit: disk
       state: blocked
       never_says: [select.cpython]
       agrees:
         - row: blocked
+          # As for the slow client: the serving thread's life, not the
+          # server's.
           with: client.handler_off_ns
-          outside: client.latency_ns
+          slack_ns: 50000000
           plus: client.poll_ns
 
 # Checks this case shows failing, each filed against the file that owns what
@@ -172,12 +191,17 @@ open_findings:
       life": `main_task` in src/triage/latency.rs decomposes the launched
       program's main thread, which waits in `select` for connections, while
       the 4.2 s of the listing are on the thread serving the connection; the
-      verdict says `sleep` for a request that was 99 % on a cpu
+      verdict says `sleep` for a request that was 99 % on a cpu. The slow
+      client's and the cold file's `blocked` pass this check by accident:
+      the accept loop is blocked too, which only the agreement below and
+      `never_says` tell apart
   - check: every-cited-number-agrees-with-the-reference
     filed: >-
       docs/fixes/w17-python.md, "a server's request is not its main thread's
       life": the on-cpu row is the main thread's 70 ms, against the serving
-      thread's 4.2 s by its own schedstat
+      thread's 4.2 s by its own schedstat; the slow client's blocked row is
+      the main thread's `select`, a second (the client's idle) longer than
+      the serving thread's wait
   - check: the-sentence-claims-nothing-false
     filed: >-
       docs/fixes/w17-python.md, "a server's request is not its main thread's

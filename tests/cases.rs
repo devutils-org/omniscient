@@ -955,6 +955,11 @@ struct Naming {
     cli_flag: bool,
     /// Why names from debuginfod were not asked for here, if they were not.
     unavailable: Option<String>,
+    /// Whether the case asks for more than the file's own names. Under
+    /// `symbols: local` the file's own names (its symbols, a perf map) are
+    /// all there will be, so a frame absent from a stack is absent, not
+    /// unnamed.
+    beyond_local: bool,
 }
 
 fn check_answer(
@@ -1009,8 +1014,13 @@ fn check_answer(
             .any(|f| f.starts_with(through.as_str()))
         {
             Outcome::Pass
-        } else if let (Some(why), true) = (&naming.unavailable, named < answer.frames.len()) {
-            // A frame no name reaches is not a frame that is missing.
+        } else if let (Some(why), true, true) = (
+            &naming.unavailable,
+            naming.beyond_local,
+            named < answer.frames.len(),
+        ) {
+            // A frame no name reaches is not a frame that is missing, where
+            // names could have been had and were not.
             Outcome::Unchecked(format!(
                 "{why}; {named} of {} frames named: {}",
                 answer.frames.len(),
@@ -1706,6 +1716,7 @@ fn run_case(case_dir: &Path, case: &Case, report: &mut Report) {
         None => Some("the case asks for the file's own names only".to_owned()),
     };
     let naming = Naming {
+        beyond_local: wants.is_some(),
         symbols: if unavailable.is_none() { wants } else { None },
         cli_flag: help.contains("--symbols"),
         unavailable,

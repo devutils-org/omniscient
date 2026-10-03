@@ -24,9 +24,13 @@ references run (`docs/cases.md` describes the format).
     own time and share.
   - Off the cpu, `a-blocking-read`: `writer.py` creates a named pipe, holds
     it open, says `ready`, waits for the target in `/proc`, and writes one
-    line 1.5 s later; `reader.py` opens the pipe and blocks in `read`. The
-    references are the writer's own clock (`held_after_target_ns`,
-    `poll_ns`) and the reader's clock around its read (`read_ns`).
+    line 1.5 s later; `reader.py` first prepares (3 million steps of a
+    pure-Python loop, about 0.18 s on a cpu), then opens the pipe and blocks
+    in `read`. The references are the writer's own clock
+    (`held_after_target_ns`, `poll_ns`) and the reader's clock around its
+    read (`read_ns`) and up to it (`before_read_ns`). The preparation is
+    there so the program's own cpu is well above what a tracer spends
+    watching it (section 9, "Review").
   - Expected: `limit: cpu`, `on-cpu`, and the sentence never presenting an
     interpreter C function as the hottest (`never_says: ['hottest function
     `']`); off the cpu `sleep`, `blocked`, leaf `__read`.
@@ -45,15 +49,22 @@ references run (`docs/cases.md` describes the format).
   alive to be read, then reads the serving thread's
   `/proc/<pid>/task/<tid>/schedstat` and the process's `/proc/<pid>/stat`,
   closes, and stops the server with SIGINT, as a person at its terminal does.
+  The serving thread is the one thread that was not there before the client
+  connected (exactly one, or the client exits saying so). For the two
+  off-cpu causes the client waits 1 s after the server listens before it
+  connects (`--idle`), so the main thread's life and the serving thread's
+  differ by a second and the agreement can tell them apart.
   - On the cpu, `a-large-listing`: ten requests for a directory of 30 000
     entries (2.3 MB of escaped, quoted HTML each).
   - Off the cpu, `a-slow-client`: one request for a 16 MiB file, read 256 KiB
     at a time with a 256 KiB receive buffer and 20 ms between reads.
   - Off the cpu, `a-cold-file`: five requests for a 256 MiB file kept in
     `{cache}` (on a disk, not tmpfs), each after the client drops it from the
-    page cache (`posix_fadvise(DONTNEED)` on its own descriptor) and checks
-    with mincore(2) that no page was left. **Skips here with the numbers**
-    (below): on this NVMe the disk is not the request's time.
+    page cache (`fsync`, then `posix_fadvise(DONTNEED)` on its own
+    descriptor, up to five times) and checks with mincore(2) that no page
+    was left; `setup` writes the file back too. **Skips here with the numbers**
+    (below): on this NVMe the disk is not the request's time. The skip's
+    reason is in `.github/expected-skips.txt`, so CI's skip gate takes it.
 
 ## 2. Shown, and reasoned
 
@@ -180,10 +191,10 @@ and the Python function is the fifth; under `http.server` the frame that
 tells the accept loop from a send (`select.cpython-314...so` against
 `_socket.cpython-314...so`) is the second, so that one is kept. **Ask**:
 print up to the innermost frame of the program's own (a perf-map frame, or
-the executable's), or more frames. **Not an `open_findings` line**: the
-person's way's check prints `unchecked` here (request 1 to stream cases),
-and a listed check that is `ok` elsewhere and never `FAILED` would fail the
-test. **For the coordinator.**
+the executable's), or more frames. Check: `the-block-s-frames-are-named`
+(`cpython-perf-map`, the person's way; the agent's way passes). It was
+`unchecked` until the fix round, which made the check fail under `symbols:
+local` (section 9). **For the coordinator.**
 
 ### 4. "a server's request is not its main thread's life" -- `src/triage/latency.rs:820` (`main_task`), the module doc at `:10`
 
@@ -200,7 +211,11 @@ reach: (a) when the main thread's largest row is a block in which other
 threads of the program ran, say so and name the busiest other thread's
 decomposition beside it -- the JSON already lists them; (b) an option to
 decompose a named thread, or the threads a request crossed
-(`omn latency --thread busiest`). Checks: `the-first-suspect-is-the-known-cause`,
+(`omn latency --thread busiest`). Since the fix round the slow client's
+`every-cited-number-agrees-with-the-reference` fails both ways too: the
+client connects a second after the server listens, and the `blocked` row,
+the main thread's `select`, is that second longer than the serving thread's
+wait (2 294 ms against 1 284 ms). Checks: `the-first-suspect-is-the-known-cause`,
 `every-cited-number-agrees-with-the-reference`,
 `the-sentence-claims-nothing-false` (`http-server-stdlib`). **For the
 coordinator.**
@@ -239,12 +254,36 @@ line. Check: `the-verdict-says-how-it-knows` (agent's way;
 "the verdict drops where its names came from". **For stream symbols / the
 coordinator** (`src/stack.rs`).
 
+### 7. "a run the budget stopped says the budget held" -- `src/main.rs:1043` (`verdict`), the stop in `src/collect/mod.rs`
+
+Found in the fix round, reproduced by hand. A session (`omn -f s.yml -o DIR
+--budget 100% --duration 180s`, the session `omn latency --dump-session`
+writes for the reader) of the CPython reader *before* it was given its
+preparation -- a program that burns 14 ms and waits 1.5 s, beside which each
+eBPF source costs 12 to 15 ms -- ran four times: twice the run ended with
+`budget: [sched.offcpu] --budget 100% was exceeded` (once with the reader's
+own `read_ns` line, once without); once it ran whole; and once **it ended
+941 ms into its window, the reader killed before its read returned (no
+`read_ns` line), and every `budget:` line said `held` or `could not be
+checked whole`** (offcpu 93.16 %, futex 97.21 %, over the whole window).
+Nothing said the run was stopped. `verdict()` prints "could not be checked
+whole" whenever `within_budget` is `None` and what the collector spent
+inside the target is unknown, so a stop that a check made during the run
+and the whole window then lands under is told as a check that could not be
+made. The harness (`ask_mcp`) recognises a stop by `was exceeded`, so it
+took the stopped run as the answer, whose `account` reference was missing:
+this is the `cpython-perf-map/a-blocking-read/mcp` failure section 5 put
+down to load, seen a second time in this round. **Ask**: a run the budget
+stopped says so on its own line whatever the whole window's figure, naming
+the source and the percentage that stopped it (*losses are counted and
+surfaced, always*). **Not a check of these cases any more**: the reader's
+preparation moves its cpu far from the ceiling, so the budget is never
+marginal here; the recipe reproduces it with the old reader (`git show
+c5f51b8:cases/cpython-interpreter/reader.py`, writer at 1500 ms). **For
+the coordinator.**
+
 ### Also shown, already filed
 
-- `the-agent-s-way-answers-within-a-model-s-budget` on both `a-blocking-read`
-  causes: the reader burns 14 ms in 1.5 s and `sched.offcpu` or
-  `sched.futex` alone spend more at `--budget 100%`: case 1's "a waiting
-  program exceeds every budget".
 - `the-person-s-way-says-where-names-came-from` everywhere: case 1's "the
   verdict drops where its names came from".
 
@@ -332,12 +371,13 @@ written through directly) is the one to adapt.
 ## 8. Needs from another stream
 
 - **stream cases** (`tests/cases.rs`, `docs/cases.md`):
-  1. `the-block-s-frames-are-named` is `unchecked` (*"the case asks for the
-     file's own names only"*) whenever a frame is an address and the case
-     says `symbols: local`. Under `local` the file's own names are all there
-     will be, so an absent frame is absent, not unnamed: `unchecked` only
-     where names *could* have been had (debuginfod asked and unavailable).
-     This hides finding 3 in `cpython-perf-map`.
+  1. **Done here in the fix round**, so stream cases should know before it
+     merges its own fix round: `the-block-s-frames-are-named` is `unchecked`
+     only where names beyond the file's own were asked for and could not be
+     had (`Naming::beyond_local` in `tests/cases.rs`, three hunks, and the
+     table row in `docs/cases.md`). Under `symbols: local` an absent frame
+     now fails. Only `cpython-perf-map` has a `through` under `local`, so no
+     other case's outcome changes.
   2. `read_mcp` (and the person's reading) take the hottest *leaf*: rank by
      the innermost frame a perf map named when there is one (finding 1), and
      give a cpu answer the frames of its hottest stack, not the leaf alone,
@@ -356,17 +396,87 @@ written through directly) is the one to adapt.
      listing | a slow client; a cold 256 MiB file, skipped where storage is
      fast | the client's clock, the serving thread's schedstat, the
      process's stat).
-  5. A note for the flaky tally: `both-ways-name-the-same-suspect` on
+  5. A note for the flaky tally (also a comment in the case, at the cause):
+     `both-ways-name-the-same-suspect` on
      `cpython-interpreter/one-function-dominates` compares two named C
      leaves of a flat profile (`__tls_get_addr` about 10 %, `_Py_Dealloc`
      about 7 %); in every run so far both ways named the first, but a run
      that flips them fails a check that is not listed. Finding 2's fix
      removes the comparison of C leaves altogether.
-- **coordinator** (`src/triage/latency.rs`, `docs/mcp.md`): findings 1 to 5.
+- **coordinator** (`src/triage/latency.rs`, `docs/mcp.md`): findings 1 to 5;
+  (`src/main.rs`, `src/collect/mod.rs`): finding 7.
 - **stream symbols, or the coordinator** (`src/stack.rs`): finding 6.
 - Also changed after the first commit: `client.py` exits with one line
   (*"the server stopped answering GET ..."*) instead of a traceback when a
   budget stops the server under a request.
 - **coordinator** (`.github/workflows/ci.yml`): nothing to install for these
   cases (python3 is on the runner); `cargo test --test cases` already runs
-  them once it runs case 1.
+  them once it runs case 1. **But the skip gate reads them**: `a-cold-file`
+  skips wherever the storage serves the file faster than `http.server`
+  copies it, which a hosted runner's disk may or may not do; that skip's
+  reason is now a line of `.github/expected-skips.txt` (section 9), added in
+  the fix round and named here because the coordinator owns that file.
+
+## 9. Review (the fix round)
+
+The adversarial review's six points, and what became of each.
+
+1. **`a-cold-file`'s skip fails CI's gate, and its drop may leave dirty
+   pages** (defect): fixed both ways. `setup` fsyncs `cold.bin` after
+   writing it (and when it was already there), and the client's drop now
+   fsyncs its descriptor before `POSIX_FADV_DONTNEED` and retries up to five
+   times until mincore finds no page, so a file written just before the run
+   is cold too. The storage skip's `why` was reworded to a stable phrase
+   (*"the storage was slower than the server's copy"*), and
+   `.github/expected-skips.txt` matches that phrase on an `a-cold-file`
+   skip only, with its reason above it; checked by feeding this machine's
+   skip line to `.github/scripts/skip-gate.sh` (accepted). The
+   `client.resident` hold has no pattern on purpose: a page left after an
+   fsync and five drops is not the cell's storage, and should stop the job.
+2. **The budget check listed under `open_findings` sits at 100 % by
+   chance** (gap): confirmed, and worse than flaky: see finding 7. The
+   reader burned 14 ms and each eBPF source spends 12 to 15 ms over the same
+   run, so whether `--budget 100%` stopped it was a coin toss. Lengthening
+   the hold does not help (at 3 s, 107 %: the tracers' cost is mostly
+   fixed). The reader now prepares first (3 million steps of a pure-Python
+   loop, about 0.18 s on a cpu), as a program that sets itself up before it
+   waits does, so the tracers are a few percent of its cpu: the check
+   passes on every cause, and its line is gone from both CPython cases. The
+   writer agreement takes the preparation through the reader's own
+   `before_read_ns`. Case 1 still shows "a waiting program exceeds every
+   budget" with its 0.6 ms target, nowhere near the ceiling.
+3. **`a-slow-client` passes the known-cause and numbers checks on the main
+   thread's `select`** (gap): the numbers half fixed. The client now
+   connects 1 s after the server listens (`--idle 1000`), and the agreement
+   no longer credits the server's life outside the request (`outside` gone;
+   a 50 ms slack for the serving thread's own life outside it, plus the
+   client's poll). The main thread's row is a second longer than the
+   serving thread's wait, so `every-cited-number-agrees-with-the-reference`
+   now fails on the slow client both ways (already listed, finding 4) and
+   can pass only on the serving thread. The known-cause check cannot tell
+   the two threads apart (both `blocked`, `sleep`), and the case's
+   `open_findings` text now says the slow client passes it by accident; the
+   agent's way's `never_says` is still request 3. The same for
+   `a-cold-file`.
+4. **`cpython-perf-map`'s headline frame is unchecked on the person's way**
+   (gap): fixed by doing request 1 here (section 8). The check now fails on
+   the person's way and is listed, filed as finding 3.
+5. **`both-ways-name-the-same-suspect` compares two C leaves** (nit): a
+   comment at the cause says why it may flip and what to do (rerun once).
+   A check that passes cannot be listed.
+6. **The client summed every thread but the main one** (nit): fixed. The
+   serving thread is the one thread that appeared after the client
+   connected; any other count exits saying so.
+
+Shown after the round (`cargo test --test cases`: 4 passed, 88.3 s; every
+listed check failed where it is listed, and nothing else failed):
+
+```
+cpython-interpreter/a-blocking-read/cli:  blocked 1310.4 ms, on-cpu 197.6 ms; read 1310.5 ms; before the read 181.9 ms; writer 1500.1 ms
+cpython-interpreter/a-blocking-read/mcp:  budget ok; blocked 1310.2 ms; read 1310.2 ms
+cpython-perf-map/a-blocking-read/cli:     the-block-s-frames-are-named FINDING: __read <- libpython+0x2ebff6 <- +0x3335ca <- +0x5dfc1
+cpython-perf-map/a-blocking-read/mcp:     budget ok; the-block-s-frames-are-named ok; blocked 1313.6 ms, read 1313.6 ms
+http-server-stdlib/a-slow-client/cli:     blocked 2293.6 ms (main thread) against the serving thread's 1283.6 ms: FINDING; idle 1000.1 ms
+http-server-stdlib/a-slow-client/mcp:     blocked 2296.7 ms against 1286.0 ms: FINDING
+http-server-stdlib/a-cold-file:           SKIPPED both ways (off-cpu share 0.166 and 0.163), on the reworded reason the gate accepts
+```

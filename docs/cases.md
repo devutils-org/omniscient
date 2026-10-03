@@ -29,7 +29,7 @@ Each answer is held to named checks:
 |---|---|
 | `the-first-suspect-is-the-known-cause` | the dominant state (and, for the person's way, the verdict's `limit`) is the cause the case put there |
 | `the-dominant-stack-ends-in-the-known-frame` | the hottest function on a cpu, or the frame the dominant block began in off it, is the one the case names -- compared only where the frame is named, never a name against an address |
-| `the-block-s-frames-are-named` | the dominant stack passes through the frame the case names under `through`; unchecked where names were not asked for and a frame is an address |
+| `the-block-s-frames-are-named` | the dominant stack passes through the frame the case names under `through`; unchecked where names beyond the file's own (debuginfod) were asked for and could not be had, and a frame is an address; under `symbols: local` an absent frame fails |
 | `every-cited-number-agrees-with-the-reference` | each row the case lists under `agrees` is within the two resolutions of the reference's figure |
 | `the-verdict-says-how-it-knows` | the method, the evidence level of every row, the unwind mode, and for the agent's way where its names came from. What it could not see (losses, degradations, missing rows) is printed under the run's line, not required: a run that lost nothing is not a worse answer |
 | `the-person-s-way-names-the-hottest-function` | where the case asks for names, the verdict's hottest function is one |

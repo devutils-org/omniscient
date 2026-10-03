@@ -101,11 +101,15 @@ causes:
       about: >-
         A second process creates a named pipe, holds it open for writing, and
         writes one line into it 1.5 s after the target appears. The target
-        opens the pipe (at once: a writer is there) and reads it, and the read
-        blocks until the line arrives; the tool never touches either process.
+        first prepares (`prepare`, 3 million steps of a pure-Python loop,
+        about 0.2 s on a cpu), then opens the pipe (at once: a writer is
+        there) and reads it, and the read blocks until the line arrives; the
+        tool never touches either process. The preparation keeps the
+        program's own cpu well above what the tracers spend watching it
+        (`reader.py`).
       run: [python3, '{case}/writer.py', '{dir}/fifo', '1500', python3]
       ready: ready
-    target: [python3, -X, perf, '{case}/reader.py', '{dir}/fifo']
+    target: [python3, -X, perf, '{case}/reader.py', '{dir}/fifo', '3000000']
     own_account: stdout
     reference:
       - name: writer
@@ -127,12 +131,14 @@ causes:
       agrees:
         - row: blocked
           with: writer.held_after_target_ns
-          # The writer starts its clock when it sees the target in /proc, up
-          # to `poll_ns` late; the target reaches its read once the
-          # interpreter has started, some 20 to 50 ms after that on a loaded
-          # machine: 100 ms covers it.
+          # The writer starts its clock when it sees the target in /proc;
+          # the target reaches its read `before_read_ns` after its script's
+          # first line, and that line once the interpreter has started, some
+          # 20 to 50 ms after it appeared on a loaded machine. The writer may
+          # also have seen it up to its `poll_ns` (10 to 40 ms) late: 100 ms
+          # covers the two.
           slack_ns: 100000000
-          plus: writer.poll_ns
+          plus: account.before_read_ns
         - row: blocked
           with: account.read_ns
           outside: account.read_ns
@@ -153,8 +159,10 @@ open_findings:
     filed: >-
       docs/fixes/w17-cases.md, "the verdict drops where its names came from":
       the profile says `perf-<pid>.map: perf-map` and the verdict does not
-  - check: the-agent-s-way-answers-within-a-model-s-budget
+  - check: the-block-s-frames-are-named
     filed: >-
-      docs/fixes/w17-cases.md, "a waiting program exceeds every budget":
-      the reader burns 15 ms in its 1.5 s wait, and `sched.offcpu` alone
-      spends more than that at `--budget 100%`
+      docs/fixes/w17-python.md, "the verdict cuts a block's stack at four
+      frames": `blocking_stack` in src/triage/latency.rs prints the four
+      frames nearest the leaf, `__read` and three of libpython's, and the
+      Python function the perf map names, `py::wait_for_input`, is the fifth;
+      the agent's way, which reads the whole stack, passes

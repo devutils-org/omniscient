@@ -1,6 +1,6 @@
 """The client of case 4: asks a running `python3 -m http.server`, and times it.
 
-    python3 client.py ROOT PATH COUNT [--cold FILE] [--pace BYTES MS]
+    python3 client.py ROOT PATH COUNT [--cold FILE] [--pace BYTES MS] [--idle MS]
 
 The injection of case 4's causes (`case.yml`); no load generator is
 installed, so this is both the load and the latency clock. It says `ready` on
@@ -14,14 +14,25 @@ It then sends COUNT requests for PATH, one after the other on one HTTP/1.1
 connection (the server is started with `-p HTTP/1.1`), so one thread of the
 server -- the one `http.server` starts for the connection -- serves them all
 and is alive to be read when the last response is in. Each response is read
-to its end.
+to its end. That thread is told from the others by being the one that was not
+there before the client connected: the server's threads are listed once it
+listens and again once the last response is in, and exactly one must be new.
 
 - `--cold FILE`: before each request, FILE (the file PATH names) is dropped
   from the page cache, `posix_fadvise(POSIX_FADV_DONTNEED)` on the client's
   own descriptor -- the server's are never touched -- and mincore(2) counts
   how many of its pages were left resident.
+  The file is written back first (fsync(2) on that descriptor): DONTNEED
+  only starts the writeback of dirty pages and leaves those being written
+  where they are, so a file written just before the run would stay resident.
+  The drop is tried up to five times until no page is left.
 - `--pace BYTES MS`: the client reads BYTES at a time and sleeps MS between
   reads, with a receive buffer of BYTES, so the server's writes wait for it.
+- `--idle MS`: once the server listens, the client waits MS before it
+  connects, so the server's main thread has waited in its accept loop for
+  that long before the request's thread exists. The two threads' lives then
+  differ by MS, and an answer about the main thread cannot pass for one
+  about the serving thread.
 
 Once done it reads the server's own accounts, closes the connection and stops
 the server with SIGINT, as a person stops it at its terminal ("Keyboard
@@ -29,20 +40,22 @@ interrupt received, exiting.", exit 0). Its account, on one line:
 
     requests=N bytes=B latency_ns=L cpu_ns=C handler_run_ns=R
     handler_wait_ns=W handler_off_ns=O handler_off_share=S paced_ns=P
-    resident=K poll_ns=Q
+    resident=K idle_ns=I poll_ns=Q
 
 - `latency_ns`: the sum over the requests of the client's CLOCK_MONOTONIC
   from sending the request to the response's last byte.
 - `cpu_ns`: the server's utime plus stime, `/proc/<pid>/stat`, every thread
   of it, ended ones included, at a resolution of one clock tick.
 - `handler_run_ns`, `handler_wait_ns`: the first two fields of the serving
-  thread's `/proc/<pid>/task/<tid>/schedstat`, nanoseconds on a cpu and
-  runnable waiting for one, over its life (the connection's).
+  thread's `/proc/<pid>/task/<tid>/schedstat` (the one new thread, above),
+  nanoseconds on a cpu and runnable waiting for one, over its life (the
+  connection's).
 - `handler_off_ns`: `latency_ns` less those two, at least 0: the time the
   thread serving the requests was neither on a cpu nor waiting for one;
   `handler_off_share` is its share of `latency_ns`.
 - `paced_ns`: the client's own sleeps between reads (`--pace`).
 - `resident`: pages of the cold file found resident after each drop, summed.
+- `idle_ns`: the client's own wait before it connected (`--idle`).
 - `poll_ns`: the longest gap between two looks at /proc.
 """
 
@@ -63,6 +76,7 @@ pace = None
 if "--pace" in options:
     at = options.index("--pace")
     pace = (int(options[at + 1]), int(options[at + 2]))
+idle_ms = int(options[options.index("--idle") + 1]) if "--idle" in options else 0
 me = os.getpid()
 print("ready", flush=True)
 
@@ -137,11 +151,24 @@ def resident(file_path):
 
 
 def drop(file_path):
-    fd = os.open(file_path, os.O_RDONLY)
-    try:
-        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-    finally:
-        os.close(fd)
+    """Drops the file from the page cache; the pages left, by mincore(2)."""
+    for _ in range(5):
+        fd = os.open(file_path, os.O_RDONLY)
+        try:
+            # Dirty or under-writeback pages are not dropped: write them back
+            # first, and wait for it.
+            os.fsync(fd)
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+        left_now = resident(file_path)
+        if left_now == 0:
+            break
+    return left_now
+
+
+def threads(pid):
+    return {int(tid) for tid in os.listdir(f"/proc/{pid}/task")}
 
 
 deadline = time.monotonic() + 60
@@ -161,6 +188,12 @@ while port is None and time.monotonic() < deadline:
 if port is None:
     sys.exit(f"no server serving {root} listened within 60 s")
 
+idle = 0
+if idle_ms:
+    before = time.monotonic_ns()
+    time.sleep(idle_ms / 1000)
+    idle = time.monotonic_ns() - before
+before_connect = threads(pid)
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 if pace is not None:
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, pace[0])
@@ -175,8 +208,7 @@ def ask():
     """One request, read to its end; its latency by the client's clock."""
     global received, left, paced
     if cold is not None:
-        drop(cold)
-        left += resident(cold)
+        left += drop(cold)
     start = time.monotonic_ns()
     connection.request("GET", path)
     response = connection.getresponse()
@@ -201,13 +233,14 @@ for _ in range(count):
         # The server was stopped under the request (a run a budget ended).
         sys.exit(f"the server stopped answering GET {path}: {error!r}")
 
-handler_run = handler_wait = 0
-for tid in os.listdir(f"/proc/{pid}/task"):
-    if int(tid) == pid:
-        continue
-    with open(f"/proc/{pid}/task/{tid}/schedstat") as file:
-        run, wait = (int(value) for value in file.read().split()[:2])
-    handler_run, handler_wait = handler_run + run, handler_wait + wait
+new = sorted(threads(pid) - before_connect)
+if len(new) != 1:
+    sys.exit(
+        f"the server has {len(new)} threads that were not there before the connection "
+        f"({new}), where `http.server` starts exactly one to serve it"
+    )
+with open(f"/proc/{pid}/task/{new[0]}/schedstat") as file:
+    handler_run, handler_wait = (int(value) for value in file.read().split()[:2])
 with open(f"/proc/{pid}/stat") as file:
     fields = file.read().rsplit(")", 1)[1].split()
 cpu_ns = (int(fields[11]) + int(fields[12])) * 1_000_000_000 // os.sysconf("SC_CLK_TCK")
@@ -219,6 +252,6 @@ print(
     f"requests={count} bytes={received} latency_ns={latency} cpu_ns={cpu_ns} "
     f"handler_run_ns={handler_run} handler_wait_ns={handler_wait} handler_off_ns={off} "
     f"handler_off_share={off / latency if latency else 0:.4f} paced_ns={paced} "
-    f"resident={left} poll_ns={poll_ns}",
+    f"resident={left} idle_ns={idle} poll_ns={poll_ns}",
     flush=True,
 )
