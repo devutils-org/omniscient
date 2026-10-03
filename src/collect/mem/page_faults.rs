@@ -585,6 +585,87 @@ mod tests {
         );
     }
 
+    /// The rung the budget's ladder moves `mem.faults` onto, `trace` to
+    /// `sample`, as the paranoid-2 path serves it: sampled in user mode only,
+    /// one fault in `PERIOD`, each sample weighed by its period. Over a block
+    /// only this thread's stores touch, the weighed samples are the thread's
+    /// own fault count for the stores (`RUSAGE_THREAD`), to within the period
+    /// the counter carried in from before and the one it leaves unfinished;
+    /// unweighed they would be a sixteenth of it. Until now the move was
+    /// tested only where the kernel's half is allowed (`tests/budget.rs`),
+    /// which neither CI cell is.
+    #[test]
+    fn sampled_in_user_mode_the_weighed_samples_are_the_faults_the_thread_took() {
+        const PAGES: usize = 4096;
+        const PERIOD: u64 = 16;
+        let mut collector = PageFaultCollector::new(
+            0,
+            Mode::Sample {
+                freq: crate::scalar::Frequency::from_hz(PERIOD),
+            },
+        );
+        collector.user_mode_only = true;
+        if let Err(reason) = collector.start() {
+            eprintln!("skipped: this machine will not sample page faults at all: {reason}");
+            return;
+        }
+        let block = fresh_block(PAGES);
+        // One fault a page, not one a folio: a multi-size THP fault installs
+        // several pages at once, and the count below is of faults.
+        // SAFETY: advice on the mapping made above.
+        unsafe { libc::madvise(block, PAGES * 4096, libc::MADV_NOHUGEPAGE) };
+        let minflt = || {
+            let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+            // SAFETY: a valid out-pointer for this thread's own usage.
+            unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) };
+            usage.ru_minflt as u64
+        };
+        let before = minflt();
+        for index in 0..PAGES {
+            // SAFETY: inside the mapping, one byte per page.
+            unsafe { block.cast::<u8>().add(index * 4096).write_volatile(1) };
+        }
+        let took = minflt() - before;
+        let mut events = collector.sample(0).unwrap();
+        events.extend(collector.stop());
+        let base = block as u64;
+        let in_block: Vec<&Event> = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.key(crate::request::KeyKind::Mem),
+                    Some(KeyValue::Mem { base: addr, .. })
+                        if (base..base + (PAGES * 4096) as u64).contains(addr)
+                )
+            })
+            .collect();
+        // SAFETY: unmapping what was mapped above, after the last store.
+        unsafe { libc::munmap(block, PAGES * 4096) };
+        let weighed: u64 = in_block
+            .iter()
+            .map(|event| match event.attr(crate::emit::WEIGHT_ATTR) {
+                Some(crate::event::AttrValue::Uint(weight)) => *weight,
+                _ => 1,
+            })
+            .sum();
+        let said = format!(
+            "{} samples in the block weigh {weighed} faults; the thread took {took} over the \
+             stores to {PAGES} pages",
+            in_block.len()
+        );
+        eprintln!("{said}");
+        assert!(took >= PAGES as u64 / 2, "too few faults to judge: {said}");
+        assert!(
+            weighed + 2 * PERIOD >= took && weighed <= took + 2 * PERIOD,
+            "{said}"
+        );
+        assert!(
+            collector.losses().is_clean(),
+            "{said}: {:?}",
+            collector.losses()
+        );
+    }
+
     /// The retry for paranoid 2 has to recognise a refusal the way `crate::perf`
     /// actually returns one. Until the sixteenth wave it matched the errno, which
     /// `crate::perf` does not keep, so the retry never ran and the CI's

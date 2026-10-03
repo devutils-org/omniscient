@@ -194,6 +194,9 @@ struct Profile {
     /// The unwind mode the notes say was used.
     events: u64,
     collector_cpu_ns: u64,
+    /// Everything the tool says it spent, by its own account: before the
+    /// window, in it, and after it (`Overhead::tool_cpu_ns`).
+    reported_tool_ns: u64,
     /// What the target said its own thread used.
     target_cpu_ns: u64,
     /// What `omn` and the program it launched used between them, by the
@@ -304,6 +307,14 @@ fn profile_emitting(
         degradations: strings(&result["degradations"]),
         events: result["events_seen"].as_u64().unwrap_or(0),
         collector_cpu_ns: cost["overhead"]["collector_cpu_ns"].as_u64().unwrap_or(0),
+        reported_tool_ns: [
+            "before_window_cpu_ns",
+            "collector_cpu_ns",
+            "after_window_cpu_ns",
+        ]
+        .iter()
+        .map(|field| cost["overhead"][field].as_u64().unwrap_or(0))
+        .sum(),
         target_cpu_ns,
         tree_cpu_ns,
     })
@@ -932,10 +943,12 @@ fn each_mode_copies_what_it_declares_and_dwarf_costs_more_per_sample_than_fp() {
         let expected = run.target_cpu_ns as f64 / (1e9 / 1999.0);
         let said = format!(
             "{mode}: {} samples, the target's clock says {:.0} ms = {expected:.0} periods; the \
-             tool says it cost {:.1} ms, the kernel counts {:.1} ms beyond the target",
+             tool says it cost {:.1} ms in the window and {:.1} ms in all, the kernel counts \
+             {:.1} ms beyond the target",
             run.events,
             run.target_cpu_ns as f64 / 1e6,
             run.collector_cpu_ns as f64 / 1e6,
+            run.reported_tool_ns as f64 / 1e6,
             run.tool_cpu_ns() as f64 / 1e6
         );
         eprintln!("{said}");
@@ -945,6 +958,20 @@ fn each_mode_copies_what_it_declares_and_dwarf_costs_more_per_sample_than_fp() {
         );
         assert!(
             run.collector_cpu_ns <= run.tool_cpu_ns() + 1_000_000,
+            "{said}"
+        );
+        // And the whole account is no longer only a lower bound. The window
+        // alone is a twentieth of what `omn` costs a debug run: the rest is
+        // its start (the catalog, the probes, the kernel's symbols) and its
+        // end, which the cost record carries beside the window since the
+        // sixteenth wave. Measured here: 1169.9 ms said against 1178.1 ms
+        // counted (fp), 1150.9 against 1159.5 (dwarf); what is left is the
+        // results' formatting and the target's own exec and exit outside its
+        // thread clock. Half is the separation from the 26 ms the window
+        // alone said.
+        assert!(
+            run.reported_tool_ns <= run.tool_cpu_ns() + 1_000_000
+                && run.reported_tool_ns * 2 >= run.tool_cpu_ns(),
             "{said}"
         );
     }
