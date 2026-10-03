@@ -626,7 +626,7 @@ other streams:
 | run | both halves | user-only |
 |---|---|---|
 | 500 fsync-bound commits, `--symbols debuginfod`, `--budget 100%` | stopped at 0.1 s: 129 to 179 % | stopped at 0.1 s: 116 to 131 %, once ran out at 9 % |
-| the same, no debuginfod, whole run | 20 to 33 % before, 20 to 30 % after | 15 to 21 % before, **6 to 10 % after** |
+| the same, no debuginfod, whole run | 20 to 38 % before, 20 to 30 % after | 13 to 58 % before, **7 to 29 % after** |
 | 50 000 commits on a WAL, whole run, before | 7.8 % | 4.1 % |
 
 Two costs, neither of them the mode's:
@@ -638,16 +638,24 @@ Two costs, neither of them the mode's:
    `omn` over a 2.4 s run in which the target burnt 0.5 s. A user-only profile
    of a program that lives in system calls gets few samples (21 to 55 against
    500 to 640 with both halves, the same commits) and paid for every tick
-   anyway. **Fixed**: `ProfileCollector::drain_into` takes the records out of
-   the rings first and re-reads the mappings of the processes those records
-   hold samples of, and of no other, still in the tick that interns their
-   stacks. Over the same three pairs, user-only, run alternately: 21.2 / 15.4
-   / 17.2 % before, 9.6 / 6.9 / 6.0 % after. Both halves did not move
-   measurably: there the drain itself dominates, about 150 µs a sample of a
-   debug build, most of it naming kernel frames (`src/stack.rs`, filed).
-   Held by `a_tick_with_no_sample_of_a_process_does_not_reread_its_mappings`:
-   a sleeping child over ten ticks is read no time at all, and a burning one
-   once per drain that held its samples.
+   anyway. **Fixed**: `ProfileCollector::drain_into` re-reads only what is
+   being sampled. A process the last drain held samples of, or that no drain
+   has held samples of yet, is re-read before the drain, as every process
+   was; one that was idle and is sampled again, after the drain and before
+   its stacks are interned; an idle one, not at all. The first version read
+   every sampled process after the drain, and across a launched program's
+   `execve` that names the child's samples of this tool's own code against
+   the new image: at 100 kHz, 82 to 266 frames fell in no mapping where the
+   old rule left 7 to 54 (found by the suite: `tests/triage.rs`'s lossy
+   profile carried 81). The corrected rule matches the old one again, 10 to
+   223 against 10 to 238 over eight runs each. Cost, user-only, seven pairs
+   run alternately at load 22 to 27: 13.2 to 58.2 % before, **7.1 to 28.7 %
+   after**, separating in each pair. Both halves did not move measurably:
+   there the drain itself dominates, about 150 µs a sample of a debug build,
+   most of it naming kernel frames (`src/stack.rs`, filed). Held by
+   `a_tick_with_no_sample_of_a_process_does_not_reread_its_mappings`: a child
+   that burns and then `exec`s `sleep`, over 80 ticks, is read 27 or 28 times
+   where the old rule read it 81, and never in the drains of its sleep.
 2. **The first sample in a module named from debuginfod loads that module's
    symbols**, about 25 ms of a debug build for `sqlite3`'s debug file, inside
    the window. The budget's first check, 0.1 s in, weighs it against a target
@@ -686,10 +694,14 @@ alone, 55.5 and 72.3 ms.
 ### The stripped build's second shape
 
 `a_stripped_build_is_named_from_debuginfod_...`: the unstripped reference
-missing the whole `compare` branch, seen once in the sixteenth wave. Not
-reproduced in 22 more runs at load 22 to 27 beside nine other streams (40 in
-all since). Left to the flaky tally; the failure message already carries every
-stack with its count.
+missing whole branches, seen once in the sixteenth wave. Not reproduced in 22
+runs alone at load 22 to 27, then seen once in a workspace run at load 30 to
+48: the reference's 299 samples held only `hash_block` (146) and
+`parse_record` (153), no `compare` and no `checksum`, where the stripped run
+beside it held all four. A branch absent from a profile of an unchanged
+binary is one that did not run while it was sampled, so this reads as the
+workload or the window, not the names. Left to the flaky tally with that
+message.
 
 ### `mem.faults`' sampled rung where paranoid 2 serves it
 
