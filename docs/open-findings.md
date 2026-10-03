@@ -10320,3 +10320,46 @@ either way (`DECISIONS.md`, "Open").
 `/dev/nullb0` at 0600 after a `chmod a+r` made at once; the test then panics
 *"/dev/nullb0 is not there or not readable"* (twice today). Wait for the node
 (`udevadm settle`, or 2 s) before the `chmod`.
+
+## The CI at `b37a925`, read back
+
+Run 37155975223, 2026-10-03, both cells red; the logs are in
+`../omniscient-ci-logs/37155975223/`. The run before it (37125637909) failed
+the skip gate on the same two reasons, so neither is new to this wave. The
+`gh` token now carries the `workflow` scope, and `main` is pushed.
+
+### To the owner of `.github/**`: two skips the gate does not expect
+
+- **bpftool, both cells.** `linux-tools-6.17.0-1022-azure` installs no
+  `bpftool` binary under `/usr/lib` (the step's own warning), so
+  `btf.rs`'s cross-check skips with *"bpftool not found for kernel
+  6.17.0-1022"*. The runner lacks something the workflow should install:
+  bpftool from another source, not a pattern in `expected-skips.txt`.
+- **The memory controller, `defaults` only.** *"no ancestor of /omn-ci/job
+  delegates the memory controller to this user"*: "Configure the cell" makes
+  `/omn-ci` without handing `memory` down to `job`.
+
+### To the owner of `src/collect/mem/{testing,swap}.rs`: the swap tests are killed by their own limit
+
+`defaults`: `memory_pushed_out_of_a_limited_cgroup_is_counted_as_swap` and
+`the_machines_counter_sees_at_least_what_one_cgroup_did` -- *"the child died
+before it finished touching its memory (signal 9); memory.events: max 387 oom
+1 oom_kill 1"*. On a runner with no swap the limit is an OOM, not a push to
+swap; the test is to check for swap before setting it, and skip with that
+reason.
+
+### To stream io's owner (`tests/scenario_io.rs`): the polled queue never sees the burst, both cells
+
+`a_burst_of_writes_shows_up_as_a_queue_on_the_device_that_took_it`: *"the
+kernel's own reads of /sys/block/nvme0n1/inflight found the queue non-empty
+for 2.37 s of 2.38 s (deepest 199), and a 20 ms poll saw a queue that never
+held one: max 0.0"* over 101 samples. Deterministic on both cells, green here:
+the polled source reads something other than what `inflight` reads on that
+device (an nvme with several hardware queues), or reads the wrong device.
+
+### For the flaky tally
+
+Twice more on the CI: `wss::a_process_that_holds_much_and_touches_little_reports_the_little`
+(`defaults`, 8 351 744 of 16 777 216 bytes) and
+`encoders::a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made`
+(`stock`, *"no event arrived in the window"*); both are in `docs/flaky.md`.

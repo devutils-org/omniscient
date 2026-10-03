@@ -675,13 +675,12 @@ the code), two new ones open.
    with and without the capabilities, through the skip gate; the memory
    crossing at paranoid 2; the engine's reclaim and namespace tests on
    `main`.
-2. **The push, and the CI read back.** Blocked on credentials in the agent
-   shell (an ssh key, or a `gh` token with the `workflow` scope). Nothing has
-   been read since `37f17c8`; the sixteenth wave's table of what each cell
-   should do (`git show a3678bb:STATE.md`, "After the sixteenth wave", item 1)
-   still holds, plus `tests/cases.rs` in the `defaults` cell, where every
-   cause answers or skips both ways with the machine's reason first
-   (reasoned), and `a-cold-file`'s skip, which is a pattern.
+2. ~~**The push, and the CI read back.**~~ Pushed (`b37a925`), and the run
+   read (37155975223, `docs/open-findings.md`, "The CI at `b37a925`, read
+   back"): both cells red on the skip gate (bpftool missing from the runner's
+   linux-tools, the memory controller not handed to `/omn-ci/job`), the swap
+   tests killed by their own limit on a runner without swap, and the polled
+   queue depth that never sees a burst on the runner's nvme.
 3. **The triage, from what the cases found** (`src/triage/latency.rs`,
    `src/cli.rs`, `src/triage/saturate.rs`, `docs/mcp.md`; the coordinator's
    files, or a stream of their own). In order of how many cases each turns:

@@ -1,17 +1,21 @@
-# Brief — programs nobody wrote for it
+# Brief — what the programs found
 
-The seventeenth wave: **ROADMAP phase 12**, and the sixteenth wave's open
-filings, grouped by the files they land in. Every ground truth so far is a
-workload written for the test. This wave takes programs that were not written
-for Omniscient -- `sqlite3`, CPython, `http.server`, `gcc`, `make -j` -- and
-holds the answer to *"why is this slow, for this objective"* against a cause
-known independently of the tool.
+The eighteenth wave: everything `STATE.md` listed under "After the seventeenth
+wave", items 3 to 11, and what the CI read at `b37a925` found
+(`docs/open-findings.md`, "The CI at `b37a925`, read back"). No new phase: the
+seventeenth wave pointed the tool at programs nobody wrote for it, and this
+wave fixes what those programs showed -- the triage answering from the wrong
+task, a profile that costs 280 % of its target, an in-kernel histogram at
+12 %, two binaries with two privilege models -- and turns the CI green.
+
+It runs as **twelve streams**, as many as the files allow: ten at once, then
+two that need the first ten merged.
 
 Read `CLAUDE.md` first -- **including "How much to test, and when", which this
-wave is held to** -- then `STATE.md` ("What remains", "After the sixteenth
-wave"), then `ROADMAP.md` phase 12, then your section here. The earlier briefs
-are in `docs/briefs/`; waves 15 and 16 had none of their own and ran the list
-`STATE.md` left.
+wave is held to** -- then `STATE.md` ("What remains", "After the seventeenth
+wave"), then the `docs/open-findings.md` sections your section cites, then your
+section here. The earlier briefs are in `docs/briefs/`; the seventeenth's is
+`docs/briefs/wave-17-programs.md`.
 
 **This is the only brief.** What comes after this wave is written in
 `STATE.md` under "What remains", and nowhere else.
@@ -20,24 +24,29 @@ are in `docs/briefs/`; waves 15 and 16 had none of their own and ran the list
 
 ## Decided before this wave
 
-- **Phase 12 is worth doing** (the user, 2026-10-03). Case 6's project is the
-  **sqlite amalgamation**, fetched once and cached outside the repository.
-- **Perf-map symbols land first**, as their own stream, because without them
-  the CPython case can only check that the verdict says it cannot see.
-  A `/tmp/perf-<pid>.map` is a file the target wrote on this machine and asks
-  nothing of anyone, so it is read under `--symbols local` (and therefore
-  `debuginfod`), not behind a new rung.
-- **The GPL-2.0 text ships**: `LICENSES/GPL-2.0-only.txt`, installed by
-  `make install` and packed by `scripts/release.sh`.
-- **The network namespace goes beside an interface's index**: the identity
-  becomes `iface#<netns>:<index>`, and a join across namespaces is refused
-  with its reason, never credited silently (`docs/open-findings.md`, "the
-  network namespace beside the index").
-- **One order for "unbuilt" and "missing"**: the chain's, on both paths, as the
-  filing suggests (`DECISIONS.md`, "Open"); the forced path changes to match.
+- **Which task the triage decomposes** (`DECISIONS.md`, "Open"): both of the
+  two candidates the cases asked for, no `--thread` option. A wait for a
+  child (`wait4`, `waitid`, a pipe read the child closes) is followed into the
+  child that ran during it, and its decomposition takes the wait's place; and
+  when the main thread's largest row is a block in which other threads of the
+  process ran, the busiest of them is named beside it with its own
+  decomposition. The verdict says which task each row is from. Chosen
+  because it needs nothing from the person asking, which is what the triage
+  promises.
+- **One privilege model for `omn` and `omn-mcp`**: `omn-mcp` collects through
+  the `omn` binary it ships beside, so the capabilities are granted to one
+  file, by `make`, `make install`, `scripts/release.sh` and the sudoers line
+  alike; and `tests/cases.rs` refuses to compare two ways run with different
+  privileges rather than reporting a difference the machine made.
+- **The phase 6 criterion stays open** until the coordinator's `null_blk`
+  run of the corrected program statistics: stream io makes the statistics
+  read the programs that ran, and says in its handoff which way the numbers
+  point.
+- **The CI installs bpftool**; it does not learn to expect its absence. A
+  runner without swap skips the swap tests with that reason.
 
 Each of these moves out of `DECISIONS.md` "Open" into the settled table, with
-its reason, in the stream that lands it.
+its reason, in the stream that lands it (by a decision line in its handoff).
 
 ---
 
@@ -48,178 +57,245 @@ its reason, in the stream that lands it.
   while iterating.
 - **Before your last commit**: one `make check`. If red, one
   `cargo test --workspace --no-fail-fast` to see every failure together. A red
-  test outside your paths that is in the flaky tally: rerun it alone once.
+  test outside your paths that is in the flaky tally (`docs/flaky.md`,
+  `docs/open-findings.md`): rerun it alone once, and move on if it passes.
 - **`cargo fmt` before `make`, never after.** `make` once per build, before
   eBPF tests.
-- **Read by range**: `grep -n`, then the lines you need.
-- **Six agents share this machine.** Assert the separation, not a threshold
+- **Read by range**: `grep -n`, then the lines you need. Never read
+  `docs/open-findings.md` or `STATE.md` whole: grep for your section.
+- **Ten agents share this machine.** Assert the separation, not a threshold
   calibrated on a quiet one. Do not start `scripts/matrix.sh` or
   `scripts/bench.sh`.
+- **Disk is short** (`/home` about 85 %): each worktree builds without
+  incremental compilation (its own untracked `.cargo/config.toml`; do not
+  commit it, do not remove it), and never copies a `target/` around.
 - **Privileged commands**: `/etc/sudoers.d/omniscient-privileged` grants,
-  without a password, exactly the commands in `STATE.md` "Needs privilege"
-  (sysctl `perf_event_paranoid` 2/-1, `null_blk`, `tc netem` on lo, a nosuid
-  tmpfs) and `dmsetup`/`losetup`. **Do not change a sysctl**: it is machine
-  wide and the other streams' tests read it. List the privileged run you want
-  in your handoff; the coordinator runs it alone.
+  without a password, exactly the commands in `STATE.md` "Needs privilege".
+  **Do not change a sysctl and do not load a module**: they are machine wide
+  and the other streams' tests read them. List the privileged run you want in
+  your handoff, with the exact command; the coordinator runs it alone.
+- **The CI logs** of the run this wave answers are in
+  `../omniscient-ci-logs/37155975223/{defaults,stock}.log`.
 
 ## Where you work, and how you hand off
 
-Each stream has its own worktree, `/home/moha/repos/omniscient-w17-<stream>`,
-on `feat/w17-<stream>`. Commit there with `git commit`; never touch the main
-checkout. The handoff is `docs/fixes/w17-<stream>.md`: what landed, what you
+Each stream has its own worktree, `/home/moha/repos/omniscient-w18-<stream>`,
+on `feat/w18-<stream>`. Commit there with `git commit`; never touch the main
+checkout. The handoff is `docs/fixes/w18-<stream>.md`: what landed, what you
 showed versus reasoned, what you could not do and why, the privileged runs you
-want, and the requests to other files under "Needs from another stream". A
-request to a file you do not own is filed there, not made.
+want, your decision lines for `DECISIONS.md`, and the requests to other files
+under "Needs from another stream". A request to a file you do not own is filed
+there, not made.
 
 ---
 
 ## The streams
 
-| Stream | Owns | Depends on |
+| Stream | Owns | Phase |
 |---|---|---|
-| **symbols** | `src/stack.rs`, `src/unwind.rs` (the names half), `src/collect/runtime/jit_map.rs` (to share its parser), `tests/stack_capture.rs` | -- |
-| **cases** | `cases/**`, `tests/cases.rs`, `docs/cases.md`, `cases/sqlite3-*` | -- |
-| **engine** | `src/bpf/mem_stall.rs`, `src/collect/mem/stall.rs`, `src/collect/proc/status.rs`, `src/collect/mem/footprint.rs`, `src/collect/net/**`, `src/bpf/net_qdisc.rs`, `src/event.rs`, `src/join.rs`, `catalog/{proc,mem,net}.yaml`, `docs/keys.md` | -- |
-| **core** | `src/emit.rs`, `src/resolve.rs`, `tests/cross_memory.rs`, `docs/portability.md`, `LICENSES/`, `scripts/release.sh`, `Makefile` (install), `README.md` (licence lines) | -- |
-| **python** | `cases/cpython-*`, `cases/http-server-*` | symbols, cases |
-| **build** | `cases/sqlite3-durability`, `cases/gcc-*`, `cases/make-*` | cases |
-| **io** | `src/bpf/io.rs`, `src/bpf/request.rs`, `src/collect/io/{block,histogram}.rs`, `tests/scenario_io.rs`, `docs/scenarios/io.md` | engine, core (rebases on them) |
+| **green** | `.github/**`, `src/collect/mem/{testing,swap,wss}.rs`, `tests/encoders.rs`, `docs/flaky.md` | A |
+| **triage** | `src/triage/{latency,escalate,objective,engine,mod}.rs`, `src/triage/workload.c`, `tests/triage.rs` | A |
+| **names** | `src/triage/{saturate,diff}.rs`, `src/cli.rs`, `docs/mcp.md`, `man/omn.1` | A |
+| **mcp** | `mcp/**`, `Makefile`, `scripts/release.sh`, `docs/install.md` | A |
+| **launcher** | `src/main.rs`, `src/collect/{mod,launch,task}.rs`, `tests/{budget,runner}.rs` | A |
+| **profile** | `src/collect/cpu/profile.rs`, `src/unwind.rs`, `src/collect/mem/page_faults.rs`, `catalog/unwind.yaml`, `tests/{unwind,stack_capture}.rs`, `docs/unwind.md` | A |
+| **sched** | `src/collect/sched/**`, `src/bpf/{sched_*,offcpu,runqlat,wakeup,switch_count,migrate}.rs`, `src/stack.rs`, `tests/{scenario,family}_sched.rs` | A |
+| **io** | `src/bpf/{io,request}.rs`, `src/collect/io/**`, `tests/{scenario,family}_io.rs`, `tests/dm_delay.rs`, `docs/scenarios/io.md` | A |
+| **engine** | `src/join.rs`, `src/event.rs`, `src/bpf/btf.rs`, `shim/**`, `tests/join_engine.rs`, `examples/**`, `docs/families/join.md`, `CATALOG.md` | A |
+| **bench** | the `cost:` lines of `catalog/*.yaml`, `docs/bench.md`, `tests/bench_*.rs` | A |
+| **resolver** | `src/resolve.rs`, and the test lines `1aa114f` moves | B, after io |
+| **cases** | `cases/**`, `tests/cases.rs`, `docs/cases.md` | B, after triage, names, mcp, launcher |
 
-`DECISIONS.md` and `STATE.md` are the coordinator's. A stream writes its
-decision lines into its handoff, and the coordinator moves them.
+A catalog entry's other lines belong to the stream that owns its collector.
+`DECISIONS.md`, `STATE.md`, `ROADMAP.md`, `GUIDE.md` and the indexes are the
+coordinator's. Phase B streams start from `main` with phase A merged.
 
-### symbols -- a perf map is a symbol source
+### green -- the CI's two cells green
 
-`cpu.profile` (and every stack the tool names) reads `/tmp/perf-<pid>.map`
-when the target wrote one: an address in an anonymous executable mapping that
-a map line covers takes that line's name, and the frame says where its name
-came from (`perf-map`), as it says `elf`, `debuginfod` or nothing today. Only
-`runtime.jit` reads the file now (`src/collect/runtime/jit_map.rs`), as a
-stream of compilations: share the parser, do not write a second one. The map
-is read at the end of the run as well as during it (a JIT writes lines as it
-compiles). Ground truth: a test program that maps an executable page, writes a
-perf map naming it, and burns there; the profile names the frame and the
-reference is the map the test wrote. Then `python3 -X perf` on a pure-Python
-loop, skipped loudly where `sys.activate_stack_trampoline` is absent.
+`docs/open-findings.md`, "The CI at `b37a925`, read back", and the flaky
+tally ("The seventeenth wave, the coordinator's", the entries in files you
+own).
 
-### cases -- a case is data
+- bpftool on the runner: `linux-tools-$(uname -r)` ships none for the azure
+  kernel. Install it from a source that has it (Ubuntu's `bpftool` package
+  where it exists, `linux-tools-generic`'s binary, or a build of the kernel
+  tree's `tools/bpf/bpftool` pinned and cached), and make the step fail
+  loudly when none answers `btf dump file /sys/kernel/btf/vmlinux`.
+- "Configure the cell" hands `memory` (and every controller the tests ask)
+  down to `/omn-ci/job`, so the limit tests run in `defaults`.
+- The swap tests check for swap before setting their limit and skip with that
+  reason when there is none; the zero-page swap test runs on the CI
+  (sixteenth wave's filing).
+- `wss::a_process_that_holds_much_and_touches_little_reports_the_little` and
+  `encoders::a_known_allocation_lands_on_the_chrome_trace_...`: find why they
+  fail on a runner, not just that they do; fix the test or the tool.
+- You cannot run the CI: show each change on this machine where it can be
+  shown (the skip gate, `.github/scripts/skip-gate.sh`, against a local log),
+  and say in the handoff what only a run will show.
 
-ROADMAP phase 12, tasks 1 to 3. `cases/<name>/case.yml` holds: the program and
-how it was obtained (package, build id, flags), how to fetch anything not on
-the machine (into `$XDG_CACHE_HOME/omniscient/cases/`, never into the tree),
-the injected cause, the reference's own account (a command whose output is
-parsed by a named extractor), the objective asked, and the verdict expected.
-`tests/cases.rs` discovers every directory and runs each case **both ways** --
-`omn triage` as a person would, and `omn-mcp` as an agent would -- and asserts
-the two name the same first suspect, that it is the known cause, that every
-number the verdict cites agrees with the reference within the reference's
-resolution, and that the verdict says how it knows (method, evidence level of
-each join, unwind mode and the source of each name, what it could not see).
+### triage -- which task a program's latency is
 
-Adding a program must mean adding a directory: the extractors are a small
-registry in `tests/cases.rs` keyed by name, and a case names one. A case whose
-program, fetch or injection is unavailable skips with the machine's reason
-first (the skip gate reads it). The injection never modifies the target
-(boundary 5); the draft in `/home/moha/repos/omniscient-wave16-brief-draft.md`
-lists six ways, each with its reference.
+`STATE.md` item 3, first bullet, and "Decided before this wave".
 
-The pilot is **case 1, `sqlite3` stripped** (names through debuginfod; the
-CPU cause a query whose plan scans instead of searching, reference
-`EXPLAIN QUERY PLAN` and `.stats`; the off-CPU cause a second process holding
-`BEGIN EXCLUSIVE` for a known time while the target waits in `busy_timeout`,
-reference the holder's own clock). Write `docs/cases.md`: the format, the
-extractors, and how to add one.
+- Follow a wait for a child into the child; name the busiest other thread
+  when the main thread's largest row is a block others ran in; say which task
+  each row is from. `make-sqlite`, `http-server-stdlib` and `gcc-shell` are
+  the cases this turns (`docs/fixes/w17-build.md`, `w17-python.md`); hold it
+  with a test in `tests/triage.rs` whose ground truth is a workload whose
+  work is known to be in a child or another thread.
+- `sched.mutex` is asked only when a sleeping row needs splitting, or through
+  a backend under its own ceiling; a source's cost is said when it is over the
+  criterion (python 5, build's mutex shim).
+- `Limit::Sleep`'s sentence names a polled lock and a wait for a child.
+- `--symbols` reaches every latency request that reads it (names owns the
+  flag in `src/cli.rs`; you own where `latency.rs` honours it).
+- `gcc-shell`'s return from `cases/held/` is the cases stream's, in phase B:
+  say in your handoff whether it should.
 
-A wrong suspect is a finding against the method, the collector or the unwinder
-that produced it: file it, with the case that shows it, and do not carry a
-workaround in the case.
+### names -- what the verdict names
 
-### engine -- the sixteenth wave's engine filings
+`STATE.md` item 3, last two bullets.
 
-From `docs/open-findings.md`, the sixteenth wave's sections:
+- `--symbols` on `latency` and `saturate`, set on every request that reads
+  it; the verdict's names note.
+- The hottest function under a perf map ranked by its innermost perf-map
+  frame; a flat interpreter profile said as one; a block's stack printed to
+  the program's own frame (python 1 to 3, `docs/fixes/w17-python.md`).
+- `docs/mcp.md` and `man/omn.1` follow.
 
-- **A `last_ns` per stall row** (`src/bpf/mem_stall.rs`,
-  `src/collect/mem/stall.rs`), so the 100 ms reclaim session credits its rows
-  too ("a tighter enclosing window for a drained stall row"). A shared eBPF
-  layer: run the full suite once before handing off.
-- **Carry `proc`** (`src/collect/proc/status.rs`, `src/collect/mem/footprint.rs`
-  and their catalog entries): "`proc` has no producer".
-- **The network namespace beside the index**, as decided above:
-  `KeyValue::iface_in(netns, index, name)`, the identity
-  `iface#<netns>:<index>`, the namespace's inode from the kernel side in
-  `net_qdisc.rs`, `capture.rs`, `hwts.rs`, this process's own for a named
-  procfs read. Ground truth: the 2000 packets on an unprivileged namespace's lo
-  (`unshare -rn`) are no longer credited to this one's.
+### mcp -- one privilege model, and what `run_session` answers
 
-### core -- the shared layers and the root
+`docs/open-findings.md`, "`omn-mcp` carries no capabilities"; `STATE.md`
+item 4's `mcp/` half.
 
-- **`src/emit.rs`**: a kernel-built histogram's `sum` from `total_ns`, not the
-  buckets' low bounds ("a kernel-built histogram's `sum`").
-- **`src/resolve.rs`**: the chain's order for a backend both unbuilt and
-  unservable, on the forced path too; `scenario_net`'s `net.hwts` test then
-  accepts one exit code (file that request to its owner, do not edit it).
-- **`tests/cross_memory.rs`**: `cross-memory-which-allocation.yml` meets a
-  user-mode-only run on `defaults`; at paranoid 2 it skips with *"this machine
-  withholds a source it needs: caveat: ..."*. Branch on the result's
-  *"page faults in user mode only"* note and assert what the user-mode half
-  can, as `scenario_mem::sampled_in_user_mode_only` does.
-- **`docs/portability.md:184`**: `sched.switches` is usable on 5.15 through
-  `pmu:sw`.
-- **The GPL-2.0 text**, as decided above, and the README's licence lines.
+- `omn-mcp` collects through the `omn` binary beside it ("Decided"), so
+  `make`, `make install`, `scripts/release.sh`, `docs/install.md` and the
+  sudoers line grant one file. The sudoers line in `CLAUDE.md` is the
+  coordinator's: put the new spelling in your handoff.
+- `run_session` answers with the program's stdout, and a waiting target's
+  budget (a wall-clock denominator, or optional) is said, not guessed.
 
-### python -- an interpreter and a server (after symbols and cases)
+### launcher -- the budget and the stop
 
-Case 3, **CPython 3.14, a pure-Python hot loop**: the CPU cause one function
-dominating by construction of the input; the off-CPU cause a blocking read.
-Reference `cProfile`. With `-X perf` the verdict names the Python function
-(symbols); without it, it must say "interpreter frames", never a C function as
-the suspect. Case 4, **`python3 -m http.server`** under the test's own client
-(no load generator is installed; the client is also the latency clock): a
-CPU-bound handler path (a large directory listing) and a served file on a cold
-cache (`posix_fadvise(DONTNEED)` from the harness). Reference: the client's
-clock and the server's `/proc/<pid>/schedstat`.
+`STATE.md` item 4's `src/` half and item 11's registry line.
 
-### build -- durability, a compiler and a build (after cases)
+- The budget's denominator weighs the descendants the collectors watched.
+- A stop ends the process group; a stopped run says so on its own line.
+- `WEIGHS_ITS_SAMPLES` (`src/main.rs`) moves into the collector registry, so
+  a collector declares it rather than a table naming it.
 
-Case 2, **`sqlite3` durability**: `journal_mode=DELETE`, `synchronous=FULL`
-against WAL; reference the commit count times the fsyncs per commit and
-`/proc/<pid>/io`. Case 5, **`gcc -O2`** on a known translation unit: `-O2`
-against `-O0` (two builds, the difference is the cause), headers on a cold
-cache; reference `-ftime-report` and the process tree gcc -> cc1 -> as. Case 6,
-**`make -j` on the sqlite amalgamation's build**: the critical path, one long
-serial job, and many short processes; reference `make --trace` timings and
-per-process `schedstat`.
+### profile -- what a profile costs, and the ladder
 
-### io -- the in-kernel histogram costs 23.6 % at 3 M IOPS
+`docs/open-findings.md`, "a user-mode-only profile costs 280 % of the target";
+`STATE.md` item 11's `mem.faults`, `unwind` and `collector_cpu_ns` lines.
 
-Found by the coordinator before this wave, running the privileged list:
-`scenario_io::the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent`
-on `null_blk` (the doc comment's commands, granted by the sudoers file) reads
-*"bare 3158519 IOPS, under the in-kernel histogram 2413950: 23.57 %"* against
-phase 6's 1 %. The bench agrees in kind: `io.latency` through `bpf:raw_tp` at
-3.44 % of the target's cpu against `low`'s 1 %, `io.size` 6.45 %, `io.queue`
-2.85 %. Find where the cost is -- the programs' own run time
-(`sysctl kernel.bpf_stats_enabled`, granted, is machine wide: ask the
-coordinator), the map updates per request, a per-request lookup that a
-per-cpu array would avoid, the issue/complete pairing, or the attach points --
-measure it, and bring it under the criterion or say, with numbers, why the
-criterion is the wrong one. The test needs `null_blk`, which is machine wide:
-**ask the coordinator to run it** with your branch, alone, rather than loading
-the module while the other streams build. You may use
-`sudo -n /usr/bin/modprobe null_blk ...` yourself only for a functional check
-at low load.
+- At `perf_event_paranoid` 2 without `CAP_PERFMON`, `cpu.profile` over
+  `sqlite3`'s commit loop spends 266 % of the target's cpu. Find which mode the
+  ladder picks there and why it costs that; bring it into its declared band
+  or declare the band it has, and make the resolver's choice say it.
+  Reproduce it without changing the sysctl: the capability-less binary
+  (`cp target/debug/omn` elsewhere, no `setcap`) at this machine's paranoid
+  level shows the user-only path, and the handoff says what only paranoid 2
+  would add.
+- The mode ladder where `mem.faults` is served; `unwind`'s stripped-build
+  second shape; `collector_cpu_ns` for the profile.
+
+### sched -- the sched collectors follow the target
+
+`STATE.md` item 5, and `scenario_sched`'s fixed probe name (item 8).
+
+- Follow the target's descendants as `cpu.profile` does.
+- The 1.7 us a wait that leaves `blocked` for `runnable` is counted where it
+  belongs.
+- `sched.offcpu`'s stacks named through debuginfod (`src/stack.rs`), with
+  "dynamic symbols only" said in the facts line when that is all there is;
+  debuginfod held against a real server if one answers here, or a local one
+  the test starts.
+- `scenario_sched`'s probe name unique per checkout.
+
+### io -- the histogram's cost, and the queue the CI cannot see
+
+`docs/open-findings.md`, "the in-kernel histogram, measured", "`chmod` races
+udev", and "the polled queue never sees the burst"; `STATE.md` item 11's io
+lines.
+
+- The program statistics read 0 runs while the histogram counted 26.8 M
+  requests: read them from the programs that ran, while they are loaded.
+  Then say, from the per-request numbers, whether the 348 ns is the programs
+  or the dispatch (the open decision) -- the `null_blk` run itself is the
+  coordinator's, with your exact command.
+- Wait for udev before the `chmod` of `/dev/nullb0`.
+- The polled queue depth that reads 0 on the runner's nvme while `inflight`
+  reads 199: find what it reads instead (hardware queues, a partition, the
+  wrong device) and fix the source, not the test.
+- A known set of device latencies (`null_blk` with a fixed `completion_nsec`)
+  for the edge-crossers, with its test; driving a known number of merges; one
+  program for both `io.latency` histograms if it falls out of the rest.
+
+### engine -- the files nobody owned
+
+`STATE.md` item 6, item 8 (except `tests/cases.rs`, `docs/cases.md` and
+`scenario_sched`), item 11's engine lines.
+
+- `shim/src/lib.rs:384`: no clock read on a call that does not report.
+- `btf.rs`'s `member_offset` follows a typedef (a shared layer: test every
+  caller).
+- `examples/cross-machine-reclaim-io.yml`'s `enclosing:` line with its
+  assertion (one measured run first); `tests/join_engine.rs`'s
+  other-namespace test; `docs/families/join.md:39`; `docs/unwind.md`'s and
+  `CATALOG.md`'s perf-map line under `--symbols local` (`docs/unwind.md` is
+  profile's: file it there, write `CATALOG.md`'s).
+- A rule choosing the kernel or query tier (phase 5's last `[~]`);
+  `assemble`'s linear clone in `src/join.rs`.
+
+### bench -- the bands, corrected to the table
+
+`STATE.md` item 9; the table is `target/bench/backends-1791030430` in the
+main checkout (read it there, do not copy it).
+
+- Correct each `cost:` the table measured outside its band -- 46 pairs, worst
+  `io.fsync` through `bpf:fentry` at 142 % -- to the band it measured, or say
+  in `docs/bench.md` why the declared one stands (a workload that is not the
+  source's case). An in-kernel collector's cost is the target's dilation, not
+  the tool's cpu.
+- `tests/bench_*.rs` hold the catalog to the table it last measured, so a
+  band can no longer drift from the measurement silently.
+
+### resolver -- one order (phase B)
+
+`STATE.md` item 7, `docs/fixes/w17-core.md` section 2.
+
+- Cherry-pick `1aa114f` with the eleven test changes in one merge; then
+  `scenario_io`'s two rows and the pinned `net.hwts` twin. The exit-3 line of
+  `DECISIONS.md` goes in your handoff, worded.
+
+### cases -- the cases, re-asked (phase B)
+
+`STATE.md` item 8's `tests/cases.rs` and `docs/cases.md` lines, and the
+privilege half of "Decided".
+
+- `says:`, `held:`, the perf-map ranking in `read_mcp`, the wait for a
+  stopped run's descendants; `docs/cases.md`'s injection table.
+- `tests/cases.rs` refuses to compare two ways run with different privileges.
+- Every case re-asked on merged phase A: each case's first suspect for its
+  objective, both ways; `gcc-shell` back from `cases/held/` if the triage now
+  names its cause; the flaky tally's two `cases` lines removed if python's
+  findings 2 and 5 are what removed them.
 
 ---
 
 ## Exit criteria for the wave
 
-- The six cases each have two known causes, one on the CPU and one off it, and
-  the triage's first suspect is the known cause for the objective asked --
-  or the case is filed as a finding against what got it wrong, with the case
-  that shows it.
-- Both ways of asking name the same suspect.
-- Every case runs at `perf_event_paranoid` 2 in the CI's `defaults` cell or
-  skips there with the machine's reason first.
-- The in-kernel histogram under 1 % at 2 M IOPS, or the criterion argued.
-- The engine and core filings landed or re-filed with what blocked them.
-- `make check` green at the merge.
+- The CI's two cells green, or red only on what a run shows and this machine
+  cannot, filed with the log line.
+- `make-sqlite`, `http-server-stdlib` and `gcc-shell` name their known cause
+  first, both ways, or are filed against what still gets it wrong.
+- `cpu.profile` at paranoid 2 within its declared band, or the band says what
+  it costs.
+- The program statistics read the programs that ran; the phase 6 criterion
+  decidable from the coordinator's run.
+- One privilege model for both binaries.
+- The bench's bands match the table, and a test holds them to it.
+- Items 6 to 11 of "After the seventeenth wave" landed or re-filed with what
+  blocked them.
+- `make check` green at each merge.
