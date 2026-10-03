@@ -480,3 +480,7 @@ http-server-stdlib/a-slow-client/cli:     blocked 2293.6 ms (main thread) agains
 http-server-stdlib/a-slow-client/mcp:     blocked 2296.7 ms against 1286.0 ms: FINDING
 http-server-stdlib/a-cold-file:           SKIPPED both ways (off-cpu share 0.166 and 0.163), on the reworded reason the gate accepts
 ```
+
+Then one `make check` on the committed round (5eadebf), the capabilities in
+place: **green**, 2 189 passed, 0 failed, 10 ignored; `cases` 4 passed in
+81.3 s inside it.
