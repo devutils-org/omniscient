@@ -6,10 +6,11 @@
 # `net.qdisc` reads the interface off the packet in the kernel and carries its
 # index (`iface:lo`, index 1, as the kernel numbers it). `net.iface` reads
 # `/proc/net/dev`, which names interfaces only, and keeps one series per kind
-# of counter (`iface:lo/drops`). A join compares an `iface` key by the kernel's
-# index -- resolved from the name at the read when a producer has only the
-# name, and a name's sub-series after `/` is not part of the interface -- so
-# the two meet on lo, and on nothing else (`docs/keys.md`).
+# of counter (`iface:lo/drops`). A join compares an `iface` key by its network
+# namespace and the kernel's index there -- the index resolved from the name at
+# the read when a producer has only the name, and a name's sub-series after `/`
+# is not part of the interface -- so the two meet on this namespace's lo, and
+# on nothing else; another namespace's lo is another key (`docs/keys.md`).
 #
 # The rule: each `drops` reading of an interface closes an interval of it, and
 # each drained row of queued packets of that interface is credited whole to the

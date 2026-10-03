@@ -1118,9 +1118,9 @@ fn a_machine_that_cannot_serve_a_valid_request_has_its_own_exit_code() {
 /// nothing and reported that it attributed zero events, which reads as a
 /// workload that did nothing rather than as a key that was never there.
 ///
-/// The entry now declares `task` alone, so the promise and the events agree and
+/// The entry now declares `task` and `proc`, so the promise and the events agree and
 /// the request is refused before anything is attached. Both halves are asserted
-/// here -- the refusal, and that the events carry exactly the key that is left
+/// here -- the refusal, and that the events carry exactly the keys that are left
 /// -- because a fix that only edited the refusal would be the same lie the
 /// other way round.
 ///
@@ -1166,7 +1166,7 @@ fn the_only_key_proc_fd_declares_is_the_only_one_its_events_carry() {
         "--emit",
         "raw",
         "--keys",
-        "task",
+        "task,proc",
         "--format",
         "json",
         "--",
@@ -1178,10 +1178,10 @@ fn the_only_key_proc_fd_declares_is_the_only_one_its_events_carry() {
     let doc = document(&output);
     for event in events(&doc["results"][0]) {
         let keys = event["keys"].as_array().expect("keys");
-        assert_eq!(keys.len(), 1, "one key per event, and it is task: {event}");
+        assert_eq!(keys.len(), 2, "two keys per event, task and proc: {event}");
         assert!(
-            keys[0].get("task").is_some(),
-            "the key on the event is not `task`: {event}"
+            keys[0].get("task").is_some() && keys[1].get("proc").is_some(),
+            "the keys on the event are not `task` then `proc`: {event}"
         );
     }
 }

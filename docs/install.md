@@ -22,7 +22,7 @@ $ omn list | tail -n 3 | head -n 1
 ### From a release archive
 
 A release is one archive and its checksum. The archive is a prefix: it holds
-exactly these six files under one top directory, and nothing else
+exactly these nine files under one top directory, and nothing else
 (`scripts/release.sh list` prints the list the archive is checked against):
 
 ```
@@ -32,6 +32,10 @@ bin/libomn_preload.so      the preload shim the mem.heap.*, sched.mutex and gpu.
 share/man/man1/omn.1       the manual page
 share/doc/omn/README.md
 share/doc/omn/install.md   this file
+share/doc/omn/LICENSE-MIT
+share/doc/omn/LICENSE-APACHE
+share/doc/omn/LICENSES/GPL-2.0-only.txt
+                           the licence text src/bpf's second option names
 ```
 
 ```console
