@@ -297,3 +297,6 @@ The code under `src/bpf/`, which emits the programs loaded into the kernel, is
 licensed under either of the MIT license or the GNU General Public License,
 version 2 (`MIT OR GPL-2.0`), and the programs declare `Dual MIT/GPL` to the
 kernel: several helpers they call are available to GPL-compatible programs only.
+The GPL-2.0 text is in [`LICENSES/GPL-2.0-only.txt`](LICENSES/GPL-2.0-only.txt),
+and `make install` and the release archive ship it under
+`share/doc/omn/LICENSES/`.

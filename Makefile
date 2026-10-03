@@ -184,6 +184,7 @@ install:
 	install -D -m 644 docs/install.md               $(DESTDIR)$(DOCDIR)/install.md
 	install -D -m 644 LICENSE-MIT                   $(DESTDIR)$(DOCDIR)/LICENSE-MIT
 	install -D -m 644 LICENSE-APACHE                $(DESTDIR)$(DOCDIR)/LICENSE-APACHE
+	install -D -m 644 LICENSES/GPL-2.0-only.txt     $(DESTDIR)$(DOCDIR)/LICENSES/GPL-2.0-only.txt
 	@echo
 	@echo "installed omn, omn-mcp and the preload shim in $(DESTDIR)$(BINDIR)."
 	@echo "no capability was granted. Without them the eBPF and per-cpu perf backends"
@@ -197,6 +198,8 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/omn $(DESTDIR)$(BINDIR)/omn-mcp $(DESTDIR)$(BINDIR)/libomn_preload.so
 	rm -f $(DESTDIR)$(MAN1DIR)/omn.1 $(DESTDIR)$(DOCDIR)/README.md $(DESTDIR)$(DOCDIR)/install.md
 	rm -f $(DESTDIR)$(DOCDIR)/LICENSE-MIT $(DESTDIR)$(DOCDIR)/LICENSE-APACHE
+	rm -f $(DESTDIR)$(DOCDIR)/LICENSES/GPL-2.0-only.txt
+	-rmdir $(DESTDIR)$(DOCDIR)/LICENSES 2>/dev/null
 	-rmdir $(DESTDIR)$(DOCDIR) 2>/dev/null
 
 # The ground truth for an installed tree: `make install` into a scratch
