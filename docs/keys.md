@@ -70,9 +70,10 @@ blocking, syscalls, and exec. An exec that replaces a multithreaded process
 gives the exec'ing thread the leader's id, which is the kernel's rule. It does
 not survive exit, because the kernel reuses ids. And it does not follow work a
 task caused but another task did: writeback, a kworker, a softirq that lands
-on whatever was running. **Processes are keyed `task:<pid>` too**
+on whatever was running. **Processes are keyed `task:<pid>` first too**
 (`src/collect/proc/status.rs`, `src/collect/mem/footprint.rs`), so a process's
-series and its main thread's carry the same key.
+series and its main thread's carry the same first key; `proc`, after it, is
+what tells them apart.
 
 **`proc`, a process across containers.** The pid namespace a process lives
 in, by the inode `/proc/<pid>/ns/pid` names, and its pid inside that
@@ -80,13 +81,16 @@ namespace, the last `NSpid` of `/proc/<pid>/status`
 (`KeyValue::proc_of`). Two containers' pid 1 are two keys, and a process is
 never its main thread, which `task:<pid>` is. Kept rather than removed because
 `CATALOG.md` ("The container trap") names it as the answer to `--cgroup` not
-being a pid filter. `KeyValue::proc_of` is the one way to make it, and **no
-collector calls it yet**: the per-process sources (`src/collect/proc/status.rs`,
-`src/collect/mem/footprint.rs`) are to carry it as a second key after `task`,
-and their catalog entries to list it (`docs/open-findings.md`, the sixteenth
-wave, stream engine). Until then `task` stands in, with the namespace limit
-given above. Reading the namespace link takes the access `ptrace` read does,
-so a process of another user has no `proc` key, and says so by having none.
+being a pid filter. `KeyValue::proc_of` is the one way to make it. The
+per-process procfs sources carry it as their second key, after `task`:
+`proc.fd` and `proc.threads` (`src/collect/proc/status.rs`) and `mem.rss`,
+`mem.pss` and `mem.uss` (`src/collect/mem/footprint.rs`), read once when the
+collector attaches, since a process does not change pid namespace and an exec
+keeps it. So a join `via: proc` between any two of them meets on one process
+in one namespace, where `via: task` would also meet a namespace's pid that
+another namespace reuses. No eBPF source writes it yet. Reading the
+namespace link takes the access `ptrace` read does, so a process of another
+user has no `proc` key, and says so by having none.
 
 **`file`, device and inode.** From `inode->i_sb->s_dev` and `i_ino`, read at
 the VFS by `io.vfs`, `io.fsync` and `io.pagecache` (`src/collect/io/`). It

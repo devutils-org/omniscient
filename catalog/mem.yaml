@@ -14,7 +14,7 @@
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, tid: native, cgroup: native, launch: native, container: native}
-  keys: [task, cgroup]
+  keys: [task, proc, cgroup]
   filter_fields: [comm]
   determinism: medium
   caveats:
@@ -38,7 +38,7 @@
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, cgroup: native, launch: native, container: native}
-  keys: [task, cgroup, mem]
+  keys: [task, proc, cgroup, mem]
   filter_fields: [comm]
   determinism: medium
   caveats:
@@ -57,7 +57,7 @@
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, launch: native}
-  keys: [task, mem]
+  keys: [task, proc, mem]
   filter_fields: [comm]
   determinism: medium
   caveats:
