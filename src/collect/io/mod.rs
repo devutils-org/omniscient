@@ -26,6 +26,7 @@ mod fsync;
 pub(super) mod histogram;
 mod pagecache;
 mod pressure;
+mod underneath;
 pub(super) mod vfs;
 mod writeback;
 

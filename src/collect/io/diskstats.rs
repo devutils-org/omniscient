@@ -352,9 +352,13 @@ impl Diskstats {
     /// layer's I/O accounting, counted from the moment a request is accounted,
     /// scheduler queue included. On the CI's 6.17 kernel the disk's line read
     /// 0 at every one of 101 polls while `/sys/block/nvme0n1/inflight` read up
-    /// to 199 (`docs/scenarios/io.md`, defect 20): the likeliest reading is
-    /// that the accounting stayed on the partition the writes went through
-    /// and never reached the disk's line, which 7.2 here does not do. `/sys/block/<dev>/inflight`
+    /// to 199 (`docs/scenarios/io.md`, defect 20). The kernel's source says
+    /// why: from the per-cpu `in_flight` counters' first use for multi-queue
+    /// devices until 7.2, `blk_account_io_start` counted a request on the
+    /// partition it came through and never on the disk, whose line therefore
+    /// read 0 under any queue a partition made. 7.2 counts it on both
+    /// (upstream `5bdb8ec58b54`, "block: propagate in_flight to whole disk on
+    /// partition I/O"). `/sys/block/<dev>/inflight`
     /// is the other account, which on a multi-queue device walks the
     /// requests the driver holds, whichever partition they came through, and
     /// leaves out the ones still in the scheduler. Each is a count of requests

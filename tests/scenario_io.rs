@@ -6282,3 +6282,68 @@ fn a_device_with_a_known_latency_puts_every_request_in_its_bucket_in_both_histog
     assert_eq!(only(streamed), expected, "the streamed histogram");
     assert_eq!(only(kernel), expected, "the histogram built in the kernel");
 }
+
+/// A file event names the filesystem's superblock device, and `io.bytes`
+/// counts the block devices under it: `blk_devs` is where the two meet, each
+/// device spelled as `io.bytes` keys its series.
+///
+/// The reference is the test's own walk from the mount source through `/sys`
+/// ([`backing_device`]), which shares no code with the collector's: on btrfs
+/// the superblock's `0:28` names nothing, and both have to reach the disk
+/// (`dev:259+0`) through the partition the mount names.
+#[test]
+fn a_file_event_names_the_block_devices_its_filesystem_is_on() {
+    if let Some(reason) = no_fentry_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let target = scratch("blk-devs.bin");
+    std::fs::create_dir_all(target.parent().expect("a parent")).expect("the scratch directory");
+    std::fs::write(&target, b"").expect("the target exists before the run");
+    let device = match backing_device(&target) {
+        Ok(device) => device,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let (superblock, _) = mounted_device(&target);
+    let output = run(&[
+        "io.fs",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "dd",
+        "if=/dev/zero",
+        &format!("of={}", target.display()),
+        "bs=64k",
+        "count=16",
+        "conv=fsync",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document = json(&output);
+    let result = &document["results"][0];
+    let on_it: Vec<_> = raw_with_keys(result)
+        .into_iter()
+        .filter(|(event, _)| file_key(event).is_some_and(|(dev, _)| dev == superblock))
+        .collect();
+    assert!(
+        !on_it.is_empty(),
+        "dd's writes reached no file on the scratch filesystem"
+    );
+    for (_, attrs) in &on_it {
+        let under = attr_text(attrs, "blk_devs");
+        assert!(
+            under.split(',').any(|key| key == device.key),
+            "a file on {} carries blk_devs `{under}`, which does not hold {}, the disk its \
+             mount source is on",
+            device.leaf,
+            device.key
+        );
+    }
+    let _ = std::fs::remove_file(&target);
+}

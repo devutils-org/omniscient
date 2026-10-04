@@ -202,6 +202,10 @@ impl PageCacheCollector {
             Attr::uint("sb_dev", io_vfs::stat_dev(row.dev)),
             Attr::text("fs", fs),
         ]);
+        // The devices a fill read from, as `io.bytes` keys them.
+        if let Some(under) = self.mounts.block_devices(dev) {
+            attrs.push(Attr::text("blk_devs", under));
+        }
         Event {
             ts_ns,
             ts_err_ns: 0,

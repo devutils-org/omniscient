@@ -199,9 +199,10 @@
        sampling, not the device."
     - "The kernel counts what is outstanding twice, and the two can part: the
        I/O accounting in /proc/diskstats (scheduler queue included) and the
-       requests the driver holds in /sys/block/<dev>/inflight. On one 6.17
-       kernel the disk's diskstats line read 0 under a queue of 199
-       (docs/scenarios/io.md, defect 20; the cause is still open). `inflight`
+       requests the driver holds in /sys/block/<dev>/inflight. Before 7.2 the
+       first counted a request on the partition it came through and never on
+       the disk, so a 6.17 disk's line read 0 under a queue of 199
+       (docs/scenarios/io.md, defect 20). `inflight`
        is the larger of the two, each a count of requests really outstanding;
        `diskstats_inflight` and `sysfs_inflight` carry each, and
        `sysfs_inflight` is absent, not zero, where the file could not be read."
@@ -265,6 +266,13 @@
        st_dev stat(2) reports -- every subvolume has its own anonymous device --
        and inode numbers repeat across subvolumes, so there the key names the
        filesystem and the inode, not always one file."
+    - "`blk_devs` names the block devices the filesystem is on, each spelled
+       as io.bytes keys its series (`dev:259+0`), comma-separated: the mount
+       source followed through /sys, a partition to its disk, a dm or md
+       device to its members, a btrfs to every device it spans. It is the
+       set the filesystem can write to, not the device a given byte reached,
+       and it is absent where the filesystem is on no block device (tmpfs,
+       overlay, a network filesystem)."
     - "An event is a histogram row, not a call: `count` says how many."
 
 - id: io.pagecache
@@ -286,6 +294,9 @@
   filter_fields: [comm, dev, ino, fs]
   determinism: low
   caveats:
+    - "`blk_devs` names the block devices under the file's filesystem, as
+       io.fs carries it: each as io.bytes keys its series, absent off a block
+       device."
     - "A cold run and a warm run differ by an order of magnitude. Mixing them
        produces a bimodal distribution that then gets mistaken for noise."
     - "A miss is a page the cache had to fill, on demand or read ahead. A page
@@ -377,6 +388,9 @@
   filter_fields: [comm, dev, ino, call, fs]
   determinism: low
   caveats:
+    - "`blk_devs` names the block devices under the file's filesystem, as
+       io.fs carries it: each as io.bytes keys its series, absent off a block
+       device."
     - "Attaching the trampolines costs about 65 ms, paid once per run whatever
        the run sees, and on a short run it is most of what the run cost: the
        bench measured 64 ms with no event."

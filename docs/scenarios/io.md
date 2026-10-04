@@ -1353,6 +1353,37 @@ Held also by `diskstats::tests::a_queue_one_account_misses_is_read_from_the_othe
 Shown green here; **whether the CI's cells go green is the next CI run's to
 show**.
 
+**The cause, settled from the kernel's source (the twentieth wave).** The
+partition reading was right. In 6.17, `/proc/diskstats`' ninth column is
+`bdev_count_inflight(hd)` (`block/genhd.c`), which sums the per-cpu
+`in_flight` counters of that one `block_device`; `blk_account_io_start`
+(`block/blk-mq.c`) increments them with `part_stat_local_inc(req->part, ...)`,
+and `part_stat_local_inc` touches only the partition it is given -- unlike
+`part_stat_inc`, which adds to the whole disk too. So a request through
+`nvme0n1p1` was outstanding on `nvme0n1p1`'s line and on no other, and the
+disk's line read 0. `/sys/block/nvme0n1/inflight` on a multi-queue device goes
+through `blk_mq_in_driver_rw` instead, which walks the driver's tags for the
+whole disk: 199. Upstream fixed it in 7.2 (`5bdb8ec58b54`, "block: propagate
+in_flight to whole disk on partition I/O", committed 2026-06-09; its message
+traces the loss back to `e016b78201a2` and the removal of
+`generic_{start,end}_io_acct`): `bdev_inc_in_flight` now adds to the disk
+when the request came through a partition. v7.1's `block/blk.h` has no
+`bdev_inc_in_flight`, v7.2's does, which is why this machine (7.2.7) reads
+the two lines alike. Read from the tags `v6.17` and `v7.2` of the kernel's
+tree, not run on a 6.17 machine; the CI's next log, whose
+`diskstats_inflight` should read 0 where `sysfs_inflight` does not, is what
+would show it.
+
+The workaround stays right, and is now explained: on a kernel before 7.2,
+a disk's diskstats column counts only I/O addressed to the whole disk, and the
+sysfs walk is the account that holds the rest. What it still misses there is
+a request through a partition that is in the scheduler and not yet in the
+driver (`blk_mq_in_driver_rw` counts only the driver's); the partition's own
+line holds those, and adding the partitions' columns to the disk's where the
+disk's is the smaller would recover them. Not done: the partitions are lines
+the collector leaves out on purpose, and the CI's `none` scheduler holds
+nothing there.
+
 ### 21. The program statistics read 0 runs while the histogram counted 26.8 M — **fixed for `io.latency`; the rest filed**
 
 The coordinator's `null_blk` run with `kernel.bpf_stats_enabled=1` printed
@@ -1447,3 +1478,51 @@ should count the timer's slack (filed in `docs/open-findings.md`).
   own on `null_blk`.
 - **One program for both `io.latency` histograms**: not started; it was
   optional, and the two items above came first.
+
+## The twentieth wave
+
+### 23. A file's device and the device `io.bytes` counts did not meet — **fixed**
+
+`io.fs` keyed a file by its superblock's device, which on btrfs is an
+anonymous `0:28` that names nothing in `/proc/diskstats`, and `io.bytes`
+counts the devices nothing is stacked on (`dev:259+0`). The flows view could
+not draw a file -> device edge for that reason (`docs/view/flows.md`, "What it
+does not do"). `io.fs`, `io.fsync` and `io.pagecache` now carry `blk_devs`:
+the mount source followed through `/sys` -- a partition to its disk, a dm or
+md device to its members, a btrfs to every device in
+`/sys/fs/btrfs/<fsid>/devices` -- each spelled as `io.bytes` keys its series,
+comma-separated (`src/collect/io/underneath.rs`). On this machine the root
+btrfs spans `nvme0n1p6` and `nvme0n1p9`, the mount names only the first, and
+both land on `dev:259+0`, the key `io.bytes -e summary --system` reports.
+Held by `a_file_event_names_the_block_devices_its_filesystem_is_on`, whose
+reference is the test's own walk from the mount source (`backing_device`),
+and by the unit tests over fabricated `/sys` trees (partition, multi-device
+btrfs, dm on md, a whole disk, an unknown name).
+
+It is the set the filesystem can write to, not the device a given byte
+reached: on a btrfs over two disks or a striped volume, which disk took a
+write is not in the mount table.
+
+### 24. Batched direct reads are coalesced without being counted as merges — **measured, not held**
+
+The known number of merges was attempted again. Sixteen adjacent 4 KiB
+`O_DIRECT` reads in one `io_uring` submission (`fio --ioengine=io_uring
+--iodepth=16 --iodepth_batch_submit=16`, on a NOCOW file so btrfs does not
+checksum it) became **two requests and one merge** on `nvme0n1`, three times
+out of three; the same reads made one at a time (`psync`) were sixteen
+requests and no merge. So the block layer coalesced fifteen bios and the
+merge column counted one: `io.merges` is not "bios combined", and a workload
+cannot predict it from the number of adjacent bios it submits. The same
+sixteen reads through `io_submit` (libaio) on btrfs moved the whole 256 KiB
+file in four requests -- btrfs answered the asynchronous direct reads through
+the page cache -- so libaio is not a merge driver on this filesystem either.
+No test holds a merge count; the scenario above (`merges` bracketed by the
+kernel's own column over an enclosing window) is still what does.
+
+### Not done this wave
+
+- **`io.bytes` split by direction in the aggregating emits.** The split is on
+  every event (`read_bytes`, `write_bytes`) and `raw` shows it; a timeline or
+  summary per direction needs a key the series can be grouped on, and
+  `KeyKind` (`src/request.rs`) has none. Filed in `docs/fixes/w20-io.md`.
+- **One program for both `io.latency` histograms**: optional, not started.
