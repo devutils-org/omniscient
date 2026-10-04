@@ -78,22 +78,22 @@ fn device_names() -> BTreeMap<(u32, u32), String> {
 pub fn factories() -> Vec<Factory> {
     vec![
         Factory::new("io.bytes", "fs:proc", |resolved| {
-            Ok(Box::new(diskstats::Prepare::new(
-                Metric::Bytes,
-                resolved.request.mode,
-            )?))
+            Ok(Box::new(
+                diskstats::Prepare::new(Metric::Bytes, resolved.request.mode)?
+                    .keyed(&resolved.request.keys),
+            ))
         }),
         Factory::new("io.iops", "fs:proc", |resolved| {
-            Ok(Box::new(diskstats::Prepare::new(
-                Metric::Iops,
-                resolved.request.mode,
-            )?))
+            Ok(Box::new(
+                diskstats::Prepare::new(Metric::Iops, resolved.request.mode)?
+                    .keyed(&resolved.request.keys),
+            ))
         }),
         Factory::new("io.merges", "fs:proc", |resolved| {
-            Ok(Box::new(diskstats::Prepare::new(
-                Metric::Merges,
-                resolved.request.mode,
-            )?))
+            Ok(Box::new(
+                diskstats::Prepare::new(Metric::Merges, resolved.request.mode)?
+                    .keyed(&resolved.request.keys),
+            ))
         }),
         Factory::new("io.inflight", "fs:proc", |resolved| {
             Ok(Box::new(diskstats::Prepare::new(

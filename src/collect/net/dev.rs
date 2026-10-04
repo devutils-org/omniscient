@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
-use crate::event::{Attr, CollectorId, Event, KeyValue};
+use crate::event::{Attr, CollectorId, Direction, Event, KeyValue};
 use crate::request::Target;
 
 const PATH: &str = "/proc/net/dev";
@@ -54,7 +54,9 @@ impl Counted {
     }
 }
 
-pub struct Prepare(pub Counted);
+/// What to count, and whether the request is keyed on `dir`: then each
+/// interface's increase is one event per direction rather than one with both.
+pub struct Prepare(pub Counted, pub bool);
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
@@ -75,6 +77,7 @@ impl Prepared for Prepare {
         Ok(Box::new(DevCollector {
             id: CollectorId::new(format!("{}/fs:proc", self.0.source())),
             counted: self.0,
+            by_direction: self.1,
             only,
             previous: BTreeMap::new(),
             losses: Losses::default(),
@@ -86,6 +89,8 @@ impl Prepared for Prepare {
 pub struct DevCollector {
     id: CollectorId,
     counted: Counted,
+    /// One event per direction, keyed `dir:rx` and `dir:tx`.
+    by_direction: bool,
     only: Option<String>,
     /// Last value seen per interface, for the delta.
     previous: BTreeMap<String, (u64, u64)>,
@@ -183,16 +188,36 @@ impl Collector for DevCollector {
 
             let received = current.0 - previous.0;
             let transmitted = current.1 - previous.1;
+            let iface = KeyValue::iface(
+                super::interfaces::index_of(&line.name).unwrap_or(0),
+                line.name.clone(),
+            );
+            if self.by_direction {
+                for (direction, value) in [(Direction::Rx, received), (Direction::Tx, transmitted)]
+                {
+                    events.push(Event {
+                        ts_ns,
+                        ts_err_ns: 0,
+                        kind: self.counted.source().to_owned(),
+                        keys: vec![iface.clone(), KeyValue::dir(direction)],
+                        attrs: vec![
+                            Attr::uint(self.counted.value_attr(), value),
+                            Attr::text("iface", line.name.clone()),
+                        ],
+                        collector_id: self.id.clone(),
+                        seq: index,
+                    });
+                    index += 1;
+                }
+                continue;
+            }
             events.push(Event {
                 ts_ns,
                 ts_err_ns: 0,
                 kind: self.counted.source().to_owned(),
                 // The index asked at the read, as `procfs::interfaces` does, so
                 // this key names the interface the index-reading sources name.
-                keys: vec![KeyValue::iface(
-                    super::interfaces::index_of(&line.name).unwrap_or(0),
-                    line.name.clone(),
-                )],
+                keys: vec![iface],
                 attrs: vec![
                     Attr::uint(self.counted.value_attr(), received + transmitted),
                     Attr::uint("rx", received),
@@ -228,7 +253,7 @@ mod tests {
     use super::*;
 
     fn collector(counted: Counted) -> Box<dyn Collector> {
-        Box::new(Prepare(counted))
+        Box::new(Prepare(counted, false))
             .attach(&Target::System)
             .expect("a system target is readable")
     }
@@ -241,6 +266,25 @@ mod tests {
         let mut collector = collector(Counted::Bytes);
         collector.sample(0).unwrap();
         assert!(collector.stop().is_empty());
+    }
+
+    /// Keyed on `dir`, an interface's increase is two events, `dir:rx` and
+    /// `dir:tx`, under the interface; together they are its one event's bytes.
+    #[test]
+    fn a_request_keyed_on_direction_gets_one_series_per_direction() {
+        let mut collector = Box::new(Prepare(Counted::Bytes, true))
+            .attach(&Target::Iface("lo".to_owned()))
+            .expect("loopback is readable");
+        assert!(collector.sample(0).unwrap().is_empty());
+        let events = collector.sample(1).unwrap();
+        let directions: Vec<String> = events
+            .iter()
+            .map(|event| {
+                assert_eq!(event.attr("iface").unwrap().to_string(), "lo");
+                event.keys[1].to_string()
+            })
+            .collect();
+        assert_eq!(directions, ["dir:rx", "dir:tx"]);
     }
 
     #[test]
@@ -280,7 +324,7 @@ mod tests {
 
     #[test]
     fn an_interface_target_narrows_to_that_interface() {
-        let mut collector = Box::new(Prepare(Counted::Bytes))
+        let mut collector = Box::new(Prepare(Counted::Bytes, false))
             .attach(&Target::Iface("lo".to_owned()))
             .expect("loopback exists");
         collector.sample(0).unwrap();
@@ -313,7 +357,7 @@ mod tests {
 
     #[test]
     fn a_process_target_is_refused_with_the_reason() {
-        let Err(error) = Box::new(Prepare(Counted::Bytes)).attach(&Target::Pid(vec![1])) else {
+        let Err(error) = Box::new(Prepare(Counted::Bytes, false)).attach(&Target::Pid(vec![1])) else {
             panic!("a process target has no interface counters and must be refused");
         };
         assert!(error.contains("--iface"), "{error}");
@@ -321,7 +365,7 @@ mod tests {
 
     #[test]
     fn an_interface_that_does_not_exist_ends_the_run() {
-        let mut collector = Box::new(Prepare(Counted::Bytes))
+        let mut collector = Box::new(Prepare(Counted::Bytes, false))
             .attach(&Target::Iface("definitely-not-an-interface".to_owned()))
             .expect("attaching does not read the file");
         match collector.sample(0) {

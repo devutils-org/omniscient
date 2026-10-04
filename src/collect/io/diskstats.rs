@@ -36,8 +36,8 @@ use std::path::{Path, PathBuf};
 
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
-use crate::event::{Attr, CollectorId, Event, KeyValue};
-use crate::request::{Mode, Target};
+use crate::event::{Attr, CollectorId, Direction, Event, KeyValue};
+use crate::request::{KeyKind, Mode, Target};
 
 /// `/proc/diskstats` counts in 512-byte sectors whatever the device's own
 /// block size is, so this factor is a fact about the file, not an assumption
@@ -99,6 +99,40 @@ impl Metric {
         Some(attrs)
     }
 
+    /// The same increase split by direction, for a request keyed on `dir`:
+    /// each direction the kernel counts, and only those it counts -- a kernel
+    /// that writes no discard column gives no `dir:discard`, not a zero.
+    fn directions(self, delta: &DeviceCounters) -> Vec<(Direction, u64)> {
+        let mut split = match self {
+            Metric::Bytes => vec![
+                (Direction::Read, delta.sectors_read * SECTOR_BYTES),
+                (Direction::Write, delta.sectors_written * SECTOR_BYTES),
+            ],
+            Metric::Iops => vec![
+                (Direction::Read, delta.reads),
+                (Direction::Write, delta.writes),
+            ],
+            Metric::Merges => vec![
+                (Direction::Read, delta.reads_merged),
+                (Direction::Write, delta.writes_merged),
+            ],
+            Metric::Inflight => return Vec::new(),
+        };
+        match self {
+            Metric::Bytes => split.extend(
+                delta
+                    .sectors_discarded
+                    .map(|sectors| (Direction::Discard, sectors * SECTOR_BYTES)),
+            ),
+            Metric::Iops => {
+                split.extend(delta.discards.map(|ops| (Direction::Discard, ops)));
+                split.extend(delta.flushes.map(|ops| (Direction::Flush, ops)));
+            }
+            _ => {}
+        }
+        split
+    }
+
     fn source_id(self) -> &'static str {
         match self {
             Metric::Bytes => "io.bytes",
@@ -131,16 +165,22 @@ impl Metric {
 pub struct Prepare {
     metric: Metric,
     mode: Mode,
+    by_direction: bool,
 }
 
 impl Prepare {
     /// Refuses a mode this backend cannot serve, with what it would take to
     /// serve it, rather than returning a number of a different kind.
     pub fn new(metric: Metric, mode: Mode) -> Result<Self, String> {
+        let ready = Self {
+            metric,
+            mode,
+            by_direction: false,
+        };
         match (mode, metric.is_gauge()) {
-            (Mode::Poll { .. }, _) => Ok(Self { metric, mode }),
-            (Mode::Count, false) => Ok(Self { metric, mode }),
-            (Mode::Snapshot, true) => Ok(Self { metric, mode }),
+            (Mode::Poll { .. }, _) => Ok(ready),
+            (Mode::Count, false) => Ok(ready),
+            (Mode::Snapshot, true) => Ok(ready),
             (Mode::Count, true) => Err(format!(
                 "`{}` is a queue depth: it is read at an instant, so it counts over no window. \
                  Poll it, or take one snapshot",
@@ -158,6 +198,14 @@ impl Prepare {
             )),
         }
     }
+
+    /// One event per device and direction rather than one per device, when
+    /// the request is keyed on `dir`. Without it the events are what every
+    /// reader of a device's series has always read.
+    pub fn keyed(mut self, keys: &[KeyKind]) -> Self {
+        self.by_direction = keys.contains(&KeyKind::Dir);
+        self
+    }
 }
 
 impl Prepared for Prepare {
@@ -167,11 +215,10 @@ impl Prepared for Prepare {
     /// machine's total, which would be attribution that was never measured.
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         match target {
-            Target::System => Ok(Box::new(Diskstats::new(
-                self.metric,
-                self.mode,
-                PathBuf::from("/proc/diskstats"),
-            ))),
+            Target::System => Ok(Box::new(
+                Diskstats::new(self.metric, self.mode, PathBuf::from("/proc/diskstats"))
+                    .by_direction(self.by_direction),
+            )),
             other => Err(format!(
                 "/proc/diskstats counts per device for the whole machine, and a {} target asks \
                  for something it does not record; use --system, or the eBPF backend once it \
@@ -203,6 +250,12 @@ pub struct Diskstats {
     /// The reading a `count` request measures its total against: taken before
     /// the observed program starts, so the total covers the whole run.
     baseline: Option<Reading>,
+    /// A polled run's first tick, which the runner takes as soon as the
+    /// program is released, is passed over: its interval since the baseline
+    /// would be microseconds long. The next tick measures from the baseline.
+    pass_first_tick: bool,
+    /// One event per direction, keyed `dir`, rather than one per device.
+    by_direction: bool,
     losses: Losses,
 }
 
@@ -218,8 +271,15 @@ impl Diskstats {
             roles: BTreeMap::new(),
             previous: None,
             baseline: None,
+            pass_first_tick: false,
+            by_direction: false,
             losses: Losses::default(),
         }
+    }
+
+    pub fn by_direction(mut self, by_direction: bool) -> Self {
+        self.by_direction = by_direction;
+        self
     }
 
     /// Reads the file and sums the devices whose counters are their own.
@@ -323,6 +383,35 @@ impl Diskstats {
                 ));
                 continue;
             };
+            if self.by_direction {
+                for (direction, value) in self.metric.directions(&delta) {
+                    let mut attrs = vec![
+                        Attr::uint(self.metric.value_attr(), value),
+                        Attr::uint("interval_ns", interval_ns),
+                        Attr::text("dev", device.name.clone()),
+                    ];
+                    if self.metric == Metric::Bytes {
+                        attrs.push(Attr::uint("sector_bytes", SECTOR_BYTES));
+                    }
+                    events.push(Event {
+                        ts_ns: after.ts_ns,
+                        ts_err_ns: 0,
+                        kind: self.metric.source_id().to_owned(),
+                        keys: vec![
+                            KeyValue::Dev {
+                                major: device.major,
+                                minor: device.minor,
+                            },
+                            KeyValue::dir(direction),
+                        ],
+                        attrs,
+                        collector_id: self.id.clone(),
+                        seq: index,
+                    });
+                    index += 1;
+                }
+                continue;
+            }
             let Some(mut attrs) = self.metric.attrs(&delta) else {
                 return Vec::new();
             };
@@ -416,22 +505,29 @@ impl Collector for Diskstats {
         self.metric.value_attr()
     }
 
-    /// A counted run takes its baseline before the observed program is
-    /// released, so its one total covers the whole run.
+    /// Every run that measures an increase takes its baseline here, before
+    /// the observed program is released, so what it does from its first
+    /// instruction is in the first interval.
     ///
-    /// A polled run does not: the runner takes its first sample immediately
-    /// after starting, and an interval of a few microseconds would put a
-    /// meaningless ratio at the head of every series. Its first read is the
-    /// baseline instead, and produces no event, because a baseline is not a
-    /// measurement of anything.
+    /// A counted run measures its one total against it. A polled run measures
+    /// its first interval against it, at its *second* tick: the runner takes
+    /// the first as soon as the program is released, and an interval of a few
+    /// microseconds would put a meaningless ratio at the head of every series.
+    /// That tick produces no event and moves nothing, so the bytes between
+    /// the release and it are in the next interval rather than lost.
     fn start(&mut self) -> Result<(), String> {
-        if self.mode != Mode::Count {
+        if self.metric.is_gauge() || matches!(self.mode, Mode::Snapshot) {
             return Ok(());
         }
         let reading = self
             .read()
             .map_err(|error| format!("cannot read {}: {error:?}", self.path.display()))?;
-        self.baseline = Some(reading);
+        if self.mode == Mode::Count {
+            self.baseline = Some(reading);
+        } else {
+            self.previous = Some(reading);
+            self.pass_first_tick = true;
+        }
         Ok(())
     }
 
@@ -445,6 +541,9 @@ impl Collector for Diskstats {
         // A counted run reports one total at the end; reading the file every
         // tick would cost something and answer nothing.
         if self.mode == Mode::Count {
+            return Ok(Vec::new());
+        }
+        if std::mem::take(&mut self.pass_first_tick) {
             return Ok(Vec::new());
         }
         let after = self.read()?;
@@ -822,6 +921,87 @@ mod tests {
         assert_eq!(event.attr("dev").unwrap().to_string(), device);
         assert!(event.attr("interval_ns").unwrap().as_f64().unwrap() > 0.0);
         assert!(collector.losses().is_clean());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A polled run's baseline is taken at the start, before the program is
+    /// released, and not at the first tick: what the device did between the
+    /// two is in the first interval the run reports, not lost.
+    #[test]
+    fn a_polled_run_measures_from_its_start_and_not_from_its_first_tick() {
+        let Some(device) = a_leaf_device() else {
+            return;
+        };
+        let path = scratch("poll-baseline");
+        write_stats(&path, &[line(&device, 10, 100, 20, 200)]);
+        let mut collector = Diskstats::new(Metric::Bytes, poll(), path.clone());
+        collector.start().expect("the fake file reads");
+        // The program's first I/O, between its release and the first tick.
+        write_stats(&path, &[line(&device, 11, 104, 21, 204)]);
+        assert!(
+            collector.sample(0).expect("the first tick").is_empty(),
+            "the first tick, microseconds after the release, is no interval"
+        );
+        write_stats(&path, &[line(&device, 12, 108, 23, 216)]);
+        let events = collector.sample(1).expect("the second tick");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].attr("bytes").unwrap().as_f64(),
+            Some(24.0 * 512.0),
+            "the whole increase since the start, the release's included"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Keyed on `dir`, a device's increase is one event per direction, each
+    /// carrying that direction's share under the value attribute, and the
+    /// directions add up to the device's total.
+    #[test]
+    fn a_request_keyed_on_direction_gets_one_series_per_direction() {
+        let Some(device) = a_leaf_device() else {
+            return;
+        };
+        let path = scratch("by-direction");
+        write_stats(&path, &[line(&device, 10, 100, 20, 200)]);
+        let mut collector = Diskstats::new(Metric::Bytes, poll(), path.clone()).by_direction(true);
+        assert!(collector.sample(0).expect("the baseline").is_empty());
+        write_stats(&path, &[line(&device, 12, 108, 23, 216)]);
+        let events = collector.sample(1).expect("a second read");
+        let split: Vec<(String, f64)> = events
+            .iter()
+            .filter(|event| event.keys[1] != KeyValue::dir(Direction::Discard))
+            .map(|event| {
+                assert!(matches!(event.keys[0], KeyValue::Dev { .. }));
+                (
+                    event.keys[1].to_string(),
+                    event.attr("bytes").unwrap().as_f64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            split,
+            [
+                ("dir:read".to_owned(), 8.0 * 512.0),
+                ("dir:write".to_owned(), 16.0 * 512.0)
+            ]
+        );
+        let series: std::collections::BTreeSet<String> = events
+            .iter()
+            .map(|event| crate::emit::SeriesKey::by(event, &[KeyKind::Dir]).to_string())
+            .collect();
+        assert!(series.contains("dir:read") && series.contains("dir:write"));
+        assert!(
+            Prepare::new(Metric::Bytes, poll())
+                .unwrap()
+                .keyed(&[KeyKind::Dev, KeyKind::Dir])
+                .by_direction
+        );
+        assert!(
+            !Prepare::new(Metric::Bytes, poll())
+                .unwrap()
+                .keyed(&[KeyKind::Dev])
+                .by_direction
+        );
         std::fs::remove_file(&path).ok();
     }
 

@@ -53,11 +53,15 @@ pub fn probe(requirement: &str) -> Option<Result<(), String>> {
 /// The collectors this family provides.
 pub fn factories() -> Vec<Factory> {
     vec![
-        Factory::new("net.bytes", "fs:proc", |_| {
-            Ok(Box::new(dev::Prepare(dev::Counted::Bytes)))
+        Factory::new("net.bytes", "fs:proc", |resolved| {
+            let by_direction = resolved
+                .request
+                .keys
+                .contains(&crate::request::KeyKind::Dir);
+            Ok(Box::new(dev::Prepare(dev::Counted::Bytes, by_direction)))
         }),
         Factory::new("net.packets", "fs:proc", |_| {
-            Ok(Box::new(dev::Prepare(dev::Counted::Packets)))
+            Ok(Box::new(dev::Prepare(dev::Counted::Packets, false)))
         }),
         Factory::new("net.tcp.rtt", "netlink", |_| Ok(Box::new(tcp_rtt::Prepare))),
         // Both of these read counters, and both declare `snapshot`. The mode
