@@ -793,13 +793,14 @@ fn only_a_session_its_owner_approved_launches_a_program() {
         approved.join("ran-here").exists(),
         "the program did not run from its session's own directory"
     );
-    let held: f64 = answer["said_by_omn"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|line| line.as_str()?.trim().strip_prefix("FDS ")?.parse().ok())
+    // The program's stderr is its own, apart from omn's lines.
+    let held: f64 = answer["program_stderr"]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("FDS ")?.parse().ok())
         .next()
-        .unwrap_or_else(|| panic!("the program's own count is not in what omn said: {answer}"));
+        .unwrap_or_else(|| panic!("the program's own count is not on its stderr: {answer}"));
     let request = &answer["read_back"]["requests"][0];
     let series = &request["result"]["outputs"][0]["series"][0];
     assert_eq!(series["max"], held, "{series}");
@@ -844,6 +845,7 @@ fn a_launched_programs_stdout_comes_back_apart_from_omns_document() {
          - python3\n        - -c\n        - |\n          import sys, time\n          \
          for n in range(20): print('LINE %d' % n)\n          sys.stdout.flush()\n          \
          sys.stdout.buffer.write(b'NOT UTF-8 \\xff\\n')\n          sys.stdout.buffer.flush()\n          \
+         sys.stderr.write('THE PROGRAM ON STDERR\\n')\n          sys.stderr.flush()\n          \
          time.sleep(1.0)\n    mode: poll@50ms\n    emit: [summary]\n";
     let approved = approve(&dir, "printing.yml", text);
     let mut client = Client::start(&[
@@ -881,6 +883,20 @@ fn a_launched_programs_stdout_comes_back_apart_from_omns_document() {
         file, printed,
         "the file holds the program's bytes unchanged"
     );
+    // Its stderr comes back apart too, written by `omn` to a file of its
+    // own rather than among `omn`'s lines.
+    let stderr = &answer["program_stderr"];
+    assert_eq!(stderr["text"], "THE PROGRAM ON STDERR\n", "{stderr}");
+    assert!(
+        !answer["said_by_omn"]
+            .to_string()
+            .contains("THE PROGRAM ON STDERR"),
+        "{}",
+        answer["said_by_omn"]
+    );
+    // Nothing stopped it.
+    assert!(answer["stopped_by_budget"].is_null(), "{answer}");
+
     // And the document taken out is the one on disk: the run reads back.
     assert_eq!(
         answer["read_back"]["requests"][0]["result"]["label"], "descriptors",

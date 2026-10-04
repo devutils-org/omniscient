@@ -74,6 +74,83 @@ pub struct Lifetime {
     /// nothing.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub left_running: u32,
+    /// How many processes the stop ended that had left the program's tree
+    /// before it -- orphaned, their parent gone first, and adopted by this
+    /// process ([`adopt_orphans`]) -- and that a walk of the program's tree
+    /// no longer finds. Counted, so a run says it reached them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub adopted_ended: u32,
+}
+
+/// Whether this process adopts the orphans of the programs it launches
+/// ([`adopt_orphans`]).
+static ADOPTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Makes this process the subreaper of what it launches: a descendant of the
+/// launched program whose parent exits before it is reparented here rather
+/// than to init, where a stop can still find it. Without it, a process that
+/// was orphaned and left the program's process group (`setsid`, a daemon's
+/// double fork) was in no tree a stop walks, and outlived the run.
+///
+/// For the `omn` binary alone, which starts no process of its own that
+/// outlives the call that started it: at a stop, every child of this process
+/// other than the program is then one of the program's, and is ended with it.
+/// A library caller -- a test harness with other tests' children beside the
+/// program -- never calls this, and a stop then ends the program's tree only.
+pub fn adopt_orphans() -> bool {
+    // SAFETY: a prctl that takes no pointer.
+    let adopted = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0;
+    ADOPTING.store(adopted, std::sync::atomic::Ordering::Relaxed);
+    adopted
+}
+
+/// Ends every process this one adopted, and their descendants, once the
+/// program has been reaped: stopped first, as [`freeze`] stops a tree, then
+/// killed and reaped. Returns how many it ended and how many it could not
+/// signal.
+fn end_adopted() -> (u32, u32) {
+    if !ADOPTING.load(std::sync::atomic::Ordering::Relaxed) {
+        return (0, 0);
+    }
+    // SAFETY: getpid cannot fail.
+    let me = unsafe { libc::getpid() };
+    let mut stopped: Vec<i32> = Vec::new();
+    for _ in 0..64 {
+        let new: Vec<i32> = super::task::descendants(me)
+            .into_iter()
+            .filter(|adopted| !stopped.contains(adopted))
+            .collect();
+        if new.is_empty() {
+            break;
+        }
+        for adopted in new {
+            // SAFETY: stopping a process the launched program started.
+            unsafe { libc::kill(adopted, libc::SIGSTOP) };
+            stopped.push(adopted);
+        }
+    }
+    let (mut ended, mut refused) = (0, 0);
+    for adopted in &stopped {
+        // SAFETY: killing a process the launched program started.
+        if unsafe { libc::kill(*adopted, libc::SIGKILL) } == 0 {
+            ended += 1;
+        } else if std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+            refused += 1;
+        }
+    }
+    // The adopted are this process's children now, and their killed
+    // descendants become so as their parents die: reaped until none is left,
+    // bounded, since a child this process could not signal never ends.
+    for _ in 0..200 {
+        let mut status = 0;
+        // SAFETY: reaping any child; the program was reaped before this.
+        match unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) } {
+            0 => std::thread::sleep(std::time::Duration::from_millis(1)),
+            pid if pid > 0 => {}
+            _ => break,
+        }
+    }
+    (ended, refused)
 }
 
 fn is_zero(count: &u32) -> bool {
@@ -108,6 +185,8 @@ pub struct Gated {
     cpu_ns: Option<u64>,
     /// What the stop could not signal ([`Lifetime::left_running`]).
     left_running: u32,
+    /// What the stop ended outside the program's tree ([`Lifetime::adopted_ended`]).
+    adopted_ended: u32,
 }
 
 impl Gated {
@@ -208,6 +287,9 @@ impl Gated {
             self.status = Some(status);
             self.cpu_ns = Some(cpu_ns(&usage));
         }
+        let (ended, refused) = end_adopted();
+        self.adopted_ended += ended;
+        self.left_running += refused;
         let reaped_ns = monotonic_ns();
         // Its end is somewhere after it was last seen running, which may be
         // before the signal: a program that exited a moment before it was
@@ -230,6 +312,7 @@ impl Gated {
             terminated: self.terminated,
             cpu_ns: self.cpu_ns,
             left_running: self.left_running,
+            adopted_ended: self.adopted_ended,
         })
     }
 }
@@ -301,11 +384,62 @@ fn describe(status: i32) -> String {
     }
 }
 
+/// The variable naming a file the launched program's stderr is written to,
+/// rather than the stderr it would share with `omn`.
+///
+/// A caller reading `omn`'s stderr -- the MCP server's `run_session` -- gets
+/// the program's lines mixed into `omn`'s, with nothing to tell them apart. A
+/// file of its own separates them at the source, without a guess at whose a
+/// line is. The variable is `omn`'s and is not passed on to the program.
+pub const PROGRAM_STDERR_VARIABLE: &str = "OMN_PROGRAM_STDERR";
+
+/// Opens the file [`PROGRAM_STDERR_VARIABLE`] names, created or truncated,
+/// close-on-exec in this process; `None` when the variable is not set.
+fn program_stderr(path: Option<&std::ffi::OsStr>) -> io::Result<Option<RawFd>> {
+    let Some(path) = path.filter(|path| !path.is_empty()) else {
+        return Ok(None);
+    };
+    let c_path = CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL"))?;
+    // SAFETY: a NUL-terminated path this frame owns.
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        return Err(io::Error::new(
+            error.kind(),
+            format!(
+                "{PROGRAM_STDERR_VARIABLE}={}: {error}",
+                std::path::Path::new(&path).display()
+            ),
+        ));
+    }
+    Ok(Some(fd))
+}
+
 /// Forks a child that waits at a gate, then execs `argv` when released.
 ///
 /// `environment` is added to the child's environment, which is how a preloaded
 /// shim is told where to send what it sees.
 pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Gated> {
+    gated_with(
+        argv,
+        environment,
+        std::env::var_os(PROGRAM_STDERR_VARIABLE).as_deref(),
+    )
+}
+
+/// [`gated`], with the program's stderr written to `stderr` when one is given.
+fn gated_with(
+    argv: &[String],
+    environment: &[(String, String)],
+    stderr: Option<&std::ffi::OsStr>,
+) -> io::Result<Gated> {
     let (program, _) = argv
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no program to launch"))?;
@@ -328,6 +462,7 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
     let mut variables: Vec<CString> = std::env::vars()
         .filter(|(name, _)| !environment.iter().any(|(added, _)| added == name))
         .chain(environment.iter().cloned())
+        .filter(|(name, _)| name != PROGRAM_STDERR_VARIABLE)
         .map(|(name, value)| {
             CString::new(format!("{name}={value}")).unwrap_or_else(|_| CString::new("").unwrap())
         })
@@ -337,9 +472,18 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
         variables.iter().map(|variable| variable.as_ptr()).collect();
     environment_pointers.push(std::ptr::null());
 
+    let stderr_fd = program_stderr(stderr)?;
+    let close_stderr = || {
+        if let Some(fd) = stderr_fd {
+            // SAFETY: a descriptor `program_stderr` opened, closed once.
+            unsafe { libc::close(fd) };
+        }
+    };
+
     let mut pipe_fds = [0i32; 2];
     // SAFETY: `pipe` fills two file descriptors into an array we own.
     if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
+        close_stderr();
         return Err(io::Error::last_os_error());
     }
     let (read_fd, write_fd) = (pipe_fds[0], pipe_fds[1]);
@@ -353,6 +497,7 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
             libc::close(read_fd);
             libc::close(write_fd);
         }
+        close_stderr();
         return Err(error);
     }
 
@@ -375,6 +520,11 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
             // writing means it gave up.
             libc::read(read_fd, go.as_mut_ptr() as *mut libc::c_void, 1);
             libc::close(read_fd);
+            // The program's own stderr, when one was asked for: `dup2`
+            // clears close-on-exec on the copy, so the program keeps it.
+            if let Some(fd) = stderr_fd {
+                libc::dup2(fd, 2);
+            }
             libc::execvpe(
                 c_program.as_ptr(),
                 argv_pointers.as_ptr(),
@@ -388,6 +538,7 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
 
     // SAFETY: closing the end of the pipe this process does not use.
     unsafe { libc::close(read_fd) };
+    close_stderr();
     // SAFETY: `pidfd_open` on a child of this process that cannot have been
     // reaped yet, so the pid still names it. Refused only on a kernel older
     // than 5.3, below this project's floor, and then the run falls back to its
@@ -408,6 +559,7 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
         exited: None,
         terminated: false,
         left_running: 0,
+        adopted_ended: 0,
     })
 }
 
@@ -607,6 +759,33 @@ mod tests {
             "{fds} is not readable by the user who launched it: {:?}",
             listed.err()
         );
+    }
+
+    /// The program's stderr goes to the file the variable names, and the
+    /// variable is not passed on to it.
+    #[test]
+    fn a_program_given_a_stderr_of_its_own_writes_there_and_is_not_told_about_it() {
+        let file = std::env::temp_dir().join(format!("omn-launch-stderr-{}", std::process::id()));
+        let launched = gated_with(
+            &[
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                format!(
+                    "echo the program said this >&2; echo \"[${PROGRAM_STDERR_VARIABLE}]\" >&2"
+                ),
+            ],
+            &[(PROGRAM_STDERR_VARIABLE.to_owned(), "set".to_owned())],
+            Some(file.as_os_str()),
+        );
+        let mut child = launched.expect("fork");
+        child.release();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while child.finished().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let written = std::fs::read_to_string(&file).expect("the file was created");
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(written, "the program said this\n[]\n");
     }
 
     #[test]

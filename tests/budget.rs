@@ -2331,3 +2331,102 @@ fn a_target_that_burns_under_a_tick_per_check_is_weighed_and_the_budget_acts_on_
         "the check saw a run over its ceiling and did nothing: {account}"
     );
 }
+
+/// A session of requests this machine cannot serve is refused with every one
+/// of them named, not the first: `examples/sched-forced-backends.yml` pins
+/// five sched sources to their eBPF backends, and the resolution loop used to
+/// return at the first it could not resolve (`docs/scenarios/sched.md`
+/// defect 8). On a machine that serves them the run is a run, and there is
+/// nothing here to check.
+#[test]
+fn a_session_refused_at_resolution_names_every_request_it_could_not_resolve() {
+    let session = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/sched-forced-backends.yml");
+    let output = run(&[
+        "trace",
+        "-f",
+        session.to_str().expect("a utf-8 path"),
+        "-d",
+        "100ms",
+    ]);
+    let said = stderr(&output);
+    if output.status.success() || !said.contains("has no viable backend") {
+        eprintln!("SKIP: this machine resolves the pinned sched backends: {said}");
+        return;
+    }
+    let refused: Vec<&str> = said
+        .lines()
+        .filter(|line| line.starts_with("error: `") && line.contains("has no viable backend"))
+        .collect();
+    for source in [
+        "sched.switches",
+        "sched.wakeup",
+        "sched.migrations",
+        "sched.offcpu",
+    ] {
+        assert!(
+            refused
+                .iter()
+                .any(|line| line.contains(&format!("`{source}`"))),
+            "`{source}` is named among the refused: {said}"
+        );
+    }
+    assert!(
+        said.contains(&format!(
+            "{} of the session's 5 requests cannot be resolved here",
+            refused.len()
+        )),
+        "and the count is said: {said}"
+    );
+    assert_eq!(output.status.code(), Some(1), "the machine's gap: {said}");
+}
+
+/// A stop ends what the program started even when it left the program's
+/// tree first: a grandchild whose parent exited, in a session of its own
+/// (`setsid`), was reparented away from the program and outlived the run.
+/// `omn` adopts such orphans now (`PR_SET_CHILD_SUBREAPER`), and its stop
+/// ends them and says how many.
+#[test]
+fn a_stop_ends_an_orphan_that_left_the_program_s_tree_and_group() {
+    // A sleep no other test starts, so finding it afterwards finds this one.
+    let marker = format!(
+        "{}.{}",
+        40 + std::process::id() % 50,
+        std::process::id() % 997
+    );
+    let script = format!("(setsid sleep {marker} &) ; sleep 30");
+    let output = run(&[
+        "trace",
+        "proc.fd",
+        "-m",
+        "poll@50ms",
+        "-e",
+        "summary",
+        "-d",
+        "600ms",
+        "--",
+        "sh",
+        "-c",
+        &script,
+    ]);
+    let said = stderr(&output);
+    assert!(output.status.success(), "{said}");
+    let survivors = Command::new("pgrep")
+        .args(["-f", &format!("^sleep {marker}$")])
+        .output()
+        .map(|found| String::from_utf8_lossy(&found.stdout).trim().to_owned());
+    if let Ok(pids) = &survivors {
+        for pid in pids.lines() {
+            let _ = Command::new("kill").args(["-9", pid]).status();
+        }
+        assert!(
+            pids.is_empty(),
+            "the orphan outlived the run: {pids}; {said}"
+        );
+    }
+    assert!(
+        said.contains(
+            "the stop also ended 1 process(es) the program started that had left its tree"
+        ),
+        "and the run says it ended it: {said}"
+    );
+}

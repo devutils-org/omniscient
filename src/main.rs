@@ -88,6 +88,10 @@ fn restore_own_dumpability() {
 
 fn main() -> ExitCode {
     restore_own_dumpability();
+    // A launched program's orphans are reparented here, where a stop can
+    // still end them (`collect::adopt_orphans`). This process starts nothing
+    // else that outlives the call that started it.
+    omn::collect::adopt_orphans();
     let cli = match Cli::try_parse_from(normalize(std::env::args_os())) {
         Ok(cli) => cli,
         Err(error) => {
@@ -245,6 +249,7 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
     let capabilities = Capabilities::detect();
     let mut resolutions = Vec::new();
     let mut unserved: Vec<collect::Unserved> = Vec::new();
+    let mut refused_at_resolution = Vec::new();
     for request in &session.requests {
         // A request held for the escalation (`window: on <layer>`) that this
         // machine cannot serve is not a reason to refuse the run: the session
@@ -288,20 +293,34 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
                     reason: error.to_string(),
                 });
             }
-            Err(error) => {
-                eprintln!("error: {error}");
-                // The hint used to say "the request is valid; it is this
-                // machine that cannot serve it" under every resolver failure
-                // and one line above the code for a request that is *not*
-                // valid. Both halves are said per case now, and the code is
-                // derived from the same answer the sentence gives.
-                let whose = resolution_is(&error);
-                if let Some(hint) = resolution_hint(&error) {
-                    eprintln!("  hint: {hint}");
-                }
-                return Ok(ExitCode::from(exit_for(whose)));
+            // Every request is resolved before the run is refused, so that
+            // a session of several requests this machine cannot serve names
+            // each of them rather than the first.
+            Err(error) => refused_at_resolution.push(error),
+        }
+    }
+    if !refused_at_resolution.is_empty() {
+        for error in &refused_at_resolution {
+            eprintln!("error: {error}");
+            // The hint used to say "the request is valid; it is this machine
+            // that cannot serve it" under every resolver failure and one line
+            // above the code for a request that is *not* valid. Both halves
+            // are said per case now, and the code is derived from the same
+            // answer the sentence gives.
+            if let Some(hint) = resolution_hint(error) {
+                eprintln!("  hint: {hint}");
             }
         }
+        if refused_at_resolution.len() > 1 {
+            eprintln!(
+                "error: {} of the session's {} requests cannot be resolved here",
+                refused_at_resolution.len(),
+                session.requests.len()
+            );
+        }
+        return Ok(ExitCode::from(exit_for(first_to_fix(
+            refused_at_resolution.iter().map(resolution_is),
+        ))));
     }
 
     // A budget that could move a request onto a mode its emits cannot be
@@ -477,6 +496,19 @@ fn symbols_not_read(session: &Session) -> Option<String> {
 /// which is a change to the request, not to the machine. A key the selected
 /// backend does not attach is whose the backend that would attach it says:
 /// see [`resolve::KeyElsewhere::whose`].
+/// Whose gap a session refused several ways is: the one the reader has to
+/// deal with first -- a request to rewrite, then a build that lacks a part,
+/// then a machine -- as [`collect::CollectError::whose`] orders them.
+fn first_to_fix(each: impl Iterator<Item = omn::collect::Whose>) -> omn::collect::Whose {
+    use omn::collect::Whose;
+    each.min_by_key(|whose| match whose {
+        Whose::Request => 0,
+        Whose::Build => 1,
+        Whose::Machine => 2,
+    })
+    .unwrap_or(Whose::Machine)
+}
+
 fn resolution_is(error: &resolve::ResolveError) -> omn::collect::Whose {
     use omn::collect::Whose;
     match error {
@@ -1021,9 +1053,19 @@ impl MeasuredCost {
         } else {
             String::new()
         };
+        // A table loaded once inside the window is in the cpu said, and not
+        // in the percentage, which is the rate a budget weighs.
+        let once = if overhead.one_time_cpu_ns > 0 {
+            format!(
+                " ({} of it once, loading symbol tables, weighed apart from the percentage)",
+                span(overhead.one_time_cpu_ns)
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "{} ({}) via `{}` spent {} of cpu{inside} {against}, over {} of wall time{before}; \
-             measuring that cost {} across {} read(s){unknown}",
+            "{} ({}) via `{}` spent {} of cpu{once}{inside} {against}, over {} of wall \
+             time{before}; measuring that cost {} across {} read(s){unknown}",
             self.source,
             self.mode,
             self.served_by.join("` then `"),
@@ -1410,6 +1452,17 @@ fn report_costs(costs: &[MeasuredCost], run: &encode::RunOutput) {
         eprintln!(
             "warning: the stop left {left} process(es) the program started running: they \
              could not be signalled (a setuid child refuses this process's signals)"
+        );
+    }
+    let adopted = run
+        .results
+        .iter()
+        .find_map(|results| results.lifetime)
+        .map_or(0, |life| life.adopted_ended);
+    if adopted > 0 {
+        eprintln!(
+            "note: the stop also ended {adopted} process(es) the program started that had left \
+             its tree before it (orphaned, their parent gone first, and adopted by omn)"
         );
     }
     if let Some(comparison) = compare_backends(costs, &run.results) {

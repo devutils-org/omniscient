@@ -706,7 +706,7 @@ fn tools() -> Vec<Value> {
         json!({
             "name": "run_session",
             "title": "Run one bounded session",
-            "description": "Runs a session through the omn binary for a bounded duration, under a budget when one is given, and reads the run back. Only when the server was started with --allow-run, only up to the duration it allows. A session that launches a program runs only when it is `approved`: a file of the --allow-launch directory, run as the file states it, from its own directory; the answer then carries what the program printed on stdout, told apart from omn's document (`program_stdout`). Every other session observes targets that already exist.",
+            "description": "Runs a session through the omn binary for a bounded duration, under a budget when one is given, and reads the run back. Only when the server was started with --allow-run, only up to the duration it allows. A session that launches a program runs only when it is `approved`: a file of the --allow-launch directory, run as the file states it, from its own directory; the answer then carries what the program printed on stdout, told apart from omn's document (`program_stdout`), and on stderr, which omn writes to a file of its own rather than among its lines (`program_stderr`). A run a budget stopped before its end says so, per request (`stopped_by_budget`; null when nothing stopped it). Every other session observes targets that already exist.",
             "inputSchema": {
                 "type": "object",
                 "properties": run_properties,

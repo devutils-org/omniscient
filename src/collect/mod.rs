@@ -22,6 +22,7 @@ mod cpu;
 pub mod gpu;
 pub(crate) mod io;
 mod launch;
+pub use launch::{adopt_orphans, PROGRAM_STDERR_VARIABLE};
 pub mod mem;
 /// Public for its probes: `net::probe` answers the PTP-clock and ethtool
 /// requirements, which the capability layer asks.
@@ -731,6 +732,16 @@ pub struct Overhead {
     /// formatting the results costs after that is not in it.
     #[serde(default)]
     pub after_window_cpu_ns: u64,
+    /// The part of `attributed_cpu_ns` spent once rather than at a rate:
+    /// loading a symbol table the first time a frame landed in its module.
+    /// Weighed apart -- outside [`Overhead::percent`] and the budget's checks
+    /// -- and said apart, because a load of tens of milliseconds read against
+    /// the few milliseconds a waiting program burns by the first check is a
+    /// percentage of how early the check came, not of what running costs.
+    /// Still in `collector_cpu_ns` and [`Overhead::tool_cpu_ns`]: what the
+    /// run cost is what it cost.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub one_time_cpu_ns: u64,
 }
 
 impl Overhead {
@@ -752,7 +763,12 @@ impl Overhead {
             Some(work) if work > 0 => work,
             _ => observed,
         };
-        Some((self.attributed_cpu_ns + inside) as f64 * 100.0 / work as f64)
+        Some((self.running_cpu_ns() + inside) as f64 * 100.0 / work as f64)
+    }
+
+    /// The tool's share less what it spent once: the rate a budget weighs.
+    pub fn running_cpu_ns(&self) -> u64 {
+        self.attributed_cpu_ns.saturating_sub(self.one_time_cpu_ns)
     }
 
     /// Everything this process spent, by its own kernel account, from its
@@ -771,7 +787,7 @@ impl Overhead {
     /// 47 reported it.
     pub fn own_percent(&self) -> Option<f64> {
         let observed = self.observed_cpu_ns.filter(|observed| *observed > 0)?;
-        Some(self.attributed_cpu_ns as f64 * 100.0 / observed as f64)
+        Some(self.running_cpu_ns() as f64 * 100.0 / observed as f64)
     }
 
     /// Whether what the collector spent inside the target is part of
@@ -2458,6 +2474,7 @@ fn run_core(
     // collector the run held to the end, as a session's sources share one.
     let closing_ns = monotonic_ns();
     let ended_s = closing_ns.saturating_sub(started_ns) as f64 / 1e9;
+    spending.read_in_target_before_the_stops();
     for (index, slot) in slots.iter_mut().enumerate() {
         match slot {
             Slot::Attached(collector) => {
@@ -2911,6 +2928,8 @@ struct Since {
     wall_opened_ns: u64,
     /// What the collector had spent inside the target by then.
     in_target: Inside,
+    /// This process's one-time loads by then ([`crate::stack::one_time_cpu_ns`]).
+    one_time_ns: u64,
 }
 
 /// The cost half of a run: what it is spending, what it was allowed to spend,
@@ -2946,6 +2965,8 @@ struct Spending<'a> {
     since: Vec<Since>,
     opened_ns: u64,
     self_cpu_opened_ns: u64,
+    /// [`crate::stack::one_time_cpu_ns`] when the run opened.
+    one_time_opened_ns: u64,
     observed_opened: Vec<u64>,
     last_check_ns: u64,
     measurement_ns: u64,
@@ -3011,6 +3032,7 @@ impl<'a> Spending<'a> {
             .collect();
         let opened_ns = monotonic_ns();
         let self_cpu_opened_ns = rusage_ns(libc::RUSAGE_SELF);
+        let one_time_opened_ns = crate::stack::one_time_cpu_ns();
         let observed_opened: Vec<u64> = Meter::read_each(&meters)
             .into_iter()
             .map(|read| read.unwrap_or(0))
@@ -3034,10 +3056,12 @@ impl<'a> Spending<'a> {
                     total_inside_ns: 0,
                     wall_opened_ns: opened_ns,
                     in_target: inside_since.get(index).copied().unwrap_or_default(),
+                    one_time_ns: one_time_opened_ns,
                 })
                 .collect(),
             opened_ns,
             self_cpu_opened_ns,
+            one_time_opened_ns,
             observed_opened,
             last_check_ns: opened_ns,
             measurement_ns: 0,
@@ -3118,6 +3142,16 @@ impl<'a> Spending<'a> {
                 (collector_cpu_ns as u128 * mine as u128 / total as u128) as u64
             }
         };
+        // A one-time load is in the process's account; this collection's
+        // share of it is its share of that account, all of it when it is
+        // the only one.
+        let one_time_ns = crate::stack::one_time_cpu_ns().saturating_sub(since.one_time_ns);
+        let one_time_cpu_ns = if collector_cpu_ns == 0 {
+            0
+        } else {
+            ((one_time_ns as u128 * attributed_cpu_ns as u128 / collector_cpu_ns as u128) as u64)
+                .min(attributed_cpu_ns)
+        };
         let in_target = match (&self.stats_lost, in_target) {
             (Some(lost), Ok(_)) if matches!(self.inside[index], InsideMeter::Programs { .. }) => {
                 Err(lost.clone())
@@ -3152,6 +3186,7 @@ impl<'a> Spending<'a> {
             in_target_runs,
             in_target_left_out,
             in_target_from,
+            one_time_cpu_ns,
         }
     }
 
@@ -3207,6 +3242,7 @@ impl<'a> Spending<'a> {
                     total_inside_ns: self.inside_ns.iter().sum(),
                     wall_opened_ns: entered_ns,
                     in_target: in_target.clone().unwrap_or_default(),
+                    one_time_ns: crate::stack::one_time_cpu_ns(),
                 },
             );
             let spent = self.spent(
@@ -3235,6 +3271,14 @@ impl<'a> Spending<'a> {
             let inside = match spent.in_target_cpu_ns {
                 Some(ns) if ns > 0 => format!(" ({} of it inside the target)", span_ns(ns)),
                 _ => String::new(),
+            };
+            let inside = if spent.one_time_cpu_ns > 0 {
+                format!(
+                    "{inside} (and {} once, loading symbol tables, weighed apart)",
+                    span_ns(spent.one_time_cpu_ns)
+                )
+            } else {
+                inside
             };
             // A collection a budget has already moved once is weighed on the
             // window since it moved, so the reason has to say which window it
@@ -3334,6 +3378,9 @@ impl<'a> Spending<'a> {
             return Err(one_process_of_several(&next, named).to_string());
         }
         replacement.start()?;
+        // What the outgoing collector spent inside the target, read while its
+        // programs are open: a `stop` that drops them leaves nothing to read.
+        let _ = self.inside[index].read();
         let mut trailing = current.stop();
         let overlap_to_ns = monotonic_ns();
         events[index].append(&mut trailing);
@@ -3382,6 +3429,7 @@ impl<'a> Spending<'a> {
             total_inside_ns: self.inside_ns.iter().sum(),
             wall_opened_ns: monotonic_ns(),
             in_target: self.inside[index].read().unwrap_or_default(),
+            one_time_ns: crate::stack::one_time_cpu_ns(),
         }
     }
 
@@ -3430,6 +3478,21 @@ impl<'a> Spending<'a> {
         self.measurement_ns += thread_cpu_ns().saturating_sub(entered_cpu_ns);
     }
 
+    /// Reads every collection's in-target meter just before the collectors
+    /// are stopped. A meter keeps its last reading, and a collector whose
+    /// `stop` drops its programs closes the descriptors the kernel's account
+    /// is read through: read only at the close, such a run without a budget
+    /// -- never checked, so never read -- said zero spent inside the target
+    /// (the block programs read "0 runs for 0 ns" beside 26.8 M requests).
+    fn read_in_target_before_the_stops(&mut self) {
+        let entered_cpu_ns = thread_cpu_ns();
+        for meter in &mut self.inside {
+            let _ = meter.read();
+        }
+        self.measurements += 1;
+        self.measurement_ns += thread_cpu_ns().saturating_sub(entered_cpu_ns);
+    }
+
     /// The account of a collection that ran for the whole of the run.
     fn whole_run(&self, index: usize) -> Since {
         Since {
@@ -3439,6 +3502,7 @@ impl<'a> Spending<'a> {
             total_inside_ns: 0,
             wall_opened_ns: self.opened_ns,
             in_target: self.inside_opened.get(index).copied().unwrap_or_default(),
+            one_time_ns: self.one_time_opened_ns,
         }
     }
 
@@ -4187,6 +4251,9 @@ impl Ledger {
         // what the stop drains was all written before it returns.
         let closed_ns = monotonic_ns();
         self.watched[index].closed_ns = closed_ns;
+        // Read before the stop as well as after it: a collector whose `stop`
+        // drops its programs leaves them nothing to report afterwards.
+        let _ = spending.inside[index].read();
         let mut trailing = collector.stop();
         self.events[index].append(&mut trailing);
         self.losses[index].absorb(collector.losses());
@@ -5011,6 +5078,30 @@ mod tests {
             ..overhead
         };
         assert!(everywhere.percent().unwrap() > 200.0);
+    }
+
+    /// A table loaded once inside the window is weighed apart from the rate:
+    /// a 25 ms load against the 15 ms a waiting program burns by the first
+    /// check reads 166 % of a collector whose running cost is 6 %. It stays
+    /// in what the tool spent.
+    #[test]
+    fn a_one_time_load_is_weighed_apart_from_the_rate_and_still_spent() {
+        let overhead = Overhead {
+            collector_cpu_ns: 25_900_000,
+            attributed_cpu_ns: 25_900_000,
+            one_time_cpu_ns: 25_000_000,
+            observed_cpu_ns: Some(15_000_000),
+            in_target_cpu_ns: Some(0),
+            ..Overhead::default()
+        };
+        assert!((overhead.percent().unwrap() - 6.0).abs() < 1e-9);
+        assert!((overhead.own_percent().unwrap() - 6.0).abs() < 1e-9);
+        assert_eq!(overhead.tool_cpu_ns(), 25_900_000);
+        let all_of_it = Overhead {
+            one_time_cpu_ns: 0,
+            ..overhead
+        };
+        assert!(all_of_it.percent().unwrap() > 170.0);
     }
 
     /// Which account a collection's in-target cost is read from is decided by

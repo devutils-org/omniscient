@@ -925,7 +925,7 @@ impl Symbolizer {
 
     fn module(&mut self, path: &Path) -> Option<&Module> {
         if !self.modules.contains_key(path) {
-            let (module, origin) = Module::read(path, self.debuginfod.as_deref());
+            let (module, origin) = once(|| Module::read(path, self.debuginfod.as_deref()));
             self.origins.insert(path.to_path_buf(), origin);
             self.modules.insert(path.to_path_buf(), module);
         }
@@ -1234,7 +1234,46 @@ impl PerfMap {
 static KERNEL_SYMBOLS: std::sync::OnceLock<Option<KernelSymbols>> = std::sync::OnceLock::new();
 
 fn kernel_symbols() -> Option<&'static KernelSymbols> {
-    KERNEL_SYMBOLS.get_or_init(KernelSymbols::read).as_ref()
+    KERNEL_SYMBOLS
+        .get_or_init(|| once(KernelSymbols::read))
+        .as_ref()
+}
+
+/// Cpu time this process has spent loading tables it loads once per run --
+/// a module's symbols, the kernel's -- whichever thread loaded them.
+static ONE_TIME_CPU_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// What [`ONE_TIME_CPU_NS`] holds: the part of this process's cpu that a
+/// budget's check weighs apart from the rate a collector runs at. A drain
+/// that meets a new module pays for its table once, inside the window; read
+/// against the few milliseconds a waiting target has burnt by the first
+/// check, that one load stopped runs whose rate was a fraction of their
+/// ceiling (`DECISIONS.md`, "What the budget's first check may stop a run
+/// on").
+pub fn one_time_cpu_ns() -> u64 {
+    ONE_TIME_CPU_NS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Runs a one-time load, and adds the cpu it took to [`one_time_cpu_ns`].
+fn once<T>(load: impl FnOnce() -> T) -> T {
+    let started = thread_cpu_ns();
+    let loaded = load();
+    ONE_TIME_CPU_NS.fetch_add(
+        thread_cpu_ns().saturating_sub(started),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    loaded
+}
+
+/// The cpu time the calling thread has been charged.
+fn thread_cpu_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: a valid pointer to a timespec this frame owns.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
 }
 
 /// Pays for the table now, before a window opens, if this run will want it.
@@ -1258,12 +1297,18 @@ pub fn prime_kernel_symbols() {
 struct KernelSymbols {
     /// `(address, name)`, sorted by address.
     symbols: Vec<(u64, String)>,
+    /// Whether any address is real, decided once at the read. Asked per
+    /// kernel frame, it was a scan of every one of the 395 318 lines whenever
+    /// the answer was no -- which is every run at `perf_event_paranoid` 2
+    /// without `CAP_SYSLOG`, where the file reads as all zeroes: most of the
+    /// 150 us a sample cost a drain of a debug build.
+    usable: bool,
 }
 
 impl KernelSymbols {
     fn read() -> Option<Self> {
         let text = std::fs::read_to_string("/proc/kallsyms").ok()?;
-        let mut symbols: Vec<(u64, String)> = text
+        let symbols: Vec<(u64, String)> = text
             .lines()
             .filter_map(|line| {
                 let mut fields = line.split_whitespace();
@@ -1278,8 +1323,13 @@ impl KernelSymbols {
                 Some((addr, fields.next()?.to_owned()))
             })
             .collect();
+        Some(Self::of(symbols))
+    }
+
+    fn of(mut symbols: Vec<(u64, String)>) -> Self {
         symbols.sort_by_key(|(addr, _)| *addr);
-        Some(Self { symbols })
+        let usable = symbols.iter().any(|(addr, _)| *addr != 0);
+        Self { symbols, usable }
     }
 
     /// Whether the addresses in the file are real.
@@ -1288,7 +1338,7 @@ impl KernelSymbols {
     /// so a usable-looking table resolves the whole kernel to whichever symbol
     /// sorts first.
     fn is_usable(&self) -> bool {
-        self.symbols.iter().any(|(addr, _)| *addr != 0)
+        self.usable
     }
 
     fn lookup(&self, addr: u64) -> Option<(String, u64)> {
@@ -1302,27 +1352,91 @@ impl KernelSymbols {
 }
 
 /// A mapped file's function symbols, by file offset.
+///
+/// Indexed, not copied. Every function is an offset, a size and where its name
+/// starts in a string table; the name is read, and the prologue looked at, the
+/// first time a frame lands in it. The files are mapped rather than read, so
+/// the pages a run never looks up are never paid for: reading a 192 MB debug
+/// build and naming all of its 95 034 functions up front cost 205 ms of cpu,
+/// all inside the first drain that met it, against a target that had burnt
+/// 13 to 21 ms.
 struct Module {
-    /// `(file offset, size, name)` of every function, sorted by offset.
+    /// Every function, sorted by offset.
     ///
     /// Indexed by file offset rather than by virtual address because that is
     /// what a mapping gives directly: a map line says where in the file it
     /// starts, and converting through the load segments once, here, keeps every
     /// lookup a subtraction.
     functions: Vec<Function>,
+    /// The mapped file, for the prologues and the names of its own tables.
+    image: Mapped,
+    /// The debug file debuginfod gave, for the names read from it.
+    debug: Option<Mapped>,
+    /// Each function's name and prologue verdict, once looked at.
+    looked_at: std::cell::RefCell<HashMap<usize, (String, Option<bool>)>>,
 }
 
 struct Function {
     offset: u64,
     size: u64,
-    name: String,
-    /// Whether this function's prologue sets up a frame pointer, as far as the
-    /// first few bytes of it can say. `None` where the question cannot be
-    /// answered on this architecture.
-    frame_pointer: Option<bool>,
+    /// Where the name starts, in the file the name comes from.
+    name_at: usize,
     /// Read from a debug file debuginfod gave, rather than from the mapped
     /// file itself.
     from_debuginfo: bool,
+}
+
+/// A file mapped read-only, private: its pages are read as they are touched.
+struct Mapped {
+    at: *const u8,
+    len: usize,
+}
+
+impl Mapped {
+    fn of(path: &Path) -> Option<Self> {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::File::open(path).ok()?;
+        let len = usize::try_from(file.metadata().ok()?.len()).ok()?;
+        if len == 0 {
+            return None;
+        }
+        // SAFETY: a fresh read-only private mapping of a file this frame
+        // holds open; the descriptor may close once it is mapped.
+        let at = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if at == libc::MAP_FAILED {
+            return None;
+        }
+        Some(Self { at: at.cast(), len })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: `at` maps `len` readable bytes until `drop`. A file
+        // truncated under the mapping would fault on a page past its new
+        // end; the files mapped here are executables and debug files, which
+        // are replaced rather than rewritten in place.
+        unsafe { std::slice::from_raw_parts(self.at, self.len) }
+    }
+}
+
+// SAFETY: the mapping is read-only and owned by this value alone.
+unsafe impl Send for Mapped {}
+// SAFETY: as above; shared reads of read-only memory.
+unsafe impl Sync for Mapped {}
+
+impl Drop for Mapped {
+    fn drop(&mut self) {
+        // SAFETY: the mapping `of` made, unmapped once.
+        unsafe { libc::munmap(self.at.cast_mut().cast(), self.len) };
+    }
 }
 
 impl Module {
@@ -1337,13 +1451,14 @@ impl Module {
         path: &Path,
         debuginfod: Option<&unwind::Debuginfod>,
     ) -> (Option<Self>, unwind::NameOrigin) {
-        let Ok(bytes) = std::fs::read(path) else {
+        let Some(image) = Mapped::of(path) else {
             return (
                 None,
                 unwind::NameOrigin::None("the file cannot be read".to_owned()),
             );
         };
-        let Some(elf) = Elf::parse(&bytes) else {
+        let bytes = image.bytes();
+        let Some(elf) = Elf::parse(bytes) else {
             return (
                 None,
                 unwind::NameOrigin::None("not an ELF this build reads".to_owned()),
@@ -1360,18 +1475,18 @@ impl Module {
         // than either. Duplicates are harmless -- the same address twice is the
         // same answer twice.
         for (symbols, strings) in elf.symbol_tables() {
-            for symbol in elf.symbols(symbols, strings) {
+            for symbol in elf.symbol_entries(symbols, strings) {
                 if let Some(offset) = elf.file_offset_of(symbol.value) {
                     functions.push(Function {
-                        frame_pointer: sets_up_frame_pointer(&bytes, offset),
                         offset,
                         size: symbol.size,
-                        name: symbol.name,
+                        name_at: symbol.name_at,
                         from_debuginfo: false,
                     });
                 }
             }
         }
+        let mut debug = None;
         if let (Some(client), false) = (debuginfod, elf.has_symtab()) {
             match elf.build_id().map(|id| unwind::hex(&id)) {
                 None => {
@@ -1381,24 +1496,22 @@ impl Module {
                 }
                 Some(build_id) => match client.debuginfo(&build_id) {
                     Ok((debug_path, fetched)) => {
-                        if let Ok(debug_bytes) = std::fs::read(&debug_path) {
-                            if let Some(debug) = Elf::parse(&debug_bytes) {
-                                for (symbols, strings) in debug.symbol_tables() {
-                                    for symbol in debug.symbols(symbols, strings) {
+                        if let Some(mapped) = Mapped::of(&debug_path) {
+                            if let Some(debug_elf) = Elf::parse(mapped.bytes()) {
+                                for (symbols, strings) in debug_elf.symbol_tables() {
+                                    for symbol in debug_elf.symbol_entries(symbols, strings) {
                                         if let Some(offset) = elf.file_offset_of(symbol.value) {
                                             functions.push(Function {
-                                                frame_pointer: sets_up_frame_pointer(
-                                                    &bytes, offset,
-                                                ),
                                                 offset,
                                                 size: symbol.size,
-                                                name: symbol.name,
+                                                name_at: symbol.name_at,
                                                 from_debuginfo: true,
                                             });
                                         }
                                     }
                                 }
                                 origin = fetched;
+                                debug = Some(mapped);
                             }
                         }
                     }
@@ -1424,28 +1537,57 @@ impl Module {
                 // one of them bounds anything.
                 .then(right.size.cmp(&left.size))
         });
-        (Some(Self { functions }), origin)
+        let module = Self {
+            functions,
+            image,
+            debug,
+            looked_at: std::cell::RefCell::new(HashMap::new()),
+        };
+        (Some(module), origin)
     }
 
     fn lookup(&self, file_offset: u64) -> Option<(String, u64, NamedBy)> {
-        let function = self.function_at(file_offset)?;
+        let index = self.function_at(file_offset)?;
+        let function = &self.functions[index];
         let named_by = if function.from_debuginfo {
             NamedBy::Debuginfod
         } else {
             NamedBy::Elf
         };
         Some((
-            function.name.clone(),
+            self.looked_at(index).0,
             file_offset - function.offset,
             named_by,
         ))
     }
 
     fn frame_pointer(&self, file_offset: u64) -> Option<bool> {
-        self.function_at(file_offset)?.frame_pointer
+        self.looked_at(self.function_at(file_offset)?).1
     }
 
-    fn function_at(&self, file_offset: u64) -> Option<&Function> {
+    /// A function's name and prologue verdict, read the first time it is
+    /// asked for and kept.
+    fn looked_at(&self, index: usize) -> (String, Option<bool>) {
+        if let Some(known) = self.looked_at.borrow().get(&index) {
+            return known.clone();
+        }
+        let function = &self.functions[index];
+        let names = match (&self.debug, function.from_debuginfo) {
+            (Some(debug), true) => debug.bytes(),
+            _ => self.image.bytes(),
+        };
+        let name = read_str(names, function.name_at)
+            .map(unversioned)
+            .unwrap_or_default();
+        let known = (
+            name,
+            sets_up_frame_pointer(self.image.bytes(), function.offset),
+        );
+        self.looked_at.borrow_mut().insert(index, known.clone());
+        known
+    }
+
+    fn function_at(&self, file_offset: u64) -> Option<usize> {
         let index = self
             .functions
             .partition_point(|function| function.offset <= file_offset)
@@ -1457,7 +1599,7 @@ impl Module {
         if function.size > 0 && file_offset >= function.offset + function.size {
             return None;
         }
-        Some(function)
+        Some(index)
     }
 }
 
@@ -1538,8 +1680,14 @@ struct Section {
 
 struct ElfSymbol {
     value: u64,
-    size: u64,
     name: String,
+}
+
+struct SymbolEntry {
+    value: u64,
+    size: u64,
+    /// Where the name starts in the file.
+    name_at: usize,
 }
 
 const SHT_SYMTAB: u32 = 2;
@@ -1718,6 +1866,34 @@ impl<'a> Elf<'a> {
             .collect()
     }
 
+    /// A table's functions, each with where its name starts rather than the
+    /// name: what [`Module`] indexes, so that a name is read only when a frame
+    /// lands in it.
+    fn symbol_entries(&self, table: Section, strings: Section) -> Vec<SymbolEntry> {
+        if table.entry_size == 0 {
+            return Vec::new();
+        }
+        let count = (table.size / table.entry_size) as usize;
+        (0..count)
+            .filter_map(|index| {
+                let at = table.offset as usize + index * table.entry_size as usize;
+                let info = *self.bytes.get(at + 4)?;
+                if info & 0xf != STT_FUNC {
+                    return None;
+                }
+                let value = read_u64(self.bytes, at + 8)?;
+                if value == 0 {
+                    return None;
+                }
+                Some(SymbolEntry {
+                    value,
+                    size: read_u64(self.bytes, at + 16)?,
+                    name_at: strings.offset as usize + read_u32(self.bytes, at)? as usize,
+                })
+            })
+            .collect()
+    }
+
     fn symbols(&self, table: Section, strings: Section) -> Vec<ElfSymbol> {
         if table.entry_size == 0 {
             return Vec::new();
@@ -1740,11 +1916,7 @@ impl<'a> Elf<'a> {
                     self.bytes,
                     strings.offset as usize + read_u32(self.bytes, at)? as usize,
                 )?);
-                Some(ElfSymbol {
-                    value,
-                    size: read_u64(self.bytes, at + 16)?,
-                    name,
-                })
+                Some(ElfSymbol { value, name })
             })
             .collect()
     }
@@ -2598,6 +2770,32 @@ fn executable(pid: i32) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// What loading one file's symbol table costs, on a file named by
+    /// `OMN_SYMBOL_LOAD_FILE`: the one-time cost the budget's first check
+    /// weighed against a waiting target. A measurement, not a check.
+    #[test]
+    #[ignore = "a measurement on a file the environment names"]
+    fn the_cost_of_loading_one_symbol_table() {
+        let Ok(path) = std::env::var("OMN_SYMBOL_LOAD_FILE") else {
+            return;
+        };
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let cpu = thread_cpu_ns();
+            let (module, _) = Module::read(Path::new(&path), None);
+            let functions = module.as_ref().map_or(0, |module| module.functions.len());
+            let named = module
+                .as_ref()
+                .and_then(|module| module.lookup(module.functions[functions / 2].offset));
+            eprintln!(
+                "{path}: {functions} functions, {:.2} ms wall, {:.2} ms cpu, middle one {:?}",
+                started.elapsed().as_secs_f64() * 1e3,
+                (thread_cpu_ns() - cpu) as f64 / 1e6,
+                named.map(|(name, _, _)| name)
+            );
+        }
+    }
+
     #[test]
     fn a_versioned_symbol_is_named_without_its_version() {
         assert_eq!(
@@ -2864,17 +3062,13 @@ mod tests {
     /// after one symbol.
     #[test]
     fn a_kallsyms_whose_addresses_are_hidden_is_not_a_usable_one() {
-        let hidden = KernelSymbols {
-            symbols: vec![(0, "_stext".to_owned()), (0, "schedule".to_owned())],
-        };
+        let hidden = KernelSymbols::of(vec![(0, "_stext".to_owned()), (0, "schedule".to_owned())]);
         assert!(!hidden.is_usable());
 
-        let real = KernelSymbols {
-            symbols: vec![
-                (0xffff_ffff_8100_0000, "_stext".to_owned()),
-                (0xffff_ffff_8100_1000, "schedule".to_owned()),
-            ],
-        };
+        let real = KernelSymbols::of(vec![
+            (0xffff_ffff_8100_1000, "schedule".to_owned()),
+            (0xffff_ffff_8100_0000, "_stext".to_owned()),
+        ]);
         assert!(real.is_usable());
         assert_eq!(
             real.lookup(0xffff_ffff_8100_1010),
