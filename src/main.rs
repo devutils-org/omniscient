@@ -333,6 +333,15 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         ))));
     }
 
+    // Requests whose backends cannot share the one launch they ask for are
+    // the invalid combination too: asked once each request's backend is
+    // known, since the rule is about the library that will serve it, and
+    // before the program is started.
+    let refused = launch_rejections(&resolutions);
+    if !refused.is_empty() {
+        return Ok(reject(&refused));
+    }
+
     // A budget that could move a request onto a mode its emits cannot be
     // continued in is the invalid combination, refused before anything runs
     // and on the dumps alike: the request is what is wrong.
@@ -1464,15 +1473,19 @@ fn report_costs(costs: &[MeasuredCost], run: &encode::RunOutput) {
              could not be signalled (a setuid child refuses this process's signals)"
         );
     }
-    let adopted = run
-        .results
-        .iter()
-        .find_map(|results| results.lifetime)
-        .map_or(0, |life| life.adopted_ended);
+    let lifetime = run.results.iter().find_map(|results| results.lifetime);
+    let adopted = lifetime.map_or(0, |life| life.adopted_ended);
     if adopted > 0 {
+        // Stopped, or exited on its own leaving them running: either way the
+        // run ended them, and says which end it was.
+        let end = if lifetime.is_some_and(|life| life.terminated) {
+            "the stop also ended"
+        } else {
+            "the program exited, and the end of the run then ended"
+        };
         eprintln!(
-            "note: the stop also ended {adopted} process(es) the program started that had left \
-             its tree before it (orphaned, their parent gone first, and adopted by omn)"
+            "note: {end} {adopted} process(es) the program started that had left its tree \
+             before it (orphaned, their parent gone first, and adopted by omn)"
         );
     }
     if let Some(comparison) = compare_backends(costs, &run.results) {
@@ -2763,6 +2776,10 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
         }
         return Ok(ExitCode::from(exit_for(omn::collect::Whose::Machine)));
     }
+    let launch_refused = launch_rejections(&resolutions);
+    if !launch_refused.is_empty() {
+        return Ok(reject(&launch_refused));
+    }
     // The session as it runs: the requests that resolved.
     let mut running = session.clone();
     running.requests = resolutions
@@ -3323,6 +3340,33 @@ fn process_cpu_ns() -> u64 {
     unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
     let of = |time: libc::timeval| time.tv_sec as u64 * 1_000_000_000 + time.tv_usec as u64 * 1_000;
     of(usage.ru_utime) + of(usage.ru_stime)
+}
+
+/// The resolved requests that cannot share their launch with the others,
+/// as the request's error: a family's rule about the library that will
+/// serve each one (`collect::gpu::launch_refusals`), so it is asked of the
+/// backends the resolver chose rather than of the sources' names.
+fn launch_rejections(resolutions: &[ResolvedRequest]) -> Vec<Rejection> {
+    let pairs: Vec<(&omn::request::Request, &str)> = resolutions
+        .iter()
+        .map(|resolved| (&resolved.request, resolved.backend.id.as_str()))
+        .collect();
+    collect::gpu::launch_refusals(&pairs)
+        .into_iter()
+        .map(|(index, reason)| {
+            let request = &resolutions[index].request;
+            Rejection {
+                request: Some(
+                    request
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| format!("{} #{}", request.source, index + 1)),
+                ),
+                message: reason,
+                hint: None,
+            }
+        })
+        .collect()
 }
 
 fn reject(rejections: &[Rejection]) -> ExitCode {

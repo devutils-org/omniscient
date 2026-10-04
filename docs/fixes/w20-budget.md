@@ -69,7 +69,9 @@ Six commits, each with its tests.
   `note: the stop also ended N process(es) the program started that had left
   its tree before it`. One it could not signal is counted in `left_running`.
   A library caller never adopts, so a test harness's other children are
-  never touched.
+  never touched. A program that exits on its own is covered since the
+  review round (below): `Gated::end_orphans` ends them at the end of every
+  run, not at a stop only.
 - **`980190d` -- `docs/mcp.md`**: the budget optional (the walk-through, the
   decision's item 2 and the `DECISIONS.md` row); `program_stdout`,
   `program_stderr`, `bounds`, `budget_against`, `stopped_by_budget` in the
@@ -125,6 +127,14 @@ binary, `perf_event_paranoid` -1, nine agents sharing it):
   in 0.75 s after; **on the binary without `adopt_orphans()` it fails, and
   takes 71.7 s**: the orphan held `omn`'s stderr pipe open until its sleep
   ended, and the run never said it.
+- **The orphan of a program that exits on its own** (review round):
+  `a_program_that_exits_on_its_own_does_not_leave_its_orphan_running` --
+  `sh -c '(setsid sleep <marker> &) ; (setsid sleep 0.05 &) ; sleep 0.3'`
+  under `-d 5s`. Passes in 0.37 s; without the `end_orphans` call in
+  `collect::run` it fails (the sleep outlives the run, no note); without the
+  zombie filter it says `ended 2`, counting the orphan that had already
+  exited. The reviewer's repro now prints the note and leaves no
+  `sleep 47.31`.
 - **`stopped_by_budget`**: `a_run_the_budget_stopped_says_so_in_the_answer`
   on a written `cost.json`; null in the stdout test's real run. A real
   stopped run through `run_session` was not driven.
@@ -223,8 +233,9 @@ sudo -n /usr/bin/sysctl kernel.perf_event_paranoid=-1
   file), not passed on to the program; the MCP server always asks for it.
   A variable rather than a flag because `src/cli.rs` is not this stream's;
   a `--program-stderr FILE` flag is filed.
-- **The `omn` binary is the subreaper of what it launches**, and a stop ends
-  what it adopted; a library caller is not and does not.
+- **The `omn` binary is the subreaper of what it launches**, and the end of
+  every run -- a stop, or the program exiting on its own -- ends what it
+  adopted; a library caller is not and does not.
 - **A session refused at resolution names every request**, and its exit
   code is the first gap to fix (request, build, machine).
 
@@ -259,3 +270,42 @@ protocol, 2 walk-through), `cargo test --test unwind` (13),
 `cargo clippy --workspace --all-targets -- -D warnings` and
 `cargo fmt --check`, both clean. No `make`, no capabilities on this
 worktree's binary: the eBPF halves skipped, loudly.
+
+## Review
+
+One finding, a gap, fixed (`src/collect/launch.rs`, `src/collect/mod.rs`,
+`src/main.rs`, `tests/budget.rs`).
+
+- **`end_adopted` ran only inside `Gated::terminate`**, which returned at
+  once when `finished()` had already reaped the program. A program that
+  exited on its own -- the double-fork daemon -- left its adopted orphans
+  running, uncounted and unmentioned; through `run_session`'s pipe that is
+  the 71.7 s hang. The reviewer is right, and the handoff's scope ("at a
+  stop") did not say it.
+  - `Gated::end_orphans`: once per program, once it is reaped, ends and
+    reaps what `omn` adopted. `terminate` calls it on both of its paths
+    (so `Drop` does too), and `collect::run` calls it after the stop block
+    whether or not the program was stopped -- after the collectors' stops,
+    not at the reap in `finished()`, so their last reads see the run as it
+    was.
+  - A zombie is no longer counted: an orphan that exited during the run is
+    a zombie under `omn`, `kill` succeeds on it and it used to count as
+    ended. It is skipped (`/proc/<pid>/stat` state `Z`) and still reaped by
+    the `waitpid(-1)` loop. Orphans that exit during the run stay zombies
+    until the run's end: reaping them earlier would need a `waitpid` that
+    cannot take the program's own status and rusage, and a zombie holds
+    only a pid.
+  - The note names which end it was: `the stop also ended N ...` when the
+    run stopped the program (unchanged), `the program exited, and the end of
+    the run then ended N ...` when it exited on its own.
+  - Not changed: the `left_running` warning still says "the stop left", and
+    after a natural end its count can include an orphan `end_adopted` could
+    not signal (setuid). Rare, and `src/main.rs`'s wording only.
+  - Decision this makes, for `DECISIONS.md`: a daemon a launched program
+    starts is ended with the run even when the program exits on its own.
+    `omn` measures a program and leaves nothing it started behind; a user
+    who wants the daemon to outlive the run launches it outside `omn`.
+
+Tested: `cargo test --lib launch` (21), `cargo test --test budget orphan`
+(2, after `make`, capabilities granted), clippy `-D warnings` and
+`cargo fmt --check` clean.
