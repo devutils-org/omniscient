@@ -108,6 +108,12 @@ pub struct Reference {
     pub requires_setting: Vec<Setting>,
     #[serde(default)]
     pub privileged: bool,
+    /// With `privileged`: the tool a wrapper `command` (`sh`, `timeout`) runs
+    /// as `$SUDO <tool>`. The command then runs unprivileged with `SUDO=sudo
+    /// -n` in its environment, so a sudoers file granting the tool alone is
+    /// enough; without it the whole command goes through `sudo -n`.
+    #[serde(default)]
+    pub sudo: Option<String>,
     /// Text in the tool's stderr that means this machine refused it: the run
     /// then skips quoting it rather than failing.
     #[serde(default)]
@@ -360,6 +366,9 @@ impl Pair {
         if uses_pid && self.run != RunMode::Attach {
             out.push("`{pid}` only means something with `run: attach`".into());
         }
+        if self.reference.sudo.is_some() && !self.reference.privileged {
+            out.push("`reference.sudo` only means something with `privileged: true`".into());
+        }
         if self.run == RunMode::Attach && self.workload.is_empty() {
             out.push("`run: attach` needs a workload to launch".into());
         }
@@ -609,7 +618,12 @@ pub fn run_pair(pair: &Pair, parsers: &[Parser], omn: &Path) -> Outcome {
         }
     }
     if pair.reference.privileged {
-        let tool = pair.reference.command.first().map_or("", String::as_str);
+        let tool = pair
+            .reference
+            .sudo
+            .as_deref()
+            .or(pair.reference.command.first().map(String::as_str))
+            .unwrap_or("");
         if !sudo_grants(tool) {
             return Outcome::Skip(
                 format!("`sudo -n` does not grant root here for `{tool}`, and this tool needs it"),
@@ -1023,23 +1037,70 @@ fn tail(text: &str, n: usize) -> Vec<String> {
     lines[lines.len().saturating_sub(n)..].to_vec()
 }
 
-/// Whether `sudo` may run `tool` at all: asked of that command (`sudo -l
-/// <tool>`), because a sudoers file may grant the witnesses one by one and
-/// nothing else, in which case `sudo -n true` fails. A rule that needs a
-/// password passes here too; the run's refusal (`REFUSALS`) skips it then.
+/// Whether `sudo -n` runs `tool` as root: credentials already cached
+/// (`sudo -n true`), or a `NOPASSWD` entry of `sudo -n -l` naming the tool's
+/// path or `ALL`. `sudo -l <tool>` cannot answer it, since it also succeeds
+/// for a rule that needs a password; a refusal the listing missed still
+/// skips at the run (`REFUSALS`).
 fn sudo_grants(tool: &str) -> bool {
     static GRANTS: OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
         OnceLock::new();
     let mut grants = GRANTS.get_or_init(Default::default).lock().unwrap();
     *grants.entry(tool.to_string()).or_insert_with(|| {
-        !tool.is_empty()
-            && Command::new("sudo")
-                .args(["-n", "-l", tool])
+        let sudo = |args: &[&str]| {
+            Command::new("sudo")
+                .args(args)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+        };
+        if tool.is_empty() {
+            return false;
+        }
+        if sudo(&["-n", "true"]).is_some() {
+            return true;
+        }
+        let Some(path) = which(tool) else {
+            return false;
+        };
+        sudo(&["-n", "-l"])
+            .is_some_and(|o| nopasswd_grants(&String::from_utf8_lossy(&o.stdout), &path))
+    })
+}
+
+/// Whether a `sudo -l` listing holds a `NOPASSWD` entry for `path` (or `ALL`)
+/// run as root with any arguments.
+fn nopasswd_grants(listing: &str, path: &str) -> bool {
+    listing.lines().any(|line| {
+        let line = line.trim();
+        let as_root = line.starts_with("(root)")
+            || line.starts_with("(ALL)")
+            || line.starts_with("(ALL : ALL)");
+        let Some((_, entries)) = line.split_once("NOPASSWD:") else {
+            return false;
+        };
+        as_root
+            && entries.split(',').any(|entry| {
+                let mut words = entry.split_whitespace();
+                let command = words.next().unwrap_or("");
+                (command == path && words.next().is_none()) || command == "ALL"
+            })
+    })
+}
+
+/// A program's path as `PATH` finds it, or the argument itself when it
+/// already names a file.
+fn which(program: &str) -> Option<String> {
+    if program.contains('/') {
+        return Some(program.to_string());
+    }
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(program))
+            .find(|p| p.is_file())
+            .map(|p| p.display().to_string())
     })
 }
 
@@ -1091,7 +1152,10 @@ fn omn_command(
 fn tool_argv(pair: &Pair, argv: &[String], tmp: &Path, pid: Option<u32>) -> Vec<String> {
     let mut out = Vec::new();
     if pair.reference.privileged {
-        out.extend(["sudo".to_string(), "-n".to_string()]);
+        match pair.reference.sudo {
+            Some(_) => out.extend(["env".to_string(), "SUDO=sudo -n".to_string()]),
+            None => out.extend(["sudo".to_string(), "-n".to_string()]),
+        }
     }
     out.extend(substitute(argv, tmp, pid));
     out
@@ -1616,6 +1680,22 @@ fn short(node: &Json) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_is_granted_only_by_a_nopasswd_entry_for_it_with_any_arguments() {
+        let listing = "User moha may run the following commands on arch:
+    (ALL : ALL) ALL
+    (root) NOPASSWD: /usr/bin/setcap cap_bpf\\,cap_perfmon+ep target/debug/omn
+    (root) NOPASSWD: /usr/bin/bpftrace, /usr/bin/memleak, /usr/bin/perf
+";
+        assert!(nopasswd_grants(listing, "/usr/bin/bpftrace"));
+        assert!(nopasswd_grants(listing, "/usr/bin/perf"));
+        // `(ALL : ALL) ALL` needs a password; `sudo -l sh` succeeds on it.
+        assert!(!nopasswd_grants(listing, "/usr/bin/sh"));
+        // An entry bound to its arguments does not grant the tool.
+        assert!(!nopasswd_grants(listing, "/usr/bin/setcap"));
+        assert!(nopasswd_grants("    (ALL) NOPASSWD: ALL\n", "/usr/bin/sh"));
+    }
 
     fn stdout_scalar(stdout: &str, _: &str) -> Result<Values, String> {
         Ok(vec![(String::new(), crate::common::number(stdout)?)])

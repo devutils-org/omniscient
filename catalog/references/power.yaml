@@ -71,7 +71,6 @@
     command: [sh, tests/reference/workloads/power/rapl_window.sh, sleep, "2"]
     parse: power_rapl_window
     requires: [sh, /sys/class/powercap/intel-rapl:0/energy_uj]
-    privileged: true
   compare:
     key: ""
     omn: results.0.outputs[emit=summary].series[key=system].mean

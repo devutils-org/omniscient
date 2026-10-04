@@ -7,7 +7,7 @@ and `mem.heap.retained`. Every pair runs one workload,
 1 MiB from libc's malloc, the peak held 0.3 s, all freed but 4. Pairs in
 `catalog/references/heap.yaml`, by id; every verdict below is the shared
 runner's (`cargo test --test reference pairs_heap`, 2026-10-04: 8 held,
-1 skipped). Alternate runs
+1 gap). Alternate runs
 throughout: valgrind replaces malloc itself, and omn's shim and heaptrack's
 are both `LD_PRELOAD` interposers, so no two of them can watch one run.
 
@@ -33,7 +33,7 @@ says "by call site" refuses `-e stack` only after the run.
 | `heaptrack`: total memory leaked | same, `last` | full | within 0.1 %: 4,605,465 vs 4.61M (pair `heaptrack-leaked`, rel 0.01) | -- |
 | `heaptrack`: temporary allocations (freed right after) | none | none | no pair | an allocation's lifetime, or its free paired with it |
 | `heaptrack`: per-site tables, flame graph, `heaptrack -p PID` | none | none | no pair | stacks on `mem.heap.alloc`; attaching to a running program (the shim reaches a program only at exec) |
-| `memleak -c prog`: outstanding bytes | `omn trace mem.heap.live -m poll@50ms -e summary` (`last`) | part | pair `memleak-outstanding` (rel 0.01) **skips here**: memleak needs root and `sudo -n` is not granted | -- |
+| `memleak -c prog`: outstanding bytes | `omn trace mem.heap.live -m poll@50ms -e summary` (`last`) | part | no: `memleak-outstanding` is a gap. memleak counts mmap beside the malloc family: 11934070 outstanding bytes against omn 4605465, which dhat's end matches to the byte | mmap'd memory in `mem.heap.live` |
 | `memleak -p PID`: outstanding by stack, on a running program | none | none | no pair | stacks; attach by pid |
 | `memleak` without `-p`: kernel allocations | `mem.kmalloc` | out of this family | no pair (the bpftrace stream's) | -- |
 | (none of them) fragmentation, retained by the allocator | `omn trace mem.heap.retained -m poll@50ms` | omn only | no pair: no tool here measures it (massif's `mem_heap_extra_B` is padding and headers, not freed pages kept); on this workload 131,072 bytes, as it should be, glibc having unmapped the 1 MiB blocks it got by `mmap` | -- |

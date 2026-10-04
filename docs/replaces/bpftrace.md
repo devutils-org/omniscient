@@ -5,32 +5,29 @@ tools that have no `.bt`. Pairs: `catalog/references/bpftrace.yaml`; parsers:
 `tests/reference/bpftrace.rs`; workloads:
 `tests/reference/workloads/bpftrace/`.
 
-**Every pair skips on this machine, through the shared runner**: bpftrace
-needs root and `sudo -n` is not granted (`cargo test --test reference
-pairs_bpftrace`: 0 held, 10 skipped, 0 gaps, 0 known defects, 0 failed).
-The bcc tools are installed and need root too. So no row says "same numbers" yet. What is shown is
-omn's side: each pair's `omn` argv was run here, its output is captured
-under `tests/reference/captures/bpftrace/omn/<id>.json`, and every compare's
-path or parser is evaluated on it by
-`bpftrace::tests::every_omn_side_resolves_on_its_capture`. *omn shown* below
-is that number against what the workload fixes; *tool pending* is what the
-privileged run settles (`docs/fixes/w23-bpftrace.md`, "Privileged runs
-wanted").
+**Through the shared runner, with root** (`/etc/sudoers.d` granting
+`bpftrace` without a password; `cargo test --test reference pairs_bpftrace`,
+2026-10-04): 9 held, 0 skipped, 1 gap, 0 known defects, 0 failed. Each
+wrapper runs unprivileged and only `bpftrace` goes through `sudo -n`
+(`reference.sudo`). The numbers below are one quiet run; each pair's `omn`
+side is also checked on its capture under
+`tests/reference/captures/bpftrace/omn/<id>.json`
+(`bpftrace::tests::every_omn_side_resolves_on_its_capture`).
 
 | Tool and use | omn equivalent | Covered | Same numbers | Missing |
 |---|---|---|---|---|
-| `syscount.bt`: syscalls per process | `omn trace proc.syscall -m count -e summary --filter 'comm == "X"'` | per process and per syscall name; one process at a time per request | skipped (root); omn shown: 21216 calls for 20000 `getppid` and python3's startup; pair `syscount` compares it within 5%, tool pending | a system-wide top-N by process in one request (`-k comm`); a comm filter that follows a rename (see Missing below) |
-| `opensnoop.bt`: who opens what | `omn trace proc.syscall --filter 'syscall == "openat"'` | the count and latency of opens; not the path, nor the fd returned | skipped (root); omn shown: 623 openat for 500 opens plus startup; pair `opensnoop`, within 5%, tool pending | the opened path and the returned fd as attributes; `open`/`openat2` folded into one "open" selector |
-| `killsnoop.bt`: who signals whom | `omn trace proc.signals -m count --filter 'sig == 12'` | the count of signals per receiving task, by number | skipped (root); omn shown: exactly 50 SIGUSR2; pair `killsnoop`, exact, tool pending | the sender's comm and pid, the kill(2) return value |
-| `execsnoop.bt`: programs executed | `omn trace proc.exec --system --filter 'comm == "true"'` | every exec, system-wide or per cgroup | skipped (root); omn shown: exactly 20 `/bin/true`, one run beside the tool; pair `execsnoop`, exact, tool pending | `proc.exec` per launch (the programs a launched command executes); argv as an attribute |
-| `bitesize.bt`: block I/O size per process | `omn trace io.size -e hist:log2 --filter 'comm == "X"'` | the same histogram, per device instead of per process name | skipped (root); omn shown: 504 requests in [4K, 8K) for 500 O_DIRECT 4 KiB reads; pair `bitesize` compares that bucket within 5%, tool pending | a `comm` correlation key, to split the histogram per process as the tool does |
-| `biosnoop.bt`: one line per block request | `omn trace io.latency -m trace -e raw` | request, device, latency, issuer | skipped (root); omn shown: 508 completed requests by the workload; pair `biosnoop`, within 5%, tool pending | -- |
-| `biolatency.bt`: block latency histogram | `omn trace io.latency -e hist:log2` | the same histogram, per device | skipped (root); omn shown: median in [32, 64) us over 508 requests; pair `biolatency`, the median within one log2 bucket, tool pending | -- |
-| `runqlat.bt`: run queue latency | `omn trace sched.runqlat -e hist:log2` | the same histogram, per task, cgroup or CPU | skipped (root); omn shown: 26406 waits, median in [64, 128) us under two spinners per CPU; pair `runqlat`, one log2 bucket, tool pending | -- |
+| `syscount.bt`: syscalls per process | `omn trace proc.syscall -m count -e summary --filter 'comm == "X"'` | per process and per syscall name; one process at a time per request | yes: 21220 against 21214 calls, pair `syscount` | a system-wide top-N by process in one request (`-k comm`); a comm filter that follows a rename (see Missing below) |
+| `opensnoop.bt`: who opens what | `omn trace proc.syscall --filter 'syscall == "openat"'` | the count and latency of opens; not the path, nor the fd returned | yes: 623 against 624 opens, pair `opensnoop` | the opened path and the returned fd as attributes; `open`/`openat2` folded into one "open" selector |
+| `killsnoop.bt`: who signals whom | `omn trace proc.signals -m count --filter 'sig == 12'` | the count of signals per receiving task, by number | yes, exact: 50 SIGUSR2, pair `killsnoop` | the sender's comm and pid, the kill(2) return value |
+| `execsnoop.bt`: programs executed | `omn trace proc.exec --system --filter 'comm == "true"'` | every exec, system-wide or per cgroup | yes, exact: 20 `/bin/true`, one run beside the tool, pair `execsnoop` | `proc.exec` per launch (the programs a launched command executes); argv as an attribute |
+| `bitesize.bt`: block I/O size per process | `omn trace io.size -e hist:log2 --filter 'comm == "X"'` | the same histogram, per device instead of per process name | yes, exact: 502 requests in [4K, 8K), pair `bitesize` | a `comm` correlation key, to split the histogram per process as the tool does |
+| `biosnoop.bt`: one line per block request | `omn trace io.latency -m trace -e raw` | request, device, latency, issuer | yes: 508 against 509 requests, pair `biosnoop` | -- |
+| `biolatency.bt`: block latency histogram | `omn trace io.latency -e hist:log2` | the same histogram, per device | yes: the median one log2 bucket apart (4096 ns against 4000), pair `biolatency` | -- |
+| `runqlat.bt`: run queue latency | `omn trace sched.runqlat -e hist:log2` | the same histogram, per task, cgroup or CPU | no pair runs: `runqlat` is a gap. runqlat.bt is the machine over the program's run and omn the program alone; on a quiet machine the medians are 2.1 ms (the workload) and 128 us (the machine) | a machine-wide target bounded by a launched program (`--system` beside `-- prog`) |
 | `runqlen.bt`: run queue length | none | 0 | no pair: omn has no run queue length source | `sched.runqlen`: sampled `nr_running` per CPU (perf sampling or a BPF timer), an lhist |
-| `tcpconnect.bt`: active connections | `omn trace net.tcp.connect -m trace` | every connect with its latency and outcome | skipped (root); omn shown: exactly 10; pair `tcpconnect`, exact, tool pending | the addresses and ports as attributes on the summary |
+| `tcpconnect.bt`: active connections | `omn trace net.tcp.connect -m trace` | every connect with its latency and outcome | yes, exact: 10 connections, pair `tcpconnect` | the addresses and ports as attributes on the summary |
 | `tcpaccept.bt`: passive connections | none | 0 | no pair: no accept event in omn (`net.backlog` counts queue drops) | `net.tcp.accept`: inet_csk_accept return with addresses and backlog length |
-| `tcplife.bt`: session duration and volume | `omn trace net.tcp.lifetime --system --filter 'comm == "X"'` | sessions with duration and bytes, system-wide only | skipped (root); omn shown: exactly 20 sockets for 10 local connections, one run beside the tool; pair `tcplife`, exact, tool pending | `net.tcp.lifetime` per launch or pid |
+| `tcplife.bt`: session duration and volume | `omn trace net.tcp.lifetime --system --filter 'comm == "X"'` | sessions with duration and bytes, system-wide only | yes, exact: 20 sockets, pair `tcplife` | `net.tcp.lifetime` per launch or pid |
 | `tcpretrans.bt`: retransmits | `omn trace net.tcp.retransmit` | per socket and task | no pair: no deterministic retransmit without a qdisc (`tc netem`) or a firewall drop rule, both root | -- (a privileged pair with `tc qdisc add dev lo root netem loss 10%`) |
 | `tcpdrop.bt`: TCP drops with kernel stack | `omn trace net.drops` | drops with reason, system-wide | no pair: tcpdrop.bt keeps only skbs with a socket and a reason above NOT_SPECIFIED, which no unprivileged workload produces deterministically | the kernel stack of the drop; a `protocol == tcp` view keyed by socket addresses |
 | `vfsstat.bt`: VFS calls per second | `omn trace io.fs -m count` (regular files only) | read/write/open/fsync on regular files | no pair: the scopes differ by design -- vfsstat counts every vfs_read* system-wide, pipes and sockets included; io.fs keeps regular files | a count of every VFS call by operation, any file type, per second (`-e rate` with `op` as a key) |

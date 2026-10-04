@@ -171,6 +171,7 @@
     parse: tcpdump_count
     requires: [tcpdump, python3]
     privileged: true
+    sudo: tcpdump
   compare:
     key: captured
     omn_parse: omn_captured

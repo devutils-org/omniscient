@@ -29,8 +29,8 @@ pub fn parsers() -> Vec<Parser> {
             parse: perf_sched_latency,
         },
         Parser {
-            name: "perf_sched_timehist_summary",
-            parse: perf_sched_timehist_summary,
+            name: "perf_sched_timehist_rows",
+            parse: perf_sched_timehist_rows,
         },
         Parser {
             name: "perf_lock_contention",
@@ -266,41 +266,44 @@ fn perf_sched_latency(stdout: &str, _stderr: &str) -> Result<Values, String> {
     acc.into_values("perf sched latency")
 }
 
-/// `perf sched timehist -s` (or `-S`): the "Runtime summary" table, one row
-/// per task as `comm[pid]` or `comm[tid/pid]`, summed by command. Keys
-/// `<comm>.{sched_in,run_ns,migrations}`, and `total.switches` from
-/// "Total number of context switches".
-fn perf_sched_timehist_summary(stdout: &str, _stderr: &str) -> Result<Values, String> {
+/// `perf sched timehist -M`: one row per time a task ran (`time [cpu]
+/// comm[tid] wait sch run`), and one `migrated: comm[tid] cpu A => B` line per
+/// migration, summed by command. Keys `<comm>.{sched_in,run_ns,migrations}`.
+/// Not `-s`: its "Runtime summary" leaves out a task that exits before the
+/// recording ends (perf 7.2), which is every workload here.
+fn perf_sched_timehist_rows(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    fn comm(task: &str) -> &str {
+        task.rsplit_once('[').map_or(task, |(c, _)| c)
+    }
     let mut acc = Acc::default();
-    // Before the summary, in its header, in its rows, past it.
-    let mut state = 0;
+    let mut rows = 0;
     for line in stdout.lines() {
         let t = line.trim();
-        if let Some(n) = t.strip_prefix("Total number of context switches:") {
-            acc.set("total", "switches", num(n.trim())?);
+        // A row starts with its timestamp; the header and rule do not.
+        if !t.starts_with(|c: char| c.is_ascii_digit()) {
             continue;
         }
-        match state {
-            0 if t.starts_with("Runtime summary") => state = 1,
-            1 if t.starts_with("---") => state = 2,
-            2 if t.is_empty() => state = 3,
-            2 => {
-                let f: Vec<&str> = t.split_whitespace().collect();
-                // The command, which may hold spaces, then eight numbers.
-                if f.len() < 9 {
-                    return Err(format!("unexpected timehist summary row: `{t}`"));
-                }
-                let nums = &f[f.len() - 8..];
-                let task = f[..f.len() - 8].join(" ");
-                let comm = task.rsplit_once('[').map_or(task.as_str(), |(c, _)| c);
-                acc.add(comm, "sched_in", num(nums[1])?);
-                acc.add(comm, "run_ns", num(nums[2])? * 1e6);
-                acc.add(comm, "migrations", num(nums[7])?);
-            }
-            _ => {}
+        if let Some((_, moved)) = t.split_once("migrated: ") {
+            let task = moved.split_whitespace().next().unwrap_or("");
+            acc.add(comm(task), "migrations", 1.0);
+            rows += 1;
+            continue;
         }
+        let f: Vec<&str> = t.split_whitespace().collect();
+        // time, [cpu], task (no spaces in `comm[tid]` but a comm may hold
+        // them), then wait, sch delay and run time.
+        if f.len() < 6 {
+            return Err(format!("unexpected timehist row: `{t}`"));
+        }
+        let task = f[2..f.len() - 3].join(" ");
+        acc.add(comm(&task), "sched_in", 1.0);
+        acc.add(comm(&task), "run_ns", num(f[f.len() - 1])? * 1e6);
+        rows += 1;
     }
-    acc.into_values("perf sched timehist -s")
+    if rows == 0 {
+        return Err("no perf sched timehist rows in the tool's output".into());
+    }
+    acc.into_values("perf sched timehist -M")
 }
 
 /// `perf lock contention` (tracepoints or `-b`): one row per caller (or per
@@ -315,6 +318,7 @@ fn perf_lock_contention(stdout: &str, stderr: &str) -> Result<Values, String> {
     };
     let mut acc = Acc::default();
     let mut in_table = false;
+    let mut per_thread = false;
     for line in text.lines() {
         let t = line.trim();
         // perf appends `=== output for debug ===` (`(BPF)` with `-b`) when
@@ -323,8 +327,11 @@ fn perf_lock_contention(stdout: &str, stderr: &str) -> Result<Values, String> {
         if t.starts_with("===") {
             break;
         }
-        if t.starts_with("contended") && t.contains("caller") {
+        // `-t` prints one row per thread, `pid comm` where the default prints
+        // `type caller`.
+        if t.starts_with("contended") && (t.contains("caller") || t.contains("comm")) {
             in_table = true;
+            per_thread = !t.contains("caller");
             continue;
         }
         if !in_table || t.is_empty() {
@@ -338,9 +345,14 @@ fn perf_lock_contention(stdout: &str, stderr: &str) -> Result<Values, String> {
         let contended = num(f[0])?;
         let total = duration_ns(f[1], f[2])?;
         let max = duration_ns(f[3], f[4])?;
-        let ty = f[7];
-        acc.add(ty, "contended", contended);
-        acc.add(ty, "wait_ns", total);
+        // A comm may hold spaces (`Thread-5 (churn`); a type never does.
+        let row = if per_thread {
+            format!("comm:{}", f[8..].join(" "))
+        } else {
+            f[7].to_string()
+        };
+        acc.add(&row, "contended", contended);
+        acc.add(&row, "wait_ns", total);
         acc.add("total", "contended", contended);
         acc.add("total", "wait_ns", total);
         acc.max("total", "max_wait_ns", max);
@@ -445,15 +457,25 @@ mod tests {
     }
 
     #[test]
-    fn perf_sched_timehist_summary_reads_the_runtime_table() {
-        let v = perf_sched_timehist_summary(&capture("perf-sched-timehist-s.txt"), "").unwrap();
-        assert_eq!(value(&v, "python3.sched_in"), 23.0);
-        assert_eq!(value(&v, "python3.migrations"), 2.0);
-        assert!(close(value(&v, "python3.run_ns"), 14_823_000.0));
-        assert_eq!(value(&v, "kworker/3:1.sched_in"), 4.0);
-        assert_eq!(value(&v, "total.switches"), 29.0);
-        // "Terminated tasks" repeats a name; it is not a second row.
-        assert_eq!(value(&v, "perf.sched_in"), 2.0);
+    fn perf_sched_timehist_rows_counts_runs_and_migrations_by_command() {
+        let v = perf_sched_timehist_rows(&capture("perf-sched-timehist-M.txt"), "").unwrap();
+        // migrate.py 200, renamed `omnref-migrate`: 200 pins and its exit.
+        assert_eq!(value(&v, "omnref-migrate.migrations"), 201.0);
+        assert_eq!(value(&v, "omnref-migrate.sched_in"), 202.0);
+        assert_eq!(value(&v, "python3.sched_in"), 2.0);
+        // A `migrated:` line names the moved task, not the migration thread.
+        assert!(v.iter().all(|(k, _)| k != "migration/0.migrations"));
+        assert!(value(&v, "omnref-migrate.run_ns") > 0.0);
+    }
+
+    #[test]
+    fn perf_lock_contention_per_thread_sums_by_command() {
+        let v = perf_lock_contention(&capture("perf-lock-contention-t.txt"), "").unwrap();
+        // contend.py 8 2, every thread named `omnref-lock`, beside the rest of
+        // the machine `-- prog` does not leave out.
+        assert_eq!(value(&v, "comm:omnref-lock.contended"), 7953.0);
+        assert!(value(&v, "total.contended") > 7953.0);
+        assert!(value(&v, "comm:omnref-lock.wait_ns") > 0.0);
     }
 
     #[test]

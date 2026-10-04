@@ -1,0 +1,510 @@
+           time    cpu  task name                       wait time  sch delay   run time
+                        [tid/pid]                          (msec)     (msec)     (msec)
+--------------- ------  ------------------------------  ---------  ---------  ---------
+    6692.243705 [0000]  migration/0[20]                                                  migrated: perf[546441] cpu 0 => 1
+    6692.243714 [0000]  migration/0[20]                     0.000      0.003      0.011 
+    6692.247278 [0014]  python3[546442]                     0.010      0.010      2.171 
+    6692.251279 [0014]  python3[546442]                     0.009      0.009      3.991 
+    6692.253284 [0014]  omnref-migrate[546442]              0.029      0.029      1.975 
+    6692.253287 [0014]  migration/14[106]                                                migrated: omnref-migrate[546442] cpu 14 => 0
+    6692.253309 [0000]  omnref-migrate[546442]              0.009      0.009      0.015 
+    6692.253312 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253322 [0000]  migration/0[20]                     9.594      0.003      0.013 
+    6692.253332 [0001]  omnref-migrate[546442]              0.009      0.009      0.014 
+    6692.253335 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253351 [0000]  omnref-migrate[546442]              0.007      0.007      0.010 
+    6692.253353 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253362 [0000]  migration/0[20]                     0.028      0.003      0.011 
+    6692.253368 [0001]  omnref-migrate[546442]              0.007      0.007      0.010 
+    6692.253371 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253386 [0000]  omnref-migrate[546442]              0.007      0.007      0.010 
+    6692.253388 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253393 [0000]  migration/0[20]                     0.023      0.003      0.007 
+    6692.253403 [0001]  omnref-migrate[546442]              0.007      0.007      0.009 
+    6692.253406 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253420 [0000]  omnref-migrate[546442]              0.007      0.007      0.009 
+    6692.253423 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253431 [0000]  migration/0[20]                     0.026      0.003      0.011 
+    6692.253437 [0001]  omnref-migrate[546442]              0.007      0.007      0.009 
+    6692.253440 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253454 [0000]  omnref-migrate[546442]              0.007      0.007      0.009 
+    6692.253457 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253465 [0000]  migration/0[20]                     0.022      0.003      0.011 
+    6692.253471 [0001]  omnref-migrate[546442]              0.007      0.007      0.009 
+    6692.253474 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253488 [0000]  omnref-migrate[546442]              0.007      0.007      0.009 
+    6692.253491 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253497 [0000]  migration/0[20]                     0.022      0.003      0.008 
+    6692.253505 [0001]  omnref-migrate[546442]              0.007      0.007      0.009 
+    6692.253508 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253521 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253523 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253532 [0000]  migration/0[20]                     0.023      0.003      0.011 
+    6692.253538 [0001]  omnref-migrate[546442]              0.007      0.007      0.009 
+    6692.253540 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253554 [0000]  omnref-migrate[546442]              0.006      0.006      0.010 
+    6692.253556 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253564 [0000]  migration/0[20]                     0.022      0.003      0.010 
+    6692.253570 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253572 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253586 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253588 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253596 [0000]  migration/0[20]                     0.021      0.003      0.010 
+    6692.253602 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253605 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253618 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253621 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253628 [0000]  migration/0[20]                     0.021      0.003      0.010 
+    6692.253634 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253637 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253650 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253653 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253660 [0000]  migration/0[20]                     0.021      0.003      0.010 
+    6692.253666 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253669 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253682 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253685 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253693 [0000]  migration/0[20]                     0.021      0.003      0.010 
+    6692.253698 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253701 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253714 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253717 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253725 [0000]  migration/0[20]                     0.021      0.003      0.010 
+    6692.253731 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253733 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253747 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253749 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253756 [0000]  migration/0[20]                     0.022      0.003      0.009 
+    6692.253763 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253765 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253779 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253781 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253787 [0000]  migration/0[20]                     0.022      0.003      0.008 
+    6692.253795 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253797 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253811 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253813 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253819 [0000]  migration/0[20]                     0.023      0.003      0.008 
+    6692.253827 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253829 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253843 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253845 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253851 [0000]  migration/0[20]                     0.023      0.003      0.008 
+    6692.253859 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253861 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253875 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253877 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253883 [0000]  migration/0[20]                     0.023      0.003      0.008 
+    6692.253891 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253893 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253907 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253909 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253917 [0000]  migration/0[20]                     0.023      0.003      0.010 
+    6692.253923 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253925 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253939 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253941 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253949 [0000]  migration/0[20]                     0.021      0.003      0.010 
+    6692.253955 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253957 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.253971 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253973 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.253981 [0000]  migration/0[20]                     0.021      0.003      0.010 
+    6692.253987 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.253989 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254003 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.254005 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254012 [0000]  migration/0[20]                     0.021      0.003      0.008 
+    6692.254019 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.254021 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254035 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.254037 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254044 [0000]  migration/0[20]                     0.023      0.003      0.008 
+    6692.254051 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.254053 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254067 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.254069 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254076 [0000]  migration/0[20]                     0.023      0.003      0.008 
+    6692.254083 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.254085 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254099 [0000]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.254101 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254109 [0000]  migration/0[20]                     0.023      0.003      0.010 
+    6692.254115 [0001]  omnref-migrate[546442]              0.006      0.006      0.009 
+    6692.254118 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254133 [0000]  omnref-migrate[546442]              0.006      0.006      0.011 
+    6692.254135 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254142 [0000]  migration/0[20]                     0.023      0.003      0.008 
+    6692.254148 [0001]  omnref-migrate[546442]              0.005      0.005      0.009 
+    6692.254150 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254162 [0000]  omnref-migrate[546442]              0.006      0.006      0.008 
+    6692.254165 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254173 [0000]  migration/0[20]                     0.020      0.003      0.010 
+    6692.254178 [0001]  omnref-migrate[546442]              0.006      0.006      0.008 
+    6692.254180 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254191 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254193 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254199 [0000]  migration/0[20]                     0.017      0.002      0.008 
+    6692.254204 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254206 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254217 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254219 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254225 [0000]  migration/0[20]                     0.017      0.002      0.008 
+    6692.254230 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254232 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254243 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254245 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254251 [0000]  migration/0[20]                     0.017      0.002      0.008 
+    6692.254262 [0001]  omnref-migrate[546442]              0.005      0.005      0.013 
+    6692.254264 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254284 [0000]  omnref-migrate[546442]              0.014      0.014      0.007 
+    6692.254286 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254293 [0000]  migration/0[20]                     0.032      0.002      0.009 
+    6692.254298 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254300 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254311 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254314 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254319 [0000]  migration/0[20]                     0.018      0.002      0.007 
+    6692.254325 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254327 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254338 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254341 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254346 [0000]  migration/0[20]                     0.019      0.002      0.007 
+    6692.254352 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254354 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254365 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254367 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254372 [0000]  migration/0[20]                     0.019      0.002      0.006 
+    6692.254378 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254380 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254391 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254393 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254397 [0000]  migration/0[20]                     0.019      0.002      0.006 
+    6692.254404 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254406 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254417 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254419 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254424 [0000]  migration/0[20]                     0.019      0.002      0.006 
+    6692.254430 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254432 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254443 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254445 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254449 [0000]  migration/0[20]                     0.019      0.002      0.006 
+    6692.254456 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254458 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254469 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254471 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254475 [0000]  migration/0[20]                     0.020      0.002      0.006 
+    6692.254482 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254485 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254495 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254498 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254502 [0000]  migration/0[20]                     0.020      0.002      0.006 
+    6692.254508 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254510 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254522 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254524 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254528 [0000]  migration/0[20]                     0.020      0.002      0.006 
+    6692.254535 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254537 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254548 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254550 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254554 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.254561 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254563 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254574 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254576 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254579 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.254587 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254589 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254600 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254602 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254605 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.254613 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254615 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254626 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254628 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254631 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.254639 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254641 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254652 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254654 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254657 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.254665 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254667 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254678 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254680 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254683 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.254691 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254693 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254704 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254706 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254709 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.254717 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254719 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254730 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254732 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254735 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.254743 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254745 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254757 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254759 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254762 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.254770 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254772 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254783 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254785 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254788 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.254796 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254798 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254809 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254811 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254814 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.254822 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254824 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254835 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254837 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254840 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.254848 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254850 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254861 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254863 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254866 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.254874 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254876 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254887 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254889 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254892 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.254900 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254902 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254913 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254915 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254918 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.254926 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254928 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254939 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254941 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254944 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.254952 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254954 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254965 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.254967 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254971 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.254979 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254981 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.254992 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.254994 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.254997 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255005 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255007 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255019 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255021 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255024 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255032 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255034 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255045 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255047 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255050 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255058 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255060 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255072 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255074 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255077 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255085 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255087 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255098 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255100 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255103 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255111 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255113 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255125 [0000]  omnref-migrate[546442]              0.005      0.005      0.009 
+    6692.255128 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255131 [0000]  migration/0[20]                     0.022      0.003      0.006 
+    6692.255140 [0001]  omnref-migrate[546442]              0.006      0.006      0.008 
+    6692.255142 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255155 [0000]  omnref-migrate[546442]              0.006      0.006      0.008 
+    6692.255157 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255160 [0000]  migration/0[20]                     0.023      0.002      0.005 
+    6692.255168 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255170 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255181 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255183 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255186 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255194 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255196 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255207 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255209 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255212 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255220 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255222 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255233 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255235 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255238 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255246 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255248 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255268 [0000]  omnref-migrate[546442]              0.005      0.005      0.016 
+    6692.255270 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255274 [0000]  migration/0[20]                     0.029      0.002      0.005 
+    6692.255282 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255284 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255296 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255298 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255301 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255309 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255311 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255322 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255325 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255328 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255336 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255338 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255349 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255351 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255354 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255362 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255364 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255375 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255377 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255380 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255388 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255390 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255401 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255404 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255407 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255414 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255417 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255427 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255430 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255433 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255441 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255443 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255454 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255456 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255459 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255467 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255469 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255480 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255482 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255485 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255493 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255495 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255506 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255508 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255511 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255519 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255521 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255532 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255534 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255537 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255545 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255547 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255558 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255560 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255563 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255571 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255573 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255584 [0000]  omnref-migrate[546442]              0.004      0.004      0.007 
+    6692.255586 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255589 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255597 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255599 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255610 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255612 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255615 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255623 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255625 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255636 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255638 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255642 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255650 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255652 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255662 [0000]  omnref-migrate[546442]              0.004      0.004      0.007 
+    6692.255665 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255668 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255675 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255677 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255688 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255690 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255694 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255701 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255703 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255714 [0000]  omnref-migrate[546442]              0.004      0.004      0.008 
+    6692.255716 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255720 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255728 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255730 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255741 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255743 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255746 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255754 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255756 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255767 [0000]  omnref-migrate[546442]              0.004      0.004      0.007 
+    6692.255769 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255772 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255780 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255782 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255793 [0000]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255795 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255798 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255806 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255808 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255819 [0000]  omnref-migrate[546442]              0.004      0.004      0.007 
+    6692.255821 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255824 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255832 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255834 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255845 [0000]  omnref-migrate[546442]              0.004      0.004      0.007 
+    6692.255847 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255850 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255858 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255860 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255871 [0000]  omnref-migrate[546442]              0.004      0.004      0.008 
+    6692.255873 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255876 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255884 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255886 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255897 [0000]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255899 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255903 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.255910 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255912 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255923 [0000]  omnref-migrate[546442]              0.004      0.004      0.007 
+    6692.255925 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255929 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255936 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255938 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255949 [0000]  omnref-migrate[546442]              0.004      0.004      0.007 
+    6692.255951 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255954 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255962 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.255964 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.255975 [0000]  omnref-migrate[546442]              0.004      0.004      0.008 
+    6692.255978 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.255981 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.255989 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.255991 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.256002 [0000]  omnref-migrate[546442]              0.004      0.004      0.008 
+    6692.256004 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.256007 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.256015 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.256017 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.256028 [0000]  omnref-migrate[546442]              0.004      0.004      0.008 
+    6692.256030 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.256033 [0000]  migration/0[20]                     0.021      0.002      0.005 
+    6692.256041 [0001]  omnref-migrate[546442]              0.005      0.005      0.008 
+    6692.256043 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.256054 [0000]  omnref-migrate[546442]              0.004      0.004      0.007 
+    6692.256056 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.256059 [0000]  migration/0[20]                     0.020      0.002      0.005 
+    6692.256067 [0001]  omnref-migrate[546442]              0.005      0.005      0.007 
+    6692.256069 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.256082 [0000]  omnref-migrate[546442]              0.005      0.005      0.010 
+    6692.256085 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.256088 [0000]  migration/0[20]                     0.023      0.003      0.005 
+    6692.256097 [0001]  omnref-migrate[546442]              0.005      0.005      0.009 
+    6692.256099 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.256112 [0000]  omnref-migrate[546442]              0.006      0.006      0.008 
+    6692.256114 [0000]  migration/0[20]                                                  migrated: omnref-migrate[546442] cpu 0 => 1
+    6692.256118 [0000]  migration/0[20]                     0.023      0.002      0.006 
+    6692.256127 [0001]  omnref-migrate[546442]              0.006      0.006      0.008 
+    6692.256129 [0001]  migration/1[26]                                                  migrated: omnref-migrate[546442] cpu 1 => 0
+    6692.257903 [0000]  omnref-migrate[546442]              0.000      0.000      1.771 

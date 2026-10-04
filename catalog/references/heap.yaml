@@ -162,12 +162,16 @@
   workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
   omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json, -o, "{out}"]
   reference:
-    command: [sh, -c, 'exec memleak -T 100000 -o 0 -c "$*" 2 1', memleak]
+    # libbpf-tools' memleak execs `-c` as one path, unsplit: the workload goes
+    # through a one-line script that execs it, keeping the pid memleak traces.
+    command: [sh, -c, 'f=$(mktemp) && printf "#!/bin/sh\nexec %s\n" "$*" >"$f" && chmod +x "$f" && $SUDO memleak -T 100000 -o 1 -c "$f" 2 1; r=$?; rm -f "$f"; exit $r', memleak]
     parse: memleak_outstanding
     requires: [memleak, python3]
     privileged: true
+    sudo: memleak
+  gap: "libbpf-tools' memleak counts mmap and munmap beside the malloc family, and omn's mem.heap.live does not: on blocks.py 64 1048576 4 0.3, memleak 11934070 outstanding bytes against omn 4605465, which dhat's end matches to the byte; the rest is most likely mmap'd memory (memleak's report holds two 3064432-byte regions dhat never sees; reasoned, not shown by symbol). The pair runs once omn counts mmap'd heap or memleak can leave it out"
   compare:
     key: bytes
     omn: results.0.outputs[emit=summary].series.0.last
     tolerance: {rel: 0.01}
-    why: "memleak's uprobes on malloc and free summed over every stack of its one report, taken after the program exited, against omn's last live total; -o 0 so no young allocation is pruned. Alternate runs"
+    why: "memleak's uprobes on malloc and free summed over every stack of its one report, taken after the program exited, against omn's last live total; -o 1 (the least it takes) so no allocation older than a millisecond is pruned. Alternate runs"

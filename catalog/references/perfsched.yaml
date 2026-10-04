@@ -106,9 +106,13 @@
   compare:
     key: getppid.calls
     omn: results[source=proc.syscall].outputs[emit=summary].series.*.count
-    tolerance: {abs: 0}
-    why: "perf trace and omn both read raw_syscalls in the kernel and could
-      observe one run; alternate runs suffice for a deterministic count"
+    tolerance: {rel: 0.1, side: above}
+    why: "both read raw_syscalls in the kernel over a workload making exactly
+      5000 getppid calls; omn counts 5000 on every run, as strace -c does
+      (pair strace-c-count, exact), while perf trace -s drops calls, with or
+      without its LOST line: 4634 to 4999 over a dozen runs, still short with
+      --mmap-pages 16384. Its count is a lower bound, so this pair holds omn
+      above it, never below; the exact count is strace-c-count's to show"
 
 - id: perf-trace-latency
   source: proc.syscall
@@ -137,10 +141,11 @@
   workload: [python3, tests/reference/workloads/perfsched/sleeper.py, "100", "2"]
   omn: [trace, sched.switches, -m, count, -e, topk, --format, json, -o, "{out}"]
   reference:
-    command: [sh, -c, 'd=$(mktemp) && perf sched record -q -o "$d" -- "$@" >/dev/null 2>&1 && perf sched latency -i "$d"; r=$?; rm -f "$d"; exit $r', sh]
+    command: [sh, -c, 'd=$(mktemp -d) && $SUDO perf sched record -q -o "$d/perf.data" -- "$@" >/dev/null 2>&1 && $SUDO perf sched latency -f -i "$d/perf.data"; r=$?; rm -rf "$d"; exit $r', sh]
     parse: perf_sched_latency
     requires: [perf, sh]
     privileged: true
+    sudo: perf
   compare:
     key: omnref-sleep.switches
     omn: results[source=sched.switches].outputs[emit=topk].series.*.total
@@ -167,10 +172,11 @@
   workload: [python3, tests/reference/workloads/perfsched/migrate.py, "200"]
   omn: [trace, sched.migrations, -m, count, -e, topk, --format, json, -o, "{out}"]
   reference:
-    command: [sh, -c, 'd=$(mktemp) && perf sched record -q -o "$d" -- "$@" >/dev/null 2>&1 && perf sched timehist -s -i "$d"; r=$?; rm -f "$d"; exit $r', sh]
-    parse: perf_sched_timehist_summary
+    command: [sh, -c, 'd=$(mktemp -d) && $SUDO perf sched record -q -o "$d/perf.data" -- "$@" >/dev/null 2>&1 && $SUDO perf sched timehist -M -f -i "$d/perf.data"; r=$?; rm -rf "$d"; exit $r', sh]
+    parse: perf_sched_timehist_rows
     requires: [perf, sh]
     privileged: true
+    sudo: perf
   compare:
     key: omnref-migrate.migrations
     omn: results[source=sched.migrations].outputs[emit=topk].series.*.total
@@ -191,10 +197,11 @@
   workload: [python3, tests/reference/workloads/perfsched/sleeper.py, "100", "2"]
   omn: [trace, sched.switches, -m, count, -e, topk, --format, json, -o, "{out}"]
   reference:
-    command: [sh, -c, 'd=$(mktemp) && perf sched record -q -o "$d" -- "$@" >/dev/null 2>&1 && perf sched timehist -s -i "$d"; r=$?; rm -f "$d"; exit $r', sh]
-    parse: perf_sched_timehist_summary
+    command: [sh, -c, 'd=$(mktemp -d) && $SUDO perf sched record -q -o "$d/perf.data" -- "$@" >/dev/null 2>&1 && $SUDO perf sched timehist -M -f -i "$d/perf.data"; r=$?; rm -rf "$d"; exit $r', sh]
+    parse: perf_sched_timehist_rows
     requires: [perf, sh]
     privileged: true
+    sudo: perf
   compare:
     key: omnref-sleep.sched_in
     omn: results[source=sched.switches].outputs[emit=topk].series.*.total
@@ -210,16 +217,23 @@
   use: "perf lock contention -b -- prog  (kernel lock contentions)"
   workload: [python3, tests/reference/workloads/perfsched/contend.py, "8", "2"]
   omn: [trace, sched.lock, -e, summary, --format, json, -o, "{out}"]
+  run: tool_wraps_omn
   reference:
-    command: [perf, lock, contention, -b, --]
+    # `-- prog` does not limit `-b` to the program: it counts the machine
+    # (958303 spinlock waits of a software-rendering compositor beside the
+    # program's 7953, in one run). `-t` gives one row per thread and the
+    # workload names every thread `omnref-lock`.
+    command: [perf, lock, contention, -b, -t, --]
     parse: perf_lock_contention
     requires: [perf]
     privileged: true
   compare:
-    key: total.contended
+    key: comm:omnref-lock.contended
     omn: results[source=sched.lock].outputs[emit=summary].series.*.count
-    tolerance: {rel: 0.3}
-    why: "alternate runs of a timed churn on one process's mmap_lock: both
-      count contention_begin, but how many contentions a 2 s run makes
-      depends on the run (omn: about 6000 to 7400 over 8 threads, two runs here), and each
-      tool shortens the convoy it measures (sched.lock's caveat)"
+    tolerance: {rel: 0.02}
+    why: "one run: perf wraps omn, which launches the workload, and both count
+      contention_begin for the workload's threads alone (perf by their name,
+      omn by following the launched process); omn's losses
+      (losses.reasons, 61 to 122 a run, about 1 %) are the waits it saw begin
+      and could not time, so omn reads a little under: 0.4 to 0.6 % over three
+      runs"

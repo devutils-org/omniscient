@@ -12749,40 +12749,71 @@ parser divides.
 
 Run after the merge with `/etc/sudoers.d/omniscient-witnesses` granting
 `bpftrace`, the bcc tools, `tcpdump`, `turbostat` and `perf` without a password,
-`/sys/kernel/tracing` at 755, RAPL readable and `make CAPTURE=1`.
+`/sys/kernel/tracing` at 755, RAPL readable and `make CAPTURE=1`. Answered in
+the same pass unless marked open; the privileged families now read perfsched
+9/9, bpftrace 9 held and 1 gap, heap 8 held and 1 gap, net 8/8, power 6 held
+and 1 skipped (`docs/replaces.md`).
 
-### To the runner (`tests/reference/runner.rs`): `sudo -n true` is not the question
+### Answered: the runner asked `sudo -n true`, which a per-tool grant never satisfies
 
-The runner skipped every privileged pair on `sudo -n true` failing, which a
-sudoers file granting the witnesses one by one never satisfies. It now asks
-`sudo -n -l <tool>`, and a run refused with `sudo: a password is required`
-skips quoting it. `sudo -l` cannot tell a rule that needs a password from one
-that does not, so the run's refusal is what decides.
+The runner skipped every privileged pair on `sudo -n true` failing. It now
+reads `sudo -n -l`'s `NOPASSWD` entries for the tool's path (or cached
+credentials), and a run refused with `sudo: a password is required` skips
+quoting it. `sudo -l <tool>` alone cannot decide: it also succeeds for a rule
+that needs a password.
 
-### To the families (bpftrace, perfsched, power, heap, net): a privileged pair wraps its tool in `sh`
+### Answered: a privileged pair wrapped its tool in `sh`
 
-Of the 20 privileged pairs, 17 run `sudo -n sh ...` or `sudo -n timeout ...`
-(`under.sh`, `perf sched record` then `latency`, `rapl_window.sh`,
-`cpu1_ticks.sh`, `memleak` and `tcpdump` under `sh -c`). A sudoers line that
-grants the tool cannot grant them short of granting `sh`, which is root. They
-skip with the refusal quoted. For them to run: the wrapper unprivileged, and
-`sudo -n` inside it in front of the tool alone (a `$SUDO` the runner exports
-when `privileged: true`), and the pre-check reading `sudo -n -l`'s `NOPASSWD`
-entries for that tool's path.
+Fifteen pairs ran `sudo -n sh ...` or `sudo -n timeout ...`, which no grant
+short of root allows. `reference.sudo: <tool>` now runs the wrapper
+unprivileged with `SUDO=sudo -n` in its environment, and the wrapper puts
+`$SUDO` in front of the tool alone (`under.sh`, `bracket.py`, the `perf
+sched` and `memleak` commands). The RAPL-files pair needs no root once
+`energy_uj` is readable, and is refused (skips) when it is not.
 
-### `perfsched` `perf-trace-count`: `perf trace -s` loses calls, `omn` does not
+### Answered: `perf sched timehist -s` leaves out a task that exits
 
-`omn` counts the workload's 5000 `getppid` calls exactly on every run; `perf
-trace -s` reported 4634 and 4934 on two runs. The witness drops events (its
-ring), so the pair's 0 tolerance fails on the witness. Wanted: the workload's
-own count as the ground truth beside `perf trace`, or `perf trace`'s lost
-count read and the pair skipping when it is non-zero.
+On perf 7.2 the "Runtime summary" omits every task that exited before the
+recording ended -- every workload here -- while `-M`'s rows show it 202
+times. The pairs read `-M`'s rows (`perf_sched_timehist_rows`, on a real
+capture).
 
-### `perfsched` `perf-lock-contention`: a hundredfold apart
+### Answered: `perf lock contention -b -- prog` counts the machine, not the program
 
-`omn` `sched.lock` counted 9156 and 10474 contentions on the churn workload,
-`perf lock contention -b` 978189 and 1012310 on alternate runs. Not a
-tolerance: either the two count different things (every `contention_begin`
-in the system, or spins `omn` folds) or `sched.lock` misses most of them. For
-the sched family's owner: one run with both, `perf lock contention -a` against
-`-p`, and `omn`'s losses read.
+The hundredfold gap (958303 against about 9000) was a compositor's
+software-rendering threads (`llvmpipe-*`, the NVIDIA driver missing since a
+boot) contending a page-table spinlock: `-- prog` does not limit `-b` to the
+program. The workload names its threads `omnref-lock`, perf runs with `-t`,
+and the pair is one run with perf wrapping `omn`: 9183 against 9261, `omn`
+under by about its counted losses. Not a defect of `sched.lock`.
+
+### Answered, in part: `perf trace -s` loses calls, `omn` does not
+
+`omn` counts the workload's 5000 `getppid` exactly, as `strace -c` does;
+`perf trace -s` reported 4634 to 4999 over a dozen runs, with or without its
+`LOST` line, still short at `--mmap-pages 16384`. `perf-trace-count` now holds
+`omn` above `perf trace` by up to 10 %; the exact count is `strace-c-count`'s.
+**Open**: `perf-trace-latency` went red once in five runs (a 9.61 ms mean for
+a 10 ms sleep), the same losses pairing an enter with the wrong exit.
+
+### Open: `runqlat` and `memleak-outstanding` are gaps of scope
+
+`runqlat.bt` is the machine over a program's run; `omn` cannot watch the
+machine for as long as a program runs (`--system` beside `-- prog`, `STATE.md`
+item 1), so its histogram is the program's: 2.1 ms median for the workload
+against 128 us for the machine on a quiet run. It held during the wave only
+because the load made the workload's waits the machine's. libbpf-tools'
+`memleak` counts mmap beside the malloc family: 11934070 outstanding bytes
+against `omn`'s 4605465, which dhat's end matches to the byte. It also execs
+`-c` as one unsplit path, so the pair goes through a one-line script.
+
+### Open: three pairs red only when every family runs at once
+
+`cargo test --test reference` runs the eleven families in parallel, about
+100 s of load. In that run `execsnoop` (bpftrace's output missed the
+workload's twenty `/bin/true`, with other families' `sh`, `fio` and `cat`
+exec'ing beside it), `copy-time-nsys` (nsys 1968797 ns against `omn`'s
+1452542) and `perf-trace-latency` went red; each held alone on its one rerun
+(20 = 20, 1549279 against 1457120, 10.06 ms against 10.09 ms). For the
+runner: a way to run the families one after another (`--test-threads=1`, or
+a lock the timed pairs take), since a pair's band is set on a quiet machine.

@@ -1643,32 +1643,30 @@ filed to stream top as a possible one-sided bias. The decisions are in
      on the MCP way, `sqlite3-durability`'s commits); the smaller ones (the
      unwind share tests' aliasing, the uprobe's tid, `DEVICE_STACKS` as data,
      a sweep from an installed tree).
-2. **What the user grants, so the 17 skipped pairs run.** Everything else is
-   installed and granted now: smem, ethtool, sysstat, heaptrack, the bcc
-   tools, tcpdump, powertop, fio, perf, nvidia-smi, nsys and ncu run here;
-   `make CAPTURE=1` puts `CAP_NET_RAW` on `omn`; the NVIDIA driver is loaded;
-   `/etc/sudoers.d/omniscient-witnesses` grants `bpftrace`, the bcc tools,
-   `tcpdump`, `turbostat` and `perf` without a password. The runner now asks
-   sudo per tool and skips on `sudo: a password is required`. Run so after
-   the merge: perfsched 4 held, 3 skipped, 2 failed (`perf-trace-count`, the
-   witness losing calls; `perf-lock-contention`, a hundredfold apart --
-   `docs/open-findings.md`, "the privileged pairs"); power 5/2; heap 8/1;
-   net 7/1; bpftrace 0/10. What still skips is a pair wrapping its tool in
-   `sh` or `timeout` (bpftrace's ten, perfsched's three `perf sched`, power's
-   two, `memleak`, `tcpdump`): `sudo -n sh` is refused, and granting `sh`
-   is granting root. The fix is the families' and the runner's (`sudo -n`
-   inside the wrapper, in front of the tool alone), not a grant.
+2. **What the user grants, so the last skipped pair runs.** Everything is
+   installed and granted now, through `/etc/sudoers.d/omniscient-witnesses`
+   (`bpftrace`, the bcc tools, `tcpdump`, `turbostat`, `perf` without a
+   password), tracefs at 755, RAPL readable and `make CAPTURE=1`; the runner
+   sends only the tool through `sudo -n` (`reference.sudo`). After the merge:
+   108 of 113 pairs held, 2 gaps of scope (`runqlat`, `memleak-outstanding`),
+   1 known defect, `top-cpus` at its band's edge, and one skip:
+   `freq-cpupower-mperf`, because `cpupower` checks for uid 0 itself. Add
+   `/usr/bin/cpupower` to the sudoers line (and `privileged: true` stays).
+   tracefs' mode and `energy_uj`'s read bit reset at boot, and a plain `make`
+   drops `CAP_NET_RAW`:
 
    ```console
-   cd /home/moha/repos/omniscient && make && make CAPTURE=1
-   sudo modprobe msr                                   # cpupower -m Mperf
-   sudo -v                                             # in the terminal that runs the test
+   sudo mount -o remount,mode=755 /sys/kernel/tracing          # after each boot
+   sudo chmod o+r /sys/class/powercap/intel-rapl:0/energy_uj   # after each boot
+   cd /home/moha/repos/omniscient && make CAPTURE=1
    cargo test --test reference -- --nocapture
    ```
 
    Then the captures still written from documentation replaced by the tools'
    real output (the commands are in each `docs/fixes/w23-<family>.md`,
-   "Privileged runs wanted"): perfsched's four `perf` captures, bpftrace's
+   "Privileged runs wanted"): perfsched's two other `perf` captures
+   (`perf-trace-s.txt`, `perf-sched-latency.txt`; timehist's and lock's are
+   real now), bpftrace's
    `<tool>.txt` beside each `.format.txt`, `memleak.txt`, power's
    `cpupower_mperf.txt` and `rapl_window*.txt`; each parser test's numbers
    moved to its capture. And the runs "Needs privilege" carries.

@@ -55,6 +55,7 @@
     parse: bpftrace_map
     requires: [bpftrace]
     privileged: true
+    sudo: bpftrace
   compare:
     key: "@process[omnref]"
     omn: results.0.outputs[emit=summary].series.*.count
@@ -72,6 +73,7 @@
     parse: opensnoop
     requires: [bpftrace]
     privileged: true
+    sudo: bpftrace
   compare:
     key: "comm:omnref"
     omn: results.0.outputs[emit=summary].series.*.count
@@ -89,6 +91,7 @@
     parse: killsnoop
     requires: [bpftrace]
     privileged: true
+    sudo: bpftrace
   compare:
     key: "omnref/SIGUSR2"
     omn: results.0.outputs[emit=summary].series.*.last
@@ -104,10 +107,11 @@
   run: alongside
   settle_ms: 2000
   reference:
-    command: [timeout, --preserve-status, -s, INT, "6", bpftrace, /usr/share/bpftrace/tools/execsnoop.bt]
+    command: [sh, -c, 'exec timeout --preserve-status -s INT 6 $SUDO bpftrace "$1"', sh, /usr/share/bpftrace/tools/execsnoop.bt]
     parse: execsnoop
     requires: [bpftrace, timeout]
     privileged: true
+    sudo: bpftrace
   compare:
     key: "argv0:/bin/true"
     omn: results.0.outputs[emit=summary].series.*.count
@@ -125,6 +129,7 @@
     parse: bpftrace_hist
     requires: [bpftrace]
     privileged: true
+    sudo: bpftrace
   compare:
     key: "@[omnref]/4096"
     omn: results.0.outputs[emit=hist].series.*.buckets[low=4096].count
@@ -142,6 +147,7 @@
     parse: biosnoop
     requires: [bpftrace]
     privileged: true
+    sudo: bpftrace
   compare:
     key: "comm:omnref"
     omn: results.0.outputs[emit=summary].series.*.count
@@ -159,6 +165,7 @@
     parse: bpftrace_hist_usecs
     requires: [bpftrace]
     privileged: true
+    sudo: bpftrace
   compare:
     key: "@usecs/p50"
     omn_parse: omn_hist_usecs
@@ -176,6 +183,8 @@
     parse: bpftrace_hist_usecs
     requires: [bpftrace]
     privileged: true
+    sudo: bpftrace
+  gap: "runqlat.bt is system-wide over the program's run, and omn has no machine-wide target bounded by a launched program (--system beside -- prog, STATE.md item 1): its histogram is the program's alone. Under the twenty-third wave's load the workload's waits dominated the machine's and the medians agreed; on a quiet machine they do not (omn 2097152 ns for the workload's two busy children per cpu, runqlat.bt 128000 ns for the machine, log2 buckets 21 and 16). The pair runs once omn can watch the machine for as long as a program runs"
   compare:
     key: "@usecs/p50"
     omn_parse: omn_hist_usecs
@@ -193,6 +202,7 @@
     parse: tcpconnect
     requires: [bpftrace]
     privileged: true
+    sudo: bpftrace
   compare:
     key: "comm:omnref"
     omn: results.0.outputs[emit=summary].series.*.count
@@ -208,10 +218,11 @@
   run: alongside
   settle_ms: 2000
   reference:
-    command: [timeout, --preserve-status, -s, INT, "6", bpftrace, /usr/share/bpftrace/tools/tcplife.bt]
+    command: [sh, -c, 'exec timeout --preserve-status -s INT 6 $SUDO bpftrace "$1"', sh, /usr/share/bpftrace/tools/tcplife.bt]
     parse: tcplife
     requires: [bpftrace, timeout]
     privileged: true
+    sudo: bpftrace
   compare:
     key: "comm:omnref"
     omn: results.0.outputs[emit=summary].series.*.count
