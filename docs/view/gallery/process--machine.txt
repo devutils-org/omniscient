@@ -8,7 +8,7 @@ omn top │ fixture machine │ 20.0s                                           
  Network                            not asked: needs net.socket
  GPU                                kernels not asked   VRAM 734MiB
  Energy  ▅▆██▇▇▇▇▇▆▆▆▅▅▅▅▆▆▆▆▆▆▆▆   93.5 W         avg 101 W   the machine's, not apportioned
- Time                               not asked: needs cpu.profile or sched.offcpu or sched.runqlat or cpu.oncpu_time
+ Time                               nothing on the target from cpu.oncpu_time
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ▶ suspect: none read                                                                                Enter/click → detail
 

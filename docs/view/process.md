@@ -58,8 +58,10 @@ one nothing was read in, never a zero.
 | suspect | the page that explains the state: on cpu, sleep, blocked, lock → `flame`; run queue → `lanes`; I/O → `heatmap`; network → `flows`; else `timebar` | the state `omn latency`'s verdict names, what names it when that is a name, its share | the timebar's verdict on the same bar |
 
 A line whose source the run did not ask says so in place and dimmed (`not
-asked: needs io.latency`); a refused source says `refused` with the reason.
-Neither is drawn as zero.
+asked: needs io.latency`); a refused source says `refused` with the reason;
+a source the run asked but that read nothing on the target (the machine's
+results only) says `nothing on the target from cpu.oncpu_time`. None is
+drawn as zero.
 
 ## The colours
 

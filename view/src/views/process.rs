@@ -125,7 +125,8 @@ impl Row {
     }
 
     /// A line with nothing to read, said in place and dimmed: refused with
-    /// the reason, or not asked with what it needs.
+    /// the reason, asked but holding nothing on the target, or not asked
+    /// with what it needs.
     fn absent(mut self, data: &Data, sources: &[&str]) -> Row {
         self.held = false;
         self.graph = vec![Span::raw(" ".repeat(SPARK))];
@@ -145,7 +146,23 @@ impl Row {
                 ];
             }
             None => {
-                self.text = format!("not asked: needs {}", sources.join(" or "));
+                // Asked and read, but nothing of it is the target's: the
+                // machine's results only, or none this line can draw.
+                let asked: Vec<&str> = sources
+                    .iter()
+                    .copied()
+                    .filter(|source| {
+                        data.run
+                            .results
+                            .iter()
+                            .any(|results| results.source == *source)
+                    })
+                    .collect();
+                self.text = if asked.is_empty() {
+                    format!("not asked: needs {}", sources.join(" or "))
+                } else {
+                    format!("nothing on the target from {}", asked.join(" or "))
+                };
                 self.figures = vec![dim_span(self.text.clone())];
             }
         }
@@ -1563,6 +1580,34 @@ mod tests {
         }
         // A line with nothing drawn is never listed as kept neutral.
         assert!(screen.notes.is_empty(), "{:?}", screen.notes);
+    }
+
+    /// A source the run asked for but that read nothing on the target -- the
+    /// machine's results only -- is not said to be "not asked".
+    #[test]
+    fn a_source_asked_on_the_machine_only_is_not_said_unasked() {
+        let mut data = Data::default();
+        data.run.results.push(crate::model::Results {
+            label: "cpu.oncpu_time@system".to_owned(),
+            source: "cpu.oncpu_time".to_owned(),
+            ..Default::default()
+        });
+        let screen = screen_of(&data);
+        for name in ["CPU", "Time"] {
+            let line = row(&screen, name);
+            assert!(!line.held, "{name}");
+            assert!(
+                line.text.starts_with("nothing on the target from ")
+                    && line.text.contains("cpu.oncpu_time"),
+                "{name}: {}",
+                line.text
+            );
+        }
+        assert_eq!(
+            row(&screen, "Time").text,
+            "nothing on the target from cpu.oncpu_time"
+        );
+        assert!(row(&screen, "Memory").text.starts_with("not asked: needs "));
     }
 
     /// Usage is coloured by how full the resource is, a live run reading its
