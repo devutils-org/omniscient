@@ -1,40 +1,40 @@
 omn top │ fixture workload-flows │ 1.00s                          view: snapshot │ collectors ≥14.4% │ target 5.80% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ process -- one process at a glance: pid 1783958, ran 986ms ──────────────────────────────────────────────────────────┐
-│first suspect: ▶ sleep 93.2% -- the cpu tile (flame) has the detail                                                   │
-│one view's essence per tile: enter, or a click on the selected tile, opens it                                         │
-│┌ time → timebar ─────────────────────┐┏ cpu → flame ━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ cost → ledger ──────────────────────┐│
-││▶ sleep 93.2%                        │┃___perf_sw_event › perf_swevent_event ┃│cpu 74.5ms                           ││
-││█░░░░░░░░░░░░░░░░░░░░░░░             │┃on cpu: the hottest own code          ┃│rss peak 14.1MiB · 3.95k faults      ││
-││flows-main (1783958), 1.00s wall     │┃off cpu: PyEval_EvalCode ›            ┃│cpu: the program's own account       ││
-││                                     │┃clock_nanosleep 95.0%                 ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││~low det degraded x4                 │┃11 late ~low det degraded x9          ┃│~low det 11 late                     ││
-│└─────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└─────────────────────────────────────┘│
-│┌ request → request ──────────────────┐┌ latency → heatmap ───────────────────┐┌ threads → lanes ────────────────────┐│
-││no request declared                  ││max 4.64ms                            ││2 threads                            ││
-││refused: cannot start collecting     ││        █                             ││▃      ▂█▅                           ││
-││`net.request`: /usr/bin/python3      ││io.latency: 83 measured, median 29.8µs││43 context switches                  ││
-││declares no request: `net.request`   ││                                      ││                                     ││
-││follows a request from a             ││                                      ││                                     ││
-││`request__start(id)` probe to a      ││                                      ││                                     ││
-││`request__done(id)` probe the        ││                                      ││                                     ││
-││program fires itself, any provider,  ││                                      ││                                     ││
-││and this one carries no USDT probe…  ││10 late ~low det degraded x2          ││10 late ~low det degraded x2         ││
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
-│┌ wake → wake ────────────────────────┐┌ flows → flows ───────────────────────┐┌ gpu → lanes ────────────────────────┐│
-││softirq ×21                          ││net ↓1.00MiB ↑4.00MiB                 ││no kernel launched                   ││
-││48.8% of 43 wake-ups; 8 wakers       ││disk ↓0B ↑9.02MiB                     ││device memory peak 0B                ││
-││                                     ││↓ received or read · ↑ sent or written││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││10 late ~low det degraded            ││~low det degraded x3                  ││7 late degraded                      ││
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ hjkl move between tiles  enter open the tile's view
+ flows-main  pid 1783958 · 2 threads · 986ms · omn costs ≥14.4% cpu
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ CPU     ▂▂▂▂▂▂▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁   0.00927 cores   avg 0.0756   peak 0.850  ~low det
+ Memory   ███████████████████       14.1MiB        +195KiB/s   peak 14.1MiB
+ Disk    ▁▁▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁   R 0B/s         W 9.14MiB/s   p99 4.64ms  10 late ~low det degraded x2
+ Network ▁▁▁▁▁▁▁▄██▄▁▁▁▁▁▁▁▁▁▁▁▁▁   ↓ 1.01MiB/s    ↑ 4.06MiB/s   0 retrans (machine)  ~low det degraded x3
+ GPU                                no kernel launched   VRAM 0B
+ Energy  ▆▇▇▇▇▇▇▇▇▇▇▇███████▇▇▇▇▇   61.6 W         avg 62.6 W   the machine's, not apportioned
+ Time    █░░░░░░░░░░░░░░░░░░░░░░░   sleep 93.2%   on cpu 4.04%   I/O 0.72%   child 0.49%  ~low det degraded x4
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▶ suspect: sleep (blocked: sleeping)  93.2%                                                         Enter/click → detail
+
+CPU in one hue: the machine's cores are not in the recording
+Memory in one hue: the machine's memory is not in the recording
+Disk in one hue: a device's speed is not known
+Network in one hue: a link's speed is not known
+Energy in one hue: energy has no capacity
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ jk move between lines  enter open the line's page

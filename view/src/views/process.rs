@@ -1,162 +1,224 @@
-//! The `process` view: one process at a glance.
+//! The `process` view: the system view for one process.
 //!
-//! The first screen of `omn top -- <program>` and of `--pid`: every view's
-//! essence for that one process on one screen, a number and a colour per
-//! tile, each tile opening the view that has the detail
-//! (`docs/view/process.md`).
+//! The first screen of `omn top -- <program>` and of `--pid`: one line per
+//! resource -- CPU, memory, disk, network, GPU, energy -- each a sparkline
+//! over the run, the current value, the mean, the peak and the share of the
+//! machine, then the program's time split by state and the first suspect
+//! `omn latency` names (`docs/view/process.md`). The detail lives in the
+//! dedicated pages: `Enter` or a click on a line opens its page.
 //!
-//! A tile reads only what the other views already ask for, the way they read
-//! it, and says what it could not read: a source refused is said with its
-//! reason, a source the run does not hold is said as such, and nothing is
-//! drawn as zero for want of a measurement.
+//! A line reads only what the other views already ask for, and says what it
+//! could not read in place: a source refused with its reason, a source the
+//! run did not ask as such, dimmed, never drawn as zero.
 //!
-//! The colours say what the tool found, never a threshold: the first suspect
-//! (the timebar's verdict on the program's bar) colours the time tile and the
-//! border of the tile whose view explains it; a request's cause and a
-//! function's state are drawn in the timebar's colour for that state; every
-//! figure is dimmed and badged by its trust.
+//! Colour says how full a resource is: its share of a capacity that exists
+//! (cores, memory, the GPU's engines), green when free through yellow to red
+//! when full. A resource with no known capacity keeps one neutral hue and the
+//! screen says why. Trust never washes the colour out: a figure with a loss
+//! or a time error keeps its hue, and its badges stand beside it.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::timebar::{self, Class, Verdict};
 use super::{Action, Ctx, Focus, Need, Region, View};
-use crate::model::{Data, Event, Key, Output, Results, SeriesSummary};
+use crate::model::{Data, Event, Output, Results};
 use crate::trust::{palette, Trust};
 use crate::units;
 
-/// The tiles read what the other views already ask for: the process view
+/// The lines read what the other views already ask for: the process view
 /// asks for nothing of its own, so it never changes what a live run
 /// collects.
 const NEEDS: &[Need] = &[];
 
 const KEYS: &[(&str, &str)] = &[
-    ("↑↓ hjkl", "move between tiles"),
-    ("enter", "open the tile's view"),
+    ("↑↓ jk", "move between lines"),
+    ("enter", "open the line's page"),
 ];
 
-/// The grid: three tiles across.
-const COLUMNS: usize = 3;
+/// The cells a sparkline is drawn in.
+pub const SPARK: usize = 24;
 
-/// The cells a strip is drawn in.
-const STRIP: usize = 24;
+/// The label column.
+const LABEL: usize = 9;
 
-/// The latency sources, in the heatmap's own order of preference, so the
-/// strip drawn here is of the source the heatmap opens on.
-const LATENCY: &[(&str, &str)] = &[
-    ("gpu.kernel", "duration_ns"),
-    ("io.latency", "latency_ns"),
-    ("net.socket", "lat_ns"),
-    ("sched.runqlat", "wait_ns"),
-];
-
+/// A sparkline's eight heights; a cell nothing was read in is a blank.
 const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// The hue of a resource whose capacity is not known: neither free nor
+/// full. The views stream's palette in `trust.rs` takes it over.
+const NEUTRAL: Color = Color::Blue;
+
+/// Usage, by how full the resource is: green while it is free, yellow past
+/// half, red past four fifths. A measured fraction of a known bound, read in
+/// three steps a sixteen-colour terminal shows apart; the views stream's
+/// gradient in `trust.rs` takes it over.
+pub fn usage(fraction: f64) -> Color {
+    if fraction >= 0.8 {
+        Color::Red
+    } else if fraction >= 0.5 {
+        Color::Yellow
+    } else {
+        Color::Green
+    }
+}
 
 #[derive(Default)]
 pub struct Process {
-    selected: usize,
+    /// The selected row: 0 is the header's cost, then the resources, then
+    /// the suspect.
+    selected: Option<usize>,
     regions: Vec<Region>,
 }
 
-/// One tile: what it is, its headline figure, a line or two under it, and
-/// the view it opens.
+/// One line of the screen: a resource, or the time.
 #[derive(Debug, Clone)]
-pub struct Tile {
-    /// Its name in the grid: `time`, `cpu`, `cost`...
+pub struct Row {
+    /// `CPU`, `Memory`, `Disk`, `Network`, `GPU`, `Energy`, `Time`.
     pub name: &'static str,
-    /// The view it opens.
+    /// The page it opens.
     pub view: &'static str,
-    /// The headline: a number, in the colour of what was found.
-    pub figure: Line<'static>,
-    /// The essence's other lines.
-    pub detail: Vec<Line<'static>>,
-    /// The headline as plain text.
-    pub text: String,
-    /// The tile explains the first suspect: its border is drawn in the
-    /// suspect's colour.
-    pub suspect: Option<Color>,
-    /// What the view it opens is narrowed to.
+    /// What the page it opens is narrowed to.
     pub focus: Focus,
-    /// The trust of every figure the tile draws, badged on its last line
-    /// so the headline stays a number read at a glance.
+    /// The sparkline's cells, in the line's unit; `None` where nothing was
+    /// read. The time line holds its states' amounts.
+    pub values: Vec<Option<f64>>,
+    /// The sparkline as drawn.
+    pub graph: Vec<Span<'static>>,
+    /// The figures, as drawn.
+    pub figures: Vec<Span<'static>>,
+    /// The figures as plain text.
+    pub text: String,
+    /// The current value's share of the capacity, when the capacity is
+    /// known.
+    pub fill: Option<f64>,
+    /// Why the line has no capacity to be coloured by, when it has none.
+    pub neutral: Option<&'static str>,
     pub trust: Trust,
-    /// The tile draws something read: false when its source is refused or
-    /// absent, or held but empty (a plain headline and nothing under it),
-    /// and then it is never the one marked as explaining a suspect.
+    /// Something was read: false when the line's sources are refused or not
+    /// asked, or held nothing.
     pub held: bool,
 }
 
-impl Tile {
-    fn new(name: &'static str, view: &'static str, focus: &Focus) -> Tile {
-        Tile {
+impl Row {
+    fn new(name: &'static str, view: &'static str, focus: &Focus) -> Row {
+        Row {
             name,
             view,
-            figure: Line::default(),
-            detail: Vec::new(),
-            text: String::new(),
-            suspect: None,
             focus: focus.clone(),
+            values: Vec::new(),
+            graph: Vec::new(),
+            figures: Vec::new(),
+            text: String::new(),
+            fill: None,
+            neutral: None,
             trust: Trust::clean(),
             held: true,
         }
     }
 
-    /// The headline, in the trust style and the colour of what was found.
-    fn headline(mut self, text: String, colour: Option<Color>, trust: &Trust) -> Tile {
-        self.held = true;
-        let mut style = trust.style();
-        if let Some(colour) = colour {
-            style = style.fg(colour).add_modifier(Modifier::BOLD);
-        }
-        self.figure = Line::from(Span::styled(text.clone(), style));
-        self.text = text;
-        self.trust.merge(trust.clone());
-        self
-    }
-
-    /// A headline that is not a figure: nothing was there to read, so the
-    /// tile holds nothing that could explain a suspect.
-    fn plain(mut self, text: &str) -> Tile {
+    /// A line with nothing to read, said in place and dimmed: refused with
+    /// the reason, or not asked with what it needs.
+    fn absent(mut self, data: &Data, sources: &[&str]) -> Row {
         self.held = false;
-        self.text = text.to_owned();
-        self.figure = dim(text.to_owned());
-        self
-    }
-
-    /// A tile with nothing to read: refused with the reason, or not in the
-    /// run.
-    fn absent(self, data: &Data, sources: &[&str]) -> Tile {
+        self.graph = vec![Span::raw(" ".repeat(SPARK))];
         let refusal = data
             .refused
             .iter()
             .find(|refusal| sources.contains(&refusal.source.as_str()));
-        let mut tile = self;
-        tile.held = false;
         match refusal {
             Some(refusal) => {
-                tile.text = format!("{} refused", refusal.source);
-                tile.figure = Line::from(Span::styled(
-                    tile.text.clone(),
-                    Style::new().fg(palette::REFUSED),
-                ));
-                tile.detail = vec![dim(refusal.reason.clone())];
+                self.text = format!("{} refused: {}", refusal.source, refusal.reason);
+                self.figures = vec![
+                    Span::styled(
+                        format!("{} refused", refusal.source),
+                        Style::new().fg(palette::REFUSED),
+                    ),
+                    dim_span(format!(": {}", refusal.reason)),
+                ];
             }
             None => {
-                tile = tile.plain("not in this run");
-                tile.detail = vec![dim(format!("needs {}", sources.join(" or ")))];
+                self.text = format!("not asked: needs {}", sources.join(" or "));
+                self.figures = vec![dim_span(self.text.clone())];
             }
         }
-        tile
+        self
     }
 
-    fn line(mut self, line: Line<'static>) -> Tile {
-        self.detail.push(line);
+    /// A line whose sources are there and hold nothing to draw.
+    fn empty(mut self, said: String) -> Row {
+        self.held = false;
+        self.graph = vec![Span::raw(" ".repeat(SPARK))];
+        self.text = said;
+        self.figures = vec![dim_span(self.text.clone())];
+        self
+    }
+
+    /// The figures: the first in the usage colour, the rest plain, the
+    /// trust's badges after them -- never dimming the hue away.
+    fn says(mut self, figures: Vec<String>, trust: Trust) -> Row {
+        let hue = self.hue(self.fill);
+        self.text = figures.join("   ");
+        self.figures.clear();
+        for (index, figure) in figures.into_iter().enumerate() {
+            if index > 0 {
+                self.figures.push(Span::raw("   "));
+            }
+            let (style, width) = match index {
+                0 => (Style::new().fg(hue).add_modifier(Modifier::BOLD), 12),
+                _ => (Style::new(), 0),
+            };
+            self.figures
+                .push(Span::styled(format!("{figure:<width$}"), style));
+        }
+        let badges = trust.badges();
+        if !badges.is_empty() {
+            self.figures.push(Span::raw("  "));
+            self.figures.extend(badges);
+        }
+        self.trust.merge(trust);
+        self
+    }
+
+    /// The colour a value of this line takes: by its fill when the capacity
+    /// is known, the neutral hue otherwise.
+    fn hue(&self, fill: Option<f64>) -> Color {
+        match (self.neutral, fill) {
+            (None, Some(fill)) => usage(fill),
+            _ => NEUTRAL,
+        }
+    }
+
+    /// The sparkline: each cell's height against the line's peak, its colour
+    /// by its own share of the capacity.
+    fn spark(mut self, values: Vec<Option<f64>>, capacity: Option<f64>) -> Row {
+        let top = values.iter().flatten().copied().fold(0.0, f64::max);
+        self.graph = values
+            .iter()
+            .map(|value| match value {
+                None => Span::raw(" "),
+                Some(value) => {
+                    let level = if top > 0.0 {
+                        ((value / top) * (BLOCKS.len() - 1) as f64).round() as usize
+                    } else {
+                        0
+                    };
+                    let fill = capacity.filter(|cap| *cap > 0.0).map(|cap| value / cap);
+                    Span::styled(
+                        BLOCKS[level.min(BLOCKS.len() - 1)].to_string(),
+                        Style::new().fg(self.hue(fill)),
+                    )
+                }
+            })
+            .collect();
+        self.values = values;
         self
     }
 }
@@ -167,7 +229,7 @@ impl View for Process {
     }
 
     fn title(&self) -> &'static str {
-        "one process at a glance: every view's essence, each tile opening its view"
+        "the system view for one process: each resource over the run, the time by state, the suspect"
     }
 
     fn needs(&self) -> &'static [Need] {
@@ -175,44 +237,72 @@ impl View for Process {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>) {
-        let tiles = tiles(ctx);
-        self.selected = self.selected.min(tiles.len().saturating_sub(1));
+        let screen = screen(ctx);
+        let count = screen.rows.len() + 2;
+        let selected = self.selected.unwrap_or(1).min(count - 1);
+        self.selected = Some(selected);
         self.regions.clear();
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .title(format!(" process -- {} ", target_says(ctx.data)));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let [head, grid] =
-            Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
-        frame.render_widget(Paragraph::new(verdict_lines(&tiles)), head);
-        let rows = tiles.len().div_ceil(COLUMNS).max(1);
-        let row_areas = Layout::vertical(vec![Constraint::Ratio(1, rows as u32); rows]).split(grid);
-        for (index, tile) in tiles.iter().enumerate() {
-            let cells = Layout::horizontal(vec![Constraint::Ratio(1, COLUMNS as u32); COLUMNS])
-                .split(row_areas[index / COLUMNS]);
-            let rect = cells[index % COLUMNS];
-            draw_tile(frame, rect, tile, index == self.selected);
-            self.regions.push(Region::new(rect, index));
+        let width = area.width as usize;
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut regions = Vec::new();
+        let mut place = |lines: &mut Vec<Line<'static>>, line: Line<'static>, id: Option<usize>| {
+            let row = lines.len() as u16;
+            if let Some(id) = id {
+                if row < area.height {
+                    regions.push(Region::new(
+                        Rect::new(area.x, area.y + row, area.width, 1),
+                        id,
+                    ));
+                }
+            }
+            lines.push(line);
+        };
+
+        let mut header = screen.header.clone();
+        if selected == 0 {
+            for span in header.iter_mut().skip(screen.cost_at) {
+                span.style = span.style.add_modifier(Modifier::REVERSED);
+            }
         }
+        place(&mut lines, Line::from(header), Some(0));
+        place(&mut lines, rule(width), None);
+        for (index, row) in screen.rows.iter().enumerate() {
+            place(
+                &mut lines,
+                draw_row(row, selected == index + 1),
+                Some(index + 1),
+            );
+        }
+        place(&mut lines, rule(width), None);
+        let mut suspect = screen.suspect.clone();
+        if selected == count - 1 {
+            if let Some(first) = suspect.first_mut() {
+                first.style = first.style.add_modifier(Modifier::REVERSED);
+            }
+        }
+        let used: usize = suspect.iter().map(|span| span.width()).sum();
+        let hint = "Enter/click → detail";
+        let hint_width = hint.chars().count();
+        if used + hint_width + 2 <= width {
+            suspect.push(Span::raw(" ".repeat(width - used - hint_width)));
+            suspect.push(dim_span(hint.to_owned()));
+        }
+        place(&mut lines, Line::from(suspect), Some(count - 1));
+        place(&mut lines, Line::default(), None);
+        for note in &screen.notes {
+            place(&mut lines, dim(note.clone()), None);
+        }
+        self.regions = regions;
+        frame.render_widget(Paragraph::new(lines), area);
     }
 
     fn key(&mut self, key: KeyEvent, ctx: &Ctx<'_>) -> Action {
-        let count = tiles(ctx).len();
-        if count == 0 {
-            return Action::None;
-        }
-        let at = self.selected.min(count - 1);
+        let count = screen(ctx).rows.len() + 2;
+        let at = self.selected.unwrap_or(1).min(count - 1);
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') => {
-                if at + COLUMNS < count {
-                    self.selected = at + COLUMNS;
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => self.selected = at.saturating_sub(COLUMNS),
-            KeyCode::Char('l') => self.selected = (at + 1).min(count - 1),
-            KeyCode::Char('h') => self.selected = at.saturating_sub(1),
-            KeyCode::Home => self.selected = 0,
+            KeyCode::Down | KeyCode::Char('j') => self.selected = Some((at + 1).min(count - 1)),
+            KeyCode::Up | KeyCode::Char('k') => self.selected = Some(at.saturating_sub(1)),
+            KeyCode::Home => self.selected = Some(1),
             KeyCode::Enter => return self.open(ctx),
             _ => {}
         }
@@ -228,21 +318,24 @@ impl View for Process {
     }
 
     fn select(&mut self, id: usize, _ctx: &Ctx<'_>) -> Action {
-        self.selected = id;
+        self.selected = Some(id);
         Action::None
     }
 }
 
 impl Process {
-    /// The selected tile's view, narrowed to what the tile is about.
+    /// The selected line's page, narrowed to the process.
     fn open(&self, ctx: &Ctx<'_>) -> Action {
-        match tiles(ctx).into_iter().nth(self.selected) {
-            Some(tile) => Action::Goto {
-                view: tile.view,
-                focus: tile.focus,
-            },
-            None => Action::None,
-        }
+        let screen = screen(ctx);
+        let at = self.selected.unwrap_or(1);
+        let (view, focus) = if at == 0 {
+            ("ledger", ctx.focus.clone())
+        } else if let Some(row) = screen.rows.get(at - 1) {
+            (row.view, row.focus.clone())
+        } else {
+            (screen.suspect_view, ctx.focus.clone())
+        };
+        Action::Goto { view, focus }
     }
 }
 
@@ -251,45 +344,165 @@ pub fn view() -> Box<dyn View> {
 }
 
 // ---------------------------------------------------------------------------
-// The tiles
+// The screen
 // ---------------------------------------------------------------------------
 
-/// Every tile, in the grid's order: time, cpu, cost; request, latency,
-/// threads; wake, flows, gpu.
-pub fn tiles(ctx: &Ctx<'_>) -> Vec<Tile> {
-    let target = Target::of(ctx.data);
-    let (time, suspect) = time_tile(ctx);
-    let mut tiles = vec![
-        time,
-        cpu_tile(ctx),
-        cost_tile(ctx),
-        request_tile(ctx),
-        latency_tile(ctx, &target),
-        threads_tile(ctx, &target),
-        wake_tile(ctx, &target),
-        flows_tile(ctx, &target),
-        gpu_tile(ctx, &target),
-    ];
-    if let Some(class) = suspect {
-        let explains = explained_by(class);
-        for tile in tiles
-            .iter_mut()
-            .filter(|tile| tile.name == explains && tile.held)
-        {
-            tile.suspect = Some(class.colour());
-        }
-    }
-    tiles
+/// Everything the view draws, read once per frame.
+#[derive(Debug, Clone)]
+pub struct Screen {
+    /// `process-main  pid 41207 · 3 threads · 2.37s · omn costs 0.8% cpu`.
+    pub header: Vec<Span<'static>>,
+    /// The span the header's cost starts at: what selecting it marks.
+    pub cost_at: usize,
+    /// CPU, Memory, Disk, Network, GPU, Energy, Time.
+    pub rows: Vec<Row>,
+    /// `▶ suspect: ...`, from the timebar's verdict.
+    pub suspect: Vec<Span<'static>>,
+    /// The page that explains the suspect.
+    pub suspect_view: &'static str,
+    /// What the colours could not say: the lines kept neutral, and why.
+    pub notes: Vec<String>,
 }
 
-/// Which tile explains a suspect state: the view a reader goes to next.
-fn explained_by(class: Class) -> &'static str {
-    match class {
-        Class::OnCpu | Class::Sleep | Class::Blocked => "cpu",
-        Class::RunQueue => "threads",
-        Class::Lock => "wake",
-        Class::Io | Class::Network => "flows",
-        Class::Child | Class::Other => "cost",
+/// The screen for this run.
+pub fn screen(ctx: &Ctx<'_>) -> Screen {
+    let data = ctx.data;
+    let target = Target::of(data);
+    let axis = Axis::of(data);
+    let capacity = Capacity::of(data);
+    let main = main_bar(data);
+    let cpu = cpu_row(ctx, &axis, &capacity);
+    let energy = energy_row(ctx, &axis, &capacity, &cpu);
+    let rows = vec![
+        cpu,
+        memory_row(ctx, &axis, &capacity),
+        disk_row(ctx, &axis, &target),
+        network_row(ctx, &axis, &target),
+        gpu_row(ctx, &axis, &target),
+        energy,
+        time_row(ctx, main.as_ref()),
+    ];
+    let (suspect, suspect_view) = suspect_line(main.as_ref());
+    // The lines kept neutral, grouped by why, in the screen's order.
+    let mut neutral: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+    for row in rows.iter().filter(|row| row.held) {
+        let Some(why) = row.neutral else { continue };
+        match neutral.iter_mut().find(|(held, _)| *held == why) {
+            Some((_, names)) => names.push(row.name),
+            None => neutral.push((why, vec![row.name])),
+        }
+    }
+    let notes = neutral
+        .into_iter()
+        .map(|(why, names)| format!("{} in one hue: {why}", names.join(", ")))
+        .collect();
+    let (header, cost_at) = header(data, &target, main.as_ref(), &axis);
+    Screen {
+        header,
+        cost_at,
+        rows,
+        suspect,
+        suspect_view,
+        notes,
+    }
+}
+
+/// The resources the run's machine has, as a bound a usage is a share of.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Capacity {
+    pub cores: Option<f64>,
+    pub memory: Option<f64>,
+}
+
+impl Capacity {
+    /// A live run's machine is the one the view runs on: its cores the
+    /// scheduler lets this process use, its memory `MemTotal`. A recording
+    /// does not carry its machine's (`docs/fixes/w21-process.md` asks for
+    /// it), and this machine's would be a guess.
+    fn of(data: &Data) -> Capacity {
+        if data.live.is_none() {
+            return Capacity::default();
+        }
+        static HERE: OnceLock<Capacity> = OnceLock::new();
+        HERE.get_or_init(|| Capacity {
+            cores: std::thread::available_parallelism()
+                .ok()
+                .map(|cores| cores.get() as f64),
+            memory: std::fs::read_to_string("/proc/meminfo")
+                .ok()
+                .and_then(|text| mem_total(&text)),
+        })
+        .clone()
+    }
+}
+
+/// `MemTotal` from `/proc/meminfo`'s text, in bytes.
+fn mem_total(text: &str) -> Option<f64> {
+    let line = text.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kib: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kib * 1024.0)
+}
+
+/// The run's time, cut into [`SPARK`] cells: the program's life when the run
+/// says it, the run's window otherwise.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Axis {
+    pub start: u64,
+    pub end: u64,
+}
+
+impl Axis {
+    fn of(data: &Data) -> Axis {
+        let life = data.run.results.iter().find_map(|results| {
+            let lifetime = results.lifetime.as_ref()?;
+            let released = lifetime.get("released_ns")?.as_u64()?;
+            let exited = lifetime.get("exited_ns").and_then(|value| value.as_u64());
+            Some((released, exited))
+        });
+        let (start, end) = match life {
+            Some((released, Some(exited))) if exited > released && data.live.is_none() => {
+                (released, exited)
+            }
+            Some((released, _)) => (released, data.closed_ns()),
+            None => (data.opened_ns(), data.closed_ns()),
+        };
+        Axis {
+            start,
+            end: end.max(start + 1),
+        }
+    }
+
+    fn span(&self) -> f64 {
+        (self.end - self.start) as f64
+    }
+
+    fn cell_ns(&self) -> f64 {
+        self.span() / SPARK as f64
+    }
+
+    /// Adds `amount`, spread evenly over `[from, to)`, to the cells it
+    /// covers: the part of an interval outside the axis is outside the
+    /// program's life and is left out. An instant (`from == to`) goes whole
+    /// to its cell, the nearest end's when it is outside.
+    fn spread(&self, cells: &mut [Option<f64>], from: u64, to: u64, amount: f64) {
+        let cell = self.cell_ns();
+        let at = |ts: u64| (ts as f64 - self.start as f64) / cell;
+        let (first, last) = (at(from), at(to.max(from)));
+        if last - first < 1e-9 {
+            let index = first.clamp(0.0, (SPARK - 1) as f64) as usize;
+            *cells[index].get_or_insert(0.0) += amount;
+            return;
+        }
+        let rate = amount / (last - first);
+        let mut index = first.max(0.0).floor() as usize;
+        while (index as f64) < last && index < SPARK {
+            let low = first.max(index as f64);
+            let high = last.min(index as f64 + 1.0);
+            if high > low {
+                *cells[index].get_or_insert(0.0) += rate * (high - low);
+            }
+            index += 1;
+        }
     }
 }
 
@@ -332,533 +545,222 @@ impl Target {
 
     /// Whether an event is the target's: by its thread when the run says
     /// which threads are the target's, by its process otherwise; and every
-    /// event when the run says neither (a recording of one source).
-    fn holds(&self, tid: Option<i32>, pid: Option<i32>) -> bool {
+    /// event when the run says neither.
+    fn holds(&self, event: &Event) -> bool {
         if self.tids.is_empty() && self.pid.is_none() {
             return true;
         }
-        match (tid, pid) {
+        match (tid(event), pid(event)) {
             (Some(tid), _) if self.tids.contains(&tid) => true,
             (_, Some(pid)) => self.pid == Some(pid),
             _ => false,
         }
     }
-
-    fn holds_event(&self, event: &Event) -> bool {
-        self.holds(tid(event), pid(event))
-    }
 }
 
-/// The wall-clock bar of the program's thread and its first suspect, as the
-/// timebar decides it.
-fn time_tile(ctx: &Ctx<'_>) -> (Tile, Option<Class>) {
-    let tile = Tile::new("time", "timebar", ctx.focus);
-    let sheets = timebar::sheets(ctx.data);
-    let main = sheets
-        .iter()
-        .find_map(|sheet| sheet.main.as_ref().map(|(index, _)| (sheet, *index)))
-        .or_else(|| {
-            sheets
-                .iter()
-                .find(|sheet| !sheet.bars.is_empty())
-                .map(|sheet| (sheet, 0))
-        });
-    let Some((sheet, index)) = main else {
-        let tile = tile.absent(
-            ctx.data,
-            &[
-                "cpu.profile",
-                "sched.offcpu",
-                "sched.runqlat",
-                "cpu.oncpu_time",
-            ],
-        );
-        return (tile, None);
-    };
-    let bar = &sheet.bars[index];
-    let who = match (bar.tid, &bar.comm) {
-        (Some(tid), Some(comm)) => format!("{comm} ({tid})"),
-        (Some(tid), None) => format!("thread {tid}"),
-        _ => bar.key.clone(),
-    };
-    let mut tile = tile;
-    if bar.request.is_some() {
-        tile.focus.request = bar.request.clone();
-    }
-    let (tile, suspect) = match &bar.verdict {
-        Verdict::Names {
-            part,
-            amount,
-            share,
-            ..
-        } => {
-            let part = &bar.parts[*part];
-            let bound = if part.lower_bound || part.upper.is_some() {
-                "≥"
-            } else {
-                ""
-            };
-            let figure = match share {
-                Some(share) => format!("{bound}{}", units::percent(share * 100.0)),
-                None => format!("{bound}{}", units::duration(*amount)),
-            };
-            (
-                tile.headline(
-                    format!("▶ {} {figure}", part.class.short()),
-                    Some(part.class.colour()),
-                    &bar.trust,
-                ),
-                Some(part.class),
-            )
-        }
-        Verdict::Undecided(_) => (
-            tile.headline("≈ no single state".to_owned(), None, &bar.trust),
-            None,
-        ),
-    };
-    let wall = bar
-        .whole
-        .map(|whole| format!(", {} wall", units::duration(whole)))
-        .unwrap_or_default();
-    let tile = tile
-        .line(state_strip(bar))
-        .line(dim(format!("{who}{wall}")));
-    (tile, suspect)
-}
+// ---------------------------------------------------------------------------
+// The lines
+// ---------------------------------------------------------------------------
 
-/// The bar in a few cells: each state its glyph and colour, in proportion.
-fn state_strip(bar: &timebar::Bar) -> Line<'static> {
-    let amounts: Vec<f64> = bar
-        .parts
-        .iter()
-        .map(|part| part.amount.unwrap_or(0.0))
-        .collect();
-    let scale = bar.whole.unwrap_or(0.0).max(amounts.iter().sum());
-    if scale <= 0.0 {
-        return dim("no state read".to_owned());
-    }
-    let cells = timebar::allocate(&amounts, scale, STRIP);
-    let mut spans: Vec<Span<'static>> = bar
-        .parts
-        .iter()
-        .zip(cells)
-        .filter(|(_, cells)| *cells > 0)
-        .map(|(part, cells)| {
-            Span::styled(
-                part.class.glyph().to_string().repeat(cells),
-                Style::new().fg(part.class.colour()),
-            )
-        })
-        .collect();
-    let drawn: usize = spans.iter().map(|span| span.content.chars().count()).sum();
-    if drawn < STRIP {
-        spans.push(dim_span("·".repeat(STRIP - drawn)));
-    }
-    Line::from(spans)
-}
+/// One reading: the interval it covers, on `CLOCK_MONOTONIC`, and its value.
+type Reading = (u64, u64, f64);
 
-/// The hottest code on cpu and off it, over the stacks the flame's two panes
-/// draw.
-fn cpu_tile(ctx: &Ctx<'_>) -> Tile {
-    let data = ctx.data;
-    let tile = Tile::new("cpu", "flame", ctx.focus);
-    let on = on_target(data, "cpu.profile");
-    let off = on_target(data, "sched.offcpu");
-    if on.is_empty() && off.is_empty() {
-        return tile.absent(data, &["cpu.profile", "sched.offcpu"]);
-    }
-    let mut tile = match hottest(&on) {
-        Some((name, share)) => tile
-            .headline(
-                format!("{name} {}", units::percent(share * 100.0)),
-                Some(Class::OnCpu.colour()),
-                &Trust::joined(data, on.iter().copied()),
-            )
-            .line(dim("on cpu: the hottest own code".to_owned())),
-        None if on.is_empty() => tile.plain("on cpu: not in this run"),
-        None => tile.plain("no cpu sample"),
-    };
-    let line = match hottest(&off) {
-        Some((name, share)) => {
-            let trust = Trust::joined(data, off.iter().copied());
-            let line = Line::from(Span::styled(
-                format!("off cpu: {name} {}", units::percent(share * 100.0)),
-                trust.style().fg(Class::Blocked.colour()),
-            ));
-            tile.trust.merge(trust);
-            // Off cpu is what explains a sleep or a block: the tile holds it
-            // even when on cpu has no sample.
-            tile.held = true;
-            line
-        }
-        None if off.is_empty() => dim("off cpu: not in this run".to_owned()),
-        None => dim("off cpu: no block recorded".to_owned()),
-    };
-    tile.detail.push(line);
-    tile
-}
-
-/// What a stack is charged to here: its two deepest frames of the
-/// program's own code, caller first (`crunch › burn`) -- an interpreter's
-/// frames (`py::name:file`) when the stack has any, its resolved frames
-/// otherwise. A frame left as `library+0x...` or a bare address names
-/// nothing a reader can act on; the caller is kept because a leaf shared by
-/// every caller (a helper, a system call) does not say whose work it was.
-pub fn charged_to(frames: &[String]) -> Option<String> {
-    let interpreted: Vec<&str> = frames
-        .iter()
-        .filter_map(|frame| frame.strip_prefix("py::"))
-        .map(|name| name.split(':').next().unwrap_or(name))
-        .collect();
-    let own: Vec<&str> = if interpreted.is_empty() {
-        frames
-            .iter()
-            .map(String::as_str)
-            .filter(|frame| {
-                !frame.contains("+0x") && !frame.starts_with("0x") && !frame.starts_with('[')
-            })
-            .collect()
-    } else {
-        interpreted
-    };
-    let deepest = own.len().checked_sub(1)?;
-    Some(own[deepest.saturating_sub(1)..].join(" › "))
-}
-
-/// The function with the largest weight across the stacks, and its share of
-/// the whole (the stacks no function was charged for included in the whole).
-fn hottest(results: &[&Results]) -> Option<(String, f64)> {
-    let mut by: BTreeMap<String, f64> = BTreeMap::new();
-    let mut whole = 0.0;
+/// The points of every timeline series of these results, each with the
+/// interval it covers: since the series' point before it, or the poll
+/// period, or the typical gap.
+fn timeline(results: &[&Results]) -> Vec<Vec<Reading>> {
+    let mut all = Vec::new();
     for one in results {
         for output in &one.outputs {
-            if let Output::Stack { stacks, .. } = output {
-                for stack in stacks {
-                    whole += stack.total;
-                    if let Some(name) = charged_to(one.frames(stack.stack)) {
-                        *by.entry(name).or_default() += stack.total;
-                    }
+            let Output::Timeline {
+                series,
+                first_ts_ns,
+            } = output
+            else {
+                continue;
+            };
+            let origin = first_ts_ns.unwrap_or(one.window.opened_ns);
+            for line in series {
+                let stamps: Vec<u64> = line
+                    .points
+                    .iter()
+                    .map(|point| origin + point.offset_ns)
+                    .collect();
+                let mut gaps: Vec<u64> = stamps
+                    .windows(2)
+                    .map(|pair| pair[1].saturating_sub(pair[0]))
+                    .filter(|gap| *gap > 0)
+                    .collect();
+                gaps.sort_unstable();
+                let typical = one.period_ns.or(gaps.get(gaps.len() / 2).copied());
+                let points = line
+                    .points
+                    .iter()
+                    .enumerate()
+                    .map(|(index, point)| {
+                        let at = stamps[index];
+                        let since = match index {
+                            0 => typical.map(|gap| at.saturating_sub(gap)).unwrap_or(at),
+                            _ => stamps[index - 1],
+                        };
+                        (since, at, point.value)
+                    })
+                    .collect();
+                all.push(points);
+            }
+        }
+    }
+    all
+}
+
+/// An amount read per interval (cpu nanoseconds, joules), per cell as a
+/// rate: the amount in the cell over the cell's nanoseconds, times `scale`.
+fn rate_cells(axis: &Axis, series: &[Vec<Reading>], scale: f64) -> Vec<Option<f64>> {
+    let mut cells = vec![None; SPARK];
+    for points in series {
+        for (since, at, value) in points {
+            axis.spread(&mut cells, *since, *at, *value);
+        }
+    }
+    let cell = axis.cell_ns();
+    cells
+        .into_iter()
+        .map(|value| value.map(|value| value * scale / cell))
+        .collect()
+}
+
+/// A level (bytes held), per cell: each series' largest reading in the cell,
+/// carried forward between readings, summed over the series.
+fn level_cells(axis: &Axis, series: &[Vec<Reading>]) -> Vec<Option<f64>> {
+    let mut cells: Vec<Option<f64>> = vec![None; SPARK];
+    for points in series {
+        let mut own: Vec<Option<f64>> = vec![None; SPARK];
+        for (_, at, value) in points {
+            let index = (at.saturating_sub(axis.start) as f64 / axis.cell_ns()) as usize;
+            let slot = &mut own[index.min(SPARK - 1)];
+            *slot = Some(slot.map_or(*value, |held: f64| held.max(*value)));
+        }
+        let first = own.iter().position(Option::is_some);
+        let last = own.iter().rposition(Option::is_some);
+        if let (Some(first), Some(last)) = (first, last) {
+            let mut held = None;
+            for slot in own.iter_mut().take(last + 1).skip(first) {
+                match slot {
+                    Some(value) => held = Some(*value),
+                    None => *slot = held,
                 }
             }
         }
+        for (cell, value) in cells.iter_mut().zip(own) {
+            if let Some(value) = value {
+                *cell.get_or_insert(0.0) += value;
+            }
+        }
     }
-    if whole <= 0.0 {
-        return None;
-    }
-    by.into_iter()
-        .max_by(|x, y| x.1.total_cmp(&y.1).then_with(|| y.0.cmp(&x.0)))
-        .map(|(name, weight)| (name, weight / whole))
+    cells
 }
 
-/// The cost line by resource: cpu time, the resident peak, the page faults.
-fn cost_tile(ctx: &Ctx<'_>) -> Tile {
+fn last_of(cells: &[Option<f64>]) -> Option<f64> {
+    cells.iter().rev().find_map(|cell| *cell)
+}
+
+fn peak_of(cells: &[Option<f64>]) -> Option<f64> {
+    cells.iter().flatten().copied().reduce(f64::max)
+}
+
+/// CPU: the cores the process kept busy, from its threads' on-cpu time.
+fn cpu_row(ctx: &Ctx<'_>, axis: &Axis, capacity: &Capacity) -> Row {
     let data = ctx.data;
-    let tile = Tile::new("cost", "ledger", ctx.focus);
-    let cpu = on_target(data, "cpu.oncpu_time");
-    let rss = on_target(data, "mem.rss");
-    let faults = on_target(data, "mem.faults");
-    let lifetime_cpu = data
+    let row = Row::new("CPU", "flame", ctx.focus);
+    let held = on_target(data, "cpu.oncpu_time");
+    let series = timeline(&held);
+    if series.iter().all(Vec::is_empty) {
+        return row.absent(data, &["cpu.oncpu_time"]);
+    }
+    let cells = rate_cells(axis, &series, 1.0);
+    let polled: f64 = series.iter().flatten().map(|(_, _, value)| value).sum();
+    // The program's own account when it has one: what its threads burnt
+    // from start to exit, exact, not polled.
+    let burnt = data
         .run
         .results
         .iter()
-        .find_map(|results| results.lifetime.as_ref()?.get("cpu_ns")?.as_f64());
-    let cpu_ns = lifetime_cpu.or_else(|| summed(&cpu, |series| series.last));
-    if cpu_ns.is_none() && rss.is_empty() && faults.is_empty() {
-        return tile.absent(data, &["cpu.oncpu_time", "mem.rss", "mem.faults"]);
-    }
-    let trust = Trust::joined(data, cpu.iter().chain(&rss).chain(&faults).copied());
-    let headline = match cpu_ns {
-        Some(ns) => format!("cpu {}", units::duration(ns)),
-        None => "cpu not read".to_owned(),
-    };
-    let mut tile = tile.headline(headline, None, &trust);
-    let mut parts = Vec::new();
-    if let Some(peak) = peak(&rss) {
-        parts.push(format!("rss peak {}", units::bytes(peak)));
-    }
-    if let Some(count) = summed(&faults, |series| series.count as f64) {
-        parts.push(format!("{} faults", units::count(count)));
-    }
-    if !parts.is_empty() {
-        tile = tile.line(Line::from(Span::styled(parts.join(" · "), trust.style())));
-    }
-    tile.line(dim(if lifetime_cpu.is_some() {
-        "cpu: the program's own account".to_owned()
-    } else {
-        "cpu: polled per thread".to_owned()
-    }))
-}
-
-/// The largest value any summary of these results holds.
-fn peak(results: &[&Results]) -> Option<f64> {
-    results
-        .iter()
-        .flat_map(|one| one.outputs.iter())
-        .filter_map(|output| match output {
-            Output::Summary { series } => series.iter().map(|one| one.max).reduce(f64::max),
-            _ => None,
-        })
-        .reduce(f64::max)
-}
-
-/// The sum over every series of a summary's figure, or `None` when no
-/// result holds a summary.
-fn summed(results: &[&Results], read: impl Fn(&SeriesSummary) -> f64) -> Option<f64> {
-    let mut any = false;
-    let mut sum = 0.0;
-    for one in results {
-        for output in &one.outputs {
-            if let Output::Summary { series } = output {
-                any = true;
-                sum += series.iter().map(&read).sum::<f64>();
-            }
-        }
-    }
-    any.then_some(sum)
-}
-
-/// The slowest request and the state it spent most in.
-fn request_tile(ctx: &Ctx<'_>) -> Tile {
-    let data = ctx.data;
-    let tile = Tile::new("request", "request", ctx.focus);
-    let held = on_target(data, "net.request");
-    if held.is_empty() {
-        // A program declares its requests or does not: a refusal here is
-        // the common case, said in full but not drawn as a failure.
-        return match data
-            .refused
-            .iter()
-            .find(|refusal| refusal.source == "net.request")
-        {
-            Some(refusal) => tile
-                .plain("no request declared")
-                .line(dim(format!("refused: {}", refusal.reason))),
-            None => tile.absent(data, &["net.request"]),
-        };
-    }
-    let trust = Trust::joined(data, held.iter().copied());
-    let events: Vec<&Event> = held.iter().flat_map(|one| one.events()).collect();
-    let total = |event: &&&Event| event.number("total_ns").unwrap_or(0.0);
-    let Some(slowest) = events
-        .iter()
-        .filter(|event| event.number("total_ns").is_some())
-        .max_by(|x, y| total(x).total_cmp(&total(y)))
-    else {
-        return tile.plain("no request ended");
-    };
-    let id = slowest.keys.iter().find_map(|key| match key {
-        Key::Req { id } => Some(id.clone()),
-        _ => None,
-    });
-    let cause = request_cause(slowest);
-    let mut tile = tile;
-    if let Some(id) = &id {
-        tile.focus.request = Some(id.clone());
-    }
-    let why = cause
-        .map(|(class, share)| format!(" ▶ {} {}", class.short(), units::percent(share * 100.0)))
-        .unwrap_or_default();
-    tile.headline(
-        format!(
-            "{} {}{why}",
-            id.as_deref().unwrap_or("?"),
-            units::duration(slowest.number("total_ns").unwrap_or(0.0))
-        ),
-        cause.map(|(class, _)| class.colour()),
-        &trust,
-    )
-    .line(dim(format!(
-        "the slowest of {} requests",
-        units::count(events.len() as f64)
-    )))
-}
-
-/// The state a request spent most of its time in, by the fields
-/// `net.request` writes, and its share of the request.
-pub fn request_cause(event: &Event) -> Option<(Class, f64)> {
-    let total = event.number("total_ns").filter(|total| *total > 0.0)?;
-    let held = event.number("holder_ns").unwrap_or(0.0);
-    let sleep = event.number("sleep_ns").unwrap_or(0.0);
-    let read = |name: &str| event.number(name).unwrap_or(0.0);
-    let parts = [
-        (Class::OnCpu, read("oncpu_ns")),
-        (Class::RunQueue, read("runq_ns")),
-        (Class::Io, read("disk_ns")),
-        (Class::Network, read("rx_wait_ns") + read("tx_wait_ns")),
-        // A sleep another thread's lock explains is the lock's.
-        (Class::Lock, held.min(sleep)),
-        (Class::Sleep, (sleep - held).max(0.0)),
+        .find_map(|results| results.lifetime.as_ref()?.get("cpu_ns")?.as_f64())
+        .filter(|_| data.live.is_none())
+        .unwrap_or(polled);
+    let mean = burnt / axis.span();
+    let now = last_of(&cells).unwrap_or(0.0);
+    let peak = peak_of(&cells).unwrap_or(0.0);
+    let mut row = row;
+    row.neutral = capacity
+        .cores
+        .is_none()
+        .then_some("the machine's cores are not in the recording");
+    row.fill = capacity.cores.map(|cap| now / cap);
+    let mut figures = vec![
+        format!("{} cores", units::approx(now)),
+        format!("avg {}", units::approx(mean)),
+        format!("peak {}", units::approx(peak)),
     ];
-    parts
-        .into_iter()
-        .filter(|(_, amount)| *amount > 0.0)
-        .max_by(|x, y| x.1.total_cmp(&y.1))
-        .map(|(class, amount)| (class, amount / total))
-}
-
-/// The latency strip of the source the heatmap opens on: the slowest
-/// measurement in each slice of the run.
-fn latency_tile(ctx: &Ctx<'_>, target: &Target) -> Tile {
-    let data = ctx.data;
-    let tile = Tile::new("latency", "heatmap", ctx.focus);
-    let chosen = LATENCY.iter().find_map(|(source, attr)| {
-        let held = on_target(data, source);
-        let points: Vec<(u64, f64)> = held
-            .iter()
-            .flat_map(|one| {
-                let attr = one.value_attr.clone().unwrap_or_else(|| (*attr).to_owned());
-                one.events()
-                    .iter()
-                    .filter(|event| target.holds_event(event))
-                    .filter_map(|event| Some((event.ts_ns, event.number(&attr)?)))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        (!points.is_empty()).then_some((*source, held, points))
-    });
-    let Some((source, held, points)) = chosen else {
-        let sources: Vec<&str> = LATENCY.iter().map(|(source, _)| *source).collect();
-        return tile.absent(data, &sources);
-    };
-    let trust = Trust::joined(data, held.iter().copied());
-    let mut sorted: Vec<f64> = points.iter().map(|(_, value)| *value).collect();
-    sorted.sort_by(f64::total_cmp);
-    let max = sorted[sorted.len() - 1];
-    let median = sorted[sorted.len() / 2];
-    let strip = strip(data, &points, |values| {
-        values.iter().copied().fold(0.0, f64::max)
-    });
-    tile.headline(format!("max {}", units::duration(max)), None, &trust)
-        .line(Line::from(Span::styled(
-            strip,
-            trust.style().fg(palette::TIME),
-        )))
-        .line(dim(format!(
-            "{source}: {} measured, median {}",
-            units::count(points.len() as f64),
-            units::duration(median)
-        )))
-}
-
-/// The threads' activity: how many switches each slice of the run holds,
-/// over the target's threads.
-fn threads_tile(ctx: &Ctx<'_>, target: &Target) -> Tile {
-    let data = ctx.data;
-    let tile = Tile::new("threads", "lanes", ctx.focus);
-    let held = on_target(data, "sched.switches");
-    let events: Vec<&Event> = held
-        .iter()
-        .flat_map(|one| one.events())
-        .filter(|event| target.holds_event(event))
-        .collect();
-    let threads: BTreeSet<i32> = events
-        .iter()
-        .filter_map(|event| tid(event))
-        .chain(target.tids.iter().copied())
-        .collect();
-    if held.is_empty() && threads.is_empty() {
-        return tile.absent(data, &["sched.switches", "cpu.oncpu_time"]);
+    if let Some(cap) = capacity.cores {
+        figures.push(format!("{} of machine", units::percent(mean * 100.0 / cap)));
     }
     let trust = Trust::joined(data, held.iter().copied());
-    let plural = if threads.len() == 1 { "" } else { "s" };
-    let tile = tile.headline(format!("{} thread{plural}", threads.len()), None, &trust);
-    if events.is_empty() {
-        // A thread count alone does not explain a run-queue wait.
-        let mut tile = tile.line(dim("no switch recorded".to_owned()));
-        tile.held = false;
-        return tile;
-    }
-    let points: Vec<(u64, f64)> = events
-        .iter()
-        .map(|event| (event.ts_ns, event.number("count").unwrap_or(1.0)))
-        .collect();
-    let switches: f64 = points.iter().map(|(_, count)| *count).sum();
-    tile.line(Line::from(Span::styled(
-        strip(data, &points, |values| values.iter().sum()),
-        trust.style().fg(Class::OnCpu.colour()),
-    )))
-    .line(dim(format!("{} context switches", units::count(switches))))
+    row.spark(cells, capacity.cores).says(figures, trust)
 }
 
-/// What woke the target's threads most: a thread, by its name, or the
-/// kernel's interrupt context.
-fn wake_tile(ctx: &Ctx<'_>, target: &Target) -> Tile {
+/// Memory: the resident size, its growth over the run, its peak.
+fn memory_row(ctx: &Ctx<'_>, axis: &Axis, capacity: &Capacity) -> Row {
     let data = ctx.data;
-    let tile = Tile::new("wake", "wake", ctx.focus);
-    let held = on_target(data, "sched.wakeup");
+    let row = Row::new("Memory", "ledger", ctx.focus);
+    let held = on_target(data, "mem.rss");
+    let series = timeline(&held);
+    if series.iter().all(Vec::is_empty) {
+        return row.absent(data, &["mem.rss"]);
+    }
+    let cells = level_cells(axis, &series);
+    let now = last_of(&cells).unwrap_or(0.0);
+    let first = cells.iter().find_map(|cell| *cell).unwrap_or(0.0);
+    let peak = peak_of(&cells).unwrap_or(0.0);
+    let growth = (now - first) * 1e9 / axis.span();
+    let mut row = row;
+    row.neutral = capacity
+        .memory
+        .is_none()
+        .then_some("the machine's memory is not in the recording");
+    row.fill = capacity.memory.map(|cap| now / cap);
+    let sign = if growth >= 0.0 { "+" } else { "-" };
+    let mut figures = vec![
+        units::bytes(now),
+        format!("{sign}{}/s", units::bytes(growth.abs())),
+        format!("peak {}", units::bytes(peak)),
+    ];
+    if let Some(cap) = capacity.memory {
+        figures.push(format!("{} of machine", units::percent(peak * 100.0 / cap)));
+    }
+    let trust = Trust::joined(data, held.iter().copied());
+    row.spark(cells, capacity.memory).says(figures, trust)
+}
+
+/// Disk: the bytes the process's block requests moved, read and written, and
+/// their p99 latency. Bytes on a device of unknown speed: one neutral hue.
+fn disk_row(ctx: &Ctx<'_>, axis: &Axis, target: &Target) -> Row {
+    let data = ctx.data;
+    let row = Row::new("Disk", "heatmap", ctx.focus);
+    let held = on_target(data, "io.latency");
     if held.is_empty() {
-        return tile.absent(data, &["sched.wakeup"]);
+        let mut row = row.absent(data, &["io.latency"]);
+        // Without the latency, the bytes a page has are the flows'.
+        row.view = "flows";
+        return row;
     }
-    let trust = Trust::joined(data, held.iter().copied());
-    let mut by: BTreeMap<String, f64> = BTreeMap::new();
-    let mut whole = 0.0;
-    for event in held.iter().flat_map(|one| one.events()) {
-        let wakee_tid = event.number("wakee_tid").map(|tid| tid as i32);
-        let wakee_pid = event.number("wakee_pid").map(|pid| pid as i32);
-        if !target.holds(wakee_tid, wakee_pid) {
-            continue;
-        }
-        let count = event.number("count").unwrap_or(1.0);
-        whole += count;
-        let context = event
-            .attr("waker_context")
-            .and_then(|value| value.as_str())
-            .unwrap_or("task");
-        let waker = if context == "task" {
-            let tid = event.number("waker_tid").map(|tid| tid as i32);
-            let comm = event.attr("waker_comm").and_then(|value| value.as_str());
-            match (comm, tid) {
-                (Some(comm), Some(tid)) => format!("{comm} ({tid})"),
-                (None, Some(tid)) => format!("thread {tid}"),
-                _ => "a thread".to_owned(),
-            }
-        } else {
-            context.to_owned()
-        };
-        *by.entry(waker).or_default() += count;
-    }
-    let Some((waker, count)) = by
-        .iter()
-        .max_by(|x, y| x.1.total_cmp(y.1).then_with(|| y.0.cmp(x.0)))
-    else {
-        return tile.plain("no wake-up of the target");
-    };
-    tile.headline(format!("{waker} ×{}", units::count(*count)), None, &trust)
-        .line(dim(format!(
-            "{} of {} wake-ups; {} wakers",
-            units::percent(count * 100.0 / whole),
-            units::count(whole),
-            by.len()
-        )))
-}
-
-/// The bytes in and out: over the sockets, and to and from the devices.
-fn flows_tile(ctx: &Ctx<'_>, target: &Target) -> Tile {
-    let data = ctx.data;
-    let tile = Tile::new("flows", "flows", ctx.focus);
-    let sockets = on_target(data, "net.socket");
-    let devices = on_target(data, "io.latency");
-    if sockets.is_empty() && devices.is_empty() {
-        return tile.absent(data, &["net.socket", "io.latency"]);
-    }
-    let (mut received, mut sent) = (0.0, 0.0);
-    for event in sockets
-        .iter()
-        .flat_map(|one| one.events())
-        .filter(|event| target.holds_event(event))
-    {
-        let bytes = event.number("bytes").unwrap_or(0.0);
-        match event.attr("op").and_then(|value| value.as_str()) {
-            Some("recv") => received += bytes,
-            Some("send") => sent += bytes,
-            _ => {}
-        }
-    }
+    let mut cells = vec![None; SPARK];
     let (mut read, mut written) = (0.0, 0.0);
-    for event in devices
+    let mut latencies = Vec::new();
+    for event in held
         .iter()
         .flat_map(|one| one.events())
-        .filter(|event| target.holds_event(event))
+        .filter(|event| target.holds(event))
     {
         let bytes = event.number("bytes").unwrap_or(0.0);
         let rwbs = event
@@ -870,286 +772,485 @@ fn flows_tile(ctx: &Ctx<'_>, target: &Target) -> Tile {
         } else if rwbs.contains('R') {
             read += bytes;
         }
+        axis.spread(&mut cells, event.ts_ns, event.ts_ns, bytes);
+        if let Some(latency) = event.number("latency_ns") {
+            latencies.push(latency);
+        }
     }
-    let net = if sockets.is_empty() {
-        "net not in this run".to_owned()
-    } else {
-        format!("net ↓{} ↑{}", units::bytes(received), units::bytes(sent))
-    };
-    let tile = tile.headline(
-        net,
-        Some(Class::Network.colour()),
-        &Trust::joined(data, sockets.iter().copied()),
-    );
-    let disk = if devices.is_empty() {
-        dim("disk: not in this run".to_owned())
-    } else {
-        let trust = Trust::joined(data, devices.iter().copied());
-        Line::from(Span::styled(
-            format!("disk ↓{} ↑{}", units::bytes(read), units::bytes(written)),
-            trust.style().fg(Class::Io.colour()),
-        ))
-    };
-    tile.line(disk)
-        .line(dim("↓ received or read · ↑ sent or written".to_owned()))
+    let mut row = row;
+    row.neutral = Some("a device's speed is not known");
+    if latencies.is_empty() {
+        return row.empty("no block request of the process".to_owned());
+    }
+    let cells: Vec<Option<f64>> = cells
+        .into_iter()
+        .map(|cell| Some(cell.unwrap_or(0.0) * 1e9 / axis.cell_ns()))
+        .collect();
+    let seconds = axis.span() / 1e9;
+    latencies.sort_by(f64::total_cmp);
+    let p99 = latencies[((latencies.len() as f64 * 0.99).ceil() as usize).saturating_sub(1)];
+    let figures = vec![
+        format!("R {}/s", units::bytes(read / seconds)),
+        format!("W {}/s", units::bytes(written / seconds)),
+        format!("p99 {}", units::duration(p99)),
+    ];
+    let trust = Trust::joined(data, held.iter().copied());
+    row.spark(cells, None).says(figures, trust)
 }
 
-/// The target's share of the GPU: its kernels' time over the run's wall
-/// time, and its device memory.
-fn gpu_tile(ctx: &Ctx<'_>, target: &Target) -> Tile {
+/// Network: the bytes the process's sockets received and sent, and the
+/// retransmissions.
+fn network_row(ctx: &Ctx<'_>, axis: &Axis, target: &Target) -> Row {
     let data = ctx.data;
-    let tile = Tile::new("gpu", "lanes", ctx.focus);
+    let row = Row::new("Network", "flows", ctx.focus);
+    let held = on_target(data, "net.socket");
+    if held.is_empty() {
+        return row.absent(data, &["net.socket"]);
+    }
+    let mut cells = vec![None; SPARK];
+    let (mut received, mut sent) = (0.0, 0.0);
+    for event in held
+        .iter()
+        .flat_map(|one| one.events())
+        .filter(|event| target.holds(event))
+    {
+        let bytes = event.number("bytes").unwrap_or(0.0);
+        match event.attr("op").and_then(|value| value.as_str()) {
+            Some("recv") => received += bytes,
+            Some("send") => sent += bytes,
+            _ => {}
+        }
+        // A row aggregated over a window covers the window before it.
+        let window = event.number("window_ns").unwrap_or(0.0) as u64;
+        axis.spread(
+            &mut cells,
+            event.ts_ns.saturating_sub(window),
+            event.ts_ns,
+            bytes,
+        );
+    }
+    let mut row = row;
+    row.neutral = Some("a link's speed is not known");
+    if received + sent <= 0.0 {
+        return row.empty(format!("no socket bytes   {}", retransmits(data)));
+    }
+    let cells: Vec<Option<f64>> = cells
+        .into_iter()
+        .map(|cell| Some(cell.unwrap_or(0.0) * 1e9 / axis.cell_ns()))
+        .collect();
+    let seconds = axis.span() / 1e9;
+    let figures = vec![
+        format!("↓ {}/s", units::bytes(received / seconds)),
+        format!("↑ {}/s", units::bytes(sent / seconds)),
+        retransmits(data),
+    ];
+    let trust = Trust::joined(data, held.iter().copied());
+    row.spark(cells, None).says(figures, trust)
+}
+
+/// The retransmissions: the process's when the run has them, the machine's
+/// said as such otherwise.
+fn retransmits(data: &Data) -> String {
+    let count = |results: &Results| -> f64 {
+        results
+            .outputs
+            .iter()
+            .map(|output| match output {
+                Output::Summary { series } => {
+                    0.0 + series.iter().map(|one| one.count as f64).sum::<f64>()
+                }
+                Output::Raw { events } => {
+                    0.0 + events
+                        .iter()
+                        .map(|event| event.number("count").unwrap_or(1.0))
+                        .sum::<f64>()
+                }
+                _ => 0.0,
+            })
+            .sum()
+    };
+    let own = on_target(data, "net.tcp.retransmit");
+    if !own.is_empty() {
+        // `0.0 +`: an empty sum of floats is `-0`.
+        let total: f64 = 0.0 + own.iter().map(|one| count(one)).sum::<f64>();
+        return format!("{} retrans", units::count(total));
+    }
+    match data
+        .of_source("net.tcp.retransmit")
+        .map(count)
+        .reduce(|x, y| x + y)
+    {
+        Some(total) => format!("{} retrans (machine)", units::count(total)),
+        None => "retrans not asked".to_owned(),
+    }
+}
+
+/// GPU: the share of the run the process's kernels kept the device busy,
+/// and its device memory. Busy is a share of the engine's time: a capacity
+/// that exists.
+fn gpu_row(ctx: &Ctx<'_>, axis: &Axis, target: &Target) -> Row {
+    let data = ctx.data;
+    let row = Row::new("GPU", "lanes", ctx.focus);
     let kernels = on_target(data, "gpu.kernel");
     let memory = on_target(data, "gpu.mem");
     if kernels.is_empty() && memory.is_empty() {
-        return tile.absent(data, &["gpu.kernel", "gpu.mem"]);
+        return row.absent(data, &["gpu.kernel", "gpu.mem"]);
     }
     let trust = Trust::joined(data, kernels.iter().chain(&memory).copied());
     let launched: Vec<&Event> = kernels
         .iter()
         .flat_map(|one| one.events())
-        .filter(|event| pid(event).is_none() || target.holds_event(event))
+        .filter(|event| pid(event).is_none() || target.holds(event))
+        .collect();
+    let vram = peak_of(&level_cells(axis, &timeline(&memory)));
+    let vram_text = match vram {
+        Some(bytes) => format!("VRAM {}", units::bytes(bytes)),
+        None => "VRAM not asked".to_owned(),
+    };
+    if launched.is_empty() {
+        let said = if kernels.is_empty() {
+            "kernels not asked"
+        } else {
+            "no kernel launched"
+        };
+        let mut row = row.empty(format!("{said}   {vram_text}"));
+        row.trust = trust;
+        return row;
+    }
+    let mut cells = vec![None; SPARK];
+    for event in &launched {
+        let duration = event.number("duration_ns").unwrap_or(0.0);
+        axis.spread(
+            &mut cells,
+            event.ts_ns,
+            event.ts_ns + duration as u64,
+            duration,
+        );
+    }
+    let cells: Vec<Option<f64>> = cells
+        .into_iter()
+        .map(|cell| Some((cell.unwrap_or(0.0) / axis.cell_ns()).min(1.0)))
         .collect();
     let busy: f64 = launched
         .iter()
         .filter_map(|event| event.number("duration_ns"))
         .sum();
-    let wall = data.closed_ns().saturating_sub(data.opened_ns()) as f64;
-    let mut tile = tile;
-    tile.trust.merge(trust.clone());
-    let tile = if launched.is_empty() {
-        tile.plain(if kernels.is_empty() {
-            "kernels not in this run"
-        } else {
-            "no kernel launched"
-        })
-    } else if wall > 0.0 {
-        tile.headline(
-            format!("{} busy", units::percent(busy * 100.0 / wall)),
-            None,
-            &trust,
-        )
-        .line(dim(format!(
-            "{} kernels, {} on the device",
-            units::count(launched.len() as f64),
-            units::duration(busy)
-        )))
-    } else {
-        tile.headline(
-            format!("{} on the device", units::duration(busy)),
-            None,
-            &trust,
-        )
-    };
-    match peak(&memory) {
-        Some(peak) => tile.line(dim(format!("device memory peak {}", units::bytes(peak)))),
-        None => tile,
+    let now = last_of(&cells).unwrap_or(0.0);
+    let mut row = row;
+    row.fill = Some(now);
+    let figures = vec![
+        units::percent(now * 100.0),
+        format!("avg {}", units::percent(busy * 100.0 / axis.span())),
+        vram_text,
+    ];
+    row.spark(cells, Some(1.0)).says(figures, trust)
+}
+
+/// Energy: the machine's draw, and the process's estimated share of it by
+/// its share of the busy cores. Energy has no capacity: one neutral hue.
+fn energy_row(ctx: &Ctx<'_>, axis: &Axis, capacity: &Capacity, cpu: &Row) -> Row {
+    let data = ctx.data;
+    let row = Row::new("Energy", "system", ctx.focus);
+    let held: Vec<&Results> = data.of_source("power.energy").collect();
+    let series = timeline(&held);
+    if series.iter().all(Vec::is_empty) {
+        return row.absent(data, &["power.energy"]);
     }
+    let watts = rate_cells(axis, &series, 1e9);
+    let util: Vec<&Results> = data.of_source("cpu.util").collect();
+    let busy = level_cells(axis, &timeline(&util));
+    // The process's share of the machine's busy cores in each cell: needs
+    // the cores, which only a live run knows.
+    let share: Option<Vec<Option<f64>>> = capacity.cores.map(|cores| {
+        (0..SPARK)
+            .map(|index| {
+                let mine = cpu.values.get(index).copied().flatten()?;
+                let machine = busy[index]? * cores;
+                (machine > 0.0).then(|| (mine / machine).min(1.0))
+            })
+            .collect()
+    });
+    let mut row = row;
+    row.neutral = Some("energy has no capacity");
+    let trust = Trust::joined(data, held.iter().copied());
+    let (cells, figures) = match share {
+        Some(share) => {
+            let cells: Vec<Option<f64>> = watts
+                .iter()
+                .zip(&share)
+                .map(|(watts, share)| Some((*watts)? * (*share)?))
+                .collect();
+            let joules: f64 = cells.iter().flatten().sum::<f64>() * axis.cell_ns() / 1e9;
+            let figures = vec![
+                format!("≈ {} W", units::approx(last_of(&cells).unwrap_or(0.0))),
+                format!("avg {} W", units::approx(joules * 1e9 / axis.span())),
+                "estimated: the machine's by the busy cores' share".to_owned(),
+            ];
+            (cells, figures)
+        }
+        None => {
+            let joules: f64 = series.iter().flatten().map(|(_, _, value)| value).sum();
+            let figures = vec![
+                format!("{} W", units::approx(last_of(&watts).unwrap_or(0.0))),
+                format!("avg {} W", units::approx(joules * 1e9 / axis.span())),
+                "the machine's, not apportioned".to_owned(),
+            ];
+            (watts, figures)
+        }
+    };
+    row.spark(cells, None).says(figures, trust)
+}
+
+/// The program's thread's wall-clock bar, as the timebar reads it.
+fn main_bar(data: &Data) -> Option<timebar::Bar> {
+    let sheets = timebar::sheets(data);
+    sheets
+        .iter()
+        .find_map(|sheet| {
+            sheet
+                .main
+                .as_ref()
+                .map(|(index, _)| sheet.bars[*index].clone())
+        })
+        .or_else(|| sheets.iter().find_map(|sheet| sheet.bars.first().cloned()))
+}
+
+/// Time: the program's wall clock split by state, each state its share.
+fn time_row(ctx: &Ctx<'_>, bar: Option<&timebar::Bar>) -> Row {
+    let data = ctx.data;
+    let mut row = Row::new("Time", "timebar", ctx.focus);
+    let Some(bar) = bar else {
+        return row.absent(
+            data,
+            &[
+                "cpu.profile",
+                "sched.offcpu",
+                "sched.runqlat",
+                "cpu.oncpu_time",
+            ],
+        );
+    };
+    if bar.request.is_some() {
+        row.focus.request = bar.request.clone();
+    }
+    let amounts: Vec<f64> = bar
+        .parts
+        .iter()
+        .map(|part| part.amount.unwrap_or(0.0))
+        .collect();
+    let scale = bar.whole.unwrap_or(0.0).max(amounts.iter().sum());
+    row.trust = bar.trust.clone();
+    if scale <= 0.0 {
+        return row.empty("no state read".to_owned());
+    }
+    let cells = timebar::allocate(&amounts, scale, SPARK);
+    let mut graph: Vec<Span<'static>> = bar
+        .parts
+        .iter()
+        .zip(&cells)
+        .filter(|(_, cells)| **cells > 0)
+        .map(|(part, cells)| {
+            Span::styled(
+                part.class.glyph().to_string().repeat(*cells),
+                Style::new().fg(part.class.colour()),
+            )
+        })
+        .collect();
+    let drawn: usize = cells.iter().sum();
+    if drawn < SPARK {
+        graph.push(dim_span("·".repeat(SPARK - drawn)));
+    }
+    row.graph = graph;
+    // By class, largest first: the four that matter most.
+    let mut by: Vec<(Class, f64)> = Vec::new();
+    for (part, amount) in bar.parts.iter().zip(&amounts) {
+        match by.iter_mut().find(|(class, _)| *class == part.class) {
+            Some((_, held)) => *held += amount,
+            None => by.push((part.class, *amount)),
+        }
+    }
+    by.sort_by(|x, y| y.1.total_cmp(&x.1));
+    let mut text = Vec::new();
+    for (class, amount) in by.iter().filter(|(_, amount)| *amount > 0.0).take(4) {
+        let said = format!(
+            "{} {}",
+            class.short(),
+            units::percent(amount * 100.0 / scale)
+        );
+        if !row.figures.is_empty() {
+            row.figures.push(Span::raw("   "));
+        }
+        row.figures
+            .push(Span::styled(said.clone(), Style::new().fg(class.colour())));
+        text.push(said);
+    }
+    row.text = text.join("   ");
+    let badges = bar.trust.badges();
+    if !badges.is_empty() {
+        row.figures.push(Span::raw("  "));
+        row.figures.extend(badges);
+    }
+    row.values = amounts.into_iter().map(Some).collect();
+    row
+}
+
+/// The suspect: the state the timebar's verdict names, with what names it,
+/// and the page that explains it.
+fn suspect_line(bar: Option<&timebar::Bar>) -> (Vec<Span<'static>>, &'static str) {
+    let lead = Span::styled("▶ suspect: ", Style::new().add_modifier(Modifier::BOLD));
+    let Some(bar) = bar else {
+        return (vec![lead, dim_span("none read".to_owned())], "timebar");
+    };
+    match &bar.verdict {
+        Verdict::Names { part, share, .. } => {
+            let part = &bar.parts[*part];
+            // What names it, when that is a name: a sentence about a stack
+            // is the flame's to show.
+            let what = part
+                .named
+                .first()
+                .filter(|named| named.chars().count() <= 32)
+                .cloned()
+                .unwrap_or_else(|| part.state.clone());
+            let what = if what == part.class.short() {
+                String::new()
+            } else {
+                format!(" ({what})")
+            };
+            let share = share
+                .map(|share| format!("  {}", units::percent(share * 100.0)))
+                .unwrap_or_default();
+            (
+                vec![
+                    lead,
+                    Span::styled(
+                        format!("{}{what}{share}", part.class.short()),
+                        Style::new()
+                            .fg(part.class.colour())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ],
+                explained_by(part.class),
+            )
+        }
+        Verdict::Undecided(why) => (
+            vec![lead, dim_span(format!("no single state -- {why}"))],
+            "timebar",
+        ),
+    }
+}
+
+/// The page that explains a suspect state.
+fn explained_by(class: Class) -> &'static str {
+    match class {
+        Class::OnCpu | Class::Sleep | Class::Blocked | Class::Lock => "flame",
+        Class::RunQueue => "lanes",
+        Class::Io => "heatmap",
+        Class::Network => "flows",
+        Class::Child | Class::Other => "timebar",
+    }
+}
+
+/// The header: what the program is, its pid, its threads, how long it ran,
+/// and what measuring it cost -- that last part opening the ledger.
+fn header(
+    data: &Data,
+    target: &Target,
+    bar: Option<&timebar::Bar>,
+    axis: &Axis,
+) -> (Vec<Span<'static>>, usize) {
+    // A recording of the machine has no process of its own: what the lines
+    // read is every task's, and the header says so rather than name one.
+    if data.live.is_none() && !data.has_target() {
+        let spans = vec![
+            Span::raw(" "),
+            Span::styled(
+                "no target: this run measured the machine",
+                Style::new().add_modifier(Modifier::BOLD),
+            ),
+            dim_span(format!(
+                "  {} · every task's, not one process's · ",
+                units::duration(axis.span())
+            )),
+        ];
+        let cost_at = spans.len();
+        let mut spans = spans;
+        spans.push(Span::styled(omn_cost(data), Style::new().fg(palette::COST)));
+        return (spans, cost_at);
+    }
+    let name = bar
+        .and_then(|bar| bar.comm.clone())
+        .unwrap_or_else(|| "the target".to_owned());
+    let mut said = Vec::new();
+    if let Some(pid) = target.pid.or(bar.and_then(|bar| bar.pid)) {
+        said.push(format!("pid {pid}"));
+    }
+    if !target.tids.is_empty() {
+        let count = target.tids.len();
+        said.push(format!(
+            "{count} thread{}",
+            if count == 1 { "" } else { "s" }
+        ));
+    }
+    said.push(units::duration(axis.span()));
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(name, Style::new().add_modifier(Modifier::BOLD)),
+        Span::raw(format!("  {} · ", said.join(" · "))),
+    ];
+    let cost_at = spans.len();
+    spans.push(Span::styled(omn_cost(data), Style::new().fg(palette::COST)));
+    (spans, cost_at)
+}
+
+/// What measuring the program cost, as the frame's corner says it: every
+/// collector's cpu and what it spent inside the target, as a share of one cpu
+/// over the run; `≥` where some of what was spent inside is not known. Only
+/// known at the run's end.
+fn omn_cost(data: &Data) -> String {
+    if data.live.is_some() {
+        return "omn's cost at the end".to_owned();
+    }
+    let costs = crate::app::run_costs(data);
+    if costs.wall_ns == 0 {
+        return "omn's cost not measured".to_owned();
+    }
+    let spent = costs.collectors_cpu_ns + costs.in_target_cpu_ns;
+    let bound = if costs.in_target_unknown > 0 {
+        "≥"
+    } else {
+        ""
+    };
+    format!(
+        "omn costs {bound}{} cpu",
+        units::percent(spent as f64 * 100.0 / costs.wall_ns as f64)
+    )
 }
 
 // ---------------------------------------------------------------------------
 // Drawing
 // ---------------------------------------------------------------------------
 
-/// The verdict line: the first suspect, and the tile that explains it.
-fn verdict_lines(tiles: &[Tile]) -> Vec<Line<'static>> {
-    let time = tiles.iter().find(|tile| tile.name == "time");
-    let next = tiles.iter().find(|tile| tile.suspect.is_some());
-    let mut first = vec![Span::styled(
-        "first suspect: ",
-        Style::new().add_modifier(Modifier::BOLD),
-    )];
-    match (time, next) {
-        (Some(time), Some(next)) => {
-            first.extend(time.figure.spans.iter().cloned());
-            first.push(Span::raw(format!(
-                " -- the {} tile ({}) has the detail",
-                next.name, next.view
-            )));
-        }
-        (Some(time), None) => first.extend(time.figure.spans.iter().cloned()),
-        _ => first.push(dim_span("none read".to_owned())),
-    }
-    vec![
-        Line::from(first),
-        Line::from(dim_span(
-            "one view's essence per tile: enter, or a click on the selected tile, opens it"
-                .to_owned(),
-        )),
-    ]
-}
-
-fn draw_tile(frame: &mut Frame<'_>, area: Rect, tile: &Tile, selected: bool) {
-    let mut border = Style::new();
-    if let Some(colour) = tile.suspect {
-        border = border.fg(colour);
-    }
-    let mut title = Style::new().add_modifier(Modifier::BOLD);
+fn draw_row(row: &Row, selected: bool) -> Line<'static> {
+    let mut label = Style::new().add_modifier(Modifier::BOLD);
     if selected {
-        title = title.add_modifier(Modifier::REVERSED);
+        label = label.add_modifier(Modifier::REVERSED);
     }
-    let block = Block::new()
-        .borders(Borders::ALL)
-        .border_type(if tile.suspect.is_some() {
-            BorderType::Thick
-        } else {
-            BorderType::Plain
-        })
-        .border_style(border)
-        .title(Line::from(vec![
-            Span::styled(format!(" {} ", tile.name), title),
-            dim_span(format!("→ {} ", tile.view)),
-        ]));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let mut lines = vec![tile.figure.clone()];
-    // A detail line is wrapped, not cut: a refusal's reason is read whole.
-    lines.extend(
-        tile.detail
-            .iter()
-            .flat_map(|line| wrap(line, inner.width as usize)),
-    );
-    let height = inner.height as usize;
-    if lines.len() > height && height > 0 {
-        // More than the tile holds: its last row says so, and the view the
-        // tile opens has the rest.
-        lines.truncate(height);
-        if let Some(last) = lines.last_mut() {
-            ellipsis(last, inner.width as usize);
-        }
+    if !row.held {
+        label = label.add_modifier(Modifier::DIM);
     }
-    let badges = tile.trust.badges();
-    if !badges.is_empty() && inner.height as usize > lines.len() {
-        // The trust on the tile's last row: the headline stays a number.
-        let blank = inner.height as usize - lines.len() - 1;
-        lines.extend(std::iter::repeat_n(Line::default(), blank));
-        lines.push(Line::from(badges));
-    }
-    frame.render_widget(Paragraph::new(lines), inner);
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(format!("{:<width$}", row.name, width = LABEL - 1), label),
+    ];
+    spans.extend(row.graph.iter().cloned());
+    spans.push(Span::raw("   "));
+    spans.extend(row.figures.iter().cloned());
+    Line::from(spans)
 }
 
-/// A line broken to `width` columns, at a space when the row has one, the
-/// spans keeping their styles.
-fn wrap(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
-    if width == 0 || line.width() <= width {
-        return vec![line.clone()];
-    }
-    let cells: Vec<(char, Style, usize)> = line
-        .spans
-        .iter()
-        .flat_map(|span| {
-            span.content
-                .chars()
-                .map(move |ch| (ch, span.style, Span::raw(ch.to_string()).width()))
-        })
-        .collect();
-    let mut rows: Vec<Vec<(char, Style, usize)>> = Vec::new();
-    let mut row: Vec<(char, Style, usize)> = Vec::new();
-    let mut used = 0;
-    for cell in cells {
-        if used + cell.2 > width && !row.is_empty() {
-            let rest = match row.iter().rposition(|(ch, _, _)| *ch == ' ') {
-                Some(space) if space > 0 => {
-                    let rest = row.split_off(space + 1);
-                    row.pop();
-                    rest
-                }
-                _ => Vec::new(),
-            };
-            rows.push(std::mem::replace(&mut row, rest));
-            used = row.iter().map(|cell| cell.2).sum();
-        }
-        if row.is_empty() && cell.0 == ' ' {
-            continue;
-        }
-        used += cell.2;
-        row.push(cell);
-    }
-    if !row.is_empty() {
-        rows.push(row);
-    }
-    rows.into_iter()
-        .map(|row| {
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            for (ch, style, _) in row {
-                match spans.last_mut() {
-                    Some(last) if last.style == style => last.content.to_mut().push(ch),
-                    _ => spans.push(Span::styled(ch.to_string(), style)),
-                }
-            }
-            Line::from(spans).style(line.style)
-        })
-        .collect()
-}
-
-/// A row cut short: its end replaced by `…` within `width`.
-fn ellipsis(line: &mut Line<'static>, width: usize) {
-    while line.width() + 1 > width {
-        let Some(span) = line.spans.last_mut() else {
-            break;
-        };
-        if span.content.to_mut().pop().is_none() || span.content.is_empty() {
-            line.spans.pop();
-        }
-    }
-    let style = line.spans.last().map(|span| span.style).unwrap_or_default();
-    line.spans.push(Span::styled("…", style));
-}
-
-/// What the header says of the target: its pid, and how long it ran.
-fn target_says(data: &Data) -> String {
-    let target = Target::of(data);
-    let mut parts = Vec::new();
-    if let Some(pid) = target.pid {
-        parts.push(format!("pid {pid}"));
-    }
-    let wall = data.run.results.iter().find_map(|results| {
-        let lifetime = results.lifetime.as_ref()?;
-        let released = lifetime.get("released_ns")?.as_u64()?;
-        let exited = lifetime.get("exited_ns")?.as_u64()?;
-        Some(exited.saturating_sub(released))
-    });
-    if let Some(wall) = wall {
-        parts.push(format!("ran {}", units::duration(wall as f64)));
-    }
-    if parts.is_empty() {
-        "one process at a glance".to_owned()
-    } else {
-        format!("one process at a glance: {}", parts.join(", "))
-    }
-}
-
-/// A run-wide strip: the run cut into [`STRIP`] slices, each drawn by the
-/// height of `reduce` over the values in it, against the tallest. An empty
-/// slice is a blank, never a zero.
-fn strip(data: &Data, points: &[(u64, f64)], reduce: impl Fn(&[f64]) -> f64) -> String {
-    let first = points.iter().map(|(ts, _)| *ts).min().unwrap_or(0);
-    let last = points.iter().map(|(ts, _)| *ts).max().unwrap_or(0);
-    let opened = data.opened_ns();
-    let start = if opened > 0 { opened.min(first) } else { first };
-    let end = data.closed_ns().max(last);
-    let span = end.saturating_sub(start).max(1) as f64;
-    let mut slices: Vec<Vec<f64>> = vec![Vec::new(); STRIP];
-    for (ts, value) in points {
-        let at = (ts.saturating_sub(start) as f64 / span * STRIP as f64) as usize;
-        slices[at.min(STRIP - 1)].push(*value);
-    }
-    let heights: Vec<Option<f64>> = slices
-        .iter()
-        .map(|values| (!values.is_empty()).then(|| reduce(values)))
-        .collect();
-    let top = heights.iter().flatten().copied().fold(0.0, f64::max);
-    heights
-        .iter()
-        .map(|height| match height {
-            None => ' ',
-            Some(_) if top <= 0.0 => BLOCKS[0],
-            Some(height) => {
-                let level = (height / top * (BLOCKS.len() - 1) as f64).round() as usize;
-                BLOCKS[level.min(BLOCKS.len() - 1)]
-            }
-        })
-        .collect()
+fn rule(width: usize) -> Line<'static> {
+    dim("─".repeat(width))
 }
 
 // ---------------------------------------------------------------------------
@@ -1197,7 +1298,7 @@ mod tests {
 
     use super::*;
     use crate::app::{App, Cost};
-    use crate::model::{AttrValue, Refusal};
+    use crate::model::{Live, Refusal};
     use crate::snapshot::{self, HEIGHT, WIDTH};
 
     /// The recording this view was judged on: the `process` workload
@@ -1221,31 +1322,29 @@ mod tests {
         app.views[app.current].name()
     }
 
-    fn tiles_of(data: &Data) -> Vec<Tile> {
+    fn screen_of(data: &Data) -> Screen {
         let focus = Focus::default();
-        tiles(&Ctx {
+        screen(&Ctx {
             data,
             against: None,
             focus: &focus,
         })
     }
 
-    fn tile<'a>(tiles: &'a [Tile], name: &str) -> &'a Tile {
-        tiles
+    fn row<'a>(screen: &'a Screen, name: &str) -> &'a Row {
+        screen
+            .rows
             .iter()
-            .find(|tile| tile.name == name)
-            .unwrap_or_else(|| panic!("no {name} tile"))
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("no {name} line"))
     }
 
-    fn all_text(tile: &Tile) -> String {
-        let mut text = tile.text.clone();
-        for line in &tile.detail {
-            text.push('\n');
-            for span in &line.spans {
-                text.push_str(&span.content);
-            }
-        }
-        text
+    fn text(spans: &[Span<'_>]) -> String {
+        spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    fn integral(row: &Row, axis: &Axis) -> f64 {
+        row.values.iter().flatten().sum::<f64>() * axis.cell_ns() / 1e9
     }
 
     #[test]
@@ -1261,234 +1360,325 @@ mod tests {
         snapshot::assert_snapshot("process--process-run", &buffer);
     }
 
-    /// Each tile against the workload's manifest, within the trust it states.
+    /// Each line against the workload's manifest, within the trust it states.
     #[test]
-    fn the_tiles_find_what_the_workload_did() {
+    fn the_lines_find_what_the_workload_did() {
         let data = recording();
         let truth = manifest();
-        let tiles = tiles_of(&data);
-        assert_eq!(tiles.len(), 9);
+        let screen = screen_of(&data);
+        let names: Vec<&str> = screen.rows.iter().map(|row| row.name).collect();
+        assert_eq!(
+            names,
+            ["CPU", "Memory", "Disk", "Network", "GPU", "Energy", "Time"]
+        );
+        let axis = Axis::of(&data);
+        let seconds = axis.span() / 1e9;
+        let number = |text: &str, after: &str| -> f64 {
+            let rest = text
+                .split(after)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{after} in {text}"));
+            rest.split(' ').next().unwrap().parse().unwrap()
+        };
 
-        // cpu: `crunch` is the hottest code on cpu -- four times `tidy`.
-        let cpu = tile(&tiles, "cpu");
-        let hot = truth["cpu"]["function"].as_str().unwrap();
+        // CPU: the program burns `crunch` and `tidy` on one thread; the mean
+        // is its own cpu account over its life.
+        let burnt = truth["cpu"]["seconds"].as_f64().unwrap()
+            + truth["cpu"]["minor"]["seconds"].as_f64().unwrap();
+        let cpu = row(&screen, "CPU");
+        let mean = number(&cpu.text, "avg ");
         assert!(
-            cpu.text.starts_with(&format!("{hot} › ")),
+            mean >= burnt / seconds * 0.95 && mean <= (burnt + 0.6) / seconds,
+            "{burnt} s burnt over {seconds:.2} s; the line says {}",
+            cpu.text
+        );
+        // The cells hold cores: their integral is the polled cpu time.
+        let polled = integral(cpu, &axis);
+        assert!(
+            polled >= burnt * 0.9 && polled <= burnt + 0.6,
+            "the sparkline holds {polled:.3} s of cpu, the program burns {burnt}"
+        );
+        assert!(
+            peak_of(&cpu.values).unwrap() <= 1.5,
+            "one thread burns: at most a core and a poll's jitter, {:?}",
+            cpu.values
+        );
+
+        // Memory: the peak is at least the bytes held, and it grew.
+        let memory = row(&screen, "Memory");
+        let peak = peak_of(&memory.values).unwrap();
+        assert!(
+            peak >= truth["memory"]["bytes"].as_f64().unwrap(),
             "{}",
-            all_text(cpu)
+            memory.text
         );
+        assert!(memory.text.contains("   +"), "{}", memory.text);
 
-        // cost: the resident peak is at least the bytes the workload holds.
-        let rss = peak(&on_target(&data, "mem.rss")).expect("an rss");
+        // Network: the socket bytes, exactly, as rates over the life.
+        let network = row(&screen, "Network");
+        let sent = truth["socket"]["sent"].as_f64().unwrap();
+        let received = truth["socket"]["received"].as_f64().unwrap();
         assert!(
-            rss >= truth["memory"]["bytes"].as_f64().unwrap(),
-            "rss peak {rss}"
+            network.text.starts_with(&format!(
+                "↓ {}/s   ↑ {}/s",
+                units::bytes(received / seconds),
+                units::bytes(sent / seconds)
+            )),
+            "{}",
+            network.text
         );
-        assert!(tile(&tiles, "cost").text.starts_with("cpu "));
-
-        // flows: the socket bytes, exactly, as the system calls moved them.
-        let flows = tile(&tiles, "flows");
-        let sent = units::bytes(truth["socket"]["sent"].as_f64().unwrap());
-        let received = units::bytes(truth["socket"]["received"].as_f64().unwrap());
-        assert_eq!(flows.text, format!("net ↓{received} ↑{sent}"));
-
-        // request: python3 declares none, and the tile says so, not red.
-        let request = tile(&tiles, "request");
-        assert_eq!(request.text, "no request declared");
-        let said = all_text(request);
+        let moved = integral(network, &axis);
         assert!(
-            said.contains("refused: cannot start collecting `net.request`"),
-            "{said}"
+            (moved - sent - received).abs() < 1.0,
+            "the sparkline holds {moved} bytes, the program moved {}",
+            sent + received
         );
+
+        // Disk: the file goes through the device, at least its bytes.
+        let disk = row(&screen, "Disk");
+        assert!(disk.held, "{}", disk.text);
+        assert!(disk.text.contains(" p99 "), "{}", disk.text);
+        let written = truth["file"]["written"].as_f64().unwrap();
         assert!(
-            said.contains("no USDT probe"),
-            "the reason is kept whole: {said}"
+            integral(disk, &axis) >= written,
+            "the device moved {} bytes of the process's, the file is {written}",
+            integral(disk, &axis)
         );
 
-        // threads: the main thread, the lock holder, the peer's at least.
-        let threads = tile(&tiles, "threads");
-        let count: usize = threads.text.split(' ').next().unwrap().parse().unwrap();
-        assert!(count >= 2, "{}", threads.text);
+        // GPU: the workload launches none, and the line says so, dimmed.
+        let gpu = row(&screen, "GPU");
+        assert!(gpu.text.starts_with("no kernel launched"), "{}", gpu.text);
+        assert!(!gpu.held);
 
-        // gpu: the workload launches none, and the tile says so.
-        assert_eq!(tile(&tiles, "gpu").text, "no kernel launched");
-
-        // time: the program's bar has a verdict or says why not, and the
-        // tile that explains a suspect is the only one marked.
-        let marked: Vec<&str> = tiles
-            .iter()
-            .filter(|tile| tile.suspect.is_some())
-            .map(|tile| tile.name)
-            .collect();
-        assert!(marked.len() <= 1, "{marked:?}");
-        let time = tile(&tiles, "time");
+        // Energy: a recording has no cores, so the machine's, said as such.
+        let energy = row(&screen, "Energy");
         assert!(
-            time.text.starts_with('▶') == (marked.len() == 1),
-            "{} {marked:?}",
-            time.text
+            energy.text.contains("the machine's, not apportioned"),
+            "{}",
+            energy.text
         );
+
+        // No capacity in a recording: CPU and Memory neutral, and said so.
+        assert!(cpu.neutral.is_some() && memory.neutral.is_some());
+        assert!(
+            screen
+                .notes
+                .iter()
+                .any(|note| note.starts_with("CPU in one hue")),
+            "{:?}",
+            screen.notes
+        );
+
+        // Time: the bar's states, and the suspect names one of them.
+        let time = row(&screen, "Time");
+        assert!(time.text.contains("on cpu"), "{}", time.text);
+        let suspect = text(&screen.suspect);
+        assert!(suspect.starts_with("▶ suspect: "), "{suspect}");
+
+        // The header: the main thread by name, and omn's cost.
+        let header = text(&screen.header);
+        assert!(
+            header.contains(truth["thread"].as_str().unwrap()),
+            "{header}"
+        );
+        assert!(header.contains("omn costs "), "{header}");
     }
 
-    /// Every tile opens the view its essence came from, and the frame can
-    /// come back.
+    /// Every line opens its page by key and by click, and the frame comes
+    /// back.
     #[test]
-    fn each_tile_opens_its_view_by_key_and_by_click() {
+    fn each_line_opens_its_page_by_key_and_by_click() {
         let data = recording();
-        let views: Vec<&str> = tiles_of(&data).iter().map(|tile| tile.view).collect();
+        let screen = screen_of(&data);
+        let mut pages = vec!["ledger"];
+        pages.extend(screen.rows.iter().map(|row| row.view));
+        pages.push(screen.suspect_view);
         assert_eq!(
-            views,
-            [
-                "timebar", "flame", "ledger", "request", "heatmap", "lanes", "wake", "flows",
-                "lanes"
-            ]
+            &pages[..8],
+            ["ledger", "flame", "ledger", "heatmap", "flows", "lanes", "system", "timebar"]
         );
-        for (index, view) in views.iter().enumerate() {
+        for (index, page) in pages.iter().enumerate() {
             let mut app = App::new(recording());
             app.cost = Cost::Snapshot;
             snapshot::draw_app(&mut app, WIDTH, HEIGHT);
-            for _ in 0..index / COLUMNS {
+            app.key(KeyEvent::from(KeyCode::Char('k')));
+            for _ in 0..index {
                 app.key(KeyEvent::from(KeyCode::Char('j')));
             }
-            for _ in 0..index % COLUMNS {
-                app.key(KeyEvent::from(KeyCode::Char('l')));
-            }
             app.key(KeyEvent::from(KeyCode::Enter));
-            assert_eq!(name(&app), *view, "tile {index} by keys");
+            assert_eq!(name(&app), *page, "line {index} by keys");
             app.key(KeyEvent::from(KeyCode::Backspace));
-            assert_eq!(name(&app), "process", "back from {view}");
+            assert_eq!(name(&app), "process", "back from {page}");
         }
-        // By the mouse: a click selects the tile, a second goes in.
-        let mut app = App::new(recording());
-        app.cost = Cost::Snapshot;
-        let buffer = snapshot::draw_app(&mut app, WIDTH, HEIGHT);
-        let (column, row) = snapshot::find(&buffer, " wake → wake").expect("the wake tile");
-        snapshot::click(&mut app, column + 1, row + 1);
-        snapshot::draw_app(&mut app, WIDTH, HEIGHT);
-        snapshot::click(&mut app, column + 1, row + 1);
-        assert_eq!(name(&app), "wake");
-        snapshot::right_click(&mut app, 0, 0);
-        assert_eq!(name(&app), "process");
+        // By the mouse: a click selects the line, a second goes in.
+        for (needle, page) in [
+            (" Network", "flows"),
+            (" Time", "timebar"),
+            ("omn costs", "ledger"),
+        ] {
+            let mut app = App::new(recording());
+            app.cost = Cost::Snapshot;
+            let buffer = snapshot::draw_app(&mut app, WIDTH, HEIGHT);
+            let (column, row) = snapshot::find(&buffer, needle).expect(needle);
+            snapshot::click(&mut app, column + 1, row);
+            snapshot::draw_app(&mut app, WIDTH, HEIGHT);
+            snapshot::click(&mut app, column + 1, row);
+            assert_eq!(name(&app), page, "{needle}");
+            snapshot::right_click(&mut app, 0, 0);
+            assert_eq!(name(&app), "process");
+        }
     }
 
-    /// A run without the sources says so per tile, a refusal with its
-    /// reason; nothing is drawn as a zero.
+    /// A run without the sources says so per line, dimmed, a refusal with
+    /// its reason; nothing is drawn as a zero.
     #[test]
-    fn a_tile_without_its_sources_says_so_and_a_refusal_says_why() {
+    fn a_line_without_its_sources_says_so_and_a_refusal_says_why() {
         let mut data = Data::default();
         data.refused.push(Refusal {
-            label: "sched.wakeup".to_owned(),
-            source: "sched.wakeup".to_owned(),
+            label: "net.socket".to_owned(),
+            source: "net.socket".to_owned(),
             reason: "needs CAP_BPF".to_owned(),
         });
-        let tiles = tiles_of(&data);
-        let wake = tile(&tiles, "wake");
-        assert_eq!(wake.text, "sched.wakeup refused");
-        assert!(all_text(wake).contains("needs CAP_BPF"));
-        for tile in tiles.iter().filter(|tile| tile.name != "wake") {
-            assert_eq!(tile.text, "not in this run", "{}", tile.name);
-            assert!(tile.suspect.is_none());
+        let screen = screen_of(&data);
+        let network = row(&screen, "Network");
+        assert_eq!(network.text, "net.socket refused: needs CAP_BPF");
+        for row in &screen.rows {
+            assert!(!row.held, "{}", row.name);
+            assert!(row.values.iter().flatten().next().is_none(), "{}", row.name);
+            if row.name != "Network" {
+                assert!(
+                    row.text.starts_with("not asked: needs "),
+                    "{}: {}",
+                    row.name,
+                    row.text
+                );
+                assert!(
+                    row.figures
+                        .iter()
+                        .all(|span| span.style.add_modifier.contains(Modifier::DIM)),
+                    "{} is dimmed",
+                    row.name
+                );
+            }
         }
+        // A line with nothing drawn is never listed as kept neutral.
+        assert!(screen.notes.is_empty(), "{:?}", screen.notes);
     }
 
+    /// Usage is coloured by how full the resource is, a live run reading its
+    /// machine's capacity; a trust mark keeps the hue.
     #[test]
-    fn a_long_reason_is_wrapped_not_cut() {
-        let line = dim(
-            "net.request refused: cannot start collector: python3 carries no USDT probe".to_owned(),
+    fn usage_takes_the_gradient_by_the_capacity_and_trust_keeps_the_hue() {
+        assert_eq!(usage(0.1), Color::Green);
+        assert_eq!(usage(0.6), Color::Yellow);
+        assert_eq!(usage(0.95), Color::Red);
+
+        let mut data = recording();
+        data.live = Some(Live {
+            opened_ns: data.opened_ns(),
+            now_ns: data.closed_ns(),
+        });
+        let screen = screen_of(&data);
+        let cpu = row(&screen, "CPU");
+        assert!(
+            Capacity::of(&data).cores.is_some(),
+            "a live run reads the cores"
         );
-        let rows = wrap(&line, 20);
-        assert!(rows.len() > 1);
-        assert!(rows.iter().all(|row| row.width() <= 20));
-        let joined: Vec<String> = rows
-            .iter()
-            .map(|row| row.spans.iter().map(|span| span.content.as_ref()).collect())
-            .collect();
+        assert!(cpu.neutral.is_none());
         assert_eq!(
-            joined.join(" "),
-            "net.request refused: cannot start collector: python3 carries no USDT probe"
+            cpu.figures[0].style.fg,
+            Some(usage(cpu.fill.unwrap())),
+            "the current value in the gradient"
         );
-        assert!(rows.iter().all(|row| row
-            .spans
-            .iter()
-            .all(|span| span.style == line.spans[0].style)));
+        // Live: provisional, a trust mark, and still the hue, never dimmed.
+        assert!(!cpu.trust.marks.is_empty());
+        assert!(!cpu.figures[0].style.add_modifier.contains(Modifier::DIM));
+        assert!(cpu.text.contains("of machine"), "{}", cpu.text);
+        let energy = row(&screen, "Energy");
+        assert!(energy.text.contains("estimated"), "{}", energy.text);
+        // A resource with no capacity keeps the neutral hue.
+        let network = row(&screen, "Network");
+        assert_eq!(network.figures[0].style.fg, Some(NEUTRAL));
     }
 
+    /// The manifest's phases repeat the figures the program reads: they
+    /// must not drift from them.
     #[test]
-    fn a_row_cut_short_ends_in_an_ellipsis_within_the_width() {
-        let mut line = Line::from(vec![Span::raw("abc "), Span::raw("defgh")]);
-        ellipsis(&mut line, 6);
-        assert_eq!(line.width(), 6);
-        assert_eq!(line.to_string(), "abc d…");
-    }
-
-    #[test]
-    fn an_empty_tile_is_never_marked() {
-        for tile in [
-            Tile::new("wake", "wake", &Focus::default()).plain("no wake-up of the target"),
-            Tile::new("cpu", "flame", &Focus::default()).plain("no cpu sample"),
-        ] {
-            assert!(!tile.held, "{}", tile.text);
-        }
-        let tile = Tile::new("cpu", "flame", &Focus::default())
-            .plain("no cpu sample")
-            .headline("x".to_owned(), None, &Trust::clean());
-        assert!(tile.held);
-    }
-
-    #[test]
-    fn a_stack_is_charged_to_the_program_s_own_code() {
-        let frames = |names: &[&str]| -> Vec<String> {
-            names.iter().map(|name| (*name).to_owned()).collect()
-        };
-        assert_eq!(
-            charged_to(&frames(&[
-                "py::main:/w.py",
-                "libpython3.so+0x10",
-                "py::crunch:/w.py",
-                "libpython3.so+0x20",
-                "PyNumber_Remainder",
-            ])),
-            Some("main › crunch".to_owned())
-        );
-        assert_eq!(
-            charged_to(&frames(&[
-                "main",
-                "sqlite3_step",
-                "libc.so.6+0x99",
-                "0x7f00"
-            ])),
-            Some("main › sqlite3_step".to_owned())
-        );
-        assert_eq!(charged_to(&frames(&["libc.so.6+0x99", "[unknown]"])), None);
-    }
-
-    #[test]
-    fn a_request_is_charged_to_its_largest_state_a_held_lock_first() {
-        let event = |attrs: &[(&str, u64)]| Event {
-            ts_ns: 0,
-            ts_err_ns: 0,
-            kind: "net.request".to_owned(),
-            keys: Vec::new(),
-            attrs: attrs
+    fn the_manifest_s_phases_are_the_program_s_figures() {
+        let truth = manifest();
+        let phases = truth["phases"].as_array().expect("phases");
+        let of = |line: &str, field: &str| -> Vec<f64> {
+            phases
                 .iter()
-                .map(|(name, value)| crate::model::Attr {
-                    name: (*name).to_owned(),
-                    value: AttrValue::Uint(*value),
-                })
-                .collect(),
-            collector_id: String::new(),
-            seq: 0,
+                .filter(|phase| phase["line"] == line)
+                .filter_map(|phase| phase[field].as_f64())
+                .collect()
         };
-        let (class, share) = request_cause(&event(&[
-            ("total_ns", 100),
-            ("oncpu_ns", 10),
-            ("sleep_ns", 80),
-            ("holder_ns", 70),
-        ]))
-        .unwrap();
-        assert_eq!(class, Class::Lock);
-        assert!((share - 0.7).abs() < 1e-9);
-        let (class, _) = request_cause(&event(&[("total_ns", 100), ("disk_ns", 60)])).unwrap();
-        assert_eq!(class, Class::Io);
-        assert!(request_cause(&event(&[("oncpu_ns", 5)])).is_none());
+        let cpu = truth["cpu"]["seconds"].as_f64().unwrap()
+            + truth["cpu"]["minor"]["seconds"].as_f64().unwrap();
+        assert_eq!(of("CPU", "seconds"), [cpu]);
+        assert_eq!(
+            of("Time", "seconds"),
+            [
+                truth["sleep"]["seconds"].as_f64().unwrap(),
+                truth["lock"]["seconds"].as_f64().unwrap()
+            ]
+        );
+        assert_eq!(
+            of("Memory", "bytes"),
+            [truth["memory"]["bytes"].as_f64().unwrap()]
+        );
+        assert_eq!(
+            of("Memory", "seconds"),
+            [truth["memory"]["hold_s"].as_f64().unwrap()]
+        );
+        assert_eq!(
+            of("Disk", "written"),
+            [truth["file"]["written"].as_f64().unwrap()]
+        );
+        assert_eq!(
+            of("Network", "sent"),
+            [truth["socket"]["sent"].as_f64().unwrap()]
+        );
+        assert_eq!(
+            of("Network", "received"),
+            [truth["socket"]["received"].as_f64().unwrap()]
+        );
+        // Every line the view draws is a phase, or is said not exercised.
+        for line in ["CPU", "Memory", "Disk", "Network", "GPU", "Energy", "Time"] {
+            assert!(
+                phases.iter().any(|phase| phase["line"] == line)
+                    || truth["not_exercised"][line].is_string(),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_amount_is_spread_over_the_cells_it_covers() {
+        let axis = Axis {
+            start: 0,
+            end: SPARK as u64 * 100,
+        };
+        let mut cells = vec![None; SPARK];
+        axis.spread(&mut cells, 50, 250, 200.0);
+        assert_eq!(cells[0], Some(50.0));
+        assert_eq!(cells[1], Some(100.0));
+        assert_eq!(cells[2], Some(50.0));
+        assert_eq!(cells[3], None);
+        axis.spread(&mut cells, 2_400, 2_400, 7.0);
+        assert_eq!(cells[SPARK - 1], Some(7.0));
+        // Half of it after the axis' end: that half is left out.
+        axis.spread(&mut cells, 2_300, 2_500, 10.0);
+        assert_eq!(cells[SPARK - 1], Some(12.0));
+    }
+
+    #[test]
+    fn mem_total_is_read_in_bytes() {
+        assert_eq!(
+            mem_total("MemTotal:       65536 kB\nMemFree: 1 kB\n"),
+            Some(65536.0 * 1024.0)
+        );
+        assert_eq!(mem_total("nothing"), None);
     }
 }

@@ -1,20 +1,20 @@
 [0m[1momn top[0m │ fixture http-server │ 3.24s        [0m[35mview: snapshot[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatma[0m
-┌ process -- one process at a glance: pid 1493220, ran 3.23┐[0m
-│[0m[1mfirst suspect: [0m[1;2;37m▶ sleep 96.7%[0m -- the cpu tile (flame) has t│[0m
-│[0m[2mone view's essence per tile: enter, or a click on the sele[0m│[0m
-│┌[0m[1;7m time [0m[2m→ timebar [0m─┐[0m[37m┏[0m[1;37m cpu [0m[2;37m→ flame [0m[37m━━━━━┓[0m┌[0m[1m cost [0m[2m→ ledger [0m──┐│[0m
-││[0m[1;2;37m▶ sleep 96.7%[0m    │[0m[37m┃[0m[1;2;32m_PyObject_MakeTpCa[0m[37m┃[0m│[0m[2mcpu 3.17s[0m        ││[0m
-││[0m[32m█[0m[37m░░░░░░░░░░░░░░░…[0m│[0m[37m┃[0m[2mon cpu: the…[0m      [0m[37m┃[0m│[0m[2mrss peak 27.3MiB…[0m││[0m
-│└─────────────────┘[0m[37m┗━━━━━━━━━━━━━━━━━━┛[0m└─────────────────┘│[0m
-│┌[0m[1m request [0m[2m→ reques[0m┐┌[0m[1m latency [0m[2m→ heatmap[0m┐┌[0m[1m threads [0m[2m→ lanes [0m┐│[0m
-││[0m[2mno request declar[0m││[0m[2mmax 524µs[0m         ││[0m[2m4 threads[0m        ││[0m
-││[0m[2mrefused: cannot[0m  ││[0m[2;36m▁██▂ ▁▁▁▁▂▂▂▂▂▂[0m   ││[0m[2;32m█▂▃ ▂  ▂  ▁▃   ▂[0m ││[0m
-││[0m[2mstart collecting…[0m││[0m[2;36m▂▂▂█▅▅ ▂…[0m         ││[0m[2;32m▁▁▂▂▆▂▃…[0m         ││[0m
-│└─────────────────┘└──────────────────┘└─────────────────┘│[0m
-│┌[0m[1m wake [0m[2m→ wake [0m────┐┌[0m[1m flows [0m[2m→ flows [0m───┐┌[0m[1m gpu [0m[2m→ lanes [0m────┐│[0m
-││[0m[2msoftirq ×141[0m     ││[0m[1;2;36mnet ↓1.76KiB ↑28.3[0m││[0m[2mno kernel launche[0m││[0m
-││[0m[2m73.8% of 191…[0m    ││[0m[2;34mdisk ↓0B ↑0B…[0m     ││[0m[2mdevice memory…[0m   ││[0m
-│└─────────────────┘└──────────────────┘└─────────────────┘│[0m
-└──────────────────────────────────────────────────────────┘[0m
-[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓ hj[0m
+ [0m[1mpython3[0m  pid 1493220 · 4 threads · 3.23s · [0m[35momn costs ≥24.3%[0m
+[0m[2m────────────────────────────────────────────────────────────[0m
+ [0m[1;7mCPU     [0m[34m▆█▇▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆[0m   [0m[1;34m0.962 cores [0m   avg 0.981[0m
+ [0m[1mMemory  [0m[34m▆▆██▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇[0m    [0m[1;34m25.1MiB     [0m   +2.05MiB/[0m
+ [0m[1;2mDisk    [0m                           [0m[2mno block request of the [0m
+ [0m[1mNetwork [0m[34m▁▆▅█▅▇▇▄▅▇▆▃▇▇▆▆▄▇▅▆▅▇▄▂[0m   [0m[1;34m↓ 558B/s    [0m   ↑ 8.76MiB[0m
+ [0m[1;2mGPU     [0m                           [0m[2mno kernel launched   VRA[0m
+ [0m[1mEnergy  [0m[34m▅▇▆▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇████[0m   [0m[1;34m143 W       [0m   avg 115 W[0m
+ [0m[1mTime    [0m[32m█[0m[37m░░░░░░░░░░░░░░░░░░░░░░░[0m   [0m[37msleep 96.7%[0m   [0m[32mon cpu 2.4[0m
+[0m[2m────────────────────────────────────────────────────────────[0m
+[0m[1m▶ suspect: [0m[1;37msleep (blocked: sleeping)  96.7%[0m                 [0m
+                                                            [0m
+[0m[2mCPU in one hue: the machine's cores are not in the recording[0m
+[0m[2mMemory in one hue: the machine's memory is not in the record[0m
+[0m[2mNetwork in one hue: a link's speed is not known[0m             [0m
+[0m[2mEnergy in one hue: energy has no capacity[0m                   [0m
+                                                            [0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓ jk[0m
