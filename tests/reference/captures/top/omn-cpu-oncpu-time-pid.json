@@ -1,0 +1,58 @@
+{
+  "results": [
+    {
+      "label": "cpu.oncpu_time",
+      "source": "cpu.oncpu_time",
+      "unit": "ns",
+      "backend": "bpf:raw_tp",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "task:202778",
+              "count": 4,
+              "min": 2488311.0,
+              "max": 993807302.0,
+              "mean": 500322610.25,
+              "last": 2488311.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 4,
+      "observed_ns": 6009066704,
+      "window": {
+        "run_opened_ns": 2205126028673,
+        "opened_ns": 2205126028673,
+        "closed_ns": 2211135095377,
+        "attached": true
+      },
+      "stopped_because": "the requested duration elapsed",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "overhead": {
+        "collector_cpu_ns": 1730000,
+        "attributed_cpu_ns": 1730000,
+        "observed_cpu_ns": null,
+        "observed_from": "the cpu time of 202778 (clock ticks from /proc/<pid>/stat, because the scheduler's nanosecond account could not be read here: a target that burns less than a tick between two checks reads as having burnt nothing, children reaped included)",
+        "wall_ns": 6016263179,
+        "measurement_ns": 53000,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel is not timing eBPF programs on this run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable",
+        "before_window_cpu_ns": 168442000,
+        "after_window_cpu_ns": 111000
+      },
+      "served_by": [
+        "bpf:raw_tp"
+      ],
+      "value_attr": "ns"
+    }
+  ]
+}

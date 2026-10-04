@@ -3,11 +3,14 @@
 //! wave"). Sizes come out in bytes and times in nanoseconds, the units omn
 //! reports them in; a utilization comes out as a ratio in [0, 1].
 //!
-//! The tools that take a pid (`top -p`, `pmap`, `smem -P`) are run through
-//! `tests/reference/workloads/top/onpid.py`, which launches the workload and
-//! hands the tool its pid once the workload says it is ready.
+//! The tools that take a pid (`top -p`, `pmap`, `smem -P`) run under the
+//! runner's `attach`, through `tests/reference/workloads/top/at.sh`, which
+//! waits for the workload's phase before it execs the tool. `omn_*` parsers
+//! read `omn`'s own JSON, for the values `omn` does not hold at one place
+//! (`compare.omn_parse`).
 
 use crate::common::{Parser, Values};
+use serde_json::Value;
 
 pub fn parsers() -> Vec<Parser> {
     vec![
@@ -31,7 +34,61 @@ pub fn parsers() -> Vec<Parser> {
             name: "smem_uss_pss_rss",
             parse: smem_uss_pss_rss,
         },
+        Parser {
+            name: "omn_cpu_total",
+            parse: omn_cpu_total,
+        },
+        Parser {
+            name: "omn_cpu_share",
+            parse: omn_cpu_share,
+        },
     ]
+}
+
+/// `cpu.oncpu_time`'s summary in `omn`'s JSON: the sum over its series of
+/// `count * mean`, which is the sum of the per-poll deltas of a cumulative
+/// counter (one series per thread through `bpf:raw_tp`, the process through
+/// `fs:proc`), and the result's `observed_ns`.
+fn omn_cpu(stdout: &str) -> Result<(f64, f64), String> {
+    let doc: Value =
+        serde_json::from_str(stdout).map_err(|e| format!("omn's output is not JSON: {e}"))?;
+    let result = doc["results"]
+        .as_array()
+        .and_then(|r| r.iter().find(|r| r["source"] == "cpu.oncpu_time"))
+        .ok_or("no cpu.oncpu_time result in omn's output")?;
+    let series = result["outputs"]
+        .as_array()
+        .and_then(|o| o.iter().find(|o| o["emit"] == "summary"))
+        .and_then(|o| o["series"].as_array())
+        .ok_or("no summary series in omn's cpu.oncpu_time result")?;
+    if series.is_empty() {
+        return Err("omn's cpu.oncpu_time summary has no series".into());
+    }
+    let mut total = 0.0;
+    for s in series {
+        let (Some(count), Some(mean)) = (s["count"].as_f64(), s["mean"].as_f64()) else {
+            return Err(format!("a series without count and mean: {s}"));
+        };
+        total += count * mean;
+    }
+    let observed = result["observed_ns"]
+        .as_f64()
+        .filter(|o| *o > 0.0)
+        .ok_or("no positive observed_ns in omn's cpu.oncpu_time result")?;
+    Ok((total, observed))
+}
+
+/// The cpu `omn` saw the target spend, in ns, keyed `time` as `top`'s TIME+.
+fn omn_cpu_total(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let (total, _) = omn_cpu(stdout)?;
+    Ok(vec![("time".into(), total)])
+}
+
+/// That cpu over the time `omn` observed, a ratio of one cpu, keyed `cpu`
+/// as `top`'s `%CPU`.
+fn omn_cpu_share(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let (total, observed) = omn_cpu(stdout)?;
+    Ok(vec![("cpu".into(), total / observed)])
 }
 
 const KIB: f64 = 1024.0;
@@ -307,14 +364,39 @@ mod tests {
     }
 
     #[test]
-    // Captured from smem 1.5 (Debian's smem_1.5-3, the script run in place;
-    // no Arch package) through onpid.py on `hold.py 64 2 1`, the pairs'
-    // exact command: the regex matched the workload alone.
+    // Captured from `omn trace cpu.oncpu_time -m poll -e summary -d 6s --pid
+    // PID` attached to `hold.py 64 2 1` stopped before its exec, the TIME+
+    // pair's shape: four polls of one thread through `bpf:raw_tp`.
+    fn omn_cpu_total_sums_the_series_deltas() {
+        let v = omn_cpu_total(&capture("omn-cpu-oncpu-time-pid.json"), "").unwrap();
+        assert_eq!(v.len(), 1);
+        assert!((get(&v, "time") - 4.0 * 500322610.25).abs() < 1.0);
+        assert!(omn_cpu_total("not json", "").is_err());
+        assert!(omn_cpu_total(r#"{"results": []}"#, "").is_err());
+    }
+
+    #[test]
+    // Captured from the %CPU pair's shape: `--window 1s..3s` on `hold.py 16
+    // 5 0.5` while it spins.
+    fn omn_cpu_share_divides_by_the_observed_time() {
+        let text = capture("omn-cpu-oncpu-time-window.json");
+        let v = omn_cpu_share(&text, "").unwrap();
+        let share = get(&v, "cpu");
+        assert!((share - 0.9902962096348015).abs() < 1e-9, "{share}");
+        let empty = r#"{"results": [{"source": "cpu.oncpu_time", "observed_ns": 0,
+            "outputs": [{"emit": "summary", "series": [{"count": 1, "mean": 5}]}]}]}"#;
+        assert!(omn_cpu_share(empty, "").is_err());
+    }
+
+    #[test]
+    // Captured from smem 1.5 (the AUR's smem 1.5-8, installed) through at.sh
+    // on `hold.py 64 2 1` at `hold-done`, the pairs' exact command: the
+    // regex matched the workload alone.
     fn smem_reads_one_row_and_refuses_many() {
         let v = smem_uss_pss_rss(&capture("smem-H-c-uss-pss-rss.txt"), "").unwrap();
-        assert_eq!(get(&v, "uss"), 68800.0 * KIB);
-        assert_eq!(get(&v, "pss"), 69803.0 * KIB);
-        assert_eq!(get(&v, "rss"), 75484.0 * KIB);
+        assert_eq!(get(&v, "uss"), 68812.0 * KIB);
+        assert_eq!(get(&v, "pss"), 70210.0 * KIB);
+        assert_eq!(get(&v, "rss"), 75620.0 * KIB);
         let two = "    68780    70058    75392 \n     9000    10000    12000 \n";
         assert!(smem_uss_pss_rss(two, "").is_err());
         assert!(smem_uss_pss_rss("", "").is_err());
