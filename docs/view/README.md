@@ -203,6 +203,7 @@ holds this table to the code.
 | ledger | `mem.rss` | poll@250ms | timeline,summary | target | memory held |
 | ledger | `mem.faults` | trace | summary | target | memory faulted in |
 | ledger | `io.syscall` | trace | summary,hist | target | bytes read and written, and their latency as the program saw it |
+| ledger | `net.socket` | trace | raw,hist | target | network volume: bytes sent and received through the target's sockets |
 | ledger | `net.tcp.retransmit` | trace | summary | system | retransmissions, the machine's: a retransmission is sent from a timer, so the collector cannot give it to a process |
 | ledger | `gpu.mem` | poll@250ms | timeline,summary | target | GPU memory held |
 | ledger | `gpu.kernel` | trace | raw,summary | target | GPU time per kernel |
