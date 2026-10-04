@@ -2068,6 +2068,31 @@ fn the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need() {
         "true",
     ]);
     let complaint = stderr(&outcome);
+    // Its pinned twin: the same request with the per-packet backend forced
+    // exits the same way the walk does, on either branch below. The walk said
+    // "the machine" and the pin "the build" on a runner with no readable PTP
+    // clock until the eighteenth wave (`DECISIONS.md`, "one order for unbuilt
+    // and missing").
+    let pinned = omn(&[
+        "net.hwts",
+        "--mode",
+        "trace",
+        "--duration",
+        "200ms",
+        "--emit",
+        "raw",
+        "--backend",
+        "force:so_timestamping",
+        "--",
+        "true",
+    ]);
+    let pinned_complaint = stderr(&pinned);
+    assert_eq!(
+        code(&pinned),
+        code(&outcome),
+        "pinning the backend the walk refused exits another way:\nwalk: {complaint}\npin: \
+         {pinned_complaint}"
+    );
     // The per-packet backend needs a PTP hardware clock this process can
     // read, as well as a collector. Where none can be read the machine is the
     // first answer, exit 1, with the clock named against the backend -- the
@@ -2088,6 +2113,11 @@ fn the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need() {
             1,
             "a machine with no readable PTP clock cannot serve it: {complaint}"
         );
+        assert!(
+            pinned_complaint.contains("so_timestamping (pinned with --backend force:")
+                && pinned_complaint.contains("phc: missing"),
+            "the pin names the clock it lacks here, as the walk does: {pinned_complaint}"
+        );
         return;
     }
     assert!(
@@ -2100,6 +2130,11 @@ fn the_trace_leg_of_the_sweep_answers_or_names_the_backend_it_would_need() {
         code(&outcome),
         3,
         "valid and not built is exit 3: {complaint}"
+    );
+    assert!(
+        pinned_complaint.contains("so_timestamping")
+            && pinned_complaint.contains("no collector is written"),
+        "the pin is the build's gap where the walk's is: {pinned_complaint}"
     );
 }
 
