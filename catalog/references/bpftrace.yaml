@@ -11,7 +11,7 @@
 # attach to a child that has not been created yet), which is why every
 # compared quantity is one the workload fixes -- a number of calls, signals,
 # connections, block requests -- or, for a latency, a median held to one log2
-# bucket. The workloads name themselves `omnref` (a symlink to python3), so
+# bucket above it (see "Medians" below). The workloads name themselves `omnref` (a symlink to python3), so
 # the tool's per-comm key and omn's `comm` filter select the same events.
 #
 # Paths into omn's results.json (`compare.omn`), over the request's first
@@ -21,6 +21,17 @@
 #   hist.count     the sum of every bucket's count over every series
 #   hist.p50       the lower bound of the bucket holding the median, the
 #                  series' buckets merged by their bounds
+#
+# Medians. The two grids differ: bpftrace's buckets are powers of two in
+# microseconds, which bpftrace_hist_usecs multiplies by 1000, so the
+# reference p50 is r = 1000 * 2^k ns; omn's are powers of two in ns
+# (src/bpf/insn.rs, push_log2_bucket). The same latency lands omn in
+# 2^(k+9) = 0.512 r or 2^(k+10) = 1.024 r; one omn bucket higher is
+# 2^(k+11) = 2.048 r, off by 1.048 r. The runner allows rel * r, so
+# `rel: 1.1` admits that bucket and refuses 2^(k+12) = 4.096 r. Below r it
+# bounds nothing: any lower median passes, since rel >= 1 admits 0. A
+# tolerance on bucket indices (log2) would be symmetric; the runner has none
+# (docs/fixes/w22-bpftrace.md, "Requests").
 #
 # A family field the runner does not know: `alongside: true` says omn takes
 # no program (its source has no per-launch target) and runs `--system` for
@@ -136,8 +147,8 @@
   compare:
     key: "@usecs/p50"
     omn: hist.p50
-    tolerance: {rel: 1.0}
-    why: "a median, held to one log2 bucket: two runs, biolatency is system-wide and starts at block_bio_queue where omn starts at submit, and the 500 reads dominate both distributions"
+    tolerance: {rel: 1.1}
+    why: "a median, held to one omn log2 bucket above its own (2.048 times the reference; unbounded below, see the header): two runs, biolatency is system-wide and starts at block_bio_queue where omn starts at submit, and the 500 reads dominate both distributions"
 
 - source: sched.runqlat
   tool: runqlat.bt
@@ -152,8 +163,8 @@
   compare:
     key: "@usecs/p50"
     omn: hist.p50
-    tolerance: {rel: 1.0}
-    why: "two busy children per CPU for two seconds: their waits dominate runqlat's system-wide histogram and are all of omn's; a median held to one log2 bucket, over two runs"
+    tolerance: {rel: 1.1}
+    why: "two busy children per CPU for two seconds: their waits dominate runqlat's system-wide histogram and are all of omn's; a median held to one omn log2 bucket above its own (2.048 times the reference; unbounded below, see the header), over two runs"
 
 - source: net.tcp.connect
   tool: tcpconnect.bt

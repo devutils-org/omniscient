@@ -96,11 +96,14 @@ None of the runner's own. A family's privileged pairs need
 ## Decision lines
 
 - A pair's `omn` exit 1 is a skip, quoting `omn`'s reason; exits 2 and 3
-  are failures. A use `omn` cannot serve is declared with `gap:`, not left
+  are failures. Exit 1 is a failure instead when `omn` wrote its results
+  first (something failed while running), when the workload fails with no
+  observer, or when an attached workload exited non-zero on its own. A use `omn` cannot serve is declared with `gap:`, not left
   to fail.
 - A tool's non-zero exit is a skip only when its stderr carries a refusal
-  wording (built-in list, plus the pair's `refused_when`). Any other parse
-  failure fails the pair.
+  wording (built-in list, plus the pair's `refused_when`) and the workload
+  succeeds when run alone: under `run: separate` the workload's stderr is
+  part of the tool's. Any other parse failure fails the pair.
 - Several matches of an `omn` path are summed, so per-thread series add up
   to the process.
 - The tolerance allowed is the larger of `rel` and `abs`.
@@ -120,3 +123,40 @@ None of the runner's own. A family's privileged pairs need
     have to pass first.
   - If `both_observers_see_the_same_attached_pid` hangs, the cause is the
     attach start-up (`run_attached`). Look at a stopped `sh` in `ps`.
+
+## Review
+
+Fix round after the merge into main.
+
+- **`tests/scenario_proc.rs`, `tests/scenario_cpu.rs`: copying `catalog/`
+  breaks on `catalog/references/`.** The reviewer is right. The same
+  `is_file()` guard as in `tests/cli.rs` and `tests/triage.rs` now skips the
+  subdirectory in both loops. No other test reads `catalog/` entry by entry.
+  `a_machine_that_cannot_serve_a_valid_request_has_its_own_exit_code` and
+  `a_backend_that_cannot_serve_the_mode_is_passed_over_before_the_launch`
+  pass.
+- **`judge_omn`: every exit 1 was a skip.** Fixed in the runner, without
+  changing `omn`'s exit codes. Exit 1 now fails the pair in three cases. The
+  first is when `omn` wrote its results first (`-o {out}`), which is a run
+  that reached its end and then failed. The second is when an attached
+  workload exited non-zero on its own (`run_attached` keeps its status). The
+  third is when the workload fails with no observer. Only what is left is a
+  skip. One case is still read as the machine's: `omn` failing mid-run
+  before it writes anything, against a healthy workload. Telling that apart
+  needs `omn` to say which half of exit 1 it is giving, which is a change to
+  `src/main.rs` and not to this stream's runner.
+- **`judge_tool`: a workload's "Permission denied" read as a refused
+  tool.** Fixed. Before a refusal is granted as a skip, the workload runs
+  once alone (`workload_fails_alone`). If it fails there, the pair fails
+  and the failure quotes the workload's stderr. This runs only on the way
+  to a skip, so a pair that runs pays nothing for it. The same check comes
+  before an `omn` exit 1 is skipped.
+- Covered by `runner::tests::a_failure_that_is_not_the_machines_is_not_a_skip`
+  (four cases).
+- **Found on the way, not this round's:** on merged main, `cargo test
+  --test reference` has 11 failures. The same 11 fail with this round's
+  changes stashed. They come from the families' pair files, which use forms
+  the runner's validation refuses: `{pid}` outside `run: attach` (top, pmap,
+  perf stat) and `[0]` in compare paths (perfrecord). They also come from
+  rows that are not backed. Each family's pairs need fixing, or the path
+  grammar needs `[N]`. That is the coordinator's call.

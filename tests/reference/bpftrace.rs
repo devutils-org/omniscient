@@ -318,9 +318,16 @@ mod tests {
             .1
     }
 
-    fn capture(name: &str) -> String {
+    /// A format fixture, not a capture: each file under
+    /// `captures/bpftrace/` is written by hand from the tool's `printf`
+    /// formats and bpftrace's map and histogram layout, with synthetic
+    /// numbers that agree with no tool and no omn run. These tests check the
+    /// parsers, never a pair; the pairs need the privileged run
+    /// (docs/fixes/w22-bpftrace.md), whose real output goes beside these as
+    /// `<tool>.txt`.
+    fn fixture(tool: &str) -> String {
         let path = format!(
-            "{}/tests/reference/captures/bpftrace/{name}",
+            "{}/tests/reference/captures/bpftrace/{tool}.format.txt",
             env!("CARGO_MANIFEST_DIR")
         );
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
@@ -337,21 +344,21 @@ mod tests {
 
     #[test]
     fn syscount_counts_per_process_and_per_syscall() {
-        let v = bpftrace_map(&capture("syscount.txt"), "").unwrap();
-        assert_eq!(get(&v, "@process[omnref]"), 21217.0);
-        assert_eq!(get(&v, "@syscall[110]"), 20004.0);
+        let v = bpftrace_map(&fixture("syscount"), "").unwrap();
+        assert_eq!(get(&v, "@process[omnref]"), 7313.0);
+        assert_eq!(get(&v, "@syscall[110]"), 7001.0);
     }
 
     #[test]
     fn vfsstat_sums_its_per_second_maps() {
-        let v = bpftrace_map(&capture("vfsstat.txt"), "").unwrap();
+        let v = bpftrace_map(&fixture("vfsstat"), "").unwrap();
         assert_eq!(get(&v, "@[vfs_read]"), 2958.0 + 3112.0);
         assert_eq!(get(&v, "@[vfs_open]"), 120.0 + 98.0);
     }
 
     #[test]
     fn swapin_keys_by_comm_whatever_the_pid() {
-        let v = bpftrace_map(&capture("swapin.txt"), "").unwrap();
+        let v = bpftrace_map(&fixture("swapin"), "").unwrap();
         assert_eq!(get(&v, "@[omnref, 4242]"), 12.0);
         assert_eq!(get(&v, "@[omnref]"), 12.0 + 30.0);
     }
@@ -363,9 +370,9 @@ mod tests {
 
     #[test]
     fn bitesize_reads_one_histogram_per_comm() {
-        let v = bpftrace_hist(&capture("bitesize.txt"), "").unwrap();
-        assert_eq!(get(&v, "@[omnref]/count"), 508.0);
-        assert_eq!(get(&v, "@[omnref]/4096"), 501.0);
+        let v = bpftrace_hist(&fixture("bitesize"), "").unwrap();
+        assert_eq!(get(&v, "@[omnref]/count"), 308.0);
+        assert_eq!(get(&v, "@[omnref]/4096"), 301.0);
         assert_eq!(get(&v, "@[omnref]/131072"), 2.0);
         assert_eq!(get(&v, "@[omnref]/p50"), 4096.0);
         assert_eq!(get(&v, "@[kworker/u33:2]/count"), 3.0);
@@ -373,23 +380,23 @@ mod tests {
 
     #[test]
     fn runqlat_reads_usecs_as_nanoseconds() {
-        let v = bpftrace_hist_usecs(&capture("runqlat.txt"), "").unwrap();
-        assert_eq!(get(&v, "@usecs/count"), 16747.0);
-        // The median falls in [2K, 4K) usecs: 2048 * 1000 ns.
-        assert_eq!(get(&v, "@usecs/p50"), 2_048_000.0);
+        let v = bpftrace_hist_usecs(&fixture("runqlat"), "").unwrap();
+        assert_eq!(get(&v, "@usecs/count"), 10747.0);
+        // The median falls in [1K, 2K) usecs: 1024 * 1000 ns.
+        assert_eq!(get(&v, "@usecs/p50"), 1_024_000.0);
         assert_eq!(get(&v, "@usecs/0"), 43.0);
     }
 
     #[test]
     fn biolatency_reads_its_single_histogram() {
-        let v = bpftrace_hist_usecs(&capture("biolatency.txt"), "").unwrap();
-        assert_eq!(get(&v, "@usecs/count"), 508.0);
-        assert_eq!(get(&v, "@usecs/p50"), 4_000.0);
+        let v = bpftrace_hist_usecs(&fixture("biolatency"), "").unwrap();
+        assert_eq!(get(&v, "@usecs/count"), 333.0);
+        assert_eq!(get(&v, "@usecs/p50"), 8_000.0);
     }
 
     #[test]
     fn runqlen_reads_a_linear_histogram() {
-        let v = bpftrace_hist(&capture("runqlen.txt"), "").unwrap();
+        let v = bpftrace_hist(&fixture("runqlen"), "").unwrap();
         assert_eq!(get(&v, "@runqlen/count"), 1980.0 + 205.0 + 12.0);
         assert_eq!(get(&v, "@runqlen/p50"), 0.0);
         assert_eq!(get(&v, "@runqlen/2"), 12.0);
@@ -402,31 +409,31 @@ mod tests {
 
     #[test]
     fn execsnoop_counts_what_was_executed() {
-        let v = execsnoop(&capture("execsnoop.txt"), "").unwrap();
-        assert_eq!(get(&v, ""), 22.0);
-        assert_eq!(get(&v, "argv0:/bin/true"), 20.0);
+        let v = execsnoop(&fixture("execsnoop"), "").unwrap();
+        assert_eq!(get(&v, ""), 8.0);
+        assert_eq!(get(&v, "argv0:/bin/true"), 6.0);
         assert_eq!(get(&v, "argv0:sh"), 1.0);
     }
 
     #[test]
     fn killsnoop_counts_signals_by_sender() {
-        let v = killsnoop(&capture("killsnoop.txt"), "").unwrap();
-        assert_eq!(get(&v, "omnref/SIGUSR2"), 50.0);
-        assert_eq!(get(&v, "SIGUSR2"), 50.0);
+        let v = killsnoop(&fixture("killsnoop"), "").unwrap();
+        assert_eq!(get(&v, "omnref/SIGUSR2"), 12.0);
+        assert_eq!(get(&v, "SIGUSR2"), 12.0);
         assert_eq!(get(&v, "Web Content/SIGTERM"), 1.0);
-        assert_eq!(get(&v, ""), 51.0);
+        assert_eq!(get(&v, ""), 13.0);
     }
 
     #[test]
     fn opensnoop_counts_failed_opens_too() {
-        let v = opensnoop(&capture("opensnoop.txt"), "").unwrap();
+        let v = opensnoop(&fixture("opensnoop"), "").unwrap();
         assert_eq!(get(&v, "comm:omnref"), 6.0);
         assert_eq!(get(&v, "comm:systemd-journal"), 1.0);
     }
 
     #[test]
     fn biosnoop_counts_and_sums_latency_by_issuer() {
-        let v = biosnoop(&capture("biosnoop.txt"), "").unwrap();
+        let v = biosnoop(&fixture("biosnoop"), "").unwrap();
         assert_eq!(get(&v, "comm:omnref"), 5.0);
         assert_eq!(get(&v, "lat_ms:omnref"), 1.0);
         assert_eq!(get(&v, "comm:kworker/u33:2"), 1.0);
@@ -434,14 +441,14 @@ mod tests {
 
     #[test]
     fn tcpconnect_counts_active_opens_by_comm() {
-        let v = tcpconnect(&capture("tcpconnect.txt"), "").unwrap();
-        assert_eq!(get(&v, "comm:omnref"), 10.0);
-        assert_eq!(get(&v, ""), 11.0);
+        let v = tcpconnect(&fixture("tcpconnect"), "").unwrap();
+        assert_eq!(get(&v, "comm:omnref"), 3.0);
+        assert_eq!(get(&v, ""), 4.0);
     }
 
     #[test]
     fn tcplife_counts_both_ends_and_sums_their_volume() {
-        let v = tcplife(&capture("tcplife.txt"), "").unwrap();
+        let v = tcplife(&fixture("tcplife"), "").unwrap();
         assert_eq!(get(&v, "comm:omnref"), 4.0);
         assert_eq!(get(&v, "tx_kb:omnref"), 128.0);
         assert_eq!(get(&v, "rx_kb:omnref"), 128.0);
