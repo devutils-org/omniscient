@@ -3,21 +3,25 @@ omn top │ fixture workload-flame │ 2.07s                          view: snap
 ┌ ledger -- what task 1524065 and 2 more cost over 2.07s of wall-clock ────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        1.43s on cpu     69.3% of one cpu          ████████████▂▂▂▄▄▄▄▄▄▃▃▃    ≥24.6ms  ~low det            │
-│    task 1524067        1.00s  ████████     69.7%                                                                     │
-│    task 1524143        401ms  ███          27.9%                                                                     │
-│    task 1524065       33.4ms  ▏            2.33%                                                                     │
+│    1524067 hot         1.00s  ████████     69.7%                                                                     │
+│    1524143 warm        401ms  ███          27.9%                                                                     │
+│    1524065 python3    33.4ms  ▏            2.33%                                                                     │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
 │    own account         1.44s  with its descendants, as the scheduler counts them                                     │
 │    machine busy        23.8s  █            6.04%                                                                     │
+│  blocked time    2.61s            1.26 threads               ▁          ▇ ▁▁▁▁▁ ▁▁▁█    ≥51.6ms  ~low det degraded   │
+│    1524065 python3     2.01s  █████████    77.0%                                                                     │
+│    1524143 warm        601ms  ███          23.0%                                                                     │
+│    1524067 hot        25.2µs  ▏            0.00%                                                                     │
 │  memory held     13.2MiB peak     +320KiB from 12.9MiB      ▁▁▁▁▁▁▁▁▁▁▁▁▁▁██████████      790µs                      │
 │  memory faulted  1.70k faults     820/s                     a total only                ≥1.15ms  30 late             │
-│    task 1524065        1.69k  ████████████ 99.4%                                                                     │
-│    task 1524067            8  ▏            0.47%                                                                     │
-│    task 1524143            3  ▏            0.18%                                                                     │
+│    1524065 python3     1.69k  ████████████ 99.4%                                                                     │
+│    1524067 hot             8  ▏            0.47%                                                                     │
+│    1524143 warm            3  ▏            0.18%                                                                     │
 │  I/O syscalls    618 calls        1.40ms inside them        256ns ▁█▄▁▁▁▁▁▁ 131µs       ≥54.2ms  ~low det degraded x2│
-│    task 1524065       1.38ms  ████████████ 98.0%                                                                     │
-│    task 1524067       23.9µs  ▏            1.70%                                                                     │
-│    task 1524143       4.24µs  ▏            0.30%                                                                     │
+│    1524065 python3    1.38ms  ████████████ 98.0%                                                                     │
+│    1524067 hot        23.9µs  ▏            1.70%                                                                     │
+│    1524143 warm       4.24µs  ▏            0.30%                                                                     │
 │    bytes read and written: on the raw rows only, which this run did not keep                                         │
 │  network         0B moved         0B out, 0B in             no socket call              ≥54.2ms  ~low det degraded x3│
 │  retransmits     0 sent again     machine-wide              a total only                 ≥276µs  19 late ~low det    │
@@ -26,15 +30,11 @@ omn top │ fixture workload-flame │ 2.07s                          view: snap
 │  energy          232J machine     112W on average           █████████████████████       ≥46.5µs                      │
 │    ≈ the target's      14.1J  an estimate, not a measurement: its share of the machine's busy cpu, 1.44s of 23.8s    │
 │                                                                                                                      │
-│  to know all of this: ≥137ms of omn's cpu, ≥9.53% of what the target spent                                           │
+│  to know all of this: ≥188ms of omn's cpu, ≥13.1% of what the target spent                                           │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
 │· the source is not reproducible between two runs of the same workload                                                │
 │· to know it: 24.6ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
-│run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl       │
-│kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable                 │
-│· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │
-│where it could not be read, of 1524065 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line

@@ -14,12 +14,12 @@ omn top │ fixture machine │ 20.0s                                           
 │memory    held the whole run, unmoved (the device's size: in its events)          734MiB held                         │
 ├ memory time the machine stalled waiting for it ──────────────────────────────────────────────────────────── ~low det ┤
 │stalled   ······································································· never stalled                       │
-├ power watts, from the RAPL counters; per domain by name: in the events only ─────────────────────────────────────────┤
+├ power watts, from the RAPL counters, no capacity so one hue; per domain by name: in the events only ─────────────────┤
 │all       ▄▄▄▄▅▅▆▇███▇▇▇▇▇▇▇▇▆▇▆▇▆▆▇▆▆▅▅▅▅▅▅▅▅▅▄▅▄▄▄▄▄▄▄▄▅▅▅▅▆▅▆▆▆▆▅▅▆▅▅▅▅▅▅▆▆▆▆▅ 101W mean  146W peak  2.01kJ        │
-├ disk bytes moved, per device; read apart from written: in the events only ──────────────────────── ~low det degraded ┤
+├ disk bytes moved, per device, speed unknown so one hue; read apart from written: in the events o…─ ~low det degraded ┤
 │259:0     ··▃█▇··▁▁······▁·······▁▁▁··············▁··········▁···▁···▁··········· 1.70GiB  peak 3.06GiB/s             │
 │          +2 moved nothing: 253:0 7:0                                                                                 │
-├ network bytes moved, per interface; in apart from out: in the events only ──────────────────────── ~low det degraded ┤
+├ network bytes moved, per interface, speed unknown so one hue; in apart from out: in the events o…─ ~low det degraded ┤
 │wlan0     ▅▁▁▁▁▁▁▁▁▁·▁▁▁▁▁▁▁▁▁▁·▁▁▁█▂▁·▁▁▁▁▁▁▁·▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁·▁▁▁▁▁▁▁▁▁▁ 2.42MiB  peak 3.73MiB/s             │
 │tailscale ▃·▁▁▁·▁··▁···▁··▁···▁··▁▁▇▂▁···▁▁▁▁···▁··▁·▁▁▁··▁···▁··▁···▁··▁▁▁·▁▁·▁▁ 1.78MiB  peak 3.30MiB/s             │
 │          +5 moved nothing: br-bf6c2e1afced br-cb843b6eb1dd docker0 enp38s0 lo                                        │

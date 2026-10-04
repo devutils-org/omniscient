@@ -5,7 +5,7 @@ omn top │ fixture workload-lanes │ 2.24s                          view: snap
 │                                                                                                                      │
 │ ▶ first suspect  1529959 lanes-main (the program): blocked: sleeping, on a futex 2.11s (94.1% of its wall clock)     │
 │   asleep on a lock another thread held: lock-contended                                                               │
-│   2.11s waiting in futex(2) over 22 wait(s)                                                                          │
+│   2.11s waiting in futex(2) over 22 wait(s), from `sched.futex`                                                      │
 │   decisive: ahead of the next state (30.7ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
 │                                                                                                                      │
 │ ▸ 1529959 lanes-main  ├█▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 94.1% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞   ┤    2.24s  ▶ lock 94.1%        │
@@ -16,7 +16,7 @@ omn top │ fixture workload-lanes │ 2.24s                          view: snap
 │   1530061 cuda0000140…├░░ sleep 29.3% ░░░                                            ┤    2.24s  ▶ sleep 29.3%       │
 │   1530062 lane-gpu    ├▞▞▞ lock 29.0% ▞▞▞                                            ┤    2.24s  ▶ lock 29.0%        │
 │   1530060 lane-gpu    ├█████▞▞▞▞▞▞▞▞▞▞▞▞▞                                            ┤    2.24s  ▶ lock 20.2%        │
-│   1530063 omn-cupti-f…├░░ sleep 29.0% ░░░                                            ┤    2.24s  ▶ sleep 29.0%       │
+│   1530063 omn-cupti-f…├░░ sleep 28.8% ░░░                                            ┤    2.24s  ▶ sleep 28.8%       │
 │   1530064 lane-gpu    ├▞▞ lock 27.4% ▞▞▞                                             ┤    2.24s  ▶ lock 27.4%        │
 │   1530067 lane-gpu    ├▞▞ lock 26.3% ▞▞                                              ┤    2.24s  ▶ lock 26.3%        │
 │   1530125 lane-gpu    ├░░░░░░░░░░░░░                                                 ┤    2.24s  ▶ sleep 21.0%       │
@@ -29,7 +29,7 @@ omn top │ fixture workload-lanes │ 2.24s                          view: snap
 │     ↳ most-sampled leaf `PyNumber_Remainder`: 121 of 1605 samples, every thread's: the samples are spread, no one f… │
 │ ▚ runnable                         sched.runqlat   2.18ms          0.10%   exact     15     ~low det degraded        │
 │ ▞ blocked: sleeping, on a futex    sched.offcpu    2.11s           94.1%   exact     18     ~low det degraded x2     │
-│     ↳ 2.11s waiting in futex(2) over 22 wait(s)                                                                      │
+│     ↳ 2.11s waiting in futex(2) over 22 wait(s), from `sched.futex`                                                  │
 │   residue: the whole less the rows                 100ms           4.48%   exact     time no row accounts for        │
 │                                                                                                                      │
 │ task:1529959 is the program's: its main thread, the one whose id is its process's.                                   │

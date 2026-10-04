@@ -5,17 +5,21 @@
 │[0m[1;32m▸ cpu time        [0m[2m86.9ms on cpu[0m    [0m[2m0.55% of one cpu[0m          [0m[2;32m▅▅▅▆▆▆▅▅▄▇█▇▇▇▆▅▅▅▅▆▆▅▄▄[0m [0m[35m   ≥64.6ms[0m  [0m[33m1 late[0m [0m[36m~low det[0m     │[0m
 │    1504266 server  [0m[2m   42.2ms  ██████       48.6%[0m                                                                     │[0m
 │    1504111 server  [0m[2m   40.9ms  ██████       47.1%[0m                                                                     │[0m
-│    task 1504265    [0m[2m   3.70ms  █            4.26%[0m                                                                     │[0m
+│    1504265 server  [0m[2m   3.70ms  █            4.26%[0m                                                                     │[0m
 │[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
 │    own account     [0m[1m   86.7ms[0m  [0m[2mwith its descendants, as the scheduler counts them[0m                                     │[0m
 │    machine busy        3m27s  ▏            0.04%                                                                     │[0m
+│  [0m[1mblocked time    [0m[2m46.9s[0m            [0m[2m2.96 threads[0m              [0m[2;32m▄▆▃█▆▆▅▆▆▆▅▆▆▆▆▅▆▆▅▆▆▅▆▆[0m [0m[35m    ≥171ms[0m  [0m[33m3 late[0m [0m[36m~low det[0m [0m[33mdegr[0m│[0m
+│    1504265 server  [0m[2m    15.7s  ████         33.4%[0m                                                                     │[0m
+│    1504111 server  [0m[2m    15.6s  ████         33.3%[0m                                                                     │[0m
+│    1504266 server  [0m[2m    15.6s  ████         33.3%[0m                                                                     │[0m
 │  [0m[1mmemory held     [0m2.14MiB peak     +20.0KiB from 2.12MiB     [0m[32m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m [0m[35m     750µs[0m  [0m[33m1 late[0m              │[0m
 │  [0m[1mmemory faulted  [0m103 faults       7/s                       [0m[2;3ma total only[0m             [0m[35m    ≥639µs[0m  [0m[33m320 late[0m            │[0m
 │    1504111 server         92  ███████████  89.3%                                                                     │[0m
 │    1504266 server         10  █            9.71%                                                                     │[0m
-│    task 1504265            1  ▏            0.97%                                                                     │[0m
+│    1504265 server          1  ▏            0.97%                                                                     │[0m
 │  [0m[1mI/O syscalls    [0m[2m1.74k calls[0m      [0m[2m15.7s inside them[0m         [0m[2m256ns [0m[2;32m█▅▂▂▂▁▁▁ ▂[0m[2m 268ms[0m   [0m[35m    ≥182ms[0m  [0m[33m-237 lost (16.9%)[0m [0m[33m3 [0m│[0m
-│    task 1504265    [0m[2m    15.5s  ████████████ 98.6%[0m                                                                     │[0m
+│    1504265 server  [0m[2m    15.5s  ████████████ 98.6%[0m                                                                     │[0m
 │    1504111 server  [0m[2m    213ms  ▏            1.35%[0m                                                                     │[0m
 │    1504266 server  [0m[2m    474µs  ▏            0.00%[0m                                                                     │[0m
 │[0m[2;3m    bytes read and written: on the raw rows only, which this run did not keep[0m                                         │[0m
@@ -29,12 +33,8 @@
 │  [0m[1menergy          [0m1.64kJ machine   104W on average           [0m[32m▄▄▅▅▅▅▄▄▆████▇▇▇▆▇▇▆▆▆▆▆[0m [0m[35m    ≥104µs[0m  [0m[33m1 late[0m              │[0m
 │    ≈ the target's  [0m[3m    0.69J[0m  [0m[2;3man estimate, not a measurement: its share of the machine's busy cpu, 86.7ms of 3m27s[0m   │[0m
 │                                                                                                                      │[0m
-│[0m[1m  to know all of this[0m[35m: ≥429ms of omn's cpu, ≥495% of what the target spent[0m                                            │[0m
+│[0m[1m  to know all of this[0m[35m: ≥600ms of omn's cpu, ≥692% of what the target spent[0m                                            │[0m
 │[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
-│[0m[2;32m cpu time -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────────[0m│[0m
-│[0m[1mcpu.oncpu_time via bpf:raw_tp[0m -- cpu time, per thread                                                                 │[0m
-│· 1 rounds of reads came late: nothing is missing, but the series is not spaced as asked                              │[0m
-│· the source is not reproducible between two runs of the same workload                                                │[0m
-│[0m[33m· 1× a round of reads outran the 250.0ms tick: worst 383.2ms, 383.2ms on average[0m                                      │[0m
+│                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m line  [0m[1mt[0m next task  [0m[1menter[0m the view behind the line            [0m

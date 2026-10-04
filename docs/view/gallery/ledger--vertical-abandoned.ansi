@@ -3,6 +3,7 @@
 ┌ ledger -- [0m[1mwhat the target cost over 184ms of wall-clock[0m ─────────────────────────────────────────────────────────────┐[0m
 │[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
 │[0m[1;32m▸ cpu time        [0m[2;3mnot in this run: cpu.oncpu_time was not asked for[0m                                                   │[0m
+│  [0m[1mblocked time    [0m[2;3mnot in this run: sched.offcpu was not asked for[0m                                                     │[0m
 │  [0m[1mmemory held     [0m[2;3mnot in this run: mem.rss was not asked for[0m                                                          │[0m
 │  [0m[1mmemory faulted  [0m[2;3mnot in this run: mem.faults was not asked for[0m                                                       │[0m
 │  [0m[1mI/O syscalls    [0m[2;3mnot in this run: io.syscall was not asked for[0m                                                       │[0m
@@ -19,7 +20,6 @@
 │cpu.oncpu_time -- cpu time, per thread                                                                                │[0m
 │This run did not ask for it. `omn top` live asks for every line of the sheet; a recording made by another session     │[0m
 │holds what that session asked.                                                                                        │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

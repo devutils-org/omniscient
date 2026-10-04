@@ -17,13 +17,13 @@ omn top │ fixture sqlite-commits │ 6.84s                          view: snap
 ├ memory time the machine stalled waiting for it ──────────────────────────────────────────────────────────── ~low det ┤
 │stalled     ····················································▇▇▇▆▆············ 0.29% mean  4.27% peak              │
 │target    ███████████████████████████████████████████████████████████████████████ 4.80MiB held, peak 4.80MiB          │
-├ power watts, from the RAPL counters; per domain by name: in the events only ─────────────────────────────────────────┤
+├ power watts, from the RAPL counters, no capacity so one hue; per domain by name: in the events only ─────────────────┤
 │all         ▆▆▆▆▆▆▆▆▅▅▅▅▅▅▅▅▅▅▆▆▆▆▅▅▇▇█████████████████████▇▇▆▆▆▇▇▇█████████████▆ 124W mean  146W peak  845J          │
-├ disk bytes moved, per device; read apart from written: in the events only ──────────────────────── ~low det degraded ┤
+├ disk bytes moved, per device, speed unknown so one hue; read apart from written: in the events o…─ ~low det degraded ┤
 │253:0       ····················································███▄▄············ 496MiB  peak 1.30GiB/s              │
 │259:0       ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁···▁▁▁▁▁··▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ 61.9MiB  peak 166MiB/s              │
 │          +1 moved nothing: 7:0                                                                                       │
-├ network bytes moved, per interface; in apart from out: in the events only ──────────────────────── ~low det degraded ┤
+├ network bytes moved, per interface, speed unknown so one hue; in apart from out: in the events o…─ ~low det degraded ┤
 │wlan0       ▁▁▁▁▁▁▁▁▃▃▃▁▁···▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▁▁▁▁▁▁▁▁▂▂▂▁▁···▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▁▁▁█ 209KiB  peak 374KiB/s               │
 │tailscale   ········▂▂▂·····▁▁▁▁▁▁▁······▁▁·····▁▁▁▁▁▁·······▁▁▁········▁▁▁▁▁···▅ 141KiB  peak 241KiB/s               │
 │lo          ····················································▁▁▁▁▁············ 2.36KiB  peak 7.88KiB/s             │

@@ -3,15 +3,18 @@
 ┌ ledger -- [0m[1mwhat task 1784901 and 1 more cost over 1.28s of wall-clock[0m ────────────────────────────────────────────────┐[0m
 │[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
 │  [0m[1mcpu time        [0m[2m636ms on cpu[0m     [0m[2m49.7% of one cpu[0m          [0m[2;32m██████████▄▄▄▄▂▁▁▁▁▁▁▁▁▁[0m [0m[35m   ≥18.1ms[0m  [0m[36m~low det[0m            │[0m
-│    1784901 python3 [0m[2m    603ms  ███████████  94.8%[0m                                                                     │[0m
-│    task 1785025    [0m[2m   33.1ms  █            5.21%[0m                                                                     │[0m
+│    1784901 ledger… [0m[2m    603ms  ███████████  94.8%[0m                                                                     │[0m
+│    1785025 python3 [0m[2m   33.1ms  █            5.21%[0m                                                                     │[0m
 │[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
 │    own account     [0m[1m    637ms[0m  [0m[2mwith its descendants, as the scheduler counts them[0m                                     │[0m
 │    machine busy        3.08s  ██           20.7%                                                                     │[0m
+│  [0m[1mblocked time    [0m[2m641ms[0m            [0m[2m0.50 threads[0m              [0m[2;32m           ▁ ▁         █[0m [0m[35m   ≥37.7ms[0m  [0m[36m~low det[0m [0m[33mdegraded[0m   │[0m
+│    1784901 ledger… [0m[2m    641ms  ████████████ 99.9%[0m                                                                     │[0m
+│    1785025 python3 [0m[2m    472µs  ▏            0.07%[0m                                                                     │[0m
 │[0m[1;32m▸ memory held     [0m78.2MiB peak     +64.3MiB from 13.9MiB     [0m[32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁██████████[0m [0m[35m    1.25ms[0m                      │[0m
 │  [0m[1mmemory faulted  [0m17.0k faults     13.3k/s                   [0m[2;3ma total only[0m             [0m[35m   ≥11.1ms[0m  [0m[33m15 late[0m             │[0m
-│    1784901 python3     15.1k  ███████████  88.3%                                                                     │[0m
-│    task 1785025        2.00k  █            11.7%                                                                     │[0m
+│    1784901 ledger…     15.1k  ███████████  88.3%                                                                     │[0m
+│    1785025 python3     2.00k  █            11.7%                                                                     │[0m
 │  [0m[1mI/O syscalls    [0m[2m237 calls[0m        [0m[2m1.84ms inside them[0m        [0m[2m256ns [0m[2;32m▆▄▄▂▂█▃▂▁[0m[2m 131µs[0m    [0m[35m   ≥42.5ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
 │    bytes           [0m[2m  1.63MiB[0m  [0m[2mread, 4.00MiB written[0m                                                                  │[0m
 │  [0m[1mnetwork         [0m[2m2.25MiB moved[0m    [0m[2m2.00MiB out, 256KiB in[0m    [0m[2;32m            █           [0m [0m[35m   ≥43.5ms[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m│[0m
@@ -22,16 +25,13 @@
 │  [0m[1menergy          [0m85.1J machine    66.5W on average          [0m[32m██████████▇▇▇▇█████     [0m [0m[35m   ≥29.7µs[0m                      │[0m
 │    ≈ the target's  [0m[3m    17.6J[0m  [0m[2;3man estimate, not a measurement: its share of the machine's busy cpu, 637ms of 3.08s[0m    │[0m
 │                                                                                                                      │[0m
-│[0m[1m  to know all of this[0m[35m: ≥117ms of omn's cpu, ≥18.4% of what the target spent[0m                                           │[0m
+│[0m[1m  to know all of this[0m[35m: ≥155ms of omn's cpu, ≥24.4% of what the target spent[0m                                           │[0m
 │[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
 │[0m[2;32m memory held -- ↑/↓ another line [0m[2m─────────────────────────────────────────────────────────────────────────────────────[0m│[0m
 │[0m[1mmem.rss via fs:proc:smaps_rollup[0m -- memory held                                                                       │[0m
 │[0m[35m· to know it: 1.25ms of omn's cpu, and 0ns inside the target -- nothing of this collector runs in the target's[0m        │[0m
 │[0m[35mcontext: it reads the kernel's account, or a file, from its own[0m                                                       │[0m
 │· the peak is the highest level read; it went from 13.9MiB at the first read to 78.2MiB at the last                   │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

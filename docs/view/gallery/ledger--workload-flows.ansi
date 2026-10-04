@@ -3,15 +3,18 @@
 ┌ ledger -- [0m[1mwhat task 1783958 and 1 more cost over 1.00s of wall-clock[0m ────────────────────────────────────────────────┐[0m
 │[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
 │[0m[1;32m▸ cpu time        [0m[2m74.4ms on cpu[0m    [0m[2m7.44% of one cpu[0m          [0m[2;32m██████▅▅▅▅▅▅▁▁▁▁▁▁▁▁▁▁▁▁[0m [0m[35m   ≥19.3ms[0m  [0m[36m~low det[0m            │[0m
-│    1783958 python3 [0m[2m   40.4ms  ███████      54.3%[0m                                                                     │[0m
-│    task 1784066    [0m[2m   34.1ms  █████        45.7%[0m                                                                     │[0m
+│    1783958 flows-… [0m[2m   40.4ms  ███████      54.3%[0m                                                                     │[0m
+│    1784066 python3 [0m[2m   34.1ms  █████        45.7%[0m                                                                     │[0m
 │[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
 │    own account     [0m[1m   76.0ms[0m  [0m[2mwith its descendants, as the scheduler counts them[0m                                     │[0m
 │    machine busy        2.05s  ▏            3.71%                                                                     │[0m
+│  [0m[1mblocked time    [0m[2m948ms[0m            [0m[2m0.95 threads[0m              [0m[2;32m          ▅            █[0m [0m[35m   ≥33.0ms[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m│[0m
+│    1783958 flows-… [0m[2m    944ms  ████████████ 99.7%[0m                                                                     │[0m
+│    1784066 python3 [0m[2m   3.21ms  ▏            0.34%[0m                                                                     │[0m
 │  [0m[1mmemory held     [0m14.1MiB peak     +192KiB from 13.9MiB      [0m[32m▁▁▁▁▁▁▁▁▁▁▁█████████████[0m [0m[35m     371µs[0m                      │[0m
 │  [0m[1mmemory faulted  [0m3.95k faults     3.95k/s                   [0m[2;3ma total only[0m             [0m[35m   ≥4.18ms[0m  [0m[33m11 late[0m             │[0m
-│    task 1784066        2.02k  ██████       51.1%                                                                     │[0m
-│    1783958 python3     1.93k  ██████       48.9%                                                                     │[0m
+│    1784066 python3     2.02k  ██████       51.1%                                                                     │[0m
+│    1783958 flows-…     1.93k  ██████       48.9%                                                                     │[0m
 │  [0m[1mI/O syscalls    [0m[2m445 calls[0m        [0m[2m3.38ms inside them[0m        [0m[2m256ns [0m[2;32m▃▃▂▄▅█▂▁▁[0m[2m 131µs[0m    [0m[35m   ≥25.2ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
 │    bytes           [0m[2m  9.63MiB[0m  [0m[2mread, 9.00MiB written[0m                                                                  │[0m
 │  [0m[1mnetwork         [0m[2m5.00MiB moved[0m    [0m[2m4.00MiB out, 1.00MiB in[0m   [0m[2;32m          █             [0m [0m[35m   ≥30.8ms[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m│[0m
@@ -22,7 +25,7 @@
 │  [0m[1menergy          [0m61.7J machine    61.7W on average          [0m[32m▇▇▇▇▇▇███████▇▇▇▇▇      [0m [0m[35m   ≥32.0µs[0m                      │[0m
 │    ≈ the target's  [0m[3m    2.29J[0m  [0m[2;3man estimate, not a measurement: its share of the machine's busy cpu, 76.0ms of 2.05s[0m   │[0m
 │                                                                                                                      │[0m
-│[0m[1m  to know all of this[0m[35m: ≥80.8ms of omn's cpu, ≥106% of what the target spent[0m                                           │[0m
+│[0m[1m  to know all of this[0m[35m: ≥114ms of omn's cpu, ≥150% of what the target spent[0m                                            │[0m
 │[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
 │[0m[2;32m cpu time -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────────[0m│[0m
 │[0m[1mcpu.oncpu_time via bpf:raw_tp[0m -- cpu time, per thread                                                                 │[0m
@@ -33,8 +36,5 @@
 │· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │[0m
 │where it could not be read, of 1783958 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │[0m
 │in microseconds once it was reaped)                                                                                   │[0m
-│· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│[0m
-│own account's                                                                                                         │[0m
-│                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m line  [0m[1mt[0m next task  [0m[1menter[0m the view behind the line            [0m

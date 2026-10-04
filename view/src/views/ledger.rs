@@ -45,7 +45,8 @@ pub const NEEDS: &[Need] = &[
         mode: "trace",
         emit: &["summary"],
         keys: &["task"],
-        stack: None,
+        // The stacks the flame, timebar and lanes ask the same request for.
+        stack: Some("fp"),
         scope: Scope::Target,
         why: "blocked time, per thread: the line that opens the timebar",
     },
@@ -2794,7 +2795,11 @@ mod tests {
             ..Focus::default()
         };
         // The I/O line selected, so its detail is the one drawn.
-        for _ in 0..3 {
+        let io = ITEMS
+            .iter()
+            .position(|spec| spec.resource == "I/O syscalls")
+            .expect("an I/O line");
+        for _ in 0..io {
             app.key(KeyEvent::from(KeyCode::Down));
         }
         let buffer = snapshot::draw_app(&mut app, snapshot::WIDTH, snapshot::HEIGHT);

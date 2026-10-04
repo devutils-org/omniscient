@@ -9,6 +9,7 @@
 │    task 1501528    [0m[2m    9.05s  █            5.99%[0m                                                                     │[0m
 │[0m[2;3m    and 3117 more tasks: 1m44s[0m                                                                                        │[0m
 │[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
+│  [0m[1mblocked time    [0m[2;3mnot in this run: sched.offcpu was not asked for[0m                                                     │[0m
 │  [0m[1mmemory held     [0m[2;3mnot in this run: mem.rss was not asked for[0m                                                          │[0m
 │  [0m[1mmemory faulted  [0m[2;3mnot in this run: mem.faults was not asked for[0m                                                       │[0m
 │  [0m[1mI/O syscalls    [0m[2;3mnot in this run: io.syscall was not asked for[0m                                                       │[0m
@@ -26,7 +27,6 @@
 │[0m[35m· to know it: 424ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this run:[0m│[0m
 │[0m[35m`kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl[0m            │[0m
 │[0m[35mkernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable[0m                 │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

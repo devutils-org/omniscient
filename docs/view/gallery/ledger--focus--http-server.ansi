@@ -4,6 +4,7 @@
 │[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
 │  [0m[1mcpu time        [0m[2m3.09s on cpu[0m     [0m[2m95.2% of one cpu[0m          [0m[2;32m▆▆▇▇███████████████████▇[0m [0m[35m   ≥58.7ms[0m  [0m[36m~low det[0m            │[0m
 │[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
+│  [0m[1mblocked time    [0m[2m20.1ms[0m           [0m[2m0.01 threads[0m              [0m[2;32m ▁▂  ▁  ▁  ▁▁   ▁  ▁▁  █[0m [0m[35m    ≥149ms[0m  [0m[36m~low det[0m [0m[33mdegraded[0m   │[0m
 │  [0m[1mmemory held     [0m--                                                                                                  │[0m
 │[0m[2;3m    nothing of tid 1493226 in this result: its series are keyed task:1493220[0m                                          │[0m
 │  [0m[1mmemory faulted  [0m16.3k faults     5.03k/s                   [0m[2;3ma total only[0m             [0m[35m   ≥28.7ms[0m  [0m[33m59 late[0m             │[0m
@@ -19,7 +20,7 @@
 │  [0m[1menergy          [0m372J machine     115W on average           [0m[32m▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇▇█████ [0m [0m[35m    ≥136µs[0m                      │[0m
 │[0m[2;3m    no estimate for one task: the own account it would be charged by is the whole target's[0m                            │[0m
 │                                                                                                                      │[0m
-│[0m[1m  to know all of this[0m[35m: ≥302ms of omn's cpu, ≥9.27% of what the target spent[0m                                           │[0m
+│[0m[1m  to know all of this[0m[35m: ≥451ms of omn's cpu, ≥13.9% of what the target spent[0m                                           │[0m
 │[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
 │[0m[2;3m    the whole run's, not tid 1493226's: a collector's time is not split per task[0m                                      │[0m
 │[0m[2;32m I/O syscalls -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────[0m│[0m
@@ -35,6 +36,5 @@
 │[0m[35m· to know it: 106ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this run:[0m│[0m
 │[0m[35m`kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl[0m            │[0m
 │[0m[35mkernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable[0m                 │[0m
-│· the time inside them is exact, each kernel row carrying its sum; the distribution's buckets are log2-wide, from the │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m line  [0m[1mt[0m next task  [0m[1menter[0m the view behind the line            [0m

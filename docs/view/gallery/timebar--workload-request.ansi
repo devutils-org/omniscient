@@ -3,27 +3,30 @@
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐[0m
 │ [0m[1;32mthe view's reading[0m[2m  one bar per thread, whole: the run's window[0m                                                      │[0m
 │                                                                                                                      │[0m
-│ [0m[1m▶ first suspect  1530298 server (the program): [0m[1;37mblocked: sleeping 1.08s (92.0% of its wall clock)[0m                     │[0m
+│ [0m[1m▶ first suspect  1530298 server (the program): [0m[1;37mblocked: sleeping 963ms (81.8% of its wall clock)[0m                     │[0m
 │   asleep on something that is not a lock seen here: a timer, a pipe, a socket, a condition                           │[0m
-│   74 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <- _st… │[0m
-│ [0m[2m  decisive: ahead of the next state (12.6ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea…[0m │[0m
+│   the sleep less the futex waits `sched.futex` saw                                                                   │[0m
+│ [0m[2m  decisive: ahead of the next state (121ms) and of what no row read (0ns) -- omn latency's rule, on the view's read…[0m │[0m
 │                                                                                                                      │[0m
-│ [0m[1;32m▸ 1530298 server      [0m[2m├[0m[2;32m█[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 92.0% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░[0m[2m    ┤    1.18s [0m[1;37m ▶ sleep 92.0%     [0m  │[0m
+│ [0m[1;32m▸ 1530298 server      [0m[2m├[0m[2;32m█[0m[2;31m▞▞▞▞▞▞[0m[2;37m░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 81.8% [0m[2;37m░░░░░░░░░░░░░░░░░░░[0m[2m    ┤    1.18s [0m[1;37m ▶ sleep 81.8%     [0m  │[0m
 │   1530389 server      [0m[2m├[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 93.2% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░[0m[2m    ┤    1.18s [0m[1;37m ▶ sleep 93.2%     [0m  │[0m
 │   1530390 server      [0m[2m├[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 92.9% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░[0m[2m    ┤    1.18s [0m[1;37m ▶ sleep 92.9%     [0m  │[0m
 │ [0m[2m                     0 ───────────────────────────┼ 589ms ───────────────────────────┤ 1.18s                        [0m │[0m
-│                        [0m[32m█[0m on cpu   [0m[35m▚[0m run queue   [0m[34m▓[0m I/O   [0m[37m░[0m sleep                                                      │[0m
+│                        [0m[32m█[0m on cpu   [0m[35m▚[0m run queue   [0m[31m▞[0m lock   [0m[34m▓[0m I/O   [0m[37m░[0m sleep                                             │[0m
 │                                                                                                                      │[0m
 │ [0m[1m  state                            source          amount          share   ±         reads  trust                   [0m │[0m
 │ [0m[2m  whole: the run's window                          1.18s           100%    exact                                    [0m │[0m
 │ [0m[32m█ [0m[2mon-cpu                           cpu.oncpu_time  12.6ms          1.07%   exact     0      [0m[36m~low det[0m                 │[0m
 │ [0m[2m    ↳ most-sampled leaf `chacha_permute`: 4 of 15 samples, every thread's                                           [0m │[0m
 │ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   378µs           0.03%   exact     24     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[31m▞ [0m[2mblocked: sleeping, on a futex    sched.offcpu    121ms           10.3%   exact     6      [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[2m    ↳ 121ms waiting in futex(2) over 6 wait(s), from `sched.futex`                                                  [0m │[0m
+│ [0m[2m    ↳ 74 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <-…[0m │[0m
 │ [0m[34m▓ [0m[2mblocked: uninterruptible         sched.offcpu    11.1ms          0.94%   exact     138    [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
 │ [0m[2m    ↳ 87 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <-…[0m │[0m
-│ [0m[37m░ [0m[2mblocked: sleeping                sched.offcpu    1.08s           92.0%   exact     29     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[37m░ [0m[2mblocked: sleeping                sched.offcpu    963ms           81.8%   exact     23     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[2m    ↳ the sleep less the futex waits `sched.futex` saw                                                              [0m │[0m
 │ [0m[2m    ↳ 74 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <-…[0m │[0m
-│ [0m[2m    ↳ 121ms waiting in futex(2) over 6 wait(s): less than half the sleep                                            [0m │[0m
 │ [0m[2m  residue: the whole less the rows                 69.6ms          5.91%   exact     time no row accounts for       [0m │[0m
 │                                                                                                                      │[0m
 │ [0m[2mtask:1530298 is the program's: its main thread, the one whose id is its process's.[0m                                   │[0m
@@ -32,9 +35,6 @@
 │ [0m[2m  latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.[0m                              │[0m
 │ [0m[2mTrust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it[0m  │[0m
 │ [0m[2m  gives up (2).[0m                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓[0m bar  [0m[1md[0m decomposition  [0m[1ms[0m scale  [0m[1menter[0m open                     [0m

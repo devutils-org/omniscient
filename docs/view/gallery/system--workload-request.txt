@@ -17,12 +17,12 @@ omn top │ fixture workload-request │ 1.18s                        view: snap
 ├ memory time the machine stalled waiting for it ──────────────────────────────────────────────────────────── ~low det ┤
 │stalled                  ·······················································  never stalled                       │
 │target      █████████████████████████████████████████████████████████████         2.15MiB held, peak 2.15MiB          │
-├ power watts, from the RAPL counters; per domain by name: in the events only ─────────────────────────────────────────┤
+├ power watts, from the RAPL counters, no capacity so one hue; per domain by name: in the events only ─────────────────┤
 │all                       ██████████████▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇ 102W mean  117W peak  120J          │
-├ disk bytes moved, per device; read apart from written: in the events only ──────────────────────── ~low det degraded ┤
+├ disk bytes moved, per device, speed unknown so one hue; read apart from written: in the events o…─ ~low det degraded ┤
 │259:0                    ███████████████▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁·········▁  18.3MiB  peak 74.5MiB/s             │
 │          +2 moved nothing: 253:0 7:0                                                                                 │
-├ network bytes moved, per interface; in apart from out: in the events only ──────────────────────── ~low det degraded ┤
+├ network bytes moved, per interface, speed unknown so one hue; in apart from out: in the events o…─ ~low det degraded ┤
 │lo                       ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁███████████████▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  66.9KiB  peak 210KiB/s              │
 │wlan0                    ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▁▁▁▁▁▁▁▁▁▁  19.7KiB  peak 66.7KiB/s             │
 │tailscale                ······························▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂··········  14.1KiB  peak 54.2KiB/s             │

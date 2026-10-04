@@ -18,12 +18,12 @@ omn top │ fixture workload-flame │ 2.07s                          view: snap
 ├ memory time the machine stalled waiting for it ──────────────────────────────────────────────────────────── ~low det ┤
 │stalled            ····························································   never stalled                       │
 │target     █████████████████████████████████████████████████████████████████████  13.2MiB held, peak 13.2MiB          │
-├ power watts, from the RAPL counters; per domain by name: in the events only ─────────────────────────────────────────┤
+├ power watts, from the RAPL counters, no capacity so one hue; per domain by name: in the events only ─────────────────┤
 │all                ██████████████████████████████████▇▇▇▇▇▇▇▇██████████████████   112W mean  123W peak  232J          │
-├ disk bytes moved, per device; read apart from written: in the events only ──────────────────────── ~low det degraded ┤
+├ disk bytes moved, per device, speed unknown so one hue; read apart from written: in the events o…─ ~low det degraded ┤
 │259:0              ········████████············································   24.0KiB  peak 104KiB/s              │
 │          +2 moved nothing: 253:0 7:0                                                                                 │
-├ network bytes moved, per interface; in apart from out: in the events only ──────────────────────── ~low det degraded ┤
+├ network bytes moved, per interface, speed unknown so one hue; in apart from out: in the events o…─ ~low det degraded ┤
 │wlan0              ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█████████▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁·········▁▁▁▁▁▁▁▁▁   120KiB  peak 385KiB/s               │
 │tailscale          ················▂▂▂▂▂▂▂▂▂··························▁▁▁▁▁▁▁▁·   41.9KiB  peak 109KiB/s              │
 │          +5 moved nothing: br-bf6c2e1afced br-cb843b6eb1dd docker0 enp38s0 lo                                        │

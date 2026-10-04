@@ -9,6 +9,9 @@ omn top │ fixture workload-system │ 2.01s                         view: snap
 │    user and system apart: on the raw events only, which this run did not keep                                        │
 │    own account         2.08s  with its descendants, as the scheduler counts them                                     │
 │    machine busy        7.65s  ███          27.2%                                                                     │
+│  blocked time    940ms            0.47 threads                   ▅           ▁     █    ≥45.9ms  ~low det degraded   │
+│    1529755 system…     939ms  ████████████ 99.9%                                                                     │
+│    1529839 Thread…    1.28ms  ▏            0.14%                                                                     │
 │  memory held     14.7MiB peak     +820KiB from 13.9MiB      ▁▁▁▁▁▂▂▂▂▂▂▂▂▂▂▂▂███████      585µs                      │
 │  memory faulted  3.98k faults     1.98k/s                   a total only                ≥2.60ms  23 late             │
 │    1529755 system…     2.02k  ██████       50.8%                                                                     │
@@ -26,15 +29,12 @@ omn top │ fixture workload-system │ 2.01s                         view: snap
 │  energy          158J machine     78.6W on average          ▇▇▇▇████████▇▇▇▇▆▆▆▆▆▆      ≥36.0µs                      │
 │    ≈ the target's      43.0J  an estimate, not a measurement: its share of the machine's busy cpu, 2.08s of 7.65s    │
 │                                                                                                                      │
-│  to know all of this: ≥133ms of omn's cpu, ≥6.38% of what the target spent                                           │
+│  to know all of this: ≥179ms of omn's cpu, ≥8.58% of what the target spent                                           │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
 │· the source is not reproducible between two runs of the same workload                                                │
 │· to know it: 23.5ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
 │run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl       │
-│kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable                 │
-│· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │
-│where it could not be read, of 1529755 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line

@@ -5,7 +5,7 @@ omn top │ fixture http-server │ 3.24s                             view: snap
 │                                                                                                                      │
 │ ▶ first suspect  1493220 python3: blocked: sleeping 3.13s (96.7% of its wall clock)                                  │
 │   asleep on something that is not a lock seen here: a timer, a pipe, a socket, a condition                           │
-│   100 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- select.cpython-314-x86_64-linux-gnu.so+0x3fd3 <- lib… │
+│   the sleep less the futex waits `sched.futex` saw                                                                   │
 │   decisive: ahead of the next state (79.5ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
 │                                                                                                                      │
 │ ▸ 1493220 python3     ├█░░░░░░░░░░░░░░░░░░░░░░░ sleep 96.7% ░░░░░░░░░░░░░░░░░░░░░░░░ ┤    3.24s  ▶ sleep 96.7%       │
@@ -13,18 +13,21 @@ omn top │ fixture http-server │ 3.24s                             view: snap
 │   1493224 python3     ├██░░░░░░░░░░░░░░░░░░░░░░░ sleep 96.1% ░░░░░░░░░░░░░░░░░░░░░░░ ┤    3.24s  ▶ sleep 96.1%       │
 │   + 1 thread(s) under 1.00% of the window each: 1493225 ldconfig                                                     │
 │                      0 ───────────────────────────┼ 1.62s ───────────────────────────┤ 3.24s                         │
-│                        █ on cpu   ▚ run queue   ▓ I/O   ░ sleep                                                      │
+│                        █ on cpu   ▚ run queue   ▞ lock   ▓ I/O   ░ sleep                                             │
 │                                                                                                                      │
 │   state                            source          amount          share   ±         reads  trust                    │
 │   whole: the run's window                          3.24s           100%    exact                                     │
 │ █ on-cpu                           cpu.oncpu_time  79.5ms          2.45%   exact     0      ~low det                 │
 │     ↳ most-sampled leaf `link_path_walk`: 179 of 3213 samples, every thread's: the samples are spread, no one funct… │
 │ ▚ runnable                         sched.runqlat   213µs           0.01%   exact     14     2 late ~low det degraded │
+│ ▞ blocked: sleeping, on a futex    sched.offcpu    459µs           0.01%   exact     7      ~low det degraded        │
+│     ↳ 459µs waiting in futex(2) over 7 wait(s), from `sched.futex`                                                   │
+│     ↳ 100 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- select.cpython-314-x86_64-linux-gnu.so+0x3fd3 <-… │
 │ ▓ blocked: uninterruptible         sched.offcpu    54.2µs          0.00%   exact     2      ~low det degraded        │
 │     ↳ 73 % of it from one stack, leaf first: __open_nocancel <- opendir <- libpython3.14.so.1.0+0x2e8d78 <- libpyth… │
-│ ░ blocked: sleeping                sched.offcpu    3.13s           96.7%   exact     13     ~low det degraded        │
+│ ░ blocked: sleeping                sched.offcpu    3.13s           96.7%   exact     6      ~low det degraded        │
+│     ↳ the sleep less the futex waits `sched.futex` saw                                                               │
 │     ↳ 100 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- select.cpython-314-x86_64-linux-gnu.so+0x3fd3 <-… │
-│     ↳ 459µs waiting in futex(2) over 7 wait(s): less than half the sleep                                             │
 │   residue: the whole less the rows                 28.1ms          0.87%   exact     time no row accounts for        │
 │                                                                                                                      │
 │ No decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread    │
@@ -32,9 +35,6 @@ omn top │ fixture http-server │ 3.24s                             view: snap
 │   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │
 │ Trust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it  │
 │   gives up (2); 2 rounds of reads came late: nothing is missing, but the series is not spaced as asked.              │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ bar  d decomposition  s scale  enter open

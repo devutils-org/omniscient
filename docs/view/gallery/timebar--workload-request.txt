@@ -3,27 +3,30 @@ omn top │ fixture workload-request │ 1.18s                        view: snap
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
 │ the view's reading  one bar per thread, whole: the run's window                                                      │
 │                                                                                                                      │
-│ ▶ first suspect  1530298 server (the program): blocked: sleeping 1.08s (92.0% of its wall clock)                     │
+│ ▶ first suspect  1530298 server (the program): blocked: sleeping 963ms (81.8% of its wall clock)                     │
 │   asleep on something that is not a lock seen here: a timer, a pipe, a socket, a condition                           │
-│   74 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <- _st… │
-│   decisive: ahead of the next state (12.6ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
+│   the sleep less the futex waits `sched.futex` saw                                                                   │
+│   decisive: ahead of the next state (121ms) and of what no row read (0ns) -- omn latency's rule, on the view's read… │
 │                                                                                                                      │
-│ ▸ 1530298 server      ├█░░░░░░░░░░░░░░░░░░░░░░ sleep 92.0% ░░░░░░░░░░░░░░░░░░░░░░    ┤    1.18s  ▶ sleep 92.0%       │
+│ ▸ 1530298 server      ├█▞▞▞▞▞▞░░░░░░░░░░░░░░░░░░░ sleep 81.8% ░░░░░░░░░░░░░░░░░░░    ┤    1.18s  ▶ sleep 81.8%       │
 │   1530389 server      ├░░░░░░░░░░░░░░░░░░░░░░ sleep 93.2% ░░░░░░░░░░░░░░░░░░░░░░░    ┤    1.18s  ▶ sleep 93.2%       │
 │   1530390 server      ├░░░░░░░░░░░░░░░░░░░░░░ sleep 92.9% ░░░░░░░░░░░░░░░░░░░░░░░    ┤    1.18s  ▶ sleep 92.9%       │
 │                      0 ───────────────────────────┼ 589ms ───────────────────────────┤ 1.18s                         │
-│                        █ on cpu   ▚ run queue   ▓ I/O   ░ sleep                                                      │
+│                        █ on cpu   ▚ run queue   ▞ lock   ▓ I/O   ░ sleep                                             │
 │                                                                                                                      │
 │   state                            source          amount          share   ±         reads  trust                    │
 │   whole: the run's window                          1.18s           100%    exact                                     │
 │ █ on-cpu                           cpu.oncpu_time  12.6ms          1.07%   exact     0      ~low det                 │
 │     ↳ most-sampled leaf `chacha_permute`: 4 of 15 samples, every thread's                                            │
 │ ▚ runnable                         sched.runqlat   378µs           0.03%   exact     24     ~low det degraded        │
+│ ▞ blocked: sleeping, on a futex    sched.offcpu    121ms           10.3%   exact     6      ~low det degraded        │
+│     ↳ 121ms waiting in futex(2) over 6 wait(s), from `sched.futex`                                                   │
+│     ↳ 74 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <-… │
 │ ▓ blocked: uninterruptible         sched.offcpu    11.1ms          0.94%   exact     138    ~low det degraded        │
 │     ↳ 87 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <-… │
-│ ░ blocked: sleeping                sched.offcpu    1.08s           92.0%   exact     29     ~low det degraded        │
+│ ░ blocked: sleeping                sched.offcpu    963ms           81.8%   exact     23     ~low det degraded        │
+│     ↳ the sleep less the futex waits `sched.futex` saw                                                               │
 │     ↳ 74 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <-… │
-│     ↳ 121ms waiting in futex(2) over 6 wait(s): less than half the sleep                                             │
 │   residue: the whole less the rows                 69.6ms          5.91%   exact     time no row accounts for        │
 │                                                                                                                      │
 │ task:1530298 is the program's: its main thread, the one whose id is its process's.                                   │
@@ -32,9 +35,6 @@ omn top │ fixture workload-request │ 1.18s                        view: snap
 │   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │
 │ Trust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it  │
 │   gives up (2).                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ bar  d decomposition  s scale  enter open

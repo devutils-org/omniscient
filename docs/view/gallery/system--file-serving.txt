@@ -9,10 +9,10 @@ omn top │ fixture file-serving │ 2.58s                            view: snap
 │          not in this run                                                                                             │
 ├ power ───────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │          not in this run                                                                                             │
-├ disk bytes moved, per device; read apart from written: in the events only ───────────────── 2 late ~low det degraded ┤
+├ disk bytes moved, per device, speed unknown so one hue; read apart from written: in the e…─ 2 late ~low det degraded ┤
 │259:0                ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁███▁▁▁▁▁▁▁▁▁▁▁········ 25.9MiB  peak 58.9MiB/s             │
 │          +2 moved nothing: 253:0 7:0                                                                                 │
-├ network bytes moved, per interface; in apart from out: in the events only ───────────────── 2 late ~low det degraded ┤
+├ network bytes moved, per interface, speed unknown so one hue; in apart from out: in the e…─ 2 late ~low det degraded ┤
 │lo                   ████████▃▃▃▃▃▃▃▃▃▅▅▅▅▅▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▃▃▃▆▆▆▆▆▆▆▆▂▂▂········ 224MiB  peak 209MiB/s               │
 │wlan0                ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁············▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁·······▁ 69.9KiB  peak 139KiB/s              │
 │tailscale            ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁············▁▁▁▁▁▁▁▁▁·····················▁ 55.9KiB  peak 113KiB/s              │

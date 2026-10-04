@@ -4,6 +4,7 @@ omn top │ fixture http-server │ 3.24s │ focus: tid 1493226        view: sn
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │  cpu time        3.09s on cpu     95.2% of one cpu          ▆▆▇▇███████████████████▇    ≥58.7ms  ~low det            │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
+│  blocked time    20.1ms           0.01 threads               ▁▂  ▁  ▁  ▁▁   ▁  ▁▁  █     ≥149ms  ~low det degraded   │
 │  memory held     --                                                                                                  │
 │    nothing of tid 1493226 in this result: its series are keyed task:1493220                                          │
 │  memory faulted  16.3k faults     5.03k/s                   a total only                ≥28.7ms  59 late             │
@@ -19,7 +20,7 @@ omn top │ fixture http-server │ 3.24s │ focus: tid 1493226        view: sn
 │  energy          372J machine     115W on average           ▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇▇█████      ≥136µs                      │
 │    no estimate for one task: the own account it would be charged by is the whole target's                            │
 │                                                                                                                      │
-│  to know all of this: ≥302ms of omn's cpu, ≥9.27% of what the target spent                                           │
+│  to know all of this: ≥451ms of omn's cpu, ≥13.9% of what the target spent                                           │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │    the whole run's, not tid 1493226's: a collector's time is not split per task                                      │
 │ I/O syscalls -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────│
@@ -35,6 +36,5 @@ omn top │ fixture http-server │ 3.24s │ focus: tid 1493226        view: sn
 │· to know it: 106ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this run:│
 │`kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl            │
 │kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable                 │
-│· the time inside them is exact, each kernel row carrying its sum; the distribution's buckets are log2-wide, from the │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line

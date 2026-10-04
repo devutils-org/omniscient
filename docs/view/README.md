@@ -267,7 +267,7 @@ holds this table to the code.
 | flame | `cpu.profile` | sample@997hz | stack (stack fp) | target | the on-cpu icicle |
 | flame | `sched.offcpu` | trace | stack (stack fp) | target | the off-cpu icicle |
 | ledger | `cpu.oncpu_time` | poll@250ms | timeline,summary (keys task) | target | cpu time, per thread |
-| ledger | `sched.offcpu` | trace | summary (keys task) | target | blocked time, per thread: the line that opens the timebar |
+| ledger | `sched.offcpu` | trace | summary (keys task) (stack fp) | target | blocked time, per thread: the line that opens the timebar |
 | ledger | `mem.rss` | poll@250ms | timeline,summary | target | memory held |
 | ledger | `mem.faults` | trace | summary | target | memory faulted in |
 | ledger | `io.syscall` | trace | raw,summary,hist | target | bytes read and written, and their latency as the program saw it |

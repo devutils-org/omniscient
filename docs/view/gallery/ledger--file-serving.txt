@@ -3,6 +3,7 @@ omn top │ fixture file-serving │ 2.58s                            view: snap
 ┌ ledger -- what task 1523237 and 1 more cost over 2.58s of wall-clock ────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        not in this run: cpu.oncpu_time was not asked for                                                   │
+│  blocked time    not in this run: sched.offcpu was not asked for                                                     │
 │  memory held     not in this run: mem.rss was not asked for                                                          │
 │  memory faulted  not in this run: mem.faults was not asked for                                                       │
 │  I/O syscalls    888 calls        20.1ms inside them        1.02µs ▅▃▂▂█▅▁▁ 262µs       ≥6.80ms  12 late ~low det deg│
@@ -22,7 +23,6 @@ omn top │ fixture file-serving │ 2.58s                            view: snap
 │cpu.oncpu_time -- cpu time, per thread                                                                                │
 │This run did not ask for it. `omn top` live asks for every line of the sheet; a recording made by another session     │
 │holds what that session asked.                                                                                        │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
