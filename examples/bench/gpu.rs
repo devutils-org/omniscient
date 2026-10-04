@@ -48,6 +48,23 @@ pub struct GpuWorkload {
     /// What bounds it, in words.
     pub regime: &'static str,
     pub args: Vec<String>,
+    /// What an arm that replays every launch runs instead ([`Arm::replays`]),
+    /// with its own bare and control beside it: the same regime, fewer
+    /// launches. `None` runs `args` for every arm.
+    pub replayed: Option<Vec<String>>,
+}
+
+impl GpuWorkload {
+    /// The workload a replaying arm runs, and its baselines with it: the same
+    /// name and regime with the `replayed` arguments, or `None` when every arm
+    /// runs `args`.
+    pub fn scaled(&self) -> Option<GpuWorkload> {
+        Some(GpuWorkload {
+            args: self.replayed.clone()?,
+            replayed: None,
+            ..self.clone()
+        })
+    }
 }
 
 /// The three regimes, sized to take 60 to 100 ms of timed section here: long
@@ -57,18 +74,32 @@ pub struct GpuWorkload {
 /// `launch` is the worst case `gpu.kernel`'s stream named: 50 000 launches,
 /// a kernel every two microseconds. `compute` is the common case: 50 kernels
 /// of about 1.6 ms each.
+///
+/// An arm that replays every launch (`gpu.counters`) runs `launch` with
+/// [`REPLAYED_LAUNCHES`] instead, against a bare run and a control of that
+/// size: at 50 000 launches it took 108 of the GPU step's 117 minutes.
 pub fn gpu_workloads() -> Vec<GpuWorkload> {
     let new = |name, regime, args: &[&str]| GpuWorkload {
         name,
         regime,
         args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        replayed: None,
     };
+    let replayed = REPLAYED_LAUNCHES.to_string();
     vec![
-        new("launch", "launch-bound", &["launches", "50000"]),
+        GpuWorkload {
+            replayed: Some(vec!["launches".to_owned(), replayed]),
+            ..new("launch", "launch-bound", &["launches", "50000"])
+        },
         new("compute", "compute-bound", &["compute", "50", "200000"]),
         new("memory", "memory-bound", &["memory", "200", "64"]),
     ]
 }
+
+/// The launches of the `launch` regime for an arm that replays each one: a
+/// twenty-fifth of the others', which brings a replaying arm from about 108
+/// minutes to about 4, and still a few milliseconds of timed section bare.
+pub const REPLAYED_LAUNCHES: u32 = 2000;
 
 /// How many cpus the GPU workload is given: the first for the launching
 /// thread alone, the rest for every other thread of the process (`gpu.c`).
@@ -139,6 +170,13 @@ impl Arm {
             Arm::Served(method) => method.label(),
             Arm::Nsys(_) => "nsys (reference)".into(),
         }
+    }
+
+    /// Whether the arm runs each kernel launch several times (kernel replay),
+    /// so its cost grows with the launches by orders of magnitude and it runs
+    /// a workload's `replayed` arguments ([`GpuWorkload::scaled`]).
+    pub fn replays(&self) -> bool {
+        matches!(self, Arm::Served(method) if method.source == "gpu.counters")
     }
 
     /// The baseline a served row's tracer is measured against: the control
