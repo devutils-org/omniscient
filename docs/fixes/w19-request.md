@@ -1,0 +1,180 @@
+# The nineteenth wave, stream request
+
+Branch `feat/w19-request`, from `main` at `91a0cef`. `BRIEF.md`, "request --
+what one request costs": the same sheet as the ledger for one unit of work,
+from `net.request` and the join engine: a waterfall of its life by state and
+its share of each resource, held to the `http-server-*` cases' requests,
+whose causes are known.
+
+Files touched, all in the row: `view/src/views/request.rs`,
+`docs/view/request.md`, `docs/view/gallery/request--*`, and this handoff.
+
+## What landed
+
+- **`view/src/views/request.rs`**: the view, replacing the stub. Its declared
+  need is unchanged (`net.request`, trace, raw), so `docs/view/README.md`'s
+  table and `tests/view_model.rs` still hold.
+  - **Every request** on one row: its span (first byte in to last byte out)
+    as a bar of the six states that tile it -- net in, on cpu, run queue,
+    lock/sleep, disk, net out, each its own glyph and colour, so the `.txt`
+    reads without colour -- **all to one scale**, and `mostly` naming the
+    one or two states above a twentieth of it. `↑`/`↓` (`j`/`k`, `g`/`G`)
+    select, `s` sorts slowest first, the list scrolls with the selection.
+  - **The waterfall** of the selected request on its own time axis: the
+    network in before `request__start` and out after `request__done` where
+    they happened, the service between them filled by its states' shares
+    (said under it to be shares, not an order), and **each block request it
+    issued on the device when it was there**, from `io.latency` events that
+    carry its `req` key.
+  - **Where its time went** with the decomposition's evidence grade per state
+    (`IDENTITY`/`KEY`), the lock's waker, the socket; **its share of each
+    resource** (its cpu against its process's whole cpu, its device time
+    against the run's, the part of its disk wait off the device from the
+    `block-io` table, the network either side, its longest sleep and its
+    waker); and **what sets it apart from the other requests**: each state
+    against the median of the others' same state, the two furthest above.
+  - `enter` focuses every view on the request; `l` opens `lanes` on its
+    thread. A focus set elsewhere selects the request once; a pid or tid
+    focus filters the list.
+  - No request: the refusal in its own words where the view would be, or
+    "this run did not ask for net.request", each followed by how to get a run
+    with requests (`omn top -f examples/vertical-one-request.yml`).
+  - Every figure through `trust`: request figures carry `net.request`'s marks
+    (here a `degraded x2` badge, no dimming), disk figures `io.latency`'s
+    (low determinism: dimmed, `~low det`), a live run `live`.
+- **Tests** (`cargo test -p omn-view --lib views::request`, 11):
+  each vertical request is mostly its injected cause; the six states tile
+  each span; block requests go to the request whose id they carry (64 to
+  a002, 32 to a003, none elsewhere, each inside its request's service) and
+  their device time equals the decomposition's `parts`; what sets each
+  request apart is its cause; cell allocation adds up and never overdraws;
+  round ticks; the keys (select, sort keeping the selection, enter, `l`); a
+  focused request is the one drawn; a refusal draws its reason and the way to
+  requests; a live run half way draws the three requests ended so far, as
+  `live`; small terminals (22x6 to 200x60) draw without panicking.
+- **Snapshots**: `request--<fixture>` for all seven fixtures (core's harness),
+  and **`request--vertical-requests--a00{1..5}`**, one per request selected
+  with `↓` (`each_vertical_request_has_its_snapshot`, written through
+  `snapshot::assert_snapshot`, so `OMN_VIEW_BLESS=1` rewrites them like the
+  others).
+- **`docs/view/request.md`**: what it draws, the five requests against their
+  injected causes, what it reads and does not draw, what it does not show,
+  and the verdict.
+
+## Shown versus reasoned
+
+Shown, on the recorded `vertical-requests` run, by the tests above and the
+snapshots:
+
+- The view names each request's injected cause, unprompted, as `mostly` and
+  as "what sets it apart": a001 lock/sleep +40.1 ms (woken by tid 2759758),
+  a002 disk +8.27 ms, a003 lock/sleep +20.1 ms and disk +1.97 ms, a004 net
+  in +30.1 ms, a005 net out +32.7 ms.
+- The block requests the view places on a request's time axis are exactly the
+  ones the join engine counted (64 and 32), and their device time is the
+  `block-io` table's to the nanosecond: the view and the decomposition read
+  the same events and agree.
+- a003's 32 block requests sit at the end of its service, after its lock
+  wait; a005's network out is 28.5 ms blocked in `send` inside the service
+  and 4.21 ms after `request__done`. Both are in the snapshots.
+- `omn top --replay tests/view_fixtures/vertical-requests --headless --view
+  request --size 100x30` draws through the real binary.
+
+Reasoned, not shown:
+
+- **The brief says "held to the `http-server-*` cases"**; the `http-server`
+  fixture's server is `python3 -m http.server`, which fires no request
+  probes, so `net.request` is refused there (core's README says the same).
+  The view is held to the vertical case's server instead, whose requests'
+  causes are injected and known -- the stronger ground truth. On
+  `http-server` it shows the refusal, which is the correct screen.
+- **Live**: shown only through `feed::as_live_until` on the recording, not
+  in a terminal on a running server (no terminal in this shell; `omn top` is
+  refused without one, by design).
+- **Many requests**: the list scrolls and says `+N more ↓`, tested only by
+  drawing the five-request fixture in 30 rows; no fixture has hundreds of
+  requests.
+
+## What I could not do, and why
+
+- **Place the states inside a request in time.** `net.request` keeps the sums
+  per state, not their order, so the service bar is shares, said so on
+  screen. Filed below.
+- **Declare `io.latency` as a need.** Adding it to `NEEDS` changes
+  `docs/view/README.md`'s table (core's file, held by
+  `tests/view_model.rs`). The view reads it when the run holds it -- the
+  vertical session asks it; live `omn top` asks it for the heatmap -- and
+  says so when the run lacks it. Filed below.
+- **Bytes per request on the network**: not in `net.request`. Filed below.
+
+## Privileged runs wanted
+
+None. The view reads recordings; nothing it does needs a capability beyond
+what `make` grants, and it changes no machine state.
+
+## Decision lines for DECISIONS.md
+
+- **The request view draws the states inside a request by share, never in
+  sequence**: `net.request` adds a request's time up by state in the kernel
+  and keeps the sums, so an order on screen would be invented. Only what was
+  timed is placed in time: the network before and after the request, and
+  each block request it issued.
+- **A view may read a source it did not declare, when the run holds it, and
+  says where the run lacks it**: the request view reads `io.latency`'s
+  `req`-keyed events beside `net.request`; its declared needs stay what it
+  cannot draw without, so a run without block latency still draws every
+  request.
+- **What sets a request apart is measured against its siblings, not
+  declared**: each state against the median of the other requests' same
+  state, shown only above a twentieth of the request's span, the two
+  largest. On the vertical case it names every injected cause.
+
+## Needs from another stream
+
+- **Core, `docs/view/README.md`**: the request row could say that the view
+  also reads `io.latency`'s raw events when the run holds them (for the block
+  requests each request issued, by its `req` key). Or core adds an optional
+  need to `Need` (drawn when present, never asked for alone), and the request
+  view declares `io.latency` through it.
+- **Core, fixtures**: a recording with many requests (the vertical server
+  run with a few hundred requests, mixed causes) would test the list's
+  scrolling and the "apart" median on a real population rather than five.
+- **The `net.request` collector's owner (coordinator: `src/bpf/request.rs`,
+  `src/collect/net/request.rs`)**: two attributes would let the view draw
+  more without inventing anything: the bytes received and sent per request
+  (for its share of the network), and the start of its longest sleep (so the
+  lock wait, the one state with a named cause, can be placed on the time
+  axis). The order of all states would need a per-request log of
+  transitions, which is a larger change.
+
+## The suite
+
+While iterating: `cargo test -p omn-view --lib views::request` (11 pass),
+`cargo test --test view_snapshots request`, and `cargo clippy -p omn-view
+--all-targets -- -D warnings` (clean).
+
+Before the last commit, after `make` (capabilities granted), on a machine
+shared with the other streams (load average 22 to 47):
+
+- `make check`: red in `tests/runner.rs` only --
+  `a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`
+  and `a_source_attached_for_one_phase_counts_that_phase_and_nothing_of_the_other`.
+  Both are in `docs/open-findings.md`. Rerun alone once: the second passes;
+  the first fails again (113 951 short against its ring's 109 373), which the
+  open finding "the ring-loss test is red on a quiet machine too" already
+  says: throttles are not carried per ring.
+- `cargo test --workspace --no-fail-fast`: **2372 passed, 5 failed, 11
+  ignored**. None of the five is in `view/` or reads it:
+  - `runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`
+    -- the open finding above;
+  - `scenario_proc::defect_1_the_first_reading_of_a_launched_target_is_of_the_program`
+    and `defect_2_the_last_reading_of_a_launched_target_is_one_the_program_was_alive_for`
+    -- rerun alone once: pass;
+  - `unwind::dwarf_recovers_the_whole_tree_of_a_build_without_frame_pointers`
+    -- rerun alone once: pass;
+  - `cases::every_case_names_its_known_cause_both_ways` -- rerun alone once:
+    fails again (276 s, `cpu.profile` with 13 late ticks under the load). It is
+    in `docs/open-findings.md` (`http-server-stdlib`'s cost against its
+    budget); it measures the machine's own cases and touches nothing of this
+    branch.
+- Every `view_*` test and every `omn-view` unit test passed in both runs.
