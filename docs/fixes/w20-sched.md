@@ -168,5 +168,5 @@ scripts/bench.sh backends   # the cost table; sched.wakeup's `cost: med` re-chec
   the values to the table and says so.
   Shown: 40400 hard and 10731 soft over 79959 reads; and with the collector
   mutated to never push `irq`, the test fails (`0 wakeups named a hard
-  interrupt`, "79959 direct reads from the disk, and no wakeup named a hard
+  interrupt`, "71135 direct reads from the disk, and no wakeup named a hard
   interrupt"), then passes again with the collector restored.
