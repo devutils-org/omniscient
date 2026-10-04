@@ -1,32 +1,30 @@
 [0m[1momn top[0m │ fixture http-server │ 2.84s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥16.1%[0m[35m │ target 92.0% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake [0m[1;7m 9 flows [0m                                [0m
 ┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐[0m
-│[0m[3mNot drawn yet. What this view needs, and what this run holds of it:[0m                                                   │[0m
-│                                                                                                                      │[0m
-│[0m[1mnet.socket               [0m[2m86 events via bpf:fentry [raw,hist][0m [0m[36m~low det[0m [0m[33mdegraded x2[0m                                     │[0m
-│[0m[2m                         bytes per socket[0m                                                                             │[0m
-│[0m[1mnet.bytes@system         [0m[2m84 events via fs:proc [timeline,summary][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                   │[0m
-│[0m[2m                         bytes per interface[0m                                                                          │[0m
-│[0m[1mio.syscall               [0m[2m48 events via bpf:fentry [summary,hist][0m [0m[36m~low det[0m [0m[33mdegraded x2[0m                                 │[0m
-│[0m[2m                         bytes per file[0m                                                                               │[0m
-│[0m[1mio.bytes@system          [0m[2m36 events via fs:proc [timeline,summary][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                   │[0m
-│[0m[2m                         bytes per device[0m                                                                             │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
+│pid 2758953 over 2.84s   [0m[2;32m28.3MiB[0m[2m sent, [0m[2;36m1.76KiB[0m[2m received   [0m[32m█[0m out [0m[36m█[0m in [0m[90m█[0m the machine's                                  │[0m
+│[0m[1;37m network [0m[37m· [0m[1;37mnet.socket[0m[37m bpf:fentry [0m[36m~low det[0m[37m [0m[33mdegraded x2[0m[37m · [0m[1;37mnet.bytes[0m[37m fs:proc [0m[36m~low det[0m[37m [0m[33mdegraded[0m[37m ──────────────────────────[0m│[0m
+│[0m[2;3m         thread[0m             [0m[2;3msocket[0m                                             [0m[2;3mstack[0m         [0m[2;3minterface, the machine's[0m │[0m
+│Thread-1 (proce [0m[2;37m┃[0m[2;32m█████████[0m[32m┃[0m[1;32m▶inet :59936   [0m[2;37m▅▅█▆█▆▆█[0m[2;32m ↑28.3MiB[0m[2;36m ↓1.76KiB[0m   [0m[32m┃[0m[2;32m█████████[0m[37m┃[0m[2;90m█████████┃[0m [0m[1mlo       [0m[2m56.6MiB[0m [0m[2;37m▆▆█▆█▄▆▆[0m│[0m
+│[0m[2m    tid 2758974[0m [0m[2;37m┃[0m[2;32m█████████[0m[32m┃[0m  [0m[2m9.95MiB/s, 176 calls, 47.8µs each[0m         [0m[32m┃[0m[2;32m█████████[0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                [0m[2;37m┃[0m[2;32m█████████[0m[32m┃[0m                                            [0m[32m┃[0m[2;32m█████████[0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                [0m[2;37m┃[0m[2;32m█████████[0m[32m┃[0m                                            [0m[32m┃[0m[2;32m█████████[0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                [0m[2;37m┃[0m[2;32m█████████[0m[32m┃[0m                                            [0m[32m┃[0m[2;32m█████████[0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                [0m[2;37m┃[0m[2;32;46m▀▀▀▀▀▀▀▀▀[0m[32m┃[0m                                            [0m[32m┃[0m[2;32;46m▀▀▀▀▀▀▀▀▀[0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m [0m[1mwlan0    [0m[2m6.78KiB[0m [0m[2;37m▁▂█▃▅ ▂ [0m│[0m
+│[0m[2msockets 28.3MiB[0m -> [0m[2minterfaces 56.6MiB[0m[1;2m = 2.00x[0m[2m · 5 interfaces idle · lo counts a byte twice; sockets are not tied to in[0m│[0m
+│[0m[1;37m storage [0m[37m· [0m[1;37mio.syscall[0m[37m bpf:fentry [0m[36m~low det[0m[37m [0m[33mdegraded x2[0m[37m · [0m[1;37mio.bytes[0m[37m fs:proc [0m[36m~low det[0m[37m [0m[33mdegraded[0m[37m ───────────────────────────[0m│[0m
+│[0m[2;3m         thread[0m             [0m[2;3mfile[0m                                               [0m[2;3mcache[0m         [0m[2;3mdevice, the machine's[0m    │[0m
+│ [0m[1mbytes per file: not in this run[0m                                                   [0m[2mno device moved a byte in this run[0m │[0m
+│ [0m[2mio.syscall is in this run as a summary and a histogram: latency per[0m               [0m[2m(3 idle)[0m                           │[0m
+│ [0m[2mthread, which carries no bytes. Its `raw` rows (per descriptor) or[0m                                                   │[0m
+│ [0m[2mio.fs's (per file) do.[0m                                                                                               │[0m
+│ [0m[2mdocs/view/flows.md has the session that draws it.[0m                                                                    │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
@@ -36,5 +34,7 @@
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
+│[0m[32m▶ socket 17490 (inet, peer port 59936): [0m[2;32m28.3MiB sent in 150 calls, 9.94MiB/s[0m; [0m[2;36m1.76KiB received in 26 calls, 633B/s[0m    │[0m
+│[0m[2mpid 2758953, thread 2758974 -- enter narrows every view to it[0m                                                         │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
-[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help                                                                   [0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m socket or file  [0m[1menter[0m focus its thread                       [0m
