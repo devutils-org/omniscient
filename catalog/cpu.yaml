@@ -175,6 +175,15 @@
        one tick off: the first increment after the attach can reach back to
        the tick before it, and a thread on a cpu at the end is short by the
        time since its last tick."
+    - "Through `fs:proc` the series is the process alone: `utime` and `stime`
+       in `/proc/<pid>/stat` are its own threads', so what a launched program
+       starts -- a shell's commands, a build driver's compilers -- is in no
+       reading; their time reaches the parent's `cutime` only as it waits for
+       them, and this backend does not read it. And a launched program is
+       reaped before the run's closing read, so its cpu since the last poll,
+       up to one interval, is in no reading either. The program's exit in the
+       results carries the exact total, `cpu_ns`, from the reap (`wait4`),
+       its waited-for children included."
 
 - id: cpu.context_switches
   family: cpu
