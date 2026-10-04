@@ -914,9 +914,24 @@ impl Cgroup {
             let delegated = read(dir.join("cgroup.subtree_control"))
                 .is_some_and(|controllers| controllers.split_whitespace().any(|c| c == "memory"));
             if delegated {
-                let ours = dir.join(format!("omn-cross-machine-{}.scope", std::process::id()));
-                if std::fs::create_dir(&ours).is_ok() {
-                    return Ok(Self { dir: ours });
+                // Named per call: two tests of this binary each make one, and a
+                // shared name made the second read an existing directory as a
+                // machine that does not delegate.
+                static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let call = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let ours = dir.join(format!(
+                    "omn-cross-machine-{}-{call}.scope",
+                    std::process::id()
+                ));
+                match std::fs::create_dir(&ours) {
+                    Ok(()) => return Ok(Self { dir: ours }),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        return Err(format!(
+                            "{} is taken, by a run of this test that did not remove it",
+                            ours.display()
+                        ));
+                    }
+                    Err(_) => {}
                 }
             }
             if !dir.pop() {

@@ -153,6 +153,16 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Saturate(args) => saturate(args),
         Command::Diff(args) => diff(args),
         Command::Top(args) => top(*args),
+        Command::Join(args) => match omn::cli::join(&args) {
+            Ok(out) => {
+                print!("{out}");
+                Ok(ExitCode::SUCCESS)
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                Ok(ExitCode::from(EXIT_REJECTED))
+            }
+        },
     }
 }
 

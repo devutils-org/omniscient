@@ -586,6 +586,40 @@ fn check_backend_targets(entry: &Entry) -> Result<(), ParseError> {
     Ok(())
 }
 
+/// A backend declared `equivalent` declares no cheaper band than a backend
+/// above it in the chain serving a target it serves. A budget degrades down
+/// the chain to pay less; an equivalent that claimed to cost less than what it
+/// stands in for, for the same targets, would be stepped onto and keep paying
+/// the same -- or the band above it is wrong. Either way one of the two lines
+/// is false, and the loader is where a chain's other invariants are held
+/// (moved here from `tests/bench_bands.rs`, which held it of the embedded
+/// catalog alone).
+fn check_equivalent_costs(entry: &Entry) -> Result<(), ParseError> {
+    let served = |backend: &Backend| -> BTreeSet<TargetKind> {
+        TargetKind::ALL
+            .into_iter()
+            .filter(|kind| entry.backend_target_support(backend, *kind) != TargetSupport::No)
+            .collect()
+    };
+    for (at, fallback) in entry.backends.iter().enumerate() {
+        if !fallback.equivalent {
+            continue;
+        }
+        let theirs = served(fallback);
+        for above in &entry.backends[..at] {
+            if fallback.cost < above.cost && !served(above).is_disjoint(&theirs) {
+                return Err(ParseError::new(format!(
+                    "catalog entry `{}`: `{}` is declared equivalent and declares `{}`, under \
+                     `{}`'s `{}` for a target both serve: a budget would degrade onto it and \
+                     keep paying the same",
+                    entry.id, fallback.id, fallback.cost, above.id, above.cost
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The same two directions for `filter_fields`: a backend cannot carry a field
 /// the entry never offers, and a field the entry offers has to be carried by
 /// some backend or it is a predicate that can only ever empty a series.
@@ -899,6 +933,7 @@ impl Catalog {
             check_backend_modes(entry)?;
             check_backend_keys(entry)?;
             check_backend_units(entry)?;
+            check_equivalent_costs(entry)?;
             check_requirement_globs(entry)?;
         }
         let catalog = Self { entries };
@@ -1088,6 +1123,58 @@ mod tests {
         // And it reads back from the catalog's own spelling.
         let yaml = serde_norway::to_string(&base.backends[1]).unwrap();
         assert!(yaml.contains("unit: ns"), "{yaml}");
+    }
+
+    /// The rule's ground truth is the chain: `io.size`'s `bpf:tp` stands in
+    /// for `bpf:raw_tp` as an equivalent. Made cheaper than its head on a
+    /// target both serve, it is refused; as dear, dearer, degraded rather than
+    /// equivalent, or on a disjoint target, it is not.
+    #[test]
+    fn an_equivalent_backend_cheaper_than_what_it_stands_in_for_is_refused() {
+        let io_size = catalog().get(&"io.size".parse().unwrap()).unwrap().clone();
+        assert_eq!(io_size.backends[0].id, "bpf:raw_tp");
+        assert!(io_size.backends[1].equivalent);
+        let load = |fallback: Cost, equivalent: bool, disjoint: bool| {
+            let mut entry = io_size.clone();
+            entry.backends[0].cost = Cost::High;
+            entry.backends[1].cost = fallback;
+            entry.backends[1].equivalent = equivalent;
+            if !equivalent {
+                entry.backends[1].degraded = Some("test".into());
+            }
+            if disjoint {
+                // The head serves the system alone, the equivalent every
+                // other target -- none of which falls back onto the system --
+                // so the entry's targets are all still served.
+                let (system, others): (Vec<_>, Vec<_>) = io_size
+                    .supported_targets()
+                    .into_iter()
+                    .partition(|kind| *kind == TargetKind::System);
+                assert_eq!(system.len(), 1, "`io.size` serves the system");
+                let some = |kinds: &[TargetKind]| {
+                    Some(
+                        kinds
+                            .iter()
+                            .map(|kind| (*kind, io_size.target_support(*kind)))
+                            .collect::<BTreeMap<_, _>>(),
+                    )
+                };
+                entry.backends[0].targets = some(&system);
+                entry.backends[1].targets = some(&others);
+            }
+            Catalog::from_entries(vec![entry]).map(|_| ())
+        };
+        let error = load(Cost::Low, true, false).unwrap_err().to_string();
+        assert!(
+            error.contains("`bpf:tp` is declared equivalent and declares `low`")
+                && error.contains("`bpf:raw_tp`'s `high`"),
+            "{error}"
+        );
+        assert!(load(Cost::High, true, false).is_ok());
+        assert!(load(Cost::Extreme, true, false).is_ok());
+        assert!(load(Cost::Low, false, false).is_ok());
+        let disjoint = load(Cost::Low, true, true);
+        assert!(disjoint.is_ok(), "{disjoint:?}");
     }
 
     #[test]

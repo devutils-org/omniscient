@@ -3233,6 +3233,74 @@ joins:
         at_the_agent,
         "the query tier over the stored run and the agent tier over the run disagree"
     );
+
+    // The same, through the command: `omn join` over the stored run, with the
+    // session file itself as the rules, answers each rule what the agent tier
+    // did -- the agent-tier rule included, since over a stored run every rule
+    // is at the query tier.
+    let dir = std::env::temp_dir().join(format!("omn-join-engine-{}-stored", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    struct Gone(PathBuf);
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _gone = Gone(dir.clone());
+    let stored = dir.join("results.json");
+    std::fs::write(&stored, &output.stdout).unwrap();
+    let rules = dir.join("session.yml");
+    std::fs::write(&rules, SESSION).unwrap();
+    let joined = Command::new(BINARY)
+        .arg("join")
+        .arg("-f")
+        .arg(&rules)
+        .arg(&dir)
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        joined.status.success(),
+        "{}",
+        String::from_utf8_lossy(&joined.stderr)
+    );
+    let answered: serde_json::Value = serde_json::from_slice(&joined.stdout).unwrap();
+    let answered: Vec<join::Correlation> =
+        serde_json::from_value(answered["joins"].clone()).expect("the command's joins");
+    assert_eq!(answered.len(), 2, "{answered:?}");
+    for correlation in answered {
+        assert_eq!(
+            join::Correlation {
+                rule: at_the_agent.rule.clone(),
+                ..correlation
+            },
+            at_the_agent,
+            "`omn join` over the stored run and the agent tier over the run disagree"
+        );
+    }
+
+    // A rule whose side the run did not store is refused with the reason, not
+    // answered with nothing.
+    let unstored = dir.join("unstored.yml");
+    std::fs::write(
+        &unstored,
+        "{id: unstored, from: proc.threads, to: io.latency, via: task, match: eq}",
+    )
+    .unwrap();
+    let refused = Command::new(BINARY)
+        .arg("join")
+        .arg("-f")
+        .arg(&unstored)
+        .arg(&stored)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(2), "{said}");
+    assert!(
+        said.contains("io.latency") && said.contains("no result in the stored run"),
+        "{said}"
+    );
 }
 
 /// A rule at the kernel tier, which no match kind serves, and one at the

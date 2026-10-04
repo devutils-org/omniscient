@@ -37,6 +37,10 @@ omn \- one vocabulary for system observability
 .br
 .B omn diff
 .I before after
+.br
+.B omn join
+.B \-f
+.I rules results
 .SH DESCRIPTION
 .B omn
 describes a measurement along five axes and refuses the combinations that cannot
@@ -194,6 +198,21 @@ prints the session the question is asked through and exits: an ordinary
 session, which
 .B omn \-f
 runs to print the tables the answer is read from.
+.TP
+.B join \-f \fIrules results\fR
+Applies join rules to a stored run: the query tier, after the run.
+.I rules
+is a session file's \fBjoins:\fR, a list of rules or one rule, in YAML or
+JSON; every rule in it is applied, whatever its \fBtier:\fR says.
+.I results
+is a run's \fIresults.json\fR or the directory it was written to with
+.BR \-o ,
+and each side of a rule must have been stored with \fB\-e raw\fR. Prints the
+correlations as a run prints its joins, in
+.B \-\-format
+text, json, yaml or toml. A rule the stored run cannot answer -- a side with no
+result, or one stored without \fBraw\fR -- refuses the command with exit 2
+rather than being left out.
 .SH OPTIONS
 .SS Target
 .TP
@@ -557,6 +576,18 @@ onto a \fBdrained\fR source, whose events are sums of blocks.
 .B between
 A polled total's change between two readings is credited to the states that
 opened or closed in that interval. \fBTEMPORAL\fR by construction.
+.PP
+A rule's \fBtier:\fR says where it is applied.
+.B agent
+(the default) applies it in this process when the run ends, over the events
+collected.
+.B query
+applies it after the run, over the stored run's \fBraw\fR output: the run
+refuses such a rule unless both of its sides are stored with \fBraw\fR, and
+.B omn join
+applies it.
+.B kernel
+is refused with the reason: no match kind has a program in the kernel yet.
 .SS Decompositions
 A \fBdecompose:\fR block splits a whole into parts, per key:
 .PP
@@ -931,6 +962,12 @@ Which function a change made slower:
 omn cpu.profile \-m sample@997hz \-e stack \-\-stack fp \-\-format json \-o before \-\- ./old
 omn cpu.profile \-m sample@997hz \-e stack \-\-stack fp \-\-format json \-o after \-\- ./new
 omn diff before after
+.EE
+.TP
+A join applied after the run, to what the run stored:
+.EX
+omn \-f session.yml \-\-format json \-o run
+omn join \-f session.yml run
 .EE
 .TP
 Write a session down for a machine other than this one:
