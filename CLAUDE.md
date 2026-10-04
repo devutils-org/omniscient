@@ -97,12 +97,16 @@ a password blocks forever wherever nobody is there to type one, and "nobody is
 there" is not the same as "no terminal" -- a pty with no human behind it is what
 a build hook, a CI runner and an agent shell all have. To stop needing sudo at
 all, one narrowly scoped line under
-`visudo -f /etc/sudoers.d/omniscient`, which permits exactly that command on
+`visudo -f /etc/sudoers.d/omniscient`, which permits exactly those commands on
 the checkout and its per-stream worktrees and nothing else:
 
 ```
-<user> ALL=(root) NOPASSWD: /usr/bin/setcap cap_bpf\,cap_perfmon+ep /path/to/omniscient*/target/debug/omn
+<user> ALL=(root) NOPASSWD: /usr/bin/setcap cap_bpf\,cap_perfmon+ep /path/to/omniscient*/target/debug/omn, /usr/bin/setcap cap_bpf\,cap_perfmon+ep /path/to/omniscient*/target/release/omn
 ```
+
+The capabilities go on `omn` alone, debug and release builds: `omn-mcp`
+collects through the `omn` beside it and needs no line of its own
+(`DECISIONS.md`, "one privilege model").
 
 The comma is escaped and the path absolute on purpose (`docs/open-findings.md`
 finding 10); `make` tries that spelling first.

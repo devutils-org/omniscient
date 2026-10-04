@@ -124,7 +124,7 @@ answer from each.
 |---|---|---|
 | The runner closes the window | The last round of `sample` calls is the closing read; `Collector::stop` returns what is already buffered and does not read again | `run_all` reads every collector and *then* asks whether the run is over, so the last round already lands at the end of the window. `net/dev.rs` reads once more in `stop` on the grounds that the last interval would otherwise be dropped, and it is not: measured, what is left for that read to cover is tens of microseconds of a 100 ms tick, and the point it produces sits at the same offset as the previous one with a delta of zero. `io` and `power` refuse to read there for exactly that reason. A `count` window is the exception -- it has no series, and its single measurement *is* the closing read. `the_runner_closes_the_window` measures the leftover rather than asserting the rule. |
 | A throttled period is not a dropped event | `Losses::throttled`, counted apart from `Losses::dropped` | A drop count is a number of events the ring reported losing. A throttle is the kernel declining to deliver for a while, and how many events happened inside that while is not recorded anywhere. `sched.switches` added one to `dropped` per throttle, which states a count nobody has; `mem.faults` ignored throttling entirely, so a throttled run read as complete. Counted apart, a run that hit `kernel.perf_event_max_sample_rate` says it cannot tell how much it lost, which is the true answer. |
-| "Valid, and not built" is exit 3, wherever it is discovered | `NoCollector` and `UnsupportedTarget` both exit 3 | The two exits mean different things to a caller: exit 1 is a problem with this run, and retrying or raising privileges may help; exit 3 is a problem with this build, and neither will. *Seventeenth wave: decided to read "... on a machine that lacks nothing it needs" once a backend both unbuilt and missing a requirement is the machine's on every path; that change is decided and not yet in the code ("Settled in the seventeenth wave").* `mem.heap.alloc --pid` is a request the catalog declares -- a uprobe serves it -- and that this build cannot answer, and it exited 1, indistinguishable from a counter that failed to open. The same refusal is also now asked *before* "pass --duration", because advice for a request that cannot work is a dead end. |
+| "Valid, and not built" is exit 3, wherever it is discovered, on a machine that lacks nothing the backend needs | `NoCollector` and `UnsupportedTarget` both exit 3 | The two exits mean different things to a caller: exit 1 is a problem with this run, and retrying or raising privileges may help; exit 3 is a problem with this build, and neither will. *Eighteenth wave: a backend both unbuilt and missing a requirement here is the machine's on every path ("one order for unbuilt and missing", `e04ef9a`); a test that wants the build's refusal pins a backend whose requirements hold, or branches on what `omn list` probes for it.* `mem.heap.alloc --pid` is a request the catalog declares -- a uprobe serves it -- and that this build cannot answer, and it exited 1, indistinguishable from a counter that failed to open. The same refusal is also now asked *before* "pass --duration", because advice for a request that cannot work is a dead end. |
 
 ---
 
@@ -289,7 +289,7 @@ waits land within what the program timed itself.
 | Decision | Choice | Reason |
 |---|---|---|
 | Who answers a machine question asked through MCP | **The `omn` binary that would run the session.** `omn-mcp` probes nothing and holds no capability; every machine-dependent answer names the binary and the capabilities on it. Validation, which is machine-independent, runs on the library. | A probe answers for the process that asks. A copy of `omn` without its capabilities answered 52 usable sources against 93, silently -- the relink failure, one binary over. |
-| Whether a model may run a session | **Only when the person who started the server passed `--allow-run DURATION`**, for at most that duration, with a required budget, writing only under the server's directory -- and **never a session that launches a program**. *Amended in the thirteenth wave: a launching session the person approved, below.* | Asking for a measurement is what phase 11 grants; running a program a model chose is changing the machine (boundary 5). The opt-in has `make CAPTURE=1`'s shape: the power closest to acting is granted by a person, when asked. |
+| Whether a model may run a session | **Only when the person who started the server passed `--allow-run DURATION`**, for at most that duration, with a required budget, writing only under the server's directory -- and **never a session that launches a program**. *Amended in the thirteenth wave: a launching session the person approved, below. Amended in the eighteenth wave: with an optional budget, and every run says what a budget is a percentage of (`budget_against`); the duration stays the server's bound.* | Asking for a measurement is what phase 11 grants; running a program a model chose is changing the machine (boundary 5). The opt-in has `make CAPTURE=1`'s shape: the power closest to acting is granted by a person, when asked. |
 | What an answer is | **The documents as written, regrouped per request**, with each request's losses, shortfalls, degradations, unverified requirements and timestamp error restated first, and two additions only: `evidence_means` beside every evidence level, and `elided` where raw events were cut, counted in `missing`. | Every field a shaped answer leaves out is a place a shortfall falls through; and `IDENTITY` and `TEMPORAL` are one word each, so what each establishes is written beside it. |
 
 `docs/mcp.md` has the protocol, the checks (1346 numbers matched key by key
@@ -767,7 +767,7 @@ one order for "unbuilt" and "missing", and the GPL-2.0 text.
 | Where perf-map symbols land | **First, as their own stream, read under `--symbols local`** (and so `debuginfod`), not behind a new rung. | Without them a CPython case can only check that the verdict says it cannot see; a `/tmp/perf-<pid>.map` is a file the target wrote on this machine and asks nothing of anyone. Landed: `stack_capture::a_python_function_is_named_in_the_profile_under_x_perf`. |
 | The GPL-2.0 text (was open) | **Ships**: `LICENSES/GPL-2.0-only.txt`, installed under `share/doc/omn/LICENSES/` by `make install` and packed by `scripts/release.sh`; the README's licence section names it. | `src/bpf` is `MIT OR GPL-2.0`, and an option whose text is absent is half an offer. `make dist-verify`: exactly the nine paths `release.sh list` names (core). |
 | The network namespace beside an interface's index (was open) | **Part of the identity**, `iface#<netns>:<index>` (`iface:<netns>:<name>` with no index). A producer that reads in this process's namespace writes this one's; `net.qdisc` writes the device's own, `dev->nd_net.net->ns.inum`, read in the kernel. Another namespace's interface is another key: counted unmatched or uncredited and labelled `iface:<name>@netns:<inode>`, never credited to this namespace's, and not refused, since a `--system` run legitimately sees every namespace's devices. | An index is per namespace and `net.qdisc` reads them all: 2000 of 2000 packets on another namespace's lo were credited to this one's, and are now 2000 uncredited and keyed by their namespace (engine; run by hand and as a test applied and reverted, filed for `tests/join_engine.rs`). `join::tests::another_namespaces_interface_of_the_same_index_is_not_credited_to_this_ones`, `bpf::net_qdisc::tests::an_interface_target_is_compared_with_its_namespace`. |
-| One order for "unbuilt" and "missing" (was open) | **The chain's, on every path**: a backend both unbuilt and missing a requirement here is the machine's (exit 1) for the walk, a pin and the key hint alike. *"Valid, and not built" is exit 3* then holds on a machine that lacks nothing the backend needs. **Decided, not yet in the code**: `1aa114f` (core) is reverted on `main` (`4c13181`) until it lands with the eleven tests that pin an unbuilt backend to reach exit 3 (`docs/fixes/w17-core.md`, section 2). | One request exited 1 or 3 by the path that reached it. Until it lands, the forced path still asks the build first, and `scenario_net`'s `net.hwts` test still accepts both codes. |
+| One order for "unbuilt" and "missing" (was open) | **The chain's, on every path**: a backend both unbuilt and missing a requirement here is the machine's (exit 1) for the walk, a pin and the key hint alike. *"Valid, and not built" is exit 3* then holds on a machine that lacks nothing the backend needs. **Landed in the eighteenth wave** (`e04ef9a`, `1aa114f` cherry-picked with its eleven tests, and the pinned `net.hwts` twin in `267842a`; "Settled in the eighteenth wave"). | One request exited 1 or 3 by the path that reached it. |
 
 **Symbols** (`docs/fixes/w17-symbols.md`):
 
@@ -817,24 +817,140 @@ one order for "unbuilt" and "missing", and the GPL-2.0 text.
 
 ---
 
+## Settled in the eighteenth wave
+
+What was decided before the wave (`docs/briefs/wave-18-findings.md`,
+"Decided before this wave") and what the twelve streams settled, from the
+decision lines of their handoffs (`docs/fixes/w18-*.md`). Two lines open after
+the seventeenth wave close here: which task the triage decomposes, and one
+order for "unbuilt" and "missing", now in the code. The phase 6 criterion
+stays open, below.
+
+**Decided before the wave**, each landed by the stream named:
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Which task the triage decomposes (was open) | **The main thread, then the task that ran in its largest row when that row is a sleep or a futex wait**: a child, in the wait's place, when the blocking stack names a wait for a child (`wait4`, `waitpid`, `waitid`, `wait3`, `wait`) or the child was busy for a quarter of the block; another thread of the process, beside the block, when it was busy (on a cpu or queued) for a quarter of it; a task no source placed in a process, in the block's place, said unplaced rather than guessed. Followed the same way down to eight tasks. No `--thread` option. Landed by triage. | It needs nothing from the person asking, and the three cases it turns are one shape: the program's work in a task its main thread waits on. `triage::a_program_whose_work_is_in_its_child_is_answered_by_that_child`, `..._in_another_thread_names_that_thread_beside_its_wait`; both ways of `make-sqlite`, `gcc-shell` and `http-server-stdlib`'s listing in `tests/cases.rs`. |
+| One privilege model for `omn` and `omn-mcp` | **The capabilities go on `omn` alone**, by `make`, by the command `make install` and `scripts/release.sh` print, and by the sudoers line; `omn-mcp` collects through the `omn` beside it (or `--omn PATH`) and is never granted one. `tests/cases.rs` reads the capabilities of the `omn` the person runs and the `answered_by` of every `run_session` answer, and a cause whose two ways differ fails `both-ways-run-with-the-same-privileges` and is not compared. Landed by mcp and cases. | A grant on two files is two things to lose at a relink, and a person and a model asking one question must be answered by one machine; two ways run with different privileges answer from two machines. `release.sh check` compares the two sweeps; `a_run_through_the_server_is_as_privileged_as_omn` shows a `CAP_BPF` run through the server with nothing granted to it (the `CAP_PERFMON` half at paranoid 2 is the coordinator's run). |
+| The CI and bpftool (was "the CI installs bpftool") | **Upstream's static build, pinned by version and sha256** (`libbpf/bpftool` v7.7.0), Ubuntu's `linux-tools` as the fallback; the step fails when none dumps `/sys/kernel/btf/vmlinux`. A runner without swap skips the swap tests with that reason. Landed by green. | The azure kernel's `linux-tools` ships no bpftool at all; a static binary has no library to miss, and dumping a BTF blob does not depend on the kernel the tool was built beside. |
+
+**The CI** (`docs/fixes/w18-green.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| The `defaults` cell's cgroup | **Two delegating levels deep** (`omn-ci`, `omn-ci/app`, the shell in `omn-ci/app/job`), the shape of a systemd user session; the step fails if a level lacks `cpu`, `memory`, `io` or `pids`. | A leaf holding processes can never hand a controller down, so "down to `/omn-ci/job`" is met one level up. The skip itself was two tests making one cgroup name, filed. |
+| A test that pushes written pages to swap | **Limits with `memory.high`**, not `memory.max`; a zero-page test may keep `max`. | `max` kills when reclaim waits on a slow swap device; `high` throttles, and a throttled child is judged on what it says it wrote. |
+| An ESRCH from a procfs file of a running process | **Not the end of the run**: read again with a fresh open; only a process gone or a zombie ends it. | A file opened on the address space an `execve` replaced answers ESRCH. `wss::tests::an_esrch_from_a_running_process_is_read_once_more_and_never_ends_the_run`; `footprint.rs` is filed. |
+
+**The triage** (`docs/fixes/w18-triage.md`, `w18-names.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A followed task's silent row | **Unread for a child or an unplaced task; a zero for the program's own thread** from a source that watches every switch of its threads and lost no event. | A source that does not follow children says nothing about them; one that sees every switch says "never" by saying nothing. |
+| `sched.mutex` in the triage | **A second pass**, only when a futex sleep (or, without `sched.futex`, any sleep) is the largest row on the verdict's way; never in the dumped session. | Every backend is `extreme`, and on a program that locks often it doubled the time it was asked to explain; a second run is paid only where the split can change the answer. |
+| A source's measured cost beside the verdict | **Said when over 20 % of the target's cpu**, where the catalog's `extreme` band starts; not held against the criterion when the work was in a task outside the launched process. | A source that dilates what it measures must say so beside what it measured. |
+| A verdict's room when every row was read | **The rows' own resolution**, not the whole's bracket. | On a loaded machine the program's exit is seen up to 60 ms late, which moves the residue, not a row. |
+| What a sample is charged to | **Its innermost perf-map frame where its stack has one, else its leaf**, one rule (`diff::charged_to`) for `omn diff`'s own cost and the triage's hottest function. | Under a perf map the leaf is the runtime's on every sample: `py::score` was under 99 % of them and never a leaf. |
+| How a perf-map frame is known | **By reading back the maps the run's names note cites**; a map gone is said, and its samples go to their leaves. | Results keep labels, not provenance; a prefix list of runtimes would guess. |
+| A flat interpreter profile | **Said as one, naming no function as the suspect and not saying whose they are**, when the program or a frame module in half the samples is an interpreter, the hottest was charged by its leaf, and it holds under half the samples; with what writes a perf map for that runtime. | The interpreter's own work is in every program it runs; half keeps a C extension that does the work nameable. |
+| `--symbols` on the triage | **Set on every request whose collector reads it** (`stack::symbol_readers()`: `cpu.profile`, `sched.offcpu`), on no other; `omn saturate` takes it and says no request read it. | Handing `debuginfod` to a source that refuses it would refuse the whole question. |
+| A block's stack | **Leaf first to the program's own frame** -- the innermost perf-map frame, else the innermost in the executable (symlinks followed) -- **4 to 16 frames**. | Four printed none of the Python function, the fifth frame. |
+
+**`omn-mcp`** (`docs/fixes/w18-mcp.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| `run_session`'s budget | **Optional**, as on `omn`; every run says what a budget is a share of (`budget_against`: the target's cpu, the window, and a floor where the in-target part is unknown). | Requiring one of a model stopped a waiting program on the agent's way only, which made two ways disagree for a reason that was neither the program's nor the machine's. |
+| The program's stdout | **Handed back apart from `omn`'s document**, matched byte for byte against `results.json` and never guessed; the whole stream in `program.stdout`, its last 64 KiB in the answer. | A program's own account is often on stdout. |
+
+**The launcher** (`docs/fixes/w18-launcher.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A launched program's budget denominator | **Its process tree**: the program's cpu, every live or unreaped descendant's, and what each reaped, read from `/proc/<pid>/task/*/children` and kept at its high water; every descendant, not only those a collector follows. | The reaped children were already in the denominator; a running child out of it while a reaped one is in was the inconsistency. A gcc driver read 8581 % of its own 4 ms. |
+| A stop | **Ends the program's tree** (frozen with `SIGSTOP`, then killed) and its own process group when it made one; the program is not put in a group of its own at launch. | A background group stops on its first terminal read, so `omn -- cat` would hang. |
+| A run the budget stopped | **Says so on a line of its own**, before the verdicts, naming the source and the percentage; `cost.json` carries `stopped_by_budget`. | A stopped run said its budget "held". |
+| A collector that weighs its samples | **Declares it in the registry** (`Factory::weighing_its_samples`); no table names it elsewhere. | A registry is an append seam; a table in `src/main.rs` was one more place to forget. |
+
+**The profile** (`docs/fixes/w18-profile.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A collector's per-tick work | **Follows what the tick drained**: a process's maps, executable and CFI are re-read for the processes the drain holds samples of, before their stacks are interned. | Work done whatever the samples is paid by a program that waits as much as by one that burns, and was most of what a profile cost a program that waits (user-only 13.2 to 58.2 % before, 7.1 to 28.7 % after). |
+| What paranoid 2 costs | **Said where the choice is made**: the user-only degradation says the samples shrink with the program's user time and the tool's per-tick work does not. | A reader should not infer from a percentage why a profile cost more than its band. |
+
+**The scheduler** (`docs/fixes/w18-sched.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A sched wait | **The kernel's own account**: `sched.runqlat`'s waits and `sched.offcpu`'s `queued_ns` read from `sched_info` at the switch (`rq->clock - last_queued`, plus `run_delay`'s growth over the wait); the tracepoints' figure kept as `wake_to_run_ns`. Only these durations come from the scheduler's clock; timestamps stay `CLOCK_MONOTONIC`. | The reference a decomposition is held to is the task's `schedstat`, and the tracepoints parted from it by about 1.5 us a wait, on every wait; now 459.8 ms against the kernel's 459.2. |
+| Where a block starts | **At `__schedule`'s entry** (`sched_entry_tp`), where the kernel stops the task's cpu account; kernels before 6.16 keep the switch and say so. | Starting at the switch put the pick's time in the wrong row. |
+| Following the target's descendants | **Every sched source with a per-process filter, in the kernel** (`sched_process_fork`/`sched_process_free` and a map), as `cpu.profile` does in userspace. `sched.lock` and `sched.futex` not yet. | cc1's table had no `runnable` row where the kernel says it waited 2 s. |
+| `--symbols debuginfod` on `sched.offcpu` | **Read** (`stack::NAMED_BY_CHOICE`); a request with no `DEBUGINFOD_URLS` is refused at attach. | The kernel walks the stack, so where the names come from is the only choice there is. |
+
+**The block layer** (`docs/fixes/w18-io.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| `io.inflight` | **The larger of the kernel's two in-flight accounts** (`/proc/diskstats`' column and `/sys/block/<dev>/inflight`), each carried. | On the CI's 6.17 the disk's line read 0 under a queue of 199; each is a lower bound, and keeping both visible lets a kernel where they part be seen. Why they part there is open. |
+| A collector's stop and its programs | **Detaches the programs and does not close them**, so their run time is readable at the close. | The block programs closed at the stop read "0 runs for 0 ns" beside 26.8 M counted requests. The general form, reading the meters before the stops, is filed. |
+
+**The engine** (`docs/fixes/w18-engine.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Where a join rule runs | **Per rule, `tier:` one of `agent`, `query` or `kernel`**, `agent` by default. `query` applies the same engine to a stored run's `raw` events (`join::apply_stored`), reading a detach back from each result's `stopped_because`, and is refused at validation unless both sides are stored in full; `kernel` is refused with the reason until a match kind has a program. | Phase 5 decided placement per rule; a tier that cannot answer what the agent would have is refused rather than degraded. `join_engine::a_rule_moved_to_the_query_tier_answers_from_the_stored_run_what_the_agent_did`. |
+| `Btf::member_offset` and a typedef | **Followed, structs first.** | The loader should check what `net_qdisc` wrote by hand, and C names a typedef's members as it names a struct's; no caller's type is shadowed on the running kernel (audit test). |
+
+**The bench** (`docs/fixes/w18-bench.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| The cost bands | **Follow the bench's table, and a test holds them to it**: 43 corrected to the second table; `tests/bench_bands.rs` reads the record in `docs/bench.md` and fails when a cost line and its row disagree. | The bands are what `--budget` promises in advance, and they had drifted from the measurement by up to two bands with nothing failing. |
+| A row's cost | **The larger of the tool's share and the target's dilation**, a dilation within the workload's resolution reading as zero. | An in-kernel collector's cost is in the target (finding 47), and a dilation the gate cannot resolve is not a measurement. |
+| A fixed per-run cost | **Has no band**: `io.fsync` and `net.tcp.connect` through `bpf:fentry` keep their bands on their dilation; the ~55 ms attach is still counted by `cost.json`. | A band is a percentage, and a fixed cost is one only once a length is chosen. |
+| `free` | **Under 0.1 %, and the perf counters are not under it** (0.13 to 0.20 % in `count`, now `low`). | The band's ceiling is a number (`Cost::worst_case_percent`). |
+| An equivalent backend's band | **Never cheaper than what it stands in for**, for backends serving a common target (`tests/bench_bands.rs`). | `--budget` degrades onto what declares less; an equivalent backend is the same measurement, so a cheaper band promises a saving the move cannot deliver. |
+
+**The resolver** (`docs/fixes/w18-resolver.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| One order for "unbuilt" and "missing" | **Landed** (`e04ef9a`): a backend both unbuilt and missing a requirement here is the machine's (exit 1) on the walk, a pin and the key hint; the key hint ranks a carrier this machine can run and nobody wrote above one it cannot run (`Forceable`, `Unwritten`, `Missing`, `Unfit`), as the walk stops at the first backend it could run. | One request exited 1 or 3 by the path that reached it. Shown with and without the capabilities over the eleven tests. |
+
+**The cases** (`docs/fixes/w18-cases.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| The agent's reading | **Follows the triage's**: from the main thread's table, a `blocked` largest row is followed into the task busy for a quarter of it, with that task's own events for its stack (`raw` beside `stack`), perf-map frames first, and a flat interpreter profile names nothing. | `docs/mcp.md` promises a model can read a run the way `omn latency` does; a reading of its own would test a third way. |
+| "The same suspect" for a cause that names no frame | **The same state, and whether each way names a leaf**; two named leaves are compared only where the case names its `leaf`. | The hottest leaf of a spread profile moves between runs; comparing two samples of the noise failed one run in four. |
+| An open finding that alternates | **`sometimes: true`, scoped to a `cause:`**, filed with why and how often, closed by hand. | Listed, its passing runs fail the test; unlisted, its failing ones do; held, the case's other checks stop running. |
+
+---
+
 ## Open
 
 - **The phase 6 criterion for the in-kernel histogram** (io, pending the
-  coordinator's `null_blk` run of the new program pair). If the run reads
-  above 1 % with the programs' own run time a small part of the per-request
-  cost, the criterion becomes a per-request cost in nanoseconds on that load,
-  since 1 % of a device that does no work is 25 ns for two tracepoint
-  dispatches and two clock reads; if the programs' own time is most of it,
-  `tp_btf` is next (`docs/fixes/w17-io.md`). Leaving it open costs phase 6
-  its last box.
-- **Which task the triage decomposes** (python and build, filed to
-  `src/triage/latency.rs`). Today a program's latency is its main thread's
-  life, and every server, compiler driver and build in phase 12 answers from
-  a thread that waited (`select`, `wait4`) while another thread or a child did
-  the work. The candidates: follow a wait for a child into the child that ran
-  during it, name the busiest other thread's decomposition beside the main
-  one's, or a `--thread` option. Leaving it open costs four of the six cases
-  their first suspect.
+  coordinator's `null_blk` run, `STATE.md` "Needs privilege" item 2). The
+  eighteenth wave found why the program statistics read 0 runs (the block
+  programs were closed at the stop, before the run read their account) and
+  keeps them loaded until the close, so the run can now say how much of the
+  348 ns a request is the programs' own. If it is a small part, the criterion
+  becomes a per-request cost in nanoseconds on that load, since 1 % of a
+  device that does no work is 25 ns for two tracepoint dispatches and two
+  clock reads; if it is most of it, as stream io reasons (150 to 300 ns),
+  `tp_btf` for the two device reads is next (`docs/fixes/w18-io.md`).
+  Leaving it open costs phase 6 its last box.
+- **What the budget's first check may stop a run on** (eighteenth wave,
+  profile and bench, filed to `src/collect/mod.rs`). The first check, 0.1 s
+  into a launched run, weighs a one-time cost -- the first debuginfod symbol
+  load, about 25 ms of a debug build; `bpf:fentry`'s 55 ms attach -- against
+  the few milliseconds a waiting target has burnt, and stops `cpu.profile` at
+  116 to 179 % where its rate is under 30 %. The candidates: no stop before
+  the target has burnt some multiple of the check interval, or a one-time
+  cost a collector reports weighed apart and said apart. Leaving it open
+  costs every budgeted run of a waiting program with `--symbols debuginfod`
+  its answer (`sqlite3-durability`'s agent way, whenever a budget is asked).
 
 A new open line goes here with what it costs to leave it open, which is the
 habit that kept this section honest.

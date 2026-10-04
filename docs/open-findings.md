@@ -9921,6 +9921,8 @@ checked once each (`profile.rs:502`, `ibs.rs:654`), not added twice.
 
 ### To the coordinator (`docs/unwind.md`, `CATALOG.md`'s `--symbols` lines): the perf map under `--symbols local`
 
+**Half landed in the eighteenth wave**: `CATALOG.md` says it (stream engine, `81f78c1`); `docs/unwind.md` does not yet, re-filed for its owner (the eighteenth wave, stream engine).
+
 `--symbols local` (and so `debuginfod`) now reads `/tmp/perf-<pid>.map` for
 addresses in anonymous executable mappings no file names. Neither document
 says so yet.
@@ -9948,6 +9950,8 @@ fix lands (the test fails until it does).
 
 ### To stream symbols (`src/stack.rs`) and the coordinator (`src/collect/sched/offcpu*`): an off-cpu stack cannot ask debuginfod
 
+**Landed in the eighteenth wave**: part 1 by stream sched (`sched.offcpu` reads `--symbols debuginfod`, `stack::NAMED_BY_CHOICE`), part 2 by names' glue patch at the merge (`983ea32`, set on every request whose collector reads it).
+
 `--symbols` is read by `cpu.profile` alone, so a block's stack in a stripped
 binary is `clock_nanosleep <- sqlite3+0x57e9a <- sqlite3+0x120142 <- ...`,
 where `sqliteDefaultBusyCallback` names the cause. Part 1: `sched.offcpu`'s
@@ -9958,6 +9962,8 @@ reaching the `sched.offcpu` request (below). Check: `the-block-s-frames-are-name
 
 ### To the coordinator (`src/cli.rs`, `src/triage/latency.rs:162`, `src/triage/saturate.rs:139`): the triage cannot ask debuginfod
 
+**Landed in the eighteenth wave** (stream names, wired by `983ea32`): `--symbols` on `omn latency` and `omn saturate`, carried by `--dump-session`. `sqlite3-stripped`'s check came out (`cc3adc1`).
+
 `omn latency` and `omn saturate` take no `--symbols`, so a stripped binary is
 ranked per instruction (*"hottest function `sqlite3+0x70564`, 5 %"*, where
 named it is `sqlite3VdbeExec`, 65 %). Wanted: `--symbols` on both, set on
@@ -9966,11 +9972,15 @@ every request that reads it, and carried by `--dump-session`. Check:
 
 ### To the coordinator (`src/triage/latency.rs:1128`, `notes`): the verdict drops where its names came from
 
+**Landed in the eighteenth wave** (stream names, `diff::names_notes`, wired by `983ea32`); the check came out on five cases (`cc3adc1`).
+
 `notes(run)` copies losses and degradations, not the results' `notes`, where
 *"names came from -- ..."* is. Check: `the-person-s-way-says-where-names-came-from`
 (every case).
 
 ### To the coordinator (`src/triage/latency.rs:269`): a polled lock is called not a lock
+
+**Landed in the eighteenth wave** (stream triage): *"... a lock polled with a sleep between tries, or a wait for a child process"*; held by `says:` on `sqlite3-stripped` (stream cases).
 
 `Limit::Sleep` says *"asleep on something that is not a lock: a timer, a pipe
 or a socket"*; sqlite's busy handler polls a file lock by sleeping. Wanted:
@@ -9980,6 +9990,8 @@ as one. Check: `the-sentence-claims-nothing-false`.
 
 ### To the coordinator (`mcp/src/server.rs:427`, `src/main.rs`): a waiting program exceeds every budget
 
+**Answered in the eighteenth wave, in part**: `run_session`'s budget is optional (stream mcp) and a launched program's denominator is its process tree (stream launcher). No wall-clock denominator; the check passes because no budget is asked, not because one holds, and is now `unchecked` (stream cases). What stops a budgeted run of a waiting program is a one-time cost on the first check (`DECISIONS.md`, "Open").
+
 `run_session` requires a budget over the target's cpu; a target that burns
 0.6 ms in 1.5 s is stopped at 254.7 ms by `--budget 100%` (146 %). Wanted:
 `budget` optional (bounded by `--allow-run`'s duration), or a wall-clock
@@ -9988,6 +10000,8 @@ denominator for a target that waits. Check:
 `http-server-stdlib` through stream python's finding 5).
 
 ### To the coordinator (`mcp/src/session.rs`): the program's stdout in `run_session`'s answer
+
+**Landed in the eighteenth wave** (stream mcp): `program_stdout`, separated from `omn`'s document byte for byte.
 
 Low priority. A program's own account is often on stdout, which neither
 stream of `run_session` carries; the cases move it to stderr with
@@ -10019,6 +10033,8 @@ applied, measured and reverted.
 
 ### To the coordinator (`examples/cross-machine-reclaim-io.yml`, `tests/cross_machine.rs`): the 100 ms session credits its rows
 
+**Landed in the eighteenth wave** (stream engine, `7876659`): measured first, 42 314 of 42 314 pages credited.
+
 `enclosing: enclosing_ns` under `reclaim-per-pressure-interval`, the
 assertion that half the cgroup's pgsteal is credited in
 `cross_machine::a_memory_limit_turns_...`, and a sentence for `enclosing:` in
@@ -10028,6 +10044,8 @@ wants one measured run on `main` with the capabilities before it lands.
 
 ### To the coordinator (`tests/join_engine.rs`): another namespace's lo is not this one's
 
+**Landed in the eighteenth wave** (stream engine, `7876659`): credited 0, uncredited 2000.
+
 The brief's ground truth as a test, about 100 lines, pasted whole in the
 handoff (`another_namespaces_lo_is_not_credited_to_this_ones`): applied, run
 once (credited 0, uncredited 2000) and reverted. It skips with the machine's
@@ -10035,9 +10053,13 @@ reason where `unshare -rn` or `netem` fails.
 
 ### To the coordinator (`docs/families/join.md:39`): the identity is `iface#<netns>:<index>`
 
+**Landed in the eighteenth wave** (stream engine, `81f78c1`).
+
 The line still gives `iface#<index>`.
 
 ### To whoever owns `src/bpf/btf.rs`: follow a typedef in `member_offset`
+
+**Landed in the eighteenth wave** (stream engine, `9970178`); `net_qdisc` asking for it is re-filed (the eighteenth wave, stream engine).
 
 `possible_net_t` is a typedef of an anonymous struct, so
 `net_qdisc::netns_offsets` takes the `net` pointer's offset as 0 (read off
@@ -10054,6 +10076,8 @@ See the seventeenth wave's coordinator section below:
 Stream core's handoff is `docs/fixes/w17-core.md`.
 
 ### To the coordinator: cherry-pick `1aa114f` with the eleven tests it changes
+
+**Landed in the eighteenth wave** (stream resolver, `e04ef9a` and `267842a`; `DECISIONS.md`'s exit-3 line re-worded).
 
 One order for "unbuilt" and "missing" (decided: the chain's). `1aa114f`
 changes `src/resolve.rs`; eleven tests pin a backend nothing collects to reach
@@ -10078,6 +10102,8 @@ within the edge-crossers' skew.
 
 ### To the coordinator: `scenario_sched::sharing_one_file_...` across checkouts
 
+**Landed in the eighteenth wave** (stream sched, `67c4067`): the lock workload's name is the run's own.
+
 The session filters on `comm == omnlockprobe`, a fixed name, so two
 checkouts running `scenario_sched` at once see each other's writers (*"the
 run attributed a wait to pid N, which is not one of the 12 it started"*;
@@ -10091,6 +10117,8 @@ its section 3.
 
 ### To the coordinator (`src/triage/latency.rs:1033`, `docs/mcp.md`) and stream cases (`tests/cases.rs`, `read_mcp`): the hottest leaf is never the Python function
 
+**Landed in the eighteenth wave**: ranked by the innermost perf-map frame (stream names, `diff::charged_to`), and the same in `read_mcp` (stream cases); `cpython-perf-map` names `py::score` both ways. `docs/mcp.md`'s reading is names'.
+
 Under `-X perf` the leaf is always an interpreter C function (`__tls_get_addr`,
 9 %) while `py::score` is on 1 043 of 1 056 stacks. Wanted: where frames a
 perf map named are present, rank by the innermost such frame and say so; the
@@ -10100,6 +10128,8 @@ full stack so `through` means the same on and off the cpu. Check:
 
 ### To the coordinator (`src/triage/latency.rs:1054`): an interpreter's C function is named as the suspect
 
+**Landed in the eighteenth wave** (stream names): a flat interpreter profile is said as one and names no suspect; `cpython-interpreter` has no open finding.
+
 Without a perf map the profile is flat over the interpreter; the verdict
 should say the time is in the interpreter's frames and which flag would name
 them, not present a C function as the hottest. Check:
@@ -10107,12 +10137,16 @@ them, not present a C function as the hottest. Check:
 
 ### To the coordinator (`src/triage/latency.rs:1082`): the verdict cuts a block's stack at four frames
 
+**Landed in the eighteenth wave** (stream names, `diff::leafward`): to the program's own frame, 4 to 16.
+
 `blocking_stack` takes four frames; the Python function is the fifth. Wanted:
 up to the innermost frame of the program's own (a perf-map frame or the
 executable's). Check: `the-block-s-frames-are-named` (`cpython-perf-map`, the
 person's way).
 
 ### To the coordinator (`src/triage/latency.rs:820`, `main_task`): a server's request is not its main thread's life
+
+**Landed in the eighteenth wave** (stream triage) for the listing: the serving thread is followed beside the `select`, both ways. The slow client, whose serving thread blocks rather than burns, is re-filed (the eighteenth wave, stream cases, "a thread that waits beside the main thread").
 
 The listing's serving thread was on a cpu 4 340 of the client's 4 342 ms; the
 verdict decomposes the main thread, 98 % in `select`. Wanted, in order of
@@ -10125,6 +10159,8 @@ main thread" (`DECISIONS.md`, "Open").
 
 ### To the coordinator (`src/triage/latency.rs:181`): the triage's mutex source doubles a threaded interpreter's time
 
+**Landed in the eighteenth wave** (stream triage): `sched.mutex` only in a second pass, and a source over 20 % of the target's cpu said.
+
 `sched.mutex` resolves to `preload` and costs 127 % of the listing's cpu (the
 client's latency 2 124 ms bare, 4 059 ms under it); the four other sources
 cost 0 to 4 % each. Wanted: ask it only through a backend under its own
@@ -10134,11 +10170,15 @@ say what a source cost when it cost more than the criterion. Check:
 
 ### To stream symbols or the coordinator (`src/stack.rs:2503`, `facts`): "dynamic symbols only" is not said
 
+**Landed in the eighteenth wave** (stream sched, `stack::names_fact`).
+
 A run whose every module carries only its dynamic symbols writes no
 `names came from` line. Wanted: that origin among those that trigger the
 line. Check: `the-verdict-says-how-it-knows` (agent's way).
 
 ### To the coordinator (`src/main.rs:1043`, `src/collect/mod.rs`): a run the budget stopped says the budget held
+
+**Landed in the eighteenth wave** (stream launcher): a line of its own, and `cost.json`'s `stopped_by_budget`.
 
 Reproduced by hand: a run ended 941 ms into its window by the budget, and
 every `budget:` line said `held` or `could not be checked whole`. Wanted: a
@@ -10151,7 +10191,8 @@ percentage. Not a check any more; the recipe is in the handoff.
   `the-block-s-frames-are-named` fails under `symbols: local` where it was
   `unchecked`.
 - A positive `says: [...]` beside `never_says`, and `never_says` read against
-  the agent's way's dominant stack too.
+  the agent's way's dominant stack too. **Landed in the eighteenth wave**
+  (stream cases).
 - `docs/cases.md`'s three rows: **landed at the merge** (`ae889f7`).
 
 ## Needs from another stream — the seventeenth wave, stream build
@@ -10159,6 +10200,8 @@ percentage. Not a check any more; the recipe is in the handoff.
 Stream build's handoff is `docs/fixes/w17-build.md`; its findings are section 3.
 
 ### To the coordinator (`src/triage/latency.rs`): a program is its main thread, and the compiler driver's waits for its children
+
+**Landed in the eighteenth wave** (stream triage; read both ways by stream cases): `gcc-shell` is back in `cases/gcc-shell/`. What the cited numbers still get wrong is re-filed (the eighteenth wave, stream cases, "a job is a chain of processes").
 
 gcc's driver and make spend the run in `wait4`; the verdict says
 `blocked: sleeping 99.9 %` while cc1 or a job does the work. Wanted: when the
@@ -10169,6 +10212,8 @@ sentence names such a wait as one. Checks: `the-first-suspect-is-the-known-cause
 (`make-sqlite`, and `gcc-shell`, which returns from `cases/held/` with it).
 
 ### To the coordinator (`src/collect/sched/`): the sched sources follow the target's descendants; the per-wait bias
+
+**Landed in the eighteenth wave** (stream sched): descendants followed in the kernel, and a wait read from `sched_info`.
 
 - `sched.runqlat` and `sched.offcpu` do not follow the target's children as
   `cpu.profile` does: cc1's table has no `runnable` row where the kernel says
@@ -10182,6 +10227,8 @@ sentence names such a wait as one. Checks: `the-first-suspect-is-the-known-cause
 
 ### To the coordinator (`src/main.rs`, `src/collect/mod.rs`, the launcher): a budget weighs the launched process alone
 
+**Landed in the eighteenth wave** (stream launcher): the denominator is the process tree, and a stop ends the tree.
+
 A gcc driver at 4 ms against cc1's seconds: *"`cpu.profile` spent 8581.01 %
 of the target's cpu time"*, and every cause of cases 5 and 6 stops at
 `100%`. And the stop kills the main thread only: cc1 ran on, reparented,
@@ -10191,6 +10238,8 @@ collectors watched, and a stop ends the target's process group. Checks:
 `both-ways-name-the-same-suspect` (`gcc-shell`).
 
 ### To the coordinator (`src/triage/latency.rs`, `OPTIONAL`; `shim/src/lib.rs:384`): the mutex shim doubles a real program's cpu
+
+**Landed in the eighteenth wave**: `sched.mutex` in a second pass (stream triage), and no clock read on a call that does not report (stream engine, `0a25793`; its saving not re-measured).
 
 50 000 WAL commits: `.timer` cpu 0.94 s bare, 1.86 s under the triage, 1.03 s
 without `sched.mutex`. And `Timer::start` reads `CLOCK_MONOTONIC` before it
@@ -10203,11 +10252,15 @@ the tool's own clock. Wanted: `sched.mutex` only when needed or its cost said
 ### To stream cases (`tests/cases.rs`)
 
 - After a budget stop, wait for or kill the stopped run's descendants before
-  asking again (the cases that call `watch.py` do it themselves).
+  asking again (the cases that call `watch.py` do it themselves). **Landed in
+  the eighteenth wave** (stream cases, `sweep`; `omn` itself now ends the
+  tree, stream launcher).
 - A `held:` field, so a case held back (`cases/held/gcc-shell/`) is still
-  checked for well-formedness.
+  checked for well-formedness. **Landed in the eighteenth wave** (stream
+  cases); no case is held today.
 - Optionally, registered extractors for the three new accounts
-  (`gcc-time-report`, `strace-summary`, `schedstat-tree`).
+  (`gcc-time-report`, `strace-summary`, `schedstat-tree`). Not done: read
+  through `key-value` by their case's helper, as `docs/cases.md` now says.
 - Not a check: the agent's reading of a multi-task decomposition takes its
   heaviest table, which for a driver and its compiler is close to a coin;
   worth a sentence in `docs/mcp.md` once the triage follows the critical path.
@@ -10217,13 +10270,16 @@ the tool's own clock. Wanted: `sched.mutex` only when needed or its cost said
 - "The cases" rows: **landed at the merge** (`ae889f7`).
 - The injection table: the `schedstat` watcher (`cases/shared/watch.py`) as a
   reference, `taskset` plus competitors as an injection, and `cases/shared/`
-  as the home of a helper more than one case calls.
+  as the home of a helper more than one case calls. **Landed in the
+  eighteenth wave** (stream cases).
 
 ## Needs from another stream — the seventeenth wave, stream io
 
 Stream io's handoff is `docs/fixes/w17-io.md`.
 
 ### To the coordinator: the cost run, alone
+
+**Not run yet**; stream io made the statistics read the programs that ran, and the commands are `STATE.md` "Needs privilege" item 2.
 
 The two `null_blk` runs of the handoff (without, then with
 `kernel.bpf_stats_enabled`), now on `main`; their result into
@@ -10251,12 +10307,17 @@ unless said otherwise:
   ceiling, so a quieter run sometimes stays under it and the listed check
   passes everywhere, which fails the test (first `make check` of the second
   merge). The finding is real and stays listed; python's finding 5 removes
-  it.
+  it. **Closed in the eighteenth wave**: `run_session` takes no budget unless
+  asked, so the check is `unchecked` rather than made (stream cases). It did
+  not go because a cost held under a ceiling; no run measured that.
 - `cases`, `cpython-interpreter/one-function-dominates`'s
   `both-ways-name-the-same-suspect`: it compares two named C leaves of a flat
   profile (`__tls_get_addr` about 10 %, `_Py_Dealloc` about 7 %); a run that
   flips them fails a check that is not listed. Python's finding 2 removes the
-  comparison.
+  comparison. **Closed in the eighteenth wave**: the flat profile names no
+  function either way, held by `names_no_function: true` and by
+  `both-ways-name-the-same-suspect` comparing whether each way names one
+  (stream cases).
 - `recorder::two_bursts_write_exactly_two_documents_each_holding_its_burst`:
   failed 2 of 4 runs at load 27 to 30 (stream engine), firing at 256 open
   descriptors where 303 were expected -- 256 is where the descriptor table
@@ -10267,7 +10328,8 @@ unless said otherwise:
   engine); two different failures, both read as load.
 - `scenario_sched::sharing_one_file_is_the_only_difference_between_these_two_runs`:
   fails repeatedly while another checkout runs the same test (stream core's
-  filing above); run it alone.
+  filing above); run it alone. **Closed in the eighteenth wave**: the probe's
+  name is the run's own (stream sched, `67c4067`).
 - `scenario_io::the_page_cache_sessions_say_what_their_headers_predict`
   (already in the tally) at the second merge's no-fail-fast run.
 - `unwind::fp_leaf_recovers_the_caller_of_a_frameless_leaf_and_marks_it`
@@ -10281,6 +10343,8 @@ Run alone at `718cae1`, 2026-10-03, with the sudoers grants (`STATE.md`,
 "Needs privilege").
 
 ### To the owner of `Makefile`, `scripts/release.sh` and `docs/install.md`, and the triage's owner: `omn-mcp` carries no capabilities
+
+**Landed in the eighteenth wave**: one privilege model on `omn` (stream mcp), and `tests/cases.rs` refusing to compare two ways run with different privileges (stream cases). The paranoid-2 run that shows it is the coordinator's.
 
 `make` grants `cap_bpf,cap_perfmon` to `target/debug/omn` only; `make install`
 and the install line print the `setcap` for `omn` only. `tests/cases.rs` asks
@@ -10297,6 +10361,8 @@ privileges.
 
 ### To the owner of `cpu.profile` (`src/collect/cpu/profile.rs`, `src/unwind.rs`): a user-mode-only profile costs 280 % of the target
 
+**Answered in the eighteenth wave** (stream profile): not the mode, but the budget's first check weighing a one-time debuginfod symbol load, and a per-tick maps re-read now done only for the processes a drain holds. The one-time load is filed (`DECISIONS.md`, "Open").
+
 The finding above, from the other side: at paranoid 2 without `CAP_PERFMON`,
 `cpu.profile` over `sqlite3`'s commit loop spends 266 % of the target's cpu.
 Whatever mode the ladder picks there (the kernel half refused, the user stack
@@ -10304,6 +10370,8 @@ copied) is priced far outside its declared band. The CI's `defaults` cell is
 that machine.
 
 ### To stream io's owner (`src/bpf/io.rs`, `tests/scenario_io.rs`): the in-kernel histogram, measured
+
+**Answered in the eighteenth wave, in part** (stream io): the statistics read 0 because the programs were closed at the stop; they are now detached and kept. The run is still to do.
 
 `the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent`:
 **12.03 %** without program statistics (348 ns a request, the 1 % budget
@@ -10315,6 +10383,8 @@ were closed. The cost is to be found before phase 6's criterion is argued
 either way (`DECISIONS.md`, "Open").
 
 ### To the owner of `tests/scenario_io.rs`'s doc comment and `STATE.md`: `chmod` races udev
+
+**Landed in the eighteenth wave**: `udevadm settle` in the test's doc comment and panic (stream io) and in `STATE.md`'s commands.
 
 `modprobe null_blk` returns before udev has applied its rule, which leaves
 `/dev/nullb0` at 0600 after a `chmod a+r` made at once; the test then panics
@@ -10330,6 +10400,8 @@ the skip gate on the same two reasons, so neither is new to this wave. The
 
 ### To the owner of `.github/**`: two skips the gate does not expect
 
+**Landed in the eighteenth wave** (stream green): bpftool from upstream's pinned static build; the `defaults` cell two delegating levels deep, because the skip was two tests of `tests/cross_machine.rs` making one cgroup name (re-filed). Only the next CI run shows the cells green.
+
 - **bpftool, both cells.** `linux-tools-6.17.0-1022-azure` installs no
   `bpftool` binary under `/usr/lib` (the step's own warning), so
   `btf.rs`'s cross-check skips with *"bpftool not found for kernel
@@ -10341,6 +10413,8 @@ the skip gate on the same two reasons, so neither is new to this wave. The
 
 ### To the owner of `src/collect/mem/{testing,swap}.rs`: the swap tests are killed by their own limit
 
+**Landed in the eighteenth wave** (stream green): the runner has swap; `memory.max` OOM-killed a child whose written pages waited on a cloud disk, and the tests now push with `memory.high`.
+
 `defaults`: `memory_pushed_out_of_a_limited_cgroup_is_counted_as_swap` and
 `the_machines_counter_sees_at_least_what_one_cgroup_did` -- *"the child died
 before it finished touching its memory (signal 9); memory.events: max 387 oom
@@ -10349,6 +10423,8 @@ swap; the test is to check for swap before setting it, and skip with that
 reason.
 
 ### To stream io's owner (`tests/scenario_io.rs`): the polled queue never sees the burst, both cells
+
+**Worked around in the eighteenth wave** (stream io): `io.inflight` reads the larger of `/proc/diskstats`' column and `/sys/block/<dev>/inflight`, carrying both. Why 6.17's disk line read 0 is still open (`docs/scenarios/io.md` defect 20).
 
 `a_burst_of_writes_shows_up_as_a_queue_on_the_device_that_took_it`: *"the
 kernel's own reads of /sys/block/nvme0n1/inflight found the queue non-empty
@@ -10363,3 +10439,373 @@ Twice more on the CI: `wss::a_process_that_holds_much_and_touches_little_reports
 (`defaults`, 8 351 744 of 16 777 216 bytes) and
 `encoders::a_known_allocation_lands_on_the_chrome_trace_at_the_time_it_was_made`
 (`stock`, *"no event arrived in the window"*); both are in `docs/flaky.md`.
+
+## Needs from another stream — the eighteenth wave, stream green
+
+Stream green's handoff is `docs/fixes/w18-green.md`.
+
+### To the coordinator (`src/collect/mem/footprint.rs`): the `execve` race ends `mem.rss` at its first read
+
+`FootprintCollector::read_bytes` maps `NotFound`, `ESRCH` and
+`PermissionDenied` to `TargetGone`. A `smaps_rollup` read straddling the
+launched program's `execve` answers ESRCH from a live process, and the run
+ends with no event: the suspected cause of the `stock` cell's empty chrome
+trace (`docs/flaky.md` #27). Wanted: `wss.rs`'s rule (read once more when
+`/proc/<pid>/stat` exists and is not `Z`/`X`), ideally a shared helper in
+`src/collect/task.rs` that `numa.rs` and `thp.rs` can use too.
+
+### To the coordinator (`tests/cross_machine.rs`): two tests make one cgroup name
+
+`Cgroup::create` names `omn-cross-machine-{pid}.scope` for both tests that
+call it, before their `alone()` lock. Name it per call and read `EEXIST` as
+"taken", not as "not delegated". The CI's two delegating levels are a
+workaround for it.
+
+### To the owner of `tests/family_mem.rs`: the same TLB, through Python
+
+`the_working_set_is_what_was_touched_and_not_what_was_held` walks 16 MiB of
+a `bytearray`. Walk at least 128 MiB from an `mmap.mmap` advised
+`MADV_NOHUGEPAGE`, as `wss.rs`'s test now does.
+
+### To the coordinator: this machine's bpftool
+
+`/usr/bin/bpftool` fails to start (*"libLLVM.so.23.1: cannot open shared
+object file"*), so `btf.rs`'s cross-check skips in every local run.
+
+## Needs from another stream — the eighteenth wave, stream triage
+
+Stream triage's handoff is `docs/fixes/w18-triage.md`, section 7. Landed at
+the merge: `symbols: args.symbols` (names' glue patch), the denominator
+(launcher), the followed chain in `read_cli` (cases).
+
+### To the owner of `cpu.profile` (`src/collect/cpu/profile.rs`): `pid` on every sample, and the late discovery
+
+A task only the profile saw is unplaced, because profile samples carry no
+`pid`. And a child that ran 300 ms lost 43 ms (14 %) to *"found on a tick
+after they began"*, a thread 34 ms of 300: a followed task's on-cpu row is
+short by it.
+
+### To names (`docs/mcp.md`): reading a followed task
+
+The agent's way should read the tables as the command does: when the main
+thread's largest row is a `wait4` or a block another task ran in, the child's
+or the busiest thread's table, not the heaviest. `docs/cases.md`, "The
+agent's reading", is the rule the cases hold it to.
+
+### To the coordinator (`GUIDE.md`): the latency session
+
+It may still list five sources or quote the old sleep sentence.
+
+## Needs from another stream — the eighteenth wave, stream names
+
+Stream names' handoff is `docs/fixes/w18-names.md`, section 5. Landed at
+the merge: the glue patch (`983ea32`), and the cases' `read_mcp` ranking.
+
+### To the owner of `src/stack.rs` and `src/collect/sched/offcpu.rs`: the executable of each task
+
+A followed child's own frames are reached only if its executable is the
+launched one: no result carries the executable of each task it keys (`comm`
+is cut at 15 bytes, `/proc/<pid>/exe` is gone after the run).
+
+### To the coordinator (`src/emit.rs`): a frame's `NamedBy` in `Results::stacks`
+
+The triage reads `/tmp/perf-<pid>.map` back to know which frames a perf map
+named. `NamedBy` kept beside the label (or a per-result set of
+perf-map-named labels, with the map's device and inode) would end the
+read-back.
+
+## Needs from another stream — the eighteenth wave, stream mcp
+
+Stream mcp's handoff is `docs/fixes/w18-mcp.md`, section 8. Landed at the
+merge: the three `open_findings` lines (`53df56f`), `docs/cases.md`'s
+sentence and `answered_by` read by `tests/cases.rs` (stream cases), and the
+sudoers line in `CLAUDE.md` (this commit).
+
+### To names (`docs/mcp.md`): the budget optional, `program_stdout`, `budget_against`
+
+Line 529's table and the text still say "with a required budget". Add
+`program_stdout` and `budget_against` to `run_session`'s description, and the
+two new protocol tests to the test table (`a_call_that_would_change_the_machine_is_refused`
+now refuses a malformed budget instead of a missing one).
+
+### To stream cases (`tests/cases.rs`): `MODEL_BUDGET` and `ask_mcp`'s fallback
+
+`ask_mcp`'s fallback on *"`budget` is required"* can no longer happen, and
+`MODEL_BUDGET` is used only where a caller passes one.
+
+### To the owners of `cpu.profile` and the triage: `bpf_trace_run2` named as a suspect
+
+The tool's own eBPF trampoline ranked as the on-cpu suspect of a program that
+waits (`sqlite3-durability`'s commits). The same as stream cases' finding 3.5
+below.
+
+### To launcher (`src/collect/launch.rs`): a stderr of the launched program's own
+
+`said_by_omn` mixes the program's stderr with `omn`'s. A stderr of its own for
+the program, or a fixed prefix on `omn`'s lines, would let the server
+separate them as it now separates stdout.
+
+## Needs from another stream — the eighteenth wave, stream launcher
+
+Stream launcher's handoff is `docs/fixes/w18-launcher.md`, section 6. The
+line in `src/collect/mem/mod.rs` outside its row is accepted.
+
+### To the owner of `cpu.profile` (`src/collect/cpu/profile.rs`, `src/perf.rs`): a ring's throttles in `losses_by_ring`
+
+**The one test that keeps `make check` red.** `losses_by_ring` builds each
+ring's `Losses` with `dropped` only. On a loaded machine the kernel
+throttles a 50 kHz profile thousands of times a run; `emit.rs`'s `placed`
+finds the rings' throttles (0) short of the run's and marks every series
+with the whole run's loss. Wanted: each ring's `throttled` (and the retired
+rings'), which needs per-ring counts from `src/perf.rs`, a shared layer.
+Check: `runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`,
+red on the wave's base too (four streams checked it), failing alone at both
+merges (74 223 and 68 983 short; throttled 3 526 times).
+
+### To mcp (`mcp/src/runs.rs`, `mcp/src/session.rs`): the budget's stop in `run_session`'s answer
+
+`cost.json` carries `stopped_by_budget`, stderr the `budget: [...] was
+exceeded` line; `run_session` should say the stop as the CLI does, so a model
+cannot take a stopped run for a complete one.
+
+## Needs from another stream — the eighteenth wave, stream profile
+
+Stream profile's handoff is `docs/fixes/w18-profile.md`.
+
+### To launcher (`src/collect/mod.rs`): a first check that stops a run on a one-time cost
+
+The open decision (`DECISIONS.md`, "Open"): the first check, 0.1 s in, stops
+`cpu.profile` at 116 to 179 % on the first debuginfod symbol load (about
+25 ms) against 13 to 21 ms of target. Bench's filing is the same shape: the
+`bpf:fentry` attach (about 55 ms) reported apart from the run's rate.
+
+### To the owner of `src/stack.rs` (`Symbolizer`): the symbol load and the kernel frames
+
+(1) The first sample in a module named from debuginfod loads its whole
+symbol table inside the window; load it lazily or indexed. (2) With both
+halves, a drain costs about 150 us a sample of a debug build, most of it
+naming kernel frames: 15 % of the target's cpu at 997 Hz by itself.
+
+### To the triage's owner (`tests/triage.rs`): the lossy-profile verdict
+
+`a_verdict_read_off_a_lossy_profile_says_its_amount_is_a_lower_bound` is red
+under load on the base and on every branch that ran it (the 100 kHz profile
+throttled, the verdict undecided, `limit` null), and passed in phase B's
+merge run. For a quiet machine, then a test that holds under load.
+
+### To the coordinator (`cpu.profile`'s band)
+
+Bench raised `cpu.profile` through `pmu:sw` to `med` from its table; this
+stream measured 6 to 10 % user-only and 20 to 30 % with both halves against a
+program that waits. The band holds for a program that burns; the caveat
+should say which, after the re-measure.
+
+## Needs from another stream — the eighteenth wave, stream sched
+
+Stream sched's handoff is `docs/fixes/w18-sched.md`, section 7. Landed at the
+merge: `--symbols` on `sched.offcpu` (names' patch), `symbol_readers()` in
+the refusal (`983ea32`), the cases' two lines (`53df56f`).
+
+### To the owner of `src/collect/sched/{lock,futex}.rs`: follow the descendants
+
+`sched.lock` and `sched.futex` filter the current task with their own
+`current_and_filter`; the same map lookup as `push_followed_filter` would
+follow the target's children.
+
+### To engine (`CATALOG.md`, `examples/**`): children followed, and the kernel's wait
+
+The sched section can say a process target is followed into its children and
+a wait is `sched_info`'s account. `examples/sched-round-trips.yml`'s header
+says N blocks and N run-queue waits for N round trips: the driver's row is
+still N, the run's totals about 2N (the responder subshell is followed).
+`examples/sched-half-blocked.yml`'s 182.5 ms is the driver's row.
+
+### To the coordinator (`docs/scenarios/sched.md`)
+
+The per-wait bias and the descendants (the seventeenth wave's build filings)
+are fixed; the numbers are in the handoff's section 2.
+
+## Needs from another stream — the eighteenth wave, stream io
+
+Stream io's handoff is `docs/fixes/w18-io.md`.
+
+### To launcher (`src/collect/mod.rs`): read the in-target meters before the stops
+
+`Spending::close` reads every `InsideMeter` after the final stop loop; a
+collector whose `stop()` drops its programs leaves the meter its first
+reading, zero, without a `--budget`. About twenty collectors still do
+(`grep -rn 'program = None' src/collect`). One read before each
+`collector.stop()` (and before `current.stop()` in `degrade`) covers them
+all. If it does not land: a `detach()` per program type, as
+`BlockProgram::detach`.
+
+### To the coordinator (sudoers): the known-latency load
+
+`/usr/bin/modprobe null_blk queue_mode=2 irqmode=2 completion_nsec=3000000 nr_devices=1 gb=1 bs=4096`
+in `/etc/sudoers.d/omniscient-privileged`, or the test run on the granted
+`completion_nsec=6000` load (`STATE.md`, "Needs privilege" item 4).
+
+### Still open
+
+`io.inflight`'s cause on 6.17 (`docs/scenarios/io.md` defect 20); a known
+number of merges; one program for both `io.latency` histograms (optional).
+
+## Needs from another stream — the eighteenth wave, stream engine
+
+Stream engine's handoff is `docs/fixes/w18-engine.md`.
+
+### To launcher (`src/main.rs`, `assemble`): skip a query-tier rule, and clone only what is read
+
+The diff is in the handoff, applied, run (26 of `tests/join_engine.rs`;
+0.96 to 1.26 KiB resident per event against 1.58 to 1.92) and reverted.
+
+### To names (`src/cli.rs`, `man/omn.1`): apply a rule to a stored run
+
+`omn join -f <session-or-rule.yml> <results.json>`, applying each query-tier
+rule with `join::apply_stored`; and `tier:` in the man page's join rule.
+
+### To profile (`docs/unwind.md`): the perf map under `--symbols local`
+
+`CATALOG.md` says it; `docs/unwind.md` does not.
+
+### To whoever owns `src/bpf/net_qdisc.rs` next: the `net` pointer through `member_offset`
+
+`netns_offsets` can read `member_offset("possible_net_t", "net")` instead of
+writing 0; its doc comment's "does not follow a typedef" is no longer true.
+
+## Needs from another stream — the eighteenth wave, stream bench
+
+Stream bench's handoff is `docs/fixes/w18-bench.md`.
+
+### To engine (`examples/bench/harness.rs`): the resolution floor in `judge_band`
+
+Read a dilation no larger than the workload's resolution as zero, as
+`tests/bench_bands.rs::measured` does, or the next table flags `mem.swap`
+through `fs:cgroup` where `bench_bands` does not.
+
+### To the coordinator (`src/catalog.rs`, the loader): an equivalent backend's band
+
+If "an `equivalent` backend declares no cheaper band than a backend above it
+serving a target it serves" belongs with the chain invariants, move
+`cheaper_equivalents` from `tests/bench_bands.rs` into the loader.
+
+### To engine (`CATALOG.md`): the cost column
+
+The rows whose bands moved, listed in the handoff (the `count`-mode counters
+`free` to `low`, `io.size` to `high`, `net.tcp.rtt` to `med`, `power.cstate`
+to `high`, the `gpu` rows through `nvml`, `proc.exec`/`exit` to `low`, the
+`mem.*` smaps rows to `med`, and the fix round's equivalents).
+
+## Needs from another stream — the eighteenth wave, stream resolver
+
+Stream resolver's handoff is `docs/fixes/w18-resolver.md`. Landed at the
+merge (`f51189d`): the renamed tests cited by name in five scenario
+documents, and `examples/sched-forced-backends.yml`'s two exits.
+
+### To launcher (`src/main.rs`, the resolution loop): name every request refused at resolution
+
+A session of pinned backends this machine cannot serve now reaches the
+resolver's error path, and `src/main.rs` returns at the first:
+`examples/sched-forced-backends.yml` names only `sched.offcpu` here, where
+the build's refusal named all five (`docs/scenarios/sched.md` defect 8).
+
+### To the coordinator: `proc-not-built.yml` exits 1 or 3
+
+`docs/scenarios/proc.md:161,182`, `GUIDE.md:362` and `examples/README.md:191`
+say it exits 3; it is 1 on a machine whose tracefs this uid cannot read and 3
+elsewhere. The prose around the renamed tests in `docs/scenarios/io.md` and
+`gpu.md` still says "exits 3".
+
+## Needs from another stream — the eighteenth wave, stream cases
+
+Stream cases' handoff is `docs/fixes/w18-cases.md`, section 3. Each is an
+`open_findings` line of the case that shows it.
+
+### To the triage's owner (`src/triage/latency.rs`, `Tasks::follow`, `Tasks::child`): a job is a chain of processes
+
+`make -j8`'s job is `sh`, `gcc`, two `cc1` one after the other, and `as`; the
+wait's place is taken by one `cc1` (2.6 to 2.8 s of the job's 5.1 to 5.3 s).
+`every-cited-number-...` fails both ways on both `make-sqlite` causes and on
+`gcc-shell`'s contended compile, and the person's verdict on `make-sqlite`'s
+one-job cause is undecided one run in five. Wanted: the wait's place taken by
+the child the wait names and the processes under it, one after the other; or
+the undecided verdict saying the rest of the wait is in other children.
+
+### To the triage's owner (`Tasks::follow`): a thread that waits beside the main thread
+
+`http-server-stdlib`'s slow client: the serving thread was blocked in its
+send, not busy, so `RAN_IN_IT` never follows it, and both ways name the
+`select`. Wanted: a thread alive and blocked through the main thread's block,
+serving the request, named beside it as a busy one is.
+
+### To the triage's owner (`Limit`): one spelling
+
+The JSON writes `cpu_queue` and `other_block`, the text `cpu-queue` and
+`other-block`. Held by `the-verdict-s-json-spells-its-limit-as-the-text-does`
+(an open finding on the two `cpu-queue` causes).
+
+### To the owners of `cpu.profile` and the sched programs: the tool's own programs as the hottest function
+
+On `sqlite3-durability`'s commits the target's profile holds the tool's eBPF
+programs (`bpf_trace_run2`, `bpf_prog_..._omn_futex_out`); the person's
+verdict once named `bpf_trace_run2` its hottest function. Wanted: frames of
+the tool's own programs said as its cost and never the named suspect.
+
+### To the coordinator (`src/emit.rs`) or names (`docs/mcp.md`): a `stack` output is not keyed by task
+
+`keys: [task]` keys the summaries, not the stacks. Wanted: stack rows keyed by
+the request's keys, or `docs/mcp.md` telling a model to ask `raw` beside
+`stack` to read a followed task's stack.
+
+### To green (`.github/**`): `gcc-shell` on the CI
+
+It is asked again: the cell needs `gcc`, `unzip`, `taskset`, `python3` and
+the fetch from sqlite.org.
+
+## The eighteenth wave, the coordinator's
+
+### At the merges
+
+Phase A (`f95fef0` to `988f008`, then `983ea32`, `53df56f`, `cc3adc1`) and
+phase B (`4bcddda`, `e54c622`, then `f51189d`); `STATE.md`, "The eighteenth
+wave is merged". `make check` is red on one test at both, the ring-loss test
+above. The w17 filings each stream landed are marked in their sections.
+
+### For the flaky tally
+
+Each seen at the merges or in a handoff, passing when rerun alone once unless
+said otherwise; none in `docs/flaky.md` yet:
+
+- `scenario_net::an_interface_that_disappears_mid_run_ends_the_run_by_name`
+  (phase A's merge run): *"the requested duration elapsed"* instead of naming
+  `veth0`, a timing failure.
+- `join_engine::a_program_s_life_is_a_whole_its_three_states_account_for`
+  (stream cases' run).
+- `scenario_sched::a_mutex_nobody_else_wants_is_held_as_long_and_waited_for_not_at_all`
+  (stream cases' run).
+- `cases`, `sqlite3-stripped/a-plan-that-scans/cli`'s
+  `every-cited-number-agrees-with-the-reference`: on-cpu 2 127 ms against
+  `.timer`'s 2 088 ms, 39 ms apart against 35.6 ms allowed, once in seven, a
+  load stretching the 1.4 s run to 2.1 s (stream cases); stream io saw the
+  same, 41.3 against 38.7.
+- `collect::mem::page_faults::tests::sampled_in_user_mode_the_weighed_samples_are_the_faults_the_thread_took`
+  (phase B's `make check`, 4064 faults weighed against 4099; stream cases'
+  run).
+- `unwind::a_stripped_build_is_named_from_debuginfod_only_when_asked_and_as_the_unstripped_one_is`:
+  the second shape (the unstripped reference holding two of four branches)
+  seen once at load 30 to 48 after 22 green runs alone (stream profile).
+- `unwind::dwarf_recovers_the_whole_tree_of_a_build_without_frame_pointers`:
+  a branch's share outside its slack, at load 48 and in three other streams'
+  runs; six of six alone (stream profile).
+- `scenario_net::every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`:
+  another test's flood counted (`SOCKET_RCVBUFF`), in five streams' runs.
+- Not flaky: `runner::a_profile_s_losses_land_...` (a gap, above) and
+  `triage::a_verdict_read_off_a_lossy_profile_...` (red under load wherever
+  it ran, filed above).
+
+### How the wave ran
+
+The stream agents shared one scratchpad directory, and two streams' logs of
+the same name (`nff.log`) were written into one file at once (streams cases
+and resolver). The next brief should have each stream log under a directory
+named after it.

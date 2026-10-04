@@ -399,6 +399,14 @@ Now, and not before: we have three real join types to generalize from.
       *Sixteenth wave: unchanged. A kernel-tier rule would be a program of
       `src/bpf/` per match kind, and the query tier needs a command over
       stored runs, which `omn` does not have (`docs/fixes/w16-engine.md`).*
+      *Eighteenth wave: a rule chooses its tier (`tier: agent`, `query` or
+      `kernel`). The query tier applies the same engine to a stored run's
+      `raw` events (`join::apply_stored`), held equal to the agent tier field
+      for field on a real run
+      (`join_engine::a_rule_moved_to_the_query_tier_answers_from_the_stored_run_what_the_agent_did`);
+      the kernel tier is refused with the reason, since no match kind has a
+      program (`docs/fixes/w18-engine.md`). No command applies a rule to a
+      stored run yet. Left `[~]` for the kernel tier only.*
 - [x] A load test proves there is no open-state leak over 1 h.
       *Audit, fourteenth wave: Not proven: no join-engine load test of any
       length exists. The open-state balance (`states_balance` in `src/join.rs`)
@@ -475,6 +483,12 @@ Now, and not before: we have three real join types to generalize from.
       trusts the percentage. The new cost is not measured: the run is the
       coordinator's, alone (`STATE.md`, "Needs privilege"). Whether 1 % is
       the right criterion is open (`DECISIONS.md`).*
+      *Eighteenth wave: run once after the seventeenth wave's merge, 12.03 %
+      (348 ns a request), and with `bpf_stats_enabled` the programs read 0
+      runs: they were closed at the stop, before the run read their account.
+      They are now detached and kept until the close
+      (`docs/fixes/w18-io.md`), so the next run says how much of the 348 ns
+      is the programs'. Not run since; the decision waits on it.*
 - [x] Exceeding the budget produces an **announced** degradation, not a loss.
       *The runner checks every 100 ms and, over the ceiling, moves the
       collection onto the next cheaper backend of its chain that this machine
@@ -630,7 +644,7 @@ finally earns its place.
 
 ### Exit criteria
 
-- [~] A cost/resolution/loss table measured for every (source, backend). *94
+- [x] A cost/resolution/loss table measured for every (source, backend). *94
       pairs, after the tenth wave, `docs/bench.md`; the heap sources from a
       rerun.*
       *Audit, fourteenth wave: Partly: the table comes from one ignored run in
@@ -659,7 +673,13 @@ finally earns its place.
       `nvml` 14.5 %, `power.cstate` 7.8 %, `cpu.profile` through `pmu:sw`
       4.9 %. The bands are not yet corrected to it, and the table is not in
       `docs/bench.md`. Left `[~]` until they are.*
-- [~] The resolver's choices are confirmed by measurement, or corrected.
+      *Eighteenth wave, done: all 95 rows of that table are recorded in
+      `docs/bench.md`, 43 `cost:` lines corrected to the band they measured
+      and two standing with their reason (a fixed `bpf:fentry` attach), and
+      `tests/bench_bands.rs` fails when a band and its row disagree or the
+      record loses a row (`docs/fixes/w18-bench.md`). A table re-measured
+      after the wave's fixes is the coordinator's next bench run.*
+- [x] The resolver's choices are confirmed by measurement, or corrected.
       *Confirmed for the seven chains with two served backends. The table's
       correction is to the cost bands: an in-kernel collector's cost is in the
       target's dilation, not in the tool's cpu.*
@@ -670,6 +690,11 @@ finally earns its place.
       *Fifteenth wave: the band column above is that test, once the bench's
       table is rerun on a quiet machine. Left `[~]`.*
       *Sixteenth wave: unchanged; the same rerun.*
+      *Eighteenth wave, done: the table reran before the seventeenth wave and
+      the catalog's bands are corrected to it, an in-kernel collector's cost
+      read as the larger of the tool's share and the target's dilation, and
+      `tests/bench_bands.rs` holds every band to its row, including that an
+      `equivalent` backend never declares less than what it stands in for.*
 - [~] The agent's own cost (CPU, RSS) is measured separately from the dilation of
       the observed process. *Tenth wave: collector cpu from `cost.json`, peak RSS
       from `/proc`, dilation from the workload's own clock.*
@@ -870,6 +895,10 @@ through `omn latency` and through `omn-mcp` (`docs/cases.md`): `sqlite3-stripped
 `cases/held/` until the triage follows a wait for a child. What fails is
 listed under each case's `open_findings` and filed where it lives
 (`docs/open-findings.md`, the seventeenth wave's sections).*
+*Eighteenth wave: seven cases, `gcc-shell` back in `cases/gcc-shell/` now
+that the triage follows a wait for a child; both ways read the task the
+triage follows, and two ways run with different privileges are not compared
+(`docs/fixes/w18-cases.md`).*
 
 - [~] Six programs, none written for this project, each with at least two known
       causes, one on the CPU and one off it, and for every case the triage's
@@ -884,6 +913,12 @@ listed under each case's `open_findings` and filed where it lives
       the work ("a program is its main thread"; `DECISIONS.md`, "Open").
       `http-server-stdlib`'s cold file skips here with its numbers (the NVMe
       is faster than the server's copy).*
+      *Eighteenth wave, partly: seven cases over five programs, `gcc-shell`
+      back. The first suspect is the known cause, both ways, for every cause
+      asked here, `make-sqlite`'s one-job cause in four runs of five (the
+      triage follows one `cc1` of a job that is a chain of processes, filed);
+      the server's listing is followed into its serving thread, and the
+      compiles into `cc1`. Left `[~]` for `make-sqlite`.*
 - [~] Every number a verdict cites agrees with the reference's own account,
       within that account's resolution.
       *Seventeenth wave, partly: within the stated slack for `sqlite3-stripped`
@@ -894,7 +929,12 @@ listed under each case's `open_findings` and filed where it lives
       twice the run delay), `http-server-stdlib`'s slow client (the main
       thread's `select`, a second longer than the serving thread's wait), and
       `make-sqlite`.*
-- [ ] Where the cause is out of the tool's sight (interpreted or JIT frames, a
+      *Eighteenth wave, partly: `sqlite3-durability`'s rows within 7 to 20 ms
+      of the kernel's over 500 commits (the sched sources read the kernel's
+      own wait); still not for `make-sqlite` and `gcc-shell`'s contended
+      compile (one `cc1` of the job's chain), nor the slow client (a thread
+      blocked beside the main thread is not followed). Filed.*
+- [~] Where the cause is out of the tool's sight (interpreted or JIT frames, a
       closed GPU), the verdict says so by name. No case ends with a confident
       wrong suspect.
       *Seventeenth wave, not met: without a perf map the verdict presents an
@@ -903,7 +943,14 @@ listed under each case's `open_findings` and filed where it lives
       the one named; and the main-thread cases end with a confident wrong
       suspect (`Limit::Sleep`'s "a timer, a pipe or a socket" for a wait for
       a child or a polled lock). Each is filed.*
-- [~] One case names a stripped distribution binary's functions from
+      *Eighteenth wave, partly: a flat interpreter profile is said as one and
+      names no suspect, a sample under a perf map is charged to its innermost
+      perf-map frame (`py::score`, both ways), and the sleep sentence names a
+      polled lock and a wait for a child. Left: the slow client's verdict
+      names the main thread's `select` where the serving thread's send is the
+      request's, and the tool's own eBPF frames (`bpf_trace_run2`) can be
+      ranked as the hottest function. Filed.*
+- [x] One case names a stripped distribution binary's functions from
       debuginfod, and says where each name came from.
       *Seventeenth wave, the agent's way: `sqlite3-stripped` through
       `omn-mcp` names `sqlite3VdbeExec` from debuginfod with "names came from
@@ -911,12 +958,21 @@ listed under each case's `open_findings` and filed where it lives
       source (`Frame::named_by`). The person's way cannot: `omn latency` takes
       no `--symbols`, the verdict drops the names note, and `sched.offcpu`'s
       stacks are not asked through debuginfod (all filed).*
+      *Eighteenth wave, done: the person's way too. `omn latency --symbols
+      debuginfod` names `sqlite3VdbeExec.lto_priv.0` and the block's
+      `sqliteDefaultBusyCallback` (`sched.offcpu` reads the flag), and the
+      verdict carries the names note; `sqlite3-stripped` lists no open
+      finding.*
 - [ ] Every case runs at `perf_event_paranoid` 2 and says what that cost it:
       the stacks it lost, the sources it went without.
       *Seventeenth wave: reasoned (every cause answers, or skips both ways
       with the machine's reason first), not run; the sysctl is machine-wide
       and is the coordinator's privileged run (`STATE.md`, "Needs
       privilege").*
+      *Eighteenth wave: still not run. One privilege model makes the run
+      meaningful (at `718cae1` the two ways ran with different privileges and
+      the agent's failed); the commands are `STATE.md`, "Needs privilege",
+      item 1.*
 - [x] Adding a seventh program means adding a directory under `cases/`, and
       zero lines under `src/`.
       *Seventeenth wave: after the format (`docs/cases.md`), the python and
