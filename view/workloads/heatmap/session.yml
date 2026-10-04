@@ -1,0 +1,12 @@
+# The heatmap view's latency source this workload exercises, on its workload
+# (`view/workloads/heatmap/`).
+#
+#   omn -f view/workloads/heatmap/session.yml
+name: heatmap workload
+requests:
+  - label: socket
+    source: net.socket
+    target:
+      launch: [python3, view/workloads/heatmap/workload.py]
+    mode: trace
+    emit: [raw, hist]

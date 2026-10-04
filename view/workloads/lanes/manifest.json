@@ -1,0 +1,30 @@
+{
+  "view": "lanes",
+  "about": "Threads and GPU kernels in a known schedule. Three named threads pass a baton around a known number of rounds, each holding the cpu for a known time per turn while the other two wait for it; then a fourth thread launches a known number of kernels one at a time and waits for each in a context whose synchronisation blocks.",
+  "run": [
+    "python3",
+    "view/workloads/lanes/workload.py"
+  ],
+  "lanes": [
+    "lane-a",
+    "lane-b",
+    "lane-c"
+  ],
+  "rounds": 6,
+  "turn_s": 0.08,
+  "gpu": {
+    "thread": "lane-gpu",
+    "kernel": "spin",
+    "launches": 12,
+    "iterations": 4000000,
+    "optional": true
+  },
+  "trust": {
+    "turns": "exact: each lane runs `rounds` turns, one after another in the order of `lanes`, and only one lane is on the cpu at a time",
+    "on_cpu": "each turn is `turn_s` on the lane's own cpu clock, exact to a few microseconds: each lane is on the cpu `rounds * turn_s`",
+    "off_cpu": "each lane waits for the other two lanes' turns between its own: at least `(rounds - 1) * 2 * turn_s` blocked, plus the wait before its first turn",
+    "switches": "a lane leaves the cpu at least once per turn it waits for, so at least `rounds` switches per lane",
+    "kernels": "exact: `launches` launches of `spin`, one at a time, each waited for; the kernel's duration is the device's, tens of milliseconds for `iterations` on the development machine, not chosen to the microsecond. A machine with no NVIDIA driver runs the threads alone and says so on standard error",
+    "wakeups": "each turn but the very first begins with the previous lane setting the baton the lane waits on: `rounds` wakeups of each lane by the one before it, less one for `lane-a`, whose first baton is the main thread's"
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "view": "timebar",
+  "about": "One named thread whose wall clock is split by state in four known phases: on the cpu, asleep, waiting for a lock another thread holds, and runnable behind a rival process pinned to its core. A known split of wall clock by state.",
+  "run": [
+    "python3",
+    "-X",
+    "perf",
+    "view/workloads/timebar/workload.py"
+  ],
+  "symbols": "local",
+  "thread": "worker",
+  "phases": [
+    {
+      "name": "compute",
+      "state": "on_cpu",
+      "seconds": 0.6,
+      "function": "compute"
+    },
+    {
+      "name": "sleep",
+      "state": "sleeping",
+      "seconds": 0.4,
+      "function": "rest"
+    },
+    {
+      "name": "lock",
+      "state": "futex",
+      "seconds": 0.4,
+      "function": "wait_for_lock",
+      "holder": "holder"
+    },
+    {
+      "name": "contended",
+      "state": "runqueue",
+      "seconds": 0.3,
+      "function": "contend",
+      "rival": "rival"
+    }
+  ],
+  "tail_s": 0.6,
+  "trust": {
+    "on_cpu": "exact to a few microseconds on the thread's cpu clock; the contended phase adds its own 0.30 s on the cpu, so the thread's on-cpu time is 0.90 s",
+    "sleeping": "at least what was asked, longer by the scheduler's slack",
+    "futex": "the holder sleeps 0.40 s under the lock; the worker waits that long less the moment between the holder taking it and the worker asking, a few hundred microseconds",
+    "runqueue": "the worker and a rival process are pinned to one core and burn 0.30 s of cpu each; the worker waits on the run queue while the rival runs, about 0.30 s, more on a busy machine (other tasks on that core), less when the rival starts late. Only a lower bound of half of it is held",
+    "tail_s": "after its last phase the program idles `tail_s`, so that a poll of its on-cpu time every 250 ms has a point after the last of its cpu: a poll that would come after the exit cannot read a process that is gone"
+  }
+}

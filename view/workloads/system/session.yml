@@ -1,0 +1,33 @@
+# The system view's sources, on its workload (`view/workloads/system/`): the
+# program's on-cpu time, and the machine's panels.
+#
+#   omn -f view/workloads/system/session.yml
+name: system workload
+requests:
+  - label: on-cpu
+    source: cpu.oncpu_time
+    target:
+      launch: [python3, view/workloads/system/workload.py]
+    mode: poll@250ms
+    emit: [timeline, summary]
+    keys: [task]
+  - label: cpu
+    source: cpu.util
+    target: {system: true}
+    mode: poll@250ms
+    emit: [timeline, summary]
+  - label: pressure
+    source: mem.pressure
+    target: {system: true}
+    mode: poll@250ms
+    emit: [timeline, summary]
+  - label: devices
+    source: io.bytes
+    target: {system: true}
+    mode: poll@250ms
+    emit: [timeline, summary]
+  - label: network
+    source: net.bytes
+    target: {system: true}
+    mode: poll@250ms
+    emit: [timeline, summary]

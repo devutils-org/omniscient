@@ -1,0 +1,21 @@
+{
+  "view": "process",
+  "about": "All of it at once, on one process: a function that dominates the cpu, a sleep, a lock another thread holds, a resident footprint touched page by page, a file written, and bytes exchanged with a child over loopback -- each a known cost the process view's tiles summarise and the other views explain.",
+  "run": ["python3", "-X", "perf", "view/workloads/process/workload.py"],
+  "symbols": "local",
+  "thread": "process-main",
+  "cpu": {"function": "crunch", "seconds": 0.60, "minor": {"function": "tidy", "seconds": 0.15}},
+  "sleep": {"function": "doze", "seconds": 0.30},
+  "lock": {"function": "queue_up", "holder": "process-holder", "seconds": 0.25},
+  "memory": {"bytes": 33554432, "page": 4096, "hold_s": 0.6},
+  "file": {"name": "process.bin", "fd": 40, "written": 4194304, "chunk": 65536},
+  "socket": {"peer": "process-peer", "sent": 1048576, "received": 262144, "chunk": 65536},
+  "trust": {
+    "cpu": "exact to a few microseconds on the main thread's cpu clock: `crunch` four times `tidy`, together 0.75 s; a profile sees them within its sampling error",
+    "sleep": "at least what was asked, longer by the scheduler's slack",
+    "lock": "the holder sleeps `seconds` under the lock; the main thread waits that long less a few hundred microseconds",
+    "memory": "the resident size grows by at least `bytes` and stays there to the end, `hold_s` after the last of the rest, so a poll of the resident size sees it",
+    "file": "exact at the system calls, on descriptor `fd`",
+    "socket": "exact at the system calls"
+  }
+}

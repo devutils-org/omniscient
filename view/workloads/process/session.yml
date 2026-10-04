@@ -1,0 +1,45 @@
+# The sources the process view summarises, on its workload
+# (`view/workloads/process/`).
+#
+#   omn -f view/workloads/process/session.yml
+name: process workload
+requests:
+  - label: profile
+    source: cpu.profile
+    target: &workload
+      launch: [python3, -X, perf, view/workloads/process/workload.py]
+    mode: sample@997hz
+    emit: [stack]
+    stack: fp
+  - label: blocked
+    source: sched.offcpu
+    target: *workload
+    mode: trace
+    emit: [raw, stack]
+    stack: fp
+  - label: on-cpu
+    source: cpu.oncpu_time
+    target: *workload
+    mode: poll@250ms
+    emit: [timeline, summary]
+    keys: [task]
+  - label: futex
+    source: sched.futex
+    target: *workload
+    mode: trace
+    emit: [raw, summary]
+  - label: rss
+    source: mem.rss
+    target: *workload
+    mode: poll@250ms
+    emit: [timeline, summary]
+  - label: syscalls
+    source: io.syscall
+    target: *workload
+    mode: trace
+    emit: [raw, summary]
+  - label: socket
+    source: net.socket
+    target: *workload
+    mode: trace
+    emit: [raw, hist]

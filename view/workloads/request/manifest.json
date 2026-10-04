@@ -1,0 +1,49 @@
+{
+  "view": "request",
+  "about": "Requests each slowed by a known cause. The program is the vertical case's server (`examples/vertical/server.c`, a C program: a request is declared by USDT probes, which a Python program cannot carry), given a plan of sixteen requests in four kinds, four of each: plain, behind a lock another thread sleeps under, reading cold pages from the disk, and sent by a client that pauses halfway through. Its own client and holder threads are in the same process.",
+  "build": [
+    "cc",
+    "-O0",
+    "-pthread",
+    "-o",
+    "target/omn-view-workloads/request/server",
+    "examples/vertical/server.c"
+  ],
+  "run": [
+    "target/omn-view-workloads/request/server",
+    "target/omn-view-workloads/request/data",
+    "<plan...>"
+  ],
+  "requests": [
+    {
+      "cause": "none",
+      "plan": "0:0",
+      "count": 4
+    },
+    {
+      "cause": "lock_wait",
+      "plan": "30:0",
+      "count": 4,
+      "lock_ms": 30
+    },
+    {
+      "cause": "block_io",
+      "plan": "0:32",
+      "count": 4,
+      "reads": 32
+    },
+    {
+      "cause": "net_rx",
+      "plan": "0:0:40",
+      "count": 4,
+      "gap_ms": 40
+    }
+  ],
+  "order": "the kinds interleave: none, lock_wait, block_io, net_rx, four times over, each request's id its place in the plan from 1",
+  "trust": {
+    "count": "exact: sixteen requests begun and ended, none abandoned",
+    "lock_wait": "the holder sleeps `lock_ms` under the server's lock; the worker waits that long, less the moment between the holder taking the lock and the worker asking for it, more by the holder's wakeup: within a millisecond on an idle machine, from 27 to 35 ms for 30 seen with nine test runs sharing it. The other kinds wait for no lock",
+    "block_io": "`reads` pages read with O_DIRECT after the file is dropped from the page cache: `reads` block requests, each a device's latency (tens of microseconds on an NVMe disk, milliseconds on a spinning one), so the time is the device's and only the count is chosen",
+    "net_rx": "the client sends half its request, sleeps `gap_ms`, and sends the rest: the pause is before the request is declared, between its first byte and its birth, and it is the request's network-receive time, not its span. A request sent at once can still wait for the server to be scheduled on a loaded machine (12.6 ms was seen), so the pause is chosen well above that"
+  }
+}

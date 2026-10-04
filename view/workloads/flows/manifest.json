@@ -1,0 +1,37 @@
+{
+  "view": "flows",
+  "about": "Known bytes per file and per socket. The program writes two files of known sizes in writes of a known size, reads the larger back, and sends a known number of bytes over a loopback TCP connection to a child process, which answers with a known number of its own.",
+  "run": [
+    "python3",
+    "view/workloads/flows/workload.py"
+  ],
+  "directory": "target/omn-view-workloads/flows",
+  "chunk": 65536,
+  "files": [
+    {
+      "name": "large.bin",
+      "fd": 40,
+      "written": 8388608,
+      "read": 8388608
+    },
+    {
+      "name": "small.bin",
+      "fd": 41,
+      "written": 1048576,
+      "read": 0
+    }
+  ],
+  "socket": {
+    "peer": "flows-sink",
+    "sent": 4194304,
+    "received": 1048576
+  },
+  "lead_s": 0.3,
+  "tail_s": 0.6,
+  "trust": {
+    "bytes": "exact: each write and read is of `chunk` bytes, and the sizes are multiples of it; a file's bytes are the program's system calls, not the device's, which a page cache and a filesystem make different. Each file is opened on its own descriptor, `fd`, so a source that reports bytes per descriptor reports each file apart",
+    "socket": "exact at the system calls: `sent` is what the program handed `send`, `received` what `recv` returned to it; the loopback carries both, and the sink's own calls are the mirror image of the program's",
+    "tail_s": "after its last phase the program idles `tail_s`, so that a poll of the machine's devices and interfaces, every 250 ms, has a point after the last byte",
+    "lead_s": "the program idles `lead_s` before its first phase, so that the machine's polled sources have read their baseline before the first byte: a polled source's first read is its baseline, and bytes moved before it are in no point (filed in docs/fixes/w20-workloads.md)"
+  }
+}
