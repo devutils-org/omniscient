@@ -1,13 +1,13 @@
 [0m[1momn top[0m │ fixture sqlite-commits │ 2.48s [0m[3;34mlive[0m                        [0m[35mview: snapshot[0m │ [0m[35mcollectors and target: at the end[0m [0m
- 1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
+ 1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 [0m[1;2m flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference [0m[2m────────────────────────────[0m
 [0m[1mon cpu: [0m[2m0 so far[0m │ [0m[1moff cpu: [0m[2m253 so far[0m                                                                                  [0m
 [0m[2m┌[0m[1;2m on cpu [0m[2mcpu.profile ──────────────────────────────────────────────────────────────────────────────────────────────────┐[0m
 [0m[2m│0 samples on 0 stacks so far[0m [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegraded x5[0m                                                                [0m[2m│[0m
 [0m[2m│[0m[2;3mthe icicle is drawn when the run ends: the runner names the stacks then. Below, what arrived over time.[0m               [0m[2m│[0m
 [0m[2m│[0m                                                                                                                      [0m[2m│[0m
-[0m[2m│[0m[33m‼ [0m[2mthis recording kept `cpu.profile` as `stack` only: replayed as live it has no samples to count, where a live run[0m    [0m[2m│[0m
-[0m[2m│[0m[33m  [0m[2mhands them over as they arrive[0m                                                                                      [0m[2m│[0m
+[0m[2m│[0m[33m‼ [0m[2mthis recording kept `cpu.profile` as `stack` only, without `raw`: replayed as live it arrives empty, where a live[0m   [0m[2m│[0m
+[0m[2m│[0m[33m  [0m[2mrun hands its events over as they come[0m                                                                              [0m[2m│[0m
 [0m[2m│[0m[33m‼ [0m[2mpmu:sw: time-based sampling: blind to phases running at reduced frequency[0m                                           [0m[2m│[0m
 [0m[2m│[0m[33m‼ [0m[2m167 of 169 samples landed in a function that sets up no frame pointer (167 in libc.so.6), so the frames under the[0m   [0m[2m│[0m
 [0m[2m│[0m[33m  [0m[2mleaf are not its callers: most of them are outside the target's own code, which is where the callers are lost;[0m      [0m[2m│[0m

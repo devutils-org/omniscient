@@ -14,11 +14,14 @@ use std::path::{Path, PathBuf};
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::style::{Color, Modifier};
+use ratatui::text::Span;
 use ratatui::Terminal;
 
 use crate::app::{App, Cost};
 use crate::model::Data;
+use crate::views::Focus;
 
 /// The size every snapshot is drawn at: a common terminal, wide enough for
 /// the tabs.
@@ -66,6 +69,68 @@ pub fn draw(data: Data, view: &str, width: u16, height: u16) -> Buffer {
     app.cost = Cost::Snapshot;
     app.open(view).unwrap_or_else(|error| panic!("{error}"));
     draw_app(&mut app, width, height)
+}
+
+/// Draws `view` on `data` compared with `against` and narrowed to `focus`,
+/// at the given size: the gallery's way to judge a view that draws a
+/// difference or honours a focus, beside the plain drawing.
+pub fn draw_with(
+    data: Data,
+    view: &str,
+    against: Option<Data>,
+    focus: Focus,
+    width: u16,
+    height: u16,
+) -> Buffer {
+    let mut app = App::new(data);
+    app.cost = Cost::Snapshot;
+    app.against = against;
+    app.focus = focus;
+    app.open(view).unwrap_or_else(|error| panic!("{error}"));
+    draw_app(&mut app, width, height)
+}
+
+/// Sends a left click at a cell of what `app` last drew, as a terminal
+/// reports it: what a view's click path is tested with, like its keys. Draw
+/// first -- the regions a click finds are the ones last drawn.
+pub fn click(app: &mut App, column: u16, row: u16) {
+    app.mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, row));
+}
+
+/// A right click: back.
+pub fn right_click(app: &mut App, column: u16, row: u16) {
+    app.mouse(mouse(MouseEventKind::Down(MouseButton::Right), column, row));
+}
+
+/// The wheel, one notch down (`true`) or up, over a cell.
+pub fn wheel(app: &mut App, down: bool, column: u16, row: u16) {
+    let kind = if down {
+        MouseEventKind::ScrollDown
+    } else {
+        MouseEventKind::ScrollUp
+    };
+    app.mouse(mouse(kind, column, row));
+}
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+/// The first cell whose text starts `needle` in a drawn buffer, as (column,
+/// row): where a test clicks to reach what it reads on screen.
+pub fn find(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
+    for (row, line) in text(buffer).lines().enumerate() {
+        if let Some(at) = line.find(needle) {
+            let column = Span::raw(&line[..at]).width();
+            return Some((column as u16, row as u16));
+        }
+    }
+    None
 }
 
 /// Draws an app as it stands.

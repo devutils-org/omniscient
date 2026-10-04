@@ -30,7 +30,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 
-use super::{Action, Ctx, Focus, Need, Scope, View};
+use super::{Action, Ctx, Focus, Need, Region, Scope, View};
 use crate::model::{Data, Event, Key, Output, Results};
 use crate::trust::{self, palette, Trust};
 use crate::units;
@@ -112,6 +112,10 @@ pub struct Heatmap {
     zoom: u8,
     /// The width of a column at the last draw, for the cursor keys.
     column_ns: f64,
+    /// Where the last drawn window started, for a click on a column.
+    window_ns: f64,
+    /// The map's columns as last drawn, each its index from the left.
+    regions: Vec<Region>,
 }
 
 impl View for Heatmap {
@@ -200,7 +204,29 @@ impl View for Heatmap {
         Action::None
     }
 
+    fn regions(&self) -> &[Region] {
+        &self.regions
+    }
+
+    /// The wheel zooms in time, on the cursor, as `+`/`-` do.
+    fn wheel(&mut self, down: bool, ctx: &Ctx<'_>) -> Action {
+        let code = if down {
+            KeyCode::Char('-')
+        } else {
+            KeyCode::Char('+')
+        };
+        self.key(KeyEvent::from(code), ctx)
+    }
+
+    /// A column clicked puts the cursor on its middle, as `h`/`l` would.
+    fn select(&mut self, id: usize, _ctx: &Ctx<'_>) -> Action {
+        let at = self.window_ns + (id as f64 + 0.5) * self.column_ns;
+        self.cursor_ns = Some(at.max(0.0) as u64);
+        Action::None
+    }
+
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>) {
+        self.regions.clear();
         let chosen = self.selected(ctx.data);
         let need = &NEEDS[chosen];
         let mut title = format!(" heatmap -- {} latency over time ", need.source);
@@ -416,6 +442,15 @@ impl Heatmap {
 
         // The map, its latency axis, and the histogram beside it.
         let map_top = y + (map_rows - scale.rows);
+        self.window_ns = window.0;
+        self.regions = (0..cols)
+            .map(|col| {
+                Region::new(
+                    Rect::new(map_x + col, map_top, 1, scale.rows.max(1)),
+                    usize::from(col),
+                )
+            })
+            .collect();
         let row_top = grid.per_row.iter().copied().fold(0.0, f64::max);
         let levels = Levels::of(grid.max_cell());
         let bar_w = margin.saturating_sub(8);
@@ -930,6 +965,13 @@ impl Samples {
         // nanosecond, which is how their common close is found.
         let mut firsts: Vec<(usize, u64, usize)> = Vec::new();
         for (index, results) in held(ctx.data, need).into_iter().enumerate() {
+            // The run names the attribute when it says it; the table is for
+            // a recording made before it did.
+            let attr = results
+                .value_attr
+                .as_deref()
+                .filter(|named| !named.is_empty())
+                .unwrap_or(attr);
             for event in results.events() {
                 if !focused(ctx.focus, event) {
                     continue;

@@ -179,6 +179,11 @@ pub struct Results {
     /// ring per key: what [`Shortfalls`] places on each series.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_ring: Vec<crate::collect::RingLoss>,
+    /// The attribute each event's value was read from (`latency_ns`, `bytes`,
+    /// ...): what every emit above reduced, named so a reader reads a source's
+    /// value by name from the run rather than from a table of its own.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value_attr: String,
 }
 
 /// What a series is keyed on.
@@ -276,6 +281,12 @@ pub enum Output {
     },
     Timeline {
         series: Vec<Series>,
+        /// The moment every point's `offset_ns` is measured from, on
+        /// `CLOCK_MONOTONIC`: the result's first event. Without it two
+        /// timelines cannot be laid on one axis, since each starts at its own
+        /// first event and not at the run's opening.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_ts_ns: Option<u64>,
     },
     Summary {
         series: Vec<SeriesSummary>,
@@ -933,6 +944,7 @@ pub fn aggregate(
             },
             Emit::Timeline => Output::Timeline {
                 series: timeline_by(&collection.events, axes, first_ts_ns, value_attr)?,
+                first_ts_ns: collection.events.first().map(|event| event.ts_ns),
             },
             Emit::Summary => Output::Summary {
                 series: summary_by(&collection.events, axes, value_attr, &shorts)?,
@@ -1038,6 +1050,7 @@ pub fn aggregate(
             _ => None,
         },
         by_ring: collection.by_ring,
+        value_attr: value_attr.to_owned(),
     })
 }
 

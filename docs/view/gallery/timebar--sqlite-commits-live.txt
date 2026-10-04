@@ -1,5 +1,5 @@
 omn top │ fixture sqlite-commits │ 2.48s live                        view: snapshot │ collectors and target: at the end
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
 │ the view's reading  one bar per thread, whole: the run's window                                                      │
 │                                                                                                                      │
@@ -14,7 +14,7 @@ omn top │ fixture sqlite-commits │ 2.48s live                        view: s
 │                                                                                                                      │
 │   state                            source          amount          share   ±         reads  trust                    │
 │   whole: the run's window                          2.48s           100%    exact                                     │
-│ █ on-cpu                           cpu.oncpu_time  not read                ?         0      ~low det live degraded   │
+│ █ on-cpu                           cpu.oncpu_time  not read                ?         0      ~low det live degraded x │
 │     ↳ `cpu.oncpu_time` has said nothing of this thread's process yet: it is read at the run's end                    │
 │ ▚ runnable                         sched.runqlat   3.61ms          0.15%   exact     173    ~low det live degraded   │
 │ ▓ blocked: uninterruptible         sched.offcpu    207ms           8.35%   exact     515    ~low det live degraded   │
@@ -24,7 +24,7 @@ omn top │ fixture sqlite-commits │ 2.48s live                        view: s
 │   over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn │
 │   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │
 │ Trust: the source is not reproducible between two runs of the same workload; the run is still going: losses, cost    │
-│   and stack names are known at its end; served by a fallback that says what it gives up (3).                         │
+│   and stack names are known at its end; served by a fallback that says what it gives up (4).                         │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

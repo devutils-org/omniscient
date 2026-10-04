@@ -1,5 +1,5 @@
 [0m[1momn top[0m │ fixture sqlite-latency │ 284ms                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥4.79%[0m[35m │ target 9.78% cpu[0m [0m
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  9 flows                                 [0m
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  9 flows  0 process                      [0m
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐[0m
 │[0m[1msched.switches [0m[2mnot in this run[0m  [0m[1msched.wakeup [0m[2mnot in this run[0m  [0m[1msched.offcpu [0m[2mno raw events[0m  [0m[1mgpu.kernel [0m[2mnot in this run[0m  │[0m
 │                                                                                                                      │[0m

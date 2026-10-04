@@ -41,6 +41,17 @@ omn \- one vocabulary for system observability
 .B omn join
 .B \-f
 .I rules results
+.br
+.B omn top
+.RB [ \-\-view
+.IR name ]
+.RB [ \-\-pid
+.IR pid " | " "\-\- program [args]" ]
+.br
+.B omn top \-\-replay
+.I run
+.RB [ \-\-against
+.IR run ]
 .SH DESCRIPTION
 .B omn
 describes a measurement along five axes and refuses the combinations that cannot
@@ -213,6 +224,12 @@ correlations as a run prints its joins, in
 text, json, yaml or toml. A rule the stored run cannot answer -- a side with no
 result, or one stored without \fBraw\fR -- refuses the command with exit 2
 rather than being left out.
+.TP
+.B top \fR[\fIoptions\fR] [\fB\-\-pid\fR \fIpid\fR | \fB\-\-\fR \fIprogram\fR]
+An interactive terminal view of what
+.B omn
+measures, live or from a recording. See
+.BR "THE VIEW" .
 .SH OPTIONS
 .SS Target
 .TP
@@ -794,6 +811,61 @@ held request over its ceiling with nothing cheaper in its chain is let go
 rather than ending the run, and says so; a request attached mid-run is weighed
 once it has run for 100 ms, because before that its attach is most of its
 account.
+.SH THE VIEW
+.B omn top
+draws a run in ten views: \fBsystem\fR (the machine and its processes),
+\fBflame\fR (on- and off-cpu stacks, and two runs' difference),
+\fBledger\fR (what a process costs, per resource), \fBrequest\fR (one
+request's life), \fBtimebar\fR (where the wall clock went, per thread),
+\fBheatmap\fR (latency over time), \fBlanes\fR (threads and GPU streams
+side by side), \fBwake\fR (who woke whom), \fBflows\fR (where the bytes
+went) and \fBprocess\fR (one process at a glance). It is a projection,
+never a collector: live, it asks for the sources its views need through the
+same resolver and runner as
+.BR "omn trace" ,
+and a source this machine cannot serve is drawn as its reason where its panel
+would be. Every figure is drawn in one trust style: dimmed where it is not to
+be read at face value, with a badge saying why.
+.PP
+The first screen is \fBprocess\fR for a launched program, and
+\fBsystem\fR for the machine;
+.BI \-\-view " name"
+opens another.
+.B \-\-replay
+.I run
+draws a recorded run (a directory written with
+.BR \-o ,
+its \fIresults.json\fR, or a flight recorder's document);
+.B \-\-against
+.I run
+gives the views that compare a second one;
+.B \-\-gallery
+.I run
+steps through every view on one run.
+.B \-\-headless
+draws without a terminal: a live run is collected to
+.BR \-o ,
+a replay is printed as text at
+.BR \-\-size .
+.B \-\-dump\-session
+prints the session a live run would ask for.
+.PP
+Keys: \fBq\fR quits; \fB\(<-\fR/\fB\(->\fR or \fBtab\fR move between
+views, \fB1\fR\(en\fB9\fR and \fB0\fR jump; \fBenter\fR goes into what
+is selected \(em a process into its ledger, a ledger line into the view behind
+it, a request into its threads' lanes \(em and \fBbackspace\fR comes back,
+with the focus it had; \fBf\fR clears the focus; \fBM\fR turns the mouse
+off and on; \fB?\fR lists every key and the trust legend.
+.PP
+The mouse: a click selects, a click on the selection goes in, the wheel
+scrolls (or zooms where a view zooms), a right click comes back, a click on a
+tab opens its view. Nothing is reachable by the mouse only. It is decoded in
+SGR mode; inside
+.BR tmux (1)
+it needs
+.B set \-g mouse on
+to reach the view. While the mouse is captured, most terminals select text
+with \fBshift\fR held, or \fBM\fR gives the selection back.
 .SH EXIT STATUS
 .TP
 .B 0

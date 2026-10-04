@@ -1053,7 +1053,7 @@ fn ndjson(results: &Results) -> Result<String, ParseError> {
                     let _ = writeln!(out, "{line}");
                 }
             }
-            Output::Timeline { series } => {
+            Output::Timeline { series, .. } => {
                 for series in series {
                     for point in &series.points {
                         let line = serde_json::json!({
@@ -1321,7 +1321,7 @@ fn text(results: &Results) -> String {
                 }
                 push_shortfall(&mut out, series.iter().find_map(|one| one.short.as_ref()));
             }
-            Output::Timeline { series } => {
+            Output::Timeline { series, .. } => {
                 let _ = writeln!(out, "  timeline");
                 for series in series {
                     let _ = writeln!(out, "    {}", series.key);
@@ -1587,7 +1587,7 @@ fn speedscope(output: &RunOutput) -> Result<String, ParseError> {
                         "weights": weights,
                     }));
                 }
-                Output::Timeline { series } => {
+                Output::Timeline { series, .. } => {
                     for series in series {
                         let Some(first) = series.points.first() else {
                             continue;
@@ -2438,7 +2438,7 @@ fn chrome(output: &RunOutput) -> Result<String, ParseError> {
 
         for out in &results.outputs {
             match out {
-                Output::Timeline { series } => {
+                Output::Timeline { series, .. } => {
                     for series in series {
                         for point in &series.points {
                             events.push(serde_json::json!({
@@ -2618,7 +2618,7 @@ fn why_no_timeline(output: &RunOutput) -> String {
     for results in &output.results {
         for out in &results.outputs {
             match out {
-                Output::Timeline { series } => {
+                Output::Timeline { series, .. } => {
                     asked = true;
                     if series.iter().any(|series| !series.points.is_empty()) {
                         return String::new();
@@ -2673,6 +2673,7 @@ mod tests {
                     }],
                 },
                 Output::Timeline {
+                    first_ts_ns: None,
                     series: vec![Series {
                         key: "task:7".into(),
                         points: vec![
@@ -2703,6 +2704,7 @@ mod tests {
             served_by: Vec::new(),
             period_ns: None,
             by_ring: Vec::new(),
+            value_attr: String::new(),
         }
     }
 
@@ -3346,7 +3348,10 @@ mod tests {
         assert!(never.message().contains("emitted no timeline"), "{never}");
 
         let mut empty = sample();
-        empty.outputs = vec![Output::Timeline { series: Vec::new() }];
+        empty.outputs = vec![Output::Timeline {
+            series: Vec::new(),
+            first_ts_ns: None,
+        }];
         let saw_nothing = run_output(
             OutputFormat::ChromeTrace,
             &RunOutput {

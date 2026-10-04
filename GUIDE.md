@@ -151,6 +151,43 @@ sends a reader to the wrong one costs more than no message.
 
 ---
 
+## `omn top`: the views
+
+`omn top` draws a run in ten views, live or from a recording
+(`docs/view/README.md` is the whole guide; `docs/view/<view>.md` one each,
+and `docs/view/gallery/` every view drawn on every fixture).
+
+```console
+omn top --replay tests/view_fixtures/http-server    # opens on `process`
+omn top --replay tests/view_fixtures/machine        # opens on `system`
+omn top --replay tests/view_fixtures/cpython-hot \
+        --against tests/view_fixtures/cpython-hot-heavier --view flame
+omn top -- python3 -c 'sum(range(10**8))'            # live, a launched program
+omn top --gallery tests/view_fixtures/sqlite-latency --headless   # no terminal
+```
+
+What to try, and what it shows:
+
+- **The links.** In `system`, `↓` to a process and `enter`: its `ledger`,
+  focused on it. `enter` on the cpu line: its `flame`. `⌫` twice: back in
+  `system`, unfocused. In `request` (the `vertical-requests` fixture),
+  `enter` focuses every view on one request and a second `enter` opens its
+  threads in `lanes`; `w` opens its wake-ups.
+- **The mouse.** Click a process row, click it again: the same ledger. The
+  wheel scrolls a list and zooms the heatmap in time; a right click comes
+  back; a tab opens its view. `M` turns the mouse off, which gives the
+  terminal its own text selection back. Inside tmux it needs `set -g mouse
+  on`.
+- **A search that types anything.** In `flame`, `/` then `q3f`: typed, not
+  obeyed, until `enter`.
+- **The trust style.** Every dimmed figure has a badge saying why; `?` lists
+  them. In `lanes` a time error dims a cell only where it could move it by
+  a tenth of a cell or more.
+- **Without a terminal** (an agent shell, CI): `--headless` prints a replayed
+  view, or collects a live run to `-o DIR` for `--replay DIR` later.
+
+---
+
 ## Sessions that need something first
 
 Most run anywhere. These do not, and they say so rather than printing a zero.

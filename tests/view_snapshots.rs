@@ -54,7 +54,7 @@ macro_rules! views {
     };
 }
 
-views!(system, flame, ledger, request, timebar, heatmap, lanes, wake, flows);
+views!(system, flame, ledger, request, timebar, heatmap, lanes, wake, flows, process);
 
 /// The fixture every frame snapshot is drawn on.
 const FRAME_FIXTURE: &str = "http-server";
@@ -76,7 +76,9 @@ fn frame_help() {
 fn frame_gallery() {
     let mut app = frame_app();
     app.gallery = true;
-    app.open("heatmap").unwrap();
+    // The frame is drawn on a view its stream changes rarely, so a change to
+    // a view is not a change to the frame's snapshots.
+    app.open("ledger").unwrap();
     assert_snapshot("frame--gallery", &draw_app(&mut app, WIDTH, HEIGHT));
 }
 
@@ -87,7 +89,7 @@ fn frame_live() {
     let half = data.opened_ns() + (data.closed_ns() - data.opened_ns()) / 2;
     let mut app = App::new(omn_view::feed::as_live_until(&data, half));
     app.cost = Cost::Snapshot;
-    app.open("heatmap").unwrap();
+    app.open("ledger").unwrap();
     assert_snapshot("frame--live", &draw_app(&mut app, WIDTH, HEIGHT));
 }
 

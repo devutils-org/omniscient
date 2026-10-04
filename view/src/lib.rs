@@ -8,7 +8,7 @@
 //! - [`model`]: the run, mirrored from the JSON `omn` writes.
 //! - [`trust`]: the one style every figure is drawn in -- dimmed, badged,
 //!   error-barred, or refused in place.
-//! - [`views`]: the [`views::View`] contract and the registry of the nine
+//! - [`views`]: the [`views::View`] contract and the registry of the ten
 //!   views.
 //! - [`app`]: the frame -- header, tabs, help line, the view's own cost.
 //! - [`feed`]: a live run's updates.

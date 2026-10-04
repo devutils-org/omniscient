@@ -24,7 +24,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::{Action, Ctx, Focus, Need, Scope, View};
+use super::{Action, Ctx, Focus, Need, Region, Scope, View};
 use crate::model::{Data, Key, Output, Refusal, Results};
 use crate::trust::{self, palette, Trust};
 use crate::units;
@@ -125,6 +125,8 @@ const KEYS: &[(&str, &str)] = &[
 pub struct Ledger {
     /// The line whose detail is drawn under the sheet.
     selected: usize,
+    /// The sheet's lines as last drawn, each its index in `ITEMS`.
+    regions: Vec<Region>,
 }
 
 impl View for Ledger {
@@ -144,7 +146,16 @@ impl View for Ledger {
         let sheet = Sheet::of(ctx.data, ctx.focus);
         let against = ctx.against.map(|other| Sheet::of(other, ctx.focus));
         self.selected = self.selected.min(ITEMS.len() - 1);
-        draw_sheet(frame, area, &sheet, against.as_ref(), self.selected);
+        self.regions = draw_sheet(frame, area, &sheet, against.as_ref(), self.selected);
+    }
+
+    fn regions(&self) -> &[Region] {
+        &self.regions
+    }
+
+    fn select(&mut self, id: usize, _ctx: &Ctx<'_>) -> Action {
+        self.selected = id.min(ITEMS.len() - 1);
+        Action::None
     }
 
     fn key(&mut self, key: KeyEvent, ctx: &Ctx<'_>) -> Action {
@@ -405,7 +416,7 @@ fn stats(results: &[&Results], attr: &str, scoped: bool, focus: &Focus) -> BTree
     let mut by_key: BTreeMap<String, Stat> = BTreeMap::new();
     for one in results {
         let firsts: BTreeMap<&str, f64> = match one.output("timeline") {
-            Some(Output::Timeline { series }) => series
+            Some(Output::Timeline { series, .. }) => series
                 .iter()
                 .filter_map(|series| Some((series.key.as_str(), series.points.first()?.value)))
                 .collect(),
@@ -480,7 +491,7 @@ fn points(
     let mut all = Vec::new();
     for one in results {
         let shift = one.window.opened_ns.saturating_sub(opened);
-        if let Some(Output::Timeline { series }) = one.output("timeline") {
+        if let Some(Output::Timeline { series, .. }) = one.output("timeline") {
             for series in series {
                 if scoped && !keeps(&series.key, focus) {
                     continue;
@@ -883,7 +894,9 @@ fn tasks_of(data: &Data) -> Vec<(i32, Option<String>)> {
             for output in &one.outputs {
                 let keys: Vec<&str> = match output {
                     Output::Summary { series } => series.iter().map(|s| s.key.as_str()).collect(),
-                    Output::Timeline { series } => series.iter().map(|s| s.key.as_str()).collect(),
+                    Output::Timeline { series, .. } => {
+                        series.iter().map(|s| s.key.as_str()).collect()
+                    }
                     _ => Vec::new(),
                 };
                 for key in keys {
@@ -1581,7 +1594,7 @@ fn series_keys(results: &[&Results]) -> Vec<String> {
         for output in &one.outputs {
             match output {
                 Output::Summary { series } => series.iter().for_each(|s| add(s.key.clone())),
-                Output::Timeline { series } => series.iter().for_each(|s| add(s.key.clone())),
+                Output::Timeline { series, .. } => series.iter().for_each(|s| add(s.key.clone())),
                 Output::Hist { series, .. } => series.iter().for_each(|s| add(s.key.clone())),
                 Output::Raw { events } => events.iter().for_each(|e| add(event_key(&e.keys))),
                 _ => {}
@@ -1704,7 +1717,8 @@ fn draw_sheet(
     sheet: &Sheet,
     against: Option<&Sheet>,
     selected: usize,
-) {
+) -> Vec<Region> {
+    let mut regions = Vec::new();
     let block = Block::new().borders(Borders::ALL).title(Line::from(vec![
         Span::raw(" ledger -- "),
         Span::styled(title_of(sheet), Style::new().add_modifier(Modifier::BOLD)),
@@ -1713,11 +1727,16 @@ fn draw_sheet(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width < 20 || inner.height < 4 {
-        return;
+        return regions;
     }
     let columns = Columns::for_width(usize::from(inner.width));
     let mut lines: Vec<Line<'static>> = vec![header_line(&columns, against.is_some())];
     for (index, item) in sheet.items.iter().enumerate() {
+        // Each line is one row: the sheet does not wrap.
+        let y = inner.y + lines.len() as u16;
+        if y < inner.y + inner.height {
+            regions.push(Region::new(Rect::new(inner.x, y, inner.width, 1), index));
+        }
         let other = against.and_then(|other| other.items.get(index));
         lines.push(item_line(item, other, &columns, index == selected));
         if let State::Served(served) = &item.state {
@@ -1759,6 +1778,9 @@ fn draw_sheet(
             pane_area,
         );
     }
+    // The detail pane may cover the sheet's last lines.
+    regions.retain(|region| region.rect.y < pane_area.y || pane == 0);
+    regions
 }
 
 /// The sheet's title: whose cost, over how long.
@@ -2100,7 +2122,7 @@ mod tests {
     fn cpu_time_is_the_sum_of_the_polls() {
         let data = fixture("cpython-hot");
         let results = data.first("cpu.oncpu_time").expect("served");
-        let Some(Output::Timeline { series }) = results.output("timeline") else {
+        let Some(Output::Timeline { series, .. }) = results.output("timeline") else {
             panic!("a timeline");
         };
         let points: f64 = series.iter().flat_map(|s| &s.points).map(|p| p.value).sum();

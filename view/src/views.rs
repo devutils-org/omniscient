@@ -26,6 +26,7 @@ pub mod flows;
 pub mod heatmap;
 pub mod lanes;
 pub mod ledger;
+pub mod process;
 pub mod request;
 pub mod system;
 pub mod timebar;
@@ -81,8 +82,39 @@ pub enum Action {
     /// Narrow every view to this.
     Focus(Focus),
     /// Open another view, by name, narrowed to this: from a process in the
-    /// overview into its ledger, from a request into its waterfall.
+    /// overview into its ledger, from a request into its waterfall. The frame
+    /// remembers where it came from, and `Backspace` (or a right click) goes
+    /// back there.
     Goto { view: &'static str, focus: Focus },
+}
+
+/// Something a view drew that a click can select: a tile, a frame, a lane, a
+/// ledger line, a request, a heatmap cell. `id` is the view's own name for
+/// it, handed back to [`View::select`]; `rect` is where it was drawn, in the
+/// terminal's cells.
+///
+/// A click selects what is under it; a click on what is already selected
+/// goes in, as `Enter` does. So a view that reports its regions and answers
+/// [`View::select`] is clickable with nothing else to write: going in is its
+/// `Enter`, and coming back is the frame's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub rect: Rect,
+    pub id: usize,
+}
+
+impl Region {
+    pub fn new(rect: Rect, id: usize) -> Region {
+        Region { rect, id }
+    }
+
+    /// Whether the cell at `column`, `row` is inside it.
+    pub fn contains(&self, column: u16, row: u16) -> bool {
+        column >= self.rect.x
+            && column < self.rect.x.saturating_add(self.rect.width)
+            && row >= self.rect.y
+            && row < self.rect.y.saturating_add(self.rect.height)
+    }
 }
 
 /// Whether a source is measured on the target `omn top` was given, or on the
@@ -146,6 +178,32 @@ pub trait View {
     fn keys(&self) -> &'static [(&'static str, &'static str)] {
         &[]
     }
+    /// Whether the view is taking text -- a search being typed -- so every
+    /// printable key is its own, `q`, `?`, `f`, digits and `Backspace`
+    /// included. The frame keeps only `Ctrl-C`.
+    fn takes_text(&self) -> bool {
+        false
+    }
+    /// What it drew that a click can select, as last drawn. Topmost last: a
+    /// click goes to the last region that holds it.
+    fn regions(&self) -> &[Region] {
+        &[]
+    }
+    /// Selects the region `id` reported by [`View::regions`], as the keys
+    /// that move the selection would have: the same state, the same action.
+    fn select(&mut self, _id: usize, _ctx: &Ctx<'_>) -> Action {
+        Action::None
+    }
+    /// One notch of the wheel: it scrolls as `↑`/`↓` do, unless the view
+    /// zooms, where it zooms.
+    fn wheel(&mut self, down: bool, ctx: &Ctx<'_>) -> Action {
+        let code = if down {
+            ratatui::crossterm::event::KeyCode::Down
+        } else {
+            ratatui::crossterm::event::KeyCode::Up
+        };
+        self.key(KeyEvent::from(code), ctx)
+    }
 }
 
 /// Every view, in the order of the tabs.
@@ -160,6 +218,7 @@ pub fn registry() -> Vec<Box<dyn View>> {
         lanes::view(),
         wake::view(),
         flows::view(),
+        process::view(),
     ]
 }
 
@@ -317,13 +376,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nine_views_each_with_a_name_of_its_own() {
+    fn ten_views_each_with_a_name_of_its_own() {
         let views = registry();
-        assert_eq!(views.len(), 9);
+        assert_eq!(views.len(), 10);
         let mut names: Vec<_> = views.iter().map(|view| view.name()).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 9, "two views share a name");
+        assert_eq!(names.len(), 10, "two views share a name");
     }
 
     #[test]

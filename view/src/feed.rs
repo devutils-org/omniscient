@@ -127,6 +127,23 @@ pub fn apply(data: &mut Data, update: Update) {
 pub fn as_live_until(data: &Data, until_ns: u64) -> Data {
     let mut live = data.clone();
     for results in &mut live.run.results {
+        // A source the recording kept without `raw` has no events to hand
+        // over: replayed as live it arrives empty, where a live run would
+        // have handed its events over as they came. Said, so an empty panel
+        // is not read as a quiet source.
+        let kept_raw = results.outputs.iter().any(|output| output.emit() == "raw");
+        if !kept_raw && !results.outputs.is_empty() {
+            let kept: Vec<&str> = results.outputs.iter().map(|output| output.emit()).collect();
+            results.degradations.insert(
+                0,
+                format!(
+                    "this recording kept `{}` as `{}` only, without `raw`: replayed as live it \
+                     arrives empty, where a live run hands its events over as they come",
+                    results.label,
+                    kept.join("`, `")
+                ),
+            );
+        }
         let events: Vec<Event> = results
             .events()
             .iter()
@@ -154,6 +171,33 @@ pub fn as_live_until(data: &Data, until_ns: u64) -> Data {
 mod tests {
     use super::*;
     use crate::model::Results;
+
+    #[test]
+    fn a_source_kept_without_raw_says_it_arrives_empty() {
+        let mut data = Data::default();
+        data.run.results.push(Results {
+            label: "cpu.profile".into(),
+            source: "cpu.profile".into(),
+            outputs: vec![Output::Timeline {
+                series: Vec::new(),
+                first_ts_ns: None,
+            }],
+            ..Default::default()
+        });
+        data.run.results.push(Results {
+            label: "io.bytes".into(),
+            source: "io.bytes".into(),
+            outputs: vec![Output::Raw { events: Vec::new() }],
+            ..Default::default()
+        });
+        let live = as_live_until(&data, 10);
+        assert!(
+            live.run.results[0].degradations[0].contains("without `raw`"),
+            "{:?}",
+            live.run.results[0].degradations
+        );
+        assert!(live.run.results[1].degradations.is_empty());
+    }
 
     fn event(ts_ns: u64) -> Event {
         Event {

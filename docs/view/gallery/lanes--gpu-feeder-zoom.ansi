@@ -1,12 +1,12 @@
 [0m[1momn top[0m │ recording lanes-gpu │ 2.27s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥3.22%[0m[35m │ target 48.8% cpu[0m [0m
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  9 flows                                 [0m
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  9 flows  0 process                      [0m
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐[0m
 │[0m[1msched.switches [0m[2m1.32k[0m [0m[33m24 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.wakeup [0m[2m1.25k[0m [0m[33m24 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.offcpu [0m[2m556[0m [0m[36m~low[0m   │[0m
 │[0m[36mdet[0m [0m[33mdegraded x3[0m  [0m[1mgpu.kernel [0m[2m96[0m [0m[33m18 late[0m [0m[36m±295ns[0m                                                                         │[0m
 │[0m[2mzoom: 3.42ms a cell[0m     [0m[2m╷1.55s[0m         [0m[2m╷1.60s[0m         [0m[2m╷1.65s[0m        [0m[2m╷1.70s[0m         [0m[2m╷1.75s[0m         [0m[2m╷1.80s[0m   [0m[2mof the span[0m│[0m
-│[0m[35mgpu0 s7 copies        [0m[2m│                   [0m[2;36m▂▅[0m[2m                    [0m[2;7m [0m[2m                  [0m[2;36m▂▃[0m[2m                     │ busy 1.53%[0m│[0m
-│[0m[35mgpu0 s13 spin         [0m[2m│[0m[2;35m███████████████████▆[0m[2m  [0m[2;35m███████████████████[0m[2;7;35m█[0m[2;35m██████████████████▆[0m[2m [0m[2;35m▂████████████████████[0m[2m│ busy 94.6%[0m│[0m
-│[0m[35mgpu0 s14 copy         [0m[2m│                       [0m[2;35m▁[0m[2m                 [0m[2;7m [0m[2m                     [0m[2;35m▁[0m[2m                   │ busy 0.05%[0m│[0m
+│[0m[35mgpu0 s7 copies        [0m[2m│[0m                   [0m[36m▂▅[0m                    [0m[7m [0m                  [0m[36m▂▃[0m                     [0m[2m│ busy 1.53%[0m│[0m
+│[0m[35mgpu0 s13 spin         [0m[2m│[0m[35m███████████████████▆[0m  [0m[35m███████████████████[0m[7;35m█[0m[35m██████████████████▆[0m [0m[35m▂████████████████████[0m[2m│ busy 94.6%[0m│[0m
+│[0m[35mgpu0 s14 copy         [0m[2m│[0m                       [0m[35m▁[0m                 [0m[7m [0m                     [0m[35m▁[0m                   [0m[2m│ busy 0.05%[0m│[0m
 │[0m[1;7mfeeder         3065042[0m[2m│                   [0m[2;32m▃▃[0m[2m [0m[2;32m▁[0m[2m                  [0m[2;7m [0m[2m                  [0m[2;32m▃▃▁▁[0m[2m                   │awake 1.41%[0m│[0m
 │[0m[2m              off cpu │[0m[2;34m███████████████████▆▆████████████████████[0m[2;7;34m█[0m[2;34m██████████████████▆▆█████████████████████[0m[2m│ blkd 98.6%[0m│[0m
 │loader         3065050[0m[2m│                   [0m[2;32m▂██▂[0m[2m                  [0m[2;7m [0m[2m                  [0m[2;32m▂██▃[0m[2m                   │awake 5.96%[0m│[0m
