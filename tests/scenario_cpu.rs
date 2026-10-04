@@ -3073,6 +3073,9 @@ fn a_backend_that_cannot_serve_the_mode_is_passed_over_before_the_launch() {
     let mut patched = false;
     for file in std::fs::read_dir(&source).expect("the catalog directory") {
         let path = file.expect("a catalog file").path();
+        if !path.is_file() {
+            continue;
+        }
         let mut text = std::fs::read_to_string(&path).expect("readable");
         if path.file_name().is_some_and(|name| name == "cpu.yaml") && text.contains(PLAIN) {
             let at = text.find("- id: cpu.oncpu_time").expect("the entry");

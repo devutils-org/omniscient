@@ -283,6 +283,9 @@ struct RunResult {
     omn: Side,
     omn_results: Option<String>,
     tool: Side,
+    /// `run: attach`: how the workload ended when it ended on its own, `None`
+    /// when the runner had to kill it or `omn` launched it.
+    workload: Option<ExitStatus>,
 }
 
 pub fn run_pair(pair: &Pair, parsers: &[Parser], omn: &Path) -> Outcome {
@@ -319,7 +322,13 @@ pub fn run_pair(pair: &Pair, parsers: &[Parser], omn: &Path) -> Outcome {
             Ok(r) => r,
             Err(e) => return Outcome::Fail(e),
         };
-        if let Some(outcome) = judge_omn(&result.omn) {
+        if let Some(status) = result.workload.filter(|s| !s.success()) {
+            return Outcome::Fail(format!(
+                "the workload exited {status} on its own, under both observers: \
+                 neither side measured what the pair meant"
+            ));
+        }
+        if let Some(outcome) = judge_omn(pair, &result.omn, result.omn_results.as_deref()) {
             return outcome;
         }
         if let Some(outcome) = judge_tool(pair, &result.tool) {
@@ -439,16 +448,26 @@ fn median(values: &mut [f64]) -> f64 {
 
 /// `omn`'s exit status read as the manual words it: 1 is this machine, 2 a
 /// request that cannot mean anything, 3 nothing in this build collects it.
-fn judge_omn(side: &Side) -> Option<Outcome> {
+/// What `omn`'s exit says about the pair, when it says more than "go on".
+///
+/// Exit 1 is two answers in `man omn.1`: this machine cannot serve the
+/// request, or something failed while running. Only the first is a skip, so
+/// the second is told apart by what it leaves behind -- results written
+/// before the failure, or a workload that fails without any observer -- and
+/// is a failure.
+fn judge_omn(pair: &Pair, side: &Side, results: Option<&str>) -> Option<Outcome> {
     if side.timed_out {
         return Some(Outcome::Fail("omn did not finish in time".into()));
     }
     match side.status.code() {
         Some(0) => None,
-        Some(1) => Some(Outcome::Skip(
-            "omn cannot run this here".into(),
-            tail(&side.stderr, 8),
-        )),
+        Some(1) if results.is_some_and(|r| !r.trim().is_empty()) => Some(Outcome::Fail(format!(
+            "omn wrote its results and exited 1, so something failed while running: {}",
+            tail(&side.stderr, 3).join(" | ")
+        ))),
+        Some(1) => Some(workload_fails_alone(pair).unwrap_or_else(|| {
+            Outcome::Skip("omn cannot run this here".into(), tail(&side.stderr, 8))
+        })),
         Some(2) => Some(Outcome::Fail(format!(
             "omn refused the request: {}",
             tail(&side.stderr, 3).join(" | ")
@@ -462,6 +481,34 @@ fn judge_omn(side: &Side) -> Option<Outcome> {
             tail(&side.stderr, 3).join(" | ")
         ))),
     }
+}
+
+/// The workload run once with no observer, asked before a skip is granted.
+///
+/// Under `run: separate` the workload's stderr is part of each observer's, so
+/// a workload that fails with "Permission denied" reads exactly like a tool
+/// the machine refused, and a workload that dies at once can turn into an
+/// `omn` exit 1. A workload that fails alone is the pair's defect, never the
+/// machine's: this is a failure naming it. Asked only on the way to a skip,
+/// so a pair that runs costs nothing more.
+fn workload_fails_alone(pair: &Pair) -> Option<Outcome> {
+    if pair.workload.is_empty() {
+        return None;
+    }
+    let mut cmd = Command::new(&pair.workload[0]);
+    cmd.args(&pair.workload[1..]);
+    let side = match spawn(&mut cmd).and_then(|child| finish(child, timeout(pair))) {
+        Ok(side) => side,
+        Err(e) => return Some(Outcome::Fail(format!("the workload does not start: {e}"))),
+    };
+    if side.timed_out || side.status.success() {
+        return None;
+    }
+    Some(Outcome::Fail(format!(
+        "the workload fails with no observer ({}): {}",
+        side.status,
+        tail(&side.stderr, 3).join(" | ")
+    )))
 }
 
 /// Wordings of a tool refused by the machine rather than broken.
@@ -494,10 +541,12 @@ fn judge_tool(pair: &Pair, side: &Side) -> Option<Outcome> {
         .take(8)
         .collect();
     if !side.status.success() && !refused.is_empty() {
-        return Some(Outcome::Skip(
-            format!("`{}` was refused on this machine", pair.tool),
-            refused,
-        ));
+        return Some(workload_fails_alone(pair).unwrap_or_else(|| {
+            Outcome::Skip(
+                format!("`{}` was refused on this machine", pair.tool),
+                refused,
+            )
+        }));
     }
     None
 }
@@ -623,6 +672,7 @@ fn run_separate(
         omn_results: omn_results(pair, tmp),
         omn: omn_side,
         tool: tool_side,
+        workload: None,
     })
 }
 
@@ -667,17 +717,17 @@ fn run_attached(pair: &Pair, omn: &Path, tmp: &Path) -> Result<RunResult, String
     std::thread::sleep(Duration::from_millis(pair.settle_ms.unwrap_or(500)));
     unsafe { libc::kill(pid as i32, libc::SIGCONT) };
     let started = Instant::now();
-    loop {
-        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
-            break;
+    let ended = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break Some(status);
         }
         if started.elapsed() > limit {
             let _ = child.kill();
             let _ = child.wait();
-            break;
+            break None;
         }
         std::thread::sleep(Duration::from_millis(10));
-    }
+    };
     let omn_side = finish(o, limit)?;
     let tool_side = finish(t, limit)?;
     let tool_side = report(pair, tmp, tool_side, limit)?;
@@ -685,6 +735,7 @@ fn run_attached(pair: &Pair, omn: &Path, tmp: &Path) -> Result<RunResult, String
         omn_results: omn_results(pair, tmp),
         omn: omn_side,
         tool: tool_side,
+        workload: ended,
     })
 }
 
@@ -1061,5 +1112,58 @@ compare: {omn: a, tolerance: {abs: 0}, why: "test"}
             run_pair(&p, &parsers(), Path::new(SH)),
             Outcome::Gap(_)
         ));
+    }
+
+    /// Exit 1 and a "Permission denied" are the machine's only when nothing
+    /// else explains them: a workload that fails alone, a workload that dies
+    /// under attach, and results written before the failure are the pair's.
+    #[test]
+    fn a_failure_that_is_not_the_machines_is_not_a_skip() {
+        let base = r#"
+source: test.notskip
+tool: sh
+use: "sh"
+workload: [sh, -c, "echo 'cat: /nope: Permission denied' >&2; exit 1"]
+omn: ["-c", "echo 'has no viable backend' >&2; exit 1", "sh"]
+reference:
+  command: [sh, -c, "echo 1", sh]
+  parse: scalar
+compare: {omn: a, tolerance: {abs: 0}, why: "test"}
+"#;
+        let p = pair(base);
+        match run_pair(&p, &parsers(), Path::new(SH)) {
+            Outcome::Fail(why) => assert!(why.contains("no observer"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+
+        let mut p = pair(base);
+        p.omn[1] = "echo '{\"a\":1}'".into();
+        p.reference.command[2] = "\"$@\"; echo 'Permission denied' >&2; exit 1".into();
+        match run_pair(&p, &parsers(), Path::new(SH)) {
+            Outcome::Fail(why) => assert!(why.contains("no observer"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+
+        let mut p = pair(base);
+        p.workload = vec!["true".into()];
+        p.omn = vec![
+            "-c".into(),
+            "mkdir -p {out}; echo '{\"a\":1}' > {out}/results.json; echo 'error: the collector broke it' >&2; exit 1".into(),
+            "sh".into(),
+        ];
+        match run_pair(&p, &parsers(), Path::new(SH)) {
+            Outcome::Fail(why) => assert!(why.contains("wrote its results"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+
+        let mut p = pair(base);
+        p.run = RunMode::Attach;
+        p.settle_ms = Some(50);
+        p.workload = vec!["sh".into(), "-c".into(), "exit 127".into()];
+        p.omn = vec!["-c".into(), "exit 1".into(), "sh".into()];
+        match run_pair(&p, &parsers(), Path::new(SH)) {
+            Outcome::Fail(why) => assert!(why.contains("on its own"), "{why}"),
+            other => panic!("{other:?}"),
+        }
     }
 }

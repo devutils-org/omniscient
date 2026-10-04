@@ -1119,6 +1119,9 @@ fn a_machine_that_cannot_serve_a_valid_request_has_its_own_exit_code() {
     // A copy of the real catalog with one requirement no machine can satisfy.
     for entry in std::fs::read_dir(root().join("catalog")).expect("the catalog is in the tree") {
         let entry = entry.expect("a catalog file");
+        if !entry.path().is_file() {
+            continue;
+        }
         let text = std::fs::read_to_string(entry.path()).expect("readable");
         let text = text.replace(
             "requires: [\"/proc/[pid]/fd\"]",
