@@ -15,7 +15,8 @@ From `sched.wakeup` alone (one event per wakeup: the wakee, the waker -- a task
 or an interrupt -- and when), and nothing else:
 
 - **A headline**: every wakeup of the run, and how many came from a task, a
-  hard interrupt, a soft interrupt; the source's trust badges beside it.
+  hard interrupt, a soft interrupt; the source's trust badges first, so a
+  narrow screen wraps the figures rather than clipping what the run lost.
 - **A grid of the woken threads**, as many columns as the width holds: each
   thread's wakeups and what mostly woke it. The target's threads first; the
   threads outside it that the target woke are dimmed and said so. `↑`/`↓`
@@ -30,18 +31,20 @@ or an interrupt -- and when), and nothing else:
   | Column | What |
   |---|---|
   | wakes, share | how many of the thread's wakeups came this way |
-  | quiet | median time the thread this link woke had shown **no sign of life** in the run -- no wakeup received or issued -- before it: at most how long it was blocked |
+  | quiet | median time the thread this link woke had shown **no sign of life** in the run -- no wakeup received or issued -- before it: an upper bound, the thread was blocked no longer than this |
   | hold, max hold | median and worst time the **waker** held the chain: from its own wakeup to the one it issued |
   | when in the run | the branch's wakeups across the run, one cell per slice, scaled to the thread's busiest slice |
 
 - **The longest chains**, one wakeup each, link by link with each hold: the
   single worst paths the tree's medians fold away. Wakeups one earlier wakeup
-  led to, along the same links, are one line with their count.
+  led to, along the same links, are one line with their count, drawn with
+  the longest of them.
 - **What the thread woke in turn.**
 
 `enter` narrows every view to the thread (pid and tid); `l` opens it in the
-lanes view. A focus set elsewhere is honoured: a tid chooses the thread, a
-pid keeps only its threads in the grid.
+lanes view. A focus set elsewhere is honoured: a tid chooses the thread --
+also after `↑`/`↓`, whenever the focused tid changes -- and a pid keeps only
+its threads in the grid.
 
 Trust is the frame's: `sched.wakeup` is a `low` determinism source, so every
 figure is dimmed, and the rounds that came late are badged (a late read is a
@@ -75,8 +78,8 @@ client, 25 listings of a 15 000-entry directory
 **`sqlite-commits`** -- 40 commits, rollback journal, full sync:
 
 - `sqlite3` was woken 1 019 times: 54 % by a **hard interrupt** (the disk's
-  completions; quiet 378 µs at the median, at most what each wait on the
-  device took), 12 % by soft interrupts, and the rest by a dozen threads
+  completions; quiet 378 µs at the median, an upper bound on each wait on the
+  device: no wait lasted longer), 12 % by soft interrupts, and the rest by a dozen threads
   outside the target that the run cannot name -- `sched.wakeup` on a launched
   target sees a non-target thread only as the waker or the wakee of the
   target, never its own wakeups, so those chains stop at the first link and
@@ -98,11 +101,15 @@ only the system view's sources. **`sqlite-latency`** and
 
 - **Chains through threads outside the target.** Their own wakeups are not
   traced on a pid or launch target. A session that asks `sched.wakeup` on the
-  machine (`omn top -f` with a system-scope request) gives the view every
-  link; the view draws it unchanged, since it reads every result of the
-  source. It is not the default because a machine-wide trace of every wakeup
-  is large (the fixture notes measured every view's needs on the machine at
-  60 MB for eight seconds).
+  machine, labelled `sched.wakeup@system` (`omn top -f` with a system-scope
+  request), gives the view every link. The view then reads that request
+  alone, so a run that also holds the target's request counts no wakeup
+  twice; and it tells the target's threads only by the run's other
+  target-scope sources, since on the machine an interrupt's wakee is anyone's
+  (with none, nothing is dimmed). Untried on a real recording. It is not the
+  default because a machine-wide trace of every wakeup is large (the fixture
+  notes measured every view's needs on the machine at 60 MB for eight
+  seconds).
 - **Exact blocked time.** `quiet` is an upper bound: the thread may have run
   after its last wakeup received or issued. The exact off-cpu time, and the
   stack it blocked in, are the off-cpu sources', drawn by flame and lanes.

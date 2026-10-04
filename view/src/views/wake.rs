@@ -12,8 +12,8 @@
 //! Two times are drawn at each link. The **hold** is the waker's: from its
 //! own wakeup to the wakeup it issued -- how long the chain sat with it before
 //! it passed it on. The **quiet** is the woken thread's: from its last sign of
-//! life in the run (a wakeup it received or issued) to this wakeup -- at most
-//! how long it was blocked. The wakeups of one thread are folded into one
+//! life in the run (a wakeup it received or issued) to this wakeup -- an
+//! upper bound on how long it was blocked. The wakeups of one thread are folded into one
 //! tree, as a profiler folds stacks: each path from the thread to the end of
 //! its chain is a branch, with how many wakeups came that way, their share,
 //! the medians of both times, the worst hold, and when in the run they came.
@@ -35,7 +35,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::{Action, Ctx, Focus, Need, Scope, View};
-use crate::model::{Data, Output};
+use crate::model::{Data, Output, Results};
 use crate::trust::{self, palette, Trust};
 use crate::units;
 
@@ -67,8 +67,10 @@ const FIGURES: usize = 6 + 6 + 9 + 9 + 9;
 
 pub struct Wake {
     /// The thread whose chains are drawn, by tid: kept by identity rather
-    /// than by row, so a live run adding threads does not move it.
-    selected: Option<i32>,
+    /// than by row, so a live run adding threads does not move it. With it,
+    /// the focused tid it was chosen under: a focus set since, elsewhere,
+    /// chooses the thread again.
+    selected: Option<(i32, Option<i32>)>,
     depth: usize,
     cache: Option<(Stamp, Rc<Index>)>,
     /// The tree last drawn, by the index it was folded from, its thread and
@@ -95,7 +97,7 @@ impl View for Wake {
             self.name(),
             self.title()
         ));
-        let held = ctx.data.for_need(&NEEDS[0].label(), NEEDS[0].source);
+        let held = served(ctx.data);
         if held.is_empty() {
             if let Some(refusal) = ctx.data.refusal(NEEDS[0].source) {
                 trust::render_refusal(frame, area, refusal);
@@ -127,7 +129,10 @@ impl View for Wake {
             Constraint::Length(legend_height),
         ])
         .areas(inner);
-        frame.render_widget(Paragraph::new(index.headline(&trust)), head);
+        frame.render_widget(
+            Paragraph::new(index.headline(&trust)).wrap(Wrap { trim: true }),
+            head,
+        );
         frame.render_widget(Paragraph::new(grid), grid_area);
         frame.render_widget(
             Paragraph::new(legend).wrap(Wrap { trim: true }),
@@ -156,7 +161,7 @@ impl View for Wake {
         let at = root.and_then(|tid| rows.iter().position(|row| row.tid == tid));
         let mut select = |to: Option<usize>| {
             if let Some(to) = to.filter(|to| *to < rows.len()) {
-                self.selected = Some(rows[to].tid);
+                self.selected = Some((rows[to].tid, ctx.focus.tid));
             }
             Action::None
         };
@@ -239,18 +244,23 @@ impl Wake {
         }
     }
 
-    /// The thread drawn: the one the user moved to, else the focused thread,
-    /// else the most woken thread of the target.
+    /// The thread drawn: the one the user moved to, unless the focus has
+    /// changed since; else the focused thread; else the most woken thread
+    /// of the target.
     fn root(&self, rows: &[Row], focus: &Focus) -> Option<i32> {
         let present = |tid: &i32| rows.iter().any(|row| row.tid == *tid);
         self.selected
+            .filter(|(_, under)| *under == focus.tid)
+            .map(|(tid, _)| tid)
             .filter(present)
             .or_else(|| focus.tid.filter(present))
             .or_else(|| rows.first().map(|row| row.tid))
     }
 }
 
-/// What the run held when the index was built.
+/// What the run held when the index was built: every result's events, not
+/// only the wakeups, since names and the target's threads come from the
+/// other sources too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Stamp {
     origin: String,
@@ -261,21 +271,37 @@ struct Stamp {
 
 impl Stamp {
     fn of(data: &Data) -> Stamp {
-        let wakeups: Vec<_> = data
-            .of_source(NEEDS[0].source)
-            .map(|results| results.events())
-            .collect();
+        let events = || data.run.results.iter().map(|results| results.events());
         Stamp {
             origin: data.origin.clone(),
-            events: wakeups.iter().map(|events| events.len()).sum(),
-            last_ns: wakeups
-                .iter()
+            events: events().map(<[_]>::len).sum(),
+            last_ns: events()
                 .filter_map(|events| events.last().map(|event| event.ts_ns))
                 .max()
                 .unwrap_or(0),
             closed_ns: data.closed_ns(),
         }
     }
+}
+
+/// Whether a result was asked on the machine rather than on the target.
+fn on_system(results: &Results) -> bool {
+    results.label.ends_with("@system")
+}
+
+/// The results the chains are read from. A machine-wide request holds every
+/// wakeup, the target's among them: when the run has one, it alone is read,
+/// so no wakeup is counted twice. Otherwise, the request `omn top` labelled
+/// for this view, or every request of the source.
+fn served(data: &Data) -> Vec<&Results> {
+    let system: Vec<&Results> = data
+        .of_source(NEEDS[0].source)
+        .filter(|results| on_system(results))
+        .collect();
+    if !system.is_empty() {
+        return system;
+    }
+    data.for_need(&NEEDS[0].label(), NEEDS[0].source)
 }
 
 /// Who issued a wakeup.
@@ -418,9 +444,15 @@ impl Index {
         };
         let mut names: HashMap<i32, HashMap<String, usize>> = HashMap::new();
         let mut measured: HashSet<i32> = HashSet::new();
+        let read = served(data);
         for results in &data.run.results {
             let is_wakeup = results.source == NEEDS[0].source;
-            let on_target = !results.label.contains("@system");
+            if is_wakeup && !read.iter().any(|held| std::ptr::eq(*held, results)) {
+                // Another request of the source: its wakeups are in the one
+                // read, or are not this view's.
+                continue;
+            }
+            let on_target = !on_system(results);
             for event in results.events() {
                 let Some(tid) = event.tid() else { continue };
                 if let Some(comm) = event.attr("comm").and_then(|value| value.as_str()) {
@@ -455,9 +487,10 @@ impl Index {
                     index.pid.entry(*tid).or_insert(pid as i32);
                 }
                 index.pid.insert(wakee, wakee_pid);
-                if matches!(waker, Waker::Interrupt(_)) {
+                if on_target && matches!(waker, Waker::Interrupt(_)) {
                     // A target keeps an interrupt's wakeup only as its wakee:
-                    // the wakee is the target's.
+                    // the wakee is the target's. On the machine, it is
+                    // anyone's.
                     measured.insert(wakee);
                 }
                 index.wakeups.push(Wakeup {
@@ -472,7 +505,7 @@ impl Index {
         // say nothing then.
         let others = data.run.results.iter().any(|results| {
             results.source != NEEDS[0].source
-                && !results.label.contains("@system")
+                && !on_system(results)
                 && results
                     .outputs
                     .iter()
@@ -591,18 +624,17 @@ impl Index {
                     links.push(link(None));
                     break End::Origin;
                 }
-                Waker::Task(tid) => match self.previous(*tid, wakeup.ts) {
-                    None => {
-                        links.push(link(None));
-                        break End::Unseen;
-                    }
-                    Some(before) => (*tid, before),
-                },
+                Waker::Task(tid) => (*tid, self.previous(*tid, wakeup.ts)),
             };
-            links.push(link(Some(wakeup.ts - before.ts)));
+            links.push(link(before.map(|before| wakeup.ts - before.ts)));
+            // A thread already on the chain is a cycle whether or not its
+            // earlier wakeup was seen: it is back where the chain began.
             if !on_chain.insert(tid) {
                 break End::Cycle;
             }
+            let Some(before) = before else {
+                break End::Unseen;
+            };
             if links.len() == depth {
                 break End::Depth;
             }
@@ -718,7 +750,14 @@ impl Index {
         if span_ns > 0 {
             text.push_str(&format!(", in {}", units::duration(span_ns as f64)));
         }
-        vec![trust::figure(text, trust)]
+        // The badges first: a narrow screen clips the end of a line, and
+        // what the run lost must not be what goes.
+        let mut spans = trust.badges();
+        if !spans.is_empty() {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(text, trust.style()));
+        vec![Line::from(spans)]
     }
 
     /// The woken threads as a grid, column after column, the chosen one
@@ -890,20 +929,26 @@ impl Index {
 
         // Wakeups one earlier wakeup led to, along the same links, are one
         // chain said once, with how many times it woke the thread.
+        // The line shows the one that held longest: the group's worst.
         let mut longest: Vec<(&Chain, usize)> = Vec::new();
+        let mut seen: HashMap<(u64, Vec<&Waker>), usize> = HashMap::new();
         for chain in tree.chains.iter().filter(|chain| chain.held() > 0) {
-            let same = longest.iter_mut().find(|(held, _)| {
-                held.origin_ts == chain.origin_ts
-                    && held.links.len() == chain.links.len()
-                    && held
-                        .links
-                        .iter()
-                        .zip(&chain.links)
-                        .all(|(one, two)| one.waker == two.waker)
-            });
-            match same {
-                Some((_, times)) => *times += 1,
-                None => longest.push((chain, 1)),
+            let key = (
+                chain.origin_ts,
+                chain.links.iter().map(|link| &link.waker).collect(),
+            );
+            match seen.get(&key) {
+                Some(at) => {
+                    let (held, times) = &mut longest[*at];
+                    *times += 1;
+                    if chain.held() > held.held() {
+                        *held = chain;
+                    }
+                }
+                None => {
+                    seen.insert(key, longest.len());
+                    longest.push((chain, 1));
+                }
             }
         }
         longest.sort_by(|one, two| {
@@ -1241,7 +1286,7 @@ fn legend_lines(short: bool) -> Vec<Line<'static>> {
     if short {
         return vec![Line::from(vec![
             Span::styled("quiet", term),
-            Span::styled(": at most how long the woken thread was blocked; ", dim),
+            Span::styled(": how long the woken thread was blocked, or longer; ", dim),
             Span::styled("hold", term),
             Span::styled(": how long the waker held the chain", dim),
         ])];
@@ -1250,7 +1295,7 @@ fn legend_lines(short: bool) -> Vec<Line<'static>> {
         Span::styled("quiet", term),
         Span::styled(
             ": the woken thread's time with no sign of life in the run (no wakeup received or \
-             issued) before this one -- at most how long it was blocked. ",
+             issued) before this one -- an upper bound: it was blocked no longer than this. ",
             dim,
         ),
         Span::styled("hold", term),
@@ -1469,12 +1514,128 @@ mod tests {
         let whole = Index::build(&data).wakeups.len();
         let so_far = Index::build(&live).wakeups.len();
         assert!(so_far > 0 && so_far < whole, "{so_far} of {whole}");
-        let mut app = App::new(live);
+        let mut app = App::new(live.clone());
         app.cost = crate::app::Cost::Snapshot;
         app.open("wake").unwrap();
+        // The view's own badge, not the frame's: the headline carries it.
+        let headline: String = Index::build(&live)
+            .headline(&Trust::joined(&live, served(&live)))
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+            .collect();
+        assert!(headline.starts_with("~low det live"), "{headline}");
         let drawn = text(&draw_app(&mut app, WIDTH, HEIGHT));
-        assert!(drawn.contains(&format!("{so_far} wakeups")), "{drawn}");
-        assert!(drawn.contains("live"), "{drawn}");
+        let line = drawn
+            .lines()
+            .find(|line| line.contains(&format!("{so_far} wakeups")))
+            .unwrap_or_else(|| panic!("{drawn}"));
+        assert!(line.contains("live"), "{line}");
+    }
+
+    /// A worker woken by a producer 100 000 times, each from its own
+    /// interrupt: as many distinct longest chains as wakeups, merged in one
+    /// pass rather than each against all the others.
+    #[test]
+    fn a_hundred_thousand_distinct_chains_draw_in_one_pass() {
+        let mut index = Index {
+            opened_ns: 1,
+            closed_ns: 1_000_000_000,
+            ..Index::default()
+        };
+        for n in 0..100_000u64 {
+            let ts = 10 + n * 9_000;
+            index.wakeups.push(Wakeup {
+                ts,
+                wakee: 1,
+                waker: Waker::Interrupt("hardirq".to_owned()),
+            });
+            index.wakeups.push(Wakeup {
+                ts: ts + 1 + n % 7,
+                wakee: 2,
+                waker: Waker::Task(1),
+            });
+        }
+        for (at, wakeup) in index.wakeups.iter().enumerate() {
+            index.by_wakee.entry(wakeup.wakee).or_default().push(at);
+            if let Waker::Task(tid) = wakeup.waker {
+                index.by_waker.entry(tid).or_default().push(at);
+            }
+        }
+        let tree = index.tree(2, DEPTH);
+        assert_eq!(tree.chains.len(), 100_000);
+        let lines = index.tree_lines(&tree, 2, 120, 40, &Trust::clean());
+        assert!(lines.len() > 5);
+    }
+
+    #[test]
+    fn a_narrow_terminal_still_says_what_the_run_lost() {
+        let mut data = fixture("sqlite-commits");
+        for results in &mut data.run.results {
+            if results.source == NEEDS[0].source {
+                results.losses.dropped = 1234;
+            }
+        }
+        let mut app = App::new(data);
+        app.cost = crate::app::Cost::Snapshot;
+        app.open("wake").unwrap();
+        let drawn = text(&draw_app(&mut app, 80, 24));
+        assert!(drawn.contains("lost"), "{drawn}");
+        assert!(drawn.contains("was woken"), "{drawn}");
+    }
+
+    #[test]
+    fn a_focus_set_after_a_key_chooses_the_thread_again() {
+        let data = fixture("http-server");
+        let none = Focus::default();
+        let ctx = Ctx {
+            data: &data,
+            against: None,
+            focus: &none,
+        };
+        let mut view = Wake {
+            selected: None,
+            depth: DEPTH,
+            cache: None,
+            folded: None,
+        };
+        let rows = view.index(&data).rows(&none);
+        view.key(KeyEvent::from(KeyCode::Down), &ctx);
+        assert_eq!(view.root(&rows, &none), Some(rows[1].tid));
+        let elsewhere = Focus {
+            pid: None,
+            tid: Some(rows[2].tid),
+            request: None,
+        };
+        assert_eq!(view.root(&rows, &elsewhere), Some(rows[2].tid));
+    }
+
+    #[test]
+    fn a_machine_wide_request_is_read_alone_and_marks_no_interrupt_wakee() {
+        let mut data = fixture("http-server");
+        let whole = Index::build(&data);
+        let mut system = data
+            .first(NEEDS[0].source)
+            .expect("the fixture traced sched.wakeup")
+            .clone();
+        system.label = format!("{}@system", NEEDS[0].source);
+        // A machine thread woken by a device: on the machine, anyone's.
+        let mut outside = system.events()[0].clone();
+        outside
+            .attrs
+            .retain(|attr| !matches!(attr.name.as_str(), "wakee_tid" | "waker_context" | "comm"));
+        outside.keys = vec![crate::model::Key::Task { tid: 999_999 }];
+        outside.attrs.push(crate::model::Attr {
+            name: "waker_context".to_owned(),
+            value: crate::model::AttrValue::Text("hardirq".to_owned()),
+        });
+        let mut events = system.events().to_vec();
+        events.push(outside);
+        system.outputs = vec![Output::Raw { events }];
+        data.run.results.push(system);
+        let index = Index::build(&data);
+        assert_eq!(index.wakeups.len(), whole.wakeups.len() + 1);
+        assert!(!index.in_target(999_999));
+        assert!(!index.target.is_empty());
     }
 
     /// The handler thread of the HTTP server, focused: the chain the

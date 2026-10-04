@@ -37,15 +37,17 @@ touched.
     and stating the source's softirq caveat in place.
   - Keys: `↑`/`↓` (`j`/`k`, PageUp/PageDown, Home) choose the thread,
     `enter` focuses it (pid and tid, every view), `l` opens it in lanes.
-    A focus set elsewhere is honoured: a tid chooses the thread, a pid
-    narrows the grid.
+    A focus set elsewhere is honoured: a tid chooses the thread (again after
+    a key, whenever the focused tid changes), a pid narrows the grid.
   - Trust: the frame's style throughout -- figures dimmed by `~low det`,
-    badges beside the headline, `live` while a run goes, the refusal drawn
+    badges at the head of the headline, which wraps (an 80x24 screen keeps
+    them), `live` while a run goes, the refusal drawn
     in place, and a run without the source says so rather than drawing an
     empty panel.
-  - The index and the folded tree are cached per state of the run (event
-    count, last timestamp, close), so a replay folds once and a live run
-    refolds only when events arrive.
+  - The index and the folded tree are cached per state of the run (every
+    result's event count, last timestamp, close), so a replay folds once and
+    a live run rebuilds and refolds when events arrive. Drawing the tree is
+    linear in its wakeups (the longest chains are merged through a hash map).
 - **Snapshots**: `wake--<fixture>.{txt,ansi}` for the seven fixtures, and two
   of this view's own, drawn by its unit tests through the frame with a focus:
   `wake--http-server--main` (the server's main thread) and
@@ -53,7 +55,7 @@ touched.
   chooses the most woken thread, the client, whose chains are softirqs.
 - **`docs/view/wake.md`**: what it draws, what it showed on each fixture,
   what it does not show, and the verdict.
-- **Tests**, in `wake.rs` (10): every wakeup is in its thread's tree once at
+- **Tests**, in `wake.rs` (14 after the review round): every wakeup is in its thread's tree once at
   the first link and no branch outcounts its link; the server's main-handler
   handoff is a two-link cycle with holds inside the run; interrupts end a
   chain and outside wakers are not followed; the target's threads come first;
@@ -83,10 +85,13 @@ Reasoned, not shown:
 - That the hardirq quiet is the disk's service time: it is an upper bound on
   sqlite's blocked time, which is what the column says.
 - That a system-scope `sched.wakeup` request draws full chains through
-  outside threads: the view reads every result of the source, and the code
-  path is the same, but no fixture holds one (privileged run below).
-- That the caches keep a live run of 200 000 wakeups responsive: the index
-  is O(n log n) and built once per update; not measured.
+  outside threads: the view reads that request alone when the run holds one
+  (a unit test with a synthetic `@system` result checks the counting and
+  the marking), but no fixture holds a real one (privileged run below).
+- That a live run of 200 000 wakeups stays responsive: the index is
+  O(n log n), rebuilt and refolded on every update that brings events, and
+  the drawing is linear (a unit test draws 100 000 distinct chains in about
+  a second, debug build); not measured on a live run.
 
 ## What I could not do, and why
 
@@ -108,7 +113,7 @@ capabilities:
 ```console
 cat > /tmp/wake-system.yml <<'EOF'
 requests:
-  - label: sched.wakeup
+  - label: sched.wakeup@system
     source: sched.wakeup
     target: system
     mode: trace
@@ -124,7 +129,8 @@ target/debug/omn top --headless -d 10s -f /tmp/wake-system.yml -o /tmp/wake-syst
 target/debug/omn top --replay /tmp/wake-system --headless --view wake --size 120x40
 ```
 
-(`/tmp/www` prepared as `tests/view_fixtures/record.sh`'s `record_http_server`
+The label matters: the view tells a machine-wide request by its
+`@system` suffix, as `omn top` labels one. (`/tmp/www` prepared as `tests/view_fixtures/record.sh`'s `record_http_server`
 prepares `$work/www`.) If it is worth keeping, core's `record.sh` takes it.
 
 ## Decision lines for DECISIONS.md
@@ -157,6 +163,39 @@ prepares `$work/www`.) If it is worth keeping, core's `record.sh` takes it.
   `hardirq` wakeup, and on a `softirq` one served in a task's
   `local_bh_enable`, that task as `served_in_tid` (the caveat already says
   the sender is the cause). Filed as a want, not a defect.
+
+## Review
+
+The adversarial review's eight findings, all taken:
+
+- **Quadratic merge of the longest chains** (defect): merged through a
+  `HashMap` keyed on the origin and the wakers; `a_hundred_thousand_distinct_chains_draw_in_one_pass`
+  draws a producer and worker's 100 000 distinct chains.
+- **Badges clipped at 80x24** (defect): the headline now leads with the
+  badges and wraps over its two rows; `a_narrow_terminal_still_says_what_the_run_lost`
+  sets a loss on the fixture and finds it at 80x24.
+- **The live test proved nothing** (gap): it now checks the view's own
+  headline starts with `~low det live`, and that the frame's line holding
+  the wakeup count carries `live`.
+- **A key press pinned the thread against a later focus** (gap): the chosen
+  tid is kept with the focused tid it was chosen under, and a different
+  focus chooses again (`a_focus_set_after_a_key_chooses_the_thread_again`).
+  Left: a focus set back to the very tid it was before is not seen as a
+  change; the trait has no focus hook to tell it.
+- **System scope** (gap): a `@system` request is read alone when present
+  (no double count, trust joined over what is read), and an interrupt's
+  wakee is marked the target's only from a target-scope request
+  (`a_machine_wide_request_is_read_alone_and_marks_no_interrupt_wakee`).
+  The privileged session's label is now `sched.wakeup@system`.
+- **Quiet's direction** (nit): the legend, the module doc, `wake.md` and
+  this report now say upper bound -- blocked no longer than the quiet.
+- **A merged chain drew its smallest hold; a return to the root read as
+  unseen** (nit): the merged line draws the group's longest; the cycle check
+  runs before the unseen one, so the handler's `+65.0ms` chain now ends `↺`.
+- **Stamp counted only wakeups** (nit): it counts every result's events.
+
+Snapshots re-blessed: every `wake--*` (the headline's order, the legend's
+words, the two chain fixes); no other view's.
 
 ## The suite
 
