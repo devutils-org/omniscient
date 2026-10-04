@@ -159,9 +159,9 @@ rows carrying `"series": "task:<tid>"`.
   interned as labels, so `named_by` needs the `Stack` at interning time.
 - **views** (`view/src/model.rs`): a `Key::Dir { dir }` variant (today a
   `dir` key falls to `Key::Other` and prints as JSON); `Results::fields`,
-  `executables`, `named_by`, `perf_maps`, and `StackCount::series` in the
-  view's model, so the request view reads `fields` in place of sentences
-  and the flame can split by series.
+  `executables`, `named_by` and `perf_maps` in the view's model, so the
+  request view reads `fields` in place of sentences. (`StackCount::series`
+  landed in the review round, below.)
 - **docs** (`CATALOG.md`; `docs/contributing.md` is nobody's): the
   `targets: {pid: "no: <reason>"}` form where the `targets:` line is
   described, and `dir` among the keys.
@@ -192,5 +192,53 @@ rows carrying `"series": "task:<tid>"`.
   a timing assertion under the machine's load; it passes alone, rerun once.
   Filed for the run stream, whose file it is, should it recur.
 - **For views**: the flame reading a `-k task` profile now gets one row per
-  task and stack; until the view's model reads `series`, rows of one stack
-  id repeat (see "Needs from another stream").
+  task and stack; the review round below reads `series` in the view.
+
+## Review
+
+**`view/src/model.rs`'s `StackCount` had no `series`** (gap). Right, and
+fixed rather than left to views: the field was dropped silently on reading
+(serde ignores unknown fields) and lost on writing back. Measured before
+fixing, the repeated rows the reviewer feared did not show: the flame's
+`Tree::add` merges equal paths and the timebar sums by stack id or by leaf,
+and the process view reads no stack emit. What was lost was the split.
+
+- `StackCount::series: Option<String>`, `serde(default)`, written only when
+  present, so a recording without keys reads and writes as before.
+- The flame, from the stack emit: without the thread split, a stack's rows
+  of several series fall into one tower; with it (`t`), each row is rooted
+  at `[task:7]` and so on, as `folded` roots it at the series, and the
+  "not split by thread: the run kept the stacks, not the blocks" aside is
+  no longer said for keyed rows, since they are split.
+- `views::flame::tests::keyed_stack_rows_fold_into_one_tower_or_split_by_task`:
+  stack 0 on `task:7` (30) and `task:8` (15) is one `main;work` of 45
+  unsplit, and `[task:7];main;work` = 30 and `[task:8];main;work` = 15 split,
+  without the aside. `a_stack_rows_series_survives_a_round_trip`: read and
+  written back with `series`, a row without it writes none.
+
+**Also in this round**, found by clippy after merging main: `Slot::Detached`
+(`src/collect/mod.rs`) passed 240 bytes once run's `failure` joined this
+stream's `fields` and `provenance` in `Detached`, and
+`clippy::large_enum_variant` failed the workspace. Boxed
+(`Detached(Box<Detached>)`), one constructor changed; `cargo test --lib
+collect::` 682 of 683, the one failure
+`cpu::profile::...a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned`,
+in the flaky tally, passing alone.
+
+The tests of the round: `cargo test -p omn-view` 196/196; clippy
+`--workspace --all-targets -D warnings` and `fmt --check` clean. `make
+check` once: red on `family_sched::a_launched_programs_children_are_followed_and_wait_what_their_schedstat_says`
+(in the flaky tally; passes alone), so `cargo test --workspace
+--no-fail-fast`: 64 binaries, 2681 passed, 4 failed. Two are timing and
+pass alone (`triage::the_same_program_is_cpu_bound_for_latency_and_sleep_bound_for_the_tail`,
+in the tally; `unwind::dwarf_counts_and_says_the_stacks_deeper_than_its_copy`,
+not in it, filed here). Two fail every time **on main without this round's
+change** (checked with the change stashed), both the views stream's:
+
+- `view_live::a_gallery_prints_every_view`: at `--size 100x20` the gallery's
+  tab line now holds ten views and is cut before `process`, which the test
+  looks for.
+- `view_workloads::each_session_asks_its_views_sources_or_says_why_not`:
+  the ledger view now needs `sched.offcpu` (its blocked line,
+  `37a1a01`), and `view/workloads/ledger/session.yml` neither asks it nor
+  excuses it under `not_exercised`.

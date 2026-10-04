@@ -612,7 +612,12 @@ fn fill(tree: &mut Tree, results: &[&Results], run: usize, reading: &Reading<'_>
                 asides.push("narrowed to the focus".to_owned());
             }
         } else {
-            if reading.by_thread {
+            // Rows keyed by task (`--keys task`) split by thread on their
+            // own; without the split asked for, a stack's rows of several
+            // series fall into the same boxes.
+            let keyed = stack_outputs(one)
+                .any(|(stacks, _)| stacks.iter().any(|stack| stack.series.is_some()));
+            if reading.by_thread && !keyed {
                 asides.push(
                     "not split by thread: the run kept the stacks, not the blocks".to_owned(),
                 );
@@ -622,9 +627,14 @@ fn fill(tree: &mut Tree, results: &[&Results], run: usize, reading: &Reading<'_>
             }
             for (stacks, unattributed) in stack_outputs(one) {
                 for stack in stacks {
+                    let series = stack
+                        .series
+                        .as_ref()
+                        .filter(|_| reading.by_thread)
+                        .map(|series| format!("[{series}]"));
                     let frames = named(one, stack.stack);
                     tree.add(
-                        frames.iter().map(String::as_str),
+                        series.iter().chain(frames.iter()).map(String::as_str),
                         stack.total,
                         stack.events,
                         run,
@@ -2452,6 +2462,7 @@ mod tests {
                 stack: id as u64,
                 events: *count,
                 total: *count as f64,
+                series: None,
             });
         }
         results.outputs = vec![Output::Stack {
@@ -3042,6 +3053,7 @@ mod tests {
                     stack: 1,
                     events: 1,
                     total: 1000.0,
+                    series: None,
                 }],
                 unattributed: 2,
                 short: None,
@@ -3086,6 +3098,74 @@ mod tests {
         let alone = read(&kept, false);
         assert_eq!(total(&alone), 1000.0);
         assert!(alone.aside.unwrap().contains("2 blocks carried no stack"));
+    }
+
+    /// A `--keys task` profile has one row per task and stack: one stack id
+    /// on two rows is one tower, and split by thread, one tower per task.
+    #[test]
+    fn keyed_stack_rows_fold_into_one_tower_or_split_by_task() {
+        let mut data = profile(&[(&["main", "work"], 0)]);
+        let row = |series: &str, events: u64| StackCount {
+            stack: 0,
+            events,
+            total: events as f64,
+            series: Some(series.into()),
+        };
+        data.run.results[0].outputs = vec![Output::Stack {
+            stacks: vec![row("task:7", 30), row("task:8", 15)],
+            unattributed: 0,
+            short: None,
+        }];
+        let read = |by_thread: bool| {
+            let focus = Focus::default();
+            let pane = build(
+                &data,
+                None,
+                &NEEDS[ON],
+                "",
+                false,
+                &Reading {
+                    by_thread,
+                    focus: &focus,
+                },
+            );
+            match pane.body {
+                Body::Tree(tree) => (tree, pane.aside),
+                _ => panic!("a tree"),
+            }
+        };
+        let path = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let (merged, _) = read(false);
+        assert_eq!(merged.nodes[0].children.len(), 1, "one tower");
+        let work = merged.find(&path(&["main", "work"]));
+        assert_eq!(merged.nodes[work].value[0], 45.0);
+        assert_eq!(merged.nodes[work].events[0], 45);
+        let (split, aside) = read(true);
+        assert_eq!(split.nodes[0].children.len(), 2, "one tower per task");
+        let seven = split.find(&path(&["[task:7]", "main", "work"]));
+        assert_eq!(split.path(seven), path(&["[task:7]", "main", "work"]));
+        assert_eq!(split.nodes[seven].value[0], 30.0);
+        let eight = split.find(&path(&["[task:8]", "main", "work"]));
+        assert_eq!(split.nodes[eight].value[0], 15.0);
+        assert!(
+            aside.is_none_or(|aside| !aside.contains("not split by thread")),
+            "keyed rows are split"
+        );
+    }
+
+    /// The view reads a row's series and writes it back as `omn` wrote it.
+    #[test]
+    fn a_stack_rows_series_survives_a_round_trip() {
+        let json = r#"{"emit":"stack","stacks":[{"stack":1,"events":2,"total":2.0,"series":"task:7"},{"stack":1,"events":1,"total":1.0}],"unattributed":0}"#;
+        let output: Output = serde_json::from_str(json).unwrap();
+        let Output::Stack { stacks, .. } = &output else {
+            panic!("a stack emit")
+        };
+        assert_eq!(stacks[0].series.as_deref(), Some("task:7"));
+        assert_eq!(stacks[1].series, None);
+        let written = serde_json::to_value(&output).unwrap();
+        assert_eq!(written["stacks"][0]["series"], "task:7");
+        assert!(written["stacks"][1].get("series").is_none());
     }
 
     // The gallery's other screens: what a key or a second run shows, for

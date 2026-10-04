@@ -2957,7 +2957,7 @@ enum Slot {
     Attached(Box<dyn Collector>),
     /// Its window closed, and the collector with it: what is left is what the
     /// results need of it.
-    Detached(Detached),
+    Detached(Box<Detached>),
     /// Never attached. Why is in the collection's `stopped_because`.
     Missed,
 }
@@ -4500,7 +4500,7 @@ impl Ledger {
         let stopped_ns = monotonic_ns();
         spending.detached(index, stopped_ns);
         self.closed_because[index] = Some(because(self.seconds_in(stopped_ns)));
-        slots[index] = Slot::Detached(record);
+        slots[index] = Slot::Detached(Box::new(record));
         // A collection whose target had already gone keeps saying so.
         self.finished[index].get_or_insert(Finished::Window);
     }
