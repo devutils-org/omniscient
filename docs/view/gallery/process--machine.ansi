@@ -8,7 +8,7 @@
  [0m[1;2mNetwork [0m                           [0m[2mnot asked: needs net.socket[0m                                                         [0m
  [0m[1;2mGPU     [0m                           [0m[2mkernels not asked   VRAM 734MiB[0m                                                     [0m
  [0m[1mEnergy  [0m[34m▅▆██▇▇▇▇▇▆▆▆▅▅▅▅▆▆▆▆▆▆▆▆[0m   [0m[1;34m93.5 W      [0m   avg 101 W   the machine's, not apportioned                           [0m
- [0m[1;2mTime    [0m                           [0m[2mnot asked: needs cpu.profile or sched.offcpu or sched.runqlat or cpu.oncpu_time[0m     [0m
+ [0m[1;2mTime    [0m                           [0m[2mnothing on the target from cpu.oncpu_time[0m                                           [0m
 [0m[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 [0m[1m▶ suspect: [0m[2mnone read[0m                                                                                [0m[2mEnter/click → detail[0m
                                                                                                                         [0m

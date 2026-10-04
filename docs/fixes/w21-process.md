@@ -152,3 +152,39 @@ cargo test --test view_workloads process_carries_every_cost_at_once
   `io.latency` and the snapshots re-blessed on it (commands above); the
   gallery's `process--*`, `frame--help` and `frame--narrow` were re-blessed
   here.
+
+## Review
+
+Merged `main` at `c8aa662` (views and docs landed) first; it merged clean.
+
+- **"not asked" said of a source that was asked** (`view/src/views/process.rs`,
+  `Row::absent`). Fixed. A line whose sources are neither refused nor
+  in the run still says `not asked: needs ...`; a source the run did read,
+  but that left nothing this line can draw on the target (results labelled
+  `@system` only, which `on_target` drops, or no timebar bar from them),
+  now says `nothing on the target from <source>`, dimmed, like `row.empty`.
+  The machine gallery's Time line now reads `nothing on the target from
+  cpu.oncpu_time` beside the CPU line drawn from that source. Shown by the
+  new test `a_source_asked_on_the_machine_only_is_not_said_unasked` (a run
+  holding only `cpu.oncpu_time@system`: CPU and Time say it, Memory still
+  says not asked) and by `process--machine` re-blessed. The other
+  `process--*` snapshots that still say `not asked` (system-wakeup,
+  file-serving, vertical-abandoned) are runs that did not ask those
+  sources, so nothing else changed.
+- **Edits to `docs/view/gallery/**`, record's directory.** Acknowledged,
+  not reverted: the snapshot tests compare against those files, so a view
+  change without them is a red suite. This round touches one more pair,
+  `process--machine.{txt,ansi}`, for the fix above. The frame conflict the
+  reviewer foresaw did not happen: with views merged into `main`, `OMN_VIEW_BLESS=1
+  cargo test --test view_snapshots` rewrites nothing in `frame--help` or
+  `frame--narrow`, so main's copies are already what both streams draw.
+  Still owed when **record** merges its new recordings: re-bless the
+  gallery once after it (`OMN_VIEW_BLESS=1 cargo test -p omn-view` and
+  `--test view_snapshots`), since its recordings redraw every `process--*`.
+
+Fix round commit `971b8bf`. Tests run this round: `cargo test -p omn-view
+--lib views::process` 9 passed (the new one included), `cargo test -p
+omn-view` 185 passed, `--test view_snapshots` 17 passed, `--test cli` 27
+passed (two failed first only because the worktree had not built the
+preload shim; `cargo build -p omn-preload` and they pass), clippy `-p
+omn-view --all-targets -D warnings` and `cargo fmt --check` clean.
