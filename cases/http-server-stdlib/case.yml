@@ -79,8 +79,10 @@ causes:
     expect:
       limit: cpu
       state: on-cpu
-      # The main thread's accept loop is not why a request was slow.
+      # The main thread's accept loop is not why a request was slow; the
+      # thread serving the connection is.
       never_says: [select.cpython]
+      says: [while other threads of the process ran]
       agrees:
         - row: on-cpu
           # The serving thread's own nanoseconds on a cpu, by the scheduler.
@@ -185,31 +187,17 @@ causes:
 # got it wrong. A listed check that fails is reported as the open finding it
 # is; one that passes fails the test, so the line is removed once it is fixed.
 open_findings:
-  - check: the-first-suspect-is-the-known-cause
-    filed: >-
-      docs/fixes/w17-python.md, "a server's request is not its main thread's
-      life": `main_task` in src/triage/latency.rs decomposes the launched
-      program's main thread, which waits in `select` for connections, while
-      the 4.2 s of the listing are on the thread serving the connection; the
-      verdict says `sleep` for a request that was 99 % on a cpu. The slow
-      client's and the cold file's `blocked` pass this check by accident:
-      the accept loop is blocked too, which only the agreement below and
-      `never_says` tell apart
   - check: every-cited-number-agrees-with-the-reference
     filed: >-
-      docs/fixes/w17-python.md, "a server's request is not its main thread's
-      life": the on-cpu row is the main thread's 70 ms, against the serving
-      thread's 4.2 s by its own schedstat; the slow client's blocked row is
-      the main thread's `select`, a second (the client's idle) longer than
-      the serving thread's wait
+      docs/fixes/w18-cases.md, "a thread that waits beside the main thread
+      is not followed": the slow client's `blocked` row is the main thread's
+      `select` (2.3 s), a second longer than the serving thread's send
+      (1.3 s), because the serving thread was blocked too, not busy, and the
+      triage follows only a task that was on a cpu or queued for a quarter
+      of the block. The listing, where the serving thread was busy, now
+      agrees both ways
   - check: the-sentence-claims-nothing-false
     filed: >-
-      docs/fixes/w17-python.md, "a server's request is not its main thread's
-      life": the block the sentence names is the accept loop's `select`, for
-      the listing and for the slow client alike
-  - check: both-ways-name-the-same-suspect
-    filed: >-
-      docs/fixes/w18-triage.md, section 7, "cases": the person's way now
-      follows the main thread's `select` into the serving thread and names
-      its on-cpu work, while the agent's way (`read_mcp` in tests/cases.rs)
-      still reads the main thread's table and names the block
+      docs/fixes/w18-cases.md, "a thread that waits beside the main thread
+      is not followed": for the slow client, the block the sentence names,
+      and the stack the agent reads, are the accept loop's `select`

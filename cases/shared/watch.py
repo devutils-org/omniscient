@@ -13,12 +13,20 @@ one. It never touches any of them.
 
 Before anything else it ends what an earlier run left behind: every process
 whose command line names MARKER, or whose working directory is under it,
-other than this one and its ancestors. A run the tool's budget stopped ends
-the target's main process and leaves its children running (`ps -C cc1`
-after the stop); they would compete for the contended cpu, write the objects
-and reports the next run writes, and be found here as the next run's target.
-MARKER is the case's scratch directory, which holds the test's pid, so
-nothing of another run or another checkout is touched.
+other than this one and its ancestors. Until the eighteenth wave a run the
+tool's budget stopped ended the target's main process and left its children
+running (`ps -C cc1` after the stop); `omn` now ends the process group, and
+this stays as the guard for a program whose children left it: they would
+compete for the contended cpu, write the objects and reports the next run
+writes, and be found here as the next run's target. MARKER is the case's
+scratch directory, which holds the test's pid, so nothing of another run or
+another checkout is touched.
+
+PROGRAM is the name the target's first word goes by when it is found. A
+target that execs from a shell (`sh -c '... && exec sqlite3 ...'`) is
+watched by the program it execs: a shell that lives a few milliseconds can
+come and go between two passes over /proc on a loaded machine, and a watcher
+waiting for it would never find its target.
 
 With CPU and COMPETITORS, it then starts COMPETITORS processes that spin on
 cpu CPU and nothing else, and keeps itself off that cpu: the injection of a
@@ -169,6 +177,15 @@ def children(pid):
     return found
 
 
+def still_running(pid):
+    """Neither gone nor a zombie."""
+    try:
+        with open(f"/proc/{pid}/stat") as file:
+            return file.read().rpartition(")")[2].split()[0] not in ("Z", "X")
+    except (OSError, IndexError):
+        return False
+
+
 def schedstat(pid):
     """The process's tasks' time on a cpu and waiting for one, summed."""
     cpu_ns = delay_ns = 0
@@ -206,7 +223,9 @@ if target is not None:
         poll_ns = max(poll_ns, now - last)
         last = now
         alive = schedstat(target)
-        if alive is None:
+        # A zombie is gone for this account: its parent may reap it late, or,
+        # once the tool that launched it has exited, whoever inherits it.
+        if alive is None or not still_running(target):
             break
         walk = [(target, None)]
         while walk:

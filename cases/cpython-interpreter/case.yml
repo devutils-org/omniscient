@@ -82,14 +82,11 @@ causes:
       # function it names in backquotes as "hottest" is one of the
       # interpreter's, presented as the suspect.
       never_says: ['hottest function `']
-      # Known to be fragile, and not listed under `open_findings` because it
-      # passes: `both-ways-name-the-same-suspect` compares the two ways'
-      # leaves, here two named C functions of a flat profile
-      # (`__tls_get_addr` about 10 %, `_Py_Dealloc` about 7 %). A run whose
-      # two ways sample them the other way round fails that check, which is
-      # then this flat profile and not a defect of either way: rerun once
-      # (CLAUDE.md, the flaky tally). Finding 2's fix, which stops naming a C
-      # leaf as the suspect, removes the comparison.
+      # Both ways say a flat interpreter profile as one and name no function
+      # (`docs/mcp.md`, "A flat profile of an interpreter is said as one"), so
+      # `both-ways-name-the-same-suspect` compares no two C leaves of it: the
+      # coin the seventeenth wave's flaky tally counted is gone with python's
+      # finding 2.
       agrees:
         - row: on-cpu
           with: account.cpu_ns

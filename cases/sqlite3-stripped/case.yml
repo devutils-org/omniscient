@@ -139,8 +139,11 @@ causes:
       # frames are named.
       through: sqliteDefaultBusyCallback
       # What a sentence about this block must not claim: the sleep is a lock
-      # wait, polled.
-      never_says: [not a lock]
+      # wait, polled, and the claim the sentence made until the eighteenth
+      # wave was that it is "not a lock: a timer, a pipe or a socket". What
+      # it must say is that a polled lock is one of the things a sleep is.
+      never_says: ['not a lock:']
+      says: [a lock polled with a sleep between tries]
       agrees:
         - row: blocked
           with: holder.held_after_target_ns
@@ -153,12 +156,3 @@ causes:
         - row: blocked
           with: timer.off_cpu_ns
           outside: timer.real_ns
-
-# Checks this case shows failing, each filed against the file that owns what
-# got it wrong. A listed check that fails is reported as the open finding it
-# is; one that passes fails the test, so the line is removed once it is fixed.
-open_findings:
-  - check: the-sentence-claims-nothing-false
-    filed: >-
-      docs/fixes/w17-cases.md, "a polled lock is called not a lock": the
-      sentence says the sleep is on "something that is not a lock"

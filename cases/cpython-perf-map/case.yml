@@ -142,22 +142,3 @@ causes:
         - row: blocked
           with: account.read_ns
           outside: account.read_ns
-
-# Checks this case shows failing, each filed against the file that owns what
-# got it wrong. A listed check that fails is reported as the open finding it
-# is; one that passes fails the test, so the line is removed once it is fixed.
-open_findings:
-  - check: the-dominant-stack-ends-in-the-known-frame
-    filed: >-
-      docs/fixes/w17-python.md, "the hottest leaf is never the Python
-      function": `hottest()` in src/triage/latency.rs, and the agent's
-      reading (docs/mcp.md, `read_mcp` in tests/cases.rs), rank the leaf
-      frame; the perf map names the trampoline, a caller, so the leaf is
-      the interpreter's `__tls_get_addr` while `py::score` is on 99 % of
-      the stacks, as cProfile says it should be
-  - check: both-ways-name-the-same-suspect
-    filed: >-
-      docs/fixes/w18-names.md, section 5, "cases": the person's way charges
-      each sample to the innermost frame the perf map named (`py::score`),
-      while the agent's way (`read_mcp` in tests/cases.rs) still ranks by
-      leaf (`__tls_get_addr`), not yet as docs/mcp.md says to
