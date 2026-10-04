@@ -32,7 +32,7 @@ use super::insn::{
 };
 use super::map::{map_failure, Counters};
 use super::ring::{ring_bytes, RingBuffer};
-use super::sched_common::{push_followed_filter, Descendants, Followed};
+use super::sched_common::{push_followed_filter, text_of, Descendants, Followed};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 
 /// One wakeup, as the program writes it and userspace reads it.
@@ -56,7 +56,24 @@ pub struct Wakeup {
     /// issued -- NMI, hard interrupt and *serving* a softirq -- or 0 in a
     /// task's context. Read through `context()`.
     context: u32,
+    /// The woken task's name, read out of its `task_struct`.
     comm: [u8; 16],
+    /// The current task's name: the waker's in a task's context, and in an
+    /// interrupt's the task the interrupt was served on.
+    current_comm: [u8; 16],
+    /// In an interrupt's context, the thread the interrupt was served on --
+    /// the one it landed on, or the one whose `local_bh_enable` served a
+    /// softirq -- which is the waker's tid before it is cleared; 0 in a
+    /// task's.
+    pub served_in_tid: u32,
+    /// The hard interrupt whose handler was running, plus one, or 0: no
+    /// registered handler was (the local timer, an inter-processor
+    /// interrupt), or the numbers were not read.
+    irq: u32,
+    /// The softirq vector being served, plus one, or 0.
+    softirq: u32,
+    /// Written as zero, so that no byte of the record is stack garbage.
+    pad: u32,
 }
 
 /// Where a wakeup was issued from.
@@ -103,17 +120,45 @@ const INTERRUPT_BITS: u32 = NMI_MASK | HARDIRQ_MASK | SOFTIRQ_OFFSET;
 
 /// The size of the record the program writes. Stated once, used by the program
 /// and checked against the struct.
-const RECORD_BYTES: usize = 48;
+const RECORD_BYTES: usize = 80;
+
+/// The softirq vectors, in `enum` order from `include/linux/interrupt.h`;
+/// `softirq_to_name` in `kernel/softirq.c` spells them the same way.
+const SOFTIRQ_NAMES: [&str; 10] = [
+    "HI", "TIMER", "NET_TX", "NET_RX", "BLOCK", "IRQ_POLL", "TASKLET", "SCHED", "HRTIMER", "RCU",
+];
 
 impl Wakeup {
     /// The woken task's name, as the kernel holds it.
     pub fn wakee_comm(&self) -> String {
-        let end = self
-            .comm
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(self.comm.len());
-        String::from_utf8_lossy(&self.comm[..end]).into_owned()
+        text_of(&self.comm)
+    }
+
+    /// The name of the task that was current when the wakeup was issued: the
+    /// waker in a task's context, the task an interrupt was served on in an
+    /// interrupt's.
+    pub fn current_comm(&self) -> String {
+        text_of(&self.current_comm)
+    }
+
+    /// The hard interrupt whose handler issued the wakeup, when the context is
+    /// a hard interrupt and the handler is a registered one.
+    pub fn irq(&self) -> Option<u32> {
+        (self.context() == WakerContext::Hardirq && self.irq != 0).then(|| self.irq - 1)
+    }
+
+    /// The softirq vector being served, by the kernel's name for it, when the
+    /// context is a softirq.
+    pub fn softirq(&self) -> Option<String> {
+        if self.context() != WakerContext::Softirq || self.softirq == 0 {
+            return None;
+        }
+        let vector = self.softirq - 1;
+        Some(
+            SOFTIRQ_NAMES
+                .get(vector as usize)
+                .map_or_else(|| vector.to_string(), |name| (*name).to_owned()),
+        )
     }
 
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -123,6 +168,8 @@ impl Wakeup {
         let word = |at: usize| u32::from_ne_bytes(bytes[at..at + 4].try_into().ok().unwrap());
         let mut comm = [0u8; 16];
         comm.copy_from_slice(&bytes[32..48]);
+        let mut current_comm = [0u8; 16];
+        current_comm.copy_from_slice(&bytes[48..64]);
         Some(Self {
             ts_ns: u64::from_ne_bytes(bytes[0..8].try_into().ok()?),
             waker_tid: word(8),
@@ -132,6 +179,11 @@ impl Wakeup {
             cpu: word(24),
             context: word(28),
             comm,
+            current_comm,
+            served_in_tid: word(64),
+            irq: word(68),
+            softirq: word(72),
+            pad: word(76),
         })
     }
 
@@ -175,7 +227,7 @@ impl PreemptCount {
 }
 
 /// Stack offsets, negative from the frame pointer, matching `Wakeup`.
-const EVENT: i16 = -48;
+const EVENT: i16 = -(RECORD_BYTES as i16);
 const WAKER_TID: i16 = EVENT + 8;
 const WAKER_PID: i16 = EVENT + 12;
 const WAKEE_TID: i16 = EVENT + 16;
@@ -183,7 +235,17 @@ const WAKEE_PID: i16 = EVENT + 20;
 const CPU: i16 = EVENT + 24;
 const CONTEXT: i16 = EVENT + 28;
 const COMM: i16 = EVENT + 32;
-/// The one-word key of the drop counter, below the record.
+const CURRENT_COMM: i16 = EVENT + 48;
+const SERVED_IN: i16 = EVENT + 64;
+const IRQ: i16 = EVENT + 68;
+const SOFTIRQ: i16 = EVENT + 72;
+const PAD: i16 = EVENT + 76;
+/// The slots of the per-cpu map the interrupt programs write: the hard
+/// interrupt whose handler is running, and the softirq vector being served.
+const HARD_SLOT: i32 = 0;
+const SOFT_SLOT: i32 = 1;
+/// The one-word key of the drop counter, below the record, and of the
+/// interrupt map's lookups.
 const DROP_KEY: i16 = EVENT - 8;
 /// Sixteen bytes for the target comparison, `insn::push_task_filter`.
 const FILTER_SCRATCH: i16 = DROP_KEY - 16;
@@ -200,6 +262,7 @@ fn instructions(
     followed: Followed,
     ring_fd: i32,
     drops_fd: i32,
+    interrupts_fd: Option<i32>,
 ) -> Result<Vec<Insn>, String> {
     let whose = followed.whose;
     let pid_offset = btf.member_offset("task_struct", "pid")?;
@@ -226,6 +289,15 @@ fn instructions(
     program.push(Insn::call(helper::GET_SMP_PROCESSOR_ID));
     program.push(Insn::stx(BPF_W, R10, CPU, 0));
 
+    // The current task's name, which is the waker's in a task's context.
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, CURRENT_COMM as i32));
+    program.push(Insn::mov64_imm(2, 16));
+    program.push(Insn::call(helper::GET_CURRENT_COMM));
+    for slot in [SERVED_IN, IRQ, SOFTIRQ, PAD] {
+        program.push(Insn::st_imm(BPF_W, R10, slot, 0));
+    }
+
     // In an interrupt the current task is only where the interrupt landed.
     // The waker becomes the interrupt -- tid and pid 0, which also no target
     // filter below can match, so such a wakeup is kept only for its wakee.
@@ -238,8 +310,30 @@ fn instructions(
             program.push(Insn::and64_imm(1, INTERRUPT_BITS as i32));
             program.push(Insn::stx(BPF_W, R10, CONTEXT, 1));
             program.jump_to("in_a_task", Insn::jeq_imm(1, 0, 0));
+            // The task the interrupt was served on is kept beside it, under
+            // its own name: not the waker, but where a softirq served in a
+            // task's `local_bh_enable` came from.
+            program.push(Insn::ldx(BPF_W, 1, R10, WAKER_TID));
+            program.push(Insn::stx(BPF_W, R10, SERVED_IN, 1));
             program.push(Insn::st_imm(BPF_W, R10, WAKER_TID, 0));
             program.push(Insn::st_imm(BPF_W, R10, WAKER_PID, 0));
+            // Which interrupt, as the interrupt programs left it on this cpu.
+            if let Some(interrupts_fd) = interrupts_fd {
+                for (slot, into, next) in [
+                    (HARD_SLOT, IRQ, "hard_read"),
+                    (SOFT_SLOT, SOFTIRQ, "soft_read"),
+                ] {
+                    program.push(Insn::st_imm(BPF_W, R10, DROP_KEY, slot));
+                    program.extend(Insn::load_map_fd(1, interrupts_fd));
+                    program.push(Insn::mov64_reg(2, R10));
+                    program.push(Insn::add64_imm(2, DROP_KEY as i32));
+                    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+                    program.jump_to(next, Insn::jeq_imm(0, 0, 0));
+                    program.push(Insn::ldx(BPF_W, 1, 0, 0));
+                    program.push(Insn::stx(BPF_W, R10, into, 1));
+                    program.label(next);
+                }
+            }
             program.label("in_a_task");
         }
         // Every byte of the record is written before it is published; a word
@@ -338,6 +432,109 @@ fn instructions(
     Ok(instructions)
 }
 
+/// The prototypes the interrupt programs read their one argument out of.
+const IRQ_ENTRY_SIGNATURE: [&str; 2] = ["int", "irqaction *"];
+const IRQ_EXIT_SIGNATURE: [&str; 3] = ["int", "irqaction *", "int"];
+const SOFTIRQ_SIGNATURE: [&str; 1] = ["unsigned int"];
+
+/// Which interrupt a cpu is in, for the wakeup program to read.
+///
+/// Four small programs on `irq_handler_entry`/`irq_handler_exit` and
+/// `softirq_entry`/`softirq_exit` keep, per cpu, the hard interrupt whose
+/// handler is running and the softirq vector being served, each plus one so
+/// that zero is "none". A hard handler does not nest on its cpu and a softirq
+/// does not either, so one slot each is the whole state. What they cannot
+/// name is a hard interrupt with no registered handler -- the local timer,
+/// which ends most sleeps, and inter-processor interrupts -- and the wakeup a
+/// threaded handler makes of its own thread, which the kernel issues after
+/// `irq_handler_exit`: those wakeups carry no `irq`, and the caveat says so.
+struct InterruptNumbers {
+    map: Counters,
+    programs: Vec<OwnedFd>,
+    _links: Vec<OwnedFd>,
+}
+
+/// A program that sets one slot of the interrupt map from its first argument,
+/// plus one, or clears it.
+fn interrupt_instructions(slot: i32, map_fd: i32, set: bool) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    if set {
+        // A raw tracepoint's arguments are eight bytes each; the number is in
+        // the low half, and the store below takes only that half.
+        program.push(Insn::ldx(BPF_DW, 7, 6, 0));
+        program.push(Insn::add64_imm(7, 1));
+    }
+    program.push(Insn::st_imm(BPF_W, R10, -8, slot));
+    program.extend(Insn::load_map_fd(1, map_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, -8));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    if set {
+        program.push(Insn::stx(BPF_W, 0, 0, 7));
+    } else {
+        program.push(Insn::st_imm(BPF_W, 0, 0, 0));
+    }
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+impl InterruptNumbers {
+    fn load(btf: &Btf) -> Result<Self, String> {
+        for (tracepoint, expected) in [
+            ("irq_handler_entry", &IRQ_ENTRY_SIGNATURE[..]),
+            ("irq_handler_exit", &IRQ_EXIT_SIGNATURE[..]),
+            ("softirq_entry", &SOFTIRQ_SIGNATURE[..]),
+            ("softirq_exit", &SOFTIRQ_SIGNATURE[..]),
+        ] {
+            let signature = btf.tracepoint_signature(tracepoint)?;
+            if signature != expected {
+                return Err(format!(
+                    "this kernel declares `{tracepoint}({})` where `({})` was expected",
+                    signature.join(", "),
+                    expected.join(", "),
+                ));
+            }
+        }
+        let map = Counters::create(2, "omn_wake_irq")
+            .map_err(|error| map_failure("interrupt map", error))?;
+        let mut programs = Vec::new();
+        let mut links = Vec::new();
+        // The exits before the entries: an exit with no entry before it clears
+        // a slot that was clear, where an entry with no exit attached would
+        // leave a number behind that the next interrupt's wakeups would read.
+        for (tracepoint, slot, set, name) in [
+            ("irq_handler_exit", HARD_SLOT, false, "omn_wake_irqout"),
+            ("softirq_exit", SOFT_SLOT, false, "omn_wake_sftout"),
+            ("irq_handler_entry", HARD_SLOT, true, "omn_wake_irqin"),
+            ("softirq_entry", SOFT_SLOT, true, "omn_wake_sftin"),
+        ] {
+            let instructions = interrupt_instructions(slot, map.as_raw_fd(), set)?;
+            let program = syscall::prog_load(
+                syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+                &instructions,
+                name,
+                LICENSE,
+            )
+            .map_err(|error| format!("the kernel refused the `{tracepoint}` program: {error}"))?;
+            let link = syscall::raw_tracepoint_open(tracepoint, program.as_raw_fd())
+                .map_err(|error| format!("cannot attach to `{tracepoint}`: {error}"))?;
+            programs.push(program);
+            links.push(link);
+        }
+        Ok(Self {
+            map,
+            programs,
+            _links: links,
+        })
+    }
+}
+
 /// A loaded, attached wakeup program and the two maps it writes.
 ///
 /// Dropping it detaches: the link, the program and the maps are file
@@ -347,6 +544,8 @@ pub struct WakeupProgram {
     descendants: Option<Descendants>,
     /// Whether the program can tell an interrupt's wakeup from a task's.
     interrupts_told_apart: bool,
+    /// The programs that say which interrupt, or why there are none.
+    interrupts: Result<InterruptNumbers, String>,
     ring: RingBuffer,
     drops: Counters,
     program: OwnedFd,
@@ -370,6 +569,9 @@ impl WakeupProgram {
     pub fn skipped(&self) -> u64 {
         crate::bpf::attach::fentry::skipped([&self.program])
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
+            + self.interrupts.as_ref().map_or(0, |numbers| {
+                crate::bpf::attach::fentry::skipped(numbers.programs.iter())
+            })
     }
 
     /// Processes the target started that no program here followed, because
@@ -398,12 +600,22 @@ impl WakeupProgram {
             .map_or(Followed::only(whose), |descendants| {
                 descendants.followed(whose)
             });
+        // Only where an interrupt's wakeup is told apart at all: elsewhere
+        // there is no interrupt context to name.
+        let interrupts = match preempt {
+            Some(_) => InterruptNumbers::load(btf),
+            None => Err("this kernel's preempt count was not found".to_owned()),
+        };
         let instructions = instructions(
             btf,
             preempt,
             followed,
             ring_map.as_raw_fd(),
             drops.as_raw_fd(),
+            interrupts
+                .as_ref()
+                .ok()
+                .map(|numbers| numbers.map.as_raw_fd()),
         )?;
         let program = syscall::prog_load(
             syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
@@ -428,6 +640,7 @@ impl WakeupProgram {
         Ok(Self {
             descendants,
             interrupts_told_apart: preempt.is_some(),
+            interrupts,
             ring,
             drops,
             program,
@@ -440,6 +653,12 @@ impl WakeupProgram {
     /// find, where such a wakeup is credited to the interrupted task as before.
     pub fn interrupts_told_apart(&self) -> bool {
         self.interrupts_told_apart
+    }
+
+    /// Why an interrupt's wakeup carries no `irq` or `softirq`, when the
+    /// programs that read them could not be loaded.
+    pub fn interrupts_unnamed(&self) -> Option<&str> {
+        self.interrupts.as_ref().err().map(String::as_str)
     }
 
     /// Hands every complete wakeup to `handle`, and counts the records that
@@ -479,6 +698,19 @@ mod tests {
             (CPU, offset_of!(Wakeup, cpu), "cpu"),
             (CONTEXT, offset_of!(Wakeup, context), "context"),
             (COMM, offset_of!(Wakeup, comm), "comm"),
+            (
+                CURRENT_COMM,
+                offset_of!(Wakeup, current_comm),
+                "current_comm",
+            ),
+            (
+                SERVED_IN,
+                offset_of!(Wakeup, served_in_tid),
+                "served_in_tid",
+            ),
+            (IRQ, offset_of!(Wakeup, irq), "irq"),
+            (SOFTIRQ, offset_of!(Wakeup, softirq), "softirq"),
+            (PAD, offset_of!(Wakeup, pad), "pad"),
         ] {
             assert_eq!(
                 (stack - EVENT) as usize,
@@ -497,8 +729,64 @@ mod tests {
     fn a_name_stops_at_its_terminator() {
         let mut bytes = [0u8; RECORD_BYTES];
         bytes[32..36].copy_from_slice(b"true");
+        bytes[48..50].copy_from_slice(b"sh");
         let wakeup = Wakeup::from_bytes(&bytes).expect("a full record");
         assert_eq!(wakeup.wakee_comm(), "true");
+        assert_eq!(wakeup.current_comm(), "sh", "the two ends are two names");
+    }
+
+    /// The interrupt's number is read only in the context it belongs to, and
+    /// zero is "none" rather than interrupt 0 (the legacy timer, on x86).
+    #[test]
+    fn an_interrupt_is_named_only_in_its_own_context() {
+        let record = |context: u32, irq: u32, softirq: u32| {
+            let mut bytes = [0u8; RECORD_BYTES];
+            bytes[28..32].copy_from_slice(&context.to_ne_bytes());
+            bytes[64..68].copy_from_slice(&77u32.to_ne_bytes());
+            bytes[68..72].copy_from_slice(&irq.to_ne_bytes());
+            bytes[72..76].copy_from_slice(&softirq.to_ne_bytes());
+            Wakeup::from_bytes(&bytes).expect("a full record")
+        };
+        let hard = record(0x1_0000, 1, 4);
+        assert_eq!(
+            hard.irq(),
+            Some(0),
+            "stored plus one: interrupt 0 is a number"
+        );
+        assert_eq!(
+            hard.softirq(),
+            None,
+            "a hard interrupt over a softirq is the hard one's"
+        );
+        assert_eq!(hard.served_in_tid, 77);
+        assert_eq!(
+            record(0x1_0000, 0, 0).irq(),
+            None,
+            "no registered handler ran"
+        );
+        let soft = record(0x100, 9, 4);
+        assert_eq!(soft.irq(), None);
+        assert_eq!(soft.softirq().as_deref(), Some("NET_RX"));
+        assert_eq!(record(0x100, 0, 42).softirq().as_deref(), Some("41"));
+        let task = record(0, 9, 4);
+        assert_eq!((task.irq(), task.softirq()), (None, None));
+    }
+
+    /// The interrupt programs read one argument and touch one slot; nothing
+    /// else, on a path that runs on every interrupt of the machine.
+    #[test]
+    fn the_interrupt_programs_set_and_clear_one_slot() {
+        let set = interrupt_instructions(SOFT_SLOT, 3, true).expect("a program");
+        let clear = interrupt_instructions(HARD_SLOT, 3, false).expect("a program");
+        for program in [&set, &clear] {
+            assert_eq!(helpers_called(program), vec![helper::MAP_LOOKUP_ELEM]);
+        }
+        assert!(set
+            .iter()
+            .any(|insn| insn.imm == SOFT_SLOT && insn.code == 0x62));
+        assert!(clear
+            .iter()
+            .any(|insn| insn.imm == HARD_SLOT && insn.code == 0x62));
     }
 
     /// Every helper the program calls, in the order it calls them.
@@ -529,6 +817,7 @@ mod tests {
             Followed::only(Whose::Process(1)),
             3,
             4,
+            Some(5),
         )
         .expect("a program");
         let called = helpers_called(&program);
@@ -556,6 +845,7 @@ mod tests {
             Followed::only(Whose::Process(1)),
             3,
             4,
+            Some(5),
         )
         .expect("a program");
         let called = helpers_called(&program);
@@ -567,6 +857,7 @@ mod tests {
             helper::RINGBUF_OUTPUT,
             helper::MAP_LOOKUP_ELEM,
             helper::THIS_CPU_PTR,
+            helper::GET_CURRENT_COMM,
         ];
         for helper in &called {
             assert!(
@@ -596,6 +887,7 @@ mod tests {
             Followed::only(Whose::Any),
             3,
             4,
+            Some(5),
         )
         .expect("a program");
         assert!(
@@ -608,6 +900,7 @@ mod tests {
             Followed::only(Whose::Process(4242)),
             3,
             4,
+            Some(5),
         )
         .expect("a program");
         assert_eq!(
@@ -629,6 +922,7 @@ mod tests {
             Followed::only(Whose::Any),
             3,
             4,
+            Some(5),
         )
         .expect("a program");
         let output_at = program
@@ -658,6 +952,7 @@ mod tests {
             Followed::only(Whose::Process(4242)),
             3,
             4,
+            Some(5),
         )
         .expect("a program");
         let machine_wide = instructions(
@@ -666,6 +961,7 @@ mod tests {
             Followed::only(Whose::Any),
             3,
             4,
+            Some(5),
         )
         .expect("a program");
         assert!(
@@ -803,6 +1099,7 @@ mod tests {
             Followed::only(Whose::Process(4242)),
             3,
             4,
+            Some(5),
         )
         .expect("a program");
         let load = program

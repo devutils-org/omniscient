@@ -13,9 +13,12 @@
 # therefore on the cpu for its own spin and blocked for the responder's, and the
 # two are equal by construction -- not by measurement.
 #
-# Measured on this machine, 600 round trips at 100 spins: the driver was blocked
-# 182.5 ms across 605 blocks and on the cpu 210.0 ms, so 46 % of the time it
-# accounted for was time it was not running.
+# Measured on this machine, 600 round trips at 100 spins: the driver's row was
+# blocked 182.5 ms across 605 blocks and on the cpu 210.0 ms, so 46 % of the
+# time it accounted for was time it was not running. Those are the driver's own
+# rows (`keys: [task]`). The run's totals are larger: the responder is a
+# subshell of the launched shell, a process the target started, and every
+# source here follows it as one of the target's, so its blocks are in them too.
 # `cpu.oncpu_time` is here beside `sched.offcpu` for exactly that reason: it is
 # the other half, and the two together have to add up to the program.
 #

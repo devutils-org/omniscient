@@ -88,6 +88,9 @@ pub struct FutexCollector {
     notes: Vec<String>,
     stacks: BTreeMap<u64, Vec<String>>,
     symbolizers: HashMap<i32, Symbolizer>,
+    /// Processes whose symbolizer outlived their place in the followed set
+    /// at the last tick, dropped at the next one; see `retire_symbolizers`.
+    leaving: Vec<i32>,
     wants_stacks: bool,
     unwalkable: u64,
     evicted_stacks: u64,
@@ -109,6 +112,7 @@ impl FutexCollector {
             notes: Vec::new(),
             stacks: BTreeMap::new(),
             symbolizers: HashMap::new(),
+            leaving: Vec::new(),
             wants_stacks,
             unwalkable: 0,
             evicted_stacks: 0,
@@ -209,15 +213,15 @@ impl FutexCollector {
         let Some(watched) = self.watched_process() else {
             return;
         };
-        let watched = watched as i32;
-        match self.symbolizers.entry(watched) {
-            std::collections::hash_map::Entry::Occupied(mut held) => {
-                held.get_mut().refresh();
-            }
-            std::collections::hash_map::Entry::Vacant(empty) => {
-                empty.insert(Symbolizer::for_process(watched));
-            }
+        // A process target is followed into the processes it starts, and each
+        // of those is read too.
+        let mut followed = vec![watched];
+        if let Some(program) = self.program.as_ref() {
+            followed.extend(program.processes());
         }
+        followed.sort_unstable();
+        followed.dedup();
+        super::refresh_followed_symbols(&mut self.symbolizers, &mut self.leaving, &followed);
     }
 
     fn resolve_stack(&mut self, row: &FutexWait) -> Option<u32> {
@@ -274,6 +278,16 @@ impl FutexCollector {
                  upper bound on the target's share, and every total here is a lower bound",
             );
             self.skipped = skipped;
+        }
+        let unfollowed = program.unfollowed();
+        if unfollowed > 0 {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so {} waits are in no row",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "its" } else { "their" },
+            ));
         }
         let now = program.dropped();
         for (fresh, before, reason) in [

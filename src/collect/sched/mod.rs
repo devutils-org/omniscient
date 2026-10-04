@@ -50,6 +50,45 @@ pub(crate) fn whose(target: &Target, why: &str) -> Result<Whose, String> {
     })
 }
 
+/// Reads the mappings of every process a target's waits can come from, every
+/// tick, and drops the symbolizers of the ones that have left.
+///
+/// `followed` is the target and the processes it started that the kernel
+/// follows now. A symbolizer snapshots `/proc/<pid>/maps` when it is built,
+/// and a launched program and its children are each read at the wrong moment
+/// by any single read: before they exec, or after they exit. A process that
+/// has left the set keeps its symbolizer one tick longer, so the rows of its
+/// last drain still resolve, and is dropped at the next: a build starts
+/// thousands of short-lived processes, and each symbolizer holds the parsed
+/// symbol tables of every file its process mapped.
+pub(crate) fn refresh_followed_symbols(
+    symbolizers: &mut std::collections::HashMap<i32, crate::stack::Symbolizer>,
+    leaving: &mut Vec<i32>,
+    followed: &[u32],
+) {
+    let kept = |tgid: &i32| followed.contains(&(*tgid as u32));
+    for tgid in std::mem::take(leaving) {
+        if !kept(&tgid) {
+            symbolizers.remove(&tgid);
+        }
+    }
+    *leaving = symbolizers
+        .keys()
+        .copied()
+        .filter(|tgid| !kept(tgid))
+        .collect();
+    for &tgid in followed {
+        match symbolizers.entry(tgid as i32) {
+            std::collections::hash_map::Entry::Occupied(mut held) => {
+                held.get_mut().refresh();
+            }
+            std::collections::hash_map::Entry::Vacant(empty) => {
+                empty.insert(crate::stack::Symbolizer::for_process(tgid as i32));
+            }
+        }
+    }
+}
+
 /// The collectors this family provides.
 pub fn factories() -> Vec<Factory> {
     vec![
