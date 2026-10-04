@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 
 use super::histogram::{HistogramCollector, Rows, Source};
+use super::underneath;
 use crate::bpf::attach::fentry::{self, Narrowing, Row};
 use crate::bpf::attach::io_vfs::{self, Layer, Op, VfsProgram};
 use crate::collect::{not_built, Collector, Prepared};
@@ -132,17 +133,57 @@ fn coverage(layer: Layer) -> String {
 /// filesystem mounted mid-run is the one case the first read misses.
 pub(super) struct Mounts {
     by_dev: BTreeMap<(u32, u32), (String, String)>,
+    sources: BTreeMap<(u32, u32), String>,
     names: BTreeMap<(u32, u32), String>,
+    /// The block devices under each superblock, as `io.bytes` keys them,
+    /// resolved once per device: `None` when the mount source is not one.
+    under: BTreeMap<(u32, u32), Option<String>>,
 }
 
 impl Mounts {
     pub(super) fn read() -> Self {
+        let table = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
         Self {
-            by_dev: parse_mountinfo(
-                &std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default(),
-            ),
+            by_dev: parse_mountinfo(&table),
+            sources: parse_sources(&table),
             names: super::device_names(),
+            under: BTreeMap::new(),
         }
+    }
+
+    /// The block devices a superblock's I/O lands on, each spelled as the
+    /// `dev` key `io.bytes` puts on its series (`dev:259+0`), comma-separated;
+    /// `None` when the filesystem is not on a block device `/sys` knows.
+    ///
+    /// The mount source is followed first, because on btrfs the superblock's
+    /// own number is anonymous and names nothing. Where the source is not a
+    /// name `/sys` knows -- the CI's `/dev/root` alias -- the superblock's
+    /// number is tried instead, which on a single-device filesystem is the
+    /// device itself.
+    pub(super) fn block_devices(&mut self, dev: (u32, u32)) -> Option<String> {
+        if let Some(known) = self.under.get(&dev) {
+            return known.clone();
+        }
+        let sysfs = underneath::Sysfs::machine();
+        let mut leaves = self
+            .sources
+            .get(&dev)
+            .and_then(|source| underneath::kernel_name(source))
+            .map(|name| sysfs.leaves_under(&name))
+            .unwrap_or_default();
+        if leaves.is_empty() && dev.0 != 0 {
+            let by_number = std::path::Path::new("/sys/dev/block")
+                .join(format!("{}:{}", dev.0, dev.1))
+                .canonicalize()
+                .ok()
+                .and_then(|path| Some(path.file_name()?.to_string_lossy().into_owned()));
+            if let Some(name) = by_number {
+                leaves = sysfs.leaves_under(&name);
+            }
+        }
+        let found = (!leaves.is_empty()).then(|| underneath::as_keys(&leaves));
+        self.under.insert(dev, found.clone());
+        found
     }
 
     pub(super) fn lookup(&mut self, dev: (u32, u32)) -> (String, String, String) {
@@ -189,6 +230,30 @@ fn parse_mountinfo(text: &str) -> BTreeMap<(u32, u32), (String, String)> {
     mounts
 }
 
+/// `major:minor` to the mount source (`/dev/nvme0n1p6`), first mount wins.
+fn parse_sources(text: &str) -> BTreeMap<(u32, u32), String> {
+    let mut sources = BTreeMap::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let Some(separator) = fields.iter().position(|field| *field == "-") else {
+            continue;
+        };
+        let (Some(dev), Some(source)) = (fields.get(2), fields.get(separator + 2)) else {
+            continue;
+        };
+        let Some((Ok(major), Ok(minor))) = dev
+            .split_once(':')
+            .map(|(major, minor)| (major.parse(), minor.parse()))
+        else {
+            continue;
+        };
+        sources
+            .entry((major, minor))
+            .or_insert_with(|| (*source).to_owned());
+    }
+    sources
+}
+
 fn describe(layer: Layer) -> super::histogram::Describe {
     let mut mounts = (layer == Layer::Fs).then(Mounts::read);
     Box::new(move |row: &Row| {
@@ -207,11 +272,15 @@ fn describe(layer: Layer) -> super::histogram::Describe {
             }
             Layer::Fs => {
                 let dev = io_vfs::major_minor(row.dev);
-                let (fs, _, device) = mounts.as_mut().expect("read for io.fs").lookup(dev);
+                let mounts = mounts.as_mut().expect("read for io.fs");
+                let (fs, _, device) = mounts.lookup(dev);
                 attrs.push(Attr::uint("ino", row.object));
                 attrs.push(Attr::text("dev", device));
                 attrs.push(Attr::uint("sb_dev", io_vfs::stat_dev(row.dev)));
                 attrs.push(Attr::text("fs", fs));
+                if let Some(under) = mounts.block_devices(dev) {
+                    attrs.push(Attr::text("blk_devs", under));
+                }
                 (
                     vec![
                         KeyValue::File {
@@ -271,5 +340,28 @@ mod tests {
     fn optional_fields_do_not_move_the_filesystem_type() {
         let text = "36 25 8:1 / /data rw shared:1 master:2 propagate_from:3 - xfs /dev/sda1 rw\n";
         assert_eq!(parse_mountinfo(text)[&(8, 1)].0, "xfs");
+    }
+
+    /// The source is the field after the type, whatever the optional fields
+    /// before the separator are; it is what `underneath` follows down.
+    #[test]
+    fn the_mount_source_is_read_beside_the_type() {
+        let text = "36 25 0:28 /@ / rw shared:1 - btrfs /dev/nvme0n1p6 rw\n\
+                    40 25 0:43 / /tmp rw shared:5 master:2 - tmpfs tmpfs rw\n";
+        let sources = parse_sources(text);
+        assert_eq!(sources[&(0, 28)], "/dev/nvme0n1p6");
+        assert_eq!(sources[&(0, 43)], "tmpfs");
+    }
+
+    /// A tmpfs is on no block device, and says so by carrying nothing.
+    #[test]
+    fn a_filesystem_on_no_block_device_maps_to_nothing() {
+        let mut mounts = Mounts {
+            by_dev: BTreeMap::new(),
+            sources: BTreeMap::from([((0, 43), "tmpfs".to_owned())]),
+            names: BTreeMap::new(),
+            under: BTreeMap::new(),
+        };
+        assert_eq!(mounts.block_devices((0, 43)), None);
     }
 }

@@ -134,6 +134,14 @@ impl FsyncCollector {
         if record.fd >= 0 {
             attrs.push(Attr::int("fd", i64::from(record.fd)));
         }
+        // The devices the sync's writes land on, as `io.bytes` keys them.
+        if let Some(under) = self
+            .mounts
+            .as_mut()
+            .and_then(|mounts| mounts.block_devices(dev))
+        {
+            attrs.push(Attr::text("blk_devs", under));
+        }
         // Which function the sync was timed at: `do_fsync` found the file
         // through the descriptor, the other two were handed it.
         attrs.push(Attr::text(

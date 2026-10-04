@@ -265,6 +265,13 @@
        st_dev stat(2) reports -- every subvolume has its own anonymous device --
        and inode numbers repeat across subvolumes, so there the key names the
        filesystem and the inode, not always one file."
+    - "`blk_devs` names the block devices the filesystem is on, each spelled
+       as io.bytes keys its series (`dev:259+0`), comma-separated: the mount
+       source followed through /sys, a partition to its disk, a dm or md
+       device to its members, a btrfs to every device it spans. It is the
+       set the filesystem can write to, not the device a given byte reached,
+       and it is absent where the filesystem is on no block device (tmpfs,
+       overlay, a network filesystem)."
     - "An event is a histogram row, not a call: `count` says how many."
 
 - id: io.pagecache
@@ -286,6 +293,9 @@
   filter_fields: [comm, dev, ino, fs]
   determinism: low
   caveats:
+    - "`blk_devs` names the block devices under the file's filesystem, as
+       io.fs carries it: each as io.bytes keys its series, absent off a block
+       device."
     - "A cold run and a warm run differ by an order of magnitude. Mixing them
        produces a bimodal distribution that then gets mistaken for noise."
     - "A miss is a page the cache had to fill, on demand or read ahead. A page
@@ -377,6 +387,9 @@
   filter_fields: [comm, dev, ino, call, fs]
   determinism: low
   caveats:
+    - "`blk_devs` names the block devices under the file's filesystem, as
+       io.fs carries it: each as io.bytes keys its series, absent off a block
+       device."
     - "Attaching the trampolines costs about 65 ms, paid once per run whatever
        the run sees, and on a short run it is most of what the run cost: the
        bench measured 64 ms with no event."
