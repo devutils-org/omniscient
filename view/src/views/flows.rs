@@ -178,8 +178,14 @@ struct Edge {
 #[derive(Debug, Clone, Default)]
 struct Sink {
     name: String,
+    /// Its key in the machine's source (`dev:259+0`, `iface:eth0`), which a
+    /// file's `blk_devs` names.
+    key: String,
     bytes: f64,
     spark: Vec<f64>,
+    /// The target's files on it, from `io.fs`'s `blk_devs`, and the bytes
+    /// they moved through the page cache: the file -> device edge.
+    fed: Option<(usize, u64)>,
 }
 
 /// One band, ready to draw.
@@ -483,10 +489,21 @@ fn storage(ctx: &Ctx<'_>) -> Band {
                 .and_then(|dev| dev.as_str())
                 .unwrap_or("?")
                 .to_owned();
+            let under = match blk_devs(event) {
+                devices if devices.is_empty() => String::new(),
+                devices => format!(
+                    ", above block device {}",
+                    devices
+                        .iter()
+                        .map(|key| key.trim_start_matches("dev:").replace('+', ":"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
             Some((
                 format!("file:{dev}+{ino}"),
                 format!("{fs} {ino}"),
-                format!("{fs} inode {ino} on {device}"),
+                format!("{fs} inode {ino} on {device}{under}"),
                 dir_of(event),
             ))
         });
@@ -529,7 +546,67 @@ fn storage(ctx: &Ctx<'_>) -> Band {
         band.title = title(data, &held, "io.syscall");
     }
     fill_machine(&mut band, data, "io.bytes", "dev:");
+    feed(&mut band, ctx, &files);
     band
+}
+
+/// The block devices under a file, as `io.fs` names them (`blk_devs`: the
+/// keys `io.bytes` gives the same devices, comma-separated).
+fn blk_devs(event: &Event) -> Vec<String> {
+    event
+        .attr("blk_devs")
+        .and_then(|under| under.as_str())
+        .map(|under| {
+            under
+                .split(',')
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The file -> device edge: each device of the machine's column that one of
+/// the target's files sits above, with how many files and their bytes. A
+/// file over several devices (a mirror, a stripe) is counted on each, its
+/// bytes said whole on each: how they split is not measured.
+fn feed(band: &mut Band, ctx: &Ctx<'_>, files: &[&Results]) {
+    let mut fed: BTreeMap<String, (BTreeSet<String>, u64)> = BTreeMap::new();
+    for results in files {
+        for event in results.events() {
+            let tid = event
+                .tid()
+                .or_else(|| event.number("tid").map(|tid| tid as i32))
+                .unwrap_or(0);
+            let pid = event
+                .pid()
+                .or_else(|| event.number("pid").map(|pid| pid as i32))
+                .unwrap_or(0);
+            if ctx.focus.pid.is_some_and(|focus| focus != pid)
+                || ctx.focus.tid.is_some_and(|focus| focus != tid)
+            {
+                continue;
+            }
+            let Some((dev, ino)) = event.keys.iter().find_map(|key| match key {
+                Key::File { dev, ino } => Some((*dev, *ino)),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let bytes = event.number("bytes").unwrap_or(0.0).max(0.0) as u64;
+            for device in blk_devs(event) {
+                let entry = fed.entry(device).or_default();
+                entry.0.insert(format!("{dev}+{ino}"));
+                entry.1 += bytes;
+            }
+        }
+    }
+    for sink in &mut band.sinks {
+        if let Some((files, bytes)) = fed.get(&sink.key) {
+            sink.fed = Some((files.len(), *bytes));
+        }
+    }
 }
 
 fn empty_band(kind: Kind) -> Band {
@@ -863,6 +940,7 @@ fn fill_machine(band: &mut Band, data: &Data, source: &str, prefix: &str) {
                 };
                 let sink = sinks.entry(name.to_owned()).or_insert_with(|| Sink {
                     name: name.replace('+', ":"),
+                    key: one.key.clone(),
                     spark: vec![0.0; BINS],
                     ..Sink::default()
                 });
@@ -1625,7 +1703,7 @@ fn object_figures(object: &Object, seconds: f64) -> String {
 fn sink_line(sink: &Sink, trust: &Trust, width: usize) -> Line<'static> {
     let style = trust.style();
     let name_width = width.saturating_sub(17).clamp(4, 10);
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!("{:<name_width$} ", truncate(&sink.name, name_width)),
             Style::new().add_modifier(Modifier::BOLD),
@@ -1633,7 +1711,15 @@ fn sink_line(sink: &Sink, trust: &Trust, width: usize) -> Line<'static> {
         Span::styled(format!("{:>7}", units::bytes(sink.bytes)), style),
         Span::raw(" "),
         Span::styled(sparkline(&sink.spark), style.fg(BAR)),
-    ])
+    ];
+    if let Some((files, _)) = sink.fed {
+        // The edge from the target's files, in words beside the device.
+        spans.push(Span::styled(
+            format!(" ◂ {files} file{}", if files == 1 { "" } else { "s" }),
+            Style::new().add_modifier(Modifier::DIM),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn draw_heading(buffer: &mut Buffer, area: Rect, band: &Band, columns: &Columns) {
@@ -2106,6 +2192,36 @@ mod tests {
         // Tall enough, nothing is left out and nothing is said.
         let screen = text(&draw(file_server(), "flows", WIDTH, 60));
         assert!(!screen.contains("not drawn"), "{screen}");
+    }
+
+    /// A file's `blk_devs` is the edge to the device `io.bytes` measured:
+    /// the device says how many of the target's files sit above it, and the
+    /// file's detail names the device.
+    #[test]
+    fn a_file_is_joined_to_the_device_under_it() {
+        let data = crate::snapshot::fixture("file-serving");
+        let focus = Focus::default();
+        let band = storage(&ctx(&data, &focus));
+        let fed: Vec<&Sink> = band
+            .sinks
+            .iter()
+            .filter(|sink| sink.fed.is_some())
+            .collect();
+        assert_eq!(fed.len(), 1, "{:?}", band.sinks);
+        assert_eq!(fed[0].key, "dev:259+0");
+        let (files, bytes) = fed[0].fed.unwrap();
+        assert!(files >= 1 && bytes > 0);
+        assert!(band
+            .objects
+            .iter()
+            .any(|object| object.detail.contains("above block device 259:0")));
+        let line = sink_line(fed[0], &Trust::clean(), 40);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("◂"), "{text}");
     }
 
     /// Without io.fs, the storage band falls back on io.syscall's rows per
