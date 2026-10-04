@@ -1,0 +1,58 @@
+{
+  "results": [
+    {
+      "label": "net.packets",
+      "source": "net.packets",
+      "unit": "count",
+      "backend": "fs:proc",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "iface:lo",
+              "count": 4,
+              "min": 644.0,
+              "max": 7136.0,
+              "mean": 4087.0,
+              "last": 1482.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 4,
+      "observed_ns": 4000234515,
+      "window": {
+        "run_opened_ns": 2072101803095,
+        "opened_ns": 2072101803095,
+        "closed_ns": 2076102037610,
+        "attached": true
+      },
+      "stopped_because": "the requested duration elapsed",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "overhead": {
+        "collector_cpu_ns": 888000,
+        "attributed_cpu_ns": 888000,
+        "observed_cpu_ns": null,
+        "observed_from": "a network interface consumes no cpu time of its own, so there is nothing for an overhead to be a percentage of",
+        "wall_ns": 4000254745,
+        "measurement_ns": 11570,
+        "measurements": 2,
+        "in_target_cpu_ns": 0,
+        "in_target_from": "nothing of this collector runs in the target's context: it reads the kernel's account, or a file, from its own",
+        "before_window_cpu_ns": 63738000,
+        "after_window_cpu_ns": 42000
+      },
+      "served_by": [
+        "fs:proc"
+      ],
+      "value_attr": "packets"
+    }
+  ]
+}

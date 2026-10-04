@@ -1,0 +1,94 @@
+{
+  "results": [
+    {
+      "label": "net.iface",
+      "source": "net.iface",
+      "unit": "count",
+      "backend": "fs:proc",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "iface:lo/carrier",
+              "count": 5,
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "last": 0.0
+            },
+            {
+              "key": "iface:lo/collisions",
+              "count": 5,
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "last": 0.0
+            },
+            {
+              "key": "iface:lo/drops",
+              "count": 5,
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "last": 0.0
+            },
+            {
+              "key": "iface:lo/errors",
+              "count": 5,
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "last": 0.0
+            },
+            {
+              "key": "iface:lo/fifo",
+              "count": 5,
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "last": 0.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 25,
+      "observed_ns": 4000213617,
+      "window": {
+        "run_opened_ns": 2072117052923,
+        "opened_ns": 2072117052923,
+        "closed_ns": 2076117266540,
+        "attached": true
+      },
+      "stopped_because": "the requested duration elapsed",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "degradations": [
+        "fs:proc: generic counters only, no driver-specific ones",
+        "each interface is one series per counter kind -- `<iface>/errors`, `/drops`, `/fifo`, `/collisions`, `/carrier` -- because a bad frame and a full queue are different failures; `iface` on each event is the interface alone"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 971000,
+        "attributed_cpu_ns": 971000,
+        "observed_cpu_ns": null,
+        "observed_from": "a network interface consumes no cpu time of its own, so there is nothing for an overhead to be a percentage of",
+        "wall_ns": 4000301908,
+        "measurement_ns": 11420,
+        "measurements": 2,
+        "in_target_cpu_ns": 0,
+        "in_target_from": "nothing of this collector runs in the target's context: it reads the kernel's account, or a file, from its own",
+        "before_window_cpu_ns": 68438000,
+        "after_window_cpu_ns": 50000
+      },
+      "served_by": [
+        "fs:proc"
+      ],
+      "value_attr": "frames"
+    }
+  ]
+}

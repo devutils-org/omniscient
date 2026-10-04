@@ -1,0 +1,546 @@
+{
+  "results": [
+    {
+      "label": "net.tcp.retransmit",
+      "source": "net.tcp.retransmit",
+      "unit": "count",
+      "backend": "bpf:raw_tp",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "sock:16409",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16410",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16411",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16412",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16413",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16414",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16415",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16416",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16417",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16418",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16419",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16420",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16421",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16422",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16423",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16424",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16425",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16426",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16427",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16428",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16429",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16430",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16431",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16432",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16433",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16434",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16435",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16436",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16437",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16438",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16439",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16440",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16441",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16442",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16443",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16444",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16445",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16446",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16447",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16448",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16449",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16450",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16451",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16452",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16453",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16454",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16455",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16456",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16457",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16458",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16459",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16460",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16461",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16462",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16463",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16464",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16465",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16466",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16467",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16468",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16469",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            },
+            {
+              "key": "sock:16470",
+              "count": 1,
+              "min": 2.0,
+              "max": 2.0,
+              "mean": 2.0,
+              "last": 2.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 62,
+      "observed_ns": 5000036700,
+      "window": {
+        "run_opened_ns": 2072569300905,
+        "opened_ns": 2072569300905,
+        "closed_ns": 2077569337605,
+        "attached": true
+      },
+      "stopped_because": "the requested duration elapsed",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "overhead": {
+        "collector_cpu_ns": 8096000,
+        "attributed_cpu_ns": 8096000,
+        "observed_cpu_ns": 46320000000,
+        "observed_from": "everything but idle on every cpu (/proc/stat)",
+        "wall_ns": 5000467813,
+        "measurement_ns": 122300,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel is not timing eBPF programs on this run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable",
+        "before_window_cpu_ns": 244313000,
+        "after_window_cpu_ns": 151000
+      },
+      "served_by": [
+        "bpf:raw_tp"
+      ],
+      "value_attr": "retransmits"
+    }
+  ]
+}

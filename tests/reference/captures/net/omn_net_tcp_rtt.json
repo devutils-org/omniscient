@@ -1,0 +1,63 @@
+{
+  "results": [
+    {
+      "label": "net.tcp.rtt",
+      "source": "net.tcp.rtt",
+      "unit": "ns",
+      "backend": "netlink",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "sock:16473",
+              "count": 12,
+              "min": 1067000.0,
+              "max": 1330000.0,
+              "mean": 1116083.3333333333,
+              "last": 1067000.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 12,
+      "observed_ns": 5008629388,
+      "window": {
+        "run_opened_ns": 2072138123161,
+        "opened_ns": 2072138123161,
+        "closed_ns": 2077146752549,
+        "attached": true
+      },
+      "stopped_because": "the requested duration elapsed",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "filtered": {
+        "predicate": "sport == 47311",
+        "kept": 12,
+        "dropped": 626
+      },
+      "overhead": {
+        "collector_cpu_ns": 257459000,
+        "attributed_cpu_ns": 257459000,
+        "observed_cpu_ns": 54540000000,
+        "observed_from": "everything but idle on every cpu (/proc/stat)",
+        "wall_ns": 5008755739,
+        "measurement_ns": 117950,
+        "measurements": 2,
+        "in_target_cpu_ns": 0,
+        "in_target_from": "nothing of this collector runs in the target's context: it reads the kernel's account, or a file, from its own",
+        "before_window_cpu_ns": 66650000,
+        "after_window_cpu_ns": 560000
+      },
+      "served_by": [
+        "netlink"
+      ],
+      "value_attr": "rtt_ns"
+    }
+  ]
+}

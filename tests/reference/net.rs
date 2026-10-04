@@ -1,20 +1,15 @@
-//! Parsers for the `net` family's reference tools. Each turns a tool's
-//! output into the values a pair compares (BRIEF.md, "Decided before this
-//! wave").
+//! Parsers for the `net` family: the tools' outputs, and omn's where a
+//! value is not at one place in its JSON (`compare.omn_parse`).
 //!
 //! The tools here print totals since boot (`ip -s link`, `nstat -a`), the
 //! state of the moment (`ss -ti`) or a tally on interrupt (`tcpdump`), so
 //! each pair's reference command goes through a wrapper in
 //! `tests/reference/workloads/net/` that turns the tool into a measure of
-//! one run, and the parsers read what the wrapper prints.
-//!
-//! Every net source compared is system-wide or per interface, which omn
-//! refuses beside a program to launch. The pairs say so with `alongside`,
-//! and until the shared runner knows that field, `net_pairs_against_the_tools`
-//! below runs them: omn for its `--duration`, the reference command started
-//! `lead_ms` into it.
+//! one window, and the tool's parsers read what the wrapper prints. Every
+//! pair runs `alongside` (`catalog/references/net.yaml`, its header).
 
 use crate::common::{Parser, Values};
+use serde_json::Value as Json;
 
 pub fn parsers() -> Vec<Parser> {
     vec![
@@ -33,6 +28,22 @@ pub fn parsers() -> Vec<Parser> {
         Parser {
             name: "tcpdump_count",
             parse: tcpdump_count,
+        },
+        Parser {
+            name: "omn_ip_link",
+            parse: omn_ip_link,
+        },
+        Parser {
+            name: "omn_total",
+            parse: omn_total,
+        },
+        Parser {
+            name: "omn_rtt",
+            parse: omn_rtt,
+        },
+        Parser {
+            name: "omn_events",
+            parse: omn_events,
         },
     ]
 }
@@ -99,15 +110,30 @@ fn ip_s_link(text: &str) -> Result<Values, String> {
     if out.is_empty() {
         return Err("no RX: or TX: block: not `ip -s link` output".into());
     }
+    // What omn's `net.packets` and `net.iface` count: both directions
+    // summed, and the transmit-only columns under omn's names.
     let get = |k: &str| out.iter().find(|(n, _)| n == k).map(|(_, v)| *v);
-    if let (Some(rx), Some(tx)) = (get("rx_packets"), get("tx_packets")) {
-        out.push(("packets".into(), rx + tx));
+    let mut more = Values::new();
+    for (name, rx, tx) in [
+        ("packets", "rx_packets", "tx_packets"),
+        ("errors", "rx_errors", "tx_errors"),
+        ("drops", "rx_dropped", "tx_dropped"),
+    ] {
+        if let (Some(rx), Some(tx)) = (get(rx), get(tx)) {
+            more.push((name.into(), rx + tx));
+        }
     }
+    for (name, tx) in [("carrier", "tx_carrier"), ("collisions", "tx_collsns")] {
+        if let Some(tx) = get(tx) {
+            more.push((name.into(), tx));
+        }
+    }
+    out.extend(more);
     Ok(out)
 }
 
-/// `around.py ip -s link show dev <if> -- <workload>`: the increase of every
-/// column over the run.
+/// `around.py <s> ip -s link show dev <if>`: the increase of every column
+/// over the window.
 fn ip_s_link_delta(stdout: &str, _stderr: &str) -> Result<Values, String> {
     let (b, a) = before_after(stdout)?;
     delta(&ip_s_link(b)?, &ip_s_link(a)?)
@@ -134,13 +160,13 @@ fn nstat(text: &str) -> Result<Values, String> {
     Ok(out)
 }
 
-/// `around.py nstat -saz <names> -- <workload>`: each counter's increase.
+/// `around.py <s> nstat -saz <names>`: each counter's increase.
 fn nstat_delta(stdout: &str, _stderr: &str) -> Result<Values, String> {
     let (b, a) = before_after(stdout)?;
     delta(&nstat(b)?, &nstat(a)?)
 }
 
-/// `sample.py <s> ss -tin ... -- <workload>`: every `rtt:<srtt>/<rttvar>`
+/// `sample.py <interval> <s> ss -tin ...`: every `rtt:<srtt>/<rttvar>`
 /// in milliseconds (not `minrtt:`), as `rtt_ns_mean`, `rtt_ns_min`,
 /// `rtt_ns_max` and `readings`.
 fn ss_ti_rtt(stdout: &str, _stderr: &str) -> Result<Values, String> {
@@ -196,6 +222,110 @@ fn tcpdump_count(_stdout: &str, stderr: &str) -> Result<Values, String> {
     Ok(out)
 }
 
+/// omn's JSON, its first result.
+fn omn_result(stdout: &str) -> Result<Json, String> {
+    let doc: Json = serde_json::from_str(stdout).map_err(|e| format!("omn's JSON: {e}"))?;
+    doc["results"]
+        .get(0)
+        .cloned()
+        .ok_or_else(|| "omn's JSON has no result".into())
+}
+
+/// The series of omn's `summary` output.
+fn summary_series(result: &Json) -> Result<Vec<Json>, String> {
+    result["outputs"]
+        .as_array()
+        .and_then(|o| o.iter().find(|o| o["emit"] == "summary"))
+        .and_then(|o| o["series"].as_array())
+        .cloned()
+        .ok_or_else(|| "omn's result has no `summary` output".into())
+}
+
+fn field(series: &Json, name: &str) -> Result<f64, String> {
+    series[name]
+        .as_f64()
+        .ok_or_else(|| format!("a series with no numeric `{name}`: {series}"))
+}
+
+/// A counter series' whole increase: its summary keeps one value per poll,
+/// so the increase is the mean times the count.
+fn total(series: &Json) -> Result<f64, String> {
+    Ok(field(series, "mean")? * field(series, "count")?)
+}
+
+fn add(out: &mut Values, key: String, v: f64) {
+    match out.iter_mut().find(|(k, _)| *k == key) {
+        Some((_, sum)) => *sum += v,
+        None => out.push((key, v)),
+    }
+}
+
+/// omn's `net.bytes`, `net.packets` or `net.iface` summary in `ip -s
+/// link`'s keys: a series keyed `dir:rx` is `rx_<value_attr>`
+/// (`rx_bytes`), one with no direction is `<value_attr>` (`packets`, both
+/// directions), and `net.iface`'s `<iface>/<kind>` is `<kind>` (`errors`,
+/// `drops`, `carrier`, `collisions`). Series of several interfaces add up.
+fn omn_ip_link(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let result = omn_result(stdout)?;
+    let attr = result["value_attr"]
+        .as_str()
+        .ok_or("omn's result has no `value_attr`")?
+        .to_string();
+    let mut out = Values::new();
+    for s in summary_series(&result)? {
+        let key = s["key"].as_str().ok_or("a series with no key")?;
+        let name = if let Some((_, kind)) = key.split_once('/') {
+            kind.to_string()
+        } else if let Some(dir) = key.split_whitespace().find_map(|k| k.strip_prefix("dir:")) {
+            format!("{dir}_{attr}")
+        } else {
+            attr.clone()
+        };
+        add(&mut out, name, total(&s)?);
+    }
+    if out.is_empty() {
+        return Err("omn's summary has no series".into());
+    }
+    Ok(out)
+}
+
+/// The whole increase over every series of omn's summary, under every key a
+/// tool may name it by (`TcpRetransSegs`) and as `""`: a counter split per
+/// socket or task by omn and kept whole by the tool.
+fn omn_total(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let series = summary_series(&omn_result(stdout)?)?;
+    let sum = series.iter().map(total).sum::<Result<f64, String>>()?;
+    Ok(vec![("".into(), sum), ("TcpRetransSegs".into(), sum)])
+}
+
+/// `net.tcp.rtt`'s mean over every poll of every series, weighted by each
+/// series' count, as `rtt_ns_mean` (the unit is ns).
+fn omn_rtt(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let series = summary_series(&omn_result(stdout)?)?;
+    let n = series
+        .iter()
+        .map(|s| field(s, "count"))
+        .sum::<Result<f64, String>>()?;
+    if n == 0.0 {
+        return Err("omn read no rtt: no series, or none with a poll".into());
+    }
+    let sum = series.iter().map(total).sum::<Result<f64, String>>()?;
+    Ok(vec![("rtt_ns_mean".into(), sum / n)])
+}
+
+/// The number of events of omn's `raw` output, as `captured` (what
+/// `tcpdump` names the packets it kept) and `""`.
+fn omn_events(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let result = omn_result(stdout)?;
+    let events = result["outputs"]
+        .as_array()
+        .and_then(|o| o.iter().find(|o| o["emit"] == "raw"))
+        .and_then(|o| o["events"].as_array())
+        .ok_or("omn's result has no `raw` output")?;
+    let n = events.len() as f64;
+    Ok(vec![("".into(), n), ("captured".into(), n)])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,8 +345,26 @@ mod tests {
         assert_eq!(get(&v, "packets"), 2.0 * (35250790.0 - 35250335.0));
         assert_eq!(get(&v, "rx_errors"), 0.0);
         assert_eq!(get(&v, "tx_collsns"), 0.0);
+        for k in ["errors", "drops", "carrier", "collisions"] {
+            assert_eq!(get(&v, k), 0.0);
+        }
         // 16 MiB pushed, plus the headers: at least the payload each way.
         assert!(get(&v, "rx_bytes") >= 16.0 * 1048576.0);
+    }
+
+    #[test]
+    fn ip_s_link_sums_both_directions_under_omns_names() {
+        let one = |rx: u64, tx: u64| {
+            format!(
+                "    RX:  bytes packets errors dropped  missed   mcast\n    0 0 {rx} {rx} 0 0\n    TX:  bytes packets errors dropped carrier collsns\n    0 0 {tx} {tx} {tx} {tx}\n"
+            )
+        };
+        let out = format!("{}{MARKER}\n{}", one(1, 2), one(4, 7));
+        let v = ip_s_link_delta(&out, "").unwrap();
+        assert_eq!(get(&v, "errors"), 3.0 + 5.0);
+        assert_eq!(get(&v, "drops"), 3.0 + 5.0);
+        assert_eq!(get(&v, "carrier"), 5.0);
+        assert_eq!(get(&v, "collisions"), 5.0);
     }
 
     #[test]
@@ -252,223 +400,44 @@ mod tests {
     }
 
     #[test]
-    fn every_pair_names_a_parser_of_this_module() {
-        let names: Vec<_> = parsers().iter().map(|p| p.name).collect();
-        for pair in runner::pairs() {
-            let p = pair["reference"]["parse"].as_str().unwrap();
-            assert!(names.contains(&p), "`{p}` is not a net parser");
+    fn omn_ip_link_reads_a_counters_increase_per_direction() {
+        // omn net.bytes --iface lo --keys iface,dir, over a 16 MiB push.
+        let v = omn_ip_link(include_str!("captures/net/omn_net_bytes.json"), "").unwrap();
+        assert!((get(&v, "rx_bytes") - 16799488.0).abs() < 1.0);
+        assert!((get(&v, "tx_bytes") - 16799488.0).abs() < 1.0);
+        // 16 MiB pushed, plus the headers.
+        assert!(get(&v, "rx_bytes") >= 16.0 * 1048576.0);
+        let v = omn_ip_link(include_str!("captures/net/omn_net_packets.json"), "").unwrap();
+        assert_eq!(get(&v, "packets"), 16348.0);
+        let v = omn_ip_link(include_str!("captures/net/omn_net_iface.json"), "").unwrap();
+        for k in ["errors", "drops", "fifo", "carrier", "collisions"] {
+            assert_eq!(get(&v, k), 0.0, "{k}");
         }
+        assert!(omn_ip_link("{}", "").is_err());
+        assert!(omn_ip_link("not json", "").is_err());
     }
 
-    /// Runs every pair of `catalog/references/net.yaml` the family's way
-    /// (omn alongside the tool, see the module's doc), and holds each to its
-    /// tolerance. A pair whose tool, privilege or omn backend is missing on
-    /// this machine is skipped with that reason.
     #[test]
-    fn net_pairs_against_the_tools() {
-        let mut failures = Vec::new();
-        for pair in runner::pairs() {
-            let name = format!(
-                "{} / {} [{}]",
-                pair["source"].as_str().unwrap_or("?"),
-                pair["tool"].as_str().unwrap_or("?"),
-                pair["compare"]["key"].as_str().unwrap_or("")
-            );
-            match runner::run(&pair) {
-                runner::Outcome::Pass(omn, tool) => {
-                    eprintln!("net pair PASS  {name}: omn {omn} tool {tool}")
-                }
-                runner::Outcome::Skip(why) => eprintln!("net pair SKIP  {name}: {why}"),
-                runner::Outcome::Fail(why) => {
-                    eprintln!("net pair FAIL  {name}: {why}");
-                    failures.push(format!("{name}: {why}"));
-                }
-            }
-        }
-        assert!(failures.is_empty(), "{failures:#?}");
+    fn omn_total_adds_every_sockets_series() {
+        let v = omn_total(include_str!("captures/net/omn_net_tcp_retransmit.json"), "").unwrap();
+        // 62 sockets, each a SYN retransmitted twice.
+        assert_eq!(get(&v, "TcpRetransSegs"), 124.0);
+        assert_eq!(get(&v, ""), 124.0);
     }
 
-    mod runner {
-        use serde_json::Value;
-        use std::path::Path;
-        use std::process::{Command, Stdio};
-        use std::time::Duration;
+    #[test]
+    fn omn_rtt_weights_each_series_by_its_polls() {
+        let v = omn_rtt(include_str!("captures/net/omn_net_tcp_rtt.json"), "").unwrap();
+        assert!((get(&v, "rtt_ns_mean") - 1_116_083.333).abs() < 1.0);
+        let none = r#"{"results":[{"outputs":[{"emit":"summary","series":[]}]}]}"#;
+        assert!(omn_rtt(none, "").is_err());
+    }
 
-        pub enum Outcome {
-            Pass(f64, f64),
-            Skip(String),
-            Fail(String),
-        }
-
-        fn root() -> &'static Path {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-        }
-
-        pub fn pairs() -> Vec<Value> {
-            let text = std::fs::read_to_string(root().join("catalog/references/net.yaml"))
-                .expect("catalog/references/net.yaml");
-            serde_norway::from_str(&text).expect("net.yaml parses")
-        }
-
-        fn strings(v: &Value) -> Vec<String> {
-            v.as_array()
-                .map(|a| {
-                    a.iter()
-                        .map(|s| s.as_str().expect("argv strings").to_string())
-                        .collect()
-                })
-                .unwrap_or_default()
-        }
-
-        fn on_path(bin: &str) -> bool {
-            std::env::var_os("PATH")
-                .map(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
-                .unwrap_or(false)
-        }
-
-        fn output<'a>(result: &'a Value, emit: &str) -> Result<&'a Value, String> {
-            result["outputs"]
-                .as_array()
-                .and_then(|o| o.iter().find(|o| o["emit"] == emit))
-                .ok_or_else(|| format!("omn's JSON has no `{emit}` output"))
-        }
-
-        /// A counter's whole increase, a mean, or a count, read from the
-        /// first result of omn's JSON (the paths net.yaml's header lists).
-        fn omn_value(json: &Value, path: &str) -> Result<f64, String> {
-            let result = &json["results"][0];
-            if let Some(rest) = path.strip_prefix("series[") {
-                let (key, field) = rest
-                    .split_once("].")
-                    .ok_or_else(|| format!("`{path}`: not series[<key>].<field>"))?;
-                let series: Vec<&Value> = output(result, "summary")?["series"]
-                    .as_array()
-                    .map(|s| s.iter().filter(|s| key == "*" || s["key"] == key).collect())
-                    .unwrap_or_default();
-                if series.is_empty() {
-                    return Err(format!("no summary series `{key}` in omn's output"));
-                }
-                let f = |s: &Value, k: &str| s[k].as_f64().unwrap_or(0.0);
-                let total: f64 = series.iter().map(|s| f(s, "mean") * f(s, "count")).sum();
-                return match field {
-                    "sum" => Ok(total),
-                    "mean" => Ok(total / series.iter().map(|s| f(s, "count")).sum::<f64>()),
-                    _ => Err(format!("`{path}`: unknown field `{field}`")),
-                };
-            }
-            if let Some(rest) = path.strip_prefix("events.") {
-                let events = output(result, "raw")?["events"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                if rest == "count" {
-                    return Ok(events.len() as f64);
-                }
-                let attr = rest
-                    .strip_suffix(".sum")
-                    .ok_or_else(|| format!("`{path}`: not events.<attr>.sum"))?;
-                return Ok(events
-                    .iter()
-                    .flat_map(|e| e["attrs"].as_array().cloned().unwrap_or_default())
-                    .filter(|a| a["name"] == attr)
-                    .filter_map(|a| a["value"].as_f64())
-                    .sum());
-            }
-            Err(format!("`{path}`: unknown omn path"))
-        }
-
-        fn sudo_granted() -> bool {
-            Command::new("sudo")
-                .args(["-n", "true"])
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        }
-
-        pub fn run(pair: &Value) -> Outcome {
-            let reference = &pair["reference"];
-            for bin in strings(&reference["requires"]) {
-                if !on_path(&bin) {
-                    return Outcome::Skip(format!("`{bin}` is not installed on this machine"));
-                }
-            }
-            let privileged = reference["privileged"].as_bool().unwrap_or(false);
-            if privileged && !sudo_granted() {
-                return Outcome::Skip("needs root, and `sudo -n` does not grant it".into());
-            }
-            let lead = pair["alongside"]["lead_ms"].as_u64().unwrap_or(1500);
-            let omn = Command::new(env!("CARGO_BIN_EXE_omn"))
-                .args(strings(&pair["omn"]))
-                .current_dir(root())
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("spawn omn");
-            std::thread::sleep(Duration::from_millis(lead));
-            let mut argv = strings(&reference["command"]);
-            argv.extend(strings(&pair["workload"]));
-            if privileged {
-                argv.splice(0..0, ["sudo".to_string(), "-n".to_string()]);
-            }
-            let tool = Command::new(&argv[0])
-                .args(&argv[1..])
-                .current_dir(root())
-                .stdin(Stdio::null())
-                .output()
-                .expect("spawn the reference command");
-            let omn = omn.wait_with_output().expect("omn exits");
-            let omn_err = String::from_utf8_lossy(&omn.stderr);
-            if !omn.status.success() {
-                if omn_err.contains("no viable backend on this machine") {
-                    let why = omn_err.lines().take(2).collect::<Vec<_>>().join(" ");
-                    return Outcome::Skip(format!("omn: {why}"));
-                }
-                return Outcome::Fail(format!("omn failed: {omn_err}"));
-            }
-            let tool_out = String::from_utf8_lossy(&tool.stdout);
-            let tool_err = String::from_utf8_lossy(&tool.stderr);
-            if !tool.status.success() {
-                return Outcome::Fail(format!("the reference command failed: {tool_err}"));
-            }
-            let parse_name = reference["parse"].as_str().unwrap_or("");
-            let Some(parser) = super::super::parsers()
-                .into_iter()
-                .find(|p| p.name == parse_name)
-            else {
-                return Outcome::Fail(format!("no parser `{parse_name}`"));
-            };
-            let values = match (parser.parse)(&tool_out, &tool_err) {
-                Ok(v) => v,
-                Err(e) => return Outcome::Fail(format!("{parse_name}: {e}")),
-            };
-            let compare = &pair["compare"];
-            let key = compare["key"].as_str().unwrap_or("");
-            let Some(want) = values.iter().find(|(k, _)| k == key).map(|(_, v)| *v) else {
-                return Outcome::Fail(format!("{parse_name} gave no `{key}`: {values:?}"));
-            };
-            let json: Value = match serde_json::from_slice(&omn.stdout) {
-                Ok(j) => j,
-                Err(e) => return Outcome::Fail(format!("omn's JSON: {e}")),
-            };
-            let got = match omn_value(&json, compare["omn"].as_str().unwrap_or("")) {
-                Ok(v) => v,
-                Err(e) => return Outcome::Fail(e),
-            };
-            let tol = &compare["tolerance"];
-            let bound = match tol["rel"].as_f64() {
-                Some(rel) => rel * want.abs(),
-                None => tol["abs"].as_f64().unwrap_or(0.0),
-            };
-            if (got - want).abs() <= bound {
-                Outcome::Pass(got, want)
-            } else {
-                Outcome::Fail(format!(
-                    "omn {got} against the tool's {want}, outside {tol}"
-                ))
-            }
-        }
+    #[test]
+    fn omn_events_counts_the_raw_events() {
+        let v = omn_events(include_str!("captures/net/omn_net_backlog.json"), "").unwrap();
+        assert_eq!(get(&v, "captured"), 5.0);
+        let summary = include_str!("captures/net/omn_net_tcp_rtt.json");
+        assert!(omn_events(summary, "").is_err());
     }
 }
