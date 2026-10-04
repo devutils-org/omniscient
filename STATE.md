@@ -1670,7 +1670,9 @@ filed to stream top as a possible one-sided bias. The decisions are in
    `<tool>.txt` beside each `.format.txt`, `memleak.txt`, power's
    `cpupower_mperf.txt` and `rapl_window*.txt`; each parser test's numbers
    moved to its capture. And the runs "Needs privilege" carries.
-3. **The views' open points**, after the user's look at a terminal: the
+3. **The views' open points**, after the user's look at a terminal. First,
+   the user's remark (2026-10-05): every view should fill the terminal the
+   way `system` does, not draw in a corner and leave the rest empty. Then the
    `process` view live and replayed, its lines and pages, the usage gradient
    on a dark and a light terminal and in 256-colour tmux, the mouse in
    Ghostty and through tmux (item 9 of "Needs privilege"); `omn top`'s
