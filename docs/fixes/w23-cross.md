@@ -43,8 +43,9 @@ after them; the files are `tests/cross_machine.rs` and
    cgroup's `memory.stat` until `file_dirty + file_writeback` is 0 (at most
    20 s) and reports that instant. It then sleeps 300 ms so that
    `mem.reclaim`'s last 100 ms window and the poller's next tick fall inside
-   the run. The TEMPORAL rung and the containment check end at
-   `settled_ns()`, the later of the last read and the drain. Containment now
+   the run. The containment check ends at `settled_ns()`, the later of the
+   last read and the drain; the TEMPORAL rung's bound ends at the last read
+   (Review, below). Containment now
    uses each poll's `interval_ns`: the first tick reports since the baseline
    read when the window opened, and that baseline now comes before the
    program. Side effect: the test takes 2.5 s instead of 7.
@@ -67,8 +68,8 @@ after them; the files are `tests/cross_machine.rs` and
    `/proc/self/io`'s `read_bytes` counts swap-ins. The swap here is `zram0`,
    a bio-based device, so neither `io.latency` nor `io.bytes` on `nvme0n1`
    sees those reads. Measured: 2 217 pages swapped in, 8.7 MiB, against a gap
-   of 8.3 MiB. **Fix:** the program reports its cgroup's `pswpin` and
-   subtracts it, times the page size, from `read_bytes`. First tried: setting
+   of 8.3 MiB. **Fix:** the program reports what its cgroup's `pswpin` grew
+   by over its run and subtracts it, times the page size, from `read_bytes`. First tried: setting
    `memory.swap.max` to 0. That OOM-killed the program in 2 of 6 loaded runs
    (`memory.events` `oom_kill 1`): its anonymous pages had nowhere to go while
    every file page was dirty or under writeback. Reverted. The swap-in count
@@ -127,9 +128,39 @@ None. Everything ran unprivileged, with `make`'s capabilities.
   program from the session, and the program decides when it is done.
   Neither a duration nor a head start is reliable under load.
 - A reference read from `/proc/<pid>/io` is net of the cgroup's swap-ins
+  over the same run (a delta of `pswpin`, never its cumulative value)
   whenever it is compared with block-layer counts.
 - A filesystem's devices are its members (`/sys/fs/btrfs/*/devices`), not
   its mount's source.
+
+## Review
+
+Both findings were right; both are fixed in `tests/cross_machine.rs`.
+
+1. **`pswpin` was cumulative.** The two runs share one cgroup, so the
+   uncapped run subtracted the capped run's swap-ins from its own
+   `read_bytes`. A negative result then parsed to 0, which masked the
+   "short of memory uncapped" skip and tightened the uncapped IDENTITY check
+   for no reason. **Fix:** the program reads `pswpin` before its first write
+   and reports the delta. Every field of its report is now parsed strictly:
+   one that is missing, negative or not a number panics with the report line
+   instead of reading as 0. Measured after the fix: capped 1 012 pages,
+   uncapped 0 (before, the uncapped line repeated the capped count).
+2. **TEMPORAL's 64 MiB bound had lost its meaning.** Since the program waits
+   for its cgroup's writeback to drain, every one of the 96 MiB was written
+   back by `settled_ns()` whatever the limit did. **Fix:** three checks in
+   place of one. (a) The limit's bound, at least 64 MiB less 10 %, now counts
+   only the writes from the first write to the **last read** (`end_ns`), the
+   new `writes_by_end` on the ladder. (b) The mechanism is asserted: at the
+   last read, `dirty_at_end + writeback_at_end` is within the 32 MiB limit.
+   (c) The capture, reworded: by the drain, at least 96 MiB less 10 % reached
+   the file's devices. The ladder's TEMPORAL line prints `writes_by_end`.
+
+Shown: `cargo test --test cross_machine`, 6 of 6, twice, plus the reclaim
+test alone with `--nocapture`, after `make`. The machine was not loaded on
+purpose. In those runs TEMPORAL saw 756 MiB by the last read: other writers
+on the device pass (a) and (c) as easily as the program does. The block layer
+does not tell them apart, which is why this rung is TEMPORAL.
 
 ## Needs from another stream
 
