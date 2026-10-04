@@ -2430,3 +2430,56 @@ fn a_stop_ends_an_orphan_that_left_the_program_s_tree_and_group() {
         "and the run says it ended it: {said}"
     );
 }
+
+/// The same orphan when the program exits on its own, before the duration:
+/// the run ends it too. The double-forked daemon is this case -- the program
+/// returns at once and its daemon runs on -- and the stop alone did not reach
+/// it, so it outlived the run, and a caller reading `omn`'s stderr through a
+/// pipe waited on it for as long as it lived.
+#[test]
+fn a_program_that_exits_on_its_own_does_not_leave_its_orphan_running() {
+    let marker = format!(
+        "{}.{}",
+        100 + std::process::id() % 50,
+        std::process::id() % 997
+    );
+    let script = format!("(setsid sleep {marker} &) ; (setsid sleep 0.05 &) ; sleep 0.3");
+    let output = run(&[
+        "trace",
+        "proc.fd",
+        "-m",
+        "poll@50ms",
+        "-e",
+        "summary",
+        "-d",
+        "5s",
+        "--",
+        "sh",
+        "-c",
+        &script,
+    ]);
+    let said = stderr(&output);
+    assert!(output.status.success(), "{said}");
+    let survivors = Command::new("pgrep")
+        .args(["-f", &format!("^sleep {marker}$")])
+        .output()
+        .map(|found| String::from_utf8_lossy(&found.stdout).trim().to_owned());
+    if let Ok(pids) = &survivors {
+        for pid in pids.lines() {
+            let _ = Command::new("kill").args(["-9", pid]).status();
+        }
+        assert!(
+            pids.is_empty(),
+            "the orphan outlived the run: {pids}; {said}"
+        );
+    }
+    // One ended: the orphan that had exited during the run is reaped, and a
+    // zombie is not counted as a process the run ended.
+    assert!(
+        said.contains(
+            "the program exited, and the end of the run then ended 1 process(es) the program \
+             started that had left its tree"
+        ),
+        "and the run says it ended it, and only it: {said}"
+    );
+}
