@@ -91,13 +91,20 @@ everywhere.
 {"name": "run_session", "arguments": {"approved": "decompose.yml", "duration": "20s", "budget": "25%"}}
 ```
 
-The duration and budget only bound the run; the server refuses one above its
-own `--allow-run`. The answer:
+The duration bounds the run, and the server refuses one above its own
+`--allow-run`. The budget is optional, as it is for a person at the command
+line: a call without one is asked nothing more, the run is not stopped for
+what it costs, and what it cost is measured and written anyway. The answer:
 
 | Field | What it is |
 |---|---|
 | `exit` | `omn`'s exit status: 0 ran, 1 the machine refused, 2 the request, 3 this build |
-| `said_by_omn` | every line `omn` wrote on stderr -- the caveats, and **the program's own stderr**, since the program inherits it. `program.py`'s `omn-truth` line is here |
+| `said_by_omn` | every line `omn` wrote on stderr -- the notes, caveats, the cost line and the budget's verdict. `omn`'s alone: a launched program's stderr is in `program_stderr` |
+| `program_stdout` | a launched program's stdout, told apart from `omn`'s document on the pipe they share: the bytes left once the bytes of `results.json` are taken out (`told_apart` says whether they were found), the last 64 KiB as `text`, how many bytes were left out before it, and `program.stdout` in the run's directory holding all of it |
+| `program_stderr` | a launched program's stderr, which `omn` writes to `program.stderr` in the run's directory rather than among its own lines (`OMN_PROGRAM_STDERR`, set by the server, not passed on to the program): `bytes`, the last 64 KiB as `text`, and the `file`. `program.py`'s `omn-truth` line is here |
+| `bounds` | the duration, the budget (`none: ...` when the call asked for none) and the longest run the server allows |
+| `budget_against` | per request, what a budget is a percentage of: the target's cpu and where it was read, the window's wall time, the share of the window the target was on a cpu, and what the run spent against both -- `null` where the in-target part is unknown. A target that waits has little cpu to be a share of, and the same collector costs far more of it than of the window: both are here, neither standing in for the other |
+| `stopped_by_budget` | `null` unless a budget ended the run; then per request its label, source, budget and the reason, as the CLI says it on its own line. A stopped run's figures cover a shorter window than the one asked for |
 | `run` | the run's name under `--dir`, for `read_run` |
 | `read_back` | the run read back, exactly as `read_run` answers (raw events cut at 100; `read_run` with `max_events: 0` cuts none) |
 | `read_back.requests[i].what_it_is_missing` | **the shortfall**, first: non-zero loss counters and their reasons, every `short` mark, the degradations, unverified requirements, filter placement, the worst `ts_err_ns`, why it stopped |
@@ -164,6 +171,18 @@ different functions for the same run:
   are in its executable (`python3.12+0x...`), so they must not end the
   reach. The executable's frames are spelled by the file the kernel mapped,
   symlinks followed (`python3` is `python3.14`).
+- **Read a followed task's table when the main thread waited on it.** When
+  the main thread's largest row is a `wait4`, or a block another task ran
+  in, the time is the child's or the busiest thread's: read that task's
+  table, not the heaviest row of the main thread's (`docs/cases.md`, "The
+  agent's reading", is the rule the cases hold this to).
+- **Ask `raw` beside `stack` to read one task's stacks.** A `stack` output is
+  not keyed by task -- `keys: [task]` keys the summaries, not the stacks -- so
+  a followed child's stacks are merged with the main thread's. A request
+  emitting `raw` beside `stack` carries each sample's task (`keys[].task.tid`)
+  and its `stack_id` attribute, and the stacks of one task are the ids its
+  raw events carry -- read with `read_run`'s `max_events: 0`, since an answer
+  cuts raw events at 100.
 - **Say where the names came from.** Copy the `names came from` note of the
   request whose stacks you name. A frame printed as `module+0x...` was not
   named, and a stripped binary's are named only when the session's request
@@ -343,10 +362,13 @@ conditions, and each is the reason it can exist without breaking boundary 5.
    This is `make CAPTURE=1`'s shape from `DECISIONS.md`: the one power here
    that is closer to acting than observing is granted only when asked for, by
    the person, once.
-2. **Bounded by the server, not the caller.** `duration` and `budget` are
-   required. A duration above the server's bound is refused -- the model cannot
-   raise it -- and the run is passed `--duration` and `--budget`, which `omn`
-   applies to every request and says so. The process is killed at twice the
+2. **Bounded by the server, not the caller.** `duration` is required, and
+   `budget` optional (since the eighteenth wave: a person at the command line
+   is asked for none, and a model asking the same question is asked nothing
+   more). A duration above the server's bound is refused -- the model cannot
+   raise it -- and the run is passed `--duration`, and `--budget` when one is
+   given, which `omn` applies to every request and says so; a malformed budget
+   is refused before the run. The process is killed at twice the
    duration plus 30 s if it has not ended, and the answer says it was.
 3. **A launch only from a session its owner approved.** A session that
    launches a program runs whatever the session names, with this user's
@@ -441,8 +463,9 @@ account.
 | `a_timestamp_from_another_clock_keeps_its_error` | `runtime-jit` (node writing its perf map; every line known only to within the gap between two reads) | every `ts_err_ns` unchanged, and `timestamp_error.worst_ts_err_ns` is the file's largest (about 8.6 ms here). Skips loudly without node |
 | `the_sweep_is_the_one_the_binary_that_runs_gives` | `omn list` | totals, read from `omn list --format json`, equal to the text table's own footer; the capabilities equal to `getcap`'s reading; and the separation: the same binary copied without its capabilities answers fewer available sources, and its `missing` names both capabilities |
 | `a_plan_says_what_it_would_serve_and_degrade_and_runs_nothing` | a session whose program would `touch` a marker | the marker does not exist after planning; backend, rank, cost band, degradations and chain equal `omn --dump-resolved`'s; the band says it is a declaration and cites finding 47; `run_session` is announced as refusing it; an invalid session is rejected by field with its label, and the machine is not asked |
-| `a_call_that_would_change_the_machine_is_refused` | the same marker, through `run_session` | refused without `--allow-run`; with it, refused for the launch; a duration over the bound and a missing budget refused; run names and resource URIs that climb out of `--dir` refused; no marker, no run directory |
-| `only_a_session_its_owner_approved_launches_a_program` | a python program that touches a marker, writes a file relative to where it runs, and says how many descriptors it holds (`FDS 20`) | `--allow-launch` without `--allow-run` refuses to start; without `--allow-launch` the approved session and `list_approved` are refused; with it, the same session inline, by a path outside `DIR`, and by `../outside.yml`, an absolute name, `./counted.yml`, an empty name and a link in `DIR` to a file outside are each refused, and no marker and no run exist; `list_approved` lists the session with its plan (`allowed: true`) and the link as refused; `run_session` with `approved: counted.yml` runs it: the marker exists, the relative file is in `DIR`, and the summary's max is the program's own count, with losses and measured cost |
+| `a_call_that_would_change_the_machine_is_refused` | the same marker, through `run_session` | refused without `--allow-run`; with it, refused for the launch; a duration over the bound and a malformed budget refused; run names and resource URIs that climb out of `--dir` refused; no marker, no run directory |
+| `only_a_session_its_owner_approved_launches_a_program` | a python program that touches a marker, writes a file relative to where it runs, and says how many descriptors it holds (`FDS 20`) | `--allow-launch` without `--allow-run` refuses to start; without `--allow-launch` the approved session and `list_approved` are refused; with it, the same session inline, by a path outside `DIR`, and by `../outside.yml`, an absolute name, `./counted.yml`, an empty name and a link in `DIR` to a file outside are each refused, and no marker and no run exist; `list_approved` lists the session with its plan (`allowed: true`) and the link as refused; `run_session` with `approved: counted.yml` runs it: the marker exists, the relative file is in `DIR`, and the summary's max is the program's own count, read from `program_stderr`, with losses and measured cost |
+| `a_launched_programs_stdout_comes_back_apart_from_omns_document` | a python program printing twenty known lines and one that is not UTF-8 on stdout and one known line on stderr, then sleeping | `program_stdout` is the program's bytes exactly, `told_apart` yes, the file holds them unchanged, and the read-back still parses; `program_stderr` is the known line and `said_by_omn` does not hold it; `stopped_by_budget` is null; with no budget, `bounds.budget` says none and `budget_against` carries both denominators, the target's cpu the smaller |
 | `a_bounded_run_over_an_existing_process_reads_back_what_the_process_reports` | a python process holding 17 extra descriptors that counts its own (`FDS 20`) and spins | `run_session` with `proc.fd` on its pid, 1 s, 5 %: the summary's min and max are the process's own count, it stopped because the duration elapsed, the cost is measured; reading the run again gives the files unchanged |
 
 Since the fourteenth wave, `mcp/tests/walkthrough.rs` drives the walk-through
@@ -526,7 +549,7 @@ engine's (`docs/families/join.md`):
 | Decision | Choice | Reason |
 |---|---|---|
 | Who answers a machine question asked through MCP | **The `omn` binary that would run the session.** The server probes nothing and holds no capability; every machine-dependent answer names the binary and the capabilities on it. Validation, which is machine-independent, runs on the library. | A probe answers for the process that asks. A copy of `omn` without its capabilities answered 52 usable sources against 93, silently -- the relink failure, one binary over. |
-| Whether a model may run a session | **Yes, when the person who started the server passed `--allow-run DURATION`**, for at most that duration, with a required budget, writing only under the server's directory -- and **a session that launches a program only when it is a file of the directory that person passed with `--allow-launch DIR`**, run as the file states it, from its own directory (amended in the thirteenth wave; before it, never). | Asking for a measurement is what phase 11 grants; a model choosing the code that runs is changing the machine (boundary 5). A directory of files the person wrote keeps that choice theirs: the model picks which approved session and when, never what. The opt-in is `make CAPTURE=1`'s shape: the power closest to acting is granted by a person, when asked. |
+| Whether a model may run a session | **Yes, when the person who started the server passed `--allow-run DURATION`**, for at most that duration, with an optional budget (required until the eighteenth wave), writing only under the server's directory -- and **a session that launches a program only when it is a file of the directory that person passed with `--allow-launch DIR`**, run as the file states it, from its own directory (amended in the thirteenth wave; before it, never). | Asking for a measurement is what phase 11 grants; a model choosing the code that runs is changing the machine (boundary 5). A directory of files the person wrote keeps that choice theirs: the model picks which approved session and when, never what. The opt-in is `make CAPTURE=1`'s shape: the power closest to acting is granted by a person, when asked. |
 | Whether benchmarking gets its own tool | **No: repeated `run_session` calls on an approved session.** | The server does not summarise, the bench's verdict needs a quiet machine and a release binary the server cannot promise, and N documents keep each run's losses and cost where a spread would drop them. |
 | Where the spread of a repeated benchmark lives (fourteenth wave) | **In the walk-through, not in an answer**: `docs/mcp.md` names the field (`result.lifetime`), the bench's statistics and the gate's two conditions (20 runs, resolution 1 %), and a test holds the answers to the files' statistics. | Reaffirms the thirteenth wave's no-tool decision with the use case run: the answers carry every number the spread needs, unchanged, and each run's losses beside it; a server-computed spread would be the one number no document carries. |
 | Where the approved sessions of the walk-through live | **`examples/mcp/approved/`, with the client configuration one level up** (`examples/mcp/mcp.json`). | `list_approved` lists every session-shaped file under the directory, `.json` included: a client configuration inside it would be listed as an unreadable session. |
