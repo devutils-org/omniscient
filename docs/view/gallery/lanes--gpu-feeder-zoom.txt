@@ -26,7 +26,7 @@ omn top │ recording lanes-gpu │ 2.27s                             view: snap
 │  400 switch-outs and 359 wakeups seen; awake 10.9% of the run                                                        │
 │  meanwhile blocked: loader 3065050, cuda-EvtHandlr 3065048, feeder 3065044 and 6 more · on the GPU: spin on s13      │
 │(132ms)                                                                                                               │
-│  where it was off a cpu over the run, 1.94s in all (sched.offcpu, by state and stack):                               │
+│  where it was off a cpu over the run, 1.94s in all (sched.offcpu, by state and stack) ~low det degraded x3:          │
 │     1.04s 53.8% sleeping     14 blocks  libc.so.6 x2 ← libcuda.so.615.71.09 x5 ← cuCtxSynchronize ← …                │
 │     507ms 26.1% sleeping     13 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …                    │
 │     303ms 15.6% sleeping     98 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 ← …                │

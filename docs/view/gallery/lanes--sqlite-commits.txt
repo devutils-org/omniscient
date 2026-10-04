@@ -12,10 +12,10 @@ omn top │ fixture sqlite-commits │ 4.97s                          view: snap
 │└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘│
 │─────────────────────────▲ 125ms──────────────────────────────────────────────────────────────────────────────────────│
 │sqlite3 2759238 (pid 2759238) at 125ms: blocked, uninterruptible 4.77ms, 123ms → 128ms, left cpu 2                    │
-│  woken by an interrupt (hardirq), then queued 0ns for a cpu; its sched.offcpu row is this block alone                │
+│  woken by an interrupt (hardirq), then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone │
 │  in fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3                                                │
 │  1540 switch-outs and 1019 wakeups seen; awake 91.8% of the run                                                      │
-│  where it was off a cpu over the run, 410ms in all (sched.offcpu, by state and stack):                               │
+│  where it was off a cpu over the run, 410ms in all (sched.offcpu, by state and stack) ~low det degraded:             │
 │     297ms 72.5% uninterr.   515 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │
 │    56.4ms 13.8% uninterr.   254 blocks  fdatasync ← sqlite3 x10 ← libc.so.6 ← __libc_start_main ← sqlite3            │
 │    56.1ms 13.7% uninterr.   249 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │

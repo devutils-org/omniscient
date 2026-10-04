@@ -13,16 +13,16 @@
 │[0m[31m│[0mno collector is written for `gpu.kernel` on backend `vendor:cupti` yet                                              [0m[31m│[0m│[0m
 │[0m[31m└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m│[0m
 │[0m[2m─────────────────────────────────────────────────────────────[0m[2;32m▲ 1.32s[0m[2m──────────────────────────────────────────────────[0m│[0m
-│[0m[1mpython3 2758953 (pid 2758953) at 1.32s: [0m[34mblocked, sleeping[0m 500ms, 1.07s → 1.57s[0m[2m, left cpu 14[0m                           │[0m
-│  woken by [0m[1man interrupt (hardirq)[0m, then queued 0ns for a cpu[0m[2m; its sched.offcpu row is this block alone[0m                │[0m
-│[0m[2m  in [0m[34mlibc.so.6 ← select.cpython-314-x86_64-linux-gnu.so ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m               │[0m
+│[0m[1mpython3 2758953 (pid 2758953) at 1.32s: [0m[2;34mblocked, sleeping[0m[2m 500ms, 1.07s → 1.57s, left cpu 14[0m                           │[0m
+│  woken by [0m[1man interrupt (hardirq)[0m[2m, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone[0m │[0m
+│[0m[2m  in [0m[2;34mlibc.so.6 ← select.cpython-314-x86_64-linux-gnu.so ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m               │[0m
 │[0m[2m  37 switch-outs and 18 wakeups seen; awake 2.18% of the run[0m                                                          │[0m
 │[0m[2m  meanwhile [0m[32mawake: [0mThread-1 (proce 2758974                                                                            │[0m
-│[0m[2m  where it was off a cpu over the run, 2.76s in all (sched.offcpu, by state and stack):[0m                               │[0m
-│     2.75s 99.9% [0m[34msleeping  [0m[2m    6 blocks  [0mlibc.so.6 ← select.cpython-314-x86_64-linux-gnu.so ← …                       │[0m
-│    3.16ms 0.11% [0m[34msleeping  [0m[2m    1 blocks  [0m__poll ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                       │[0m
-│     157µs 0.01% [0m[34msleeping  [0m[2m    2 blocks  [0mlibc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …             │[0m
-│    76.3µs 0.00% [0m[34msleeping  [0m[2m    1 blocks  [0mlibc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …                    │[0m
+│[0m[2m  where it was off a cpu over the run, 2.76s in all (sched.offcpu, by state and stack)[0m [0m[36m~low det[0m [0m[33mdegraded[0m[2m:[0m             │[0m
+│  [0m[2m   2.75s 99.9%[0m [0m[2;34msleeping  [0m[2m    6 blocks  libc.so.6 ← select.cpython-314-x86_64-linux-gnu.so ← …[0m                       │[0m
+│  [0m[2m  3.16ms 0.11%[0m [0m[2;34msleeping  [0m[2m    1 blocks  __poll ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m                       │[0m
+│  [0m[2m   157µs 0.01%[0m [0m[2;34msleeping  [0m[2m    2 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …[0m             │[0m
+│  [0m[2m  76.3µs 0.00%[0m [0m[2;34msleeping  [0m[2m    1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …[0m                    │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

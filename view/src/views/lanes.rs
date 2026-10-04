@@ -132,7 +132,13 @@ struct Model {
     /// Whether `sched.wakeup` was in the run: without it a switch-out cannot
     /// be told a block from a preemption.
     wakeups: bool,
+    /// The instants' trust: `sched.switches` and `sched.wakeup`, which say
+    /// where every span starts and ends.
     thread_trust: Trust,
+    /// `sched.offcpu`'s, which says each block's state, stack and queueing.
+    offcpu_trust: Trust,
+    /// A block's: its ends from the instants, its colour from `sched.offcpu`.
+    block_trust: Trust,
     gpu_trust: Trust,
     /// What each source holds, for the status line.
     held: Vec<Held>,
@@ -206,8 +212,12 @@ struct Blocked {
     /// The state and stack of the `sched.offcpu` row it was matched to.
     state: String,
     frames: Vec<String>,
-    /// Whether the row is this block alone (one block, of this length).
+    /// Whether the row is this block alone (one block, of this length, and
+    /// no other row of its window could be).
     exact: bool,
+    /// The other rows of its window that could hold it as well: near in
+    /// size, so which one is this block cannot be told.
+    rivals: usize,
     queued_ns: Option<u64>,
 }
 
@@ -304,6 +314,9 @@ impl Model {
             }
         }
         model.thread_trust = Trust::joined(data, switches.iter().chain(wakeups.iter()).copied());
+        model.offcpu_trust = Trust::joined(data, offcpu.iter().copied());
+        model.block_trust = model.thread_trust.clone();
+        model.block_trust.merge(model.offcpu_trust.clone());
         model.gpu_trust = Trust::joined(data, kernels.iter().copied());
         model.threads = threads(&switches, &wakeups, &offcpu);
         model.gpus = streams(&kernels);
@@ -683,13 +696,29 @@ fn block(
         let mean = row.blocked_ns as f64 / row.blocks as f64;
         (mean.max(1.0).log2() - length.max(1.0).log2()).abs()
     };
+    // A row that could be this block too: one block within an eighth of a
+    // doubling of it, or several whose mean is within a doubling (a row's
+    // blocks spread over its log2 bucket, so one of them may be this one).
+    let could_hold = |row: &Row<'_>| {
+        if row.blocks == 1 {
+            distance(row) < 0.125
+        } else {
+            distance(row) < 1.0
+        }
+    };
     if let Some(row) = candidates
-        .into_iter()
+        .iter()
+        .copied()
         .min_by(|one, two| distance(one).total_cmp(&distance(two)))
     {
-        // Within an eighth of a doubling of the one block a row holds: that
-        // block, as near as the switch's clock and the wakeup's let it be.
-        blocked.exact = row.blocks == 1 && distance(row) < 0.125;
+        blocked.rivals = candidates
+            .iter()
+            .filter(|other| !std::ptr::eq(**other, row) && could_hold(other))
+            .count();
+        // Within an eighth of a doubling of the one block a row holds, and
+        // no other row of the window could hold it: that block, as near as
+        // the switch's clock and the wakeup's let it be.
+        blocked.exact = row.blocks == 1 && distance(row) < 0.125 && blocked.rivals == 0;
         blocked.state = row.state.clone();
         blocked.frames = row
             .stack
@@ -1163,6 +1192,9 @@ impl Lanes {
                 usize::from(LABEL),
                 label_style,
             );
+            // The tool's own threads are its cost, not the program's: their
+            // cells are drawn apart too, not only their name.
+            let own = matches!(lane, Lane::Thread(thread) if thread.comm.starts_with(OWN));
             let lane_cells = cells(lane, low, high, usize::from(columns));
             let (share, of) = lane_share(lane, low, high);
             let share = if matches!(lane, Lane::Thread(_)) && !model.wakeups {
@@ -1175,7 +1207,15 @@ impl Lanes {
                 buffer.set_string(area.x + LABEL, row, "│", dim);
                 for (column, cell) in lane_cells.iter().enumerate() {
                     let (symbol, colour) = glyph(cell);
-                    let mut style = trust.style();
+                    // A block's colour is `sched.offcpu`'s word: its cells
+                    // carry that source's trust as well as the instants'.
+                    let mut style = match colour {
+                        Some(SLEEPING | DISK) => model.block_trust.style(),
+                        _ => trust.style(),
+                    };
+                    if own {
+                        style = style.add_modifier(Modifier::DIM | Modifier::ITALIC);
+                    }
                     if let Some(colour) = colour {
                         style = style.fg(colour);
                     }
@@ -1473,6 +1513,11 @@ fn frames(frames: &[String], room: usize) -> String {
     out
 }
 
+/// A figure of the detail in its source's trust style, over `base`.
+fn trusted(text: impl Into<String>, base: Style, trust: &Trust) -> Span<'static> {
+    Span::styled(text.into(), base.patch(trust.style()))
+}
+
 /// What the selected lane was doing at the cursor, and what every other lane
 /// was doing at the same instant.
 fn detail(
@@ -1510,47 +1555,85 @@ fn detail(
                     dim,
                 )),
                 Some((span, State::Awake)) => {
-                    head.push(Span::styled("awake", Style::new().fg(AWAKE)));
-                    head.push(Span::raw(format!(
-                        " {}, on a cpu or queued for one",
-                        interval(model, span.start, span.end)
-                    )));
+                    head.push(trusted(
+                        "awake",
+                        Style::new().fg(AWAKE),
+                        &model.thread_trust,
+                    ));
+                    head.push(trusted(
+                        format!(" {}", interval(model, span.start, span.end)),
+                        Style::new(),
+                        &model.thread_trust,
+                    ));
+                    head.push(Span::raw(", on a cpu or queued for one"));
                 }
-                Some((span, State::Unknown)) => head.push(Span::raw(format!(
-                    "off a cpu at {}, next off one {} later: a block or a preemption, \
-                     which a run without wakeups cannot tell",
-                    at(model, span.start),
-                    units::duration((span.end - span.start) as f64)
-                ))),
+                Some((span, State::Unknown)) => head.push(trusted(
+                    format!(
+                        "off a cpu at {}, next off one {} later: a block or a preemption, \
+                         which a run without wakeups cannot tell",
+                        at(model, span.start),
+                        units::duration((span.end - span.start) as f64)
+                    ),
+                    Style::new(),
+                    &model.thread_trust,
+                )),
                 Some((span, State::Blocked(blocked))) => {
                     let state = if blocked.state.is_empty() {
                         "blocked".to_owned()
                     } else {
                         format!("blocked, {}", blocked.state)
                     };
-                    head.push(Span::styled(state, Style::new().fg(blocked.colour())));
-                    head.push(Span::raw(format!(
-                        " {}",
-                        interval(model, span.start, span.end)
-                    )));
+                    // The state is `sched.offcpu`'s word, the interval the
+                    // instants'.
+                    let state_trust = if blocked.state.is_empty() {
+                        &model.thread_trust
+                    } else {
+                        &model.block_trust
+                    };
+                    head.push(trusted(
+                        state,
+                        Style::new().fg(blocked.colour()),
+                        state_trust,
+                    ));
+                    head.push(trusted(
+                        format!(" {}", interval(model, span.start, span.end)),
+                        Style::new(),
+                        &model.thread_trust,
+                    ));
                     if let Some(cpu) = span.cpu {
                         head.push(Span::styled(format!(", left cpu {cpu}"), dim));
                     }
                     let mut woken =
                         vec![Span::raw("  woken by "), Span::styled(waker(blocked), bold)];
-                    if let Some(queued) = blocked.queued_ns {
-                        woken.push(Span::raw(format!(
-                            ", then queued {} for a cpu",
-                            units::duration(queued as f64)
-                        )));
+                    match blocked.queued_ns {
+                        // `sched.offcpu` writes a wait the kernel did not
+                        // stamp as zero: a zero is not a measured zero.
+                        Some(0) => woken.push(trusted(
+                            ", then queued for a cpu: 0, or not stamped",
+                            Style::new(),
+                            &model.offcpu_trust,
+                        )),
+                        Some(queued) => woken.push(trusted(
+                            format!(", then queued {} for a cpu", units::duration(queued as f64)),
+                            Style::new(),
+                            &model.offcpu_trust,
+                        )),
+                        None => {}
                     }
                     woken.push(Span::styled(
                         if blocked.state.is_empty() {
-                            "; no sched.offcpu row holds it"
+                            "; no sched.offcpu row holds it".to_owned()
                         } else if blocked.exact {
-                            "; its sched.offcpu row is this block alone"
+                            "; its sched.offcpu row is this block alone".to_owned()
+                        } else if blocked.rivals > 0 {
+                            format!(
+                                "; state, stack: the nearest in size of {} sched.offcpu rows \
+                                 of its window that could hold it",
+                                blocked.rivals + 1
+                            )
                         } else {
                             "; state, stack: its window's sched.offcpu row nearest in size"
+                                .to_owned()
                         },
                         dim,
                     ));
@@ -1559,7 +1642,11 @@ fn detail(
                     if !stack.is_empty() {
                         more.push(Line::from(vec![
                             Span::styled("  in ", dim),
-                            Span::styled(stack, Style::new().fg(blocked.colour())),
+                            trusted(
+                                stack,
+                                Style::new().fg(blocked.colour()),
+                                &model.offcpu_trust,
+                            ),
                         ]));
                     }
                 }
@@ -1568,30 +1655,59 @@ fn detail(
             lines.extend(more);
             if !thread.waits.is_empty() {
                 let total: u64 = thread.waits.iter().map(|wait| wait.total_ns).sum();
-                waits_lines = std::iter::once(Line::from(Span::styled(
-                    format!(
-                        "  where it was off a cpu over the run, {} in all (sched.offcpu, by state and stack):",
-                        units::duration(total as f64)
-                    ),
-                    dim,
-                )))
-                .chain(thread.waits.iter().take(4).map(|wait| {
-                    let colour = if wait.state == "uninterruptible" { DISK } else { SLEEPING };
-                    Line::from(vec![
-                        Span::raw(format!(
-                            "  {:>8} {:>5} ",
-                            units::duration(wait.total_ns as f64),
-                            units::percent(wait.total_ns as f64 * 100.0 / total.max(1) as f64)
-                        )),
-                        Span::styled(
-                            format!("{:<9.9} ", if wait.state == "uninterruptible" { "uninterr." } else { wait.state.as_str() }),
-                            Style::new().fg(colour),
-                        ),
-                        Span::styled(format!("{:>5} blocks  ", wait.blocks), dim),
-                        Span::raw(frames(&wait.frames, width.saturating_sub(44))),
-                    ])
-                }))
-                .collect();
+                let offcpu = &model.offcpu_trust;
+                let mut header = vec![
+                    Span::styled("  where it was off a cpu over the run, ", dim),
+                    trusted(units::duration(total as f64), Style::new(), offcpu),
+                    Span::styled(" in all (sched.offcpu, by state and stack)", dim),
+                ];
+                if !offcpu.marks.is_empty() {
+                    header.push(Span::raw(" "));
+                    header.extend(offcpu.badges());
+                }
+                header.push(Span::styled(":", dim));
+                waits_lines = std::iter::once(Line::from(header))
+                    .chain(thread.waits.iter().take(4).map(|wait| {
+                        let colour = if wait.state == "uninterruptible" {
+                            DISK
+                        } else {
+                            SLEEPING
+                        };
+                        Line::from(vec![
+                            Span::raw("  "),
+                            trusted(
+                                format!(
+                                    "{:>8} {:>5}",
+                                    units::duration(wait.total_ns as f64),
+                                    units::percent(
+                                        wait.total_ns as f64 * 100.0 / total.max(1) as f64
+                                    )
+                                ),
+                                Style::new(),
+                                offcpu,
+                            ),
+                            Span::raw(" "),
+                            trusted(
+                                format!(
+                                    "{:<9.9} ",
+                                    if wait.state == "uninterruptible" {
+                                        "uninterr."
+                                    } else {
+                                        wait.state.as_str()
+                                    }
+                                ),
+                                Style::new().fg(colour),
+                                offcpu,
+                            ),
+                            Span::styled(format!("{:>5} blocks  ", wait.blocks), dim),
+                            trusted(
+                                frames(&wait.frames, width.saturating_sub(44)),
+                                Style::new(),
+                                offcpu,
+                            ),
+                        ])
+                    }))
+                    .collect();
             }
             lines.push(Line::from(Span::styled(
                 format!(
@@ -1615,7 +1731,11 @@ fn detail(
                         op.name.clone(),
                         Style::new().fg(if op.copy { COPY } else { KERNEL }),
                     ));
-                    head.push(Span::raw(format!(" {}", interval(model, op.start, op.end))));
+                    head.push(trusted(
+                        format!(" {}", interval(model, op.start, op.end)),
+                        Style::new(),
+                        &model.gpu_trust,
+                    ));
                     let mut what = Vec::new();
                     if !op.grid.is_empty() {
                         what.push(format!("grid {}, block {}", op.grid, op.block));
@@ -1643,7 +1763,7 @@ fn detail(
     }
     // What lines up: every other lane at the same instant, by what it was
     // doing.
-    let mut groups: Vec<(&str, Color, Vec<String>)> = vec![
+    let mut groups: Vec<(&str, Color, Vec<Vec<Span<'static>>>)> = vec![
         ("awake", AWAKE, Vec::new()),
         ("blocked", SLEEPING, Vec::new()),
         ("uninterruptible", DISK, Vec::new()),
@@ -1670,16 +1790,19 @@ fn detail(
                 };
                 groups[group]
                     .2
-                    .push(format!("{} {}", thread.comm, thread.tid));
+                    .push(vec![Span::raw(format!("{} {}", thread.comm, thread.tid))]);
             }
             Lane::Gpu(gpu) => {
                 if let Some(op) = gpu.ops.iter().find(|op| op.start <= t && t < op.end) {
-                    groups[3].2.push(format!(
-                        "{} on s{} ({})",
-                        op.name,
-                        gpu.stream,
-                        units::duration((op.end - op.start) as f64)
-                    ));
+                    groups[3].2.push(vec![
+                        Span::raw(format!("{} on s{} (", op.name, gpu.stream)),
+                        trusted(
+                            units::duration((op.end - op.start) as f64),
+                            Style::new(),
+                            &model.gpu_trust,
+                        ),
+                        Span::raw(")"),
+                    ]);
                 }
             }
         }
@@ -1694,11 +1817,15 @@ fn detail(
         }
         others.push(Span::styled(format!("{name}: "), Style::new().fg(colour)));
         let shown = members.len().min(3);
-        let mut said = members[..shown].join(", ");
-        if members.len() > shown {
-            said.push_str(&format!(" and {} more", members.len() - shown));
+        for (index, member) in members[..shown].iter().enumerate() {
+            if index > 0 {
+                others.push(Span::raw(", "));
+            }
+            others.extend(member.iter().cloned());
         }
-        others.push(Span::raw(said));
+        if members.len() > shown {
+            others.push(Span::raw(format!(" and {} more", members.len() - shown)));
+        }
     }
     if others.len() > 1 {
         lines.push(Line::from(others));
@@ -2070,6 +2197,57 @@ mod tests {
         assert_eq!(thread.waits.len(), 2);
     }
 
+    /// Two one-block rows of one window near in size, with different stacks:
+    /// a block between them is matched to the nearer, and not called exact.
+    #[test]
+    fn a_window_with_two_rows_near_in_size_is_not_an_exact_match() {
+        let ms = 1_000_000;
+        let one = |ts: u64, blocked_ns: u64, stack: u64| {
+            event(
+                ts,
+                "sched.offcpu",
+                5,
+                &[
+                    ("window_ns", AttrValue::Uint(50_000_000)),
+                    ("blocks", AttrValue::Uint(1)),
+                    ("blocked_ns", AttrValue::Uint(blocked_ns)),
+                    ("queued_ns", AttrValue::Uint(0)),
+                    ("state", AttrValue::Text("sleeping".into())),
+                    ("stack_id", AttrValue::Uint(stack)),
+                ],
+            )
+        };
+        let mut offcpu = results(
+            "sched.offcpu",
+            vec![one(50 * ms, 5_050_000, 1), one(50 * ms, 5_100_000, 2)],
+        );
+        offcpu.stacks.insert(1, vec!["main".into(), "read".into()]);
+        offcpu.stacks.insert(2, vec!["main".into(), "poll".into()]);
+        let data = Data {
+            run: crate::model::Run {
+                results: vec![
+                    results("sched.switches", vec![out(10 * ms, 5)]),
+                    results("sched.wakeup", vec![woken(10 * ms + 5_080_000, 5, 0)]),
+                    offcpu,
+                ],
+                ..Default::default()
+            },
+            ..Data::default()
+        };
+        let model = Model::build(&data);
+        let thread = model.threads.iter().find(|thread| thread.tid == 5).unwrap();
+        let State::Blocked(blocked) = &thread.spans[0].state else {
+            panic!("{:?}", thread.spans)
+        };
+        assert!(!blocked.exact, "{blocked:?}");
+        assert_eq!(blocked.rivals, 1);
+        assert_eq!(blocked.frames, ["main", "poll"], "the nearer row's stack");
+        assert_eq!(
+            blocked.queued_ns, None,
+            "no queueing said of an unsure match"
+        );
+    }
+
     #[test]
     fn without_wakeups_a_switch_says_neither_block_nor_preemption() {
         let model = Model::build(&synthetic(false));
@@ -2132,7 +2310,38 @@ mod tests {
             .expect("a kernel under the cursor");
         assert_eq!(spin.name, "spin");
         assert!(span.end >= spin.end, "woken before the kernel ended");
+        // The block is its sched.offcpu row alone, 132 ms long, and the
+        // kernel covers it all but the wakeup's latency.
+        assert!(blocked.exact, "{blocked:?}");
+        assert_eq!(blocked.rivals, 0);
+        let ms = 1_000_000;
+        assert_eq!((span.end - span.start + ms / 2) / ms, 132, "{span:?}");
+        let covered = overlap(spin.start, spin.end, span.start, span.end);
+        assert!(
+            covered * 100 >= (span.end - span.start) * 99,
+            "the kernel covers {covered} ns of {span:?}"
+        );
         assert_eq!(blocked.waker_comm, "cuda-EvtHandlr");
+        // ... which a hardirq had woken a few tens of microseconds before.
+        let waker_tid = blocked.waker_tid.unwrap() as i32;
+        let waker = model
+            .threads
+            .iter()
+            .find(|thread| thread.tid == waker_tid)
+            .expect("the waker's lane");
+        let its_block = waker
+            .spans
+            .iter()
+            .filter(|its| its.end <= span.end)
+            .max_by_key(|its| its.end)
+            .unwrap();
+        let State::Blocked(its) = &its_block.state else {
+            panic!("the waker was not woken just before: {its_block:?}")
+        };
+        assert_eq!(its.waker_tid, Some(0), "{its:?}");
+        assert_eq!(its.waker_context, "hardirq");
+        let before = span.end - its_block.end;
+        assert!((20_000..40_000).contains(&before), "{before} ns before");
     }
 
     #[test]

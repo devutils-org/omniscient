@@ -41,7 +41,8 @@ legend
   lane was doing at that instant. Under it, the thread's off-cpu time over the
   whole run, by state and stack, from `sched.offcpu`'s own totals.
 - **Our own threads** in the target (the CUPTI library's `omn-cupti-flush`)
-  are drawn dim and italic: they are the tool's cost, not the program.
+  are drawn dim and italic, name and cells: they are the tool's cost, not the
+  program.
 
 Keys: `↑`/`↓` (`j`/`k`) a lane, `h`/`l` the cursor by a cell, `H`/`L` by ten,
 `[`/`]` to the previous or next change of the selected lane, `z`/`Z` zoom in
@@ -79,8 +80,13 @@ A thread's lane is rebuilt from two exact series of instants, both on
 (`src/collect/sched/offcpu.rs`). A block takes its state and stack from its
 thread's row whose window holds its end and whose mean block is nearest in
 size. The detail says which: `its sched.offcpu row is this block alone` (one
-block, within an eighth of a doubling of the reconstructed length), or `state,
-stack: its window's sched.offcpu row nearest in size`. On the recording the
+block, within an eighth of a doubling of the reconstructed length, and no
+other row of the window that could hold it), `state, stack: the nearest in
+size of N sched.offcpu rows of its window that could hold it` (another
+one-block row within an eighth of a doubling, or a row of several blocks whose
+mean is within a doubling: which row is this block cannot be told, and no
+queueing is said), or `state, stack: its window's sched.offcpu row nearest in
+size`. On the recording the
 stacks under the main thread's waits are the driver's `cuCtxSynchronize` and
 CPython's `_PySemaphore_Wait` (the queue).
 
@@ -91,8 +97,12 @@ activity records carry a correlation id, and the launch's API record is not
 collected -- so a kernel lines up with its host thread **in time**, never by
 attribution: the view never says which thread launched a kernel.
 
-Every glyph is drawn in its source's trust style. On this machine that dims
-every lane: `sched.*` are `low` determinism, and `gpu.kernel` carries a time
+Every glyph is drawn in its source's trust style: an awake bar in the
+instants' (`sched.switches`, `sched.wakeup`), a block's cells and its state
+in the instants' and `sched.offcpu`'s joined (the instants place it,
+`sched.offcpu` colours it), the queueing, the stack and the off-cpu totals in
+`sched.offcpu`'s (its badges beside the totals' heading), a GPU activity and
+its duration in `gpu.kernel`'s. On this machine that dims every lane: `sched.*` are `low` determinism, and `gpu.kernel` carries a time
 error, so the dimming says nothing that tells one lane from another here (see
 "Needs from another stream" in `docs/fixes/w19-lanes.md`).
 
@@ -148,6 +158,11 @@ sessions that ask summaries and stacks), and say so.
 - **On a cpu versus queued for one**, instant by instant: the free switch
   counter has no switch-in. Per block, the queueing is said when the block's
   `sched.offcpu` row is that block alone.
+- **A queueing of zero from one the kernel did not stamp**: `sched.offcpu`
+  writes an unstamped `queued_ns` as zero (its degradation says how many), so
+  a zero is drawn `queued for a cpu: 0, or not stamped`, never as a measured
+  zero. On the recording all but one of the main thread's rows carry a zero
+  `queued_ns`.
 - **Why a thread was preempted**, or which thread ran instead: `pmu:sw` has no
   second party.
 - **Which thread launched a kernel**: see above. The lining up is in time.

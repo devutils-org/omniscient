@@ -11,7 +11,7 @@
 │[0m[31m│[0mno collector is written for `gpu.kernel` on backend `vendor:cupti` yet                                              [0m[31m│[0m│[0m
 │[0m[31m└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m│[0m
 │[0m[2m────────────────────────────────────────────────────────────────[0m[2;32m▲ 3.97s[0m[2m───────────────────────────────────────────────[0m│[0m
-│[0m[1mpython3 2779622 (pid 2779622) at 3.97s: [0m[32mawake[0m 7.91s, 0ns → 7.91s, on a cpu or queued for one                          │[0m
+│[0m[1mpython3 2779622 (pid 2779622) at 3.97s: [0m[2;32mawake[0m[2m 7.91s, 0ns → 7.91s[0m, on a cpu or queued for one                          │[0m
 │[0m[2m  1027 switch-outs and 1 wakeups seen; awake 99.7% of the run[0m                                                         │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

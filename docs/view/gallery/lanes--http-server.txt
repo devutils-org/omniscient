@@ -14,11 +14,11 @@ omn top │ fixture http-server │ 2.84s                             view: snap
 │└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘│
 │─────────────────────────────────────────────────────────────▲ 1.32s──────────────────────────────────────────────────│
 │python3 2758953 (pid 2758953) at 1.32s: blocked, sleeping 500ms, 1.07s → 1.57s, left cpu 14                           │
-│  woken by an interrupt (hardirq), then queued 0ns for a cpu; its sched.offcpu row is this block alone                │
+│  woken by an interrupt (hardirq), then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone │
 │  in libc.so.6 ← select.cpython-314-x86_64-linux-gnu.so ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …               │
 │  37 switch-outs and 18 wakeups seen; awake 2.18% of the run                                                          │
 │  meanwhile awake: Thread-1 (proce 2758974                                                                            │
-│  where it was off a cpu over the run, 2.76s in all (sched.offcpu, by state and stack):                               │
+│  where it was off a cpu over the run, 2.76s in all (sched.offcpu, by state and stack) ~low det degraded:             │
 │     2.75s 99.9% sleeping      6 blocks  libc.so.6 ← select.cpython-314-x86_64-linux-gnu.so ← …                       │
 │    3.16ms 0.11% sleeping      1 blocks  __poll ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                       │
 │     157µs 0.01% sleeping      2 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …             │

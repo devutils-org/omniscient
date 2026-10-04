@@ -21,8 +21,11 @@ file.
   - Each block's **state and stack** from the `sched.offcpu` row of its
     thread whose drain window holds the block's end and whose mean block is
     nearest in size (log2 distance); `exact` when the row is one block within
-    an eighth of a doubling, and only then is the row's `queued_ns` said as
-    that block's queueing. The detail says which kind of match it is.
+    an eighth of a doubling **and no other row of the window could hold it**
+    (another one-block row within an eighth of a doubling, or a several-block
+    row whose mean is within a doubling), and only then is the row's
+    `queued_ns` said as that block's queueing. The detail says which kind of
+    match it is, and how many rows were in contention when several were.
   - A **GPU lane** per (process, device, stream) from `gpu.kernel`'s raw
     activities (kernels magenta, copies cyan), placed right above the
     process's main thread.
@@ -30,7 +33,7 @@ file.
     threads awake 1 % of the span or more, as many as the room allows; one
     row for the rest (a line where blocked, a bar where awake). Our own
     threads in the target (`omn-` prefix: the CUPTI flush thread) dim and
-    italic.
+    italic, their name and their cells.
   - **The detail**: the state at the cursor with its interval, the cpu left,
     the waker (thread or interrupt, and its context), the queueing, the
     stack (unnamed frames of one object folded, `libcuda.so x5`), one line of
@@ -45,8 +48,16 @@ file.
     for the GPU -- a block that ended within a tenth of an activity's length
     (or 1 ms) of its end, the activity covering four fifths of it -- else on
     the main thread's longest block.
-  - Trust: the status line carries every source's count and badges; each
-    lane is drawn in its sources' `Trust::style()`; a refused source's reason
+  - Trust: the status line carries every source's count and badges; an
+    awake cell is drawn in the instants' trust (`sched.switches`,
+    `sched.wakeup`), a blocked cell in that joined with `sched.offcpu`'s (it
+    decides the colour), a GPU cell in `gpu.kernel`'s; in the detail, every
+    figure in its source's: the intervals in the instants', the state, the
+    queueing, the stack and the off-cpu totals in `sched.offcpu`'s (its
+    badges beside the totals' heading), a GPU activity's interval and
+    duration in `gpu.kernel`'s. A zero `queued_ns` is drawn `queued for a
+    cpu: 0, or not stamped`, since `sched.offcpu` writes an unstamped one as
+    zero; a refused source's reason
     is drawn with `trust::render_refusal` under the lanes; a run with no lane
     lists what it holds of each source (absent, refused, or present without
     `raw`).
@@ -77,7 +88,15 @@ Shown (on this machine, in the committed recording and snapshots):
   alone and its stack holds `cuCtxSynchronize`; it was woken by
   `cuda-EvtHandlr`, which a hardirq woke 27 µs before (read off the raw
   events of the recording, 1751.022 ms then 1751.049 ms from the run's
-  opening). Held by `the_cursor_opens_on_the_main_thread_waiting_for_the_gpu`.
+  opening). Held by `the_cursor_opens_on_the_main_thread_waiting_for_the_gpu`,
+  which asserts each of these: the stack, the `spin` under the cursor, the
+  match exact with no rival row, the 132 ms length, the kernel covering 99 %
+  of the block, the waker's name, and the waker's own block ending 20 to
+  40 µs before, woken by tid 0 in `hardirq` context.
+- A window holding two one-block rows near in size (5.05 ms and 5.10 ms,
+  different stacks) does not make a 5.08 ms block exact: it takes the nearer
+  row's stack, says no queueing, and counts one rival. Held by
+  `a_window_with_two_rows_near_in_size_is_not_an_exact_match` (synthetic).
 - The regime change: `loader` awake and `feeder` blocked on the queue for the
   first second, then `spin` filling its lane with both host threads blocked.
   Visible in `lanes--gpu-feeder.txt`; not asserted as numbers.
@@ -91,8 +110,11 @@ Reasoned, not shown:
   `set_current_state` and `schedule`) lands in an awake span and is ignored
   there, which is what the code does, but no test drives a kernel into it.
 - That the `sched.offcpu` match picks the right row when a window holds
-  several rows of one thread near in size: the detail says it is "nearest in
-  size", not exact, in that case.
+  several rows of one thread near in size: it may not, and the detail says
+  so ("the nearest in size of N rows ... that could hold it"), not exact,
+  with no queueing. The bounds of "could hold it" (an eighth of a doubling
+  for a one-block row, a doubling for a row's mean) are a judgement, not
+  measured against a recording where they decide.
 - The view was not looked at in a real interactive terminal (this session
   has none): every look was through `--headless` and the snapshots. Keys are
   exercised through `App::key` in tests.
@@ -132,6 +154,15 @@ counts are as read from a file two runs shared. `cargo clippy --workspace
 --all-targets -D warnings` and `cargo fmt --check`: clean. The view's own
 tests (`cargo test -p omn-view --lib lanes`, 6) and `cargo test --test
 view_snapshots --test view_model` (19): green.
+
+After the review round: `cargo test -p omn-view --lib lanes` (7) and
+`cargo test --test view_snapshots --test view_model` green, then one `make
+check`, red only on `runner::a_profile_s_losses_land_...` (the filed gap),
+then one `cargo test --workspace --no-fail-fast`: 2371 passed, 2 failed --
+that same test and
+`collect::mem::page_faults::tests::sampled_in_user_mode_the_weighed_samples_are_the_faults_the_thread_took`,
+which passed alone on its one rerun (nothing in this stream touches it).
+Clippy (`-D warnings`) and `cargo fmt --check`: clean.
 
 ## Privileged runs wanted
 
@@ -178,7 +209,9 @@ touched.
   `why` of the lanes rows changed too: `sched.switches` -- "each thread's
   switch-outs, the instant each block or preemption began"; `sched.offcpu`
   -- "the state and stack of each block, from its drain window's rows" (the
-  old "each block on its own" is not what `sched.offcpu` gives).
+  old "each block on its own" is not what `sched.offcpu` gives). And
+  `the_readme_lists_what_each_view_needs` could compare the `why` column
+  too: it passes today although lanes' strings differ from the table's.
 - **core** (`tests/view_fixtures/`): a GPU fixture all views draw on --
   `docs/view/gallery/lanes-gpu/workload.py` recorded the way `record.sh`
   records the others (`omn top --headless -d 20s -o "$here/gpu-feeder" --
@@ -195,3 +228,30 @@ touched.
   timeline.
 - **sched owner** (`catalog/sched.yaml`): the `sched.offcpu` stamping caveat,
   above.
+
+## Review
+
+The adversarial review of the first handoff found two defects, a gap and
+three nits; all six are answered in the commit after `333f378`.
+
+- **Trust not applied to `sched.offcpu`'s figures** (defect): fixed as
+  described under "What landed". Checked in
+  `docs/view/gallery/lanes--gpu-feeder.ansi`: `queued 18.9µs` and
+  `1.04s 53.8%` now carry SGR 2, and the totals' heading carries
+  `~low det degraded x3`.
+- **An ambiguous match could be called exact** (defect): fixed; `exact` now
+  also needs no rival row (`Blocked::rivals`), with a test of the reviewer's
+  shape. On the recording and the shared fixtures, the blocks at the cursor
+  stay exact (no rival), so their snapshots' text did not change there.
+- **The cursor test asserted less than the handoff said** (gap): it now
+  asserts the exact match, the 132 ms, the kernel's coverage, and the
+  hardirq wakeup of `cuda-EvtHandlr` 20 to 40 µs before.
+- **Own threads' cells not dimmed** (nit): fixed, cells too.
+- **`queued 0ns` drawn as a measured zero** (nit): fixed (drawn `0, or not
+  stamped`), and listed under "What it does not show" in `lanes.md`.
+- **`sched.wakeup` undeclared; the README test does not check `why`** (nit):
+  not changed here. Both are core's files (`docs/view/README.md`,
+  `tests/view_model.rs`); the README row and the new `why` strings are
+  requested under "Needs from another stream", which the coordinator lands
+  before the wake view's needs can change. A `why` check in
+  `the_readme_lists_what_each_view_needs` is added to that request.

@@ -11,14 +11,14 @@
 │[0m[31m│[0mno collector is written for `gpu.kernel` on backend `vendor:cupti` yet                                              [0m[31m│[0m│[0m
 │[0m[31m└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m│[0m
 │[0m[2m─────────────────────────[0m[2;32m▲ 125ms[0m[2m──────────────────────────────────────────────────────────────────────────────────────[0m│[0m
-│[0m[1msqlite3 2759238 (pid 2759238) at 125ms: [0m[33mblocked, uninterruptible[0m 4.77ms, 123ms → 128ms[0m[2m, left cpu 2[0m                    │[0m
-│  woken by [0m[1man interrupt (hardirq)[0m, then queued 0ns for a cpu[0m[2m; its sched.offcpu row is this block alone[0m                │[0m
-│[0m[2m  in [0m[33mfdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3[0m                                                │[0m
+│[0m[1msqlite3 2759238 (pid 2759238) at 125ms: [0m[2;33mblocked, uninterruptible[0m[2m 4.77ms, 123ms → 128ms, left cpu 2[0m                    │[0m
+│  woken by [0m[1man interrupt (hardirq)[0m[2m, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone[0m │[0m
+│[0m[2m  in [0m[2;33mfdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3[0m                                                │[0m
 │[0m[2m  1540 switch-outs and 1019 wakeups seen; awake 91.8% of the run[0m                                                      │[0m
-│[0m[2m  where it was off a cpu over the run, 410ms in all (sched.offcpu, by state and stack):[0m                               │[0m
-│     297ms 72.5% [0m[33muninterr. [0m[2m  515 blocks  [0mfdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │[0m
-│    56.4ms 13.8% [0m[33muninterr. [0m[2m  254 blocks  [0mfdatasync ← sqlite3 x10 ← libc.so.6 ← __libc_start_main ← sqlite3            │[0m
-│    56.1ms 13.7% [0m[33muninterr. [0m[2m  249 blocks  [0mfdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │[0m
+│[0m[2m  where it was off a cpu over the run, 410ms in all (sched.offcpu, by state and stack)[0m [0m[36m~low det[0m [0m[33mdegraded[0m[2m:[0m             │[0m
+│  [0m[2m   297ms 72.5%[0m [0m[2;33muninterr. [0m[2m  515 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3[0m            │[0m
+│  [0m[2m  56.4ms 13.8%[0m [0m[2;33muninterr. [0m[2m  254 blocks  fdatasync ← sqlite3 x10 ← libc.so.6 ← __libc_start_main ← sqlite3[0m            │[0m
+│  [0m[2m  56.1ms 13.7%[0m [0m[2;33muninterr. [0m[2m  249 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3[0m            │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
