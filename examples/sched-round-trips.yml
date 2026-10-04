@@ -13,15 +13,22 @@
 #   sched.switches   N switches out. The driver leaves the cpu once per round
 #                    trip and for no other reason, and `pmu:sw` counts switches
 #                    out, not in -- so it is N, not 2N.
-#   sched.offcpu     N blocks. Every one of those switches was a block on a
-#                    read, never a preemption, so the two must agree. `blocks`
-#                    on the raw events is the count; the event rows are drains.
+#   sched.offcpu     N blocks on the driver's row. Every one of those switches
+#                    was a block on a read, never a preemption, so the two must
+#                    agree. `blocks` on the raw events is the count; the event
+#                    rows are drains. About N more are on the responder's row:
+#                    it is a subshell, a process the target started, and the
+#                    run follows it as the target's, so the run's total is
+#                    about 2N.
 #   sched.wakeup     2N wakeups. A process target keeps the wakeups it takes
 #                    part in at either end, and the driver is at one end of
 #                    every hand-off: it wakes the responder, the responder
-#                    wakes it back.
-#   sched.runqlat    N run queue waits. Each wakeup of the driver is followed
-#                    by one wait between becoming runnable and running.
+#                    wakes it back. Each names both ends: `wakee_comm` and
+#                    `waker_comm`.
+#   sched.runqlat    N run queue waits on the driver's row. Each wakeup of the
+#                    driver is followed by one wait between becoming runnable
+#                    and running; the responder's row has about N more, for the
+#                    same reason as above.
 #
 # `sched.switches` goes through `perf_event_open` and `sched.offcpu` through a
 # raw tracepoint in the kernel. They are two different mechanisms counting the
