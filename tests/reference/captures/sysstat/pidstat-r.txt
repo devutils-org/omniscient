@@ -1,0 +1,10 @@
+Linux 7.2.7-arch1-1 (host) 	10/04/26 	_x86_64_	(2 CPU)
+
+19:40:01      UID       PID  minflt/s  majflt/s     VSZ     RSS   %MEM  Command
+19:40:02     1000   2935597  32768.00      0.00  150420  140940   0.21  python3
+
+19:40:02      UID       PID  minflt/s  majflt/s     VSZ     RSS   %MEM  Command
+19:40:03     1000   2935597      0.00      0.00  150420  140944   0.21  python3
+
+Average:      UID       PID  minflt/s  majflt/s     VSZ     RSS   %MEM  Command
+Average:     1000   2935597  16384.00      0.00  150420  140942   0.21  python3

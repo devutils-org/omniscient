@@ -2,4 +2,269 @@
 # established tool on the same workload and holds them to a declared
 # tolerance. Read by tests/reference.rs, never by omn itself. Schema:
 # BRIEF.md, "Decided before this wave".
-[]
+#
+# Fields this family adds (the shared runner ignores what it does not know;
+# tests/reference/sysstat.rs reads them):
+#
+#   target: system      The tool observes the whole machine and omn's source
+#                       takes no `-- program` (`--system` refuses one). The
+#                       workload, if any, runs in the background; then omn
+#                       (its args alone, no `--`) and the reference command
+#                       (nothing appended) are started together, so both
+#                       observe the same seconds of the same machine.
+#                       Without it, the pair is a launch pair: omn's args,
+#                       `--`, the workload; then the reference command with
+#                       the workload appended, one after the other.
+#   compare.omn         `summary.<stat>` or `rate.<field>` of the series named
+#                       by `compare.omn_key` (the first one when absent), or
+#                       `raw.<attr>`: the mean of that attribute over the raw
+#                       events, a leading one stamped within half a period of
+#                       the window's opening left out (it covers a few ms:
+#                       docs/fixes/w22-sysstat.md).
+#   compare.scale       multiplies omn's value before the comparison (units).
+#   known_defect        the pair is expected to miss its tolerance because of
+#                       a filed omn defect, named here; it is reported as
+#                       KNOWN, and agreeing turns into a failure that says to
+#                       drop the field.
+
+# --- launch pairs: one process, its footprint -------------------------------
+
+- source: mem.numa
+  tool: numastat
+  use: "numastat -p PID (a process's memory per NUMA node)"
+  workload: [python3, tests/reference/workloads/sysstat/touch.py, "128", "3"]
+  omn: [mem.numa, -m, poll@250ms, -e, summary, --format, json]
+  reference:
+    command: [sh, -c, '"$@" & p=$!; sleep 1.5; numastat -p "$p"; wait "$p"', sh]
+    parse: numastat_p
+    requires: [numastat, sh]
+    privileged: false
+  compare:
+    key: "node:0"
+    omn: summary.max
+    omn_key: "node:0"
+    tolerance: {rel: 0.03}
+    why: "both read /proc/<pid>/numa_maps of a process holding 128 MiB it
+          touched; numastat sums MB per node, omn counts pages, and the parser
+          converts MB to 4 KiB pages. Alternate runs of a deterministic
+          footprint; a THP-promoted region would count in 2 MiB pages on omn's
+          side (mem.numa's caveat) and break the conversion."
+
+- source: mem.rss
+  tool: pidstat
+  use: "pidstat -r (a process's resident set over time)"
+  workload: [python3, tests/reference/workloads/sysstat/touch.py, "128", "3"]
+  omn: [mem.rss, -m, poll@250ms, -e, summary, --format, json]
+  reference:
+    command: [env, LC_ALL=C, pidstat, -r, "1", -e]
+    parse: pidstat_r
+    requires: [pidstat, env]
+    privileged: false
+  compare:
+    key: python3
+    omn: summary.max
+    tolerance: {rel: 0.03}
+    why: "the peak resident set of a process holding 128 MiB it touched:
+          pidstat reads /proc/<pid>/stat's rss, omn smaps_rollup's Rss; the
+          kernel's per-cpu rss counters can lag the page tables by a few
+          pages. Alternate runs of a deterministic footprint."
+
+- source: sched.switches
+  tool: pidstat
+  use: "pidstat -w (a process's context switches per second)"
+  workload: [python3, tests/reference/workloads/sysstat/switch.py, "1000"]
+  omn: [sched.switches, -m, count, -e, rate, --format, json]
+  reference:
+    command: [env, LC_ALL=C, pidstat, -w, "1", -e]
+    parse: pidstat_w
+    requires: [pidstat, env]
+    privileged: false
+  compare:
+    key: python3
+    omn: rate.per_second
+    tolerance: {rel: 0.15}
+    why: "a thread that sleeps 1 ms a thousand times switches about a thousand
+          times a second; pidstat reads nvcsw and nivcsw, omn a perf software
+          counter. Alternate runs of a deterministic count."
+  known_defect: "sched.switches' counted-window rate divides the run's total
+                 by a window of 12 to 22 ms instead of the run's seconds
+                 (docs/fixes/w22-sysstat.md)"
+
+# --- system pairs: the machine, observed in the same seconds ----------------
+
+- source: cpu.util
+  tool: vmstat
+  use: "vmstat 1 (us + sy: the share of the machine's cpu time spent busy)"
+  target: system
+  workload: [python3, tests/reference/workloads/sysstat/spin.py, "8"]
+  omn: [cpu.util, --system, -m, poll@1s, -e, raw, -d, 4s, --format, json]
+  reference:
+    command: [vmstat, -n, "1", "5"]
+    parse: vmstat
+    requires: [vmstat]
+    privileged: false
+  compare:
+    key: busy
+    omn: raw.busy
+    tolerance: {abs: 0.03}
+    why: "the same four seconds of /proc/stat read by both: vmstat folds
+          user+nice into us and system+irq+softirq into sy, omn's busy is the
+          same sum plus steal. vmstat's first row (since boot) and omn's
+          few-ms leading window are left out. The two windows are a few ms apart,
+          which on a loaded machine is the 0.03."
+
+- source: mem.swap
+  tool: vmstat
+  use: "vmstat 1 (si: swapped in, kB/s)"
+  target: system
+  omn: [mem.swap, --system, -m, poll@1s, -e, raw, -d, 4s, --format, json]
+  reference:
+    command: [vmstat, -n, "1", "5"]
+    parse: vmstat
+    requires: [vmstat]
+    privileged: false
+  compare:
+    key: si_bytes
+    omn: raw.in_bytes
+    tolerance: {abs: 262144}
+    why: "both read pswpin from /proc/vmstat over the same four one-second
+          windows; vmstat in kB/s, omn in bytes per tick, which is per second
+          at poll@1s. 256 KiB/s absolute: a machine that is not swapping
+          agrees at zero, one that is drifts by the few ms between windows."
+
+- source: mem.swap
+  tool: vmstat
+  use: "vmstat 1 (so: swapped out, kB/s)"
+  target: system
+  omn: [mem.swap, --system, -m, poll@1s, -e, raw, -d, 4s, --format, json]
+  reference:
+    command: [vmstat, -n, "1", "5"]
+    parse: vmstat
+    requires: [vmstat]
+    privileged: false
+  compare:
+    key: so_bytes
+    omn: raw.out_bytes
+    tolerance: {abs: 262144}
+    why: "pswpout, as for si."
+
+- source: cpu.pressure
+  tool: /proc/pressure/cpu
+  use: "cat /proc/pressure/cpu twice (the share of a window some task waited for a cpu)"
+  target: system
+  workload: [python3, tests/reference/workloads/sysstat/spin.py, "6"]
+  omn: [cpu.pressure, --system, -m, poll@1s, -e, raw, -d, 4s, --format, json]
+  reference:
+    command: [sh, -c, "date +%s%N; cat /proc/pressure/cpu; sleep 4; date +%s%N; cat /proc/pressure/cpu"]
+    parse: psi_window
+    requires: [sh, date, cat]
+    privileged: false
+  compare:
+    key: some
+    omn: raw.some
+    tolerance: {abs: 0.02}
+    why: "the `some` total's increase over the same four seconds, divided by
+          the window; omn's four one-second shares averaged. Equal windows make
+          the mean of the shares the share of the whole."
+
+- source: mem.pressure
+  tool: /proc/pressure/memory
+  use: "cat /proc/pressure/memory twice (the share of a window some task stalled on memory)"
+  target: system
+  omn: [mem.pressure, --system, -m, poll@1s, -e, raw, -d, 4s, --format, json]
+  reference:
+    command: [sh, -c, "date +%s%N; cat /proc/pressure/memory; sleep 4; date +%s%N; cat /proc/pressure/memory"]
+    parse: psi_window
+    requires: [sh, date, cat]
+    privileged: false
+  compare:
+    key: some
+    omn: raw.stall_ratio
+    tolerance: {abs: 0.02}
+    why: "as for cpu: the same counter over the same four seconds."
+
+- source: io.pressure
+  tool: /proc/pressure/io
+  use: "cat /proc/pressure/io twice (the share of a window some task stalled on I/O)"
+  target: system
+  omn: [io.pressure, --system, -m, poll@1s, -e, raw, -d, 4s, --format, json]
+  reference:
+    command: [sh, -c, "date +%s%N; cat /proc/pressure/io; sleep 4; date +%s%N; cat /proc/pressure/io"]
+    parse: psi_window
+    requires: [sh, date, cat]
+    privileged: false
+  compare:
+    key: some
+    omn: raw.stall_ratio
+    tolerance: {abs: 0.02}
+    why: "as for cpu: the same counter over the same four seconds."
+
+- source: io.pressure
+  tool: /proc/pressure/io
+  use: "cat /proc/pressure/io twice (the share of a window every task stalled on I/O)"
+  target: system
+  omn: [io.pressure, --system, -m, poll@1s, -e, raw, -d, 4s, --format, json]
+  reference:
+    command: [sh, -c, "date +%s%N; cat /proc/pressure/io; sleep 4; date +%s%N; cat /proc/pressure/io"]
+    parse: psi_window
+    requires: [sh, date, cat]
+    privileged: false
+  compare:
+    key: full
+    omn: raw.full_stall_ratio
+    tolerance: {abs: 0.02}
+    why: "the `full` line's total, as for `some`."
+
+- source: cpu.util
+  tool: mpstat
+  use: "mpstat 1 (the machine's busy share, all cpus)"
+  target: system
+  workload: [python3, tests/reference/workloads/sysstat/spin.py, "8"]
+  omn: [cpu.util, --system, -m, poll@1s, -e, raw, -d, 4s, --format, json]
+  reference:
+    command: [env, LC_ALL=C, mpstat, "1", "4"]
+    parse: mpstat
+    requires: [mpstat, env]
+    privileged: false
+  compare:
+    key: all
+    omn: raw.busy
+    tolerance: {abs: 0.03}
+    why: "the same four seconds of /proc/stat; mpstat's busy is 100 minus
+          %idle and %iowait, omn's the sum of the busy states: the same
+          partition."
+
+- source: cpu.util
+  tool: iostat
+  use: "iostat -c 1 (avg-cpu: the machine's busy share)"
+  target: system
+  workload: [python3, tests/reference/workloads/sysstat/spin.py, "8"]
+  omn: [cpu.util, --system, -m, poll@1s, -e, raw, -d, 4s, --format, json]
+  reference:
+    command: [env, LC_ALL=C, iostat, -c, "1", "5"]
+    parse: iostat_cpu
+    requires: [iostat, env]
+    privileged: false
+  compare:
+    key: all
+    omn: raw.busy
+    tolerance: {abs: 0.03}
+    why: "as mpstat; iostat's first block is since boot and is left out.
+          iostat's device columns are stream io's pairs."
+
+- source: cpu.util
+  tool: sar
+  use: "sar -u 1 (the machine's busy share, live)"
+  target: system
+  workload: [python3, tests/reference/workloads/sysstat/spin.py, "8"]
+  omn: [cpu.util, --system, -m, poll@1s, -e, raw, -d, 4s, --format, json]
+  reference:
+    command: [env, LC_ALL=C, sar, -u, "1", "4"]
+    parse: sar_u
+    requires: [sar, env]
+    privileged: false
+  compare:
+    key: all
+    omn: raw.busy
+    tolerance: {abs: 0.03}
+    why: "as mpstat: sar -u reads /proc/stat the same way when run live."
