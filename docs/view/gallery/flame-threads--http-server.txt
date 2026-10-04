@@ -1,0 +1,40 @@
+omn top │ fixture http-server │ 2.84s                             view: snapshot │ collectors ≥16.1% │ target 92.0% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
+ flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
+on cpu: 2.85k · hottest own link_path_walk 6.07% │ off cpu: 5.51s · hottest own libc+0xa08f2 50.1%
+┌ off cpu sched.offcpu 5.51s ~low det degraded ────────────────────────────────────────────────────────────────────────┐
+│width ∝ time off cpu · heaviest left                                                                   26 frames deep │
+│▏all 5.51s                                                                                                            │
+│▏[python3 2758953] › ⋯13⋯ › libc+0xa08f2 50.0%             ▏[python3 2758972] › ⋯10⋯ › libpython3.14+0x1b9172 49.8%   │
+│                                                           ▏libpython3.14+0x65c00 › ⋯12⋯ › __recv 47.6%            ▏__│
+│                                                                                                                      │
+│heaviest on their own (where it ends, every path summed)                                                              │
+│ 50.1% ████████████ libc+0xa08f2                                                                                      │
+│ 49.8% ████████████ __recv                                                                                            │
+│ 0.06% ▏            __poll                                                                                            │
+│ 0.02% ▏            clock_nanosleep                                                                                   │
+│ 0.01% ▏            __read                                                                                            │
+│ 0.00% ▏            libc+0x12071d                                                                                     │
+│                                                                                                                      │
+│‼ bpf:raw_tp: user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the│
+│  task state                                                                                                          │
+│‼ names came from -- python3.14: its dynamic symbols only: its internal functions are unnamed; libc.so.6: its dynamic │
+│  symbols only: its internal functions are unnamed; libpython3.14.so.1.0: its dynamic symbols only: its internal      │
+│  functions are unnamed; _socket.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are│
+│  unnamed; select.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are unnamed       │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+off cpu ▸ all
+5.51s · 100% of all · own 0ns · 140 blocks
+⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

@@ -1,40 +1,40 @@
 [0m[1momn top[0m │ fixture sqlite-latency │ 284ms                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥4.79%[0m[35m │ target 9.78% cpu[0m [0m
  1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
-┌ flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ──────────────────────────┐[0m
-│[0m[3mNot drawn yet. What this view needs, and what this run holds of it:[0m                                                   │[0m
-│                                                                                                                      │[0m
-│[0m[1mcpu.profile              [0m[2m43 events via pmu:sw [stack][0m [0m[33m3 late[0m [0m[36m~low det[0m [0m[33mdegraded x3[0m                                     │[0m
-│[0m[2m                         the on-cpu icicle[0m                                                                            │[0m
-│[0m[1msched.offcpu             [0m[2m69 events via bpf:raw_tp [stack][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                           │[0m
-│[0m[2m                         the off-cpu icicle[0m                                                                           │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
-[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help                                                                   [0m
+[0m[1;2m flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference [0m[2m────────────────────────────[0m
+[0m[1mon cpu: [0m[2m43 · [0mhottest own [0m[1m__btrfs_check_leaf[0m[2m 6.98%[0m │ [0m[1moff cpu: [0m[2m243ms · [0mhottest own [0m[1mfdatasync[0m[2m 100%[0m                         [0m
+[0m[32m┌[0m[1;32m on cpu [0m[2;32mcpu.profile 43 [0m[33m3 late[0m[32m [0m[36m~low det[0m[32m [0m[33mdegraded x3[0m[32m ───────┐[0m[2m┌[0m[1;2m off cpu [0m[2msched.offcpu 243ms [0m[2;36m~low det[0m[2m [0m[2;33mdegraded[0m[2m ────────────┐[0m
+[0m[32m│width ∝ samples · heaviest left           [0m[2m 35 frames deep [0m[32m│[0m[2m│[0m[32mwidth ∝ time off cpu · heaviest left      [0m[2m 15 frames deep │[0m
+[0m[32m│[0m[1;2;97;42m▏all 43                                                   [0m[32m│[0m[2m│[0m[1;2;30;47m▏all › ⋯11⋯ › sqlite3+0x19a888 243ms                      [0m[2m│[0m
+[0m[32m│[0m[2;30;101m▏sqlite3+0x5f75 › ⋯7⋯ › sqlite3+0x9aa57 97.7%            [0m[2;30;43m [0m[32m│[0m[2m│[0m[2;30;46m▏sqlite3+0x6eabb 72.8%                    [0m[2;30;104m▏fdatasync 27.2%[0m[2m│[0m
+[0m[32m│[0m[2;30;101m▏sqlite3+0x99a16 93.0%                                [0m[2;30;103m▏sq[0m [0m[32m│[0m[2m│[0m[2;30;104m▏⋯fdatasync 48.3%           [0m[2;30;46m▏⋯fdatasync   [0m                [0m[2m│[0m
+[0m[32m│[0m[2;30;101m▏sqlite3+0x8ae0e › sqlite3+0x19a888 88.4%          [0m[2;30;43m▏__[0m[2;30;103m [0m[2;30;43m▏k[0m [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[2;30;103m▏sqlite3+0x6eabb 53.5%         [0m[2;30;43m▏btrfs_sync…[0m[2;30;103m▏sqlit…[0m[2;30;43m [0m[2;30;101m▏s[0m[2;30;103m [0m    [0m[32m│[0m[2m│[0m[1mheaviest on their own[0m[2m (where it ends, every path summed)[0m  [0m[2m│[0m
+[0m[32m│[0m[2;30;43m▏btrfs_sync_file[0m[2;30;103m▏btrfs_sync_fi…[0m[2;30;43m▏btr…[0m[2;30;103m▏ext[0m[2;30;101m▏bt[0m[2;30;103m▏do_[0m[2;30;101m▏vf[0m        [0m[32m│[0m[2m│  100% [0m[36m████████████[0m[2m fdatasync[0m                             [0m[2m│[0m
+[0m[32m│[0m[2;30;43m▏btrfs_sync_…[0m[2;30;101m▏b[0m[2;30;43m [0m[2;30;103m▏btrfs…[0m[2;30;43m▏btr…[0m[2;30;103m▏co[0m[2;30;43m▏wri[0m[2;30;103m [0m[2;30;101m▏_[0m[2;30;43m [0m [0m[2;30;101m▏a[0m[2;30;43m [0m[2;30;101m▏vf[0m[2;30;103m [0m[2;30;43m▏l[0m[2;30;103m [0m        [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[2;30;103m▏__btr…[0m[2;30;101m▏wri[0m[2;30;103m▏n[0m   [0m[2;30;43m▏btrf…[0m[2;30;103m [0m[2;30;101m▏bt[0m[2;30;103m▏b[0m[2;30;101m▏_[0m[2;30;103m [0m[2;30;101m▏bt[0m[2;30;43m [0m        [0m[2;30;101m▏_[0m[2;30;43m [0m            [0m[32m│[0m[2m│[0m[33m‼ [0m[2mbpf:raw_tp: user stacks only: the kernel side of a block│[0m
+[0m[32m│[0m[2;30;103m▏bt[0m[2;30;43m [0m   [0m[2;30;103m▏b[0m[2;30;101m▏c[0m[2;30;43m [0m[2;30;101m [0m   [0m[2;30;43m▏b[0m[2;30;103m [0m[2;30;43m [0m[2;30;103m▏r[0m [0m[2;30;101m [0m[2;30;43m▏b[0m[2;30;103m [0m[2;30;101m [0m   [0m[2;30;103m [0m[2;30;101m▏w[0m                        [0m[32m│[0m[2m│[0m[33m  [0m[2mis always the scheduler, and what it was waiting for is[0m [0m[2m│[0m
+[0m[32m│[0m       [0m[2;30;101m [0m[2;30;43m [0m                                                 [0m[32m│[0m[2m│[0m[33m  [0m[2mthe task state[0m                                          [0m[2m│[0m
+[0m[32m│[0m                                                          [0m[32m│[0m[2m│[0m[33m‼ [0m[2mnames came from -- sqlite3: no names: it carries no[0m     [0m[2m│[0m
+[0m[32m│[0m[1mheaviest on their own[0m[2m (where it ends, every path summed)[0m  [0m[32m│[0m[2m│[0m[33m  [0m[2mfunction symbols; libc.so.6: its dynamic symbols only:[0m  [0m[2m│[0m
+[0m[32m│[0m[2m 6.98% [0m[33m████████████[0m[2m __btrfs_check_leaf[0m                    [0m[32m│[0m[2m│[0m[33m  [0m[2mits internal functions are unnamed[0m                      [0m[2m│[0m
+[0m[32m│[0m[2m 6.98% [0m[33m████████████[0m[2m _raw_spin_unlock_irqrestore[0m           [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[2m 4.65% [0m[33m████████    [0m[2m __rcu_read_lock[0m                       [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[2m 4.65% [0m[33m████████    [0m[2m amdv1_map_range[0m                       [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m                                                          [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m‼ [0m[2mpmu:sw: time-based sampling: blind to phases running at[0m [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2mreduced frequency[0m                                       [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m‼ [0m[2m39 of 39 samples landed in a function that sets up no[0m   [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2mframe pointer (39 in libc.so.6), so the frames under the[0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2mleaf are not its callers: most of them are outside the[0m  [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2mtarget's own code, which is where the callers are lost;[0m [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2m`--stack fp+leaf` recovers the leaf's caller and[0m        [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2m`--stack dwarf` the whole chain[0m                         [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m‼ [0m[2mstacks unwound by `fp`: the caller of a function that[0m   [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2msets up no frame pointer is lost -- every frameless[0m     [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2mleaf, and whole stacks of a target built without them[0m   [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m‼ 1 more on the last line; ! lists every caveat whole[0m     [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m└──────────────────────────────────────────────────────────┘[0m[2m└──────────────────────────────────────────────────────────┘[0m
+[0m[1;32mon cpu ▸ [0m[1mall[0m                                                                                                            [0m
+[0m[2m43 samples ≈ 43.1ms · 100% of all · own 0 · 43 events[0m                                                                   [0m
+[0m[33mcpu.profile: [0m[2mnames came from -- sqlite3: no names: it carries no function symbols; ld-linux-x86-64.so.2: its dynamic sy…[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓hl[0m move  [0m[1m⏎⌫[0m zoom  [0m[1m/*[0m find  [0m[1mom[0m pane  [0m[1mt[0m split  [0m[1md[0m shape  [0m[1m![0m caveats[0m

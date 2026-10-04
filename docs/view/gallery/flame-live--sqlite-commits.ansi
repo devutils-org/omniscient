@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture sqlite-commits │ 2.48s [0m[3;34mlive[0m                        [0m[35mview: snapshot[0m │ [0m[35mcollectors and target: at the end[0m [0m
+ 1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
+[0m[1;2m flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference [0m[2m────────────────────────────[0m
+[0m[1mon cpu: [0m[2m0 so far[0m │ [0m[1moff cpu: [0m[2m253 so far[0m                                                                                  [0m
+[0m[2m┌[0m[1;2m on cpu [0m[2mcpu.profile ──────────────────────────────────────────────────────────────────────────────────────────────────┐[0m
+[0m[2m│0 samples on 0 stacks so far[0m [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegraded x5[0m                                                                [0m[2m│[0m
+[0m[2m│[0m[2;3mthe icicle is drawn when the run ends: the runner names the stacks then. Below, what arrived over time.[0m               [0m[2m│[0m
+[0m[2m│[0m                                                                                                                      [0m[2m│[0m
+[0m[2m│[0m[33m‼ [0m[2mthis recording kept `cpu.profile` as `stack` only: replayed as live it has no samples to count, where a live run[0m    [0m[2m│[0m
+[0m[2m│[0m[33m  [0m[2mhands them over as they arrive[0m                                                                                      [0m[2m│[0m
+[0m[2m│[0m[33m‼ [0m[2mpmu:sw: time-based sampling: blind to phases running at reduced frequency[0m                                           [0m[2m│[0m
+[0m[2m│[0m[33m‼ [0m[2m167 of 169 samples landed in a function that sets up no frame pointer (167 in libc.so.6), so the frames under the[0m   [0m[2m│[0m
+[0m[2m│[0m[33m  [0m[2mleaf are not its callers: most of them are outside the target's own code, which is where the callers are lost;[0m      [0m[2m│[0m
+[0m[2m│[0m[33m  [0m[2m`--stack fp+leaf` recovers the leaf's caller and `--stack dwarf` the whole chain[0m                                    [0m[2m│[0m
+[0m[2m│[0m[33m‼ [0m[2m1 frames fell in no mapping of the target and are reported by address[0m                                               [0m[2m│[0m
+[0m[2m│[0m[2;34m                                                                                                                      [0m[2m│[0m
+[0m[2m│[0m[2;34m                                                                                                                      [0m[2m│[0m
+[0m[2m│[0m[2;34m                                                                                                                      [0m[2m│[0m
+[0m[2m│[0m[2;34m                                                                                                                      [0m[2m│[0m
+[0m[2m└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[2m┌[0m[1;2m off cpu [0m[2msched.offcpu ────────────────────────────────────────────────────────────────────────────────────────────────┐[0m
+[0m[2m│253 blocks on 3 stacks so far[0m [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegraded[0m                                                                  [0m[2m│[0m
+[0m[2m│[0m[2;3mthe icicle is drawn when the run ends: the runner names the stacks then. Below, what arrived over time.[0m               [0m[2m│[0m
+[0m[2m│[0m                                                                                                                      [0m[2m│[0m
+[0m[2m│[0m[33m‼ [0m[2mbpf:raw_tp: user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the│[0m
+[0m[2m│[0m[33m  [0m[2mtask state[0m                                                                                                          [0m[2m│[0m
+[0m[2m│[0m[33m‼ [0m[2mnames came from -- sqlite3: no names: it carries no function symbols; libc.so.6: its dynamic symbols only: its[0m      [0m[2m│[0m
+[0m[2m│[0m[33m  [0m[2minternal functions are unnamed[0m                                                                                      [0m[2m│[0m
+[0m[2m│[0m[2;34m         █                                                                                                            [0m[2m│[0m
+[0m[2m│[0m[2;34m         █    ▃                                     ▃        ▃                                                        [0m[2m│[0m
+[0m[2m│[0m[2;34m         █    █    ▅   ▂         ▅    ▅   ▅    █    █        █    █    ▅    █   ▅         ▅    ▂   █    ▅    ▅        [0m[2m│[0m
+[0m[2m│[0m[2;34m         █    █    █   █         █    █   █    █    █        █    █    █    █   █         █    █   █    █    █        [0m[2m│[0m
+[0m[2m│[0m[2;34m         █    █    █   █         █    █   █    █    █        █    █    █    █   █         █    █   █    █    █    ▅   [0m[2m│[0m
+[0m[2m│[0m[2;34m▁        █    █    █   █         █    █   █    █    █        █    █    █    █   █         █    █   █    █    █    █   [0m[2m│[0m
+[0m[2m│[0m[2;34m█   ▃    █    █    █   █         █    █   █    █    █        █    █    █    █   █         █    █   █    █    █    █   [0m[2m│[0m
+[0m[2m└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+[0m[33mcpu.profile (+1 more, ! lists them): [0m[2mstacks unwound by `fp`: the caller of a function that sets up no frame pointer is …[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓hl[0m move  [0m[1m⏎⌫[0m zoom  [0m[1m/*[0m find  [0m[1mom[0m pane  [0m[1mt[0m split  [0m[1md[0m shape  [0m[1m![0m caveats[0m
