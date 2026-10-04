@@ -1,9 +1,213 @@
 //! Parsers for the `io` family's reference tools. Each turns a tool's
 //! output into the values a pair compares (BRIEF.md, "Decided before this
 //! wave").
+//!
+//! - `fio_json`: fio's `--output-format=json` report, per direction of the
+//!   first job: `read.total_ios`, `read.io_bytes`, `read.iops`,
+//!   `read.clat_mean_ns`, `read.lat_mean_ns`, `read.clat_p50_ns`,
+//!   `read.clat_p99_ns`, and the same under `write.`.
+//! - `iostat_json`: `iostat -d -x -o JSON`'s last report, per disk as
+//!   `<disk>.<column>` and summed over the disks as `all.<column>` (a mean
+//!   column such as `r_await` is weighted by the operations behind it), with
+//!   the kB/s columns also in bytes (`rB/s`, `wB/s`) and the await columns
+//!   in nanoseconds (`r_await_ns`, `w_await_ns`).
 
-use crate::common::Parser;
+use serde_json::Value;
+
+use crate::common::{Parser, Values};
 
 pub fn parsers() -> Vec<Parser> {
-    Vec::new()
+    vec![
+        Parser {
+            name: "fio_json",
+            parse: fio_json,
+        },
+        Parser {
+            name: "iostat_json",
+            parse: iostat_json,
+        },
+    ]
+}
+
+/// The JSON document in a tool's output: fio may print a warning before it
+/// when told `--output=/dev/stderr`, so the document starts at the first `{`.
+fn json_document(stdout: &str, stderr: &str) -> Result<Value, String> {
+    let text = if stdout.contains('{') { stdout } else { stderr };
+    let start = text
+        .find('{')
+        .ok_or_else(|| "no JSON document in the tool's output".to_string())?;
+    serde_json::from_str(&text[start..]).map_err(|e| format!("not JSON: {e}"))
+}
+
+fn number(v: &Value, what: &str) -> Result<f64, String> {
+    v.as_f64()
+        .ok_or_else(|| format!("`{what}` is not a number"))
+}
+
+fn fio_json(stdout: &str, stderr: &str) -> Result<Values, String> {
+    let doc = json_document(stdout, stderr)?;
+    let job = doc
+        .get("jobs")
+        .and_then(|j| j.get(0))
+        .ok_or_else(|| "fio's report has no job".to_string())?;
+    if let Some(err) = job.get("error").and_then(Value::as_i64) {
+        if err != 0 {
+            return Err(format!("fio's job failed with error {err}"));
+        }
+    }
+    let mut out = Values::new();
+    for dir in ["read", "write"] {
+        let d = job
+            .get(dir)
+            .ok_or_else(|| format!("fio's job has no `{dir}` section"))?;
+        let field = |name: &str| -> Result<f64, String> {
+            number(
+                d.get(name).unwrap_or(&Value::Null),
+                &format!("{dir}.{name}"),
+            )
+        };
+        out.push((format!("{dir}.total_ios"), field("total_ios")?));
+        out.push((format!("{dir}.io_bytes"), field("io_bytes")?));
+        out.push((format!("{dir}.iops"), field("iops")?));
+        for (span, key) in [("clat_ns", "clat"), ("lat_ns", "lat")] {
+            let mean = d.get(span).and_then(|s| s.get("mean"));
+            out.push((
+                format!("{dir}.{key}_mean_ns"),
+                number(mean.unwrap_or(&Value::Null), &format!("{dir}.{span}.mean"))?,
+            ));
+        }
+        // Percentiles are present only when the direction did any I/O.
+        if let Some(p) = d.get("clat_ns").and_then(|s| s.get("percentile")) {
+            for (pct, key) in [("50.000000", "p50"), ("99.000000", "p99")] {
+                if let Some(v) = p.get(pct).and_then(Value::as_f64) {
+                    out.push((format!("{dir}.clat_{key}_ns"), v));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn iostat_json(stdout: &str, stderr: &str) -> Result<Values, String> {
+    let doc = json_document(stdout, stderr)?;
+    let reports = doc
+        .pointer("/sysstat/hosts/0/statistics")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "iostat's report has no statistics".to_string())?;
+    // `iostat INTERVAL COUNT` prints one report per interval; the last is
+    // the one over the window the pair observed.
+    let disks = reports
+        .last()
+        .and_then(|r| r.get("disk"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "iostat's last report has no disk section".to_string())?;
+    if disks.is_empty() {
+        return Err("iostat reported no disk".to_string());
+    }
+    const SUMMED: [&str; 6] = ["r/s", "w/s", "rkB/s", "wkB/s", "aqu-sz", "f/s"];
+    // A mean per operation, weighted by the operations of the same row.
+    const WEIGHTED: [(&str, &str); 2] = [("r_await", "r/s"), ("w_await", "w/s")];
+    let mut out = Values::new();
+    let mut sums = vec![0.0; SUMMED.len()];
+    let mut weighted = [0.0; WEIGHTED.len()];
+    for disk in disks {
+        let name = disk
+            .get("disk_device")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "a disk row has no disk_device".to_string())?;
+        let col = |c: &str| -> Result<f64, String> {
+            number(disk.get(c).unwrap_or(&Value::Null), &format!("{name}.{c}"))
+        };
+        for (i, c) in SUMMED.iter().enumerate() {
+            let v = col(c)?;
+            sums[i] += v;
+            out.push((format!("{name}.{c}"), v));
+        }
+        for (i, (c, by)) in WEIGHTED.iter().enumerate() {
+            let v = col(c)?;
+            weighted[i] += v * col(by)?;
+            out.push((format!("{name}.{c}"), v));
+        }
+        out.push((format!("{name}.util"), col("util")?));
+    }
+    for (i, c) in SUMMED.iter().enumerate() {
+        out.push((format!("all.{c}"), sums[i]));
+    }
+    for (i, (c, by)) in WEIGHTED.iter().enumerate() {
+        let ops = sums[SUMMED.iter().position(|s| s == by).unwrap()];
+        let mean = if ops > 0.0 { weighted[i] / ops } else { 0.0 };
+        out.push((format!("all.{c}"), mean));
+    }
+    // Units the omn side speaks: bytes and nanoseconds.
+    let derived: Vec<(String, f64)> = out
+        .iter()
+        .filter_map(|(k, v)| {
+            if let Some(stem) = k.strip_suffix("kB/s") {
+                Some((format!("{stem}B/s"), v * 1024.0))
+            } else if k.ends_with("_await") {
+                Some((format!("{k}_ns"), v * 1e6))
+            } else {
+                None
+            }
+        })
+        .collect();
+    out.extend(derived);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIO: &str = include_str!("captures/io/fio-randread.json");
+    const IOSTAT: &str = include_str!("captures/io/iostat-dx.json");
+
+    fn get(values: &Values, key: &str) -> f64 {
+        values
+            .iter()
+            .find(|(k, _)| k == key)
+            .unwrap_or_else(|| panic!("no `{key}` in {values:?}"))
+            .1
+    }
+
+    #[test]
+    fn fio_json_reads_the_captured_randread() {
+        let v = fio_json("", FIO).unwrap();
+        assert_eq!(get(&v, "read.total_ios"), 29118.0);
+        assert_eq!(get(&v, "read.io_bytes"), 29118.0 * 4096.0);
+        assert!((get(&v, "read.clat_mean_ns") - 68329.6848).abs() < 1e-3);
+        assert!(get(&v, "read.lat_mean_ns") >= get(&v, "read.clat_mean_ns"));
+        assert!(get(&v, "read.clat_p50_ns") > 0.0);
+        assert_eq!(get(&v, "write.total_ios"), 0.0);
+    }
+
+    #[test]
+    fn fio_json_finds_the_document_after_a_warning() {
+        let noisy = format!("fio: some warning\n{FIO}");
+        let v = fio_json("", &noisy).unwrap();
+        assert_eq!(get(&v, "read.total_ios"), 29118.0);
+    }
+
+    #[test]
+    fn fio_json_refuses_what_is_not_a_report() {
+        assert!(fio_json("", "fio: file not found").is_err());
+        assert!(fio_json("{\"jobs\": []}", "").is_err());
+    }
+
+    #[test]
+    fn iostat_json_sums_disks_and_converts_units() {
+        let v = iostat_json(IOSTAT, "").unwrap();
+        assert_eq!(get(&v, "nvme0n1.r/s"), 14612.0);
+        assert_eq!(get(&v, "all.r/s"), 14612.0);
+        assert_eq!(get(&v, "all.rB/s"), 58448.0 * 1024.0);
+        assert!((get(&v, "all.r_await_ns") - 60_000.0).abs() < 1e-6);
+        assert!((get(&v, "nvme0n1.r_await_ns") - 60_000.0).abs() < 1e-6);
+        assert_eq!(get(&v, "sda.util"), 0.0);
+    }
+
+    #[test]
+    fn iostat_json_refuses_an_empty_report() {
+        assert!(iostat_json("{\"sysstat\": {\"hosts\": []}}", "").is_err());
+        assert!(iostat_json("", "").is_err());
+    }
 }
