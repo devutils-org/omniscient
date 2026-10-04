@@ -1,0 +1,213 @@
+{
+  "results": [
+    {
+      "label": "proc.exec",
+      "source": "proc.exec",
+      "unit": "count",
+      "backend": "bpf:raw_tp",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "task:203032",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203034",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203035",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203036",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203037",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203038",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203039",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203040",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203041",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203042",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203043",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203044",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203045",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203046",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203047",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203048",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203049",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203050",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203051",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            },
+            {
+              "key": "task:203052",
+              "count": 1,
+              "min": 1.0,
+              "max": 1.0,
+              "mean": 1.0,
+              "last": 1.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 20,
+      "observed_ns": 6000033269,
+      "window": {
+        "run_opened_ns": 2204689033865,
+        "opened_ns": 2204689033865,
+        "closed_ns": 2210689067134,
+        "attached": true
+      },
+      "stopped_because": "the requested duration elapsed",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "degradations": [
+        "the predicate `comm == 'true'` was applied here, over the drained records, not in the program: every exec on the machine was published and paid for, and it removed 397 and kept 20"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 16710000,
+        "attributed_cpu_ns": 16710000,
+        "observed_cpu_ns": 21640000000,
+        "observed_from": "everything but idle on every cpu (/proc/stat)",
+        "wall_ns": 6000326702,
+        "measurement_ns": 138500,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel is not timing eBPF programs on this run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable",
+        "before_window_cpu_ns": 156598000,
+        "after_window_cpu_ns": 172000
+      },
+      "served_by": [
+        "bpf:raw_tp"
+      ],
+      "value_attr": "count"
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "results": [
+    {
+      "label": "proc.syscall",
+      "source": "proc.syscall",
+      "unit": "ns",
+      "backend": "bpf:raw_tp",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "task:182344",
+              "count": 623,
+              "min": 1024.0,
+              "max": 59880.0,
+              "mean": 2248.136436597111,
+              "last": 32768.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 6,
+      "observed_ns": 31968631,
+      "window": {
+        "run_opened_ns": 2069896945482,
+        "opened_ns": 2069896945482,
+        "closed_ns": 2069928914113,
+        "attached": true
+      },
+      "stopped_because": "the launched program exited with exit status 0",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "lifetime": {
+        "released_ns": 2069896886512,
+        "exited_ns": 2069928903533,
+        "exited_err_ns": 19759180,
+        "cpu_ns": 31743000
+      },
+      "degradations": [
+        "only `openat` (257) was timed: the predicate on `syscall` was pushed into the program, so no other syscall is in these numbers at all; the program skipped 1605 calls to other syscalls without timing them",
+        "623 calls are reported as 6 rows of a kernel-side log2 histogram, each carrying the calls it stands for; `lat_ns` is its bucket's low bound, a factor of two below the next: the buckets and `min` are bucketed and `max` is a lower bound, while the sum, mean, rate, topk and stack totals come from `total_ns`, the exact sum"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 842000,
+        "attributed_cpu_ns": 842000,
+        "observed_cpu_ns": 31574300,
+        "observed_from": "the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 182344 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)",
+        "wall_ns": 42580705,
+        "measurement_ns": 40430,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel is not timing eBPF programs on this run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable",
+        "before_window_cpu_ns": 165940000,
+        "after_window_cpu_ns": 86000
+      },
+      "served_by": [
+        "bpf:raw_tp"
+      ],
+      "value_attr": "lat_ns"
+    }
+  ]
+}

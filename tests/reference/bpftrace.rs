@@ -9,6 +9,10 @@
 //! count lines by the column a pair keys on, which is the comm wherever the
 //! tool prints one, because every tool here is system-wide and the workloads
 //! name themselves (`tests/reference/workloads/bpftrace/act.py`).
+//!
+//! One parser reads `omn`'s side: `omn_hist_usecs`, a histogram's median,
+//! which `omn` does not report and a path cannot compute. Every other value
+//! `omn` holds at one place, and the pairs name it by a path.
 
 use crate::common::{Parser, Values};
 
@@ -49,6 +53,10 @@ pub fn parsers() -> Vec<Parser> {
         Parser {
             name: "tcplife",
             parse: tcplife,
+        },
+        Parser {
+            name: "omn_hist_usecs",
+            parse: omn_hist_usecs,
         },
     ]
 }
@@ -306,6 +314,47 @@ fn tcplife(stdout: &str, _stderr: &str) -> Result<Values, String> {
     Ok(values)
 }
 
+/// `omn`'s side of a latency histogram, under the keys `bpftrace_hist_usecs`
+/// gives a tool's `@usecs` map: `@usecs/count`, `@usecs/p50` (the lower
+/// bound of the bucket holding the median) and `@usecs/<low>` per non-empty
+/// bucket, all in nanoseconds, omn's unit. Every `hist` output of every
+/// result is merged, its series' buckets added by their lower bound: one
+/// series per device or task, where the tool's map is one histogram.
+fn omn_hist_usecs(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| format!("omn's output is not JSON: {e}"))?;
+    let mut merged: std::collections::BTreeMap<u64, f64> = Default::default();
+    let results = doc["results"]
+        .as_array()
+        .ok_or("no `results` array in omn's output")?;
+    for output in results
+        .iter()
+        .flat_map(|r| r["outputs"].as_array().into_iter().flatten())
+    {
+        if output["emit"] != "hist" {
+            continue;
+        }
+        for series in output["series"].as_array().into_iter().flatten() {
+            for bucket in series["buckets"].as_array().into_iter().flatten() {
+                let low = bucket["low"]
+                    .as_u64()
+                    .ok_or_else(|| format!("a bucket with no integer `low`: {bucket}"))?;
+                let count = bucket["count"]
+                    .as_f64()
+                    .ok_or_else(|| format!("a bucket with no `count`: {bucket}"))?;
+                *merged.entry(low).or_default() += count;
+            }
+        }
+    }
+    let mut values = Values::new();
+    let mut buckets: Vec<(f64, f64)> = merged.into_iter().map(|(l, c)| (l as f64, c)).collect();
+    flush_hist(&mut values, Some("@usecs"), &mut buckets);
+    if values.is_empty() {
+        return Err("no non-empty `hist` output in omn's results".into());
+    }
+    Ok(values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +493,76 @@ mod tests {
         let v = tcpconnect(&fixture("tcpconnect"), "").unwrap();
         assert_eq!(get(&v, "comm:omnref"), 3.0);
         assert_eq!(get(&v, ""), 4.0);
+    }
+
+    /// omn's real output for the pair `id`, captured on this machine with the
+    /// pair's own `omn` argv (`captures/bpftrace/omn/<id>.json`).
+    fn omn_capture(id: &str) -> String {
+        crate::common::capture("bpftrace", &format!("omn/{id}.json"))
+    }
+
+    #[test]
+    fn omn_hist_usecs_merges_every_series_and_finds_the_median() {
+        let v = omn_hist_usecs(&omn_capture("biolatency"), "").unwrap();
+        // 508 requests on two devices; the median in [32, 64) us.
+        assert_eq!(get(&v, "@usecs/count"), 508.0);
+        assert_eq!(get(&v, "@usecs/p50"), 32768.0);
+        assert_eq!(get(&v, "@usecs/4096"), 44.0);
+        let v = omn_hist_usecs(&omn_capture("runqlat"), "").unwrap();
+        assert_eq!(get(&v, "@usecs/count"), 26406.0);
+        assert_eq!(get(&v, "@usecs/p50"), 65536.0);
+    }
+
+    #[test]
+    fn omn_hist_usecs_refuses_an_output_with_no_histogram() {
+        assert!(omn_hist_usecs(&omn_capture("syscount"), "").is_err());
+        assert!(omn_hist_usecs("not json", "").is_err());
+    }
+
+    /// Every compare's `omn` side, path or parser, evaluated on the pair's
+    /// captured omn output: what the runner reads from omn where the tool
+    /// cannot run (bpftrace needs root). The numbers are what each workload
+    /// fixes, or the median omn measured here.
+    #[test]
+    fn every_omn_side_resolves_on_its_capture() {
+        let expected = [
+            ("syscount", 21216.0), // 20000 getppid and python3's startup
+            ("opensnoop", 623.0),  // 500 opens and about 120 at startup
+            ("killsnoop", 50.0),
+            ("execsnoop", 20.0),
+            ("bitesize", 504.0), // 500 O_DIRECT 4 KiB reads and the setup's
+            ("biosnoop", 508.0),
+            ("biolatency", 32768.0),
+            ("runqlat", 65536.0),
+            ("tcpconnect", 10.0),
+            ("tcplife", 20.0),
+        ];
+        let pairs = crate::runner::load("bpftrace").unwrap();
+        assert_eq!(pairs.len(), expected.len());
+        for pair in &pairs {
+            let id = pair.id.as_deref().expect("every bpftrace pair has an id");
+            let want = expected
+                .iter()
+                .find(|(i, _)| *i == id)
+                .unwrap_or_else(|| panic!("no expected value for `{id}`"))
+                .1;
+            let text = omn_capture(id);
+            for c in pair.compare.all() {
+                let got = match (&c.omn, &c.omn_parse) {
+                    (Some(path), None) => {
+                        let doc = crate::runner::parse_json(&text).unwrap();
+                        crate::runner::eval_path(&doc, path)
+                            .unwrap_or_else(|e| panic!("{id}: `{path}`: {e}"))
+                    }
+                    (None, Some(name)) => {
+                        let parser = parsers().into_iter().find(|p| p.name == name).unwrap();
+                        get(&(parser.parse)(&text, "").unwrap(), &c.key)
+                    }
+                    _ => panic!("{id}: a compare names exactly one omn side"),
+                };
+                assert_eq!(got * c.omn_scale, want, "{id}");
+            }
+        }
     }
 
     #[test]

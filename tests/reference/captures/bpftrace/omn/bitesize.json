@@ -1,0 +1,114 @@
+{
+  "results": [
+    {
+      "label": "io.size",
+      "source": "io.size",
+      "unit": "bytes",
+      "backend": "bpf:raw_tp",
+      "outputs": [
+        {
+          "emit": "hist",
+          "layout": "log2",
+          "series": [
+            {
+              "key": "dev:259+6",
+              "count": 1126,
+              "min": 4096.0,
+              "max": 131072.0,
+              "sum": 12509184.0,
+              "buckets": [
+                {
+                  "low": 4096,
+                  "high": 8192,
+                  "count": 502
+                },
+                {
+                  "low": 8192,
+                  "high": 16384,
+                  "count": 0
+                },
+                {
+                  "low": 16384,
+                  "high": 32768,
+                  "count": 622
+                },
+                {
+                  "low": 32768,
+                  "high": 65536,
+                  "count": 0
+                },
+                {
+                  "low": 65536,
+                  "high": 131072,
+                  "count": 0
+                },
+                {
+                  "low": 131072,
+                  "high": 262144,
+                  "count": 2
+                }
+              ]
+            },
+            {
+              "key": "dev:259+9",
+              "count": 2,
+              "min": 4096.0,
+              "max": 4096.0,
+              "sum": 8192.0,
+              "buckets": [
+                {
+                  "low": 4096,
+                  "high": 8192,
+                  "count": 2
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "events_seen": 1128,
+      "observed_ns": 318425761,
+      "window": {
+        "run_opened_ns": 2070308276830,
+        "opened_ns": 2070308276830,
+        "closed_ns": 2070626702591,
+        "attached": true
+      },
+      "stopped_because": "the launched program exited with exit status 0",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "lifetime": {
+        "released_ns": 2070308238809,
+        "exited_ns": 2070626694621,
+        "exited_err_ns": 8202141,
+        "cpu_ns": 62373000
+      },
+      "degradations": [
+        "a process target sees the requests submitted in its own context, which is reads; a write leaves through writeback in a kworker minutes later and carries no submitter at all, so it is absent here rather than counted as zero",
+        "the filter kept 1128 requests and removed 0; it ran here, over the drained records, not in the kernel, so the removed ones were carried up before they were dropped"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 6228000,
+        "attributed_cpu_ns": 6228000,
+        "observed_cpu_ns": 62194629,
+        "observed_from": "the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 182375 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)",
+        "wall_ns": 318691982,
+        "measurement_ns": 31970,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel is not timing eBPF programs on this run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable",
+        "before_window_cpu_ns": 170434000,
+        "after_window_cpu_ns": 101000
+      },
+      "served_by": [
+        "bpf:raw_tp"
+      ],
+      "value_attr": "bytes"
+    }
+  ]
+}

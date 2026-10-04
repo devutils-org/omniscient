@@ -1,0 +1,65 @@
+{
+  "results": [
+    {
+      "label": "net.tcp.lifetime",
+      "source": "net.tcp.lifetime",
+      "unit": "ns",
+      "backend": "bpf:raw_tp",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "system",
+              "count": 20,
+              "min": 57011.0,
+              "max": 92861.0,
+              "mean": 63492.0,
+              "last": 57011.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 20,
+      "observed_ns": 6000086156,
+      "window": {
+        "run_opened_ns": 2210860080963,
+        "opened_ns": 2210860080963,
+        "closed_ns": 2216860167119,
+        "attached": true
+      },
+      "stopped_because": "the requested duration elapsed",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "degradations": [
+        "`comm` and `pid` are the task current when the connection reached TCP_CLOSE, which is the closing process when an application closed it and is not the connection's owner when the kernel closed it from a timer or on a reset",
+        "10 of 20 connections carry no inode: a socket taken off a listen queue has no file, and therefore no inode, until `accept()` gives it one -- which is after it is established and is where this reads",
+        "20 of 20 connections carry no socket key: the kernel generates a socket cookie the first time something asks for one, and nothing ever asked for theirs, so they cannot be joined to `net.tcp.rtt` -- their inode is on the event instead",
+        "1 connection was still established when the run ended; their lifetimes have no end yet and are in no event",
+        "the filter kept 20 connections and removed 2; it ran here, over the drained records, not in the kernel"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 12774000,
+        "attributed_cpu_ns": 12774000,
+        "observed_cpu_ns": 31510000000,
+        "observed_from": "everything but idle on every cpu (/proc/stat)",
+        "wall_ns": 6000807643,
+        "measurement_ns": 189241,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel is not timing eBPF programs on this run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable",
+        "before_window_cpu_ns": 165131000,
+        "after_window_cpu_ns": 240000
+      },
+      "served_by": [
+        "bpf:raw_tp"
+      ],
+      "value_attr": "duration_ns"
+    }
+  ]
+}
