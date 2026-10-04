@@ -748,12 +748,74 @@ fn each_child_that_exits_is_named_as_the_one_that_released_the_shell() {
 ///
 /// The truth is the kernel's own table: every `irq` a wakeup carries is a
 /// line of `/proc/interrupts` with a registered handler, and every `softirq`
-/// one of the ten vectors `kernel/softirq.c` names. Whether a second of this
-/// machine has a device interrupt that wakes a task is the machine's, so the
-/// values are held to the table whatever their number and the count is
-/// reported; a timer softirq waking something in a second is asserted.
+/// one of the ten vectors `kernel/softirq.c` names.
+///
+/// Both sides are asserted to be there, not only well formed. A timer softirq
+/// wakes something in any second of a whole machine. A device interrupt waking
+/// a task is not left to the machine: the test reads a file of its own with
+/// `O_DIRECT` for the whole window, so the disk under `target/` interrupts at
+/// each completion. Which task that wakes depends on the filesystem -- on ext4
+/// the reader itself, on btrfs the kworker its read completion is queued to,
+/// woken from the nvme handler -- but either is a wakeup in hard-interrupt
+/// context with an `irq`, so `irq` never filled fails here.
 #[test]
 fn an_interrupts_wakeup_names_an_interrupt_the_kernel_numbers() {
+    // Reads that bypass the page cache, so each one is a device completion.
+    const READS: &str = "import mmap, os, sys, time
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECT)
+except OSError:
+    print('no-direct', flush=True)
+    sys.exit(0)
+buffer = mmap.mmap(-1, 4096)
+size = os.fstat(fd).st_size
+print('ready', flush=True)
+end, offset, reads = time.monotonic() + 2.0, 0, 0
+while time.monotonic() < end:
+    try:
+        os.preadv(fd, [buffer], offset)
+    except OSError:
+        print('no-direct', flush=True)
+        sys.exit(0)
+    offset = (offset + 4096) % size
+    reads += 1
+print(reads, flush=True)
+";
+    let probe = have("python3");
+    let reader = if probe {
+        let file = scratch("interrupt-direct-reads.bin");
+        {
+            use std::io::Write;
+            let mut out = std::fs::File::create(&file).expect("the scratch file");
+            out.write_all(&vec![0x5a; 4 << 20]).expect("written");
+            out.sync_all().expect("on the disk");
+        }
+        let mut child = Command::new("python3")
+            .args(["-c", READS])
+            .arg(&file)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("the reading workload should start");
+        let mut stdout = std::io::BufReader::new(child.stdout.take().expect("a piped stdout"));
+        let mut ready = String::new();
+        stdout
+            .read_line(&mut ready)
+            .expect("the workload announces itself");
+        match ready.trim() {
+            "ready" => Some((child, stdout)),
+            said => {
+                eprintln!(
+                    "this filesystem refuses O_DIRECT ({said}): the hard-interrupt side is \
+                     only held to the table"
+                );
+                let _ = child.wait();
+                None
+            }
+        }
+    } else {
+        eprintln!("no `python3`: the hard-interrupt side is only held to the table");
+        None
+    };
     let output = omn(&[
         "trace",
         "sched.wakeup",
@@ -809,6 +871,21 @@ fn an_interrupts_wakeup_names_an_interrupt_the_kernel_numbers() {
         soft > 0,
         "a second of a whole machine with no timer softirq waking anything:\n{text}"
     );
+    if let Some((mut child, mut stdout)) = reader {
+        let mut reads = String::new();
+        let _ = stdout.read_line(&mut reads);
+        let _ = child.wait();
+        let reads = reads.trim();
+        eprintln!("the direct reader completed {reads} reads");
+        assert!(
+            reads.parse::<u64>().is_ok_and(|reads| reads > 0),
+            "the direct reader did not read: {reads}"
+        );
+        assert!(
+            hard > 0,
+            "{reads} direct reads from the disk, and no wakeup named a hard interrupt:\n{text}"
+        );
+    }
 }
 
 /// Where a program blocked, not how long -- whoever started the program.
