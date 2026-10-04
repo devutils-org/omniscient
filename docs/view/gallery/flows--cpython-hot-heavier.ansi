@@ -1,10 +1,10 @@
-[0m[1momn top[0m │ fixture cpython-hot-heavier │ 7.93s                     [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥5.29%[0m[35m │ target 96.5% cpu[0m [0m
+[0m[1momn top[0m │ fixture cpython-hot-heavier │ 8.49s                     [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥7.69%[0m[35m │ target 94.5% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake [0m[1;7m 9 flows [0m 0 process                      [0m
 ┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐[0m
-│over 7.93s   [0m[32m█[0m out [0m[36m█[0m in [0m[90m█[0m the machine's                                                                               │[0m
-│[0m[1;37m network [0m[37m· [0m[1;37mnet.socket[0m[37m bpf:fentry [0m[36m~low det[0m[37m [0m[33mdegraded x2[0m[37m · [0m[1;37mnet.bytes[0m[37m fs:proc [0m[36m~low det[0m[37m [0m[33mdegraded[0m[37m ──────────────────────────[0m│[0m
+│over 8.49s   [0m[32m█[0m out [0m[36m█[0m in [0m[90m█[0m the machine's                                                                               │[0m
+│[0m[1;37m network [0m[37m· [0m[1;37mnet.socket[0m[37m bpf:fentry [0m[36m~low det[0m[37m [0m[33mdegraded x3[0m[37m · [0m[1;37mnet.bytes[0m[37m fs:proc [0m[36m~low det[0m[37m [0m[33mdegraded[0m[37m ──────────────────────────[0m│[0m
 │[0m[2;3m         thread[0m             [0m[2;3msocket[0m                                             [0m[2;3mstack[0m         [0m[2;3minterface, the machine's[0m │[0m
-│ [0m[1mno socket moved a byte[0m                                                          [0m[37m┃[0m[2;90m█████████┃[0m [0m[1mwlan0    [0m[2m47.1KiB[0m [0m[2;37m▁▁▁▁▁▄▆█[0m│[0m
+│ [0m[1mno socket moved a byte[0m                                                          [0m[37m┃[0m[2;90m█████████┃[0m [0m[1mlo       [0m[2m5.93MiB[0m [0m[2;37m█▇▂     [0m│[0m
 │ [0m[2m0 rows in this run, none with bytes[0m                                             [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
@@ -15,12 +15,12 @@
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
-│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
-│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m [0m[1mtailsca… [0m[2m1.25KiB[0m [0m[2;37m     ▅▅█[0m│[0m
-│[0m[2minterfaces 48.3KiB · 5 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces[0m                   │[0m
+│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m [0m[1mwlan0    [0m[2m 736KiB[0m [0m[2;37m▂█▂▂▁▁▂▂[0m│[0m
+│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m [0m[1mtailsca… [0m[2m 236KiB[0m [0m[2;37m█▆█▆▃▃▆█[0m│[0m
+│[0m[2minterfaces 6.88MiB · 4 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces[0m                   │[0m
 │[0m[1;37m storage [0m[37m· [0m[1;37mio.syscall[0m[37m bpf:fentry [0m[36m~low det[0m[37m [0m[33mdegraded x2[0m[37m · [0m[1;37mio.bytes[0m[37m fs:proc [0m[36m~low det[0m[37m [0m[33mdegraded[0m[37m ───────────────────────────[0m│[0m
 │[0m[2;3m         thread[0m             [0m[2;3mfile[0m                                               [0m[2;3mcache[0m         [0m[2;3mdevice, the machine's[0m    │[0m
-│ [0m[1mbytes per file: not in this run[0m                                                 [0m[37m┃[0m[2;90m█████████┃[0m [0m[1m259:0    [0m[2m4.86MiB[0m [0m[2;37m       █[0m│[0m
+│ [0m[1mbytes per file: not in this run[0m                                                 [0m[37m┃[0m[2;90m█████████┃[0m [0m[1m259:0    [0m[2m1.51GiB[0m [0m[2;37m █▂▁▁▁ ▁[0m│[0m
 │ [0m[2mio.syscall is in this run as a summary and a histogram: latency per[0m             [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │ [0m[2mthread, which carries no bytes. Its `raw` rows (per descriptor) or[0m              [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │ [0m[2mio.fs's (per file) do.[0m                                                          [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
@@ -33,7 +33,7 @@
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
-│[0m[2mdevices 4.86MiB · 2 devices idle · page-cache hits never reach a device; writes reach it later[0m                        │[0m
+│[0m[2mdevices 1.51GiB · 2 devices idle · page-cache hits never reach a device; writes reach it later[0m                        │[0m
 │[0m[2mnothing to select: no socket of the target's moved a byte; bytes per file were not measured[0m                           │[0m
 │                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m

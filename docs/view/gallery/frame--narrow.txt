@@ -1,4 +1,4 @@
-omn top │ fixture http-server │ 2.84s        view: snapshot
+omn top │ fixture http-server │ 3.24s        view: snapshot
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatma
 ┌ process -- one process at a glance: every view's essence,┐
 │Not drawn yet. What this view needs, and what this run hol│

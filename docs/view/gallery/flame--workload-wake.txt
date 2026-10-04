@@ -1,0 +1,40 @@
+omn top │ fixture workload-wake │ 280ms                           view: snapshot │ collectors ≥41.7% │ target 61.9% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+ flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
+on cpu: 197 · hottest own [vdso]+0xd4c 21.3% │ off cpu: 635ms · hottest own __read 63.4%
+┌ on cpu cpu.profile 197 5 late ~low det degraded x8 ──────┐┌ off cpu sched.offcpu 635ms ~low det degraded x2 ─────────┐
+│width ∝ samples · heaviest left            98 frames deep ││width ∝ time off cpu · heaviest left       15 frames deep │
+│▏all › ⋯3⋯ › Py_BytesMain 194                             ││▏all › ⋯10⋯ › libpython3.14+0x1b9172 635ms                │
+│▏Py_RunMain 94.4%                                      ▏P ││▏⋯__read 62.6%                      ▏⋯wait4 36.4%         │
+│▏⋯libpython3.14+0x1b9172 85.8%                    ▏l▏l    ││                                                          │
+│▏libpython3.14+0x69935 49.2% ▏lib…                        ││heaviest on their own (where it ends, every path summed)  │
+│▏PyTime_PerfCoun…▏Py▏Py▏P                                 ││ 63.4% ████████████ __read                                │
+│▏__clock_gett…                                            ││ 36.5% ███████      wait4                                 │
+│▏+0xd4c                                                   ││ 0.08% ▏            vfork                                 │
+│                                                          ││                                                          │
+│heaviest on their own (where it ends, every path summed)  ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
+│ 21.3% ████████████ [vdso]+0xd4c                          ││  is always the scheduler, and what it was waiting for is │
+│ 10.7% ██████       PyTime_AsSecondsDouble                ││  the task state                                          │
+│ 3.55% ██           PyFloat_FromDouble                    ││‼ 1 blocks ended without this run having seen the wakeup  │
+│ 3.55% ██           PyTime_PerfCounter                    ││  that released them, so their `wake_to_run_ns` is zero   │
+│ 2.03% █            __tls_get_addr                        ││  because it is unknown rather than because there was no  │
+│ 1.52% █            [vdso]+0xd88                          ││  wait: the task was woken before the programs attached,  │
+│ 1.52% █            __clock_gettime                       ││  or by a path that does not raise `sched_wakeup`         │
+│                                                          ││‼ names came from -- python3.14: its dynamic symbols only:│
+│‼ pmu:sw: time-based sampling: blind to phases running at ││  its internal functions are unnamed; libc.so.6: its      │
+│  reduced frequency                                       ││  dynamic symbols only: its internal functions are        │
+│‼ 1 frames fell in no mapping of the target and are       ││  unnamed; libpython3.14.so.1.0: its dynamic symbols only:│
+│  reported by address                                     ││  its internal functions are unnamed;                     │
+│‼ 13 of 18 samples landed in a function that sets up no   ││  _posixsubprocess.cpython-314-x86_64-linux-gnu.so: its   │
+│  frame pointer (9 in libpython3.14.so.1.0, 2 in          ││  dynamic symbols only: its internal functions are unnamed│
+│  ld-linux-x86-64.so.2, 2 in libc.so.6), so the frames    ││                                                          │
+│  under the leaf are not its callers: most of them are    ││                                                          │
+│  outside the target's own code, which is where the       ││                                                          │
+│  callers are lost; `--stack fp+leaf` recovers the leaf's ││                                                          │
+│  caller and `--stack dwarf` the whole chain              ││                                                          │
+│‼ 6 more on the last line; ! lists every caveat whole     ││                                                          │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+on cpu ▸ Py_BytesMain  the last of 5 frames called in one chain from all
+194 samples ≈ 195ms · 98.5% of all · own 0 · 194 events
+cpu.profile (+5 more, ! lists them): 9 of 13 samples landed in a function that sets up no frame pointer (6 in libpython…
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

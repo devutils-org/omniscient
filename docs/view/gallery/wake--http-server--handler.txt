@@ -1,35 +1,35 @@
-omn top │ fixture http-server │ 2.84s │ focus: tid 2758974        view: snapshot │ collectors ≥16.1% │ target 92.0% cpu
+omn top │ fixture http-server │ 3.24s │ focus: tid 1493226        view: snapshot │ collectors ≥24.3% │ target 90.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐
-│29 late ~low det degraded  220 wakeups of 9 threads -- from a task 26.4%, hardirq 3.18%, softirq 70.5%, in 2.84s      │
+│50 late ~low det degraded  205 wakeups of 12 threads -- from a task 27.8%, hardirq 3.41%, softirq 68.8%, in 3.24s     │
 │                                                                                                                      │
 │woken thread      wakes  mostly by      woken thread      wakes  mostly by      woken thread      wakes  mostly by    │
-│python3 2758972     176  softirq   86%  tailscaled 1055       5  python3   60%  tailscaled 1024       1  python3  100%│
-│python3 2758953      18  Thread-…  56%  tailscaled 3898       4  ldconfig  50%  tailscaled 1062       1  python3  100%│
-│Thread-1… 2758974    12  python3   75%  migration/1 26        2  python3  100%  systemd 1221          1  python3  100%│
-│6 dimmed: outside the target, woken by it                                                                             │
+│python3 1493224     160  softirq   86%  tailscaled 1266       3  python3   67%  ksoftirqd/9 75        1  python3  100%│
+│python3 1493220      16  hardirq   38%  tailscal… 1374244     2  python3   50%  ksoftirqd/13 101      1  Thread-… 100%│
+│Thread-1… 1493226    15  python3   67%  migration/0 20        1  Thread-… 100%  ksoftirqd/14 107      1  Thread-… 100%│
+│tailscaled 1060       3  ldconfig  67%  migration/8 68        1  python3  100%  tailscaled 984        1  python3  100%│
+│9 dimmed: outside the target, woken by it                                                                             │
 │                                                                                                                      │
-│Thread-1 (proce 2758974 (pid 2758953) was woken 12 times, 4.22/s                                                      │
+│Thread-1 (proce 1493226 (pid 1493220) was woken 15 times, 4.63/s                                                      │
 │<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         │
-│├─ python3 2758953                                        9   75%   48.6µs   39.2µs   7.34ms  ▂   ▂    ▂   ▂   ▂   ▂ ▆│
-││  ├─ Thread-1 (proce 2758974  ↺ back on the chain        6   50%   27.8µs    249ms    501ms  ▂   ▂                ▂ ▆│
-││  └─ hardirq  a device                                   3   25%    501ms       --       --           ▂   ▂   ▂      │
-│├─ softirq  a device, or a loopback send                  2   17%    111ms       --       --   ▂▂                     │
-│└─ hardirq  a device                                      1    8%   5.07ms       --       --                         ▂│
+│├─ python3 1493220                                       10   67%    252ms   64.0µs   15.6ms  ▂   ▂  ▂   ▂   ▂   ▂  ▂▆│
+││  ├─ hardirq  a device                                   6   40%    501ms       --       --      ▂  ▂   ▂   ▂   ▂  ▂ │
+││  └─ Thread-1 (proce 1493226  ↺ back on the chain        4   27%   83.1µs    128ms    128ms  ▂                      ▆│
+│├─ softirq  a device, or a loopback send                  3   20%    129ms       --       --   ▂▂                 ▂   │
+│├─ tid 1400047  outside the target: stops                 1    7%   50.8ms       --       --             ▂            │
+│└─ hardirq  a device                                      1    7%   5.07ms       --       --                         ▂│
 │                                                                                                                      │
 │woken at      held   the longest chains, link by link: each waker and its hold                                        │
-│+2.57s       501ms   <- python3 2758953 32.5µs  <- Thread-1 (proce 2758974 501ms ↺                                    │
-│+566ms       273ms   <- python3 2758953 23.8µs  <- Thread-1 (proce 2758974 273ms ↺                                    │
-│+2.82s       257ms   <- python3 2758953 7.34ms  <- Thread-1 (proce 2758974 249ms ↺  x3                                │
-│+1.57s      41.4µs   <- python3 2758953 41.4µs  <- hardirq                                                            │
-│+2.07s      39.2µs   <- python3 2758953 39.2µs  <- hardirq                                                            │
-│+1.07s      30.5µs   <- python3 2758953 30.5µs  <- hardirq                                                            │
-│+65.0ms     21.3µs   <- python3 2758953 21.3µs  <- Thread-1 (proce 2758974 ↺                                          │
+│+3.22s       144ms   <- python3 1493220 15.6ms  <- Thread-1 (proce 1493226 128ms ↺  x3                                │
+│+3.07s       200µs   <- python3 1493220 200µs  <- hardirq                                                             │
+│+2.57s      77.5µs   <- python3 1493220 77.5µs  <- hardirq                                                            │
+│+2.07s      64.0µs   <- python3 1493220 64.0µs  <- hardirq                                                            │
+│+568ms      57.5µs   <- python3 1493220 57.5µs  <- hardirq                                                            │
+│+1.57s      48.9µs   <- python3 1493220 48.9µs  <- hardirq                                                            │
+│+1.07s      46.6µs   <- python3 1493220 46.6µs  <- hardirq                                                            │
+│+67.7ms     29.5µs   <- python3 1493220 29.5µs  <- Thread-1 (proce 1493226 ↺                                          │
 │                                                                                                                      │
-│-> it woke in turn: python3 2758953 x10, tailscaled 1055 x1                                                           │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
+│-> it woke in turn: python3 1493220 x5, migration/0 20 x1, ksoftirqd/13 101 x1, ksoftirqd/14 107 x1, and 1 more       │
 │                                                                                                                      │
 │quiet: the woken thread's time with no sign of life in the run (no wakeup received or issued) before this one -- an   │
 │upper bound: it was blocked no longer than this. hold: the waker's time from its own wakeup to the one it issued --   │

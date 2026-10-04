@@ -1,0 +1,40 @@
+omn top │ fixture workload-timebar │ 3.28s                        view: snapshot │ collectors ≥14.7% │ target 35.9% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐
+│sched.switches 484 48 late ~low det degraded x2  sched.wakeup 121 47 late ~low det degraded  sched.offcpu 16 ~low det │
+│degraded x2  gpu.kernel 0 46 late degraded                                                                            │
+│39.5ms a cell          ╷0ns        ╷500ms       ╷1.00s      ╷1.50s       ╷2.00s       ╷2.50s      ╷3.00s   of the span│
+│timebar-main   1525319│███▅                                                               ▁              ▁│awake 4.41%│
+│              off cpu │   ▄██████████████████████████████████████████████████████████████████████████████▅│ blkd 95.1%│
+│worker         1525671│   ▅████████████████████████▁         ▁         ▁▁████████████████▇                │awake 50.1%│
+│              off cpu │   ▁                        ██████████████████████                ▂▃               │ blkd 26.9%│
+│holder         1526045│                                      ───────────                                  │awake 0.00%│
+│──────────────────────────────────────────────────────────▲ 1.40s─────────────────────────────────────────────────────│
+│timebar-main 1525319 (pid 1525319) at 1.40s: blocked, sleeping 2.51s, 145ms → 2.66s, left cpu 1                       │
+│  woken by worker 1525671, then queued 1.83ms for a cpu; its sched.offcpu row is this block alone                     │
+│  in libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← PyEvent_WaitTimed ← libpython3.14.so.1.0 x4 ← …          │
+│  61 switch-outs and 7 wakeups seen; awake 4.41% of the run                                                           │
+│  meanwhile blocked: worker 1525671                                                                                   │
+│  where it was off a cpu over the run, 3.12s in all (sched.offcpu, by state and stack) ~low det degraded x2:          │
+│     2.52s 80.6% sleeping      1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …                    │
+│     601ms 19.2% sleeping      1 blocks  libc.so.6 ← libpython3.14.so.1.0 x2 ← …                                      │
+│    5.06ms 0.16% sleeping      1 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …             │
+│     466µs 0.01% sleeping      1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …                    │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│▆ awake: on a cpu or queued  ─ blocked  ━ uninterruptible  ▆ kernel  ▆ copy  height: share of the cell                │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ lane  h/l H/L cursor  [/] prev/next change  z/Z zoom  w to wa

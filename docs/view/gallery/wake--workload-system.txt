@@ -1,0 +1,40 @@
+omn top │ fixture workload-system │ 2.01s                         view: snapshot │ collectors ≥14.2% │ target 90.5% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐
+│21 late ~low det degraded  147 wakeups of 10 threads -- from a task 14.3%, hardirq 4.08%, softirq 81.6%, in 2.01s     │
+│                                                                                                                      │
+│woken thread      wakes  mostly by      woken thread      wakes  mostly by      woken thread      wakes  mostly by    │
+│Thread-1… 1529839   119  softirq  100%  kworker/8:1H 459      1  system-… 100%  gmain 1128318         1  system-… 100%│
+│system-m… 1529755    19  hardirq   32%  kworker/21:1H 463     1  system-… 100%  omn 1529007           1  system-… 100%│
+│tailscaled 1026       2  system-…  50%  tailscaled 966        1  system-… 100%                                        │
+│migration/3 38        1  system-… 100%  tailscaled 1266       1  system-… 100%                                        │
+│8 dimmed: outside the target, woken by it                                                                             │
+│                                                                                                                      │
+│Thread-1 (drain 1529839 (pid 1529755) was woken 119 times, 59.12/s                                                    │
+│<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         │
+│└─ softirq  a device, or a loopback send                119  100%   19.2µs       --       --                  █       │
+│                                                                                                                      │
+│-> it woke in turn: system-main 1529755 x4                                                                            │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│quiet: the woken thread's time with no sign of life in the run (no wakeup received or issued) before this one -- an   │
+│upper bound: it was blocked no longer than this. hold: the waker's time from its own wakeup to the one it issued --   │
+│how long the chain sat with it. A chain stops at an interrupt, at a thread already on it, or at a waker whose own     │
+│wakeup the run did not see. A softirq may be a loopback send served in its sender's context: the sender is not named. │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ thread  +/- chain depth  enter focus it, then its lanes  l it

@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture workload-wake │ 280ms                           [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥41.7%[0m[35m │ target 61.9% cpu[0m [0m
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes [0m[1;7m 8 wake [0m 9 flows  0 process                      [0m
+┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐[0m
+│[0m[33m5 late[0m [0m[36m~low det[0m  [0m[2m958 wakeups of 22 threads -- from a task 100%, in 280ms[0m                                              │[0m
+│                                                                                                                      │[0m
+│[0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m│[0m
+│[0m[1;7mrelay-a 1527172  [0m[2m   300  relay-c  100%[0m  [0m[2mmigration/23 160      4  relay-c   75%[0m  [0m[2mmigration/20 142      2  relay-a   50%[0m│[0m
+│relay-b 1527173  [0m[2m   299  relay-a  100%[0m  [0m[2mtailscaled 984        4  wake-ma…  25%[0m  [0m[2mtailscaled 966        2  relay-b   50%[0m│[0m
+│relay-c 1527174  [0m[2m   299  relay-b  100%[0m  [0m[2mmigration/3 38        3  relay-c   67%[0m  [0m[2mrcu_exp_gp_kt… 19     1  wake-ma… 100%[0m│[0m
+│wake-main 1527161[0m[2m     6  relay-a   33%[0m  [0m[2mmigration/11 86       3  relay-a   33%[0m  [0m[2mmigration/5 50        1  relay-a  100%[0m│[0m
+│[0m[2mmigration/7 62       11  relay-a   45%[0m  [0m[2mmigration/19 136      3  wake-ma…  33%[0m  [0m[2mksoftirqd/7 63        1  wake-ma… 100%[0m│[0m
+│[0m[2mmigration/8 68        7  relay-b   43%[0m  [0m[2mmigration/22 154      3  relay-a   33%[0m  [0m[2mmigration/12 92       1  relay-a  100%[0m│[0m
+│[0m[2mmigration/6 56        4  relay-b   50%[0m  [0m[2mmigration/9 74        2  relay-b   50%[0m  [0m[2mmigration/18 130      1  relay-c  100%[0m│[0m
+│[0m[2;3mthreads 1-21 of 22, ↑/↓ to move; 18 dimmed: outside the target, woken by it[0m                                           │[0m
+│                                                                                                                      │[0m
+│[0m[1;32mrelay-a 1527172[0m[2m was woken 300 times, 1.07k/s[0m                                                                          │[0m
+│[0m[2;4m<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         [0m│[0m
+│[0m[2m└─ [0m[1mrelay-c 1527174[0m[2m  its wakeup unseen x1[0m             [0m[2m   300  100%    431µs    215µs    395µs[0m  [0m[2;32m     ▆████████████████▁ [0m│[0m
+│[0m[2m   └─ [0m[1mrelay-b 1527173[0m                                [0m[2m   299  100%    431µs    215µs    297µs[0m  [0m[2;32m     ▅████████████████▁ [0m│[0m
+│[0m[2m      └─ [0m[1mrelay-a 1527172[0m[2m  ↺ back on the chain[0m        [0m[2m   299  100%    430µs    215µs    451µs[0m  [0m[2;32m     ▅████████████████▁ [0m│[0m
+│                                                                                                                      │[0m
+│[0m[2;4mwoken at      held   the longest chains, link by link: each waker and its hold                                        [0m│[0m
+│[0m[2m+68.1ms  [0m[1;2m    924µs[0m [0m[2m  <- [0mrelay-c 1527174[0m[2;32m 240µs[0m[2m  <- [0mrelay-b 1527173[0m[2;32m 234µs[0m[2m  <- [0mrelay-a 1527172[0m[2;32m 451µs[0m[2m ↺[0m                   │[0m
+│[0m[2m+181ms   [0m[1;2m    866µs[0m [0m[2m  <- [0mrelay-c 1527174[0m[2;32m 395µs[0m[2m  <- [0mrelay-b 1527173[0m[2;32m 256µs[0m[2m  <- [0mrelay-a 1527172[0m[2;32m 215µs[0m[2m ↺[0m                   │[0m
+│[0m[2m+157ms   [0m[1;2m    771µs[0m [0m[2m  <- [0mrelay-c 1527174[0m[2;32m 235µs[0m[2m  <- [0mrelay-b 1527173[0m[2;32m 297µs[0m[2m  <- [0mrelay-a 1527172[0m[2;32m 239µs[0m[2m ↺[0m                   │[0m
+│[0m[2m+158ms   [0m[1;2m    735µs[0m [0m[2m  <- [0mrelay-c 1527174[0m[2;32m 235µs[0m[2m  <- [0mrelay-b 1527173[0m[2;32m 222µs[0m[2m  <- [0mrelay-a 1527172[0m[2;32m 278µs[0m[2m ↺[0m                   │[0m
+│[0m[2m+246ms   [0m[1;2m    715µs[0m [0m[2m  <- [0mrelay-c 1527174[0m[2;32m 218µs[0m[2m  <- [0mrelay-b 1527173[0m[2;32m 212µs[0m[2m  <- [0mrelay-a 1527172[0m[2;32m 285µs[0m[2m ↺[0m                   │[0m
+│[0m[2m+112ms   [0m[1;2m    701µs[0m [0m[2m  <- [0mrelay-c 1527174[0m[2;32m 219µs[0m[2m  <- [0mrelay-b 1527173[0m[2;32m 233µs[0m[2m  <- [0mrelay-a 1527172[0m[2;32m 249µs[0m[2m ↺[0m                   │[0m
+│[0m[2m+161ms   [0m[1;2m    698µs[0m [0m[2m  <- [0mrelay-c 1527174[0m[2;32m 225µs[0m[2m  <- [0mrelay-b 1527173[0m[2;32m 251µs[0m[2m  <- [0mrelay-a 1527172[0m[2;32m 222µs[0m[2m ↺[0m                   │[0m
+│[0m[2m+127ms   [0m[1;2m    696µs[0m [0m[2m  <- [0mrelay-c 1527174[0m[2;32m 219µs[0m[2m  <- [0mrelay-b 1527173[0m[2;32m 226µs[0m[2m  <- [0mrelay-a 1527172[0m[2;32m 251µs[0m[2m ↺[0m                   │[0m
+│[0m[2m+62.7ms  [0m[1;2m    694µs[0m [0m[2m  <- [0mrelay-c 1527174[0m[2;32m 221µs[0m[2m  <- [0mrelay-b 1527173[0m[2;32m 233µs[0m[2m  <- [0mrelay-a 1527172[0m[2;32m 240µs[0m[2m ↺[0m                   │[0m
+│                                                                                                                      │[0m
+│[0m[1m-> it woke in turn: [0mrelay-b 1527173[0m[2m x299[0m, migration/7 62[0m[2m x5[0m, wake-main 1527161[0m[2m x2[0m, migration/5 50[0m[2m x1, and 8 more[0m      │[0m
+│[0m[1;2mquiet[0m[2m: the woken thread's time with no sign of life in the run (no wakeup received or issued) before this one -- an[0m   │[0m
+│[0m[2mupper bound: it was blocked no longer than this. [0m[1;2mhold[0m[2m: the waker's time from its own wakeup to the one it issued --[0m   │[0m
+│[0m[2mhow long the chain sat with it. A chain stops at an interrupt, at a thread already on it, or at a waker whose own[0m     │[0m
+│[0m[2mwakeup the run did not see. A softirq may be a loopback send served in its sender's context: the sender is not named.[0m │[0m
+│                                                                                                                      │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m thread  [0m[1m+/-[0m chain depth  [0m[1menter[0m focus it, then its lanes  [0m[1ml[0m it[0m

@@ -1,0 +1,40 @@
+omn top │ fixture vertical-abandoned │ 184ms                      view: snapshot │ collectors ≥0.55% │ target 1.44% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────┐
+│2 requests served by server (pid 1504066) · slowest a002 5.12ms · median 5.12ms · in order of arrival  degraded x5    │
+│  1 ≥: a network side unknown  in no event, not drawn: 1 never ended (req:a001 in task 1504066, 1 replaced by a later │
+│  req      span  its life by state, to one scale: the slowest is 5.12ms             mostly                            │
+│▶ a002   5.12ms  █▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  lock/sleep 98.7%                  │
+│  a003  ≥51.8µs  █                                                                  on cpu 42.3µs · net in 9.53µs     │
+│  ░░ net in   ██ on cpu   ▓▓ run queue   ▀▀ lock/sleep   ▄▄ disk   ░░ net out                                         │
+│                                                                                                                      │
+│── a002 · 5.12ms from its first byte in to its last byte out · thread 1504066 ────────────────────────────────────────│
+│            ┊0          ┊1.00ms      ┊2.00ms      ┊3.00ms      ┊4.00ms                                                │
+│  net in    ░                                                                   24.5µs before start                   │
+│  serving   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  5.09ms from start to done             │
+│  on device                                                                     io.latency not in this run            │
+│  net out                                                                       gone when done                        │
+│  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order                 │
+│                                                                                                                      │
+│  where its 5.12ms went              evidence                       its share of each resource                        │
+│  ░ net in       24.5µs   0.48% ▏             by socket 113623      cpu        31.1µs: 1.11% of the 2.79ms server took│
+│  █ on cpu       31.1µs   0.61% ▏                                              off cpu 2 times, preempted 0           │
+│  ▓ run queue    8.98µs   0.18% ▏                                   disk       io.latency not in this run: its block  │
+│  ▀ lock/sleep   5.05ms   98.7% ▀▀▀▀          woken by tid 1504067  requests are unknown                              │
+│  ▄ disk              ·                                             network    in 24.5µs · out 0ns                    │
+│  ░ net out           ·                                             lock/sleep longest 5.05ms, woken by tid 1504067   │
+│  no decomposition in this run: the evidence is not graded                                                            │
+│                                                                                                                      │
+│                                                                                                                      │
+│  what sets it apart from the other 1 request: ▀ lock/sleep +5.05ms (theirs 0ns)                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ request  s sort  enter focus it, then its lanes  l its thread

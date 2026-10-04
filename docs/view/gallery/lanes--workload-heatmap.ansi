@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture workload-heatmap │ 1.96s                        [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥11.4%[0m[35m │ target 4.07% cpu[0m [0m
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  9 flows  0 process                      [0m
+┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐[0m
+│[0m[1msched.switches [0m[2m673[0m [0m[33m20 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m  [0m[1msched.wakeup [0m[2m1.98k[0m [0m[33m20 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.offcpu [0m[2m88[0m [0m[36m~low[0m   │[0m
+│[0m[36mdet[0m [0m[33mdegraded[0m  [0m[1mgpu.kernel [0m0 [0m[33m23 late[0m [0m[33mdegraded[0m                                                                           │[0m
+│[0m[2m23.6ms a cell[0m          [0m[2m╷0ns[0m                 [0m[2m╷500ms[0m               [0m[2m╷1.00s[0m               [0m[2m╷1.50s[0m               [0m[2mof the span[0m│[0m
+│[0m[1;7mheatmap-main   1528232[0m[2m│[0m[2;32m█▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m[2m     [0m[2;7m [0m[2m      [0m[2;32m▁[0m[2m│awake 2.96%[0m│[0m
+│[0m[2m              off cpu │ [0m[2;34m▆█████████████████████████████████████████████████████████████████████████[0m[2;7;34m█[0m[2;34m██████▂[0m[2m│ blkd 96.1%[0m│[0m
+│[0m[2m──────────────────────────────────────────────────────────────────────────────────────────────────[0m[2;32m▲ 1.79s[0m[2m─────────────[0m│[0m
+│[0m[1mheatmap-main 1528232 (pid 1528232) at 1.79s: [0m[2;34mblocked, sleeping[0m[2m 300ms, 1.64s → 1.94s, left cpu 5[0m                       │[0m
+│  woken by [0m[1man interrupt (hardirq)[0m[2m, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone[0m │[0m
+│[0m[2m  in [0m[2;34mclock_nanosleep ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← libpython3.14.so.1.0 x4 ← Py_RunMain ← …[0m           │[0m
+│[0m[2m  673 switch-outs and 655 wakeups seen; awake 2.96% of the run[0m                                                        │[0m
+│[0m[2m  where it was off a cpu over the run, 1.89s in all (sched.offcpu, by state and stack)[0m [0m[36m~low det[0m [0m[33mdegraded[0m[2m:[0m             │[0m
+│  [0m[2m   1.56s 82.3%[0m [0m[2;34msleeping  [0m[2m  649 blocks  __recv ← _socket.cpython-314-x86_64-linux-gnu.so x4 ← …[0m                      │[0m
+│  [0m[2m   300ms 15.9%[0m [0m[2;34msleeping  [0m[2m    1 blocks  clock_nanosleep ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m              │[0m
+│  [0m[2m  28.9ms 1.53%[0m [0m[2;34msleeping  [0m[2m    1 blocks  accept4 ← _socket.cpython-314-x86_64-linux-gnu.so x2 ← …[0m                     │[0m
+│  [0m[2m  4.70ms 0.25%[0m [0m[2;34msleeping  [0m[2m    1 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m                        │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│[0m[32m▆[0m awake: on a cpu or queued  [0m[34m─[0m blocked  [0m[33m━[0m uninterruptible  [0m[35m▆[0m kernel  [0m[36m▆[0m copy  [0m[2mheight: share of the cell[0m                │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m lane  [0m[1mh/l H/L[0m cursor  [0m[1m[/][0m prev/next change  [0m[1mz/Z[0m zoom  [0m[1mw[0m to wa[0m

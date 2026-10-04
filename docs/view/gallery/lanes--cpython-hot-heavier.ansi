@@ -1,18 +1,18 @@
-[0m[1momn top[0m │ fixture cpython-hot-heavier │ 7.93s                     [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥5.29%[0m[35m │ target 96.5% cpu[0m [0m
+[0m[1momn top[0m │ fixture cpython-hot-heavier │ 8.49s                     [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥7.69%[0m[35m │ target 94.5% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  9 flows  0 process                      [0m
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐[0m
-│[0m[1msched.switches [0m[2m1.03k[0m [0m[33m79 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.wakeup [0m[2m4[0m [0m[33m79 late[0m [0m[36m~low det[0m  [0m[1msched.offcpu [0m[2m0[0m [0m[36m~low det[0m [0m[33mdegraded[0m     │[0m
-│[0m[1mgpu.kernel [0m[31mrefused[0m                                                                                                    │[0m
-│[0m[2m95.6ms a cell[0m          [0m[2m╷0ns[0m                [0m[2m╷2.00s[0m               [0m[2m╷4.00s[0m               [0m[2m╷6.00s[0m                [0m[2mof the span[0m│[0m
-│[0m[1;7mpython3        2779622[0m[2m│[0m[2;32m█████████████████████████████████████████[0m[2;7;32m█[0m[2;32m████████████████████████████████████████▆[0m[2m│awake 99.7%[0m│[0m
+│[0m[1msched.switches [0m[2m296[0m [0m[33m89 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.wakeup [0m[2m4[0m [0m[33m89 late[0m [0m[36m~low det[0m  [0m[1msched.offcpu [0m[2m0[0m [0m[36m~low det[0m [0m[33mdegraded[0m       │[0m
+│[0m[1mgpu.kernel [0m0 [0m[33m89 late[0m [0m[33mdegraded[0m                                                                                         │[0m
+│[0m[2m102ms a cell[0m           [0m[2m╷0ns[0m               [0m[2m╷2.00s[0m              [0m[2m╷4.00s[0m             [0m[2m╷6.00s[0m                    [0m[2mof the span[0m│[0m
+│[0m[1;7mpython3        1492174[0m[2m│[0m[2;32m█████████████████████████████████████████[0m[2;7;32m█[0m[2;32m███████████████████████████████████████▆[0m[2m │awake 98.5%[0m│[0m
 │[0m[2m              off cpu │                                         [0m[2;7m [0m[2m                                         │ blkd 0.00%[0m│[0m
-│[0m[31m┌ gpu.kernel refused ────────────────────────────────────────────────────────────────────────────────────────────────┐[0m│[0m
-│[0m[31m│gpu.kernel was not served:[0m                                                                                          [0m[31m│[0m│[0m
-│[0m[31m│[0mno collector is written for `gpu.kernel` on backend `vendor:cupti` yet                                              [0m[31m│[0m│[0m
-│[0m[31m└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m│[0m
-│[0m[2m────────────────────────────────────────────────────────────────[0m[2;32m▲ 3.97s[0m[2m───────────────────────────────────────────────[0m│[0m
-│[0m[1mpython3 2779622 (pid 2779622) at 3.97s: [0m[2;32mawake[0m[2m 7.91s, 0ns → 7.91s[0m, on a cpu or queued for one                          │[0m
-│[0m[2m  1027 switch-outs and 1 wakeups seen; awake 99.7% of the run[0m                                                         │[0m
+│[0m[2m────────────────────────────────────────────────────────────────[0m[2;32m▲ 4.24s[0m[2m───────────────────────────────────────────────[0m│[0m
+│[0m[1mpython3 1492174 (pid 1492174) at 4.24s: [0m[2;32mawake[0m[2m 8.36s, 0ns → 8.36s[0m, on a cpu or queued for one                          │[0m
+│[0m[2m  296 switch-outs and 1 wakeups seen; awake 98.5% of the run[0m                                                          │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

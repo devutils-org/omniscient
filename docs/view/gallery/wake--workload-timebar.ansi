@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture workload-timebar │ 3.28s                        [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥14.7%[0m[35m │ target 35.9% cpu[0m [0m
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes [0m[1;7m 8 wake [0m 9 flows  0 process                      [0m
+┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐[0m
+│[0m[33m47 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m121 wakeups of 13 threads -- from a task 96.7%, hardirq 3.31%, in 3.28s[0m                    │[0m
+│                                                                                                                      │[0m
+│[0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m│[0m
+│[0m[1;7mworker 1525671   [0m[2m     9  holder    44%[0m  [0m[2mrcu_exp_gp_kt… 19    24  worker    54%[0m  [0m[2mmigration/23 160      1  worker   100%[0m│[0m
+│python3 1525319  [0m[2m     7  worker    57%[0m  [0m[2mrcub/2 96             6  worker    83%[0m  [0m[2mtailscaled 1024       1  rival    100%[0m│[0m
+│holder 1526045   [0m[2m     1  hardirq  100%[0m  [0m[2mtailscaled 1055       2  python3   50%[0m  [0m[2mtailscaled 1026       1  python3  100%[0m│[0m
+│[0m[2mrcub/1 17            35  rival     57%[0m  [0m[2mmigration/8 68        1  python3  100%[0m                                        │[0m
+│[0m[2mrcu_preempt 16       32  worker    59%[0m  [0m[2mmigration/19 136      1  rival    100%[0m                                        │[0m
+│[0m[2;3m10 dimmed: outside the target, woken by it[0m                                                                            │[0m
+│                                                                                                                      │[0m
+│[0m[1;32mworker 1525671[0m (pid 1525319)[0m[2m was woken 9 times, 2.74/s[0m                                                                │[0m
+│[0m[2;4m<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         [0m│[0m
+│[0m[2m├─ [0m[1mholder 1526045[0m[2m  its wakeup unseen x1[0m              [0m[2m     4   44%    132µs    179µs    310µs[0m  [0m[2;32m           ▂ ▆          [0m│[0m
+│[0m[2m│  └─ [0m[36mhardirq[0m[2m  a device[0m                              [0m[2m     3   33%    400ms       --       --[0m  [0m[2;32m             ▆          [0m│[0m
+│[0m[2m├─ [0m[1mrival 1526152[0m[2m  its wakeup unseen[0m                  [0m[2m     3   33%   25.9ms       --       --[0m  [0m[2;32m             ▂▂    ▂    [0m│[0m
+│[0m[2m├─ [0m[1mpython3 1525319[0m                                   [0m[2m     1   11%   36.7µs   36.7µs   36.7µs[0m  [0m[2;32m ▂                      [0m│[0m
+│[0m[2m│  └─ [0m[1mworker 1525671[0m[2m  ↺ back on the chain[0m            [0m[2m     1   11%   5.52ms       --       --[0m  [0m[2;32m ▂                      [0m│[0m
+│[0m[2m└─ [0m[36mhardirq[0m[2m  a device[0m                                 [0m[2m     1   11%    693ms       --       --[0m  [0m[2;32m           ▂            [0m│[0m
+│                                                                                                                      │[0m
+│[0m[2;4mwoken at      held   the longest chains, link by link: each waker and its hold                                        [0m│[0m
+│[0m[2m+1.91s   [0m[1;2m    310µs[0m [0m[2m  <- [0mholder 1526045[0m[2;32m 310µs[0m[2m  <- [0m[36mhardirq[0m[2m  x3[0m                                                          │[0m
+│[0m[2m+145ms   [0m[1;2m   36.7µs[0m [0m[2m  <- [0mpython3 1525319[0m[2;32m 36.7µs[0m[2m  <- [0mworker 1525671[0m[2m ↺[0m                                                   │[0m
+│                                                                                                                      │[0m
+│[0m[1m-> it woke in turn: [0mrcu_preempt 16[0m[2m x19[0m, rcub/1 17[0m[2m x15[0m, rcu_exp_gp_kthr 19[0m[2m x13[0m, rcub/2 96[0m[2m x5, and 2 more[0m               │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│[0m[1;2mquiet[0m[2m: the woken thread's time with no sign of life in the run (no wakeup received or issued) before this one -- an[0m   │[0m
+│[0m[2mupper bound: it was blocked no longer than this. [0m[1;2mhold[0m[2m: the waker's time from its own wakeup to the one it issued --[0m   │[0m
+│[0m[2mhow long the chain sat with it. A chain stops at an interrupt, at a thread already on it, or at a waker whose own[0m     │[0m
+│[0m[2mwakeup the run did not see. A softirq may be a loopback send served in its sender's context: the sender is not named.[0m │[0m
+│                                                                                                                      │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m thread  [0m[1m+/-[0m chain depth  [0m[1menter[0m focus it, then its lanes  [0m[1ml[0m it[0m

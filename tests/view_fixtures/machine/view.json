@@ -34,14 +34,9 @@
       "summary": "Energy consumed per RAPL domain (pkg / cores / dram / gpu)"
     }
   },
-  "refused": [
-    {
-      "label": "cpu.oncpu_time",
-      "source": "cpu.oncpu_time",
-      "reason": "no collector is written for `cpu.oncpu_time` on backend `bpf:raw_tp` yet"
-    }
-  ],
+  "refused": [],
   "ts_err_ns": {
+    "cpu.oncpu_time": 0,
     "cpu.util@system": 0,
     "gpu.engine_busy@system": 1000000000,
     "gpu.mem": 0,

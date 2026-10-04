@@ -1,40 +1,40 @@
-omn top │ fixture sqlite-commits │ 4.97s                          view: snapshot │ collectors ≥5.82% │ target 87.8% cpu
+omn top │ fixture sqlite-commits │ 6.84s                          view: snapshot │ collectors ≥8.41% │ target 79.5% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ heatmap -- io.latency latency over time ─────────────────────────────────────────────────────────────────────────────┐
-│ io.latency 1.54k   sched.runqlat 1.54k in 382 rows   net.socket 0   gpu.kernel refused                               │
-│1.54k block requests, 6.29µs to 4.64ms, p50 24.1µs, p99 4.63ms 50 late ~low det degraded x2                           │
-│3 regimes  ~21.9µs 76% (1.17k) in bursts every ~121ms, all through  │  ~478µs 21% (328) in bursts every ~120ms, all   │
-│through  │  ~4.63ms 2.8% (44) every ~112ms, all through                                                               │
-│  count ▂ █ ▆  ▆ ▆ ▆ ▆ ▄▂ ▆ ▆ ▆ ▆  ▆ ▆ ▆ ▆ ▃▃ ▆ ▆ ▆ ▆  ▆ ▆ ▆  ▆ ▆ ▆ ▅▁ ▆ ▆ ▆  ▆ ▆ ▆ ▆▁ ▆ ▆ ▆  ▆ ▆ ▆    the whole run  │
-│       │                      │                                                                                       │
-│       │▓   ▒  ▒ ▒ ▒ ▒ ▒  ▒ ▒ ▒ ▒  ▒ ▒ ▒ ▒ ▒  ▒ ▒ ▒ ▒  ▒ ▒ ▒  ▒ ▒ ▒ ▒    ▒ ▒  ▒ ▒ ▒ ▒  ▒ ▒ ▒  ▒ ▒ ▒    █            44│
-│       │                      │                                                                                       │
-│       │                      │                                                                                       │
-│       │                      │                                                                                       │
-│       │                      │                                                                                       │
-│    1ms┤▒   ·   ·   ·  ▒▒ ▒ ▒ ▓ ▓  ▓·▓ ▒·   ·   ·   ·   ·   ·   · ▒ ·▒  ·▒ ▒· ▓ ▓ ▓ ▒▒ ▒·   ·   ·   ·  █            49│
-│       │  ▓ ▓  ▓ ▓ ▓ ▓  ▒ ▒ ▒ │        ▒ ▓ ▒▒ ▓ ▓ ▓ ▓  ▓ ▓ ▓  ▓ ▓ ▒ ▒  ▓ ▒ ▒           ▒ ▓ ▓  ▓ ▓ ▓    ██          115│
-│       │               ▒▒ ▒ ▒ ▓ ▒  ▓ ▓ ▒                          ▒        ▒  ▓ ▒ ▓ ▒▒ ▒               █            38│
-│       │▒ ▓ ▓  ▓ ▓ ▓ ▓ ▒▒ ▒ ▒ │ ▒      ▒ ▓ ▒▒ ▓ ▓ ▓ ▓  ▓ ▓ ▓  ▓ ▓ ▒ ▒▒ ▓ ▓ ▒    ▒      ▒ ▓ ▓  ▓ ▓ ▓    ██          126│
-│       │                      │                                                                                       │
-│       │                      │                                                                                       │
-│       │                      │                                                                                       │
-│  100µs┤·   ·   ·   ·   ·   · │ ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
-│       │                      │                                                                                       │
-│       │       ▒              │                                                     ▓    ▒             ▏            10│
-│       │       ▓     ▒ ▒      ▓    ▒ ▒ ▒ ▓ ▒  ▒ ▒ ▒ ▒  ▒ ▒    ▒ ▒ ▒      ▒    ▒   ▓    ▒ ▓    ▓ ▓ ▓    ██           95│
-│       │  ▓ ▓  ▓ ▓ ▓ ▓ ▓▒ █ ▓ █ ▓  ▓ ▓ ▓ ▓ ▓▓ ▓ ▓ ▓ █  █ █ █  ▓ ▓ █ ▓  █ █ █  ▓ ▓ █ ▓  ▓ █ █  █ █ ▓    █████████   514│
-│       │  █ ▓  ▓ ▓ █ ▓ ▓▒ ▓ ▓ │ █  ▓ ▓ ▓ ▓ ▓▓ █ ▓ ▓ ▒  ▓ ▓ ▓  ▓ ▓ ▓ ▓  ▓ ▓ ▓  █ ▓ ▓ ▓  ▓ ▓ ▓  ▓ ▒ ▓    ███████     419│
-│       │  ▓ ▒  ▒ ▒ ▒ ▒ ▒▒ ▒ ▒ │ ▒  ▒ ▒ ▒ ▒  ▒   ▒ ▒ ▒  ▒   ▒  ▒ ▒   ▒    ▒ ▒  ▒ ▒ ▒ ▒  ▒ ▒    ▒ ▒      █            63│
-│   10µs┤· ▒ ▒  ▒·  ▒·▒  ·   · ▒ ·  ▒·▒ ▒·▒  ▒ ▒ · ▒ ·  ▒·▒  · ▒ ▒ ▒ ·  ▒·▒ ▒·   ·   ·  ▒·  ▒· ▒ ·   ·  █            41│
-│       │  ▒      ▒ ▒   ▒▒ ▒ ▒ │ ▒               ▒        ▒        ▒ ▒    ▒    ▒ ▒ ▒ ▒  ▒          ▒    █            30│
-│       │                      │                                                                                       │
-│       └┬─────────────────┬───▲──────────────┬──────────────────┬─────────────────┬──────────────────                 │
-│        0               1.00s              2.00s              3.00s             4.00s                                 │
-│   lost nothing lost; 50 rounds of reads came late: nothing is missing, the drains were further apart than asked      │
+│ io.latency 1.56k   sched.runqlat 1.75k in 514 rows   net.socket 0   gpu.kernel 0                                     │
+│1.56k block requests, 6.58µs to 4.65ms, p50 28.9µs, p99 4.62ms 109 late ~low det degraded x2                          │
+│2 regimes  ~28.6µs 98% (1.53k) in 33 bursts, all through  │  ~4.62ms 2.2% (34) every ~203ms, all through              │
 │                                                                                                                      │
-│▲ 1.18s to 1.23s   37 block requests   p50 30.6µs   p99 4.64ms   max 4.64ms                                           │
-│  its slowest 4.64ms: sqlite3 tid 2759238 WS 12.0KiB on nvme0n1p6                                                     │
-│per cell ▒1 ▒2 ▓4 ▓8 █14   rows 2.1/octave, columns 53.4ms each                                                       │
+│  count █▅ ▅ ▅ ▅▅ ▅ ▅▅ ▅ ▅ ▅▂▄▅ ▅ ▅ ▅▂▄▅ ▅    ▅   ▅     ▂▄   ▅  ▅  ▅  ▅ ▅ ▅  ▅ ▅ ▅ ▅  ▅ ▅ ▅ ▅  ▅ ▅ ▅   the whole run  │
+│       ││                                                                                                             │
+│       │▓▒ ▒ ▒             ▒▒ ▒ ▒ ▒ ▒▒   ▒    ▒   ▒     ▒    ▒  ▒       ▒ ▒    ▒ ▒ ▒  ▒ ▒ ▒ ▒  ▒ ▒ ▒   █            34│
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│    1ms┤│   ·   ·   ▒   ·▒ ▒·▒▒ ▒ ▒ ▒   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ▒  ▒·  ▒·  ▏            29│
+│       │▓▒ ▒ ▒ ▒▒ ▒ ▒▒ ▒ ▒            ▒▒ ▒    ▒   ▒      ▒   ▒  ▒  ▒  ▒ ▒ ▒  ▒ ▒ ▒ ▒  ▒ ▒ ▒ ▒  ▒ ▒ ▒   ██          135│
+│       ││                ▒ ▒  ▒ ▒ ▒ ▒             ▒                            ▓               ▒   ▒   ▏            29│
+│       │▓▒ ▒ ▒ ▒▒ ▒ ▒▒ ▒ ▒   ▒▒ ▒     ▒▒ ▒    ▒   ▒      ▒   ▒  ▒  ▒  ▒ ▒ ▒  ▒ ▒ ▒ ▒  ▒ ▒ ▒ ▒  ▒ ▒ ▒   ██          144│
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│       ││                                                          ▒                                   ▏             1│
+│  100µs┤│   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
+│       ││                                                                                                             │
+│       ││                                     ▒   ▒                ▓    ▓ ▒  ▒        ▒     ▓  ▒ ▒ ▒   █            45│
+│       ││    ▓  ▒      ▓ ▓ ▒▒         ▒  ▓    █   █     ▒▓   █  ▓  ▒  █ ▒ ▓  █ ▓ █ █  ▓ ▓ █ ▓  █ █ ▓   █████       305│
+│       │██ █ █ ▓█ █ ██ █ █ █▒▓█ █ ▓ ▓▓▓█ █    ▓   ▓     ▓▓   █  █  █  ▓ █ █  ▓ ▒ █ █  █ █ ▓ ▓  ▓ ▓ ▓   █████████   602│
+│       │█▒ ▒ ▒ ▓▓ ▓ ▓▓ ▒ ▒ ▒ ▓▒ ▓ ▓ ▓ ▒▓ ▒    ▒   ▒             ▒  ▒  ▒ ▒      ▒        ▒ ▒    ▒ ▒ ▓   ██          167│
+│       │▒  ▒   ▒  ▒ ▒  ▒ ▒ ▒  ▒ ▒ ▒   ▒       ▒   ▒      ▒   ▒     ▒      ▒      ▒ ▒  ▒ ▒ ▒ ▒    ▒     █            41│
+│   10µs┤▒   ·   ▒   ·▒  ·▒  ·▒  · ▒ ·  ▒·▒  ·   ·   ·   ·   ·   ·   ·   ·   ·▒  ·   ·   ·   ·  ▒·▒ ▒·  ▏            16│
+│       │▒      ▒▒    ▒            ▒ ▒  ▒ ▒                            ▒ ▒    ▒ ▒        ▒              ▏            17│
+│       ││                                                                                                             │
+│       └▲────────────┬─────────────┬────────────┬─────────────┬─────────────┬────────────┬───────────                 │
+│        0          1.00s         2.00s        3.00s         4.00s         5.00s        6.00s                          │
+│   lost nothing lost; 109 rounds of reads came late: nothing is missing, the drains were further apart than asked     │
+│                                                                                                                      │
+│▲ 0 to 73.5ms   68 block requests   p50 22.6µs   p99 4.65ms   max 4.65ms                                              │
+│  its slowest 4.65ms: sqlite3 tid 1494341 WSM 16.0KiB on nvme0n1p6                                                    │
+│per cell ▒1 ▒2 ▓5 ▓8 █14   rows 2.1/octave, columns 73.5ms each                                                       │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it

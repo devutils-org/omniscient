@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture file-server │ 2.58s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥0.85%[0m[35m │ target 11.4% cpu[0m [0m
+ 1 system  2 flame [0m[1;7m 3 ledger [0m 4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
+┌ ledger -- [0m[1mwhat task 1523237 and 1 more cost over 2.58s of wall-clock[0m ────────────────────────────────────────────────┐[0m
+│[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
+│[0m[1;32m▸ cpu time        [0m[2;3mnot in this run: cpu.oncpu_time was not asked for[0m                                                   │[0m
+│  [0m[1mmemory held     [0m[2;3mnot in this run: mem.rss was not asked for[0m                                                          │[0m
+│  [0m[1mmemory faulted  [0m[2;3mnot in this run: mem.faults was not asked for[0m                                                       │[0m
+│  [0m[1mI/O syscalls    [0m[2m888 calls[0m        [0m[2m20.1ms inside them[0m        [0m[2m1.02µs [0m[2;32m▅▃▂▂█▅▁▁[0m[2m 262µs[0m    [0m[35m   ≥6.80ms[0m  [0m[33m12 late[0m [0m[36m~low det[0m [0m[33mdeg[0m│[0m
+│    1523252 Thread… [0m[2m   18.0ms  ███████████  89.3%[0m                                                                     │[0m
+│    1523237 sh      [0m[2m   2.15ms  █            10.7%[0m                                                                     │[0m
+│    bytes           [0m[2m   112MiB[0m  [0m[2mread, 3.00MiB written[0m                                                                  │[0m
+│  [0m[1mnetwork         [0m[2m112MiB moved[0m     [0m[2m109MiB out, 3.00MiB in[0m    [0m[2;32m ▇ ▇▇▁▇ ▇ ▇▇▇▅ █ ▇ ▇ ▁  [0m [0m[35m   ≥7.41ms[0m  [0m[33m11 late[0m [0m[36m~low det[0m [0m[33mdeg[0m│[0m
+│[0m[2;3m    567 socket calls[0m                                                                                                  │[0m
+│  [0m[1mretransmits     [0m[2;3mnot in this run: net.tcp.retransmit@system was not asked for[0m                                        │[0m
+│  [0m[1mGPU memory      [0m[2;3mnot in this run: gpu.mem was not asked for[0m                                                          │[0m
+│  [0m[1mGPU time        [0m[2;3mnot in this run: gpu.kernel was not asked for[0m                                                       │[0m
+│  [0m[1menergy          [0m[2;3mnot in this run: power.energy@system was not asked for[0m                                              │[0m
+│                                                                                                                      │[0m
+│[0m[1m  to know all of this[0m[35m: ≥14.2ms of omn's cpu, ≥4.77% of what the target spent[0m                                          │[0m
+│[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
+│[0m[2;32m cpu time -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────────[0m│[0m
+│cpu.oncpu_time -- cpu time, per thread                                                                                │[0m
+│This run did not ask for it. `omn top` live asks for every line of the sheet; a recording made by another session     │[0m
+│holds what that session asked.                                                                                        │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m line  [0m[1mt[0m next task  [0m[1menter[0m the view behind the line            [0m

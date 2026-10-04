@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture workload-flows │ 1.00s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥12.4%[0m[35m │ target 5.69% cpu[0m [0m
+ 1 system  2 flame  3 ledger  4 request  5 timebar [0m[1;7m 6 heatmap [0m 7 lanes  8 wake  9 flows  0 process                      [0m
+┌ heatmap -- io.latency latency over time ─────────────────────────────────────────────────────────────────────────────┐[0m
+│[0m[1;7m io.latency 92 [0m  sched.runqlat 197 in 30 rows   net.socket 85 in 8 rows  [0m[2m gpu.kernel 0 [0m                               │[0m
+│[0m[2m92 block requests, 17.3µs to 4.63ms, p50 4.57ms, p99 4.63ms[0m [0m[33m11 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m                              │[0m
+│[0m[1m3 regimes  ~27.1µs[0m[2m 26% (24) 344ms to 346ms  │  [0m[1m~386µs[0m[2m 4.3% (4) 344ms to 347ms  │  [0m[1m~4.59ms[0m[2m 70% (64) 341ms to 343ms[0m     │[0m
+│                                                                                                                      │[0m
+│[0m[2m  count[0m                                [0m[2m█▂[0m                                                              [0m[2mthe whole run[0m  │[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│       [0m[2m│[0m                               [0m[2;91m█[0m                                                               [0m[2m█████████    64[0m│[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│    1ms[0m[2m┤[0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m  [0m[90m│·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m                 │[0m
+│       [0m[2m│[0m                               [0m[2;34m░░[0m                                                              [0m[2m▏[0m        [0m[2m     2[0m│[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│       [0m[2m│[0m                               [0m[2;34m░░[0m                                                              [0m[2m▏[0m        [0m[2m     2[0m│[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│  100µs[0m[2m┤[0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m  [0m[90m│·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m                 │[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│       [0m[2m│[0m                               [0m[2;34m░[0m                                                               [0m[2m▏[0m        [0m[2m     1[0m│[0m
+│       [0m[2m│[0m                               [0m[90m│[0m                                                                              │[0m
+│       [0m[2m│[0m                               [0m[2;36m▓[0m[2;34m▒[0m                                                              [0m[2m█[0m        [0m[2m    10[0m│[0m
+│       [0m[2m│[0m                               [0m[2;36m▒▒[0m                                                              [0m[2m█[0m        [0m[2m     9[0m│[0m
+│       [0m[2m│[0m                               [0m[2;34m▒▒[0m                                                              [0m[2m█[0m        [0m[2m     4[0m│[0m
+│       [0m[2m└┬─────────────────┬────────────[0m[1;2m▲[0m[2m─────┬─────────────────┬──────────────────┬─────────────────┬[0m                 │[0m
+│        [0m[2m0[0m               [0m[2m200ms[0m              [0m[2m400ms[0m             [0m[2m600ms[0m              [0m[2m800ms[0m             [0m[2m1.00s[0m               │[0m
+│[0m[2m   lost[0m [0m[2mnothing lost; 11 rounds of reads came late: nothing is missing, the drains were further apart than asked[0m      │[0m
+│                                                                                                                      │[0m
+│[0m[1m▲ 335ms to 345ms   [0m[2m82 block requests   p50 4.58ms   p99 4.63ms   max 4.63ms[0m                                           │[0m
+│[0m[2m  its slowest 4.63ms: flows-main tid 1528032 WS 128KiB on nvme0n1p6[0m                                                   │[0m
+│[0m[2mper cell [0m[34m░[0m[2m1 [0m[34m▒[0m[2m2 [0m[36m▒[0m[2m4 [0m[36m▓[0m[2m8 [0m[33m▓[0m[2m16 [0m[91m█[0m[2m32   rows 2.6/octave, columns 10.8ms each[0m                                                   │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1ms[0m source  [0m[1mh/l[0m cursor  [0m[1m+/-[0m zoom  [0m[1mt[0m narrow to slowest  [0m[1m⏎[0m open it   [0m

@@ -69,7 +69,8 @@ keep() {
 
 # A pure-Python program whose time one function spends (case 3,
 # `one-function-dominates`), on a smaller input: on the cpu, for the flame and
-# the timebar.
+# the timebar. Under `-X perf`, so the interpreter writes its perf map and each
+# Python function has a name in the profile.
 record_cpython_hot() {
     python3 -c "
 import random
@@ -80,7 +81,7 @@ with open('$work/input.txt', 'w') as file:
 "
     rm -rf "$here/cpython-hot"
     "$omn" top --headless -d 20s -o "$here/cpython-hot" -- \
-        python3 "$root/cases/cpython-interpreter/hot.py" "$work/input.txt" >/dev/null
+        python3 -X perf "$root/cases/cpython-interpreter/hot.py" "$work/input.txt" >/dev/null
     keep cpython-hot
 }
 
@@ -97,7 +98,7 @@ with open('$work/heavier.txt', 'w') as file:
 "
     rm -rf "$here/cpython-hot-heavier"
     "$omn" top --headless -d 20s -o "$here/cpython-hot-heavier" -- \
-        python3 "$root/cases/cpython-interpreter/hot.py" "$work/heavier.txt" >/dev/null
+        python3 -X perf "$root/cases/cpython-interpreter/hot.py" "$work/heavier.txt" >/dev/null
     keep cpython-hot-heavier
 }
 
@@ -183,6 +184,88 @@ PY
     keep machine
 }
 
+# The vertical server (`examples/vertical/server.c`), built here with room for
+# a plan longer than its 64 requests, into $1.
+build_server() {
+    sed 's/^#define MAX_PLAN 64$/#define MAX_PLAN 1024/' "$root/examples/vertical/server.c" >"$work/server.c"
+    cc -O0 -pthread -o "$1" "$work/server.c"
+}
+
+# The vertical case's abandoned requests (`examples/vertical-abandoned.yml`):
+# one request declared and never ended, one ended, one whose answer never
+# leaves the stack. What the request view draws as a loss.
+record_vertical_abandoned() {
+    mkdir -p "$root/target/omn-vertical"
+    [ -x "$root/target/omn-vertical/server" ] || build_server "$root/target/omn-vertical/server"
+    rm -rf "$here/vertical-abandoned"
+    (cd "$root" && "$omn" top --headless -d 20s -f examples/vertical-abandoned.yml \
+        -o "$here/vertical-abandoned") >/dev/null
+    keep vertical-abandoned
+}
+
+# Three hundred requests on the vertical server, its four causes in turn --
+# none, a 2 ms lock, 2 cold pages, a client pausing 2 ms -- so the request
+# view draws a population rather than a handful: its slowest, its spread, the
+# cause of each.
+record_many_requests() {
+    build_server "$work/server"
+    plan=$(python3 -c 'print(" ".join(["0:0", "2:0", "0:2", "0:0:2"][i % 4] for i in range(300)))')
+    rm -rf "$here/many-requests"
+    # shellcheck disable=SC2086
+    "$omn" top --headless -d 30s -o "$here/many-requests" -- \
+        "$work/server" "$work/many-data" $plan >/dev/null 2>&1
+    keep many-requests
+}
+
+# The file server the flows view was judged on (`docs/view/gallery/flows-run/`),
+# as a fixture every view is drawn on: bytes per file and per socket asked as
+# `raw`, beside the machine's devices and interfaces.
+record_file_server() {
+    rm -rf "$here/file-server"
+    "$root/docs/view/gallery/flows-run/record.sh" "$here/file-server" >/dev/null
+    keep file-server
+}
+
+# Every wakeup on the machine for a second, no target: the wake view's
+# machine-wide chains, and the lanes it rebuilds threads from.
+record_system_wakeup() {
+    cat >"$work/system-wakeup.yml" <<YML
+name: system wakeups
+duration: 1s
+requests:
+- {source: sched.wakeup, label: sched.wakeup, mode: trace, emit: [raw, summary], target: system}
+YML
+    rm -rf "$here/system-wakeup"
+    "$omn" top --headless -f "$work/system-wakeup.yml" -o "$here/system-wakeup" >/dev/null
+    keep system-wakeup
+}
+
+# A view's own workload (`view/workloads/<view>/`), launched as its manifest
+# says, with every view's needs: the recording `tests/view_truth.rs` holds
+# that view to, within each figure's trust.
+record_workload() {
+    view=$1
+    rm -rf "$here/workload-$view"
+    if [ "$view" = request ]; then
+        mkdir -p "$root/target/omn-view-workloads/request"
+        build_server "$root/target/omn-view-workloads/request/server"
+    fi
+    # The manifest's command, the request server's plan spelled out from its
+    # session.
+    run=$(python3 -c '
+import json, re, shlex, sys
+run = json.load(open(sys.argv[1]))["run"]
+if "<plan...>" in run:
+    plan = re.findall(r"^        - \"([0-9:-]+)\"$", open(sys.argv[2]).read(), re.M)
+    run = run[: run.index("<plan...>")] + plan
+print(" ".join(shlex.quote(word) for word in run))
+' "$root/view/workloads/$view/manifest.json" "$root/view/workloads/$view/session.yml")
+    (cd "$root" && eval "\"\$omn\" top --headless -d 30s -o \"\$here/workload-\$view\" -- $run") >/dev/null 2>&1
+    keep "workload-$view"
+}
+
+WORKLOADS="flame timebar wake flows heatmap ledger system lanes request"
+
 want cpython-hot "$@" && record_cpython_hot
 want cpython-hot-heavier "$@" && record_cpython_hot_heavier
 want http-server "$@" && record_http_server
@@ -190,4 +273,11 @@ want sqlite-commits "$@" && record_sqlite_commits
 want sqlite-latency "$@" && record_sqlite_latency
 want vertical-requests "$@" && record_vertical_requests
 want machine "$@" && record_machine
+want vertical-abandoned "$@" && record_vertical_abandoned
+want many-requests "$@" && record_many_requests
+want file-server "$@" && record_file_server
+want system-wakeup "$@" && record_system_wakeup
+for view in $WORKLOADS; do
+    want "workload-$view" "$@" && record_workload "$view"
+done
 true

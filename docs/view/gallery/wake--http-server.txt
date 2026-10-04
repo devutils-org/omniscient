@@ -1,27 +1,27 @@
-omn top │ fixture http-server │ 2.84s                             view: snapshot │ collectors ≥16.1% │ target 92.0% cpu
+omn top │ fixture http-server │ 3.24s                             view: snapshot │ collectors ≥24.3% │ target 90.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐
-│29 late ~low det degraded  220 wakeups of 9 threads -- from a task 26.4%, hardirq 3.18%, softirq 70.5%, in 2.84s      │
+│50 late ~low det degraded  205 wakeups of 12 threads -- from a task 27.8%, hardirq 3.41%, softirq 68.8%, in 3.24s     │
 │                                                                                                                      │
 │woken thread      wakes  mostly by      woken thread      wakes  mostly by      woken thread      wakes  mostly by    │
-│python3 2758972     176  softirq   86%  tailscaled 1055       5  python3   60%  tailscaled 1024       1  python3  100%│
-│python3 2758953      18  Thread-…  56%  tailscaled 3898       4  ldconfig  50%  tailscaled 1062       1  python3  100%│
-│Thread-1… 2758974    12  python3   75%  migration/1 26        2  python3  100%  systemd 1221          1  python3  100%│
-│6 dimmed: outside the target, woken by it                                                                             │
+│python3 1493224     160  softirq   86%  tailscaled 1266       3  python3   67%  ksoftirqd/9 75        1  python3  100%│
+│python3 1493220      16  hardirq   38%  tailscal… 1374244     2  python3   50%  ksoftirqd/13 101      1  Thread-… 100%│
+│Thread-1… 1493226    15  python3   67%  migration/0 20        1  Thread-… 100%  ksoftirqd/14 107      1  Thread-… 100%│
+│tailscaled 1060       3  ldconfig  67%  migration/8 68        1  python3  100%  tailscaled 984        1  python3  100%│
+│9 dimmed: outside the target, woken by it                                                                             │
 │                                                                                                                      │
-│python3 2758972 was woken 176 times, 61.93/s                                                                          │
+│python3 1493224 was woken 160 times, 49.36/s                                                                          │
 │<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         │
-│├─ softirq  a device, or a loopback send                152   86%   73.8µs       --       --   ▁▁▃▂▃▂▂▄▂▂▂▂▃▂▂▂▂▃▂▄▂▂▄│
-│├─ ldconfig 2758973  its wakeup unseen                   23   13%   24.3µs       --       --  █                       │
-│└─ hardirq  a device                                      1    1%   15.2ms       --       --  ▁                       │
+│├─ softirq  a device, or a loopback send                137   86%   84.3µs       --       --   ▁▁▃▄▂▂▂▃▃▂▆▃▃▃▃▂▃▃▃▁▄▁▃│
+│├─ ldconfig 1493225  its wakeup unseen                   21   13%   37.7µs       --       --  █                       │
+│├─ tid 1491691  outside the target: stops                 1    1%   14.1ms       --       --  ▁                       │
+│└─ python3 1493220                                        1    1%    726µs   4.40ms   4.40ms  ▁                       │
+│   └─ tid 1493173  outside the target: stops              1    1%       --       --       --  ▁                       │
 │                                                                                                                      │
-│-> it woke in turn: tailscaled 1024 x1, tailscaled 1055 x1, tailscaled 3898 x1, python3 2758953 x1                    │
+│woken at      held   the longest chains, link by link: each waker and its hold                                        │
+│+4.07ms     4.40ms   <- python3 1493220 4.40ms  <- tid 1493173 (its wakeup unseen)                                    │
 │                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
+│-> it woke in turn: python3 1493220 x3, tailscaled 1266 x1, tailscaled 1374244 x1                                     │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

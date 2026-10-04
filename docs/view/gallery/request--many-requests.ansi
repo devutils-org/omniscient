@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture many-requests │ 15.8s                           [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥6.10%[0m[35m │ target 0.50% cpu[0m [0m
+ 1 system  2 flame  3 ledger [0m[1;7m 4 request [0m 5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
+┌ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────┐[0m
+│[0m[1m300 requests served by server (pid 1504111)[0m · slowest a09c 5.19ms · median 2.15ms[0m[2m · in order of arrival  [0m[33m325 late[0m [0m[33mdegr[0m│[0m
+│                                                                                                                      │[0m
+│[0m[1m  req      span  its life by state, to one scale: the slowest is 5.19ms             mostly[0m                            │[0m
+│[0m[32m▶ [0m[1;32ma001 [0m[1m  59.6µs  [0m[32m█[0m                                                                  on cpu 68.7% · net in 31.3%       │[0m
+│[0m[32m  [0ma002   2.13ms  [0m[32m█[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m                                        lock/sleep 96.7%                  │[0m
+│[0m[32m  [0ma003   4.92ms  [0m[32m██[0m[34m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m     disk 96.7%                        │[0m
+│[0m[32m  [0ma004   2.11ms  [0m[36m░░░░░░░░░░░░░░░░░░░░░░░░░░[0m                                         net in 99.0%                      │[0m
+│[0m[32m  [0ma005   45.9µs  [0m[32m█[0m                                                                  on cpu 54.7% · run queue 24.5%    │[0m
+│[0m[32m  [0ma006   2.16ms  [0m[32m█[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m                                        lock/sleep 94.9%                  │[0m
+│[0m[32m  [0ma007   5.06ms  [0m[32m███[0m[34m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m    disk 93.9%                        │[0m
+│[0m[32m  [0ma008   2.14ms  [0m[36m░░░░░░░░░░░░░░░░░░░░░░░░░░░[0m                                        net in 98.5%                      │[0m
+│[0m[32m  [0ma009   64.6µs  [0m[32m█[0m                                                                  on cpu 51.9% · net in 48.1%       │[0m
+│[0m[32m  [0ma00a   2.16ms  [0m[32m█[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m                                        lock/sleep 94.9%                  │[0m
+│[0m[32m  [0ma00b   4.94ms  [0m[32m██[0m[34m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m     disk 96.3%[0m[2m  +289 more ↓[0m           │[0m
+│  [0m[36m░░ [0m[2mnet in   [0m[32m██ [0m[2mon cpu   [0m[33m▓▓ [0m[2mrun queue   [0m[35m▀▀ [0m[2mlock/sleep   [0m[34m▄▄ [0m[2mdisk   [0m[96m░░ [0m[2mnet out   [0m                                      │[0m
+│                                                                                                                      │[0m
+│[0m[1;32m── a001 · 59.6µs from its first byte in to its last byte out · thread 1504111 [0m[2m────────────────────────────────────────[0m│[0m
+│[0m[2m            ┊0         ┊10.0µs    ┊20.0µs    ┊30.0µs    ┊40.0µs    ┊50.0µs    [0m                                        │[0m
+│[0m[36m  net in    ░░░░░░░░░░░░░░░░░░░░░[0m                                               18.6µs before start                   │[0m
+│[0m[1m  serving   [0m                    [0m[32m██████████████████████████████████████████████[0m  41.0µs from start to done             │[0m
+│[0m[34m  on device [0m                                                                  [0m[2m  no block request[0m                      │[0m
+│[0m[96m  net out   [0m                                                                  [0m[2m  gone when done[0m                        │[0m
+│[0m[2;3m  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order[0m                 │[0m
+│                                                                                                                      │[0m
+│[0m[1m  where its 59.6µs went              [0m[2mevidence[0m                       [0m[1mits share of each resource[0m                        │[0m
+│[0m[36m  ░ [0mnet in       18.6µs   31.3% [0m[36m░    [0m[2m         by socket 132592[0m      [0m[1mcpu        [0m41.0µs: 0.05% of the 86.9ms server took│[0m
+│[0m[32m  █ [0mon cpu       41.0µs   68.7% [0m[32m███  [0m[2m         [0m                                 off cpu 0 times, preempted 0           │[0m
+│[0m[33m  ▓ [0m[2mrun queue         ·         [0m[33m     [0m[2m         [0m                      [0m[1mdisk       [0m[2mno block request issued[0m                │[0m
+│[0m[35m  ▀ [0m[2mlock/sleep        ·         [0m[35m     [0m[2m         [0m                      [0m[1mnetwork    [0min 18.6µs · out 0ns                    │[0m
+│[0m[34m  ▄ [0m[2mdisk              ·         [0m[34m     [0m[2m         [0m                                                                        │[0m
+│[0m[96m  ░ [0m[2mnet out           ·         [0m[96m     [0m[2m         [0m                                                                        │[0m
+│[0m[2m  no decomposition in this run: the evidence is not graded[0m                                                            │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│[0m[1m  what sets it apart from the other 299 requests: [0m[2mnothing, every state is within a twentieth of their median[0m          │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m request  [0m[1ms[0m sort  [0m[1menter[0m focus it, then its lanes  [0m[1ml[0m its thread[0m

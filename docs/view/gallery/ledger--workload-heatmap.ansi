@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture workload-heatmap │ 1.96s                        [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥11.4%[0m[35m │ target 4.07% cpu[0m [0m
+ 1 system  2 flame [0m[1;7m 3 ledger [0m 4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
+┌ ledger -- [0m[1mwhat task 1528232 and 1 more cost over 1.96s of wall-clock[0m ────────────────────────────────────────────────┐[0m
+│[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
+│[0m[1;32m▸ cpu time        [0m[2m93.8ms on cpu[0m    [0m[2m4.79% of one cpu[0m          [0m[2;32m████▃▂▁▁▁▁▁▁▁▁▁▁▂▂▂▂▂▂▃▂[0m [0m[35m   ≥18.2ms[0m  [0m[36m~low det[0m            │[0m
+│    1528232 heatma… [0m[2m   47.0ms  ██████       50.2%[0m                                                                     │[0m
+│    task 1528242    [0m[2m   46.7ms  ██████       49.8%[0m                                                                     │[0m
+│[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
+│    own account     [0m[1m   95.1ms[0m  [0m[2mwith its descendants, as the scheduler counts them[0m                                     │[0m
+│    machine busy        7.17s  ▏            1.33%                                                                     │[0m
+│  [0m[1mmemory held     [0m13.8MiB peak     +128KiB from 13.7MiB      [0m[32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁███[0m [0m[35m     485µs[0m                      │[0m
+│  [0m[1mmemory faulted  [0m3.92k faults     2.00k/s                   [0m[2;3ma total only[0m             [0m[35m   ≥1.76ms[0m  [0m[33m23 late[0m             │[0m
+│    task 1528242        1.98k  ██████       50.4%                                                                     │[0m
+│    1528232 heatma…     1.95k  ██████       49.6%                                                                     │[0m
+│  [0m[1mI/O syscalls    [0m[2m174 calls[0m        [0m[2m1.24ms inside them[0m        [0m[2m256ns [0m[2;32m▆█▅▄▃▃▃▂▂[0m[2m 131µs[0m    [0m[35m   ≥42.3ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
+│[0m[2;3m    bytes read and written: on the raw rows only, which this run did not keep[0m                                         │[0m
+│  [0m[1mnetwork         [0m[2m1.27KiB moved[0m    [0m[2m650B out, 650B in[0m         [0m[2;32m ▅ ▇▇▆█▂ ▂ ▂▂ ▂▅▇▇█ ▇▁  [0m [0m[35m   ≥45.9ms[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m│[0m
+│[0m[2;3m    1.30k socket calls[0m                                                                                                │[0m
+│  [0m[1mretransmits     [0m[2m0 sent again[0m     [0m[3mmachine-wide[0m              [0m[2;3ma total only[0m             [0m[35m    ≥104µs[0m  [0m[33m23 late[0m [0m[36m~low det[0m    │[0m
+│  [0m[1mGPU memory      [0m0B peak          [0m[2mof 734MiB on the device[0m   [0m[32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m [0m[35m     631µs[0m                      │[0m
+│  [0m[1mGPU time        [0m0ns on GPU       0 kernels and copies      [0m[2;3mno series kept[0m           [0m[35m    ≥204µs[0m  [0m[33m23 late[0m [0m[33mdegraded[0m    │[0m
+│  [0m[1menergy          [0m141J machine     71.9W on average          [0m[32m█████████████████████   [0m [0m[35m   ≥30.3µs[0m                      │[0m
+│    ≈ the target's  [0m[3m    1.87J[0m  [0m[2;3man estimate, not a measurement: its share of the machine's busy cpu, 95.1ms of 7.17s[0m   │[0m
+│                                                                                                                      │[0m
+│[0m[1m  to know all of this[0m[35m: ≥110ms of omn's cpu, ≥115% of what the target spent[0m                                            │[0m
+│[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
+│[0m[2;32m cpu time -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────────[0m│[0m
+│[0m[1mcpu.oncpu_time via bpf:raw_tp[0m -- cpu time, per thread                                                                 │[0m
+│· the source is not reproducible between two runs of the same workload                                                │[0m
+│[0m[35m· to know it: 18.2ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this[0m    │[0m
+│[0m[35mrun: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl[0m       │[0m
+│[0m[35mkernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable[0m                 │[0m
+│· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │[0m
+│where it could not be read, of 1528232 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │[0m
+│in microseconds once it was reaped)                                                                                   │[0m
+│· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│[0m
+│own account's                                                                                                         │[0m
+│                                                                                                                      │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m line  [0m[1mt[0m next task  [0m[1menter[0m the view behind the line            [0m

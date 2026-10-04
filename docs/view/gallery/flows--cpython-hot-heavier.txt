@@ -1,10 +1,10 @@
-omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snapshot │ collectors ≥5.29% │ target 96.5% cpu
+omn top │ fixture cpython-hot-heavier │ 8.49s                     view: snapshot │ collectors ≥7.69% │ target 94.5% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐
-│over 7.93s   █ out █ in █ the machine's                                                                               │
-│ network · net.socket bpf:fentry ~low det degraded x2 · net.bytes fs:proc ~low det degraded ──────────────────────────│
+│over 8.49s   █ out █ in █ the machine's                                                                               │
+│ network · net.socket bpf:fentry ~low det degraded x3 · net.bytes fs:proc ~low det degraded ──────────────────────────│
 │         thread             socket                                             stack         interface, the machine's │
-│ no socket moved a byte                                                          ┃█████████┃ wlan0    47.1KiB ▁▁▁▁▁▄▆█│
+│ no socket moved a byte                                                          ┃█████████┃ lo       5.93MiB █▇▂     │
 │ 0 rows in this run, none with bytes                                             ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
@@ -15,12 +15,12 @@ omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃ tailsca… 1.25KiB      ▅▅█│
-│interfaces 48.3KiB · 5 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                   │
+│                                                                                 ┃█████████┃ wlan0     736KiB ▂█▂▂▁▁▂▂│
+│                                                                                 ┃█████████┃ tailsca…  236KiB █▆█▆▃▃▆█│
+│interfaces 6.88MiB · 4 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                   │
 │ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
 │         thread             file                                               cache         device, the machine's    │
-│ bytes per file: not in this run                                                 ┃█████████┃ 259:0    4.86MiB        █│
+│ bytes per file: not in this run                                                 ┃█████████┃ 259:0    1.51GiB  █▂▁▁▁ ▁│
 │ io.syscall is in this run as a summary and a histogram: latency per             ┃█████████┃                          │
 │ thread, which carries no bytes. Its `raw` rows (per descriptor) or              ┃█████████┃                          │
 │ io.fs's (per file) do.                                                          ┃█████████┃                          │
@@ -33,7 +33,7 @@ omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│devices 4.86MiB · 2 devices idle · page-cache hits never reach a device; writes reach it later                        │
+│devices 1.51GiB · 2 devices idle · page-cache hits never reach a device; writes reach it later                        │
 │nothing to select: no socket of the target's moved a byte; bytes per file were not measured                           │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

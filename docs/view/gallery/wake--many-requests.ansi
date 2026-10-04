@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture many-requests │ 15.8s                           [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥6.10%[0m[35m │ target 0.50% cpu[0m [0m
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes [0m[1;7m 8 wake [0m 9 flows  0 process                      [0m
+┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐[0m
+│[0m[33m336 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m1.76k wakeups of 48 threads -- from a task 24.8%, hardirq 25.6%, softirq 49.6%, in 15.8s[0m  │[0m
+│                                                                                                                      │[0m
+│[0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m│[0m
+│[0m[1;7mserver 1504266   [0m[2m   842  softirq   55%[0m  [0m[2mrcub/1 17             2  server    50%[0m  [0m[2mmigration/5 50        1  server   100%[0m│[0m
+│server 1504111   [0m[2m   707  softirq   57%[0m  [0m[2mrcu_exp_gp_kt… 19     2  server   100%[0m  [0m[2mmigration/8 68        1  server   100%[0m│[0m
+│server 1504265   [0m[2m   151  server    50%[0m  [0m[2mmigration/0 20        2  server   100%[0m  [0m[2mmigration/10 80       1  server   100%[0m│[0m
+│[0m[2mmigration/9 74        4  server    75%[0m  [0m[2mmigration/4 44        2  server   100%[0m  [0m[2mrcub/2 96             1  server   100%[0m│[0m
+│[0m[2mmigration/1 26        3  server    67%[0m  [0m[2mmigration/11 86       2  server    50%[0m  [0m[2mmigration/13 100      1  server   100%[0m│[0m
+│[0m[2mmigration/7 62        3  server    67%[0m  [0m[2mmigration/23 160      2  server    50%[0m  [0m[2mmigration/19 136      1  server   100%[0m│[0m
+│[0m[2mmigration/17 124      3  server    67%[0m  [0m[2mmigration/3 38        1  server   100%[0m  [0m[2mmigration/21 148      1  server   100%[0m│[0m
+│[0m[2;3mthreads 1-21 of 48, ↑/↓ to move; 45 dimmed: outside the target, woken by it[0m                                           │[0m
+│                                                                                                                      │[0m
+│[0m[1;32mserver 1504266[0m (pid 1504111)[0m[2m was woken 842 times, 53.20/s[0m                                                             │[0m
+│[0m[2;4m<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         [0m│[0m
+│[0m[2m├─ [0m[36msoftirq[0m[2m  a device, or a loopback send[0m             [0m[2m   467   55%   97.5µs       --       --[0m  [0m[2;32m▅▅▅▅▄▅▅▅▄▃▃▃▃▄▄▄▅▄▃▅▅▄▄▃[0m│[0m
+│[0m[2m└─ [0m[36mhardirq[0m[2m  a device[0m                                 [0m[2m   375   45%   50.1ms       --       --[0m  [0m[2;32m▃▃▄▄▃▄▄▄▄▃▄▃▄▄▃▄▄▄▃▄▄▃▄▃[0m│[0m
+│                                                                                                                      │[0m
+│[0m[1m-> it woke in turn: [0mmigration/9 74[0m[2m x3[0m, rcu_exp_gp_kthr 19[0m[2m x2[0m, migration/4 44[0m[2m x2[0m, migration/7 62[0m[2m x2, and 10 more[0m       │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│[0m[1;2mquiet[0m[2m: the woken thread's time with no sign of life in the run (no wakeup received or issued) before this one -- an[0m   │[0m
+│[0m[2mupper bound: it was blocked no longer than this. [0m[1;2mhold[0m[2m: the waker's time from its own wakeup to the one it issued --[0m   │[0m
+│[0m[2mhow long the chain sat with it. A chain stops at an interrupt, at a thread already on it, or at a waker whose own[0m     │[0m
+│[0m[2mwakeup the run did not see. A softirq may be a loopback send served in its sender's context: the sender is not named.[0m │[0m
+│                                                                                                                      │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m thread  [0m[1m+/-[0m chain depth  [0m[1menter[0m focus it, then its lanes  [0m[1ml[0m it[0m

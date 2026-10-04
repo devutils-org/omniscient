@@ -1,14 +1,14 @@
-[0m[1momn top[0m │ fixture vertical-requests │ 408ms                       [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥0.70%[0m[35m │ target 4.10% cpu[0m [0m
+[0m[1momn top[0m │ fixture vertical-requests │ 409ms                       [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥1.19%[0m[35m │ target 4.31% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar [0m[1;7m 6 heatmap [0m 7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ heatmap -- io.latency latency over time ─────────────────────────────────────────────────────────────────────────────┐[0m
 │[0m[1;7m io.latency 142 [0m [0m[2m sched.runqlat not asked [0m [0m[2m net.socket not asked [0m [0m[2m gpu.kernel not asked [0m                              │[0m
-│[0m[2m142 block requests, 21.2µs to 4.70ms, p50 56.4µs, p99 4.64ms[0m [0m[36m~low det[0m [0m[33mdegraded x3[0m                                     │[0m
-│[0m[1m3 regimes  ~56.0µs[0m[2m 75% (107) in bursts every ~110ms, 18.3ms to 243ms  │  [0m[1m~400µs[0m[2m 1.4% (2) 19.1ms to 19.5ms  │  [0m[1m~4.52ms[0m │[0m
-│[0m[2m23% (33) in two bursts, 17.1ms to 165ms[0m                                                                               │[0m
-│[0m[2m  count[0m    [0m[2m▄▅[0m                                [0m[2m▄█[0m               [0m[2m▃▄[0m                                       [0m[2mthe whole run[0m  │[0m
+│[0m[2m142 block requests, 29.0µs to 4.69ms, p50 57.5µs, p99 4.63ms[0m [0m[36m~low det[0m [0m[33mdegraded x3[0m                                     │[0m
+│[0m[1m3 regimes  ~57.2µs[0m[2m 75% (107) in bursts every ~110ms, 19.7ms to 243ms  │  [0m[1m~415µs[0m[2m 1.4% (2) 20.5ms to 20.9ms  │  [0m[1m~4.56ms[0m │[0m
+│[0m[2m23% (33) 18.3ms to 167ms[0m                                                                                              │[0m
+│[0m[2m  count[0m     [0m[2m▇[0m                                [0m[2m▂█[0m               [0m[2m▂▄[0m                                       [0m[2mthe whole run[0m  │[0m
 │       [0m[2m│[0m                                     [0m[90m│[0m                                                                        │[0m
 │       [0m[2m│[0m                                     [0m[90m│[0m                                                                        │[0m
-│       [0m[2m│[0m   [0m[2;33m▓▓[0m                                [0m[2;34m▒[0m                                                         [0m[2m███[0m      [0m[2m    33[0m│[0m
+│       [0m[2m│[0m    [0m[2;91m█[0m                                [0m[2;34m▒[0m                                                         [0m[2m███[0m      [0m[2m    33[0m│[0m
 │       [0m[2m│[0m                                     [0m[90m│[0m                                                                        │[0m
 │       [0m[2m│[0m                                     [0m[90m│[0m                                                                        │[0m
 │       [0m[2m│[0m                                     [0m[90m│[0m                                                                        │[0m
@@ -24,17 +24,17 @@
 │       [0m[2m│[0m                                     [0m[90m│[0m                                                                        │[0m
 │  100µs[0m[2m┤[0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·│[0m  [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m                 │[0m
 │       [0m[2m│[0m                                     [0m[90m│[0m                                                                        │[0m
-│       [0m[2m│[0m                                     [0m[2;33m▓[0m[2;91m█[0m               [0m[2;36m▓[0m[2;33m▓[0m                                       [0m[2m█████████    95[0m│[0m
-│       [0m[2m│[0m    [0m[2;36m▒[0m                                [0m[90m│[0m                                                         [0m[2m▏[0m        [0m[2m     3[0m│[0m
-│       [0m[2m│[0m    [0m[2;36m▓[0m                                [0m[90m│[0m                                                         [0m[2m█[0m        [0m[2m     6[0m│[0m
-│       [0m[2m│[0m    [0m[2;34m▒[0m                                [0m[90m│[0m                                                         [0m[2m▏[0m        [0m[2m     2[0m│[0m
-│       [0m[2m│[0m    [0m[2;34m▒[0m                                [0m[90m│[0m                                                         [0m[2m▏[0m        [0m[2m     1[0m│[0m
+│       [0m[2m│[0m                                     [0m[2;36m▒[0m[2;91m█[0m               [0m[2;36m▒[0m[2;33m▓[0m                                       [0m[2m█████████    95[0m│[0m
+│       [0m[2m│[0m    [0m[2;36m▓[0m                                [0m[90m│[0m                                                         [0m[2m█[0m        [0m[2m     7[0m│[0m
+│       [0m[2m│[0m    [0m[2;36m▒[0m                                [0m[90m│[0m                                                         [0m[2m▏[0m        [0m[2m     5[0m│[0m
+│       [0m[2m│[0m                                     [0m[90m│[0m                                                                        │[0m
+│       [0m[2m│[0m                                     [0m[90m│[0m                                                                        │[0m
 │       [0m[2m└┬─────────────────────┬──────────────[0m[1;2m▲[0m[2m───────┬──────────────────────┬──────────────────────┬─[0m                 │[0m
 │        [0m[2m0[0m                   [0m[2m100ms[0m                  [0m[2m200ms[0m                  [0m[2m300ms[0m                  [0m[2m400ms[0m                │[0m
 │[0m[2m   lost[0m [0m[2mnothing lost[0m                                                                                                  │[0m
 │                                                                                                                      │[0m
-│[0m[1m▲ 162ms to 167ms   [0m[2m21 block requests   p50 56.4µs   p99 4.70ms   max 4.70ms[0m                                           │[0m
-│[0m[2m  its slowest 4.70ms: server tid 2759757 RA 16.0KiB on nvme0n1p6 request a002[0m                                         │[0m
-│[0m[2mper cell [0m[34m▒[0m[2m1 [0m[36m▒[0m[2m3 [0m[36m▓[0m[2m6 [0m[33m▓[0m[2m12 [0m[91m█[0m[2m23   rows 2.6/octave, columns 4.39ms each[0m                                                      │[0m
+│[0m[1m▲ 163ms to 167ms   [0m[2m7 block requests   p50 55.3µs   p99 4.69ms   max 4.69ms[0m                                            │[0m
+│[0m[2m  its slowest 4.69ms: server tid 1499921 RA 16.0KiB on nvme0n1p6 request a002[0m                                         │[0m
+│[0m[2mper cell [0m[34m▒[0m[2m1 [0m[36m▒[0m[2m3 [0m[36m▓[0m[2m7 [0m[33m▓[0m[2m14 [0m[91m█[0m[2m29   rows 2.6/octave, columns 4.39ms each[0m                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1ms[0m source  [0m[1mh/l[0m cursor  [0m[1m+/-[0m zoom  [0m[1mt[0m narrow to slowest  [0m[1m⏎[0m open it   [0m

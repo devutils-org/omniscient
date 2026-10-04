@@ -1,29 +1,29 @@
-omn top │ fixture vertical-requests │ 408ms                       view: snapshot │ collectors ≥0.70% │ target 4.10% cpu
+omn top │ fixture vertical-requests │ 409ms                       view: snapshot │ collectors ≥1.19% │ target 4.31% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
 │ one-request  one bar per request, whole: `net.request` span_ns  (1 of 2: d for the next)                             │
 │                                                                                                                      │
 │ ▶ first suspect  req:a001: lock_wait 40.1ms (99.8% of its whole)                                                     │
 │   asleep on a lock another thread held: lock-contended                                                               │
-│   holder tid 2759758, on 1 of its 1 event(s)                                                                         │
-│   decisive: ahead of the next state (54.0µs) and of what no row read (0ns) -- omn latency's rule, on the run's deco… │
+│   holder tid 1500253, on 1 of its 1 event(s)                                                                         │
+│   decisive: ahead of the next state (56.6µs) and of what no row read (0ns) -- omn latency's rule, on the run's deco… │
 │                                                                                                                      │
 │ ▸ req:a001            ├▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 99.8% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞┤   40.2ms  ▶ lock 99.8%        │
-│   req:a005            ├█▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ network 98.8% ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄┤   33.1ms  ▶ network 98.8%     │
+│   req:a005            ├█▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ network 99.0% ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄┤   33.2ms  ▶ network 99.0%     │
 │   req:a004            ├▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ network 99.9% ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄┤   30.1ms  ▶ network 99.9%     │
-│   req:a003            ├██▚▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 87.4% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▓▓▓▓▓┤   23.0ms  ▶ lock 87.4%        │
-│   req:a002            ├███████▚▚▚▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ I/O 81.8% ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤   10.1ms  ▶ I/O 81.8%         │
+│   req:a003            ├█▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 89.7% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▓▓▓▓▓┤   22.3ms  ▶ lock 89.7%        │
+│   req:a002            ├█████▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ I/O 90.2% ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤   9.35ms  ▶ I/O 90.2%         │
 │                      0 ───────────────── each bar to its own whole ──────────────────┤ 100%                          │
 │                        █ on cpu   ▚ run queue   ▞ lock   ▓ I/O   ▄ network                                           │
 │                                                                                                                      │
 │   state                            source          amount          share   ±         reads  trust                    │
 │   whole: `net.request` span_ns                     40.2ms          100%    exact                                     │
-│ █ cpu_on                           net.request     54.0µs          0.13%   exact     1      degraded x2              │
-│ ▚ sched_wait                       net.request     22.6µs          0.06%   exact     1      degraded x2              │
+│ █ cpu_on                           net.request     56.6µs          0.14%   exact     1      degraded x2              │
+│ ▚ sched_wait                       net.request     10.2µs          0.03%   exact     1      degraded x2              │
 │ ▞ lock_wait                        net.request     40.1ms          99.8%   exact     1      degraded x2              │
-│     ↳ holder tid 2759758, on 1 of its 1 event(s)                                                                     │
+│     ↳ holder tid 1500253, on 1 of its 1 event(s)                                                                     │
 │ ▓ block_io                         net.request     0ns             0.00%   exact     1      degraded x2              │
-│ ▄ net_rx                           net.request     20.7µs          0.05%   exact     1      degraded x2              │
+│ ▄ net_rx                           net.request     17.3µs          0.04%   exact     1      degraded x2              │
 │ ▄ net_tx                           net.request     0ns             0.00%   exact     1      degraded x2              │
 │   residue: the whole less the rows                 0ns             0.00%   exact     within its resolution           │
 │                                                                                                                      │

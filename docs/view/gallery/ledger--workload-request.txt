@@ -1,0 +1,40 @@
+omn top │ fixture workload-request │ 1.18s                        view: snapshot │ collectors ≥11.1% │ target 0.90% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ ledger -- what task 1530298 and 2 more cost over 1.18s of wall-clock ────────────────────────────────────────────────┐
+│  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
+│▸ cpu time        15.2ms on cpu    1.29% of one cpu          ██████▃▃▃▃▃▃▃▃▃▃▂▂▂▂▃▄▄▄    ≥13.7ms  ~low det            │
+│    1530298 server     12.6ms  ██████████   83.2%                                                                     │
+│    1530390 server     2.25ms  ██           14.9%                                                                     │
+│    task 1530389        295µs  ▏            1.94%                                                                     │
+│    user and system apart: on the raw events only, which this run did not keep                                        │
+│    own account        15.0ms  with its descendants, as the scheduler counts them                                     │
+│    machine busy        13.6s  ▏            0.11%                                                                     │
+│  memory held     2.15MiB peak     +20.0KiB from 2.13MiB     ▁▁▁▁▁███████████████████      110µs                      │
+│  memory faulted  103 faults       87/s                      a total only                 ≥129µs  20 late             │
+│    1530298 server         92  ███████████  89.3%                                                                     │
+│    1530390 server         10  █            9.71%                                                                     │
+│    task 1530389            1  ▏            0.97%                                                                     │
+│  I/O syscalls    282 calls        994ms inside them         256ns ▃▃▂▁█▁   ▁ 268ms      ≥34.9ms  ~low det degraded x2│
+│    task 1530389        977ms  ████████████ 98.3%                                                                     │
+│    1530298 server     17.0ms  ▏            1.71%                                                                     │
+│    1530390 server     27.0µs  ▏            0.00%                                                                     │
+│    bytes read and written: on the raw rows only, which this run did not keep                                         │
+│  network         3.45KiB moved    1.73KiB out, 1.73KiB in      ▆ ▆▄ █  ▅▇  ▅ ▅ ▇ █ ▄    ≥36.2ms  ~low det degraded x3│
+│    1530298 server    1.73KiB  ██████       50.0%                                                                     │
+│    1530390 server    1.73KiB  ██████       50.0%                                                                     │
+│    88 socket calls                                                                                                   │
+│  retransmits     0 sent again     machine-wide              a total only                ≥69.0µs  12 late ~low det    │
+│  GPU memory      0B peak          of 734MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁      492µs                      │
+│  GPU time        0ns on GPU       0 kernels and copies      no series kept               ≥140µs  12 late degraded    │
+│  energy          120J machine     102W on average           ████████████████▇▇▇         ≥24.7µs                      │
+│    ≈ the target's      0.13J  an estimate, not a measurement: its share of the machine's busy cpu, 15.0ms of 13.6s   │
+│                                                                                                                      │
+│  to know all of this: ≥85.7ms of omn's cpu, ≥572% of what the target spent                                           │
+│    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
+│ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
+│cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
+│· the source is not reproducible between two runs of the same workload                                                │
+│· to know it: 13.7ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
+│run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl       │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line

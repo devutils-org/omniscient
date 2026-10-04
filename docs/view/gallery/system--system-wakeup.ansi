@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture system-wakeup │ 1.00s                            [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥2.08%[0m[35m │ target 520% cpu[0m [0m
+[0m[1;7m 1 system [0m 2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
+┌[0m[1m system -- [0m[2mthe overview: cpu, memory, disk, network, GPU and power, and the processes [0m────────────────────────────────┐[0m
+│[0m[2mThis run did not measure the machine: no cpu, memory, disk, network, GPU or power source is in it. The session that[0m   │[0m
+│[0m[2mmade it asked for:[0m                                                                                                    │[0m
+│sched.wakeup                                                                                                          │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+┌[0m[1m processes [0m[2mthe target's, by cpu [0m────────────────────────────────────────────────────┐[0m[35m┌ cost, share of one cpu ────────┐[0m
+│[0m[2mno process in this run: nothing in it is measured per task[0m                          │[0m[35m│[0m[2;35mnone of this view's collectors[0m  [0m[35m│[0m
+│                                                                                    │[0m[35m│[0m[2;35mis in this run[0m                  [0m[35m│[0m
+│                                                                                    │[0m[35m│[0m                                [0m[35m│[0m
+│                                                                                    │[0m[35m│[0m                                [0m[35m│[0m
+│                                                                                    │[0m[35m│[0m                                [0m[35m│[0m
+│                                                                                    │[0m[35m│[0m                                [0m[35m│[0m
+│                                                                                    │[0m[35m│[0m                                [0m[35m│[0m
+└────────────────────────────────────────────────────────────────────────────────────┘[0m[35m└────────────────────────────────┘[0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m process  [0m[1menter[0m its ledger  [0m[1ms[0m sort  [0m[1mi[0m idle devices            [0m

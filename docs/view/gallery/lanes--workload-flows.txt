@@ -1,0 +1,40 @@
+omn top │ fixture workload-flows │ 1.00s                          view: snapshot │ collectors ≥12.4% │ target 5.69% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐
+│sched.switches 124 11 late ~low det degraded x2  sched.wakeup 170 11 late ~low det degraded  sched.offcpu 23 ~low det │
+│degraded  gpu.kernel 0 13 late degraded                                                                               │
+│12.1ms a cell          ╷0ns            ╷200ms           ╷400ms          ╷600ms           ╷800ms            of the span│
+│flows-main     1528032│██▇                        ▃▂  ▂                                                   │awake 4.32%│
+│              off cpu │  ▂████████████████████████▆▇██▇█████████████████████████████████████████████████▃ │ blkd 93.6%│
+│───────────────────────────────────────────────────────────────────────────────▲ 683ms────────────────────────────────│
+│flows-main 1528032 (pid 1528032) at 683ms: blocked, sleeping 600ms, 383ms → 983ms, left cpu 4                         │
+│  woken by an interrupt (hardirq), then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone │
+│  in clock_nanosleep ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← libpython3.14.so.1.0 x4 ← Py_RunMain ← …           │
+│  124 switch-outs and 94 wakeups seen; awake 4.32% of the run                                                         │
+│  where it was off a cpu over the run, 941ms in all (sched.offcpu, by state and stack) ~low det degraded:             │
+│     900ms 95.7% sleeping      2 blocks  clock_nanosleep ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …              │
+│    29.1ms 3.09% sleeping      1 blocks  accept4 ← _socket.cpython-314-x86_64-linux-gnu.so x2 ← …                     │
+│    5.77ms 0.61% uninterr.    70 blocks  fsync ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
+│    4.43ms 0.47% sleeping      1 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│▆ awake: on a cpu or queued  ─ blocked  ━ uninterruptible  ▆ kernel  ▆ copy  height: share of the cell                │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ lane  h/l H/L cursor  [/] prev/next change  z/Z zoom  w to wa

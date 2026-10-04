@@ -1,28 +1,28 @@
-omn top │ fixture http-server │ 2.84s                             view: snapshot │ collectors ≥16.1% │ target 92.0% cpu
+omn top │ fixture http-server │ 3.24s                             view: snapshot │ collectors ≥24.3% │ target 90.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐
-│sched.switches 98 29 late ~low det degraded x2  sched.wakeup 220 29 late ~low det degraded  sched.offcpu 140 ~low det │
-│degraded  gpu.kernel refused                                                                                          │
-│34.2ms a cell          ╷0ns          ╷500ms         ╷1.00s        ╷1.50s         ╷2.00s         ╷2.50s     of the span│
-│python3        2758953│█▇              ▁              ▁             ▁              ▁             ▁       ▁│awake 2.18%│
-│              off cpu │ ▂████████████████████████████████████████████████████████████████████████████████▃│ blkd 96.9%│
-│Thread-1 (proc 2758974│ ▁██████████▅   ▄████████████▃ ▇████████▄    ▃█████████████▂▆█████████████████████▃│awake 82.0%│
-│              off cpu │     ▁  ▁   ▄███▅            ▆█▂        ▅████▆             ▇▃             ▁       ▂│ blkd 15.1%│
-│┌ gpu.kernel refused ────────────────────────────────────────────────────────────────────────────────────────────────┐│
-││gpu.kernel was not served:                                                                                          ││
-││no collector is written for `gpu.kernel` on backend `vendor:cupti` yet                                              ││
-│└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘│
-│─────────────────────────────────────────────────────────────▲ 1.32s──────────────────────────────────────────────────│
-│python3 2758953 (pid 2758953) at 1.32s: blocked, sleeping 500ms, 1.07s → 1.57s, left cpu 14                           │
+│sched.switches 59 50 late ~low det degraded x2  sched.wakeup 205 50 late ~low det degraded  sched.offcpu 135 ~low det │
+│degraded  gpu.kernel 0 22 late degraded                                                                               │
+│39.1ms a cell          ╷0ns        ╷500ms       ╷1.00s       ╷1.50s       ╷2.00s       ╷2.50s      ╷3.00s  of the span│
+│python3        1493220│█▆            ▁            ▁            ▁           ▁            ▁            ▁  ▁ │awake 1.97%│
+│              off cpu │▁▃████████████████████████████████████████████████████████████████████████████████ │ blkd 96.7%│
+│Thread-1 (proc 1493226│ ▃████████▃   ▃            ▆█████████████████████████████████████████████████▅▃███▁│awake 75.0%│
+│              off cpu │     ▁  ▁ ▆███▆████████████▃            ▁▁          ▁            ▁   ▁       ▄▆  ▁▃│ blkd 22.1%│
+│──────────────────────────────────────────────────────────────────────────────────▲ 2.32s─────────────────────────────│
+│python3 1493220 (pid 1493220) at 2.32s: blocked, sleeping 500ms, 2.07s → 2.57s, left cpu 13                           │
 │  woken by an interrupt (hardirq), then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone │
 │  in libc.so.6 ← select.cpython-314-x86_64-linux-gnu.so ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …               │
-│  37 switch-outs and 18 wakeups seen; awake 2.18% of the run                                                          │
-│  meanwhile awake: Thread-1 (proce 2758974                                                                            │
-│  where it was off a cpu over the run, 2.76s in all (sched.offcpu, by state and stack) ~low det degraded:             │
-│     2.75s 99.9% sleeping      6 blocks  libc.so.6 ← select.cpython-314-x86_64-linux-gnu.so ← …                       │
-│    3.16ms 0.11% sleeping      1 blocks  __poll ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                       │
-│     157µs 0.01% sleeping      2 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …             │
-│    76.3µs 0.00% sleeping      1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …                    │
+│  19 switch-outs and 16 wakeups seen; awake 1.97% of the run                                                          │
+│  meanwhile awake: Thread-1 (proce 1493226                                                                            │
+│  where it was off a cpu over the run, 3.13s in all (sched.offcpu, by state and stack) ~low det degraded:             │
+│     3.13s 99.9% sleeping      7 blocks  libc.so.6 ← select.cpython-314-x86_64-linux-gnu.so ← …                       │
+│    1.99ms 0.06% sleeping      1 blocks  __poll ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                       │
+│     182µs 0.01% sleeping      2 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …             │
+│     142µs 0.00% sleeping      1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …                    │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
