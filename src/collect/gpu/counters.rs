@@ -209,12 +209,25 @@ impl Prepared for InsidePrepared {
     }
 }
 
+/// What a run says of a process that died inside the injection library's
+/// exit handler: the tool ended the program, and the program's exit status
+/// is the tool's doing, not the program's.
+pub(super) fn died_in_exit(pid: u32, source: &str) -> String {
+    format!(
+        "pid {pid} died inside omn's injection library (libomn_cupti.so), in its exit handler, \
+         after the program's own work had finished: {source} killed the program it measured, \
+         so the program's exit status is the tool's failure, not the program's"
+    )
+}
+
 /// What one process said about itself, for an inside reader.
 #[derive(Debug, Default)]
 pub(super) struct Sender {
     pub names: BTreeMap<u32, String>,
     pub hello: bool,
     pub ended: bool,
+    /// The library's exit handler started ([`wire::OP_EXITING`]).
+    pub exiting: bool,
     /// Inside records the library could not send, as last reported.
     unsent: u64,
     /// The process's `proc` key, read once, while it runs: at the end of the
@@ -300,6 +313,7 @@ impl Common {
                     .get_or_insert_with(|| KeyValue::proc_of(pid as i32));
             }
             wire::OP_END => sender.ended = true,
+            wire::OP_EXITING => sender.exiting = true,
             wire::OP_NAME if payload.len() >= 4 => {
                 let id = read.u32();
                 let raw = String::from_utf8_lossy(&payload[4..])
@@ -500,17 +514,26 @@ impl Common {
     }
 
     /// At the end: a process that said hello and never said it had finished
-    /// lost what it had not sent.
+    /// lost what it had not sent; one that died inside the library's exit
+    /// handler was ended by the tool, which is a failure, not a lost read.
     pub fn unfinished(&mut self) {
         let source = self.kind.source();
         for (pid, sender) in &self.senders {
             if sender.hello && !sender.ended {
                 self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "pid {pid} never said it had finished: it was killed, or exited without \
-                     running its exit handlers, so what {source} had not yet read back from \
-                     CUPTI is missing and was not counted"
-                ));
+                if sender.exiting {
+                    self.errors.push(died_in_exit(*pid, source));
+                    self.losses.note(format!(
+                        "pid {pid} died inside omn's injection library as it exited, so what \
+                         {source} had not yet read back from CUPTI is missing and was not counted"
+                    ));
+                } else {
+                    self.losses.note(format!(
+                        "pid {pid} never said it had finished: it was killed, or exited without \
+                         running its exit handlers, so what {source} had not yet read back from \
+                         CUPTI is missing and was not counted"
+                    ));
+                }
             }
         }
     }
@@ -1165,6 +1188,32 @@ pub(super) mod tests {
         let notes = collector.notes().join("\n");
         assert!(notes.contains("gpu.counters: mine"), "{notes}");
         assert!(!notes.contains("not mine"), "{notes}");
+    }
+
+    /// A process that died after the library's exit handler started, before
+    /// its end, was killed by the tool: the run says so as a failure, beside
+    /// the lost read, and a death without that frame stays a lost read.
+    #[test]
+    fn a_death_inside_the_library_s_exit_handler_is_the_tool_s_failure() {
+        for exiting in [true, false] {
+            let (write, socket, reader) = pair(Inside::Profile);
+            let mut collector = CountersCollector::new(socket, reader, 5);
+            let mut frames = vec![(wire::OP_HELLO, vec![0; 24])];
+            if exiting {
+                frames.push((wire::OP_EXITING, Vec::new()));
+            }
+            send(write, 5, &frames);
+            collector.sample(0).unwrap();
+            collector.stop();
+            assert_eq!(collector.losses().failed_reads, 1);
+            assert_eq!(collector.losses().undecoded, 0);
+            let notes = collector.notes().join("\n");
+            assert_eq!(
+                notes.contains("killed the program it measured"),
+                exiting,
+                "{notes}"
+            );
+        }
     }
 
     /// Counters replay kernels: refused beside gpu.kernel, and beside PC

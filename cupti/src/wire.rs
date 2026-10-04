@@ -139,6 +139,10 @@ pub const OP_PC_DRAIN: u8 = 19;
 /// the [`OP_LOST`] of the inside readers.
 pub const OP_INSIDE_UNSENT: u8 = 20;
 pub const OP_INSIDE_LAST: u8 = 31;
+/// The library's exit handler has started, before it tears anything down:
+/// no payload. A process that sent this and never [`OP_END`] died inside
+/// the library's own exit path -- the tool, not the program, ended it.
+pub const OP_EXITING: u8 = 32;
 
 /// What an [`OP_INSIDE_LOST`] counts: ranges CUPTI's decode said it dropped.
 pub const LOST_RANGES: u32 = 1;

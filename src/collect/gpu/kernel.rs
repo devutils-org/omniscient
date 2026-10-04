@@ -338,6 +338,8 @@ struct Sender {
     calibration: Calibration,
     hello: Option<Hello>,
     ended: bool,
+    /// The library's exit handler started ([`wire::OP_EXITING`]).
+    exiting: bool,
     /// Records the library could not send, as it last reported them.
     lost: u64,
     /// The process's `proc` key, read once: two `/proc` reads per event
@@ -510,6 +512,7 @@ impl KernelCollector {
                 }
             }
             wire::OP_UNKNOWN => {}
+            wire::OP_EXITING => sender.exiting = true,
             // What the library learns inside kernels, for the readers of
             // `gpu.counters` and `gpu.profile` on the same socket: theirs.
             wire::OP_INSIDE_FIRST..=wire::OP_INSIDE_LAST => {}
@@ -687,11 +690,20 @@ impl Collector for KernelCollector {
         for (pid, sender) in &self.senders {
             if sender.hello.is_some() && !sender.ended {
                 self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "pid {pid} never said it had flushed CUPTI: it was killed, or exited \
-                     without running its exit handlers, so the activity of its last buffer \
-                     is missing and was not counted"
-                ));
+                if sender.exiting {
+                    self.errors
+                        .push(super::counters::died_in_exit(*pid, "gpu.kernel"));
+                    self.losses.note(format!(
+                        "pid {pid} died inside omn's injection library as it exited, so the \
+                         activity of its last buffer is missing and was not counted"
+                    ));
+                } else {
+                    self.losses.note(format!(
+                        "pid {pid} never said it had flushed CUPTI: it was killed, or exited \
+                         without running its exit handlers, so the activity of its last buffer \
+                         is missing and was not counted"
+                    ));
+                }
             }
         }
         events
