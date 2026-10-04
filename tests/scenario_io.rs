@@ -110,6 +110,31 @@ fn json(output: &Output) -> serde_json::Value {
         .unwrap_or_else(|error| panic!("the json output parses ({error}): {}", stdout(output)))
 }
 
+/// What this machine lacks for `backend` of `source`, as `omn list` probes it
+/// -- the requirements it calls missing -- or `None` when nothing it needs is
+/// missing here. A backend this build has not written is refused for the
+/// machine before the build (`DECISIONS.md`, "one order for unbuilt and
+/// missing"), so which refusal a pin or a key hint earns is this answer's.
+fn lacks_here(source: &str, backend: &str) -> Option<Vec<String>> {
+    let listing = run(&["list", source, "--format", "json"]);
+    assert!(listing.status.success(), "{}", stderr(&listing));
+    let entries = json(&listing);
+    let probed = entries[0]["probes"]
+        .as_array()
+        .expect("the listing carries each backend's probes")
+        .iter()
+        .find(|probed| probed["backend"] == backend)
+        .unwrap_or_else(|| panic!("`{source}` lists no backend `{backend}`"));
+    let missing: Vec<String> = probed["requirements"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|requirement| requirement["probe"]["state"] == "missing")
+        .filter_map(|requirement| requirement["needs"].as_str().map(str::to_owned))
+        .collect();
+    (!missing.is_empty()).then_some(missing)
+}
+
 /// The result of one labelled request in a session's output.
 fn result<'a>(document: &'a serde_json::Value, label: &str) -> &'a serde_json::Value {
     document["results"]
@@ -964,9 +989,13 @@ fn a_filter_the_backend_cannot_carry_names_the_backend_that_can() {
 /// or a request, so `io.bytes` and `io.iops` keyed on `task` or `blk` and
 /// resolved onto them would be events no join over that key could ever match.
 /// The catalog says so in each backend's `keys`, and the resolver refuses with
-/// the eBPF backend that carries them -- which this build has not written, so
-/// the refusal is the build's (exit 3) on every machine, with or without
-/// capabilities. Keyed on the device, the one thing both files do name, the
+/// the eBPF backend that carries them -- which this build has not written. The
+/// hint names them as the walk would answer (`DECISIONS.md`, "one order for
+/// unbuilt and missing"): the build's (exit 3) where this machine could run a
+/// carrier, the machine's (exit 1) where it can run none -- without the
+/// capabilities, or with tracefs unreadable and no raw tracepoint carrier.
+/// Ground truth for which: what `omn list` probes for each carrier. Keyed on
+/// the device, the one thing both files do name, the
 /// same request runs, and its series are the devices the kernel's file lists.
 #[test]
 fn a_request_keyed_on_what_the_counter_files_do_not_name_is_refused_with_the_backend_that_does() {
@@ -1020,15 +1049,46 @@ fn a_request_keyed_on_what_the_counter_files_do_not_name_is_refused_with_the_bac
                 )),
                 "{args:?}: {message}"
             );
-            assert!(
-                message.contains("`bpf:raw_tp` does") || message.contains("`bpf:tp` does"),
+            let carriers: Vec<&str> = ["bpf:raw_tp", "bpf:tp"]
+                .into_iter()
+                .filter(|carrier| message.contains(&format!("`{carrier}` does")))
+                .collect();
+            assert_eq!(
+                carriers.len(),
+                1,
                 "the refusal has to name the backend that attaches `{key}`: {message}"
             );
-            assert_eq!(
-                refused.status.code(),
-                Some(EXIT_NOT_IMPLEMENTED),
-                "the backend that attaches `{key}` is one this build has not written: {message}"
-            );
+            let named = carriers[0];
+            // A carrier this machine can run outranks one it cannot, as on the
+            // walk, so the hint is the machine's only where no carrier runs.
+            let lacking: Vec<&str> = ["bpf:raw_tp", "bpf:tp"]
+                .into_iter()
+                .filter(|carrier| lacks_here(source, carrier).is_some())
+                .collect();
+            if lacking.len() == 2 {
+                assert!(
+                    message.contains(&format!("`{named}` does, and this machine cannot run it")),
+                    "no carrier of `{key}` runs here, so the hint is the machine's: {message}"
+                );
+                assert_eq!(
+                    refused.status.code(),
+                    Some(EXIT_NO_BACKEND),
+                    "no backend that attaches `{key}` runs on this machine: {message}"
+                );
+            } else {
+                assert!(
+                    !lacking.contains(&named)
+                        && message
+                            .contains(&format!("`{named}` does, and this build has no collector")),
+                    "a carrier this machine runs is named, as this build's gap: {message}"
+                );
+                assert_eq!(
+                    refused.status.code(),
+                    Some(EXIT_NOT_IMPLEMENTED),
+                    "the backend that attaches `{key}` is one this build has not written: \
+                     {message}"
+                );
+            }
             assert!(stdout(&refused).is_empty(), "{}", stdout(&refused));
         }
     }
@@ -1069,7 +1129,8 @@ fn a_request_keyed_on_what_the_counter_files_do_not_name_is_refused_with_the_bac
 // B. The backend comparison
 
 /// Every backend this family declares and has not written is refused by name,
-/// with the exit code that means "this build", not "this run".
+/// with the exit code that means "this build" -- or "this machine" where it
+/// lacks something the backend needs, as the walk answers -- never "this run".
 ///
 /// This family still has one *implemented* backend per source -- procfs for the
 /// counters, the raw tracepoint for the block layer -- so there is no second
@@ -1084,7 +1145,7 @@ fn a_request_keyed_on_what_the_counter_files_do_not_name_is_refused_with_the_bac
 /// the build rather than written down here: the eBPF collectors landed after
 /// this scenario did, and a list in a test is a thing that goes stale quietly.
 #[test]
-fn forcing_a_backend_this_build_has_not_written_names_it_and_exits_three() {
+fn forcing_a_backend_this_build_has_not_written_names_it_in_the_chains_order() {
     let catalog = Catalog::embedded().expect("the embedded catalog loads");
     let mut asked = Vec::new();
     let mut batches = Vec::new();
@@ -1137,9 +1198,32 @@ fn forcing_a_backend_this_build_has_not_written_names_it_and_exits_three() {
             "forcing `{backend}` was refused without naming it:\n{message}"
         );
         match output.status.code() {
+            // A backend this machine lacks something for is the machine's
+            // first, as on the walk (`DECISIONS.md`, "one order for unbuilt
+            // and missing"), and only then.
+            Some(EXIT_NO_BACKEND) => {
+                let lacks = lacks_here(source, backend).unwrap_or_else(|| {
+                    panic!(
+                        "forcing `{backend}` on `{source}` was refused for the machine, which \
+                         `omn list` says lacks nothing for it:\n{message}"
+                    )
+                });
+                assert!(
+                    lacks
+                        .iter()
+                        .all(|needs| message.contains(&format!("{needs}: missing")))
+                        && !message.contains("no collector is written"),
+                    "the machine's refusal names what it lacks, not the collector:\n{message}"
+                );
+            }
             // The answer this class is about: valid request, unwritten
-            // mechanism. Retrying or raising privileges will not help.
+            // mechanism, on a machine that lacks nothing it needs. Retrying or
+            // raising privileges will not help.
             Some(EXIT_NOT_IMPLEMENTED) => {
+                assert!(
+                    lacks_here(source, backend).is_none(),
+                    "`{backend}` lacks something here and was refused as the build's:\n{message}"
+                );
                 assert!(
                     message.contains("no collector is written"),
                     "exit 3 has to say that this build is what is missing:\n{message}"

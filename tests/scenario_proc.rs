@@ -60,6 +60,32 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// What this machine lacks for `backend` of `source`, as `omn list` probes it
+/// -- the requirements it calls missing -- or `None` when nothing it needs is
+/// missing here. A pinned backend is refused for the machine before
+/// the build (`DECISIONS.md`, "one order for unbuilt and missing"), so which
+/// refusal a pin earns is this answer's.
+fn lacks_here(source: &str, backend: &str) -> Option<Vec<String>> {
+    let listing = omn(&["list", source, "--format", "json"]);
+    assert!(listing.status.success(), "{}", stderr(&listing));
+    let entries: serde_json::Value =
+        serde_json::from_str(&stdout(&listing)).expect("the listing is JSON");
+    let probed = entries[0]["probes"]
+        .as_array()
+        .expect("the listing carries each backend's probes")
+        .iter()
+        .find(|probed| probed["backend"] == backend)
+        .unwrap_or_else(|| panic!("`{source}` lists no backend `{backend}`"));
+    let missing: Vec<String> = probed["requirements"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|requirement| requirement["probe"]["state"] == "missing")
+        .filter_map(|requirement| requirement["needs"].as_str().map(str::to_owned))
+        .collect();
+    (!missing.is_empty()).then_some(missing)
+}
+
 /// The JSON document a run prints, with whatever the launched program wrote to
 /// standard output stripped from in front of it.
 fn document(output: &Output) -> serde_json::Value {
@@ -647,29 +673,29 @@ requests:
     emit: [hist]
 ";
 
-/// `examples/proc-not-built.yml`: valid, resolvable, and refused because this
-/// build has no collector for the backend it names.
+/// `examples/proc-not-built.yml`: valid, and refused either for this machine
+/// or for this build -- in that order, as the walk answers.
 ///
 /// A caller that cannot tell "you asked for something impossible" from "this is
 /// not written yet" cannot decide whether to fix the request or wait for a
 /// release, and one that cannot tell either from "this machine cannot serve it"
 /// raises privileges against a collector nobody has written. So the session
-/// validates cleanly, resolves, and exits 3 with the sentence that belongs to
-/// that answer.
+/// validates cleanly and is refused with the sentence that belongs to its
+/// answer.
 ///
-/// **This used to be a two-way test, and the sixth wave settled it.** Until
-/// then the file held the four `proc` sources with no collector at all; all
-/// four declared `bpf:tp` and nothing else, a classic tracepoint is attached by
-/// reading a numeric event id out of a root-only file under tracefs, and on a
-/// machine where that file is unreadable -- this project's own -- the honest
-/// answer was 1, "this machine cannot serve it". The test had to accept either.
-/// All four now collect through `bpf:raw_tp`, which needs a name and the
-/// kernel's own BTF; what is left unimplemented is the second backend of each
-/// chain, and `--backend force:` reaches it while bypassing the resolver
-/// entirely. The answer no longer depends on what this machine can read, which
-/// is what an exit code meaning "this build does not have it" should be.
+/// **Which answer depends on this machine, and the eighteenth wave decided it
+/// should.** The four `proc` sources collect through `bpf:raw_tp`; what is left
+/// unimplemented is the classic tracepoint backend of each chain, which `force:`
+/// pins. That backend reads a numeric event id out of tracefs, and where tracefs
+/// is not readable -- this project's own machine -- the walk has always said
+/// "this machine" (exit 1). The pin used to say "this build" (exit 3) for the
+/// same backend, so one request exited by the path that reached it. A pinned
+/// backend is now refused in the chain's order (`DECISIONS.md`, "one order for
+/// unbuilt and missing"): the machine's gap first, the build's where the
+/// machine lacks nothing. Ground truth for which this machine is: what
+/// `omn list` probes for the pinned backend.
 #[test]
-fn a_source_this_build_does_not_implement_exits_three_and_names_the_backend() {
+fn a_source_this_build_does_not_implement_is_refused_in_the_chains_order() {
     let validated = omn(&["validate", "-f", &example("proc-not-built.yml")]);
     assert!(
         validated.status.success(),
@@ -679,22 +705,6 @@ fn a_source_this_build_does_not_implement_exits_three_and_names_the_backend() {
 
     let output = omn(&["-f", &example("proc-not-built.yml")]);
     let message = stderr(&output);
-    assert_eq!(
-        output.status.code(),
-        Some(3),
-        "a valid request for a backend nothing collects is this build's gap, and `force:` \
-         bypasses the resolver so no machine can turn it into any other answer:\n{message}"
-    );
-    assert!(
-        message.contains("no collector is written"),
-        "exit 3 is this build's gap and must say so: {message}"
-    );
-    // The way out is named too: the request is fine and can be written down for
-    // a build that has it.
-    assert!(
-        message.contains("--dump-request"),
-        "a reader has to be told what they can still do with a valid request: {message}"
-    );
     assert!(
         message.contains("bpf:tp"),
         "the refusal must name the backend: {message}"
@@ -703,6 +713,51 @@ fn a_source_this_build_does_not_implement_exits_three_and_names_the_backend() {
         message.contains("proc.exec"),
         "and the source it was asked for: {message}"
     );
+    if let Some(lacks) = lacks_here("proc.exec", "bpf:tp") {
+        eprintln!(
+            "note: `bpf:tp` lacks {} here, so the pin is this machine's to refuse before it \
+             is the build's",
+            lacks.join(", ")
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "a pinned backend this machine cannot serve is the machine's, as the walk says: \
+             {message}"
+        );
+        assert!(
+            message.contains("no viable backend on this machine")
+                && lacks
+                    .iter()
+                    .all(|needs| message.contains(&format!("{needs}: missing"))),
+            "the machine's refusal names what it lacks: {message}"
+        );
+        assert!(
+            message.contains("the request is valid"),
+            "and says the request itself was fine: {message}"
+        );
+        assert!(
+            !message.contains("no collector is written"),
+            "a machine that cannot serve the backend is not sent after its collector: {message}"
+        );
+    } else {
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "a valid request for a backend nothing collects, on a machine that lacks nothing \
+             it needs, is this build's gap:\n{message}"
+        );
+        assert!(
+            message.contains("no collector is written"),
+            "exit 3 is this build's gap and must say so: {message}"
+        );
+        // The way out is named too: the request is fine and can be written
+        // down for a build that has it.
+        assert!(
+            message.contains("--dump-request"),
+            "a reader has to be told what they can still do with a valid request: {message}"
+        );
+    }
 
     // And the sibling answer stays distinct: the *other* backend of the same
     // chain is written, so the same source without the pin measures.

@@ -707,15 +707,17 @@ fn every_session_in_the_family_validates_against_the_catalog() {
 // ---------------------------------------------------------------------------
 
 /// This family has no two implemented backends to compare, so the comparison is
-/// with the refusal: forcing a backend the build does not implement must exit 3
-/// and name it, not exit 1 like a machine that cannot serve the request and not
-/// exit 2 like a request that cannot mean anything.
+/// with the refusal: forcing a backend the build does not implement must name
+/// it, and never exit 2 like a request that cannot mean anything.
 ///
 /// The distinction is the whole point of `--backend force:`. A reader who pins
 /// `fs:sys:amdgpu` on a laptop needs to know whether they are missing hardware
-/// or missing code, and only one of the two is worth waiting for.
+/// or missing code, and only one of the two is worth waiting for. Where the
+/// machine lacks something the backend needs, the hardware is the first answer
+/// (exit 1), as the walk gives it; where it lacks nothing, the code is (exit 3)
+/// -- the chain's order (`DECISIONS.md`, "one order for unbuilt and missing").
 #[test]
-fn forcing_a_backend_this_build_does_not_implement_exits_three_and_names_it() {
+fn forcing_a_backend_this_build_does_not_implement_names_it_in_the_chains_order() {
     let _together = shared();
     let mut forced = 0;
     let mut here = 0;
@@ -757,22 +759,50 @@ fn forcing_a_backend_this_build_does_not_implement_exits_three_and_names_it() {
             // Pinning is never silent: the resolver's choice was bypassed and
             // the run says so whether it then measures or refuses.
             assert!(
-                complaint.contains("is pinned"),
+                complaint.contains("is pinned")
+                    || complaint.contains(&format!("{id} (pinned with --backend force:")),
                 "pinning {id} on {source} said nothing about it: {complaint}"
             );
             if output.status.success() {
                 continue;
             }
-            assert_eq!(
-                code(&output),
-                EXIT_NOT_IMPLEMENTED,
-                "pinning {id} on {source} refused as something other than a missing \
-                 collector: {complaint}"
-            );
-            assert!(
-                complaint.contains("no collector") && complaint.contains(id),
-                "the refusal does not name the backend that is missing: {complaint}"
-            );
+            // What this machine lacks for the pinned backend, as the listing
+            // probes it: the machine's gap is answered before the build's.
+            let lacks: Vec<&str> = entry["probes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|probes| probes["backend"] == id)
+                .flat_map(|probes| probes["requirements"].as_array().into_iter().flatten())
+                .filter(|requirement| requirement["probe"]["state"] == "missing")
+                .filter_map(|requirement| requirement["needs"].as_str())
+                .collect();
+            if lacks.is_empty() {
+                assert_eq!(
+                    code(&output),
+                    EXIT_NOT_IMPLEMENTED,
+                    "pinning {id} on {source} refused as something other than a missing \
+                     collector: {complaint}"
+                );
+                assert!(
+                    complaint.contains("no collector") && complaint.contains(id),
+                    "the refusal does not name the backend that is missing: {complaint}"
+                );
+            } else {
+                assert_eq!(
+                    code(&output),
+                    EXIT_UNAVAILABLE,
+                    "pinning {id} on {source}, which lacks {lacks:?} here, is the machine's \
+                     refusal before the build's: {complaint}"
+                );
+                assert!(
+                    lacks
+                        .iter()
+                        .all(|needs| complaint.contains(&format!("{needs}: missing")))
+                        && !complaint.contains("no collector"),
+                    "the machine's refusal names what it lacks, not the collector: {complaint}"
+                );
+            }
             forced += 1;
         }
     }
@@ -795,7 +825,7 @@ fn forcing_a_backend_this_build_does_not_implement_exits_three_and_names_it() {
     assert_eq!(
         forced, unwritten,
         "the listing names {unwritten} backend(s) nobody wrote in the chains this machine \
-         serves, and pinning refused {forced} of them as the build's gap"
+         serves, and pinning refused {forced} of them, as the machine's gap or the build's"
     );
 }
 

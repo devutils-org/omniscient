@@ -152,6 +152,69 @@ fn json(output: &Output) -> serde_json::Value {
     })
 }
 
+/// What this machine lacks for `backend` of `source`, as `omn list` probes it
+/// -- the requirements it calls missing -- or `None` when nothing it needs is
+/// missing here. A pinned backend is refused for the machine before the build
+/// (`DECISIONS.md`, "one order for unbuilt and missing"), so which refusal a
+/// pin earns is this answer's.
+fn lacks_here(source: &str, backend: &str) -> Option<Vec<String>> {
+    let listing = run(&["list", source, "--format", "json"]);
+    assert!(listing.status.success(), "{}", stderr(&listing));
+    let entries = json(&listing);
+    let probed = entries[0]["probes"]
+        .as_array()
+        .expect("the listing carries each backend's probes")
+        .iter()
+        .find(|probed| probed["backend"] == backend)
+        .unwrap_or_else(|| panic!("`{source}` lists no backend `{backend}`"));
+    let missing: Vec<String> = probed["requirements"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|requirement| requirement["probe"]["state"] == "missing")
+        .filter_map(|requirement| requirement["needs"].as_str().map(str::to_owned))
+        .collect();
+    (!missing.is_empty()).then_some(missing)
+}
+
+/// Asserts the refusal a pinned backend this build has no collector for
+/// earns here: the machine's (exit 1) where it lacks something the backend
+/// needs, as the walk says it, and the build's (exit 3) where it lacks nothing.
+fn assert_refused_in_the_chains_order(source: &str, backend: &str, output: &Output) {
+    let message = stderr(output);
+    assert!(
+        message.contains(backend) && message.contains(source),
+        "the refusal has to name the source and the backend: {message}"
+    );
+    match lacks_here(source, backend) {
+        Some(lacks) => {
+            assert_eq!(
+                code(output),
+                EXIT_NO_VIABLE_BACKEND,
+                "`{source}` pinned to `{backend}`, which lacks {lacks:?} here, is the machine's \
+                 refusal before the build's: {message}"
+            );
+            assert!(
+                lacks
+                    .iter()
+                    .all(|needs| message.contains(&format!("{needs}: missing"))),
+                "the machine's refusal names what it lacks: {message}"
+            );
+            assert!(
+                !message.contains("no collector is written"),
+                "a machine that cannot serve the backend is not sent after its collector: \
+                 {message}"
+            );
+        }
+        None => assert_eq!(
+            code(output),
+            EXIT_NO_COLLECTOR,
+            "`{source}` pinned to `{backend}`, which nothing implements and this machine lacks \
+             nothing for, has to say so with exit {EXIT_NO_COLLECTOR}: {message}"
+        ),
+    }
+}
+
 /// Some machines withhold what a scenario needs. That is a skip, and the skip
 /// has to name what is missing -- a machine that cannot serve a request and a
 /// request that cannot mean anything are different answers.
@@ -1536,14 +1599,18 @@ fn both_huge_page_backends_read_the_same_promotion_counter() {
     }
 }
 
-/// Forcing a backend nothing implements is exit 3, and it names the backend.
+/// Forcing a backend nothing implements is refused by name, in the chain's
+/// order.
 ///
 /// The comparison `--backend force:` exists for is not always available: where
 /// a chain has one implemented backend and others declared, the comparison is
-/// with the refusal instead, and the refusal has to say that the build is
-/// missing rather than the machine.
+/// with the refusal instead. The refusal says the machine where it lacks
+/// something the backend needs, as the walk does (exit 1), and the build where
+/// it lacks nothing (exit 3) -- never the build for a backend this machine
+/// could not serve whoever wrote it (`DECISIONS.md`, "one order for unbuilt and
+/// missing").
 #[test]
-fn forcing_a_backend_with_no_collector_exits_three_and_names_it() {
+fn forcing_a_backend_with_no_collector_names_it_in_the_chains_order() {
     let mut checked = 0;
     for source in [
         "mem.faults",
@@ -1590,18 +1657,7 @@ fn forcing_a_backend_with_no_collector_exits_three_and_names_it() {
             } else {
                 output
             };
-            assert_eq!(
-                code(&output),
-                EXIT_NO_COLLECTOR,
-                "`{source}` pinned to `{backend}`, which nothing implements, has to say so with \
-                 exit {EXIT_NO_COLLECTOR}: {}",
-                stderr(&output)
-            );
-            assert!(
-                stderr(&output).contains(&backend) && stderr(&output).contains(source),
-                "the refusal has to name the source and the backend: {}",
-                stderr(&output)
-            );
+            assert_refused_in_the_chains_order(source, &backend, &output);
             checked += 1;
         }
     }
@@ -2908,10 +2964,11 @@ fn the_kernel_sources_tell_their_three_refusals_apart() {
         stderr(&polled)
     );
 
-    // 3: the classic tracepoint backend, which this machine can reach only
-    // through tracefs and which no collector serves either way. Forcing it is
-    // the backend comparison these four have -- each has exactly one
-    // implemented backend, so the comparison is with the refusal.
+    // 1 or 3: the classic tracepoint backend, which this machine can reach
+    // only through tracefs and which no collector serves either way. Forcing
+    // it is the backend comparison these four have -- each has exactly one
+    // implemented backend, so the comparison is with the refusal: the
+    // machine's where tracefs is not readable here, the build's where it is.
     for source in [
         "mem.page_alloc",
         "mem.kmalloc",
@@ -2939,17 +2996,7 @@ fn the_kernel_sources_tell_their_three_refusals_apart() {
             "--backend",
             "force:bpf:tp",
         ]);
-        assert_eq!(
-            code(&forced),
-            EXIT_NO_COLLECTOR,
-            "forcing an unimplemented backend is this build's gap, not this machine's: {}",
-            stderr(&forced)
-        );
-        assert!(
-            stderr(&forced).contains(source) && stderr(&forced).contains("bpf:tp"),
-            "the refusal names the source and the backend: {}",
-            stderr(&forced)
-        );
+        assert_refused_in_the_chains_order(source, "bpf:tp", &forced);
     }
 
     // 3: a key an aggregating collector cannot carry, refused before anything
