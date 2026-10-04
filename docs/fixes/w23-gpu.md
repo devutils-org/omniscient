@@ -166,3 +166,28 @@ loaded). `kernel-launches-nsys`, `kernel-time-launch-bound-nsys`,
   `requires` reads "is not installed here", which is right for a binary and
   odd for a device node (`/dev/nvidiactl`); "does not exist here" would read
   better for a path.
+
+## Review
+
+One finding, a gap: the `omn_topk` and `omn_counters` parsers and the topk
+paths are tested only on four `omn` outputs composed by hand, not on output
+`omn` produced; one sign of it, `spread` came after `min` and `max` in
+`omn_counters_raw.json`, where `src/collect/gpu/counters.rs` inserts it at
+index 4, before `max`.
+
+- **Fixed**: the attribute order. `spread` is now at index 4 in all four
+  events of `omn_counters_raw.json`, as `counters.rs` emits it (the parser
+  looks attributes up by name, so no result moved). The test module's note
+  said "three" composed captures; it says four, and that no gpu pair
+  counts as held until they are recaptured.
+- **Not fixable this round, for the same reason as before**: the recapture.
+  The driver is still not loaded (21:49, up 44 minutes, no `/dev/nvidia*`,
+  no `nvidia.ko` for `7.2.8-arch1-2`), and loading it is a root, module
+  step that is the user's. The reviewer is right that the files must be
+  recaptured before any gpu pair counts as held, and `docs/replaces/gpu.md`
+  now says so beside the runner's verdict. The recapture commands are under
+  "Privileged runs wanted" (step 2); after copying each `results.json`
+  over its `omn_*.json`, the numbers in
+  `omn_topk_reads_kernels_copies_and_calls_under_the_tools_keys` and
+  `omn_counters_reads_each_kernels_counter_under_ncus_keys` move to the
+  captured ones.
