@@ -212,3 +212,19 @@ The adversarial review's six findings, one fix round:
    view's, not the triage's; in shape mode the line above prints the raw
    totals beside their raw ratio (`x2.03, scaled to one`), not the scaled
    ratio of 1.00.
+
+### The review round's check
+
+`cargo test -p omn-view --lib views::flame`: 21 passed; `view_snapshots` 15
+passed; clippy on `omn-view` and `cargo fmt` clean. One `make check`: red at
+the `omn` lib on `a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned`
+(264 samples for 199 expected; in the flaky tally), green alone. Then one
+`cargo test --workspace --no-fail-fast`, with the machine at a load average
+of 66 (other streams' suites): 2380 passed, 7 red, none in a file this
+stream touches. Each rerun alone, once: the two `collect::power::energy`
+tests, the three in `budget`, and `cases`'
+`every_case_names_its_known_cause_both_ways` passed; `runner`'s
+`a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`
+failed again with the same message as the first round -- the kernel
+throttled the profile 4 116 times and the throttles are not placed per ring
+(already filed for stream profile).
