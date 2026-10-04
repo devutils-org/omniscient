@@ -1000,6 +1000,40 @@ gate's `RESOLVES` -- and the test names every band it puts outside.
 | sched.wakeup | bpf:raw_tp | trace | launch | contended | 3.65 % | +0.38 % | med | med | within |
 <!-- bands:end -->
 
+## The third table, after the eighteenth wave
+
+Run by the coordinator alone on 2026-10-04 at `29b1705`
+(`target/bench/backends-1791084966/` on the development machine: release
+build with its capabilities, 67 minutes, `bench_backends` green). The gate
+resolved launch 0.76 %, compute 0.18 %, memory 0.20 %, syscall 0.60 %, io
+0.86 %, contended 0.86 %, malloc 0.93 %; the same 95 pairs as the second
+table. What moved: `cpu.profile` 4.69 % (4.94), `io.latency` 3.63 % (3.44),
+`io.inflight` 0.83 % (0.30), `net.tcp.rtt` through `netlink` 5.64 % (3.21),
+the heap rows down (`mem.heap.live` 493 % from 732, `mem.heap.retained` 749 %
+from 923), `sched.migrations`' dilation +1.53 % (-1.03). `io.fsync` and
+`net.tcp.connect` through `bpf:fentry` read 158 % and 44 %, dilation inside
+their bands: their `stands` reason holds.
+
+Pasted into the record above, `tests/bench_bands.rs` names six bands outside:
+
+| source | backend | workload | measured | declared |
+|---|---|---|---|---|
+| cpu.pressure | fs:proc | compute | 0.15 % | free |
+| mem.cgroup | fs:cgroup | memory | 0.11 % | free |
+| net.hwts | netlink:ethtool | compute | 0.11 % | free |
+| net.tcp.rtt | netlink | compute | 5.64 % | med |
+| power.freq | fs:sys | compute | 1.19 % | low |
+| sched.migrations | bpf:raw_tp | contended | +1.53 % dilation | low |
+
+Correcting them is a change to `catalog/*.yaml`, which the run that measured
+them does not make, so the record still holds the second table and the
+test stays green on it. Four of the six are within a few hundredths of a
+point of their ceiling, `free`'s 0.1 % included; `net.tcp.rtt` and
+`sched.migrations` moved by more than noise. Filed
+(`docs/open-findings.md`, "The eighteenth wave, coordinator, after the
+merge"): the bands to correct, or a `stands` with its reason, with the third
+table pasted in their place.
+
 ## Exit criteria of phase 8
 
 - [x] *A cost/resolution/loss table measured for every (source, backend).* 94

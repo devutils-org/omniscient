@@ -489,6 +489,13 @@ Now, and not before: we have three real join types to generalize from.
       They are now detached and kept until the close
       (`docs/fixes/w18-io.md`), so the next run says how much of the 348 ns
       is the programs'. Not run since; the decision waits on it.*
+      *After the eighteenth wave's merge (coordinator, 2026-10-04): 11.54 %,
+      332 ns a request (bare 3 143 826 IOPS, 2 781 156 under the histogram).
+      With `bpf_stats_enabled` 1, 15.31 %, 457 ns, and the programs ran
+      53 622 158 times (twice the requests) for 149.3 ns a run, 298.5 ns a
+      request: most of the cost is the programs' own run time, so `tp_btf`
+      for the two device reads is the next cut. Not met; whether 1 % stays the
+      criterion is still open (`DECISIONS.md`).*
 - [x] Exceeding the budget produces an **announced** degradation, not a loss.
       *The runner checks every 100 ms and, over the ceiling, moves the
       collection onto the next cheaper backend of its chain that this machine
@@ -963,7 +970,7 @@ triage follows, and two ways run with different privileges are not compared
       `sqliteDefaultBusyCallback` (`sched.offcpu` reads the flag), and the
       verdict carries the names note; `sqlite3-stripped` lists no open
       finding.*
-- [ ] Every case runs at `perf_event_paranoid` 2 and says what that cost it:
+- [x] Every case runs at `perf_event_paranoid` 2 and says what that cost it:
       the stacks it lost, the sources it went without.
       *Seventeenth wave: reasoned (every cause answers, or skips both ways
       with the machine's reason first), not run; the sysctl is machine-wide
@@ -973,6 +980,16 @@ triage follows, and two ways run with different privileges are not compared
       meaningful (at `718cae1` the two ways ran with different privileges and
       the agent's failed); the commands are `STATE.md`, "Needs privilege",
       item 1.*
+      *After the eighteenth wave's merge, done (coordinator, 2026-10-04): with
+      the capabilities every cause answers both ways with the same
+      privileges, as at -1 (`a-cold-file` skips as it does at -1); without
+      them every cause skips both ways with the machine's reason first
+      (`CAP_BPF`, `unprivileged_bpf_disabled`, tracefs) and the skip gate
+      passes over the 30 lines; a user-only profile names paranoid 2 and what
+      it costs (6 to 11.5 % of `sqlite3`'s commit loop). What a case loses at
+      paranoid 2 without the capabilities is every source it needs:
+      `omn latency` refuses rather than degrades, because `sched.runqlat` is
+      required.*
 - [x] Adding a seventh program means adding a directory under `cases/`, and
       zero lines under `src/`.
       *Seventeenth wave: after the format (`docs/cases.md`), the python and

@@ -1406,6 +1406,14 @@ pair of programs on two tracepoints, and the criterion to keep is the
 per-request cost the test prints, not a percentage of a device that does no
 work (the seventeenth wave's argument, unchanged).
 
+**Measured after the eighteenth wave** (the coordinator, 2026-10-04):
+11.54 %, `N` = 332 ns a request; with the statistics on, 15.31 %, 457 ns,
+and *"the programs ran 53622158 times for 8003766951 ns: 149.3 ns per run,
+298.5 ns per request counted"*, twice the 26 811 063 requests. `Q` is 65 % of
+that run's `N`, and about 173 of the first run's 332 ns once the
+statistics' own cost (the 125 ns between the two `N`) is taken out: most of
+it, as reasoned. The next cut is item 1 above, `tp_btf`.
+
 ### 22. A known set of device latencies for the edge-crossers — **written; the run is the coordinator's**
 
 `a_device_with_a_known_latency_puts_every_request_in_its_bucket_in_both_histograms`
@@ -1419,6 +1427,15 @@ direct reads -- the bit equality the real-disk test cannot ask -- and every
 streamed interval to at least the configured latency. The latency is read from
 the module's own parameters, and the test refuses one within a quarter bucket
 of an edge. Not run here: loading `null_blk` is machine wide.
+
+**Run after the eighteenth wave, at the granted load** (`completion_nsec=6000`,
+the coordinator, 2026-10-04): **fails three of three**. The stream measured
+7.2 to 12.3 us (median 7.5 us) over 64 requests, so a request crossed 8192 ns
+each time. The timer that completes a request adds 1.2 to 6.3 us to the
+configured latency on this machine, and the quarter-bucket margin is taken
+from the configured value, so a 6 us device passes the margin and fails the
+test. The 3 ms load (0.9 ms from an edge) needs its sudoers line; the margin
+should count the timer's slack (filed in `docs/open-findings.md`).
 
 ### Not done this wave
 

@@ -10809,3 +10809,67 @@ The stream agents shared one scratchpad directory, and two streams' logs of
 the same name (`nff.log`) were written into one file at once (streams cases
 and resolver). The next brief should have each stream log under a directory
 named after it.
+
+## The eighteenth wave, coordinator, after the merge
+
+Run alone at `29b1705`, 2026-10-04, with the sudoers grants (`STATE.md`,
+"Needs privilege", where every number is).
+
+### To the owner of `tests/scenario_sched.rs` (and the resolver's): a test of exit 3 that a capability-less machine answers with 1
+
+`scenario_sched::a_source_with_no_collector_is_refused_with_its_own_exit_code`
+fails on a binary without `CAP_BPF` and `CAP_PERFMON` (at paranoid 2 and at
+-1 alike): `examples/sched-not-implemented.yml` pins `force:bpf:uprobe`, and
+since the resolver stream refuses in the chain's order the pinned backend is
+probed first, lacks `CAP_BPF`, and the session exits 1 with the machine's
+reason, where the test asserts 3 and *"no collector is written"*. With the
+capabilities it is 3. The CI's capability-less cells run this file. The
+resolver stream renamed its own tests of this kind to
+`..._is_refused_in_the_chains_order`; this one was missed. Wanted: the test
+accepts exit 1 with the machine's reason where the pinned backend probes
+missing (or skips naming it), as `proc-not-built.yml`'s text needs to
+(above, "`proc-not-built.yml` exits 1 or 3"). The comment's argument -- exit 1
+sends a reader looking for a capability that would not help -- is the case
+for asking whether a source with no collector should be refused before its
+probe; that is the resolver's call, not this run's.
+
+### To the io owner (`tests/scenario_io.rs`): the known-latency device's margin leaves out the timer
+
+`a_device_with_a_known_latency_puts_every_request_in_its_bucket_in_both_histograms`
+fails three of three at the granted load (`irqmode=2 completion_nsec=6000`):
+the stream measured 7.2 to 12.3 us, median 7.5 us, so requests cross 8192 ns.
+The test refuses a latency within a quarter bucket of an edge, taken from the
+configured value; the hrtimer that completes the request adds 1.2 to 6.3 us
+here. Wanted: the margin counted from the configured latency plus that slack
+(or the test refusing a configured latency under some tens of
+microseconds), and the 3 ms load's line in
+`/etc/sudoers.d/omniscient-privileged`
+(`/usr/bin/modprobe null_blk queue_mode=2 irqmode=2 completion_nsec=3000000 nr_devices=1 gb=1 bs=4096`),
+which is the user's to add.
+
+### To the catalog's owner and the bench's: six bands outside the third table
+
+The third table (`docs/bench.md`, "The third table, after the eighteenth
+wave") puts six bands outside: `cpu.pressure` (`fs:proc`) 0.15 %,
+`mem.cgroup` (`fs:cgroup`) 0.11 % and `net.hwts` (`netlink:ethtool`) 0.11 %
+against `free`; `net.tcp.rtt` (`netlink`) 5.64 % against `med`, up from
+3.21 %; `power.freq` (`fs:sys`) 1.19 % and `sched.migrations` (`bpf:raw_tp`,
+dilation +1.53 % on `contended`, resolved to 0.86 %) against `low`. The record
+still holds the second table, so `bench_bands` is green. Wanted: each band
+corrected or given a `stands` reason, and the third table pasted into the
+record (the rows are under `target/bench/backends-1791084966/table.md`;
+the record's rows were built from it and checked to name the same six).
+
+### To the profile's owner: the ring-loss test is red on a quiet machine too
+
+`runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`
+failed at load 1.0 after the bench: 73 298 of 186 727 events short and the
+kernel throttling. A quiet machine does not make it pass; it is the gap filed
+in "the eighteenth wave" (throttles not carried per ring), not load.
+
+### Not a defect, for the budget's open decision
+
+At paranoid 2, a capability-less `cpu.profile --symbols debuginfod` over
+`sqlite3`'s 500 commits cost 11.52 % and the first check did not stop it:
+the debuginfod cache was warm, so the one-time load was not paid. The stop the
+open decision is about needs a cold cache to reproduce.

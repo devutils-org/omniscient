@@ -940,7 +940,13 @@ stays open, below.
   device that does no work is 25 ns for two tracepoint dispatches and two
   clock reads; if it is most of it, as stream io reasons (150 to 300 ns),
   `tp_btf` for the two device reads is next (`docs/fixes/w18-io.md`).
-  Leaving it open costs phase 6 its last box.
+  Leaving it open costs phase 6 its last box. **Measured after the
+  eighteenth wave** (`STATE.md`, "Needs privilege"): 11.54 %, 332 ns a
+  request; with the statistics on, 457 ns a request of which the programs
+  ran 298.5 (149.3 ns a run, twice a request), and less the statistics' own
+  cost about 173 of the 332. Most of it, so `tp_btf` is the next cut, by the
+  rule above; whether the criterion becomes a per-request cost is still
+  open, to be judged on what `tp_btf` leaves.
 - **What the budget's first check may stop a run on** (eighteenth wave,
   profile and bench, filed to `src/collect/mod.rs`). The first check, 0.1 s
   into a launched run, weighs a one-time cost -- the first debuginfod symbol
