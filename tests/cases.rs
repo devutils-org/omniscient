@@ -679,6 +679,12 @@ struct Answer {
     /// How the reading got there from the program's main thread, one step
     /// each: `task:1 blocked 5.2 s -> task:9`.
     followed: Vec<String>,
+    /// The rest of the job a wait for a child was followed into, by state
+    /// (`on-cpu`, `runnable`): the processes the program started other than
+    /// the child decomposed in the wait's place. The child's row alone is
+    /// part of the job by construction (`docs/fixes/w20-triage.md`), so a
+    /// row held to a reference that counts the whole job adds this.
+    job: BTreeMap<String, f64>,
     /// The verdict's own sentence, where there is one.
     sentence: String,
     /// The binary that answered and the capabilities it carried.
@@ -735,19 +741,25 @@ fn read_cli(stdout: &str) -> Result<Answer, String> {
         .ok_or("the verdict has no run")?;
     let mut chain = vec![first];
     let mut run = first;
+    // The job of the last wait followed into a child: the one beside the
+    // reading the verdict decomposes.
+    let mut job = BTreeMap::new();
     while run["followed"]["reading"].is_object() {
+        job = BTreeMap::new();
+        let rest = &run["followed"]["job"];
+        for (state, field) in [("on-cpu", "on_cpu"), ("runnable", "runnable")] {
+            if let Some(amount) = rest[field].as_f64() {
+                job.insert(state.to_owned(), amount);
+            }
+        }
         run = &run["followed"]["reading"];
         chain.push(run);
     }
     let mut answer = Answer {
         way: "cli",
-        // As the text and the catalog spell it: the JSON's `cpu_queue` is
-        // the text's `cpu-queue`. The JSON's own spelling is kept, and
-        // checked apart (`LIMIT_SPELLED`), so the known cause is not
-        // decided by it.
-        limit: verdict["limit"]
-            .as_str()
-            .map(|limit| limit.replace('_', "-")),
+        // The JSON spells the limit as the text and the catalog do
+        // (`cpu-queue`); `LIMIT_SPELLED` holds it to that.
+        limit: verdict["limit"].as_str().map(str::to_owned),
         limit_written: verdict["limit"].as_str().map(str::to_owned),
         state: base_state(verdict["state"].as_str().unwrap_or("")),
         sentence: verdict["sentence"].as_str().unwrap_or("").to_owned(),
@@ -759,6 +771,7 @@ fn read_cli(stdout: &str) -> Result<Answer, String> {
             .as_str()
             .or(run["task"].as_str())
             .map(str::to_owned),
+        job,
         ..Answer::default()
     };
     answer.how.method = document["method"].as_str().map(str::to_owned);
@@ -1010,11 +1023,28 @@ fn read_mcp(
         whole = (block, resolution);
     }
     let task = table["key"].as_str().map(str::to_owned);
+    // The rest of the job, as the person's way reads it: every busy task off
+    // the followed chain, once the chain left the main thread. The tables do
+    // not say which process a task is in, so this is every other task.
+    let mut job = BTreeMap::new();
+    if !followed.is_empty() {
+        for state in ["on-cpu", "runnable"] {
+            let rest: f64 = tables
+                .iter()
+                .filter(|other| !seen.contains(other["key"].as_str().unwrap_or("")))
+                .map(|other| table_amount(other, state))
+                .sum();
+            if rest > 0.0 {
+                job.insert(state.to_owned(), rest);
+            }
+        }
+    }
     let mut answer = Answer {
         way: "mcp",
         whole,
         task: task.clone(),
         followed,
+        job,
         ..Answer::default()
     };
     answer.how.method = read_back["decompositions"][0]["id"]
@@ -1434,12 +1464,25 @@ fn check_answer(
 
     // Every number the answer cites for a state the case knows.
     let mut failures = Vec::new();
+    // The rest of a job is added only where the case says the verdict follows
+    // a wait for a child: the person's way cannot tell a child's tasks from a
+    // thread's, and a thread followed out of a server is not a job.
+    let for_a_child = expect.says.iter().any(|says| says.contains("for a child"));
     for agree in &expect.agrees {
         let result = (|| -> Result<Option<String>, String> {
             let (amount, row_resolution) = *answer
                 .rows
                 .get(&agree.row)
                 .ok_or_else(|| format!("no `{}` row has an amount", agree.row))?;
+            // A row decomposed in place of a wait for a child is that child's;
+            // the rest of its job ran beside it, and a reference that counts
+            // the job counts both.
+            let job = if for_a_child {
+                answer.job.get(&agree.row).copied()
+            } else {
+                None
+            };
+            let amount = amount + job.unwrap_or(0.0);
             let reference = lookup(accounts, &agree.with)?;
             let mut slack = row_resolution + reference.resolution;
             if let Some(outside) = &agree.outside {
@@ -2651,7 +2694,7 @@ fn the_extractors_read_what_the_programs_print() {
 fn the_person_s_reading_is_the_task_the_wait_was_followed_into() {
     let document = json!({
         "method": "latency",
-        "verdict": {"task": "task:9", "limit": "cpu_queue", "state": "runnable",
+        "verdict": {"task": "task:9", "limit": "cpu-queue", "state": "runnable",
                     "sentence": "for latency, in the run, task:1 waited 5s for a child, in `wait4`"},
         "median": 1,
         "runs": [
@@ -2660,6 +2703,7 @@ fn the_person_s_reading_is_the_task_the_wait_was_followed_into() {
              "notes": ["[on-cpu] names came from -- make: its symbols"],
              "states": [{"state": "blocked: sleeping", "amount": 5e9, "evidence": "exact"}],
              "followed": {"relation": "child", "during": "blocked: sleeping", "amount": 5e9,
+                          "job": {"tasks": ["task:12"], "on_cpu": 2e8, "runnable": 3e8},
                           "reading": {"task": "task:9", "whole": {"amount": 5e9, "resolution": 2e6},
                                       "states": [
                                           {"state": "on-cpu", "amount": 1e9, "resolution": 1e6,
@@ -2674,6 +2718,9 @@ fn the_person_s_reading_is_the_task_the_wait_was_followed_into() {
     assert_eq!(answer.limit.as_deref(), Some("cpu-queue"));
     assert_eq!(answer.state, "runnable");
     assert_eq!(answer.rows["runnable"].0, 4e9);
+    // The rest of the job is read beside the child's rows, not into them.
+    assert_eq!(answer.job.get("on-cpu"), Some(&2e8));
+    assert_eq!(answer.job.get("runnable"), Some(&3e8));
     assert!(
         !answer.rows.contains_key("blocked"),
         "the main thread's rows are not read"
