@@ -685,3 +685,136 @@ streams used the board. `docs/scenarios/gpu.md` has the tables and the tests.
   gap is the counter starved by the poll, not the integral overstating. A
   `gpu.power` poll whose counter falls below half the draw says so; energy is
   `--mode count`.
+
+# Inside a kernel: `gpu.counters` and `gpu.profile`, through CUPTI (nineteenth wave, stream profiler)
+
+`gpu.kernel` says how long each kernel took; these two say what happened inside
+one. Both go through the same injection library and the same socket as
+`gpu.kernel` (`cupti/src/profiler.rs` and `cupti/src/pcsampling.rs` in the
+library, `src/collect/gpu/counters.rs` and `src/collect/gpu/profile.rs` in
+`omn`), each arming its own bit of `OMN_CUPTI_REPORT`, and both serve a
+launched program only, for `gpu.kernel`'s reason. Nothing is wrapped: no
+`ncu`, no `nsys`; `vendor:ncu` left the chain.
+
+## `gpu.counters`: counters per launch, and a verdict per counter
+
+CUPTI's range profiler, set up on every context the program creates, in
+**kernel replay** with **automatic ranges**: every launch is a range, run as
+many times as the counters need passes (one, for the default set on this
+chip). Every counter of every launch comes back as a frame; `omn` holds them
+per kernel and counter and, at the end, emits one event per kernel and
+counter: `value` (the median over the launches), `min`, `max`, `spread` (the
+interquartile range over the median), `outliers` (launches more than 10 % from
+the median), `launches`, `disturbed`, `passes` and a `verdict`. The default
+counters are `smsp__inst_executed.sum`, `dram__bytes_read.sum`,
+`dram__bytes_write.sum`, `lts__t_bytes.sum` and `l1tex__t_bytes.sum`;
+`OMN_CUPTI_METRICS` names others, and a name the chip does not have is said and
+the rest measured.
+
+**The verdict is measured, per counter, per run.** `reproducible here` when
+the middle half of the launches is within 10 % of the median, `not dominated
+by this workload` when it is not, `measured once` for one launch. Held to two
+workloads that disagree about the same counter (`tests/gpu_counters.rs`):
+
+| Kernel | `smsp__inst_executed.sum` | `dram__bytes_read.sum` |
+|---|---|---|
+| `copy`, 64 MiB, memory-bound | 3 167 488 on every launch | 67.1 to 67.4 MB (the 64 MiB it reads, and a little), spread under 5 % end to end |
+| `spin`, compute-bound | 353 620 672 on every launch | 0 to 3.9 MB, spread 180 to 340 % |
+
+**Kernel replay destroys the timeline**, so a run that asks for counters and
+for `gpu.kernel` is refused before the program runs, with the reason
+(`counters_beside_kernel_times_or_pc_sampling_are_refused`); so is one with
+`gpu.profile`, because CUPTI cannot run its range profiler and its PC sampling
+in one process. The refusal is made at attach, where every reader of the
+launch has added its bit and the program is still parked at its gate.
+
+**Clocks are left alone.** CUPTI 13.4 locks the device's clocks only when asked
+(`cuptiClockControlLock`), and the library never asks; the clock state is in
+the facts, as for every GPU timing source.
+
+### Found: the device counts other processes' work, and a wrong count can repeat
+
+The range profiler's counters are the device's: another process's kernels
+running in a launch's window are counted with the launch. Measured while
+another worktree looped GPU programs that each lived under a second: the
+`copy` kernel's instruction count read 286 220 778 instead of 3 167 488 --
+**on every launch of the run, by the same amount** -- so the wrong count
+repeated bit for bit and a spread alone called it reproducible. NVML's process
+list, asked once a second, did not see the other programs at all.
+
+So the library always collects a **witness**, `sm__ctas_launched.sum`, the
+blocks the SMs launched in the window, and compares it with the grid the
+launch call asked for (read from `cuLaunchKernel`'s parameters, or
+`cuLaunchKernelEx`'s config): 272 for the `copy` grid when the window was the
+launch's alone, 892 to 1 032 when it was not. A launch with more blocks than its
+grid is `disturbed`, counted and left out of every counter; a kernel disturbed
+on every launch is `disturbed on every launch`, with no value of its own.
+Work that launched no block in the window -- a long kernel started before it
+-- escapes the witness and shows as `outliers` or a spread, which is why the
+spread is the middle half's: a few such launches do not turn a count that
+repeats into one that does not, and the launches they disturbed are counted
+beside the verdict.
+
+## `gpu.profile`: where the cycles go, line by line
+
+CUPTI's PC sampling, enabled and configured on every context the program
+creates, in **continuous** mode -- the program's kernels are not serialised --
+every `2^12` cycles of each SM (`OMN_CUPTI_PC_PERIOD`, 5 to 31). The library
+drains CUPTI's per-PC aggregates every 256 launches, at every module load, when
+a context is destroyed and at exit, keeps every module it saw by the CRC CUPTI
+tags program counters with, and resolves each program counter to its file and
+line with `cuptiGetSassToSourceCorrelation` when the module has line
+information. One event per program counter and stall reason per drain,
+weighed by `samples`, stacked `kernel;file:line;stall` (or
+`kernel;+0x<offset>;stall`), stamped at the drain in the program's own
+`CLOCK_MONOTONIC` with the window since the previous drain as `ts_err_ns`.
+`-e stack` is a flame of the device's cycles; `topk:10@source` ranks lines.
+
+CUPTI reports every stall reason twice, the second time restricted to the
+samples where no instruction issued (`..._not_issued`): a subset, left out so
+a sample counts once. With it the samples reported per program counter add up
+to CUPTI's own count exactly, less its samples in kernels that are not the
+program's (2 412 of 2 227 167 on one run).
+
+### Ground truth
+
+`tests/gpu_inside.py hotloop N ITERS`: a kernel whose loop body is sixteen
+dependent multiply-adds on line 20 of a source that only its `.loc` directives
+name, loop control on line 21, setup on line 10 and the store on line 30,
+JIT-compiled with `CU_JIT_GENERATE_LINE_INFO`; `hotloop-bare` is the same PTX
+without the directives. Measured here, 6 launches of 100 000 turns:
+
+| Line | Samples | Share |
+|---|---|---|
+| 20, the dependent chain | 640 027 | 95.9 % |
+| 21, loop control | 27 322 | 4.1 % |
+| 10, setup | 101 | 0.02 % |
+| 30, the store | about 10 | 0.002 % |
+
+**A configuration CUPTI accepted and did not apply is caught by its effect.**
+Every attribute's own status is checked as well as the call's; the period and
+the mode CUPTI applied are read back and a difference said; the launches the
+library saw are sent with every drain, and kernels that ran with no sample at
+all are a lost read, not an empty profile. The period is held by its effect:
+the same work took 667 450 samples at `2^12` and 166 880 at `2^14`, a ratio of
+4.0 (`the_sampling_period_asked_is_the_one_applied_by_its_effect`).
+
+A kernel without line information is placed by offset and named in the facts
+(`a_kernel_without_line_information_is_placed_by_offset_and_named`). `gpu.profile`
+and `gpu.kernel` share one launch: both read every frame meant for them, and
+neither counts the other's as unknown (`a_profile_and_kernel_times_share_one_launch`).
+
+## What is not measured, and why
+
+- **What either costs the program.** The bench stream's, against the
+  library loaded and disarmed. A replayed launch costs at least its own run
+  once per pass; PC sampling's cost was not measured.
+- **Launches through a CUDA graph.** The library follows the launch entry
+  points it knows the parameters of; a graph's kernels are ranges with no
+  launch call to pair with, counted as unpaired rather than credited to the
+  wrong kernel.
+- **Another vendor's reading.** `ncu` and `nsys` are present here and could
+  cross-check an instruction count or a hot line; the self-built references
+  (the two workloads' disagreement, the known hot line) were used instead.
+- **Multi-device.** Everything was measured on one 2080 Ti (TU102, CUPTI
+  13.4); the code keys every context by its device, unexercised past one.
