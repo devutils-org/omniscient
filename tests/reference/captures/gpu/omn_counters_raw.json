@@ -38,12 +38,12 @@
                   "value": 16781728.0
                 },
                 {
-                  "name": "max",
-                  "value": 18531040.0
-                },
-                {
                   "name": "spread",
                   "value": 0.0
+                },
+                {
+                  "name": "max",
+                  "value": 18531040.0
                 },
                 {
                   "name": "launches",
@@ -106,12 +106,12 @@
                   "value": 33554432.0
                 },
                 {
-                  "name": "max",
-                  "value": 33554432.0
-                },
-                {
                   "name": "spread",
                   "value": 0.0
+                },
+                {
+                  "name": "max",
+                  "value": 33554432.0
                 },
                 {
                   "name": "launches",
@@ -174,12 +174,12 @@
                   "value": 272.0
                 },
                 {
-                  "name": "max",
-                  "value": 272.0
-                },
-                {
                   "name": "spread",
                   "value": 0.0
+                },
+                {
+                  "name": "max",
+                  "value": 272.0
                 },
                 {
                   "name": "launches",
@@ -242,12 +242,12 @@
                   "value": 808192.0
                 },
                 {
-                  "name": "max",
-                  "value": 808192.0
-                },
-                {
                   "name": "spread",
                   "value": 0.0
+                },
+                {
+                  "name": "max",
+                  "value": 808192.0
                 },
                 {
                   "name": "launches",

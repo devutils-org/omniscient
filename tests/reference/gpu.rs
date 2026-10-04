@@ -594,13 +594,14 @@ mod tests {
         assert!(smi_dmon("", "").is_err());
     }
 
-    // The three `omn` captures below are composed, not captured: written in
+    // The four `omn` captures below are composed, not captured: written in
     // the shape today's `omn` gives `topk` and `raw` (captured from
-    // `cpu.instructions` on 2026-10-04) with the gpu sources' attributes
-    // (`src/collect/gpu/counters.rs`) and the twenty-second wave's numbers,
+    // `cpu.instructions` on 2026-10-04) with the gpu sources' attributes in
+    // the order `src/collect/gpu/counters.rs` emits them (`spread`, when
+    // there is one, at index 4) and the twenty-second wave's numbers,
     // because this machine's NVIDIA driver was not loaded when they were
     // written (docs/fixes/w23-gpu.md). Replace them by a real run's
-    // `results.json` once it is.
+    // `results.json` once it is; until then no gpu pair counts as held.
 
     #[test]
     fn omn_topk_reads_kernels_copies_and_calls_under_the_tools_keys() {
