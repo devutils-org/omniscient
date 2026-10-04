@@ -7,9 +7,9 @@ Top 10 syscalls IDs:
 @syscall[3]: 214
 @syscall[0]: 377
 @syscall[257]: 623
-@syscall[110]: 20004
+@syscall[110]: 7001
 
 Top 10 processes:
 @process[bpftrace]: 41
 @process[Xorg]: 2311
-@process[omnref]: 21217
+@process[omnref]: 7313
