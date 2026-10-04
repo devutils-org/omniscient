@@ -181,3 +181,10 @@ Merged `main` at `c8aa662` (views and docs landed) first; it merged clean.
   Still owed when **record** merges its new recordings: re-bless the
   gallery once after it (`OMN_VIEW_BLESS=1 cargo test -p omn-view` and
   `--test view_snapshots`), since its recordings redraw every `process--*`.
+
+Fix round commit `971b8bf`. Tests run this round: `cargo test -p omn-view
+--lib views::process` 9 passed (the new one included), `cargo test -p
+omn-view` 185 passed, `--test view_snapshots` 17 passed, `--test cli` 27
+passed (two failed first only because the worktree had not built the
+preload shim; `cargo build -p omn-preload` and they pass), clippy `-p
+omn-view --all-targets -D warnings` and `cargo fmt --check` clean.
