@@ -11315,3 +11315,63 @@ Each seen at the merges or in a handoff, passing when rerun alone once:
   another worktree's kernels in its counters (the witness's reason), and the
   bench's record was taken at a load falling from 13 to 1. The quiet reruns
   are in `STATE.md`, "Needs privilege".
+
+## The nineteenth wave, coordinator, after the merge
+
+Run on 2026-10-04 at `a71d9cf`, alone on the machine and the device
+(`STATE.md`, "Needs privilege", "Ran after the nineteenth wave's merge").
+
+### `gpu.profile` aborts a native CUDA program at its exit: a double free in `libomn_cupti.so`
+
+`scripts/bench.sh gpu` could not measure `gpu.profile`: its trial run on the
+bench's own workload (`target/bench/gpu compute 50 200000`, built from
+`examples/bench/gpu.c`) ended with "the GPU workload wrote no report".
+Reproduced by hand, twice in two runs:
+
+```console
+BENCH_REPORT=/tmp/r.json target/release/omn trace gpu.profile -m trace -e stack \
+    --backend force:vendor:cupti -- target/bench/gpu compute 50 200000
+```
+
+prints `free(): double free detected in tcache 2` and the program dies on
+`SIGABRT` before writing its report; the same program bare writes it. The
+core's stack (`coredumpctl info`) is the main thread in `exit`, running an
+exit handler of `libomn_cupti.so` (six frames inside it, the release build is
+stripped) that calls `free` twice, while a CUPTI thread is still inside
+`libnvperf_host.so`. So the PC-sampling teardown at exit frees something
+twice, or frees it while CUPTI still owns it. `tests/gpu_counters.rs` does
+not see it: its workloads are Python programs over the driver API, which
+exit by another road. `omn` exits 0 and its results say only
+"pid ... never said it had finished: it was killed, or exited without running
+its exit handlers" (one `failed_reads`), with the lifetime's `signal 6`: the
+target's crash is in the document, but nothing says the tool caused it.
+Owner: `cupti/` (the library's exit path for the PC sampler). A test that
+runs `gpu.profile` over a native program, `examples/bench/gpu.c` will do, and
+asserts the program's own exit status, would have caught it.
+
+### `gpu.temp` through `vendor:nvml` over `low` on the compute-bound regime
+
+The second GPU table (`docs/bench.md`, "The second GPU table, after the
+nineteenth wave") measures +1.11 % on `compute` (gate 0.56 %) where the first
+measured +0.88 %, over `low`'s 1 %. Correcting it is a change to
+`catalog/gpu.yaml` (`med`, or a `stands` with its reason), which the run does
+not make, so the record still holds the first table. With the double free
+above fixed, the next GPU bench pastes its table in.
+
+### The GPU bench takes about two hours, not fifteen minutes
+
+`gpu.counters` replays each kernel, +282 934 % on the launch-bound regime
+(2 830 times its time, over 20 repetitions after 2 warmups): `launch` alone
+took 108 of the run's 117 minutes. The band is right (`extreme`); the
+schedule is not. `STATE.md` and `docs/bench.md` said 15 minutes. A launch
+count per arm, or fewer launches for a replaying arm, would bring it back;
+until then the bench's step wants two hours alone.
+
+### The self-timed kernel's offset is not another tenant's
+
+With nothing else on the device, each self-timed kernel lasts +0.93 to
++1.25 us more than its own span (median about +1.0 us, three runs of 20), and
+starts 6.9 to 39 us after the host's `before` and ends 1.0 to 1.8 us before
+its `after`. The cupti stream measured +1.0 to +1.3 us with other tenants:
+the offset is CUPTI's dispatch and drain, as the decision says, not a
+neighbour's kernels.

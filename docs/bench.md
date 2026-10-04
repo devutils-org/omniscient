@@ -1316,6 +1316,75 @@ thread's cpu, and when a row lost more than one record in a hundred.
 | gpu.profile | vendor:cupti | - | - | - | - | - | - | - | - | - | pending: the collector lands with the profiler stream of the nineteenth wave, after this table |
 <!-- gpu-bands:end -->
 
+### The second GPU table, after the nineteenth wave
+
+Run by the coordinator alone on 2026-10-04 at `a71d9cf`, nothing else on the
+device (`nvidia-smi --query-compute-apps` empty before the run), release
+build with its capabilities (`target/bench/gpu-1791113670/` on the
+development machine). It took **117 minutes, not 15**: `launch` alone took
+108 of them, because `gpu.counters` replays every kernel and costs the
+launch-bound regime +282 934 % (2 830 times its time). The gate resolved
+launch 0.62 %, compute 0.56 %, memory 0.10 %.
+
+`bench_gpu`'s measurement **failed**, for one reason: `gpu.profile` through
+`vendor:cupti` was accepted and failed its trial run, "the GPU workload wrote
+no report". The bench's workload aborts at exit on a double free inside
+`libomn_cupti.so`'s exit handler (filed, `docs/open-findings.md`, "The
+nineteenth wave, coordinator, after the merge"), so `gpu.profile` has no row.
+
+What it measured, as written (the `over` verdict is the draft the run writes,
+for a person to set):
+
+| workload | regime | resolves |
+|---|---|---|
+| launch | launch-bound | 0.62 % |
+| compute | compute-bound | 0.56 % |
+| memory | memory-bound | 0.10 % |
+
+| source | backend | mode | workload | % of target | dilation | cpu dilation | against | losses | was | declared | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| gpu.engine_busy | vendor:nvml | count | launch | 1.10 % | -0.13 % | -0.10 % | bare | 0 of 40 | med | med | within |
+| gpu.freq | vendor:nvml | poll@100ms | launch | 11.75 % | -0.35 % | -0.24 % | bare | 1 of 188 | high | high | within |
+| gpu.power | vendor:nvml | count | launch | 1.42 % | -0.06 % | +0.03 % | bare | 0 of 20 | high | high | within |
+| gpu.temp | vendor:nvml | poll@100ms | launch | 0.67 % | +0.02 % | +0.11 % | bare | 0 of 183 | low | low | within |
+| gpu.mem | vendor:nvml | poll@100ms | launch | 1.04 % | -0.26 % | -0.19 % | bare | 0 of 159 | med | med | within |
+| gpu.kernel | vendor:cupti | trace | launch | 7.76 % | +64.50 % | +80.32 % | control | 0 of 1060608 | extreme | extreme | within |
+| gpu.api | preload | trace | launch | 6.03 % | +10.48 % | +10.55 % | bare | 0 of 1069249 | high | high | within |
+| gpu.counters | vendor:cupti | trace | launch | 0.14 % | +282934.29 % | +281778.73 % | control | 0 of 240 | extreme | extreme | within |
+| gpu.engine_busy | vendor:nvml | count | compute | 1.12 % | +0.40 % | +0.34 % | bare | 0 of 40 | med | med | within |
+| gpu.freq | vendor:nvml | poll@100ms | compute | 8.83 % | +0.53 % | +0.48 % | bare | 0 of 181 | high | high | within |
+| gpu.power | vendor:nvml | count | compute | 1.45 % | +0.44 % | +0.42 % | bare | 0 of 20 | high | high | within |
+| gpu.temp | vendor:nvml | poll@100ms | compute | 0.72 % | +1.11 % | +1.09 % | bare | 0 of 180 | low | low | over: `med` would hold it |
+| gpu.mem | vendor:nvml | poll@100ms | compute | 1.10 % | +1.03 % | +1.00 % | bare | 0 of 149 | med | med | within |
+| gpu.kernel | vendor:cupti | trace | compute | 0.62 % | +1.81 % | +1.95 % | control | 0 of 61296 | extreme | extreme | within |
+| gpu.api | preload | trace | compute | 0.58 % | +2.75 % | +2.71 % | bare | 0 of 69217 | high | high | within |
+| gpu.counters | vendor:cupti | trace | compute | 0.31 % | +351.48 % | +348.93 % | control | 0 of 120 | extreme | extreme | within |
+| gpu.engine_busy | vendor:nvml | count | memory | 1.16 % | +0.00 % | +0.01 % | bare | 0 of 40 | med | med | within |
+| gpu.freq | vendor:nvml | poll@100ms | memory | 10.49 % | -0.01 % | -0.05 % | bare | 1 of 181 | high | high | within |
+| gpu.power | vendor:nvml | count | memory | 1.55 % | -0.03 % | -0.02 % | bare | 0 of 20 | high | high | within |
+| gpu.temp | vendor:nvml | poll@100ms | memory | 0.69 % | +0.12 % | +0.10 % | bare | 0 of 179 | low | low | within |
+| gpu.mem | vendor:nvml | poll@100ms | memory | 1.03 % | -0.03 % | -0.05 % | bare | 0 of 150 | med | med | within |
+| gpu.kernel | vendor:cupti | trace | memory | 0.66 % | +0.15 % | +0.26 % | control | 0 of 64884 | extreme | extreme | within |
+| gpu.api | preload | trace | memory | 0.63 % | +0.01 % | -0.01 % | bare | 0 of 72547 | high | high | within |
+| gpu.counters | vendor:cupti | trace | memory | 0.20 % | +1840.72 % | +1831.57 % | control | 0 of 240 | extreme | extreme | within |
+
+What it says:
+
+- **`gpu.counters` is measured**: +282 934 % launch-bound, +351 % compute-bound,
+  +1 841 % memory-bound, against the control, zero lost. `extreme` holds it.
+- **`gpu.kernel`** +64.50 % launch-bound (was +67.05 % on the shared
+  machine), +1.81 % compute-bound, +0.15 % memory-bound: `extreme` holds it.
+  **`gpu.api`** +10.48 % launch-bound: `high` holds it.
+- **One band over**: `gpu.temp` through `vendor:nvml` costs +1.11 % on
+  `compute` (was +0.88 %), over `low`'s 1 %, with the gate resolving 0.56 %.
+- **`gpu.profile` has no row**, for the defect above.
+
+Pasted into the record above, `tests/bench_gpu.rs` names three faults:
+`gpu.temp`'s band, its draft verdict, and `gpu.profile`'s missing row.
+Setting a verdict on `gpu.temp` is a catalog decision, and `gpu.profile`
+needs a run with the defect fixed, so **the record still holds the first
+table** and this one is filed with the two (`docs/open-findings.md`).
+
 ## Exit criteria of phase 8
 
 - [x] *A cost/resolution/loss table measured for every (source, backend).* 94

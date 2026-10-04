@@ -871,7 +871,8 @@ the header). Each stream's handoff is `docs/fixes/w19-<stream>.md`:
   kernel counts exact on five PTX workloads; zero dropped at 50 000 launches
   with the default buffers, and 8 737 dropped and said with two small ones,
   kept + dropped = launched; each self-timed kernel within
-  `[span, span + max(10 us, 1 %)]` (+1.0 to +1.3 us); a child forked after
+  `[span, span + max(10 us, 1 %)]` (+1.0 to +1.3 us with other tenants,
+  +0.93 to +1.25 us alone on the device after the merge); a child forked after
   `cuInit` exits at once (the first library hung it). **Reasoned**: the
   drop count per call rather than cumulative on other CUPTI releases. The
   brief's "within the calibration's error" does not hold and should not
@@ -920,7 +921,10 @@ the header). Each stream's handoff is `docs/fixes/w19-<stream>.md`:
   launching thread +66 %, 1.3 us a launch), +0.81 % compute-bound, +0.14 %
   memory-bound -- band `extreme`; `gpu.api` +11.31 % -- band `high`; `nsys`
   +74.71 %; `omn`'s own decoding about 1.3 us a record; the control inside
-  the floor. `gpu.counters` and `gpu.profile` are `pending`.
+  the floor. `gpu.counters` and `gpu.profile` are `pending`. After the
+  merge, alone: `gpu.counters` +282 934 % launch-bound (`extreme`), and
+  `gpu.profile` unmeasurable, a double free in `libomn_cupti.so` at the
+  target's exit (filed).
 - **system** (`w19-system.md`): one box, every resource on one time axis,
   colour for trust only, a measured zero and an unmeasured cell drawn apart,
   the process list, the cost corner.
@@ -1225,13 +1229,22 @@ build or test.
 
 ### Still to run, after the nineteenth wave
 
+**Ran on 2026-10-04 at `a71d9cf`**: item 2 (green) and item 3's `gpu` step
+(`gpu.counters` measured, `gpu.profile` not: a double free); what they found
+is under "Ran after the nineteenth wave's merge" below. **Deferred to after
+the twentieth wave**, by the coordinator, because that wave changes the
+catalog and the collectors: item 1 (the matrix), item 3's `backends` step,
+and the full suite (`make check`). **Skipped**: item 4 (`nvidia-smi -lgc` and
+`-pm` need a password; `sudo -n` refused) and item 5 (the 3 ms `null_blk`
+line is still not in the sudoers file). Item 6 is the user's.
+
 In the order that changes the machine least between them. The GPU is one
 device: every GPU run below wants it to itself, so check first that nothing
 holds it (`nvidia-smi --query-compute-apps=pid,process_name --format=csv`
 prints only its header), and run nothing that polls NVML beside it -- a
 poller makes the energy counter under-count for every reader of the board.
 
-1. **The matrix** (alone, about 70 minutes; the cells under
+1. **The matrix** (deferred to after the twentieth wave; alone, about 70 minutes; the cells under
    `target/matrix/cells/` predate `gpu.profile`, which is what keeps
    `make check` red besides the ring-loss gap):
 
@@ -1244,7 +1257,8 @@ poller makes the energy counter under-count for every reader of the board.
    sched fallbacks on the kernels before 6.16, and the `member_offset` audit
    on each kernel.
 
-2. **The GPU tests on a device nobody else uses** (cupti, profiler; no root):
+2. **The GPU tests on a device nobody else uses** (cupti, profiler; no root;
+   **ran, green**, 2026-10-04):
 
    ```console
    cd /home/moha/repos/omniscient && make
@@ -1263,7 +1277,10 @@ poller makes the energy counter under-count for every reader of the board.
 
 3. **The bench, GPU and backends** (bench; alone on the machine and the
    device, the release build and its capabilities, `scripts/bench.sh` needs
-   nothing typed; about 15 minutes for `gpu`, 68 for `backends`):
+   nothing typed; **about 117 minutes for `gpu`** since `gpu.counters` is
+   measured, 68 for `backends`; `gpu` ran on 2026-10-04 and must run again
+   once `gpu.profile`'s double free is fixed, `backends` is deferred to after
+   the twentieth wave):
 
    ```console
    cd /home/moha/repos/omniscient && nvidia-smi --query-compute-apps=pid,process_name --format=csv
@@ -1346,6 +1363,46 @@ it waits on the user's verdict and the needs it changes ("What remains",
 item 2). It wants the device alone too.
 
 ### What the earlier runs found
+
+**Ran after the nineteenth wave's merge** (2026-10-04, at `a71d9cf`, alone on
+the machine and the device: `nvidia-smi --query-compute-apps` empty before
+each GPU run; `docs/open-findings.md`, "The nineteenth wave, coordinator,
+after the merge"). The coordinator stopped the list after the GPU bench: the
+matrix, the backends table and the full suite wait for the twentieth wave.
+
+- **Item 2, the GPU tests: green.** `make` (capabilities already on);
+  `gpu_kernel` 11 passed. Each self-timed kernel lasts **+0.93 to +1.25 us**
+  more than its own span with nothing else on the device (median about
+  +1.0 us, three runs of 20 launches by hand, `ts_err_ns` 171 to 204), starts
+  6.9 to 39 us after the host's `before` and ends 1.0 to 1.8 us before its
+  `after`: the +1.0 to +1.3 us measured with other tenants is CUPTI's own, not
+  theirs. `gpu_counters` 8 passed, no `skipped:` line; by hand, 12 of 12
+  launches undisturbed on both workloads, the copy's DRAM reads 64.0 to
+  64.4 MiB "reproducible here", the spin's "not dominated by this workload",
+  instructions bit for bit on both (3 167 488 and 353 620 672). `family_gpu`
+  10 and `scenario_gpu` 32 passed. `make install-check` and `make
+  dist-verify` passed: 102 sources, the shim's two allocations, `omn-mcp`
+  serving the same 59 sources as `omn`, and on the extracted tree
+  `libomn_cupti.so`'s glibc floor 2.34 and the tarball's 10 paths.
+- **Item 3, `scripts/bench.sh gpu`: measured, its test red on one row**
+  (`target/bench/gpu-1791113670/`, 117 minutes, gate 0.62 / 0.56 / 0.10 %).
+  `gpu.counters` measured for the first time: **+282 934 %** launch-bound,
+  +351 % compute-bound, +1 841 % memory-bound, inside `extreme`, and the
+  reason the step took 117 minutes instead of 15 (108 on `launch`).
+  `gpu.kernel` +64.50 / +1.81 / +0.15 % and `gpu.api` +10.48 % launch-bound,
+  inside their bands. **`gpu.profile` has no row**: it aborts the bench's
+  native workload at exit on a double free inside `libomn_cupti.so`'s exit
+  handler (reproduced 2 of 2 by hand; filed), so the run's assertion fails.
+  `gpu.temp` reads +1.11 % on `compute`, over `low` (filed; a catalog
+  change). The record in `docs/bench.md` still holds the first table, with
+  the second beside it ("The second GPU table, after the nineteenth wave");
+  `bench_gpu` and `bench_bands` green on it.
+- **Item 4, skipped**: `sudo -n nvidia-smi -lgc` asks for a password.
+  **Item 5, skipped**: the 3 ms `null_blk` load is not in the sudoers file.
+- **Deferred to after the twentieth wave**: the matrix and
+  `cargo test --test portability`, `scripts/bench.sh backends` and
+  `bench_bands` on its table, and the full `make check`, so
+  `portability::every_cell_covers_the_whole_catalog` stays red until then.
 
 The commands of the eighteenth wave's runs, as they ran, are in this file at
 `c6bd2b8`; what each run found stays here.
