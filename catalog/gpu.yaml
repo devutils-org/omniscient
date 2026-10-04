@@ -43,7 +43,7 @@
     - {id: "vendor:nvml", requires: ["nvml"], cost: med,
        degraded: "one whole-device figure instead of a per-engine breakdown, sampled by the driver over a window it chooses"}
   modes: [count, poll]
-  emits: [timeline, summary]
+  emits: [timeline, raw, summary]
   targets: {system: native, launch: native}
   keys: []
   filter_fields: [engine, device]
