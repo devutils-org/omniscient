@@ -1,0 +1,33 @@
+{
+  "origin": "live: /work/session.yml",
+  "facts": {
+    "io.bytes": {
+      "determinism": "low",
+      "summary": "I/O volume"
+    },
+    "io.fs": {
+      "determinism": "low",
+      "summary": "VFS and filesystem latency"
+    },
+    "io.syscall": {
+      "determinism": "low",
+      "summary": "I/O latency as the application sees it"
+    },
+    "net.bytes": {
+      "determinism": "low",
+      "summary": "Network volume"
+    },
+    "net.socket": {
+      "determinism": "low",
+      "summary": "Socket read and write latency"
+    }
+  },
+  "refused": [],
+  "ts_err_ns": {
+    "io.bytes@system": 0,
+    "io.fs": 0,
+    "io.syscall": 0,
+    "net.bytes@system": 0,
+    "net.socket": 0
+  }
+}
