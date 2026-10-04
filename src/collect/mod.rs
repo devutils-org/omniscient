@@ -341,6 +341,10 @@ pub struct Collection {
     /// a collector that is not drained, or that dropped nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drains: Vec<DrainDrop>,
+    /// The collector broke the program it measured: [`Collector::failure`].
+    /// The run's outcome reads it and exits non-zero with the sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 
 /// How a drained collector stamps a row it read from a table the kernel
@@ -1812,6 +1816,17 @@ pub trait Collector {
         None
     }
 
+    /// The sentence saying this collector broke the program it measured --
+    /// the GPU's injection library killing its target in its exit handler --
+    /// read after `stop`. `None` is the normal case.
+    ///
+    /// Not a loss: a lost read leaves the program's own outcome standing, and
+    /// this does not, so the run carries it to its outcome and `omn` exits
+    /// non-zero with it rather than exit 0 over a program the tool ended.
+    fn failure(&self) -> Option<String> {
+        None
+    }
+
     /// The frames behind each stack identity this collector interned.
     ///
     /// Empty for everything that does not capture stacks, which is most of
@@ -2606,32 +2621,36 @@ fn run_core(
         .iter()
         .enumerate()
         .map(|(index, slot)| {
-            let (value_attr, stacks, collector_notes, by_ring, facts, row_stamp) = match slot {
-                Slot::Attached(collector) => (
-                    collector.value_attr(),
-                    collector.stacks(),
-                    collector.notes(),
-                    collector.losses_by_ring(),
-                    collector.facts(),
-                    collector.row_stamp(),
-                ),
-                Slot::Detached(record) => (
-                    record.value_attr,
-                    record.stacks.clone(),
-                    record.notes.clone(),
-                    record.by_ring.clone(),
-                    record.facts.clone(),
-                    record.row_stamp,
-                ),
-                Slot::Waiting(_) | Slot::Missed => (
-                    "",
-                    BTreeMap::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    None,
-                ),
-            };
+            let (value_attr, stacks, collector_notes, by_ring, facts, row_stamp, failure) =
+                match slot {
+                    Slot::Attached(collector) => (
+                        collector.value_attr(),
+                        collector.stacks(),
+                        collector.notes(),
+                        collector.losses_by_ring(),
+                        collector.facts(),
+                        collector.row_stamp(),
+                        collector.failure(),
+                    ),
+                    Slot::Detached(record) => (
+                        record.value_attr,
+                        record.stacks.clone(),
+                        record.notes.clone(),
+                        record.by_ring.clone(),
+                        record.facts.clone(),
+                        record.row_stamp,
+                        record.failure.clone(),
+                    ),
+                    Slot::Waiting(_) | Slot::Missed => (
+                        "",
+                        BTreeMap::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        None,
+                    ),
+                };
             let mut collected = std::mem::take(&mut events[index]);
             collected.sort_by_key(|event| event.ts_ns);
             // The filter is the request's, and a degradation does not change
@@ -2666,6 +2685,7 @@ fn run_core(
                 facts,
                 row_stamp,
                 drains: std::mem::take(&mut drains[index].placed),
+                failure,
             }
         })
         .collect::<Vec<Collection>>();
@@ -2884,6 +2904,7 @@ struct Detached {
     by_ring: Vec<RingLoss>,
     facts: Vec<String>,
     row_stamp: Option<RowStamp>,
+    failure: Option<String>,
 }
 
 /// One request's drops placed in time, as the runner reads them: each read
@@ -4356,6 +4377,7 @@ impl Ledger {
             by_ring: collector.losses_by_ring(),
             facts: collector.facts(),
             row_stamp: collector.row_stamp(),
+            failure: collector.failure(),
         };
         // The last look at what it spent inside the target, while its
         // programs are still open to be read.
@@ -4707,33 +4729,43 @@ impl<'r, 'a> Recording<'r, 'a> {
         let self_cpu_ns = rusage_ns(libc::RUSAGE_SELF);
         let mut collections = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
-            let (value_attr, stacks, collector_notes, collector_losses, collector_facts, row_stamp) =
-                match slot {
-                    Slot::Attached(collector) => (
-                        collector.value_attr(),
-                        collector.stacks(),
-                        collector.notes(),
-                        collector.losses(),
-                        collector.facts(),
-                        collector.row_stamp(),
-                    ),
-                    Slot::Detached(record) => (
-                        record.value_attr,
-                        record.stacks.clone(),
-                        record.notes.clone(),
-                        Losses::default(),
-                        record.facts.clone(),
-                        record.row_stamp,
-                    ),
-                    Slot::Waiting(_) | Slot::Missed => (
-                        "",
-                        BTreeMap::new(),
-                        Vec::new(),
-                        Losses::default(),
-                        Vec::new(),
-                        None,
-                    ),
-                };
+            let (
+                value_attr,
+                stacks,
+                collector_notes,
+                collector_losses,
+                collector_facts,
+                row_stamp,
+                failure,
+            ) = match slot {
+                Slot::Attached(collector) => (
+                    collector.value_attr(),
+                    collector.stacks(),
+                    collector.notes(),
+                    collector.losses(),
+                    collector.facts(),
+                    collector.row_stamp(),
+                    collector.failure(),
+                ),
+                Slot::Detached(record) => (
+                    record.value_attr,
+                    record.stacks.clone(),
+                    record.notes.clone(),
+                    Losses::default(),
+                    record.facts.clone(),
+                    record.row_stamp,
+                    record.failure.clone(),
+                ),
+                Slot::Waiting(_) | Slot::Missed => (
+                    "",
+                    BTreeMap::new(),
+                    Vec::new(),
+                    Losses::default(),
+                    Vec::new(),
+                    None,
+                    None,
+                ),
+            };
             let mut events: Vec<Event> = ledger.events[index]
                 .iter()
                 .filter(|event| event.ts_ns >= opened_ns && event.ts_ns <= now_ns)
@@ -4812,6 +4844,7 @@ impl<'r, 'a> Recording<'r, 'a> {
                     .filter(|drain| drain.ts_ns >= opened_ns && drain.ts_ns <= now_ns)
                     .copied()
                     .collect(),
+                failure,
             });
         }
 

@@ -1408,6 +1408,7 @@ fn measure(
         Ok(collections) => collections,
         Err(error) => return Ok(refused_at_collect(catalog, &error, resolved)),
     };
+    let failures = failures(&collections);
     let (run, costs, served_by) = assemble(catalog, session, &ladder, resolved, collections)?;
 
     // Bytes rather than a `String`, because one of the nine formats is not
@@ -1439,7 +1440,34 @@ fn measure(
         );
     }
 
-    Ok(ExitCode::SUCCESS)
+    Ok(outcome(&failures))
+}
+
+/// What the collectors said they broke ([`collect::Collection::failure`]),
+/// each sentence once however many collections of one collector carried it.
+fn failures(collections: &[collect::Collection]) -> Vec<String> {
+    let mut failures: Vec<String> = Vec::new();
+    for failure in collections.iter().filter_map(|c| c.failure.as_ref()) {
+        if !failures.contains(failure) {
+            failures.push(failure.clone());
+        }
+    }
+    failures
+}
+
+/// The run's exit code once everything it produced is written: 1 with each
+/// sentence on stderr when a collector broke the program it measured, so a
+/// script does not read the tool's failure as a clean run. The results stand
+/// beside it -- what was read before the break was read.
+fn outcome(failures: &[String]) -> ExitCode {
+    for failure in failures {
+        eprintln!("error: {failure}");
+    }
+    if failures.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 /// What is said on stderr before any run: the defaults taken, the
@@ -1616,6 +1644,7 @@ fn record(
             Err(error) => return Ok(refused_at_collect(catalog, &error, resolved)),
         };
     drop(recorder);
+    let failures = failures(&collections);
 
     let costs: Vec<MeasuredCost> = collections
         .iter()
@@ -1677,7 +1706,7 @@ fn record(
             directory.display()
         );
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(outcome(&failures))
 }
 
 /// Whether a recording ended because the request of `source` under `ceiling`
@@ -3590,5 +3619,40 @@ mod tests {
             !missing.to_string().contains("--backend force:"),
             "{missing}"
         );
+    }
+
+    /// A collection as a run leaves it, carrying `failure` when given.
+    fn collection(failure: Option<&str>) -> collect::Collection {
+        let mut collection: collect::Collection = serde_json::from_value(serde_json::json!({
+            "events": [],
+            "value_attr": "value",
+            "losses": collect::Losses::default(),
+            "observed_ns": 0,
+            "stopped_because": "the test",
+        }))
+        .expect("a bare collection deserializes");
+        collection.failure = failure.map(str::to_owned);
+        collection
+    }
+
+    /// A collector that broke the program it measured makes the run's
+    /// outcome a failure, said once however many of its collections carry
+    /// it; a run without one exits 0, and a collection without one writes no
+    /// `failure` at all.
+    #[test]
+    fn a_collector_that_broke_its_program_fails_the_run_once() {
+        let killed = "pid 7 died inside omn's injection library";
+        let collections = [
+            collection(None),
+            collection(Some(killed)),
+            collection(Some(killed)),
+        ];
+        assert_eq!(failures(&collections), vec![killed.to_owned()]);
+        assert_eq!(outcome(&failures(&collections)), ExitCode::FAILURE);
+        assert_eq!(outcome(&failures(&[collection(None)])), ExitCode::SUCCESS);
+        let written = serde_json::to_value(collection(None)).unwrap();
+        assert!(written.get("failure").is_none(), "{written}");
+        let written = serde_json::to_value(collection(Some(killed))).unwrap();
+        assert_eq!(written["failure"], killed);
     }
 }
