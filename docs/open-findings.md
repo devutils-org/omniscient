@@ -12817,3 +12817,15 @@ exec'ing beside it), `copy-time-nsys` (nsys 1968797 ns against `omn`'s
 (20 = 20, 1549279 against 1457120, 10.06 ms against 10.09 ms). For the
 runner: a way to run the families one after another (`--test-threads=1`, or
 a lock the timed pairs take), since a pair's band is set on a quiet machine.
+
+### After the reboot onto the NVIDIA driver: power whole, two pairs red once
+
+Kernel 7.2.8, `nvidia_drm` loaded, no `llvmpipe` thread, tracefs 755 and RAPL
+readable from boot, `cpupower` granted. Run alone, one after another: power
+7 of 7 held (`cpupower monitor` included, its skip gone), gpu 20 of 21,
+perfsched 8 of 9 (`perf-lock-contention` 7061 against 7102). The two red
+ones, `kernel-time-launch-bound-nsys` and `perf-trace-count`, were each the
+first run of their family after the boot; their numbers were not kept. Rerun:
+both families whole, then each pair alone three times, all held
+(launch-bound -107566 to +15852 ns where 313280 is allowed; `perf trace -s`
+5000, 5000, 4999). For the flaky tally, not open.
