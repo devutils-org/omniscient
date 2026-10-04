@@ -75,14 +75,20 @@ want() {
 
 keep() {
     name=$1
-    rm -f "$here/$name/resolved.json" "$here/$name/cost.json"
+    keep_in "$here/$name"
+    echo "recorded $name: $(du -sh "$here/$name" | cut -f1)"
+}
+
+# What `keep` does to a recording, in the directory $1.
+keep_in() {
+    dir=$1
+    rm -f "$dir/resolved.json" "$dir/cost.json"
     # The recording's paths are this checkout's, which say nothing a view
     # draws and differ on every machine.
-    sed -i "s|$work|/work|g; s|$root|/omniscient|g" "$here/$name/results.json" "$here/$name/view.json"
+    sed -i "s|$work|/work|g; s|$root|/omniscient|g" "$dir/results.json" "$dir/view.json"
     # Compact: the same document without the indentation, a third the size.
     python3 -c 'import json, sys; json.dump(json.load(open(sys.argv[1])), open(sys.argv[1], "w"), separators=(",", ":"))' \
-        "$here/$name/results.json"
-    echo "recorded $name: $(du -sh "$here/$name" | cut -f1)"
+        "$dir/results.json"
 }
 
 # A pure-Python program whose time one function spends (case 3,
@@ -202,11 +208,10 @@ PY
     keep machine
 }
 
-# The vertical server (`examples/vertical/server.c`), built here with room for
-# a plan longer than its 64 requests, into $1.
+# The vertical server (`examples/vertical/server.c`, a plan of up to 1024
+# requests), built into $1.
 build_server() {
-    sed 's/^#define MAX_PLAN 64$/#define MAX_PLAN 1024/' "$root/examples/vertical/server.c" >"$work/server.c"
-    cc -O0 -pthread -o "$1" "$work/server.c"
+    cc -O0 -pthread -o "$1" "$root/examples/vertical/server.c"
 }
 
 # The vertical case's abandoned requests (`examples/vertical-abandoned.yml`):
@@ -282,6 +287,22 @@ print(" ".join(shlex.quote(word) for word in run))
     keep "workload-$view"
 }
 
+# The process view's workload (`view/workloads/process/`), launched as its
+# manifest says with every view's needs, into the gallery
+# (`docs/view/gallery/process-run/`): what `process--process-run` is drawn on
+# and `views::process`'s tests hold to the manifest. Named `process-run`.
+record_process_run() {
+    out="$root/docs/view/gallery/process-run"
+    rm -rf "$out"
+    run=$(python3 -c '
+import json, shlex, sys
+print(" ".join(shlex.quote(word) for word in json.load(open(sys.argv[1]))["run"]))
+' "$root/view/workloads/process/manifest.json")
+    (cd "$root" && eval "\"\$omn\" top --headless -d 30s -o \"\$out\" -- $run") >/dev/null 2>&1
+    keep_in "$out"
+    echo "recorded process-run: $(du -sh "$out" | cut -f1)"
+}
+
 WORKLOADS="flame timebar wake flows heatmap ledger system lanes request"
 
 want cpython-hot "$@" && record_cpython_hot
@@ -298,4 +319,5 @@ want system-wakeup "$@" && record_system_wakeup
 for view in $WORKLOADS; do
     want "workload-$view" "$@" && record_workload "$view"
 done
+want process-run "$@" && record_process_run
 true
