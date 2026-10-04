@@ -925,7 +925,7 @@ impl Symbolizer {
 
     fn module(&mut self, path: &Path) -> Option<&Module> {
         if !self.modules.contains_key(path) {
-            let (module, origin) = Module::read(path, self.debuginfod.as_deref());
+            let (module, origin) = once(|| Module::read(path, self.debuginfod.as_deref()));
             self.origins.insert(path.to_path_buf(), origin);
             self.modules.insert(path.to_path_buf(), module);
         }
@@ -1234,7 +1234,46 @@ impl PerfMap {
 static KERNEL_SYMBOLS: std::sync::OnceLock<Option<KernelSymbols>> = std::sync::OnceLock::new();
 
 fn kernel_symbols() -> Option<&'static KernelSymbols> {
-    KERNEL_SYMBOLS.get_or_init(KernelSymbols::read).as_ref()
+    KERNEL_SYMBOLS
+        .get_or_init(|| once(KernelSymbols::read))
+        .as_ref()
+}
+
+/// Cpu time this process has spent loading tables it loads once per run --
+/// a module's symbols, the kernel's -- whichever thread loaded them.
+static ONE_TIME_CPU_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// What [`ONE_TIME_CPU_NS`] holds: the part of this process's cpu that a
+/// budget's check weighs apart from the rate a collector runs at. A drain
+/// that meets a new module pays for its table once, inside the window; read
+/// against the few milliseconds a waiting target has burnt by the first
+/// check, that one load stopped runs whose rate was a fraction of their
+/// ceiling (`DECISIONS.md`, "What the budget's first check may stop a run
+/// on").
+pub fn one_time_cpu_ns() -> u64 {
+    ONE_TIME_CPU_NS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Runs a one-time load, and adds the cpu it took to [`one_time_cpu_ns`].
+fn once<T>(load: impl FnOnce() -> T) -> T {
+    let started = thread_cpu_ns();
+    let loaded = load();
+    ONE_TIME_CPU_NS.fetch_add(
+        thread_cpu_ns().saturating_sub(started),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    loaded
+}
+
+/// The cpu time the calling thread has been charged.
+fn thread_cpu_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: a valid pointer to a timespec this frame owns.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
 }
 
 /// Pays for the table now, before a window opens, if this run will want it.
@@ -2755,16 +2794,6 @@ mod tests {
                 named.map(|(name, _, _)| name)
             );
         }
-    }
-
-    fn thread_cpu_ns() -> u64 {
-        let mut now = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: a valid pointer to a timespec this frame owns.
-        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
-        now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
     }
 
     #[test]

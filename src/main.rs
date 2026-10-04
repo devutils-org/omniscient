@@ -1021,9 +1021,19 @@ impl MeasuredCost {
         } else {
             String::new()
         };
+        // A table loaded once inside the window is in the cpu said, and not
+        // in the percentage, which is the rate a budget weighs.
+        let once = if overhead.one_time_cpu_ns > 0 {
+            format!(
+                " ({} of it once, loading symbol tables, weighed apart from the percentage)",
+                span(overhead.one_time_cpu_ns)
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "{} ({}) via `{}` spent {} of cpu{inside} {against}, over {} of wall time{before}; \
-             measuring that cost {} across {} read(s){unknown}",
+            "{} ({}) via `{}` spent {} of cpu{once}{inside} {against}, over {} of wall \
+             time{before}; measuring that cost {} across {} read(s){unknown}",
             self.source,
             self.mode,
             self.served_by.join("` then `"),
