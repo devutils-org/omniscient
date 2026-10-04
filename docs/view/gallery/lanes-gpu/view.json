@@ -1,0 +1,28 @@
+{
+ "origin": "live: python3 docs/view/gallery/lanes-gpu/workload.py",
+ "facts": {
+  "gpu.kernel": {
+   "determinism": "medium",
+   "summary": "GPU time per compute kernel"
+  },
+  "sched.offcpu": {
+   "determinism": "low",
+   "summary": "Blocked time with the blocking stack"
+  },
+  "sched.switches": {
+   "determinism": "low",
+   "summary": "Context switches"
+  },
+  "sched.wakeup": {
+   "determinism": "low",
+   "summary": "Wakeup chain: who unblocks whom"
+  }
+ },
+ "refused": [],
+ "ts_err_ns": {
+  "gpu.kernel": 295,
+  "sched.offcpu": 0,
+  "sched.switches": 0,
+  "sched.wakeup": 0
+ }
+}

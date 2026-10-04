@@ -1,0 +1,40 @@
+omn top │ recording lanes-gpu │ 2.27s                             view: snapshot │ collectors ≥3.22% │ target 48.8% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
+┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐
+│sched.switches 1.32k 24 late ~low det degraded  sched.wakeup 1.25k 24 late ~low det degraded  sched.offcpu 556 ~low   │
+│det degraded x3  gpu.kernel 96 18 late ±295ns                                                                         │
+│27.4ms a cell          ╷0ns              ╷500ms            ╷1.00s            ╷1.50s             ╷2.00s     of the span│
+│gpu0 s7 copies        │          ▁ ▁▁ ▁ ▁▁ ▁ ▁▁ ▁ ▁▁ ▁▁▁▁ ▁ ▁▁   ▁   ▁  ▁  ▁  ▁  ▁▁    ▁  ▁  ▁  ▁  ▁  ▁   │ busy 1.69%│
+│gpu0 s13 spin         │          ▁ ▁  ▁ ▁  ▁ ▁  ▁ ▁  ▁ ▁▁ ▁ ▁▃████▇██▆██▆██▆██▆███▇████▆██▇███████████▆   │ busy 48.1%│
+│gpu0 s14 copy         │          ▁  ▁ ▁ ▁  ▁ ▁  ▁  ▁ ▁  ▁ ▁  ▁    ▁  ▁  ▁  ▁  ▁   ▁    ▁   ▁ ▁  ▁  ▁      │ busy 0.06%│
+│feeder         3065042│███████▃ ▁▁ ▁▁▁▁ ▁▁▁▁ ▁▁▁▁ ▁▁ ▁▁▁▁ ▁▁▁▁   ▁▁  ▁  ▁  ▁  ▁  ▁▁    ▁  ▁▁ ▁  ▁  ▁  ▂   │awake 10.9%│
+│              off cpu │▁▁▁ ▁▁▁▆███████████████████████████████████████████████████████████████████████▆   │ blkd 85.3%│
+│loader         3065050│       ▅████▄█████▇█▆▅▄██▇█████████▆██▇   ▁▁  ▃  ▃  ▃  ▃  ▁▂    ▃  ▂▂ ▁            │awake 37.1%│
+│              off cpu │       ▁ ▁▁▁▅▁ ▁ ▁▂ ▃▄▅▁ ▂ ▁▁ ▁▁▁▁ ▃▁▁▂███████▆██▆██▆██▆███▇████▆██▇▇████▇         │ blkd 43.0%│
+│cuda-EvtHandlr 3065048│  ──▁▁▁▁──▁─▁▁─▁─▁▁▁▁▁▁▁▁▁▁▁▁─▁▁▁▁▁▁─▁▁▁─▁▁▁▁▁▁─▁▁▁─▁─▁▁▁▁▁▁▁▁─▁▁▁▁▁▁─▁─▁▁▁─▁─▁▁   │awake 0.66%│
+│feeder         3065044│ ─▁─▁─▁─▁─▁─▁▁─▁─▁─▁─▁─▁▁─▁─▁─▁─▁─▁▁─▁─▁─▁─▁─▁▁─▁─▁─▁─▁─▁▁─▁─▁─▁─▁─▁▁─▁─▁─▁─▁─▁▁   │awake 0.14%│
+│omn-cupti-flus 3065045│ ─▁─▁─▁─▁─▁─▁▁─▁─▁─▁─▁─▁▁─▁─▁─▁─▁─▁▁─▁─▁─▁─▁─▁▁─▁─▁─▁─▁─▁▁─▁─▁─▁─▁─▁▁─▁─▁─▁─▁─▁─   │awake 0.11%│
+│logger         3065051│       ▁───────▁──────▁───────▁──────▁───────▁──────▁──────▁──────▁───────▁─────   │awake 0.05%│
+│feeder         3065049│       ───▁───▁───▁──▁───▁───▁──▁───▁──▁───▁───▁──▁───▁───▁──▁───▁───▁──▁───▁───   │awake 0.03%│
+│feeder         3065047│  ──────────────────▁──────────────────▁─────────────────▁─────────────────▁────   │awake 0.01%│
+│cuda0000140000 3065043│▁▁──────────────────────────────────────────────────────────────────────────────   │awake 0.00%│
+│feeder         3065046│ ───────────────────────────────────────────────────────────────────────────────   │awake 0.00%│
+│────────────────────────────────────────────────────────────────────────────────────▲ 1.69s───────────────────────────│
+│feeder 3065042 (pid 3065042) at 1.69s: blocked, sleeping 132ms, 1.62s → 1.75s, left cpu 0                             │
+│  woken by cuda-EvtHandlr 3065048, then queued 18.9µs for a cpu; its sched.offcpu row is this block alone             │
+│  in libc.so.6 x2 ← libcuda.so.615.71.09 x5 ← cuCtxSynchronize ← libffi.so.8.5.0 ← 0x7ffcf4231f80                     │
+│  400 switch-outs and 359 wakeups seen; awake 10.9% of the run                                                        │
+│  meanwhile blocked: loader 3065050, cuda-EvtHandlr 3065048, feeder 3065044 and 6 more · on the GPU: spin on s13      │
+│(132ms)                                                                                                               │
+│  where it was off a cpu over the run, 1.94s in all (sched.offcpu, by state and stack):                               │
+│     1.04s 53.8% sleeping     14 blocks  libc.so.6 x2 ← libcuda.so.615.71.09 x5 ← cuCtxSynchronize ← …                │
+│     507ms 26.1% sleeping     13 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …                    │
+│     303ms 15.6% sleeping     98 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 ← …                │
+│    58.0ms 2.99% sleeping     18 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …             │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│▆ awake: on a cpu or queued  ─ blocked  ━ uninterruptible  ▆ kernel  ▆ copy  height: share of the cell                │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ lane  h/l H/L cursor  [/] prev/next change  z/Z zoom  w to wa
