@@ -470,9 +470,20 @@ or `omn saturate` runs, against a workload whose limit the test chose.
 |---|---|
 | `triage-latency-cpu.yml` | Why is a cpu-bound program slow? The session `omn latency` asks through: on-cpu dominates, and the hottest function is named. |
 | `triage-latency-io.yml` | Why is a program making synchronous writes slow? Its blocked time is uninterruptible, from fdatasync: the disk. |
-| `triage-latency-lock.yml` | Why is a thread taking a contended mutex slow? Its sleep is covered by pthread_mutex_lock waits, and the mutex is named. |
+| `triage-latency-lock.yml` | Why is a thread taking a contended mutex slow? The first pass names its sleep a futex wait; the second, with `sched.mutex`, names the mutex. |
 | `triage-latency-tail.yml` | What makes the slowest of five runs slow, when the median is cpu-bound? The one run's 200 ms sleep. |
 | `triage-saturate-queue.yml` | What do four threads on one cpu queue for? The cpu, three deep, by Little's law over `sched.runqlat`. |
+
+The latency session asks four sources: `cpu.profile` (on a cpu, with `fp`
+stacks), `sched.runqlat` (runnable), `sched.offcpu` (blocked, split by the task
+state at each switch) and `sched.futex` (what a sleep was a futex wait for).
+`sched.mutex` runs inside the target, so it is not in the first pass: only when
+the row the verdict reads is a futex sleep does `omn latency` ask again with it
+added, and the answer is the second pass's, which says why it was asked
+(`second pass:`). `--dump-session` prints the first. The verdict reads the main
+thread, and follows a wait other tasks ran in: a `wait4` into the child that
+ran during it, a block into the busiest other thread, each named in the answer
+(`followed`). A source over 20 % of the run's cost is said beside the verdict.
 
 ## join
 
