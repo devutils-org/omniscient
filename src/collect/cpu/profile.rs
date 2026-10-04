@@ -305,9 +305,10 @@ pub struct ProfileCollector {
     choice: Option<StackChoice>,
     debuginfod: Option<std::sync::Arc<Debuginfod>>,
     /// What each ring lost, by the key its ring belongs to: the task a
-    /// per-task ring follows, the cpu a per-cpu ring is pinned to. Read from
+    /// per-task ring follows, the cpu a per-cpu ring is pinned to -- the
+    /// samples it dropped and the periods the kernel throttled it. Read from
     /// the sampler at each drain, because `stop` closes it.
-    ring_losses: Vec<(KeyValue, u64)>,
+    ring_losses: Vec<(KeyValue, RingLost)>,
 }
 
 impl ProfileCollector {
@@ -489,16 +490,18 @@ impl ProfileCollector {
             }
         }
         self.ring_losses = match &*event {
-            Sampler::Tasks(sampler) => sampler
-                .lost_by_task()
-                .into_iter()
-                .map(|(tid, lost)| (KeyValue::task(tid), lost))
-                .collect(),
-            Sampler::Cpus(sampler) => sampler
-                .lost_by_cpu()
-                .into_iter()
-                .map(|(cpu, lost)| (KeyValue::cpu(cpu), lost))
-                .collect(),
+            Sampler::Tasks(sampler) => {
+                RingLost::merge(sampler.lost_by_task(), sampler.throttled_by_task())
+                    .into_iter()
+                    .map(|(tid, lost)| (KeyValue::task(tid), lost))
+                    .collect()
+            }
+            Sampler::Cpus(sampler) => {
+                RingLost::merge(sampler.lost_by_cpu(), sampler.throttled_by_cpu())
+                    .into_iter()
+                    .map(|(cpu, lost)| (KeyValue::cpu(cpu), lost))
+                    .collect()
+            }
         };
         let throttles = event.throttled() - self.throttled;
         self.throttled += throttles;
@@ -523,6 +526,29 @@ impl ProfileCollector {
             );
         }
         self.losses.undecoded += undecoded;
+    }
+}
+
+/// One ring's losses: the samples it dropped and the periods the kernel
+/// throttled it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RingLost {
+    dropped: u64,
+    throttled: u64,
+}
+
+impl RingLost {
+    /// The sampler's two per-ring accounts, by the key each ring belongs to,
+    /// as one list: a ring that only dropped, only was throttled, or both.
+    fn merge<K: Ord + Copy>(dropped: Vec<(K, u64)>, throttled: Vec<(K, u64)>) -> Vec<(K, Self)> {
+        let mut rings: BTreeMap<K, Self> = BTreeMap::new();
+        for (key, count) in dropped {
+            rings.entry(key).or_default().dropped += count;
+        }
+        for (key, count) in throttled {
+            rings.entry(key).or_default().throttled += count;
+        }
+        rings.into_iter().collect()
     }
 }
 
@@ -635,19 +661,37 @@ impl Collector for ProfileCollector {
         self.losses.clone()
     }
 
-    /// Each ring is one task's, or one cpu's, so what it dropped is that
-    /// key's series' loss and no other's.
+    /// Each ring is one task's, or one cpu's, so what it dropped and the
+    /// periods the kernel throttled it are that key's series' loss and no
+    /// other's.
+    ///
+    /// The throttles are carried too, not only the drops: `emit.rs` places a
+    /// run's losses per ring only when the rings account for all of them, so
+    /// a profile the kernel throttled -- any 50 kHz profile on a loaded
+    /// machine -- marked every series with the whole run's loss while its
+    /// rings said only whose drops they were.
     fn losses_by_ring(&self) -> Vec<crate::collect::RingLoss> {
         self.ring_losses
             .iter()
             .map(|(key, lost)| {
                 let mut losses = Losses {
-                    dropped: *lost,
+                    dropped: lost.dropped,
+                    throttled: lost.throttled,
                     ..Losses::default()
                 };
-                losses.note(format!(
-                    "the ring of {key} overflowed: {lost} samples were taken and never read"
-                ));
+                if lost.dropped > 0 {
+                    losses.note(format!(
+                        "the ring of {key} overflowed: {} samples were taken and never read",
+                        lost.dropped
+                    ));
+                }
+                if lost.throttled > 0 {
+                    losses.note(format!(
+                        "the kernel throttled the sampling of {key} {} times: an unknown number \
+                         of samples in each throttled period were not taken",
+                        lost.throttled
+                    ));
+                }
                 crate::collect::RingLoss {
                     key: key.clone(),
                     losses,
@@ -1320,5 +1364,40 @@ mod tests {
             .start()
             .unwrap_err();
         assert!(error.contains("--mode sample@99hz"), "{error}");
+    }
+
+    /// A ring the kernel throttled and that dropped nothing is still one of
+    /// the rings that lost something, and one that did both carries both:
+    /// the per-ring account sums to the run's on both fields, which is what
+    /// `emit.rs` needs to place a throttled profile's losses per task.
+    #[test]
+    fn each_ring_carries_its_throttles_beside_its_drops() {
+        let rings = RingLost::merge(vec![(7, 40), (9, 3)], vec![(7, 2), (11, 5)]);
+        assert_eq!(
+            rings,
+            vec![
+                (
+                    7,
+                    RingLost {
+                        dropped: 40,
+                        throttled: 2
+                    }
+                ),
+                (
+                    9,
+                    RingLost {
+                        dropped: 3,
+                        throttled: 0
+                    }
+                ),
+                (
+                    11,
+                    RingLost {
+                        dropped: 0,
+                        throttled: 5
+                    }
+                ),
+            ]
+        );
     }
 }

@@ -2159,6 +2159,18 @@ impl ThreadSampler {
         self.rings.iter().map(SampledEvent::throttled).sum()
     }
 
+    /// Throttled periods by the cpu each ring is pinned to, for the rings the
+    /// kernel throttled: the part of [`ThreadSampler::throttled`] each cpu's
+    /// ring owns, the way [`ThreadSampler::lost_by_cpu`] splits the drops.
+    pub fn throttled_by_cpu(&self) -> Vec<(u32, u64)> {
+        self.rings
+            .iter()
+            .zip(&self.ring_cpus)
+            .map(|(ring, &cpu)| (cpu, ring.throttled()))
+            .filter(|(_, throttled)| *throttled > 0)
+            .collect()
+    }
+
     /// Reads every ring, handing over the samples in time order.
     ///
     /// Each ring is in order and the rings are per cpu, so a thread that
@@ -2255,8 +2267,9 @@ pub struct TaskSampler {
     /// What the rings of tasks that have exited could not decode, kept when
     /// their rings are released.
     retired_undecoded: u64,
-    /// The throttled periods of those rings, kept the same way.
-    retired_throttled: u64,
+    /// The throttled periods of those rings, by task, kept the same way: a
+    /// thread the kernel throttled and that exited was still throttled.
+    retired_throttled: std::collections::BTreeMap<i32, u64>,
     /// What those rings lost, by task, kept the same way: a thread that
     /// overflowed its ring and exited still lost those samples.
     retired_lost: std::collections::BTreeMap<i32, u64>,
@@ -2286,7 +2299,7 @@ impl TaskSampler {
             enabled: false,
             at_open: 0,
             retired_undecoded: 0,
-            retired_throttled: 0,
+            retired_throttled: std::collections::BTreeMap::new(),
             retired_lost: std::collections::BTreeMap::new(),
         };
         let tasks = if follows {
@@ -2400,10 +2413,24 @@ impl TaskSampler {
         lost.into_iter().collect()
     }
 
+    /// Throttled periods by task, for the tasks whose ring the kernel
+    /// throttled, including tasks that have exited: the part of
+    /// [`TaskSampler::throttled`] each task's ring owns, so that a profile's
+    /// throttles are placed on the task they happened to and on no other.
+    pub fn throttled_by_task(&self) -> Vec<(i32, u64)> {
+        let mut throttled = self.retired_throttled.clone();
+        for (tid, ring) in &self.rings {
+            if ring.throttled() > 0 {
+                *throttled.entry(*tid).or_default() += ring.throttled();
+            }
+        }
+        throttled.into_iter().collect()
+    }
+
     /// Throttled periods over every ring, including those of tasks that have
     /// exited. See [`SampledEvent::throttled`].
     pub fn throttled(&self) -> u64 {
-        self.retired_throttled
+        self.retired_throttled.values().sum::<u64>()
             + self
                 .rings
                 .values()
@@ -2433,7 +2460,9 @@ impl TaskSampler {
         for tid in exited {
             if let Some(ring) = self.rings.remove(&tid) {
                 self.retired_undecoded += ring.undecoded();
-                self.retired_throttled += ring.throttled();
+                if ring.throttled() > 0 {
+                    *self.retired_throttled.entry(tid).or_default() += ring.throttled();
+                }
                 if ring.lost() > 0 {
                     *self.retired_lost.entry(tid).or_default() += ring.lost();
                 }
