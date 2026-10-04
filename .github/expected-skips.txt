@@ -108,3 +108,8 @@ perf_event_max_sample_rate is [0-9]+, at or above the [0-9]+ asked
 reference [a-z]+ .*: `[^`]+` is not installed here
 reference [a-z]+ .*: `sudo -n` does not grant root here
 reference [a-z]+ .*: `[^`]+` was refused on this machine
+# ... and a pair that needs a machine setting the cell's kernel sets otherwise
+# (`requires_setting`: `perf_event_paranoid` at most 0, which a distribution
+# kernel keeps at 2 and above), or a settings file the cell does not have.
+reference [a-z]+ .*: `[^`]+` is -?[0-9]+ here, and this pair needs it at (most|least) -?[0-9]+
+reference [a-z]+ .*: `[^`]+` cannot be read here \(.*\), and this pair needs it
