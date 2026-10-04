@@ -181,7 +181,8 @@
        reading; their time reaches the parent's `cutime` only as it waits for
        them, and this backend does not read it. And a launched program is
        reaped before the run's closing read, so its cpu since the last poll,
-       up to one interval, is in no reading either. The program's exit in the
+       up to one interval, is in no reading either; the run counts it in its
+       losses, as one failed read with that reason. The program's exit in the
        results carries the exact total, `cpu_ns`, from the reap (`wait4`),
        its waited-for children included."
 
