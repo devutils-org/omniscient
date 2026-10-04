@@ -12829,3 +12829,42 @@ first run of their family after the boot; their numbers were not kept. Rerun:
 both families whole, then each pair alone three times, all held
 (launch-bound -107566 to +15852 ns where 313280 is allowed; `perf trace -s`
 5000, 5000, 4999). For the flaky tally, not open.
+
+### The runs carried since the nineteenth wave, alone after the reboot (2026-10-05)
+
+`STATE.md` "Still to run", items 2 to 5, one after another on a quiet
+machine (load about 1 on 24 cpus), the GPU free:
+
+- **GPU tests** (item 2): `gpu_counters`, `gpu_kernel`, `family_gpu`,
+  `scenario_gpu` green.
+- **GPU bench** (item 3, `target/bench/gpu-1791152014`): 1218 s, against the
+  fifteen minutes reasoned. `bench_gpu` **red**: `gpu.freq` through
+  `vendor:nvml` on `launch` lost 2 of 190 records, and the test refuses the
+  cost of a tracer that drops records under load. `gpu.profile` measured for
+  the first time: +0.17 % dilation but +45.19 % process cpu, over its `med`
+  (`extreme` would hold it). `gpu.counters` +1834 % on the memory regime,
+  within `extreme`.
+- **Backends bench** (item 3, `target/bench/backends-1791155535`): 3521 s,
+  96 pairs, test green, 16 flagged over their band. The large ones: every
+  NVML poller 25 to 36 % of the target's cpu (`gpu.temp` declared `low`,
+  `gpu.engine_busy` and `gpu.mem` `med`, `gpu.freq` and `gpu.power` `high`);
+  `io.fsync` through `bpf:fentry` 144 % (as before, 142 %);
+  `net.tcp.connect` through `bpf:fentry` 40 % against `low`. Small ones just
+  over: `cpu.profile` 6.3 % (`med`), `sched.wakeup` 6.5 % (`med`, as
+  expected), `net.tcp.rtt` 5.7 %, `io.readahead` 1.4 %, `power.freq` 1.1 %,
+  `power.temp` 1.9 %, and three `free` sources at 0.11 to 0.17 %.
+  `bench_bands` to rerun against this table; the bands not yet moved.
+- **Budget** (item 4): `what_an_ebpf_program_spends_inside_the_target`
+  green; `cpu.oncpu_time` through `bpf:raw_tp` 10.1 ms inside the target over
+  29664 runs (1.63 %, `low`); at paranoid 2 the profile's check reads
+  11.40 % (116 to 179 % before), the 19.3 ms symbol load weighed apart, and
+  says it cannot check the whole because the in-target part is unknown.
+- **Cases and views** (item 5): `cases` 6 of 6 and `view_workloads` 14 of
+  14 green, alone.
+- **`examples/proc-not-built.yml` exits 1, not 3.** The service now mounts
+  tracefs at 755, but the event `id` files stay `0440 root`, so the pinned
+  `bpf:tp` is refused by the machine (1) before the build (3). The
+  expectation in `STATE.md` assumed a readable `id`; making the files
+  readable is a chmod of every `events/*/*/id` at boot, outside the
+  project's privilege model -- the example's comment already names 1 as the
+  answer on such a machine.

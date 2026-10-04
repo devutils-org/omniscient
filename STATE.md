@@ -1837,6 +1837,12 @@ build or test.
 
 ### Still to run, after the twenty-third wave
 
+**Items 2 to 5 ran on 2026-10-05**, alone after the reboot onto the NVIDIA
+driver (`docs/open-findings.md`, "The runs carried since the nineteenth
+wave"): GPU tests, cases and views green; the GPU bench red on `gpu.freq`'s
+two lost records; the backends bench green with 16 bands outside, to move.
+Items 6 to 10 remain.
+
 Item 1, the matrix, ran after the twentieth wave's merge (2026-10-04, "What
 the earlier runs found" below). In the twenty-first to twenty-third waves
 the streams ran only what `make`'s capabilities allow, and nothing
