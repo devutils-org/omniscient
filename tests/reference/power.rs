@@ -107,7 +107,10 @@ fn turbostat_summary(stdout: &str, stderr: &str) -> Result<Values, String> {
             .find(|l| l.contains("root") || l.contains("Permission"))
             .copied()
             .unwrap_or("no header and summary line");
-        format!("turbostat printed no summary: {why}")
+        format!(
+            "turbostat printed no summary: {why} (with --no-msr it reads through cpu-wide \
+             perf events, which need perf_event_paranoid at most 0 or CAP_PERFMON)"
+        )
     })?;
     for (name, v) in names.into_iter().zip(nums) {
         if let Some(stem) = name.strip_suffix("_MHz") {

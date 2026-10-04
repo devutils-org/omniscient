@@ -103,6 +103,24 @@ sudo pacman -S powertop
   series named like `compare.key`). Until it does, these pairs should skip
   with "same_run not supported" rather than run omn with a workload, which
   fails.
+- **reference** (runner): honour `reference.requires_setting: [{file, at_most}]`
+  -- read the file as an integer and skip, naming the file, its value and the
+  bound, when it is above `at_most`. The `perf stat` energy pair and both
+  `turbostat --no-msr` pairs carry `perf_event_paranoid <= 0`.
 - The toolchain changed mid-wave on this machine (rustc lost
   `libLLVM.so.22.1` once, then rebuilt on LLVM 23); a stream that sees that
   error should simply rebuild.
+
+## Review
+
+- **The `power.freq`/`turbostat` pair failed rather than skipped above
+  `perf_event_paranoid` 0** (reviewer: gap). Right, and not only that pair:
+  `turbostat --no-msr` reads APERF/MPERF and RAPL, and `perf stat -a` reads
+  RAPL, all through cpu-wide perf events, which the kernel refuses an
+  unprivileged user above 0 (the reviewer's -1 is this machine's value, not
+  the bound). Those three pairs now declare
+  `requires_setting: [{file: /proc/sys/kernel/perf_event_paranoid, at_most: 0}]`,
+  documented in `power.yaml`'s header and asked of the runner above; the
+  turbostat parser's no-summary error now names the setting too, for a run
+  that reaches it anyway. **Reasoned, not shown**: this machine is at -1, so
+  the skip path was not exercised; the runner is not on `main`.
