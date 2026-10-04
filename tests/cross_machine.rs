@@ -884,9 +884,30 @@ with open(path, "rb") as f:
         pass
 t2 = time.monotonic_ns()
 io = dict(line.split(": ") for line in open("/proc/self/io").read().splitlines())
+own = open("/proc/self/cgroup").read().split("0::", 1)[1].strip()
+def stat():
+    return dict(line.split() for line in open("/sys/fs/cgroup" + own + "/memory.stat"))
+at_end = stat()
+# Under a limit, the window ends when the cgroup's own writeback has: what the
+# limit forced onto the device is on it, not still in the flusher's hands.
+# Uncapped, the dirty pages are the flusher's, thirty seconds later.
+capped = open("/sys/fs/cgroup" + own + "/memory.max").read().strip() != "max"
+t3 = 0
+deadline = time.monotonic() + (20 if capped else 0)
+while time.monotonic() < deadline:
+    now = stat()
+    if int(now.get("file_dirty", 0)) + int(now.get("file_writeback", 0)) == 0:
+        t3 = time.monotonic_ns()
+        break
+    time.sleep(0.01)
 os.unlink(path)
 print("omn-cross pid", os.getpid(), "write", t0, "read", t1, t2,
-      "read_bytes", io["read_bytes"].strip(), file=sys.stderr)
+      "read_bytes", io["read_bytes"].strip(),
+      "file_dirty", at_end.get("file_dirty", 0), "file_writeback", at_end.get("file_writeback", 0),
+      "drained", t3, file=sys.stderr)
+# Past the last 100 ms window of `mem.reclaim` and the device poller's next
+# tick, so both are read before the launched program's exit ends the run.
+time.sleep(0.3)
 "#;
 
 const WRITTEN_MIB: u64 = 96;
@@ -988,13 +1009,59 @@ impl Drop for Cgroup {
 }
 
 /// Where the file goes, and the block devices that hold it as the tool names
-/// them: the partition, which `io.latency` reports, and the whole disk, which
-/// is all `io.bytes` reports because a partition's bytes are counted again on
-/// the disk.
+/// them: the partitions, which `io.latency` reports, and the whole disks,
+/// which is all `io.bytes` reports because a partition's bytes are counted
+/// again on the disk.
+///
+/// A filesystem can span several devices: a btrfs volume of two partitions
+/// puts each chunk of the file on either, and with the mount's source alone
+/// the writeback that landed on the other one read as writeback that never
+/// happened (`docs/fixes/w23-cross.md`).
 struct Scratch {
     dir: PathBuf,
-    partition: Option<String>,
-    disk: Option<String>,
+    partitions: Vec<String>,
+    disks: Vec<String>,
+}
+
+impl Scratch {
+    fn holds(&self, dev: &str) -> bool {
+        self.partitions
+            .iter()
+            .chain(&self.disks)
+            .any(|name| name == dev)
+    }
+}
+
+/// Every block device of the filesystem `device` belongs to: the members a
+/// btrfs volume lists under `/sys/fs/btrfs/<fsid>/devices`, or `device` alone.
+fn members(device: &str) -> Vec<String> {
+    let volumes = std::fs::read_dir("/sys/fs/btrfs").into_iter().flatten();
+    for volume in volumes.flatten() {
+        let names: Vec<String> = std::fs::read_dir(volume.path().join("devices"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+            .collect();
+        if names.iter().any(|name| name == device) {
+            return names;
+        }
+    }
+    vec![device.to_owned()]
+}
+
+/// The whole disk a block device is on: itself, unless it is a partition.
+fn disk_of(name: &str) -> Option<String> {
+    let class = Path::new("/sys/class/block").join(name);
+    if !class.exists() {
+        return None;
+    }
+    if class.join("partition").exists() {
+        let parent = class.canonicalize().ok()?.parent()?.to_path_buf();
+        parent.file_name()?.to_str().map(str::to_owned)
+    } else {
+        Some(name.to_owned())
+    }
 }
 
 /// A disk-backed directory: a tmpfs file is memory, charged to the same cgroup,
@@ -1029,27 +1096,23 @@ fn scratch() -> Result<Scratch, String> {
             seen.push(format!("{} is {fstype}", dir.display()));
             continue;
         }
-        let partition = Path::new(source)
+        let partitions = Path::new(source)
             .canonicalize()
             .ok()
             .filter(|device| device.starts_with("/dev"))
-            .and_then(|device| device.file_name()?.to_str().map(str::to_owned));
-        let disk = partition.as_ref().and_then(|name| {
-            let class = Path::new("/sys/class/block").join(name);
-            if !class.exists() {
-                return None;
-            }
-            if class.join("partition").exists() {
-                let parent = class.canonicalize().ok()?.parent()?.to_path_buf();
-                parent.file_name()?.to_str().map(str::to_owned)
-            } else {
-                Some(name.clone())
-            }
-        });
+            .and_then(|device| device.file_name()?.to_str().map(members))
+            .unwrap_or_default();
+        let mut disks: Vec<String> = partitions.iter().filter_map(|name| disk_of(name)).collect();
+        disks.sort();
+        disks.dedup();
+        // Every member must name its disk, or the device's count is partial.
+        if disks.is_empty() || partitions.iter().any(|name| disk_of(name).is_none()) {
+            disks.clear();
+        }
         return Ok(Scratch {
             dir,
-            partition,
-            disk,
+            partitions,
+            disks,
         });
     }
     Err(format!(
@@ -1066,42 +1129,59 @@ struct Churned {
     read_ns: u64,
     end_ns: u64,
     read_bytes: u64,
+    /// The cgroup's dirty and under-writeback page cache when the program
+    /// finished reading, by its own `memory.stat`, in bytes.
+    dirty_at_end: u64,
+    writeback_at_end: u64,
+    /// When the cgroup's `file_dirty` and `file_writeback` were both back to
+    /// zero, polled by the program itself; 0 if they never were in 20 s.
+    drained_ns: u64,
 }
 
-fn churn_in(cgroup: &Cgroup, file: &Path) -> Result<Churned, String> {
-    let output = Command::new("sh")
-        .args([
-            "-c",
-            r#"echo $$ > "$1/cgroup.procs" && exec python3 -c "$2" "$3" "$4""#,
-            "sh",
-        ])
-        .arg(&cgroup.dir)
-        .arg(CHURN)
-        .arg(file)
-        .arg(WRITTEN_MIB.to_string())
-        .output()
-        .map_err(|error| format!("sh would not start: {error}"))?;
-    let _ = std::fs::remove_file(file);
-    let text = stderr(&output);
+impl Churned {
+    /// The end of what the program caused: its last read, or its cgroup's
+    /// writeback drained, whichever is later.
+    fn settled_ns(&self) -> u64 {
+        self.end_ns.max(self.drained_ns)
+    }
+}
+
+/// The program's argv, moved into the cgroup before it starts: launched by the
+/// session itself, so the run's launch gate holds it until every collector is
+/// attached, and its exit -- once the cgroup's writeback has drained -- ends
+/// the run.
+fn churn_argv(cgroup: &Cgroup, file: &Path) -> Vec<String> {
+    vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        r#"echo $$ > "$1/cgroup.procs" && exec python3 -c "$2" "$3" "$4""#.to_owned(),
+        "sh".to_owned(),
+        cgroup.dir.display().to_string(),
+        CHURN.to_owned(),
+        file.display().to_string(),
+        WRITTEN_MIB.to_string(),
+    ]
+}
+
+/// What the program said about itself, from the run's standard error, which
+/// it inherits.
+fn churned(output: &Output, cgroup: &Cgroup) -> Result<Churned, String> {
+    let text = stderr(output);
     let line = text
         .lines()
         .find(|line| line.starts_with("omn-cross "))
         .ok_or_else(|| {
-            // What it did say, or that it said nothing, with how it ended: a
-            // `cgroup.procs` the shell could not write, a python3 that is
+            // A `cgroup.procs` the shell could not write, a python3 that is
             // missing, and a program that died on a signal all print nothing
-            // here and differ in the status.
-            let out = String::from_utf8_lossy(&output.stdout);
-            let said = match (text.trim(), out.trim()) {
-                ("", "") => "it printed nothing".to_owned(),
-                (err, "") => format!("it printed on stderr: {err}"),
-                ("", out) => format!("it printed on stdout only: {out}"),
-                (err, out) => format!("it printed on stderr: {err}; on stdout: {out}"),
-            };
+            // here, and the run says how its launched program exited.
             format!(
-                "the program did not report itself: {said}, and exited {} (moved into {})",
-                output.status,
-                cgroup.dir.display()
+                "the program did not report itself (moved into {}); the run said: {}",
+                cgroup.dir.display(),
+                text.lines()
+                    .filter(|line| !line.starts_with("cost: "))
+                    .take(6)
+                    .collect::<Vec<_>>()
+                    .join(" / ")
             )
         })?;
     let fields: Vec<&str> = line.split_whitespace().collect();
@@ -1112,6 +1192,9 @@ fn churn_in(cgroup: &Cgroup, file: &Path) -> Result<Churned, String> {
         read_ns: number(6),
         end_ns: number(7),
         read_bytes: number(9),
+        dirty_at_end: number(11),
+        writeback_at_end: number(13),
+        drained_ns: number(15),
     })
 }
 
@@ -1125,11 +1208,10 @@ struct ReclaimRun {
     stalled_ns: u64,
 }
 
-/// The programs are loaded and attached in `Collector::start`, and a request
-/// completed before that happened is one the kernel never told anyone about.
-/// Every rung checked below is a lower bound, so starting the program early
-/// fails the assertion rather than weakening it.
-const ATTACH_MARGIN: Duration = Duration::from_millis(700);
+/// The longest the run may take: an upper bound only, since the launched
+/// program's exit ends it. A fixed duration was outrun by the program under
+/// load, and a fixed head start before it was outrun by the attach.
+const RUN_CEILING: &str = "60s";
 
 /// The session's two joins: the reads of a reclaiming task (KEY), and the
 /// reclaim laid across the machine's pressure intervals with no key (TEMPORAL).
@@ -1148,17 +1230,34 @@ fn run_reclaim_of(
     limit: &str,
 ) -> Result<ReclaimRun, String> {
     cgroup.limit(limit);
-    let session = std::fs::read_to_string(example(name)).expect("the reclaim session ships");
-    let stolen_before = cgroup.stat("pgsteal_direct") + cgroup.stat("pgsteal_kswapd");
-    let stalled_before = cgroup.stalled_us();
-    let child = spawn_session(&session, &[]);
-    std::thread::sleep(ATTACH_MARGIN);
     let file = scratch
         .dir
         .join(format!("omn-cross-machine-{}.churn", std::process::id()));
-    let churned = churn_in(cgroup, &file);
-    let output = child.wait_with_output().expect("omn should finish");
-    let churned = churned?;
+    // The shipped session, with the program launched beside its machine-wide
+    // requests: a request on the launched program is what makes the run hold
+    // it at the gate and end at its exit.
+    let text = std::fs::read_to_string(example(name)).expect("the reclaim session ships");
+    let mut session: Value = serde_norway::from_str(&text).expect("the reclaim session is YAML");
+    session
+        .as_object_mut()
+        .expect("a session is a mapping")
+        .remove("duration");
+    session["requests"]
+        .as_array_mut()
+        .expect("a session has requests")
+        .push(serde_json::json!({
+            "label": "program",
+            "source": "mem.rss",
+            "target": {"launch": churn_argv(cgroup, &file)},
+            "mode": "poll@100ms",
+            "emit": ["summary"],
+        }));
+    let stolen_before = cgroup.stat("pgsteal_direct") + cgroup.stat("pgsteal_kswapd");
+    let stalled_before = cgroup.stalled_us();
+    let output = spawn_session(&session.to_string(), &["-d", RUN_CEILING])
+        .wait_with_output()
+        .expect("omn should finish");
+    let _ = std::fs::remove_file(&file);
     if !output.status.success() {
         let message = stderr(&output);
         return Err(
@@ -1176,6 +1275,7 @@ fn run_reclaim_of(
             },
         );
     }
+    let churned = churned(&output, cgroup)?;
     Ok(ReclaimRun {
         document: document(&output),
         churned,
@@ -1218,6 +1318,13 @@ struct Ladder {
     overlap_credited: f64,
     overlap_in_brackets: f64,
     overlap_uncredited: f64,
+    /// Where the edges sit: when the block layer's trace was attached, the
+    /// writes to the file's device after the program ended, and the pages laid
+    /// in intervals wholly before its first write or after its end.
+    requests_opened_ns: u64,
+    writes_after_end: u64,
+    overlap_before: f64,
+    overlap_after: f64,
 }
 
 fn ladder(run: &ReclaimRun, scratch: &Scratch, cgroup_id: u64) -> Ladder {
@@ -1237,10 +1344,15 @@ fn ladder(run: &ReclaimRun, scratch: &Scratch, cgroup_id: u64) -> Ladder {
                 ladder.identity_reading_back += 1;
             }
         }
-        let on_the_file = [&scratch.partition, &scratch.disk]
-            .iter()
-            .any(|name| name.as_deref() == Some(attr_str(event, "dev")));
-        if on_the_file && rwbs.starts_with('W') && ts >= churned.write_ns && ts <= churned.end_ns {
+        let on_the_file = scratch.holds(attr_str(event, "dev"));
+        if on_the_file && rwbs.starts_with('W') && ts > churned.settled_ns() {
+            ladder.writes_after_end += bytes;
+        }
+        if on_the_file
+            && rwbs.starts_with('W')
+            && ts >= churned.write_ns
+            && ts <= churned.settled_ns()
+        {
             ladder.writes_meanwhile += bytes;
             if tid == churned.pid {
                 ladder.writes_by_program += bytes;
@@ -1251,6 +1363,10 @@ fn ladder(run: &ReclaimRun, scratch: &Scratch, cgroup_id: u64) -> Ladder {
                 .or_default() += bytes;
         }
     }
+
+    ladder.requests_opened_ns = result(document, "requests")["window"]["opened_ns"]
+        .as_u64()
+        .unwrap_or(0);
 
     let own_key = format!("task:{}", churned.pid);
     let joins = document["joins"].as_array().into_iter().flatten();
@@ -1278,16 +1394,22 @@ fn ladder(run: &ReclaimRun, scratch: &Scratch, cgroup_id: u64) -> Ladder {
     let mut last = 0;
     for event in &ticks {
         let ts = event["ts_ns"].as_u64().unwrap_or(0);
-        first = first.min(ts);
+        // A poll reports what happened since the read before it, and the first
+        // since the baseline read when the window opened.
+        first = first.min(ts.saturating_sub(attr_u64(event, "interval_ns")));
         last = last.max(ts);
-        if scratch.disk.as_deref() == Some(attr_str(event, "dev")) {
+        if scratch
+            .disks
+            .iter()
+            .any(|disk| disk == attr_str(event, "dev"))
+        {
             ladder.device_read += attr_u64(event, "read_bytes");
             ladder.device_write += attr_u64(event, "write_bytes");
         }
     }
     // A poll reports what happened since the tick before, so the tick after
     // the program ended is the one that carries its last bytes.
-    ladder.contained = first <= churned.write_ns && last >= churned.end_ns + 100_000_000;
+    ladder.contained = first <= churned.write_ns && last >= churned.settled_ns() + 100_000_000;
 
     ladder.stalled_ns = raw_events(result(document, "pressure"))
         .iter()
@@ -1326,6 +1448,10 @@ fn ladder(run: &ReclaimRun, scratch: &Scratch, cgroup_id: u64) -> Ladder {
         // (opened, closed] holds the program if it overlaps its brackets.
         if closed > churned.write_ns && opened < churned.end_ns {
             ladder.overlap_in_brackets += pages;
+        } else if closed <= churned.write_ns {
+            ladder.overlap_before += pages;
+        } else {
+            ladder.overlap_after += pages;
         }
     }
     ladder.overlap_uncredited = overlap["readings"]["uncredited"].as_f64().unwrap_or(0.0);
@@ -1333,7 +1459,10 @@ fn ladder(run: &ReclaimRun, scratch: &Scratch, cgroup_id: u64) -> Ladder {
 }
 
 fn print_ladder(title: &str, run: &ReclaimRun, ladder: &Ladder, scratch: &Scratch) {
-    let disk = scratch.disk.as_deref().unwrap_or("its disk");
+    let disk = match scratch.disks.as_slice() {
+        [] => "its disk".to_owned(),
+        disks => disks.join("+"),
+    };
     let other = (ladder.device_read + ladder.device_write)
         .saturating_sub(ladder.identity_bytes + ladder.writes_meanwhile);
     eprintln!("{title}");
@@ -1383,6 +1512,24 @@ fn print_ladder(title: &str, run: &ReclaimRun, ladder: &Ladder, scratch: &Scratc
         ladder.overlap_in_brackets,
         ladder.overlap_uncredited,
         ladder.reclaimed_machine_wide
+    );
+    eprintln!(
+        "  edges        the trace attached {:+.0} ms from the first write; at the end the cgroup \
+         held {:.1} MiB dirty and {:.1} MiB under writeback, {}; {:.1} MiB written to the \
+         file's device after that; {:.0} pages laid before the first write, {:.0} after the end",
+        (ladder.requests_opened_ns as f64 - run.churned.write_ns as f64) / 1e6,
+        mib(run.churned.dirty_at_end as f64),
+        mib(run.churned.writeback_at_end as f64),
+        match run.churned.drained_ns {
+            0 => "not waited for".to_owned(),
+            at => format!(
+                "drained {:.0} ms after the last read",
+                at.saturating_sub(run.churned.end_ns) as f64 / 1e6
+            ),
+        },
+        mib(ladder.writes_after_end as f64),
+        ladder.overlap_before,
+        ladder.overlap_after
     );
     eprintln!(
         "  residue      {:>7.1} MiB of the device's bytes are on no rung above: other programs, \
@@ -1495,9 +1642,18 @@ fn a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_it
             ladder.contained,
             "{name}: the device poller's ticks do not bracket the program ({} to {} ns), so the \
              window did not contain what it is being checked against",
-            run.churned.write_ns, run.churned.end_ns
+            run.churned.write_ns,
+            run.churned.settled_ns()
         );
     }
+
+    assert!(
+        capped.churned.drained_ns > 0,
+        "capped, the cgroup's file_dirty and file_writeback never came back to 0 within 20 s of \
+         the program's last read ({:.1} MiB dirty and {:.1} MiB under writeback then)",
+        mib(capped.churned.dirty_at_end as f64),
+        mib(capped.churned.writeback_at_end as f64)
+    );
 
     // IDENTITY, against the kernel's per-process count.
     let charged = capped.churned.read_bytes;
@@ -1580,13 +1736,24 @@ fn a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_it
         under.overlap_uncredited,
         under.reclaimed_machine_wide
     );
+    // The pages credited outside the program's intervals. The cgroup's own
+    // cannot be there: an episode, or the window a bucket was drained over,
+    // that began after the first write and before the last read lies in an
+    // interval that overlaps the program, by construction. What can is
+    // another cgroup's reclaim on the same machine -- the session reads it
+    // machine-wide -- and nothing else: the twenty-first wave's 64 and 72
+    // stray pages, against a machine-wide total within its slack of the
+    // cgroup's own.
+    let outside = under.overlap_credited - under.overlap_in_brackets;
+    let elsewhere = under
+        .reclaimed_machine_wide
+        .saturating_sub(under.reclaimed_pages) as f64;
     assert!(
-        (under.overlap_credited - under.overlap_in_brackets).abs() <= 1.0
-            || under.reclaimed_machine_wide > capped.pgsteal + capped.pgsteal / 20 + 1024,
-        "every page the tool saw reclaimed is the cgroup's, and {:.0} of the {:.0} credited \
-         lie in intervals the program did not overlap",
-        under.overlap_credited - under.overlap_in_brackets,
-        under.overlap_credited
+        outside <= elsewhere + 1.0,
+        "{outside:.0} of the {:.0} pages credited lie in intervals the program did not overlap          ({:.0} before its first write, {:.0} after its last read), and only {elsewhere:.0} of          the pages the tool saw reclaimed were another cgroup's",
+        under.overlap_credited,
+        under.overlap_before,
+        under.overlap_after
     );
 
     // The machine's PSI is not the cgroup's. The root's `some` is an average
@@ -1604,7 +1771,7 @@ fn a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_it
     }
 
     // TEMPORAL: the writeback the limit forced into the window.
-    if scratch.partition.is_some() {
+    if !scratch.partitions.is_empty() {
         assert!(
             under.writes_meanwhile >= evicted_at_least - evicted_at_least / 10,
             "to stay within {LIMIT_MIB} MiB the cgroup had to write back at least {} MiB of the \
@@ -1616,7 +1783,7 @@ fn a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_it
     }
 
     // The device, as a lower bound: it moved at least the program's reads.
-    match scratch.disk {
+    match scratch.disks.first() {
         Some(_) => assert!(
             under.device_read >= charged - charged / 20,
             "the program alone was charged {:.1} MiB of storage reads and `io.bytes` saw the \
