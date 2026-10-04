@@ -6,20 +6,39 @@
 # The workload, `hold.py MIB CPU_SECONDS LINGER`, maps and touches MIB
 # private anonymous mebibytes, says "ready", spins until its own cpu time
 # reaches CPU_SECONDS, says "done" and holds still LINGER seconds: its
-# footprint and its cpu total are fixed by its arguments, so two runs of it
-# agree to a fraction of a percent. The tools that need a pid run through
-# `onpid.py`, which launches the workload, waits for the line `--at` names
-# and runs the tool on its pid (`{pid}` in the tool's arguments). omn
-# launches its own run of the same workload: the pairs below are alternate
-# runs of a deterministic workload, not one run observed twice -- omn takes
-# no pid from another launcher's output, and the tools take no program.
+# footprint and its cpu total are fixed by its arguments. The tools that
+# need a pid run through `onpid.py`, which launches the workload, waits for
+# the line `--at` names and runs the tool on its pid (`{pid}` in the
+# tool's arguments).
+#
+# Fields this family adds, which a runner that does not know them ignores:
+#   same_run: onpid_attach
+#       One run observed by both. The runner sets ONPID_OMN to omn's full
+#       argv as a JSON list (the binary first, then `omn`, `{pid}` left in)
+#       and ONPID_OMN_OUT to a file, and runs `reference.command ++
+#       workload`: onpid.py launches the workload, starts omn on its pid at
+#       the line `--omn-at` names ("ready" by default) and the tool at
+#       `--at`'s, and omn's JSON is the file. omn's argv carries `-d`, since
+#       an attached poll needs to know when to stop, and no `--`. Without
+#       the field, the pair is alternate runs: omn launches the workload
+#       itself (`omn ++ ["--"] ++ workload`).
+#   compare.omn_jq
+#       The exact jq expression over omn's JSON that `compare.omn` names.
+#       `summary.total` is the sum over the source's series of count * mean
+#       (the per-poll deltas of a cumulative counter, one series per thread
+#       through eBPF); `summary.total/observed` divides it by the result's
+#       `observed_ns`, a ratio of one cpu.
+#
+# Until tests/reference.rs runs pairs, tests/reference/workloads/top/run_pairs.py
+# runs every pair of this file with that reading of the fields.
 # Parsers: tests/reference/top.rs.
 
 - source: mem.rss
   tool: top
   use: "top -b -p PID, the RES column"
+  same_run: onpid_attach
   workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
-  omn: [trace, mem.rss, -m, poll, -e, summary, --format, json]
+  omn: [trace, mem.rss, -m, poll, -e, summary, -d, 2s, --pid, "{pid}", --format, json]
   reference:
     command: [python3, tests/reference/workloads/top/onpid.py, --at, done, top, -b, -n, "1", -p, "{pid}", --]
     parse: top_batch_pid
@@ -28,13 +47,13 @@
   compare:
     key: res
     omn: summary.max
+    omn_jq: "[.results[0].outputs[0].series[].max] | max"
     tolerance: {rel: 0.01}
     why: >-
       top's RES is statm's resident pages, omn's the Rss of smaps_rollup:
-      the same pages counted two ways, read once the workload's 64 MiB are
-      touched and it spins in place. Alternate runs of a workload whose
-      footprint its arguments fix; measured 75584-75620 KiB (top) against
-      75616-75620 KiB (omn), 0.05 % apart.
+      the same pages counted two ways, on one run. omn polls from "ready"
+      (the 64 MiB touched) for 2 s; top reads once the cpu is spent, the
+      footprint unchanged since "ready".
 
 - source: cpu.oncpu_time
   tool: top
@@ -48,21 +67,70 @@
     privileged: false
   compare:
     key: time
-    # The summary of a per-poll delta carries no total (count * mean is
-    # one, not a field); the reap's exact cpu is what omn reports whole.
-    omn: lifetime.cpu_ns
+    omn: summary.total
+    omn_jq: "[.results[0].outputs[0].series[] | .count * .mean] | add"
     tolerance: {abs: 30000000}
     why: >-
-      The workload spins until its own cpu time reaches 2 s and top reads
-      TIME+ once it has, truncated to the hundredth; omn's is the reap's
-      wait4 total. Alternate runs; measured 1.99 s (top) against
-      2.002-2.007 s (omn): the tick truncation and the exit's own cpu.
+      The source's own deltas summed over the run (not the reap's wait4
+      total, which omn reports for every launched source). Alternate runs:
+      TIME+ is the cpu since the process began, and an attach starts
+      counting at the attach, so only a launch gives omn the whole of it.
+      The workload spins until its own cpu reaches 2 s and top reads TIME+
+      then, truncated to the hundredth; omn's total also holds the exit's
+      own cpu.
+
+- source: cpu.oncpu_time
+  tool: top
+  use: "top -b -n 2 -d 1 -p PID, the %CPU column"
+  same_run: onpid_attach
+  workload: [python3, tests/reference/workloads/top/hold.py, "16", "4", "0.5"]
+  omn: [trace, cpu.oncpu_time, -m, poll, -e, summary, -d, 2s, --pid, "{pid}", --format, json]
+  reference:
+    command: [python3, tests/reference/workloads/top/onpid.py, --at, ready, --delay, "0", top, -b, -n, "2", -d, "1", -p, "{pid}", --]
+    parse: top_batch_pid
+    requires: [top, python3]
+    privileged: false
+  compare:
+    key: cpu
+    omn: summary.total/observed
+    omn_jq: ".results[0].observed_ns as $w | [.results[0].outputs[0].series[] | .count * .mean] | add / $w"
+    tolerance: {abs: 0.05}
+    why: >-
+      One run, both started at "ready", while the workload spins: top's
+      second iteration covers its own last second, omn's ratio the 2 s it
+      observed. A loop that never sleeps holds a cpu unless the machine
+      takes it away, and both see the same run lose it.
+
+- source: cpu.util
+  tool: top
+  use: "top -b -n 2 -d 2, the busy share of the %Cpu(s) line"
+  same_run: onpid_attach
+  workload: [python3, tests/reference/workloads/top/hold.py, "1", "0", "3"]
+  omn: [trace, cpu.util, --system, -m, poll, -e, summary, -d, 2s, --format, json]
+  reference:
+    command: [python3, tests/reference/workloads/top/onpid.py, --at, ready, --delay, "0", top, -b, -n, "2", -d, "2", --]
+    parse: top_batch_cpus
+    requires: [top, python3]
+    privileged: false
+  compare:
+    key: busy
+    omn: summary[system].mean
+    omn_jq: '.results[0].outputs[0].series[] | select(.key == "system") | .mean'
+    tolerance: {abs: 0.05}
+    why: >-
+      The machine is the target, so only the same seconds compare: onpid.py
+      starts both at once beside an idle workload, top's last %Cpu(s) line
+      covering its 2 s delay and omn's mean its two 1 s polls of
+      /proc/stat. Busy is one less idle and iowait on both sides. omn's
+      window opens its startup later, so the two windows share most, not
+      all, of their seconds.
 
 - source: mem.rss
   tool: pmap
   use: "pmap -x PID, the total RSS"
+  same_run: onpid_attach
   workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
-  omn: [trace, mem.rss, -m, poll, -e, summary, --format, json]
+  omn: [trace, mem.rss, -m, poll, -e, summary, -d, 2s, --pid, "{pid}", --format, json]
   reference:
     command: [python3, tests/reference/workloads/top/onpid.py, pmap, -x, "{pid}", --]
     parse: pmap_x_total
@@ -71,18 +139,18 @@
   compare:
     key: ""
     omn: summary.max
+    omn_jq: "[.results[0].outputs[0].series[].max] | max"
     tolerance: {rel: 0.01}
     why: >-
       pmap sums each VMA's Rss from smaps, omn reads smaps_rollup's: the
-      same kernel walk, rolled up or not. Alternate runs; measured
-      75488-75496 KiB (pmap) against 75616-75620 KiB (omn), 0.17 % apart:
-      omn's max is taken while the workload spins, pmap's half a second in.
+      same kernel walk, rolled up or not, on one run.
 
 - source: mem.rss
   tool: pmap
   use: "pmap -XX PID, the Rss total"
+  same_run: onpid_attach
   workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
-  omn: [trace, mem.rss, -m, poll, -e, summary, --format, json]
+  omn: [trace, mem.rss, -m, poll, -e, summary, -d, 2s, --pid, "{pid}", --format, json]
   reference:
     command: [python3, tests/reference/workloads/top/onpid.py, pmap, -XX, "{pid}", --]
     parse: pmap_XX_total
@@ -91,16 +159,16 @@
   compare:
     key: rss
     omn: summary.max
+    omn_jq: "[.results[0].outputs[0].series[].max] | max"
     tolerance: {rel: 0.01}
-    why: >-
-      The same smaps fields, totalled by pmap and rolled up by the kernel
-      for omn. Alternate runs; measured 75476-75492 KiB against 75616-75620.
+    why: "The same smaps fields, totalled by pmap and rolled up by the kernel for omn, on one run."
 
 - source: mem.pss
   tool: pmap
   use: "pmap -XX PID, the Pss total"
+  same_run: onpid_attach
   workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
-  omn: [trace, mem.pss, -m, poll, -e, summary, --format, json]
+  omn: [trace, mem.pss, -m, poll, -e, summary, -d, 2s, --pid, "{pid}", --format, json]
   reference:
     command: [python3, tests/reference/workloads/top/onpid.py, pmap, -XX, "{pid}", --]
     parse: pmap_XX_total
@@ -109,19 +177,19 @@
   compare:
     key: pss
     omn: summary.max
-    tolerance: {rel: 0.03}
+    omn_jq: "[.results[0].outputs[0].series[].max] | max"
+    tolerance: {rel: 0.01}
     why: >-
       PSS divides each shared page by its mappers, so it depends on who
-      else maps the interpreter: under onpid.py a second python3 shares
-      libpython with the workload and lowers its PSS, under omn none does.
-      Alternate runs; measured 69782-70122 KiB (pmap) against 70805-70815
-      (omn), 1.0-1.5 % apart, all of it the launcher's sharing.
+      else maps the interpreter; on one run both see the same mappers
+      (onpid.py's own python3 among them).
 
 - source: mem.uss
   tool: pmap
   use: "pmap -XX PID, Private_Clean + Private_Dirty (USS)"
+  same_run: onpid_attach
   workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
-  omn: [trace, mem.uss, -m, poll, -e, summary, --format, json]
+  omn: [trace, mem.uss, -m, poll, -e, summary, -d, 2s, --pid, "{pid}", --format, json]
   reference:
     command: [python3, tests/reference/workloads/top/onpid.py, pmap, -XX, "{pid}", --]
     parse: pmap_XX_total
@@ -130,20 +198,19 @@
   compare:
     key: uss
     omn: summary.max
+    omn_jq: "[.results[0].outputs[0].series[].max] | max"
     tolerance: {rel: 0.01}
-    why: >-
-      The private pages are the workload's alone, whoever else maps its
-      libraries. Alternate runs; measured 68804-68808 KiB (pmap) against
-      68816-68820 (omn), 0.02 % apart.
+    why: "The private pages are the workload's alone, whoever else maps its libraries; one run."
 
 - source: mem.rss
   tool: smem
   use: "smem -P REGEX, the RSS column"
+  same_run: onpid_attach
   workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
-  omn: [trace, mem.rss, -m, poll, -e, summary, --format, json]
+  omn: [trace, mem.rss, -m, poll, -e, summary, -d, 2s, --pid, "{pid}", --format, json]
   reference:
     # The regex matches the workload's command line and neither onpid.py's
-    # (its first word after python3 is onpid.py) nor smem's own.
+    # (its first word after python3 is onpid.py), omn's nor smem's own.
     command: [python3, tests/reference/workloads/top/onpid.py, smem, -H, -c, "uss pss rss", -P, '^python3 \S*hold\.py', --]
     parse: smem_uss_pss_rss
     requires: [smem, python3]
@@ -151,14 +218,16 @@
   compare:
     key: rss
     omn: summary.max
+    omn_jq: "[.results[0].outputs[0].series[].max] | max"
     tolerance: {rel: 0.01}
-    why: "smem reads each process's smaps as pmap does; alternate runs, as the pmap pairs"
+    why: "smem reads each process's smaps as pmap does; one run, as the pmap pairs"
 
 - source: mem.pss
   tool: smem
   use: "smem -P REGEX, the PSS column"
+  same_run: onpid_attach
   workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
-  omn: [trace, mem.pss, -m, poll, -e, summary, --format, json]
+  omn: [trace, mem.pss, -m, poll, -e, summary, -d, 2s, --pid, "{pid}", --format, json]
   reference:
     command: [python3, tests/reference/workloads/top/onpid.py, smem, -H, -c, "uss pss rss", -P, '^python3 \S*hold\.py', --]
     parse: smem_uss_pss_rss
@@ -167,14 +236,19 @@
   compare:
     key: pss
     omn: summary.max
-    tolerance: {rel: 0.03}
-    why: "as pmap's Pss: onpid.py's own python3 shares the interpreter and lowers the workload's PSS; alternate runs"
+    omn_jq: "[.results[0].outputs[0].series[].max] | max"
+    tolerance: {rel: 0.01}
+    why: >-
+      as pmap's Pss, on one run, with one mapper more on smem's side: smem
+      is itself a python3, mapping the interpreter while it reads, so the
+      workload's share of it falls. Measured 0.27-0.29 % below omn.
 
 - source: mem.uss
   tool: smem
   use: "smem -P REGEX, the USS column"
+  same_run: onpid_attach
   workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
-  omn: [trace, mem.uss, -m, poll, -e, summary, --format, json]
+  omn: [trace, mem.uss, -m, poll, -e, summary, -d, 2s, --pid, "{pid}", --format, json]
   reference:
     command: [python3, tests/reference/workloads/top/onpid.py, smem, -H, -c, "uss pss rss", -P, '^python3 \S*hold\.py', --]
     parse: smem_uss_pss_rss
@@ -183,13 +257,6 @@
   compare:
     key: uss
     omn: summary.max
+    omn_jq: "[.results[0].outputs[0].series[].max] | max"
     tolerance: {rel: 0.01}
-    why: "the private pages are the workload's alone; alternate runs, as the pmap pairs"
-
-
-# No pair yet for top's `%Cpu(s)` line against `cpu.util --system`: the
-# parser exists (`top_batch_cpus`, tested on a capture), but the machine is
-# the target, so two alternate seconds of it are two different workloads.
-# Measured under this wave's twelve streams: busy 0.60/0.67, 0.25/0.62 and
-# 0.26/0.18 (top/omn) -- 0.37 apart at worst. It needs the runner to run
-# both over the same seconds; filed in docs/fixes/w22-top.md.
+    why: "the private pages are the workload's alone; one run, as the pmap pairs"
