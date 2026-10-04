@@ -467,9 +467,11 @@ impl ProfileCollector {
                     let stack = stack.flatten();
                     if stack.is_some() {
                         let task = KeyValue::task(sample.tid as i32).to_string();
-                        if !executables.contains_key(&task) {
+                        if let std::collections::btree_map::Entry::Vacant(slot) =
+                            executables.entry(task)
+                        {
                             if let Some(file) = crate::stack::executable_of(sample.pid as i32) {
-                                executables.insert(task, file);
+                                slot.insert(file);
                             }
                         }
                     }
