@@ -1,7 +1,6 @@
-Linux 7.2.7-arch1-1 (host) 	10/04/26 	_x86_64_	(2 CPU)
+Linux 7.2.8-arch1-2 (arch) 	10/04/26 	_x86_64_	(24 CPU)
 
-19:40:01      UID       PID   cswch/s nvcswch/s  Command
-19:40:02     1000   2935593    941.00      2.00  python3
+21:39:28      UID       PID   cswch/s nvcswch/s  Command
+21:39:29     1000    184358    900.00     13.00  python3
 
-Average:      UID       PID   cswch/s nvcswch/s  Command
-Average:     1000   2935593    941.00      2.00  python3
+Average:     1000    184358    900.00     13.00  python3

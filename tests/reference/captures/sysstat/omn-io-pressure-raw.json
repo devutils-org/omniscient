@@ -1,0 +1,162 @@
+{
+  "results": [
+    {
+      "label": "io.pressure",
+      "source": "io.pressure",
+      "unit": "ratio",
+      "backend": "fs:proc",
+      "outputs": [
+        {
+          "emit": "raw",
+          "events": [
+            {
+              "ts_ns": 2068054083081,
+              "kind": "io.pressure",
+              "attrs": [
+                {
+                  "name": "stall_ratio",
+                  "value": 0.2353519582147253
+                },
+                {
+                  "name": "stalled_ns",
+                  "value": 235589000
+                },
+                {
+                  "name": "interval_ns",
+                  "value": 1001007180
+                },
+                {
+                  "name": "full_stall_ratio",
+                  "value": 0.18252916028034885
+                },
+                {
+                  "name": "full_stalled_ns",
+                  "value": 182713000
+                },
+                {
+                  "name": "some_avg10",
+                  "value": 0.3002
+                },
+                {
+                  "name": "some_avg60",
+                  "value": 0.16210000000000002
+                },
+                {
+                  "name": "some_avg300",
+                  "value": 0.2321
+                },
+                {
+                  "name": "full_avg10",
+                  "value": 0.2564
+                },
+                {
+                  "name": "full_avg60",
+                  "value": 0.1073
+                },
+                {
+                  "name": "full_avg300",
+                  "value": 0.1672
+                },
+                {
+                  "name": "basis",
+                  "value": "the stall counter's increase over this tick"
+                }
+              ],
+              "collector_id": "io.pressure/fs:proc",
+              "seq": 0
+            },
+            {
+              "ts_ns": 2069053057053,
+              "kind": "io.pressure",
+              "attrs": [
+                {
+                  "name": "stall_ratio",
+                  "value": 0.08836666667427447
+                },
+                {
+                  "name": "stalled_ns",
+                  "value": 88276000
+                },
+                {
+                  "name": "interval_ns",
+                  "value": 998973972
+                },
+                {
+                  "name": "full_stall_ratio",
+                  "value": 0.0
+                },
+                {
+                  "name": "full_stalled_ns",
+                  "value": 0
+                },
+                {
+                  "name": "some_avg10",
+                  "value": 0.3002
+                },
+                {
+                  "name": "some_avg60",
+                  "value": 0.16210000000000002
+                },
+                {
+                  "name": "some_avg300",
+                  "value": 0.2321
+                },
+                {
+                  "name": "full_avg10",
+                  "value": 0.2564
+                },
+                {
+                  "name": "full_avg60",
+                  "value": 0.1073
+                },
+                {
+                  "name": "full_avg300",
+                  "value": 0.1672
+                },
+                {
+                  "name": "basis",
+                  "value": "the stall counter's increase over this tick"
+                }
+              ],
+              "collector_id": "io.pressure/fs:proc",
+              "seq": 1
+            }
+          ]
+        }
+      ],
+      "events_seen": 2,
+      "observed_ns": 2000157082,
+      "window": {
+        "run_opened_ns": 2067052950071,
+        "opened_ns": 2067052950071,
+        "closed_ns": 2069053107153,
+        "attached": true
+      },
+      "stopped_because": "the requested duration elapsed",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "overhead": {
+        "collector_cpu_ns": 400000,
+        "attributed_cpu_ns": 400000,
+        "observed_cpu_ns": 35500000000,
+        "observed_from": "everything but idle on every cpu (/proc/stat)",
+        "wall_ns": 2000325383,
+        "measurement_ns": 152810,
+        "measurements": 2,
+        "in_target_cpu_ns": 0,
+        "in_target_from": "nothing of this collector runs in the target's context: it reads the kernel's account, or a file, from its own",
+        "before_window_cpu_ns": 42167000,
+        "after_window_cpu_ns": 191000
+      },
+      "served_by": [
+        "fs:proc"
+      ],
+      "value_attr": "stall_ratio"
+    }
+  ]
+}
