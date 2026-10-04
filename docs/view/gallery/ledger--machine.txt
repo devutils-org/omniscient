@@ -1,13 +1,13 @@
-omn top │ fixture machine │ 20.0s                                                view: snapshot │ collectors ≥3.13% cpu
+omn top │ fixture machine │ 20.0s                                                view: snapshot │ collectors ≥2.90% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ ledger -- what the machine cost over 20.0s of wall-clock ────────────────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
-│▸ cpu time        2m31s on cpu     756% of one cpu           ▄▄▄█▆▅▅▅▄▃▃▃▂▂▂▂▂▃▃▃▃▃▃▃     ≥424ms  ~low det            │
-│    task 1501295        18.7s  █            12.3%                                                                     │
-│    task 1496381        10.2s  █            6.77%                                                                     │
-│    task 1496399        9.74s  █            6.44%                                                                     │
-│    task 1501528        9.05s  █            5.99%                                                                     │
-│    and 3117 more tasks: 1m44s                                                                                        │
+│▸ cpu time        2.75s on cpu     13.7% of one cpu          █▃▃▃▃▃▃▂▂▂▂▃▂▂▂▂▂▂▂▂▃▄▂▂     ≥323ms  ~low det            │
+│    task 2619032        591ms  ███          21.5%                                                                     │
+│    task 3085           171ms  █            6.23%                                                                     │
+│    task 2412           110ms  ▏            3.99%                                                                     │
+│    task 1980          94.8ms  ▏            3.45%                                                                     │
+│    and 979 more tasks: 1.78s                                                                                         │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
 │  blocked time    not in this run: sched.offcpu was not asked for                                                     │
 │  memory held     not in this run: mem.rss was not asked for                                                          │
@@ -15,16 +15,16 @@ omn top │ fixture machine │ 20.0s                                           
 │  I/O syscalls    not in this run: io.syscall was not asked for                                                       │
 │  network         not in this run: net.socket was not asked for                                                       │
 │  retransmits     not in this run: net.tcp.retransmit@system was not asked for                                        │
-│  GPU memory      734MiB peak      of 734MiB on the device   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄     4.98ms                      │
+│  GPU memory      654MiB peak      of 654MiB on the device   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄     7.05ms                      │
 │  GPU time        not in this run: gpu.kernel was not asked for                                                       │
-│  energy          2.01kJ machine   101W on average           ▅▆██▇▇▇▇▇▆▆▆▅▅▅▅▅▆▆▆▆▆▆▆     ≥635µs                      │
+│  energy          431J machine     21.5W on average          █▄▄▄▄▄▇▄▄▄▅▅▇▄▄▄▄▄▇▄█▇▆▆     ≥754µs                      │
 │                                                                                                                      │
-│  to know all of this: ≥429ms of omn's cpu                                                                            │
+│  to know all of this: ≥331ms of omn's cpu                                                                            │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
 │· the source is not reproducible between two runs of the same workload                                                │
-│· to know it: 424ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this run:│
+│· to know it: 323ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this run:│
 │`kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl            │
 │kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable                 │
 │                                                                                                                      │

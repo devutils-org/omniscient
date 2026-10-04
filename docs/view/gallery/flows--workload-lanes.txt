@@ -1,10 +1,10 @@
-omn top │ fixture workload-lanes │ 2.24s                          view: snapshot │ collectors ≥11.5% │ target 69.5% cpu
+omn top │ fixture workload-lanes │ 2.24s                          view: snapshot │ collectors ≥9.70% │ target 73.8% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐
-│pid 1529959 over 2.24s   1.70KiB sent, 0B received   █ out █ in █ the machine's                                       │
+│pid 2621955 over 2.24s   1.70KiB sent, 0B received   411B written, 1.17MiB read   █ out █ in █ the machine's          │
 │ network · net.socket bpf:fentry ~low det degraded x3 · net.bytes fs:proc ~low det degraded ──────────────────────────│
 │         thread             socket                                             stack         interface, the machine's │
-│omn-cupti-flush ┃█████████┃▶unix #120404       ▂▆█ ↑1.70KiB            ┃█████████┃█████████┃ lo       21.6MiB █▄▃   ▁ │
+│omn-cupti-flush ┃█████████┃▶unix #129690       ▂▇█ ↑1.70KiB            ┃█████████┃█████████┃ wlan0    16.0KiB ▁█▃▂▂ ▁ │
 │     lanes-main ┃█████▀▀                                                         ┃█████████┃                          │
 │       lane-gpu ┃██▀▀                                                            ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
@@ -15,26 +15,26 @@ omn top │ fixture workload-lanes │ 2.24s                          view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃ wlan0    50.9KiB ▅█▁▁▂▇▂ │
-│                                                                                 ┃█████████┃ tailsca… 28.2KiB ▆▃   █  │
-│sockets 1.70KiB -> interfaces 21.7MiB = 13081.39x · 4 interfaces idle · lo counts a byte twice; sockets are not tied t│
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃ tailsca…    321B  █      │
+│sockets 1.70KiB -> interfaces 16.4KiB = 9.65x · 5 interfaces idle · lo counts a byte twice; sockets are not tied to in│
 │ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
-│         thread             file                                               cache         device, the machine's    │
-│ bytes per file: not in this run                                                   no device moved a byte in this run │
-│ io.syscall is in this run as a summary and a histogram: latency per               (3 idle)                           │
-│ thread, which carries no bytes. Its `raw` rows (per descriptor) or                                                   │
-│ io.fs's (per file) do.                                                                                               │
-│ docs/view/flows.md has the session that draws it.                                                                    │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│▶ socket 120404 (unix): 1.70KiB sent in 15 calls, 774B/s                                                              │
-│pid 1529959, several threads -- enter narrows every view to it                                                        │
+│         thread             descriptor                                         cache         device, the machine's    │
+│        python3 ┃▀██▀▀█▀▀▀┃ fd 3          █    ▁   →16B ←1.10MiB       ┃▀▀▀▀▀▀▀▀▀┃█████████┃ 259:0    12.5MiB    █    │
+│       lane-gpu ┃█████████┃ fd 8               █   →15B ←45.1KiB       ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
+│ cuda-EvtHandlr ┃█████████┃ fd 16              █   ←15.4KiB            ┃█████████┃█████████┃                          │
+│       lane-gpu ┃█▀█▀█████┃ fd 42               █  ←4.11KiB            ┃█████████┃█████████┃                          │
+│cuda00001400006 ┃█▀▀▀█▀▀██┃ fd 18              █▁  →80B ←3.75KiB       ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
+│       lane-gpu ┃████▄▄█▀▀┃ 13 more desc…      █▂▁ →300B ←7.81KiB      ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│descriptors 1.17MiB -> devices 12.5MiB · 2 devices idle · no ratio: a descriptor may be a socket or a pipe, whose byte│
+│▶ socket 129690 (unix): 1.70KiB sent in 15 calls, 774B/s                                                              │
+│pid 2621955, several threads -- enter narrows every view to it                                                        │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ socket or file  enter focus its thread

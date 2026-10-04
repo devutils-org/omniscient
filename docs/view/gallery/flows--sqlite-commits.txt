@@ -1,30 +1,29 @@
-omn top │ fixture sqlite-commits │ 6.84s                          view: snapshot │ collectors ≥8.41% │ target 79.5% cpu
+omn top │ fixture sqlite-commits │ 5.11s                          view: snapshot │ collectors ≥9.53% │ target 86.5% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐
-│over 6.84s   █ out █ in █ the machine's                                                                               │
-│ network · net.socket bpf:fentry 2 late ~low det degraded x3 · net.bytes fs:proc ~low det degraded ───────────────────│
+│pid 2618623 over 5.11s   670KiB written, 11.5KiB read   █ out █ in █ the machine's                                    │
+│ network · net.socket bpf:fentry ~low det degraded x3 · net.bytes fs:proc ~low det degraded ──────────────────────────│
 │         thread             socket                                             stack         interface, the machine's │
-│ no socket moved a byte                                                          ┃█████████┃ wlan0     209KiB ▆▄▂▄▇▃▄█│
+│ no socket moved a byte                                                          ┃█████████┃ wlan0    21.3KiB ▁▁▁▁▁▁▇█│
 │ 0 rows in this run, none with bytes                                             ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃ tailsca…  141KiB █▄▂▄█▄▄█│
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃ lo       2.36KiB      █▂ │
-│interfaces 352KiB · 4 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                    │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃ tailsca…    642B       ██│
+│interfaces 22.0KiB · 5 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                   │
 │ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
-│         thread             file                                               cache         device, the machine's    │
-│ bytes per file: not in this run                                                 ┃█████████┃ 253:0     496MiB      █▄ │
-│ io.syscall is in this run as a summary and a histogram: latency per             ┃█████████┃                          │
-│ thread, which carries no bytes. Its `raw` rows (per descriptor) or              ┃█████████┃                          │
-│ io.fs's (per file) do.                                                          ┃█████████┃                          │
-│ docs/view/flows.md has the session that draws it.                               ┃█████████┃                          │
+│         thread             descriptor                                         cache         device, the machine's    │
+│        sqlite3 ┃██▀█▀▀▀▀▀┃▶fd 5          ▆▇█▇▆█▇▇ →342KiB ←44B        ┃▀▀▀▀▀▀▀▀▀┃█████████┃ 259:0    60.4MiB ▃█▂▁▁▁▁▁│
+│                   ▀▀██▀▀▀┃ fd 4          ▇▇█▇▆█▇▇ →328KiB ←640B       ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
+│                     ▀█▀██┃ fd 3          █    ▂   ←10.8KiB            ┃█████████┃█████████┃                          │
+│                       ▀██┃ fd 1          ▆▇█▇▆█▇█ →287B               ┃█████████┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
@@ -32,9 +31,10 @@ omn top │ fixture sqlite-commits │ 6.84s                          view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃ 259:0    61.9MiB ▂▁▁▁▁█▁▁│
-│devices 558MiB · 1 devices idle · page-cache hits never reach a device; writes reach it later                         │
-│nothing to select: no socket of the target's moved a byte; bytes per file were not measured                           │
-│                                                                                                                      │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│descriptors 681KiB -> devices 60.4MiB · 2 devices idle · no ratio: a descriptor may be a socket or a pipe, whose bytes│
+│▶ descriptor 5 of process 2618623, which may be a file, a pipe or a socket: 342KiB written in 322 calls, 66.9KiB/s;   │
+│44B read in 42 calls, 9B/s                                                                                            │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ socket or file  enter focus its thread

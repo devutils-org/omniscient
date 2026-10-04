@@ -1,23 +1,23 @@
-[0m[1momn top[0m │ fixture sqlite-commits │ 3.42s [0m[3;34mlive[0m                        [0m[35mview: snapshot[0m │ [0m[35mcollectors and target: at the end[0m [0m
+[0m[1momn top[0m │ fixture sqlite-commits │ 2.55s [0m[3;34mlive[0m                        [0m[35mview: snapshot[0m │ [0m[35mcollectors and target: at the end[0m [0m
  1 system  2 flame  3 ledger  4 request [0m[1;7m 5 timebar [0m 6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐[0m
 │ [0m[1;32mthe view's reading[0m[2m  one bar per thread, whole: the run's window[0m                                                      │[0m
 │                                                                                                                      │[0m
-│ [0m[1m≈ no single suspect  1494341 sqlite3[0m                                                                                 │[0m
-│   `runnable` is 406ms, and 2.83s of the whole is in no row that was read (on-cpu): the largest row could still be    │[0m
-│   overtaken                                                                                                          │[0m
+│ [0m[1m≈ no single suspect  2618623 sqlite3[0m                                                                                 │[0m
+│   `blocked: uninterruptible` is 206ms, and 2.34s of the whole is in no row that was read (on-cpu): the largest row   │[0m
+│   could still be overtaken                                                                                           │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
-│ [0m[1;32m▸ 1494341 sqlite3     [0m[2m├[0m[2;35m▚▚▚▚▚▚▚[0m[2;34m▓▓▓▓[0m[2m····················[0m[1;2;7m not read [0m[2m·····················┤    3.42s  ≈ no single state [0m  │[0m
-│ [0m[2m                     0 ───────────────────────────┼ 1.71s ───────────────────────────┤ 3.42s                        [0m │[0m
+│ [0m[1;32m▸ 2618623 sqlite3     [0m[2m├[0m[2;34m▓▓▓▓▓[0m[2m·······················[0m[1;2;7m not read [0m[2m························┤    2.55s  ≈ no single state [0m  │[0m
+│ [0m[2m                     0 ───────────────────────────┼ 1.28s ───────────────────────────┤ 2.55s                        [0m │[0m
 │                        [0m[35m▚[0m run queue   [0m[34m▓[0m I/O   [0m[2m·[0m not read                                                              │[0m
 │                                                                                                                      │[0m
 │ [0m[1m  state                            source          amount          share   ±         reads  trust                   [0m │[0m
-│ [0m[2m  whole: the run's window                          3.42s           100%    exact                                    [0m │[0m
+│ [0m[2m  whole: the run's window                          2.55s           100%    exact                                    [0m │[0m
 │ [0m[32m█ [0m[2mon-cpu                           cpu.oncpu_time  not read                ?         0      [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegraded[0m   │[0m
 │ [0m[2m    ↳ `cpu.oncpu_time` has no series of it                                                                          [0m │[0m
-│ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   406ms           11.9%   exact     258    [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegraded[0m   │[0m
-│ [0m[34m▓ [0m[2mblocked: uninterruptible         sched.offcpu    186ms           5.44%   exact     547    [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegraded[0m   │[0m
+│ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   9.72ms          0.38%   exact     188    [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegraded[0m   │[0m
+│ [0m[34m▓ [0m[2mblocked: uninterruptible         sched.offcpu    206ms           8.06%   exact     532    [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegraded[0m   │[0m
 │ [0m[2m  residue: the whole less the rows                 unknown: a row was not read                                      [0m │[0m
 │                                                                                                                      │[0m
 │ [0m[2mNo decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread[0m    │[0m

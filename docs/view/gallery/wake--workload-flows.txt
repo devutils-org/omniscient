@@ -1,31 +1,31 @@
-omn top │ fixture workload-flows │ 1.00s                          view: snapshot │ collectors ≥14.4% │ target 5.80% cpu
+omn top │ fixture workload-flows │ 993ms                          view: snapshot │ collectors ≥16.4% │ target 5.63% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐
-│10 late ~low det degraded  64 wakeups of 14 threads -- from a task 50.0%, hardirq 17.2%, softirq 32.8%, in 1.00s      │
+│10 late ~low det degraded  114 wakeups of 13 threads -- from a task 23.7%, hardirq 9.65%, softirq 66.7%, in 993ms     │
 │                                                                                                                      │
 │woken thread      wakes  mostly by      woken thread      wakes  mostly by      woken thread      wakes  mostly by    │
-│flows-ma… 1783958    35  softirq   37%  migration/13 100      2  flows-m… 100%  kworker/2:1H 447      1  flows-m… 100%│
-│python3 1784066       8  softirq  100%  kworker/14:1H 449     2  flows-m… 100%  tailscaled 966        1  flows-m… 100%│
-│gmain 1128318         4  flows-m… 100%  tailscaled 1266       2  flows-m…  50%  tailscaled 1265       1  python3  100%│
-│migration/11 86       3  python3  100%  migration/0 20        1  flows-m… 100%  omn 1783698           1  flows-m… 100%│
-│migration/1 26        2  flows-m…  50%  migration/2 32        1  python3  100%                                        │
-│12 dimmed: outside the target, woken by it                                                                            │
+│flows-si… 2621408    65  softirq  100%  migration/1 26        1  flows-m… 100%  tailscaled 1063       1  flows-m… 100%│
+│flows-ma… 2621407    35  hardirq   31%  migration/3 38        1  flows-m… 100%  gmain 1128318         1  flows-m… 100%│
+│tailscaled 1265       3  flows-s…  67%  migration/5 50        1  flows-m… 100%  omn 2621267           1  flows-m… 100%│
+│kworker/14:1H 449     2  flows-m… 100%  kworker/2:1H 447      1  flows-m… 100%                                        │
+│migration/0 20        1  flows-m… 100%  kworker/1:1H 465      1  flows-m… 100%                                        │
+│11 dimmed: outside the target, woken by it                                                                            │
 │                                                                                                                      │
-│flows-main 1783958 was woken 35 times, 34.98/s                                                                        │
+│flows-sink 2621408 was woken 65 times, 65.45/s                                                                        │
 │<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         │
-│├─ softirq  a device, or a loopback send                 13   37%   40.3µs       --       --          ▁▅              │
-│├─ hardirq  a device                                     11   31%    398µs       --       --         ▁▄              ▁│
-│├─ tid 1248339  outside the target: stops                 5   14%   69.7µs       --       --          ▂               │
-│├─ tid 1777068  outside the target: stops                 2    6%    163µs       --       --          ▁               │
-│├─ python3 1784066  its wakeup unseen x1                  2    6%   1.08ms   8.15ms   8.15ms          ▁▁              │
-││  └─ softirq  a device, or a loopback send               1    3%   53.3µs       --       --           ▁              │
-│├─ tid 1753083  outside the target: stops                 1    3%   1.31ms       --       --          ▁               │
-│└─ omn 1783698  outside the target: stops                 1    3%       --       --       --  ▁                       │
+│└─ softirq  a device, or a loopback send                 65  100%   21.2µs       --       --          █               │
 │                                                                                                                      │
-│woken at      held   the longest chains, link by link: each waker and its hold                                        │
-│+381ms      8.15ms   <- python3 1784066 8.15ms  <- softirq                                                            │
+│-> it woke in turn: tailscaled 1265 x2, flows-main 2621407 x2                                                         │
 │                                                                                                                      │
-│-> it woke in turn: gmain 1128318 x4, migration/13 100 x2, kworker/14:1H 449 x2, migration/0 20 x1, and 5 more        │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

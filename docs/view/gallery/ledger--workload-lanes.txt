@@ -1,40 +1,40 @@
-omn top │ fixture workload-lanes │ 2.24s                          view: snapshot │ collectors ≥11.5% │ target 69.5% cpu
+omn top │ fixture workload-lanes │ 2.24s                          view: snapshot │ collectors ≥9.70% │ target 73.8% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ ledger -- what task 1529959 and 11 more cost over 2.24s of wall-clock ───────────────────────────────────────────────┐
+┌ ledger -- what task 2621955 and 11 more cost over 2.24s of wall-clock ───────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
-│▸ cpu time        1.75s on cpu     78.0% of one cpu          ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇█▅▅▁▁▁▃▃    ≥16.5ms  ~low det            │
-│    1529975 lane-c      481ms  ███          27.5%                                                                     │
-│    1529973 lane-a      481ms  ███          27.5%                                                                     │
-│    1529974 lane-b      480ms  ███          27.5%                                                                     │
-│    1530060 lane-g…     193ms  █            11.0%                                                                     │
-│    and 8 more tasks: 115ms                                                                                           │
+│▸ cpu time        1.76s on cpu     78.7% of one cpu          ██████████████▇▇▇▅▅▃▃▃▃▃    ≥20.4ms  ~low det            │
+│    2621957 lane-b      481ms  ███          27.2%                                                                     │
+│    2621956 lane-a      481ms  ███          27.2%                                                                     │
+│    2621958 lane-c      480ms  ███          27.2%                                                                     │
+│    2622145 lane-g…     168ms  █            9.54%                                                                     │
+│    and 8 more tasks: 155ms                                                                                           │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
-│    own account         1.75s  with its descendants, as the scheduler counts them                                     │
-│    machine busy        30.1s  █            5.82%                                                                     │
-│  blocked time    9.46s            4.22 threads              ▁ ▂▂ ▂▂▂▂ ▂▂▂ ▂▆▁▂▂▃▃ ▃█    ≥48.6ms  ~low det degraded x2│
-│    1529959 python3     2.11s  ███          22.3%                                                                     │
-│    1529975 lane-c      969ms  █            10.2%                                                                     │
-│    1529974 lane-b      888ms  █            9.39%                                                                     │
-│    1529973 lane-a      808ms  █            8.54%                                                                     │
-│    and 8 more tasks: 4.68s                                                                                           │
-│  memory held     129MiB peak      +116MiB from 12.8MiB      ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂██████     1.84ms                      │
-│  memory faulted  9.31k faults     4.15k/s                   a total only                ≥4.29ms  36 late             │
-│    1530060 lane-g…     7.54k  ██████████   80.9%                                                                     │
-│    1529959 python3     1.74k  ██           18.6%                                                                     │
-│    1529973 lane-a          8  ▏            0.09%                                                                     │
-│    1530062 lane-g…         8  ▏            0.09%                                                                     │
+│    own account         1.76s  with its descendants, as the scheduler counts them                                     │
+│    machine busy        2.65s  ████████     66.6%                                                                     │
+│  blocked time    9.24s            4.12 threads               ▁▂▂ ▂▂▂▂ ▂▂▂ ▂▇ ▂▂▃▃ ▃█    ≥34.9ms  ~low det degraded x2│
+│    2621955 python3     2.08s  ███          22.5%                                                                     │
+│    2621958 lane-c      968ms  █            10.5%                                                                     │
+│    2621957 lane-b      887ms  █            9.60%                                                                     │
+│    2621956 lane-a      807ms  █            8.73%                                                                     │
+│    and 8 more tasks: 4.50s                                                                                           │
+│  memory held     131MiB peak      +118MiB from 12.8MiB      ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂██████     1.61ms                      │
+│  memory faulted  7.78k faults     3.47k/s                   a total only                ≥4.40ms  27 late             │
+│    2622145 lane-g…     6.00k  █████████    77.2%                                                                     │
+│    2621955 python3     1.74k  ███          22.3%                                                                     │
+│    2621956 lane-a          8  ▏            0.10%                                                                     │
+│    2622147 lane-g…         8  ▏            0.10%                                                                     │
 │    and 8 more tasks: 24                                                                                              │
-│  I/O syscalls    331 calls        2.13ms inside them        256ns ▃▇█▅▄▆▂▂▂ 131µs       ≥46.8ms  ~low det degraded x2│
-│    1530060 lane-g…    1.17ms  ███████      54.6%                                                                     │
-│    1529959 python3     865µs  █████        40.5%                                                                     │
-│    1530062 lane-g…    51.7µs  ▏            2.42%                                                                     │
-│    and 3 more tasks: 52.5µs                                                                                          │
-│    bytes read and written: on the raw rows only, which this run did not keep                                         │
-│  network         1.70KiB moved    1.70KiB out, 0B in                         ▃▂▅ ▅█▅    ≥46.2ms  ~low det degraded x3│
-│    1530063 omn-cu…   1.36KiB  ██████████   80.2%                                                                     │
-│    1529959 python3      264B  ██           15.2%                                                                     │
-│    1530060 lane-g…       80B  █            4.61%                                                                     │
+│  I/O syscalls    335 calls        1.94ms inside them        256ns ▅▆█▆▃▅▂▂▁ 131µs       ≥35.1ms  ~low det degraded x2│
+│    2622145 lane-g…    1.06ms  ███████      54.9%                                                                     │
+│    2621955 python3     790µs  █████        40.8%                                                                     │
+│    2622151 lane-g…    31.9µs  ▏            1.65%                                                                     │
+│    and 3 more tasks: 50.5µs                                                                                          │
+│    bytes             1.17MiB  read, 411B written                                                                     │
+│  network         1.70KiB moved    1.70KiB out, 0B in                         ▃▂▅▆ ▆█    ≥32.9ms  ~low det degraded x3│
+│    2622148 omn-cu…   1.44KiB  ██████████   84.8%                                                                     │
+│    2621955 python3      184B  █            10.6%                                                                     │
+│    2622145 lane-g…       80B  █            4.61%                                                                     │
 │    15 socket calls                                                                                                   │
-│  retransmits     10 sent again    machine-wide              a total only                 ≥147µs  26 late ~low det deg│
+│  retransmits     0 sent again     machine-wide              a total only                 ≥194µs  9 late ~low det     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line

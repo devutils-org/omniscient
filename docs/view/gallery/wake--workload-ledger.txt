@@ -1,29 +1,29 @@
-omn top │ fixture workload-ledger │ 1.28s                         view: snapshot │ collectors ≥15.6% │ target 40.0% cpu
+omn top │ fixture workload-ledger │ 1.26s                         view: snapshot │ collectors ≥16.3% │ target 41.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐
-│13 late ~low det degraded  84 wakeups of 10 threads -- from a task 58.3%, hardirq 4.76%, softirq 36.9%, in 1.28s      │
+│13 late ~low det degraded  57 wakeups of 6 threads -- from a task 26.3%, hardirq 8.77%, softirq 64.9%, in 1.26s       │
 │                                                                                                                      │
 │woken thread      wakes  mostly by      woken thread      wakes  mostly by      woken thread      wakes  mostly by    │
-│ledger-m… 1784901    46  1248339   70%  tailscaled 18352      2  ledger-… 100%  tailscaled 1026       1  ledger-… 100%│
-│ledger-p… 1785025    26  softirq  100%  migration/1 26        1  ledger-… 100%  tailscaled 1054       1  ledger-… 100%│
-│gmain 1128318         3  ledger-… 100%  migration/12 92       1  ledger-… 100%                                        │
-│rcu_exp_gp_kt… 19     2  ledger-… 100%  kworker/12:1H 466     1  ledger-… 100%                                        │
-│8 dimmed: outside the target, woken by it                                                                             │
+│ledger-p… 2621704    32  softirq  100%  tailscaled 3898       4  ledger-…  50%  migration/12 92       1  ledger-… 100%│
+│ledger-m… 2621625    17  hardirq   29%  kworker/14:1H 449     2  ledger-… 100%  gmain 1128318         1  ledger-… 100%│
+│4 dimmed: outside the target, woken by it                                                                             │
 │                                                                                                                      │
-│ledger-main 1784901 was woken 46 times, 35.94/s                                                                       │
+│ledger-peer 2621704 was woken 32 times, 25.33/s                                                                       │
 │<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         │
-│├─ tid 1248339  outside the target: stops                32   70%   23.2µs       --       --             ▆            │
-│├─ softirq  a device, or a loopback send                  5   11%   29.5µs       --       --             ▁            │
-│├─ hardirq  a device                                      4    9%    318µs       --       --             ▁           ▁│
-│├─ tid 1034502  outside the target: stops                 2    4%   17.6µs       --       --             ▁            │
-│├─ ledger-peer 1785025  its wakeup unseen x1              2    4%    393µs   5.22ms   5.22ms             ▁            │
-││  └─ softirq  a device, or a loopback send               1    2%   24.3µs       --       --             ▁            │
-│└─ tid 1784201  outside the target: stops                 1    2%       --       --       --  ▁                       │
+│└─ softirq  a device, or a loopback send                 32  100%   18.9µs       --       --             █            │
 │                                                                                                                      │
-│woken at      held   the longest chains, link by link: each waker and its hold                                        │
-│+635ms      5.22ms   <- ledger-peer 1785025 5.22ms  <- softirq                                                        │
+│-> it woke in turn: tailscaled 3898 x2, ledger-main 2621625 x2                                                        │
 │                                                                                                                      │
-│-> it woke in turn: gmain 1128318 x3, rcu_exp_gp_kthr 19 x2, migration/12 92 x1, kworker/12:1H 466 x1, and 2 more     │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

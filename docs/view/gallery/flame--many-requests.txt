@@ -1,40 +1,40 @@
-omn top │ fixture many-requests │ 15.8s                           view: snapshot │ collectors ≥6.10% │ target 0.50% cpu
+omn top │ fixture many-requests │ 15.8s                           view: snapshot │ collectors ≥5.21% │ target 0.35% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
-on cpu: 112 · hottest own htab_map_update_elem 5.36% │ off cpu: 46.9s · hottest own libc+0xa08f2 99.7%
-┌ on cpu cpu.profile 112 326 late ~low det degraded x4 ────┐┌ off cpu sched.offcpu 46.9s 3 late ~low det degraded ─────┐
-│width ∝ samples · heaviest left            39 frames deep ││width ∝ time off cpu · heaviest left        6 frames deep │
-│▏all 112                                                  ││▏all 46.9s                                                │
-│▏⋯libc+0x98042 58.0%              ▏⋯libc+0x27781 41.1%    ││▏libc+0x12072c › libc+0x98042 66.7%    ▏libc+0xa08f2 33.0%│
-│▏client 49.1%               ▏__▏h ▏main 39.3%             ││▏libc+0xa08f2 33.1%▏⋯libc+0xa08f2 32.4%                   │
-│▏⋯do_syscall_64 42.0%   ▏do ▏x    ▏do_syscall_…▏exi▏l     ││                                                          │
-│▏__inet_st…▏__tc…▏tcp…            ▏tcp▏_▏h▏d▏f ▏up        ││heaviest on their own (where it ends, every path summed)  │
-│▏tcp_…▏tcp…▏__n▏_▏__              ▏_           ▏m         ││ 99.7% ████████████ libc+0xa08f2                          │
-│▏__i… ▏t         ▏n                                       ││ 0.34% ▏            libc+0x94e9e                          │
-│▏ip                                                       ││ 0.01% ▏            fsync                                 │
-│▏n                                                        ││ 0.00% ▏            posix_fadvise                         │
-│                                                          ││                                                          │
-│heaviest on their own (where it ends, every path summed)  ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
-│ 5.36% ████████████ htab_map_update_elem                  ││  is always the scheduler, and what it was waiting for is │
-│ 4.46% ██████████   _raw_spin_unlock_irqrestore           ││  the task state                                          │
-│ 4.46% ██████████   bpf_trace_run2                        ││‼ names came from -- server: its own symbol table;        │
-│ 3.57% ████████     memset_orig                           ││  libc.so.6: its dynamic symbols only: its internal       │
-│                                                          ││  functions are unnamed                                   │
-│‼ pmu:sw: time-based sampling: blind to phases running at ││                                                          │
-│  reduced frequency                                       ││                                                          │
+on cpu: 71 · hottest own _raw_spin_unlock_irqrestore 2.82% │ off cpu: 47.2s · hottest own libc+0xa08f2 99.6%
+┌ on cpu cpu.profile 71 169 late ~low det degraded x5 ─────┐┌ off cpu sched.offcpu 47.2s ~low det degraded ────────────┐
+│width ∝ samples · heaviest left            40 frames deep ││width ∝ time off cpu · heaviest left        6 frames deep │
+│▏all 71                                                   ││▏all 47.2s                                                │
+│▏⋯libc+0x98042 54.9%            ▏⋯libc+0x27781 42.3%      ││▏libc+0x12072c › libc+0x98042 66.7%    ▏libc+0xa08f2 33.0%│
+│▏client 46.5%              ▏_▏_ ▏main 39.4%               ││▏libc+0xa08f2 33.0%▏⋯libc+0xa08f2 32.1%                   │
+│▏⋯do_syscall_64 40.8%           ▏do_syscall_…▏ex▏_        ││                                                          │
+│▏__inet_st…▏__tcp_c…▏ip         ▏tcp_…▏h▏_   ▏_           ││heaviest on their own (where it ends, every path summed)  │
+│▏_ra…▏tcp… ▏tcp…                ▏nft                      ││ 99.6% ████████████ libc+0xa08f2                          │
+│     ▏f    ▏n                                             ││ 0.34% ▏            libc+0x94e9e                          │
+│                                                          ││ 0.01% ▏            fsync                                 │
+│heaviest on their own (where it ends, every path summed)  ││                                                          │
+│ 2.82% ████████████ _raw_spin_unlock_irqrestore           ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
+│ 2.82% ████████████ bpf_prog_772db7720b2728e9_sd_fw_egress││  is always the scheduler, and what it was waiting for is │
+│ 2.82% ████████████ exit_to_user_mode_loop                ││  the task state                                          │
+│                                                          ││‼ names came from -- server: its own symbol table;        │
+│‼ pmu:sw: time-based sampling: blind to phases running at ││  libc.so.6: its dynamic symbols only: its internal       │
+│  reduced frequency                                       ││  functions are unnamed                                   │
+│‼ 11 of 15 samples landed in a function that sets up no   ││                                                          │
+│  frame pointer (10 in libc.so.6, 1 in server), so the    ││                                                          │
+│  frames under the leaf are not its callers: most of them ││                                                          │
+│  are outside the target's own code, which is where the   ││                                                          │
+│  callers are lost; `--stack fp+leaf` recovers the leaf's ││                                                          │
+│  caller and `--stack dwarf` the whole chain              ││                                                          │
 │‼ 1 frames fell in no mapping of the target and are       ││                                                          │
 │  reported by address                                     ││                                                          │
 │‼ 2 tasks the target started were found on a tick after   ││                                                          │
-│  they began, and had used 0.07 ms of cpu by then, by the ││                                                          │
+│  they began, and had used 0.12 ms of cpu by then, by the ││                                                          │
 │  kernel's own account: that time is in no sample here. A ││                                                          │
 │  task that started and ended between two ticks is in none││                                                          │
 │  at all                                                  ││                                                          │
-│‼ stacks unwound by `fp`: the caller of a function that   ││                                                          │
-│  sets up no frame pointer is lost -- every frameless     ││                                                          │
-│  leaf, and whole stacks of a target built without them   ││                                                          │
-│‼ 1 more on the last line; ! lists every caveat whole     ││                                                          │
+│‼ 2 more on the last line; ! lists every caveat whole     ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
 on cpu ▸ all
-112 samples ≈ 112ms · 100% of all · own 0 · 112 events
-cpu.profile: names came from -- server: its own symbol table; libc.so.6: its dynamic symbols only: its internal functio…
+71 samples ≈ 71.2ms · 100% of all · own 0 · 71 events
+cpu.profile (+1 more, ! lists them): stacks unwound by `fp`: the caller of a function that sets up no frame pointer is …
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

@@ -1,32 +1,32 @@
-[0m[1momn top[0m │ fixture vertical-abandoned │ 184ms                      [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥0.55%[0m[35m │ target 1.44% cpu[0m [0m
+[0m[1momn top[0m │ fixture vertical-abandoned │ 184ms                      [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥0.59%[0m[35m │ target 1.53% cpu[0m [0m
  1 system  2 flame  3 ledger [0m[1;7m 4 request [0m 5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────┐[0m
-│[0m[1m2 requests served by server (pid 1504066)[0m · slowest a002 5.12ms · median 5.12ms[0m[2m · in order of arrival  [0m[33mdegraded x5[0m    │[0m
-│[0m[33m  1 ≥: a network side unknown  in no event, not drawn: 1 never ended (req:a001 in task 1504066, 1 replaced by a later [0m│[0m
-│[0m[1m  req      span  its life by state, to one scale: the slowest is 5.12ms             mostly[0m                            │[0m
-│[0m[32m▶ [0m[1;32ma002 [0m[1m  5.12ms  [0m[32m█[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m  lock/sleep 98.7%                  │[0m
-│[0m[32m  [0ma003  ≥51.8µs  [0m[32m█[0m                                                                  on cpu 42.3µs · net in 9.53µs     │[0m
+│[0m[1m2 requests served by server (pid 2619812)[0m · slowest a002 5.16ms · median 5.16ms[0m[2m · in order of arrival  [0m[33mdegraded x5[0m    │[0m
+│[0m[33m  1 ≥: a network side unknown  in no event, not drawn: 1 never ended (req:a001 in task 2619812, 1 replaced by a later [0m│[0m
+│[0m[1m  req      span  its life by state, to one scale: the slowest is 5.16ms             mostly[0m                            │[0m
+│[0m[32m▶ [0m[1;32ma002 [0m[1m  5.16ms  [0m[32m█[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m  lock/sleep 98.4%                  │[0m
+│[0m[32m  [0ma003  ≥66.3µs  [0m[32m█[0m                                                                  on cpu 46.3µs · net in 20.0µs     │[0m
 │  [0m[36m░░ [0m[2mnet in   [0m[32m██ [0m[2mon cpu   [0m[33m▓▓ [0m[2mrun queue   [0m[35m▀▀ [0m[2mlock/sleep   [0m[34m▄▄ [0m[2mdisk   [0m[96m░░ [0m[2mnet out   [0m                                      │[0m
 │                                                                                                                      │[0m
-│[0m[1;32m── a002 · 5.12ms from its first byte in to its last byte out · thread 1504066 [0m[2m────────────────────────────────────────[0m│[0m
+│[0m[1;32m── a002 · 5.16ms from its first byte in to its last byte out · thread 2619812 [0m[2m────────────────────────────────────────[0m│[0m
 │[0m[2m            ┊0          ┊1.00ms      ┊2.00ms      ┊3.00ms      ┊4.00ms        [0m                                        │[0m
-│[0m[36m  net in    ░[0m                                                                   24.5µs before start                   │[0m
-│[0m[1m  serving   [0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m  5.09ms from start to done             │[0m
+│[0m[36m  net in    ░[0m                                                                   15.4µs before start                   │[0m
+│[0m[1m  serving   [0m[32m█[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m  5.14ms from start to done             │[0m
 │[0m[34m  on device [0m                                                                  [0m[2m  io.latency not in this run[0m            │[0m
 │[0m[96m  net out   [0m                                                                  [0m[2m  gone when done[0m                        │[0m
 │[0m[2;3m  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order[0m                 │[0m
 │                                                                                                                      │[0m
-│[0m[1m  where its 5.12ms went              [0m[2mevidence[0m                       [0m[1mits share of each resource[0m                        │[0m
-│[0m[36m  ░ [0mnet in       24.5µs   0.48% [0m[36m▏    [0m[2m         by socket 113623[0m      [0m[1mcpu        [0m31.1µs: 1.11% of the 2.79ms server took│[0m
-│[0m[32m  █ [0mon cpu       31.1µs   0.61% [0m[32m▏    [0m[2m         [0m                                 off cpu 2 times, preempted 0           │[0m
-│[0m[33m  ▓ [0mrun queue    8.98µs   0.18% [0m[33m▏    [0m[2m         [0m                      [0m[1mdisk       [0m[2mio.latency not in this run: its block[0m  │[0m
-│[0m[35m  ▀ [0mlock/sleep   5.05ms   98.7% [0m[35m▀▀▀▀ [0m[2m         woken by tid 1504067[0m  [0m[2mrequests are unknown[0m                              │[0m
-│[0m[34m  ▄ [0m[2mdisk              ·         [0m[34m     [0m[2m         [0m                      [0m[1mnetwork    [0min 24.5µs · out 0ns                    │[0m
-│[0m[96m  ░ [0m[2mnet out           ·         [0m[96m     [0m[2m         [0m                      [0m[1mlock/sleep [0mlongest 5.05ms, woken by tid 1504067   │[0m
+│[0m[1m  where its 5.16ms went              [0m[2mevidence[0m                       [0m[1mits share of each resource[0m                        │[0m
+│[0m[36m  ░ [0mnet in       15.4µs   0.30% [0m[36m▏    [0m[2m         by socket 139025[0m      [0m[1mcpu        [0m40.4µs: 1.36% of the 2.98ms server took│[0m
+│[0m[32m  █ [0mon cpu       40.4µs   0.78% [0m[32m▏    [0m[2m         [0m                                 off cpu 2 times, preempted 0           │[0m
+│[0m[33m  ▓ [0mrun queue    24.2µs   0.47% [0m[33m▏    [0m[2m         [0m                      [0m[1mdisk       [0m[2mio.latency not in this run: its block[0m  │[0m
+│[0m[35m  ▀ [0mlock/sleep   5.08ms   98.4% [0m[35m▀▀▀▀ [0m[2m         woken by tid 2619813[0m  [0m[2mrequests are unknown[0m                              │[0m
+│[0m[34m  ▄ [0m[2mdisk              ·         [0m[34m     [0m[2m         [0m                      [0m[1mnetwork    [0min 15.4µs · out 0ns                    │[0m
+│[0m[96m  ░ [0m[2mnet out           ·         [0m[96m     [0m[2m         [0m                      [0m[1mlock/sleep [0mlongest 5.06ms, woken by tid 2619813   │[0m
 │[0m[2m  no decomposition in this run: the evidence is not graded[0m                                                            │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
-│[0m[1m  what sets it apart from the other 1 request: [0m[35m▀ [0m[31mlock/sleep +5.05ms[0m[2m (theirs 0ns)[0m                                      │[0m
+│[0m[1m  what sets it apart from the other 1 request: [0m[35m▀ [0m[31mlock/sleep +5.08ms[0m[2m (theirs 0ns)[0m                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

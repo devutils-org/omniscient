@@ -1,16 +1,16 @@
-omn top │ fixture workload-flame │ 2.07s                          view: snapshot │ collectors ≥14.9% │ target 62.4% cpu
+omn top │ fixture workload-flame │ 2.05s                          view: snapshot │ collectors ≥13.2% │ target 61.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
- flame-main  pid 1524065 · 3 threads · 2.30s · omn costs ≥14.9% cpu
+ flame-main  pid 2620696 · 3 threads · 2.04s · omn costs ≥13.2% cpu
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- CPU     ▅█████████▆▅▅▄▄▄▄▄▄▄▄▁▁    0.00343 cores   avg 0.623   peak 1.05  ~low det
- Memory  ██████████████████████     13.2MiB        +139KiB/s   peak 13.2MiB
+ CPU     ▇███████████▅▅▅▄▄▄▄▄▄▄▄▃   0.281 cores    avg 0.700   peak 0.993  ~low det
+ Memory  ████████████████████████   13.2MiB        +157KiB/s   peak 13.2MiB
  Disk                               no block request of the process
  Network                            no socket bytes   0 retrans (machine)
  GPU                                no kernel launched   VRAM 0B
- Energy  ▆███████████████████▇      107 W          avg 101 W   the machine's, not apportioned
- Time    █▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞   lock 97.3%   on cpu 1.61%   run queue 0.01%  ~low det degraded x2
+ Energy  ▇▇▇▇▇▇▇▇▇▇▇▇███▇▇▆▆▆▆▆▆▆   39.8 W         avg 47.3 W   the machine's, not apportioned
+ Time    ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞   lock 98.1%   on cpu 1.35%   run queue 0.00%  ~low det degraded x2
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-▶ suspect: lock (blocked: sleeping, on a futex)  97.3%                                              Enter/click → detail
+▶ suspect: lock (blocked: sleeping, on a futex)  98.1%                                              Enter/click → detail
 
 CPU in one hue: the machine's cores are not in the recording
 Memory in one hue: the machine's memory is not in the recording

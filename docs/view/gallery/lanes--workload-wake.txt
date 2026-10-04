@@ -1,21 +1,21 @@
-omn top │ fixture workload-wake │ 280ms                           view: snapshot │ collectors ≥41.7% │ target 61.9% cpu
+omn top │ fixture workload-wake │ 264ms                           view: snapshot │ collectors ≥34.7% │ target 54.8% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐
-│sched.switches 10 5 late ~low det degraded x2  sched.wakeup 958 5 late ~low det  sched.offcpu 23 ~low det degraded x2 │
-│gpu.kernel 0 5 late degraded                                                                                          │
-│3.37ms a cell          ╷0ns          ╷50.0ms        ╷100ms         ╷150ms         ╷200ms         ╷250ms    of the span│
-│wake-main      1527161│█████████▂                                                                   ▁▇    │awake 12.0%│
-│              off cpu │         ▇████████████████████████████████████████████████████████████████████▁    │ blkd 82.9%│
-│──────────────────────────────────────────────────────────────────▲ 147ms─────────────────────────────────────────────│
-│wake-main 1527161 (pid 1527161) at 147ms: blocked, sleeping 231ms, 31.3ms → 262ms, left cpu 7                         │
-│  woken by relay-a 1527172, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone        │
+│sched.switches 12 5 late ~low det degraded x2  sched.wakeup 917 5 late ~low det  sched.offcpu 17 ~low det degraded    │
+│gpu.kernel 0 3 late degraded                                                                                          │
+│3.18ms a cell          ╷0ns           ╷50.0ms         ╷100ms          ╷150ms         ╷200ms                of the span│
+│wake-main      2621136│████████▂                                                                    ▂▅    │awake 10.9%│
+│              off cpu │        ▇████████████████████████████████████████████████████████████████████▇     │ blkd 83.8%│
+│─────────────────────────────────────────────────────────────────▲ 137ms──────────────────────────────────────────────│
+│wake-main 2621136 (pid 2621136) at 137ms: blocked, sleeping 219ms, 27.1ms → 247ms, left cpu 12                        │
+│  woken by relay-a 2621137, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone        │
 │  in wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← libpython3.14.so.1.0 x4 ← Py_RunMain ← Py_BytesMain ← …      │
-│  10 switch-outs and 6 wakeups seen; awake 12.0% of the run                                                           │
-│  where it was off a cpu over the run, 232ms in all (sched.offcpu, by state and stack) ~low det degraded x2:          │
-│     231ms 99.5% sleeping      2 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
-│     706µs 0.30% sleeping      1 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
-│     364µs 0.16% uninterr.     2 blocks  vfork ← _posixsubprocess.cpython-314-x86_64-linux-gnu.so x2 ← …              │
-│     158µs 0.07% uninterr.     1 blocks  vfork ← _posixsubprocess.cpython-314-x86_64-linux-gnu.so x2 ← …              │
+│  12 switch-outs and 7 wakeups seen; awake 10.9% of the run                                                           │
+│  where it was off a cpu over the run, 221ms in all (sched.offcpu, by state and stack) ~low det degraded:             │
+│     219ms 99.2% sleeping      1 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
+│     925µs 0.42% sleeping      2 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
+│     509µs 0.23% uninterr.     1 blocks  vfork ← _posixsubprocess.cpython-314-x86_64-linux-gnu.so x2 ← …              │
+│     376µs 0.17% uninterr.     2 blocks  vfork ← _posixsubprocess.cpython-314-x86_64-linux-gnu.so x2 ← …              │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

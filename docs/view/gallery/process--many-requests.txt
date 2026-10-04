@@ -1,14 +1,14 @@
-omn top │ fixture many-requests │ 15.8s                           view: snapshot │ collectors ≥6.10% │ target 0.50% cpu
+omn top │ fixture many-requests │ 15.8s                           view: snapshot │ collectors ≥5.21% │ target 0.35% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
- server  pid 1504111 · 3 threads · 15.8s · omn costs ≥6.10% cpu
+ server  pid 2619831 · 3 threads · 15.8s · omn costs ≥5.21% cpu
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- CPU     ▅▅▆▆▅▆▆▅▅▇█▇▇▆▅▆▅▅▅▆▅▅▅▄   0.00369 cores   avg 0.00549   peak 0.00800  1 late ~low det
- Memory  ████████████████████████   2.14MiB        +0B/s   peak 2.14MiB  1 late
- Disk    █▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂   R 38.7KiB/s    W 14.7KiB/s   p99 4.68ms  336 late ~low det degraded x3
- Network ▇███▇▇█▇▇█▇█▇█▇███████▇▆   ↓ 2.04KiB/s    ↑ 2.04KiB/s   0 retrans (machine)  3 late ~low det degraded x3
+ CPU     █▆▆▆▆▆▅▅▅▅▅▅▅▅▅▅▅▅▆▆▆▆▅▆   0.00401 cores   avg 0.00354   peak 0.00516  ~low det
+ Memory  ████████████████████████   2.15MiB        +0B/s   peak 2.15MiB
+ Disk    █▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂   R 38.8KiB/s    W 12.7KiB/s   p99 4.92ms  168 late ~low det degraded x3
+ Network ▇██████████████████████▇   ↓ 2.04KiB/s    ↑ 2.04KiB/s   0 retrans (machine)  ~low det degraded x3
  GPU                                no kernel launched   VRAM 0B
- Energy  ▄▄▅▅▅▅▄▄▆████▇▇▇▆▇▇▆▆▆▇▄   68.2 W         avg 104 W   the machine's, not apportioned  1 late
- Time    ░░░░░░░░░░░░░░░░░░░░░░░▓   sleep 96.4%   I/O 1.23%   lock 1.00%   on cpu 0.26%  8 late ~low det degraded x2
+ Energy  ▇▇▇█▇▇▇▇▇▇▇█▇▇▇▇▇▇█▇▇▇▇▆   32.1 W         avg 36.1 W   the machine's, not apportioned
+ Time    ░░░░░░░░░░░░░░░░░░░░░░░▓   sleep 96.4%   I/O 2.30%   lock 1.03%   on cpu 0.18%  ~low det degraded x2
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ▶ suspect: sleep (blocked: sleeping)  96.4%                                                         Enter/click → detail
 

@@ -1,10 +1,10 @@
-omn top │ fixture workload-flame │ 2.07s                          view: snapshot │ collectors ≥14.9% │ target 62.4% cpu
+omn top │ fixture workload-flame │ 2.05s                          view: snapshot │ collectors ≥13.2% │ target 61.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐
-│over 2.07s   █ out █ in █ the machine's                                                                               │
+│pid 2620696 over 2.05s   31.5KiB written, 1.06MiB read   █ out █ in █ the machine's                                   │
 │ network · net.socket bpf:fentry ~low det degraded x3 · net.bytes fs:proc ~low det degraded ──────────────────────────│
 │         thread             socket                                             stack         interface, the machine's │
-│ no socket moved a byte                                                          ┃█████████┃ wlan0     120KiB ▁█▁▁ ▂▁ │
+│ no socket moved a byte                                                          ┃█████████┃ wlan0       384B █  █    │
 │ 0 rows in this run, none with bytes                                             ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
@@ -14,27 +14,27 @@ omn top │ fixture workload-flame │ 2.07s                          view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃ tailsca… 41.9KiB  █   ▄  │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│interfaces 161KiB · 5 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                    │
+│                                                                                 ┃█████████┃                          │
+│interfaces 384B · 6 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                      │
 │ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
-│         thread             file                                               cache         device, the machine's    │
-│ bytes per file: not in this run                                                 ┃█████████┃ 259:0    24.0KiB █       │
-│ io.syscall is in this run as a summary and a histogram: latency per             ┃█████████┃                          │
-│ thread, which carries no bytes. Its `raw` rows (per descriptor) or              ┃█████████┃                          │
-│ io.fs's (per file) do.                                                          ┃█████████┃                          │
-│ docs/view/flows.md has the session that draws it.                               ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│devices 24.0KiB · 2 devices idle · page-cache hits never reach a device; writes reach it later                        │
-│nothing to select: no socket of the target's moved a byte; bytes per file were not measured                           │
-│                                                                                                                      │
+│         thread             descriptor                                         cache         device, the machine's    │
+│        python3 ┃█████████┃▶fd 4          █        ←1.01MiB            ┃█████████┃ no device moved a byte in this run │
+│    tid 2620696 ┃█████████┃  502KiB/s, 112 calls, 5.99µs each          ┃█████████┃ (3 idle)                           │
+│                ┃█████████┃                                            ┃█████████┃                                    │
+│                ┃█████████┃                                            ┃█████████┃                                    │
+│                ┃█████████┃                                            ┃█████████┃                                    │
+│                ┃█████████┃                                            ┃█████████┃                                    │
+│                ┃█████████┃                                            ┃█████████┃                                    │
+│                ┃█████████┃                                            ┃█████████┃                                    │
+│                ┃█████████┃                                            ┃█████████┃                                    │
+│                ┃█████████┃                                            ┃█████████┃                                    │
+│                ┃██▀▀▀▀███┃                                            ┃█████████┃                                    │
+│     flame-main ┃████▀▀███┃ fd 3          █   ▁  ▁ →31.5KiB ←55.3KiB   ┃▀▀▀▀▀▀▀▀▀┃                                    │
+│           warm ┃███▀▀▀▀██┃ fd 2                 █ →12B                ┃█████████┃                                    │
+│descriptors 1.09MiB · no ratio: a descriptor may be a socket or a pipe, whose bytes never reach a device              │
+│▶ descriptor 4 of process 2620696, which may be a file, a pipe or a socket: 1.01MiB read in 112 calls, 502KiB/s       │
+│pid 2620696, thread 2620696 -- enter narrows every view to it                                                         │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ socket or file  enter focus its thread

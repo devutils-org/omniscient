@@ -2030,16 +2030,25 @@ mod tests {
         assert!((1.9..2.1).contains(&ratio), "lo / socket = {ratio}");
     }
 
-    /// The fixtures record io.syscall without `raw`: the storage band says so
-    /// where its files would be, and still draws the machine's devices.
+    /// A recording with `io.syscall` and `net.socket` asked without `raw`,
+    /// as the fixtures were recorded before every view asked for the rows.
+    fn without_rows(name: &str) -> Data {
+        let mut data = crate::snapshot::fixture(name);
+        for results in &mut data.run.results {
+            if ["io.syscall", "net.socket"].contains(&results.source.as_str()) {
+                results
+                    .outputs
+                    .retain(|output| !matches!(output, crate::model::Output::Raw { .. }));
+            }
+        }
+        data
+    }
+
+    /// A run with io.syscall without `raw`: the storage band says so where
+    /// its files would be, and still draws the machine's devices.
     #[test]
     fn a_run_without_rows_says_why_its_files_are_missing() {
-        let buffer = draw(
-            crate::snapshot::fixture("sqlite-commits"),
-            "flows",
-            WIDTH,
-            HEIGHT,
-        );
+        let buffer = draw(without_rows("sqlite-commits"), "flows", WIDTH, HEIGHT);
         let screen = text(&buffer);
         assert!(
             screen.contains("bytes per file: not in this run"),
@@ -2119,12 +2128,7 @@ mod tests {
     #[test]
     fn unmeasured_bytes_are_never_said_to_be_zero() {
         for name in ["sqlite-latency", "sqlite-commits", "machine"] {
-            let screen = text(&draw(
-                crate::snapshot::fixture(name),
-                "flows",
-                WIDTH,
-                HEIGHT,
-            ));
+            let screen = text(&draw(without_rows(name), "flows", WIDTH, HEIGHT));
             assert!(!screen.contains("no file"), "{name}: {screen}");
             assert!(
                 screen.contains("bytes per file were not measured"),

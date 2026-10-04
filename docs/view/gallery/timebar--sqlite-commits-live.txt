@@ -1,23 +1,23 @@
-omn top │ fixture sqlite-commits │ 3.42s live                        view: snapshot │ collectors and target: at the end
+omn top │ fixture sqlite-commits │ 2.55s live                        view: snapshot │ collectors and target: at the end
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
 │ the view's reading  one bar per thread, whole: the run's window                                                      │
 │                                                                                                                      │
-│ ≈ no single suspect  1494341 sqlite3                                                                                 │
-│   `runnable` is 406ms, and 2.83s of the whole is in no row that was read (on-cpu): the largest row could still be    │
-│   overtaken                                                                                                          │
+│ ≈ no single suspect  2618623 sqlite3                                                                                 │
+│   `blocked: uninterruptible` is 206ms, and 2.34s of the whole is in no row that was read (on-cpu): the largest row   │
+│   could still be overtaken                                                                                           │
 │                                                                                                                      │
 │                                                                                                                      │
-│ ▸ 1494341 sqlite3     ├▚▚▚▚▚▚▚▓▓▓▓···················· not read ·····················┤    3.42s  ≈ no single state   │
-│                      0 ───────────────────────────┼ 1.71s ───────────────────────────┤ 3.42s                         │
+│ ▸ 2618623 sqlite3     ├▓▓▓▓▓······················· not read ························┤    2.55s  ≈ no single state   │
+│                      0 ───────────────────────────┼ 1.28s ───────────────────────────┤ 2.55s                         │
 │                        ▚ run queue   ▓ I/O   · not read                                                              │
 │                                                                                                                      │
 │   state                            source          amount          share   ±         reads  trust                    │
-│   whole: the run's window                          3.42s           100%    exact                                     │
+│   whole: the run's window                          2.55s           100%    exact                                     │
 │ █ on-cpu                           cpu.oncpu_time  not read                ?         0      ~low det live degraded   │
 │     ↳ `cpu.oncpu_time` has no series of it                                                                           │
-│ ▚ runnable                         sched.runqlat   406ms           11.9%   exact     258    ~low det live degraded   │
-│ ▓ blocked: uninterruptible         sched.offcpu    186ms           5.44%   exact     547    ~low det live degraded   │
+│ ▚ runnable                         sched.runqlat   9.72ms          0.38%   exact     188    ~low det live degraded   │
+│ ▓ blocked: uninterruptible         sched.offcpu    206ms           8.06%   exact     532    ~low det live degraded   │
 │   residue: the whole less the rows                 unknown: a row was not read                                       │
 │                                                                                                                      │
 │ No decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread    │

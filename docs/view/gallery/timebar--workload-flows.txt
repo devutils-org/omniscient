@@ -1,30 +1,30 @@
-omn top │ fixture workload-flows │ 1.00s                          view: snapshot │ collectors ≥14.4% │ target 5.80% cpu
+omn top │ fixture workload-flows │ 993ms                          view: snapshot │ collectors ≥16.4% │ target 5.63% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
 │ the view's reading  one bar per thread, whole: the run's window                                                      │
 │                                                                                                                      │
-│ ▶ first suspect  1783958 flows-main: blocked: sleeping 932ms (93.2% of its wall clock)                               │
+│ ▶ first suspect  2621407 flows-main: blocked: sleeping 929ms (93.6% of its wall clock)                               │
 │   asleep on something that is not a lock seen here: a timer, a pipe, a socket, a condition                           │
 │   97 % of it from one stack, leaf first: clock_nanosleep <- libpython3.14.so.1.0+0x5dfc1 <- libpython3.14.so.1.0+0x… │
-│   decisive: ahead of the next state (40.4ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
+│   decisive: ahead of the next state (39.0ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
 │                                                                                                                      │
-│ ▸ 1783958 flows-main  ├███░░░░░░░░░░░░░░░░░░░░░░ sleep 93.2% ░░░░░░░░░░░░░░░░░░░░░░░ ┤    1.00s  ▶ sleep 93.2%       │
-│   1784066 python3     ├██                                                            ┤    1.00s  ▶ on cpu 3.40%      │
-│                      0 ───────────────────────────┼ 500ms ───────────────────────────┤ 1.00s                         │
+│ ▸ 2621407 flows-main  ├██▓░░░░░░░░░░░░░░░░░░░░░░ sleep 93.6% ░░░░░░░░░░░░░░░░░░░░░░░ ┤    993ms  ▶ sleep 93.6%       │
+│   2621408 python3     ├██                                                            ┤    993ms  ▶ on cpu 3.45%      │
+│                      0 ───────────────────────────┼ 497ms ───────────────────────────┤ 993ms                         │
 │                        █ on cpu   ▚ run queue   ▓ I/O   ▙ child   ░ sleep                                            │
 │                                                                                                                      │
 │   state                            source          amount          share   ±         reads  trust                    │
-│   whole: the run's window                          1.00s           100%    exact                                     │
-│ █ on-cpu                           cpu.oncpu_time  40.4ms          4.04%   exact     0      ~low det                 │
-│     ↳ most-sampled leaf `perf_swevent_event`: 8 of 66 samples, every thread's: the samples are spread, no one funct… │
-│ ▚ runnable                         sched.runqlat   391µs           0.04%   exact     16     ~low det degraded        │
-│ ▓ blocked: uninterruptible         sched.offcpu    7.16ms          0.72%   exact     19     ~low det degraded x3     │
-│     ↳ 80 % of it from one stack, leaf first: fsync <- libpython3.14.so.1.0+0x5dfc1 <- libpython3.14.so.1.0+0x1b9172… │
-│ ▙ blocked: sleeping, in a wait fo… sched.offcpu    4.90ms          0.49%   exact     1      ~low det degraded x3     │
+│   whole: the run's window                          993ms           100%    exact                                     │
+│ █ on-cpu                           cpu.oncpu_time  39.0ms          3.92%   exact     0      ~low det                 │
+│     ↳ most-sampled leaf `_Py_hashtable_get`: 4 of 65 samples, every thread's: the samples are spread, no one functi… │
+│ ▚ runnable                         sched.runqlat   110µs           0.01%   exact     13     ~low det degraded        │
+│ ▓ blocked: uninterruptible         sched.offcpu    7.36ms          0.74%   exact     21     ~low det degraded x3     │
+│     ↳ 81 % of it from one stack, leaf first: fsync <- libpython3.14.so.1.0+0x5dfc1 <- libpython3.14.so.1.0+0x1b9172… │
+│ ▙ blocked: sleeping, in a wait fo… sched.offcpu    4.95ms          0.50%   exact     1      ~low det degraded x3     │
 │     ↳ 100 % of it from one stack, leaf first: wait4 <- libpython3.14.so.1.0+0x5dfc1 <- libpython3.14.so.1.0+0x1b917… │
-│ ░ blocked: sleeping                sched.offcpu    932ms           93.2%   exact     15     ~low det degraded x3     │
+│ ░ blocked: sleeping                sched.offcpu    929ms           93.6%   exact     13     ~low det degraded x3     │
 │     ↳ 97 % of it from one stack, leaf first: clock_nanosleep <- libpython3.14.so.1.0+0x5dfc1 <- libpython3.14.so.1.… │
-│   residue: the whole less the rows                 15.7ms          1.57%   exact     time no row accounts for        │
+│   residue: the whole less the rows                 12.6ms          1.26%   exact     time no row accounts for        │
 │                                                                                                                      │
 │ No decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread    │
 │   over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn │

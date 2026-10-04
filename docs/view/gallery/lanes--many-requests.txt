@@ -1,23 +1,23 @@
-omn top │ fixture many-requests │ 15.8s                           view: snapshot │ collectors ≥6.10% │ target 0.50% cpu
+omn top │ fixture many-requests │ 15.8s                           view: snapshot │ collectors ≥5.21% │ target 0.35% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐
-│sched.switches 1.84k 336 late ~low det degraded  sched.wakeup 1.76k 336 late ~low det degraded  sched.offcpu 1.28k 3  │
-│late ~low det degraded  gpu.kernel 0 127 late degraded                                                                │
-│191ms a cell           ╷0ns                      ╷5.00s                    ╷10.0s                          of the span│
-│server         1504111│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│awake 0.55%│
-│server         1504266│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│awake 0.76%│
-│server         1504265│▁▁▁▁▁─▁▁▁▁▁▁▁▁▁▁─▁▁▁▁▁▁▁▁▁▁─▁▁▁▁▁▁▁▁▁▁─▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁─▁▁▁▁▁▁▁▁▁▁─▁▁▁▁▁▁▁─│awake 0.10%│
-│─────────────────────────────────────────────────────────────▲ 7.27s──────────────────────────────────────────────────│
-│server 1504111 (pid 1504111) at 7.27s: blocked, sleeping 54.6ms, 7.24s → 7.29s, left cpu 7                            │
+│sched.switches 1.76k 168 late ~low det degraded  sched.wakeup 1.75k 169 late ~low det degraded  sched.offcpu 1.36k    │
+│~low det degraded  gpu.kernel 0 118 late degraded                                                                     │
+│190ms a cell           ╷0ns                      ╷5.00s                    ╷10.0s                          of the span│
+│server         2619831│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│awake 0.29%│
+│server         2619833│▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁│awake 0.31%│
+│server         2619832│▁▁▁▁─▁▁▁▁▁▁▁▁▁▁─▁▁▁▁▁▁▁▁▁─▁▁▁▁▁▁▁▁▁▁─▁▁▁▁▁▁▁▁▁─▁▁▁▁▁▁▁▁▁▁─▁▁▁▁▁▁▁▁▁▁─▁▁▁▁▁▁▁▁▁─▁▁▁▁│awake 0.06%│
+│─────────────────────────────────────────▲ 3.56s──────────────────────────────────────────────────────────────────────│
+│server 2619831 (pid 2619831) at 3.56s: blocked, sleeping 50.6ms, 3.54s → 3.59s, left cpu 4                            │
 │  woken by an interrupt (softirq); state, stack: its window's sched.offcpu row nearest in size                        │
 │  in libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start                                                        │
-│  762 switch-outs and 707 wakeups seen; awake 0.55% of the run                                                        │
-│  meanwhile blocked: server 1504266, server 1504265                                                                   │
-│  where it was off a cpu over the run, 15.6s in all (sched.offcpu, by state and stack) 3 late ~low det degraded:      │
-│     15.3s 97.7% sleeping    471 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start                    │
-│     197ms 1.26% uninterr.   150 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start                    │
-│     157ms 1.01% sleeping     75 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start                    │
-│    5.91ms 0.04% uninterr.     7 blocks  fsync ← libc.so.6 ← __libc_start_main ← _start                               │
+│  706 switch-outs and 690 wakeups seen; awake 0.29% of the run                                                        │
+│  meanwhile blocked: server 2619833, server 2619832                                                                   │
+│  where it was off a cpu over the run, 15.7s in all (sched.offcpu, by state and stack) ~low det degraded:             │
+│     15.2s 96.7% sleeping    455 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start                    │
+│     357ms 2.27% uninterr.   150 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start                    │
+│     162ms 1.03% sleeping     75 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start                    │
+│    5.95ms 0.04% uninterr.     7 blocks  fsync ← libc.so.6 ← __libc_start_main ← _start                               │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

@@ -1,26 +1,26 @@
-omn top │ fixture machine │ 20.0s                                                view: snapshot │ collectors ≥3.13% cpu
+omn top │ fixture machine │ 20.0s                                                view: snapshot │ collectors ≥2.90% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐
 │over 20.0s   █ out █ in █ the machine's                                                                               │
 │ network · net.socket not in this run · net.bytes fs:proc ~low det degraded ──────────────────────────────────────────│
 │         thread             socket                                             stack         interface, the machine's │
-│ bytes per socket: not in this run                                               ┃█████████┃ wlan0    2.42MiB ▅▁█▁▁▁▂▂│
+│ bytes per socket: not in this run                                               ┃█████████┃ wlan0    55.7KiB ▁▁▁▁▂▁█▅│
 │ net.socket was not asked for in this run.                                       ┃█████████┃                          │
 │ docs/view/flows.md has the session that draws it.                               ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃ tailsca… 1.78MiB ▄▁█▁▁▁▁▁│
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│interfaces 4.20MiB · 5 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                   │
+│                                                                                 ┃█████████┃ tailsca… 1.62KiB     ▃ █▃│
+│interfaces 57.4KiB · 5 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                   │
 │ storage · io.syscall not in this run · io.bytes fs:proc ~low det degraded ───────────────────────────────────────────│
 │         thread             file                                               cache         device, the machine's    │
-│ bytes per file: not in this run                                                 ┃█████████┃ 259:0    1.70GiB █▁▁ ▁▁▁ │
+│ bytes per file: not in this run                                                 ┃█████████┃ 259:0     152KiB       █ │
 │ io.syscall was not asked for in this run.                                       ┃█████████┃                          │
 │ docs/view/flows.md has the session that draws it.                               ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
@@ -33,7 +33,7 @@ omn top │ fixture machine │ 20.0s                                           
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│devices 1.70GiB · 2 devices idle · page-cache hits never reach a device; writes reach it later                        │
+│devices 152KiB · 2 devices idle · page-cache hits never reach a device; writes reach it later                         │
 │nothing to select: bytes per socket were not measured; bytes per file were not measured                               │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

@@ -1,27 +1,27 @@
-[0m[1momn top[0m │ fixture http-server │ 3.24s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥24.3%[0m[35m │ target 90.6% cpu[0m [0m
+[0m[1momn top[0m │ fixture http-server │ 2.85s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥19.9%[0m[35m │ target 90.9% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes [0m[1;7m 8 wake [0m 9 flows  0 process                      [0m
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐[0m
-│[0m[33m50 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m205 wakeups of 12 threads -- from a task 27.8%, hardirq 3.41%, softirq 68.8%, in 3.24s[0m     │[0m
+│[0m[33m31 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m210 wakeups of 8 threads -- from a task 26.7%, hardirq 3.33%, softirq 70.0%, in 2.85s[0m      │[0m
 │                                                                                                                      │[0m
 │[0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m│[0m
-│[0m[1;7mpython3 1493224  [0m[2m   160  softirq   86%[0m  [0m[2mtailscaled 1266       3  python3   67%[0m  [0m[2mksoftirqd/9 75        1  python3  100%[0m│[0m
-│python3 1493220  [0m[2m    16  hardirq   38%[0m  [0m[2mtailscal… 1374244     2  python3   50%[0m  [0m[2mksoftirqd/13 101      1  Thread-… 100%[0m│[0m
-│Thread-1… 1493226[0m[2m    15  python3   67%[0m  [0m[2mmigration/0 20        1  Thread-… 100%[0m  [0m[2mksoftirqd/14 107      1  Thread-… 100%[0m│[0m
-│[0m[2mtailscaled 1060       3  ldconfig  67%[0m  [0m[2mmigration/8 68        1  python3  100%[0m  [0m[2mtailscaled 984        1  python3  100%[0m│[0m
-│[0m[2;3m9 dimmed: outside the target, woken by it[0m                                                                             │[0m
+│[0m[1;7mpython3 2618477  [0m[2m   168  softirq   86%[0m  [0m[2mtailscaled 3898       7  python3   43%[0m  [0m[2mmigration/13 100      1  python3  100%[0m│[0m
+│python3 2618476  [0m[2m    18  Thread-…  56%[0m  [0m[2mtailscaled 966        2  python3   50%[0m  [0m[2mtailscal… 1374244     1  python3  100%[0m│[0m
+│Thread-1… 2618479[0m[2m    12  python3   75%[0m  [0m[2mksoftirqd/12 93       1  Thread-… 100%[0m                                        │[0m
+│[0m[2;3m5 dimmed: outside the target, woken by it[0m                                                                             │[0m
 │                                                                                                                      │[0m
-│[0m[1;32mpython3 1493224[0m[2m was woken 160 times, 49.36/s[0m                                                                          │[0m
+│[0m[1;32mpython3 2618477[0m[2m was woken 168 times, 58.99/s[0m                                                                          │[0m
 │[0m[2;4m<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         [0m│[0m
-│[0m[2m├─ [0m[36msoftirq[0m[2m  a device, or a loopback send[0m             [0m[2m   137   86%   84.3µs       --       --[0m  [0m[2;32m ▁▁▃▄▂▂▂▃▃▂▆▃▃▃▃▂▃▃▃▁▄▁▃[0m│[0m
-│[0m[2m├─ [0m[1mldconfig 1493225[0m[2m  its wakeup unseen[0m               [0m[2m    21   13%   37.7µs       --       --[0m  [0m[2;32m█                       [0m│[0m
-│[0m[2m├─ [0mtid 1491691[0m[2m  outside the target: stops[0m            [0m[2m     1    1%   14.1ms       --       --[0m  [0m[2;32m▁                       [0m│[0m
-│[0m[2m└─ [0m[1mpython3 1493220[0m                                   [0m[2m     1    1%    726µs   4.40ms   4.40ms[0m  [0m[2;32m▁                       [0m│[0m
-│[0m[2m   └─ [0mtid 1493173[0m[2m  outside the target: stops[0m         [0m[2m     1    1%       --       --       --[0m  [0m[2;32m▁                       [0m│[0m
+│[0m[2m├─ [0m[36msoftirq[0m[2m  a device, or a loopback send[0m             [0m[2m   144   86%   66.1µs       --       --[0m  [0m[2;32m ▁▁▃▃▂▃▄▂▂▂▂▂▂▂▂▂▁▂▂▅▂▂▂[0m│[0m
+│[0m[2m├─ [0m[1mldconfig 2618478[0m[2m  its wakeup unseen[0m               [0m[2m    23   14%   26.2µs       --       --[0m  [0m[2;32m█                       [0m│[0m
+│[0m[2m└─ [0m[36mhardirq[0m[2m  a device[0m                                 [0m[2m     1    1%   13.3ms       --       --[0m  [0m[2;32m▁                       [0m│[0m
 │                                                                                                                      │[0m
-│[0m[2;4mwoken at      held   the longest chains, link by link: each waker and its hold                                        [0m│[0m
-│[0m[2m+4.07ms  [0m[1;2m   4.40ms[0m [0m[2m  <- [0mpython3 1493220[0m[2;32m 4.40ms[0m[2m  <- [0mtid 1493173[0m[2m (its wakeup unseen)[0m                                    │[0m
+│[0m[1m-> it woke in turn: [0mtailscaled 3898[0m[2m x2[0m, tailscaled 966[0m[2m x1[0m, python3 2618476[0m[2m x1[0m                                         │[0m
 │                                                                                                                      │[0m
-│[0m[1m-> it woke in turn: [0mpython3 1493220[0m[2m x3[0m, tailscaled 1266[0m[2m x1[0m, tailscaled 1374244[0m[2m x1[0m                                     │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

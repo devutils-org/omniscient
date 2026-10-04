@@ -1,30 +1,28 @@
-omn top │ fixture cpython-hot │ 5.68s                             view: snapshot │ collectors ≥11.2% │ target 85.1% cpu
+omn top │ fixture cpython-hot │ 3.99s                             view: snapshot │ collectors ≥9.54% │ target 93.1% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐
-│over 5.68s   █ out █ in █ the machine's                                                                               │
+│pid 2627059 over 3.99s   10.7KiB written, 478KiB read   █ out █ in █ the machine's                                    │
 │ network · net.socket bpf:fentry ~low det degraded x3 · net.bytes fs:proc ~low det degraded ──────────────────────────│
 │         thread             socket                                             stack         interface, the machine's │
-│ no socket moved a byte                                                          ┃█████████┃ wlan0    1.53MiB ▁█▁▁▁▁▁▁│
+│ no socket moved a byte                                                          ┃█████████┃ wlan0    12.7KiB █▂▁ ▁▁▁▁│
 │ 0 rows in this run, none with bytes                                             ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃ tailsca… 1.26MiB ▁█▁▁▁ ▁▁│
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│interfaces 2.79MiB · 5 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                   │
-│ storage · io.syscall bpf:fentry -4 lost (18.2%) ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────│
-│         thread             file                                               cache         device, the machine's    │
-│ bytes per file: not in this run                                                 ┃█████████┃ 259:0    21.5MiB ▁▁▁▂▁ ▁█│
-│ io.syscall is in this run as a summary and a histogram: latency per             ┃█████████┃                          │
-│ thread, which carries no bytes. Its `raw` rows (per descriptor) or              ┃█████████┃                          │
-│ io.fs's (per file) do.                                                          ┃█████████┃                          │
-│ docs/view/flows.md has the session that draws it.                               ┃█████████┃                          │
+│                                                                                 ┃█████████┃ tailsca…     60B  █      │
+│interfaces 12.8KiB · 5 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                   │
+│ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
+│         thread             descriptor                                         cache         device, the machine's    │
+│        python3 ┃▀▀███████┃▶fd 4          █        ←423KiB             ┃█████████┃█████████┃ 259:0    17.4MiB ▁█      │
+│                   ▀▀▀▀▀██┃ fd 3          █      ▁ →10.7KiB ←55.3KiB   ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
+│                      ▀▀██┃ fd 1                 █ →49B                ┃█████████┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
@@ -33,8 +31,10 @@ omn top │ fixture cpython-hot │ 5.68s                             view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│devices 21.5MiB · 2 devices idle · page-cache hits never reach a device; writes reach it later                        │
-│nothing to select: no socket of the target's moved a byte; bytes per file were not measured                           │
-│                                                                                                                      │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│descriptors 489KiB -> devices 17.4MiB · 2 devices idle · no ratio: a descriptor may be a socket or a pipe, whose bytes│
+│▶ descriptor 4 of process 2627059, which may be a file, a pipe or a socket: 423KiB read in 59 calls, 106KiB/s         │
+│pid 2627059, thread 2627059 -- enter narrows every view to it                                                         │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ socket or file  enter focus its thread

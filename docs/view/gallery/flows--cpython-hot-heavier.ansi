@@ -1,10 +1,10 @@
-[0m[1momn top[0m │ fixture cpython-hot-heavier │ 8.49s                     [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥7.69%[0m[35m │ target 94.5% cpu[0m [0m
+[0m[1momn top[0m │ fixture cpython-hot-heavier │ 7.93s                     [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥8.12%[0m[35m │ target 95.9% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake [0m[1;7m 9 flows [0m 0 process                      [0m
 ┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐[0m
-│over 8.49s   [0m[32m█[0m out [0m[36m█[0m in [0m[90m█[0m the machine's                                                                               │[0m
+│pid 2627262 over 7.93s   [0m[2;32m10.7KiB[0m[2m written, [0m[2;36m484KiB[0m[2m read   [0m[32m█[0m out [0m[36m█[0m in [0m[90m█[0m the machine's                                    │[0m
 │[0m[1;37m network [0m[37m· [0m[1;37mnet.socket[0m[37m bpf:fentry [0m[36m~low det[0m[37m [0m[33mdegraded x3[0m[37m · [0m[1;37mnet.bytes[0m[37m fs:proc [0m[36m~low det[0m[37m [0m[33mdegraded[0m[37m ──────────────────────────[0m│[0m
 │[0m[2;3m         thread[0m             [0m[2;3msocket[0m                                             [0m[2;3mstack[0m         [0m[2;3minterface, the machine's[0m │[0m
-│ [0m[1mno socket moved a byte[0m                                                          [0m[37m┃[0m[2;90m█████████┃[0m [0m[1mlo       [0m[2m5.93MiB[0m [0m[2;37m█▇▂     [0m│[0m
+│ [0m[1mno socket moved a byte[0m                                                          [0m[37m┃[0m[2;90m█████████┃[0m [0m[1mwlan0    [0m[2m4.51KiB[0m [0m[2;37m█▃▃▃▆▃▃▂[0m│[0m
 │ [0m[2m0 rows in this run, none with bytes[0m                                             [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
@@ -15,16 +15,14 @@
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
-│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m [0m[1mwlan0    [0m[2m 736KiB[0m [0m[2;37m▂█▂▂▁▁▂▂[0m│[0m
-│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m [0m[1mtailsca… [0m[2m 236KiB[0m [0m[2;37m█▆█▆▃▃▆█[0m│[0m
-│[0m[2minterfaces 6.88MiB · 4 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces[0m                   │[0m
+│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│[0m[2minterfaces 4.51KiB · 6 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces[0m                   │[0m
 │[0m[1;37m storage [0m[37m· [0m[1;37mio.syscall[0m[37m bpf:fentry [0m[36m~low det[0m[37m [0m[33mdegraded x2[0m[37m · [0m[1;37mio.bytes[0m[37m fs:proc [0m[36m~low det[0m[37m [0m[33mdegraded[0m[37m ───────────────────────────[0m│[0m
-│[0m[2;3m         thread[0m             [0m[2;3mfile[0m                                               [0m[2;3mcache[0m         [0m[2;3mdevice, the machine's[0m    │[0m
-│ [0m[1mbytes per file: not in this run[0m                                                 [0m[37m┃[0m[2;90m█████████┃[0m [0m[1m259:0    [0m[2m1.51GiB[0m [0m[2;37m █▂▁▁▁ ▁[0m│[0m
-│ [0m[2mio.syscall is in this run as a summary and a histogram: latency per[0m             [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
-│ [0m[2mthread, which carries no bytes. Its `raw` rows (per descriptor) or[0m              [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
-│ [0m[2mio.fs's (per file) do.[0m                                                          [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
-│ [0m[2mdocs/view/flows.md has the session that draws it.[0m                               [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│[0m[2;3m         thread[0m             [0m[2;3mdescriptor[0m                                         [0m[2;3mcache[0m         [0m[2;3mdevice, the machine's[0m    │[0m
+│        python3 [0m[2;37m┃[0m[2;36;42m▀▀[0m[2;36m███████[0m[32m┃[0m[1;32m▶fd 4          [0m[2;37m█       [0m[2;36m ←428KiB[0m             [0m[32m┃[0m[2;36m█████████[0m[37m┃[0m[2;90m█████████┃[0m [0m[1m259:0    [0m[2m12.0MiB[0m [0m[2;37m      █ [0m│[0m
+│                   [0m[2;32m▀▀[0m[2;36;42m▀▀▀[0m[2;36m██[0m[2;37m┃[0m[1m fd 3          [0m[2;37m█      ▁[0m[2;32m →10.7KiB[0m[2;36m ←55.4KiB[0m   [0m[2;37m┃[0m[2;32;46m▀▀▀▀▀▀▀▀▀[0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                      [0m[2;32m▀▀██[0m[2;37m┃[0m[1m fd 1          [0m[2;37m       █[0m[2;32m →49B[0m                [0m[2;37m┃[0m[2;32m█████████[0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
@@ -33,8 +31,10 @@
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
-│[0m[2mdevices 1.51GiB · 2 devices idle · page-cache hits never reach a device; writes reach it later[0m                        │[0m
-│[0m[2mnothing to select: no socket of the target's moved a byte; bytes per file were not measured[0m                           │[0m
-│                                                                                                                      │[0m
+│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
+│[0m[2mdescriptors 495KiB[0m -> [0m[2mdevices 12.0MiB · 2 devices idle · no ratio: a descriptor may be a socket or a pipe, whose bytes[0m│[0m
+│[0m[32m▶ descriptor 4 of process 2627262, which may be a file, a pipe or a socket: [0m[2;36m428KiB read in 59 calls, 54.0KiB/s[0m        │[0m
+│[0m[2mpid 2627262, thread 2627262 -- enter narrows every view to it[0m                                                         │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m socket or file  [0m[1menter[0m focus its thread                       [0m

@@ -1,31 +1,31 @@
-[0m[1momn top[0m │ fixture sqlite-commits │ 6.84s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥8.41%[0m[35m │ target 79.5% cpu[0m [0m
+[0m[1momn top[0m │ fixture sqlite-commits │ 5.11s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥9.53%[0m[35m │ target 86.5% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request [0m[1;7m 5 timebar [0m 6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐[0m
 │ [0m[1;32mthe view's reading[0m[2m  one bar per thread, whole: the run's window[0m                                                      │[0m
 │                                                                                                                      │[0m
-│ [0m[1m▶ first suspect  1494341 sqlite3: [0m[1;32mon-cpu 5.64s (82.5% of its wall clock)[0m                                             │[0m
+│ [0m[1m▶ first suspect  2618623 sqlite3: [0m[1;32mon-cpu 4.63s (90.8% of its wall clock)[0m                                             │[0m
 │   on a cpu, doing its own work: cpu-bound                                                                            │[0m
-│   most-sampled leaf `sqlite3+0x90183`: 297 of 5685 samples: the samples are spread, no one function dominates        │[0m
-│ [0m[2m  decisive: ahead of the next state (774ms) and of what no row read (0ns) -- omn latency's rule, on the view's read…[0m │[0m
+│   most-sampled leaf `sqlite3+0x90183`: 241 of 4653 samples: the samples are spread, no one function dominates        │[0m
+│ [0m[2m  decisive: ahead of the next state (410ms) and of what no row read (0ns) -- omn latency's rule, on the view's read…[0m │[0m
 │                                                                                                                      │[0m
-│ [0m[1;32m▸ 1494341 sqlite3     [0m[2m├[0m[2;32m██████████████████[0m[1;2;7;32m on cpu 82.5% [0m[2;32m███████████████████[0m[2;35m▚▚▚▚▚▚▚[0m[2;34m▓▓▓[0m[2m ┤    6.84s [0m[1;32m ▶ on cpu 82.5%    [0m  │[0m
-│ [0m[2m                     0 ───────────────────────────┼ 3.42s ───────────────────────────┤ 6.84s                        [0m │[0m
+│ [0m[1;32m▸ 2618623 sqlite3     [0m[2m├[0m[2;32m█████████████████████[0m[1;2;7;32m on cpu 90.8% [0m[2;32m█████████████████████[0m[2;34m▓▓▓▓▓[0m[2m ┤    5.11s [0m[1;32m ▶ on cpu 90.8%    [0m  │[0m
+│ [0m[2m                     0 ───────────────────────────┼ 2.55s ───────────────────────────┤ 5.11s                        [0m │[0m
 │                        [0m[32m█[0m on cpu   [0m[35m▚[0m run queue   [0m[34m▓[0m I/O                                                                │[0m
 │                                                                                                                      │[0m
 │ [0m[1m  state                            source          amount          share   ±         reads  trust                   [0m │[0m
-│ [0m[2m  whole: the run's window                          6.84s           100%    exact                                    [0m │[0m
-│ [0m[32m█ [0m[2mon-cpu                           cpu.oncpu_time  5.64s           82.5%   exact     0      [0m[36m~low det[0m                 │[0m
-│ [0m[2m    ↳ most-sampled leaf `sqlite3+0x90183`: 297 of 5685 samples: the samples are spread, no one function dominates   [0m │[0m
-│ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   774ms           11.3%   exact     514    [0m[33m3 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m │[0m
-│ [0m[34m▓ [0m[2mblocked: uninterruptible         sched.offcpu    348ms           5.10%   exact     974    [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
-│ [0m[2m    ↳ 68 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <…[0m │[0m
-│ [0m[2m  residue: the whole less the rows                 76.3ms          1.12%   exact     time no row accounts for       [0m │[0m
+│ [0m[2m  whole: the run's window                          5.11s           100%    exact                                    [0m │[0m
+│ [0m[32m█ [0m[2mon-cpu                           cpu.oncpu_time  4.63s           90.8%   exact     0      [0m[36m~low det[0m                 │[0m
+│ [0m[2m    ↳ most-sampled leaf `sqlite3+0x90183`: 241 of 4653 samples: the samples are spread, no one function dominates   [0m │[0m
+│ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   14.9ms          0.29%   exact     368    [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[34m▓ [0m[2mblocked: uninterruptible         sched.offcpu    410ms           8.03%   exact     1010   [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[2m    ↳ 73 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <…[0m │[0m
+│ [0m[2m  residue: the whole less the rows                 45.9ms          0.90%   exact     time no row accounts for       [0m │[0m
 │                                                                                                                      │[0m
 │ [0m[2mNo decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread[0m    │[0m
 │ [0m[2m  over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn[0m │[0m
 │ [0m[2m  latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.[0m                              │[0m
 │ [0m[2mTrust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it[0m  │[0m
-│ [0m[2m  gives up (2); 3 rounds of reads came late: nothing is missing, but the series is not spaced as asked.[0m              │[0m
+│ [0m[2m  gives up (2).[0m                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

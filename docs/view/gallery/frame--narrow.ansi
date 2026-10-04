@@ -1,14 +1,14 @@
-[0m[1momn top[0m │ fixture http-server │ 3.24s        [0m[35mview: snapshot[0m [0m
+[0m[1momn top[0m │ fixture http-server │ 2.85s        [0m[35mview: snapshot[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatma[0m
- [0m[1mpython3[0m  pid 1493220 · 4 threads · 3.23s · [0m[35momn costs ≥24.3%[0m
+ [0m[1mpython3[0m  pid 2618476 · 4 threads · 2.84s · [0m[35momn costs ≥19.9%[0m
 [0m[2m────────────────────────────────────────────────────────────[0m
- [0m[1;7mCPU     [0m[34m▆█▇▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆[0m   [0m[1;34m0.962 cores [0m   avg 0.981[0m
- [0m[1mMemory  [0m[34m▆▆██▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇[0m    [0m[1;34m25.1MiB     [0m   +2.05MiB/[0m
+ [0m[1;7mCPU     [0m[34m▇█▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▆[0m   [0m[1;34m0.890 cores [0m   avg 0.982[0m
+ [0m[1mMemory  [0m[34m▅▅██████████████████████[0m   [0m[1;34m25.2MiB     [0m   +3.16MiB/[0m
  [0m[1;2mDisk    [0m                           [0m[2mno block request of the [0m
- [0m[1mNetwork [0m[34m▁▆▅█▅▇▇▄▅▇▆▃▇▇▆▆▄▇▅▆▅▇▄▂[0m   [0m[1;34m↓ 558B/s    [0m   ↑ 8.76MiB[0m
+ [0m[1mNetwork [0m[34m▁█▇▇▃▆▇▇▇█▇▇▇▇▄▅▇█▇▇▇█▇▂[0m   [0m[1;34m↓ 635B/s    [0m   ↑ 9.97MiB[0m
  [0m[1;2mGPU     [0m                           [0m[2mno kernel launched   VRA[0m
- [0m[1mEnergy  [0m[34m▅▇▆▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇████[0m   [0m[1;34m143 W       [0m   avg 115 W[0m
- [0m[1mTime    [0m[32m█[0m[37m░░░░░░░░░░░░░░░░░░░░░░░[0m   [0m[37msleep 96.7%[0m   [0m[32mon cpu 2.4[0m
+ [0m[1mEnergy  [0m[34m▇█▇▇▇▇▇▇▇▇▇▇▇████▇▇▇▇▇▇▇[0m   [0m[1;34m49.6 W      [0m   avg 53.5 [0m
+ [0m[1mTime    [0m[32m█[0m[37m░░░░░░░░░░░░░░░░░░░░░░░[0m   [0m[37msleep 96.7%[0m   [0m[32mon cpu 2.2[0m
 [0m[2m────────────────────────────────────────────────────────────[0m
 [0m[1m▶ suspect: [0m[1;37msleep (blocked: sleeping)  96.7%[0m                 [0m
                                                             [0m

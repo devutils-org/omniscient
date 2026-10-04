@@ -102,7 +102,7 @@
     "cpu.profile": 0,
     "cpu.util@system": 0,
     "gpu.engine_busy@system": 1000000000,
-    "gpu.kernel": 289,
+    "gpu.kernel": 276,
     "gpu.mem": 0,
     "gpu.mem@system": 0,
     "io.bytes@system": 0,

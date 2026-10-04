@@ -1,36 +1,36 @@
-[0m[1momn top[0m │ fixture workload-lanes │ 2.24s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥11.5%[0m[35m │ target 69.5% cpu[0m [0m
+[0m[1momn top[0m │ fixture workload-lanes │ 2.24s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥9.70%[0m[35m │ target 73.8% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes [0m[1;7m 8 wake [0m 9 flows  0 process                      [0m
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐[0m
-│[0m[33m26 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m371 wakeups of 26 threads -- from a task 87.9%, hardirq 12.1%, in 2.24s[0m                    │[0m
+│[0m[33m26 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m353 wakeups of 27 threads -- from a task 87.8%, hardirq 12.2%, in 2.24s[0m                    │[0m
 │                                                                                                                      │[0m
 │[0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m│[0m
-│[0m[1;7mlane-gpu 1530060 [0m[2m    78  cuda-Ev…  40%[0m  lane-a 1529973   [0m[2m     6  lane-c    83%[0m  [0m[2mnv_mem_pool_… 275    19  cuda-Ev… 100%[0m│[0m
-│cuda-Evt… 1530068[0m[2m    78  lane-gpu  40%[0m  lane-gpu 1530125 [0m[2m     5  hardirq   80%[0m  [0m[2mnvidia-modes… 309    17  lane-gpu  65%[0m│[0m
-│omn-cupt… 1530063[0m[2m    24  hardirq   50%[0m  cuda0000… 1530061[0m[2m     3  lane-gpu  67%[0m  [0m[2momn 1529940           5  lane-gpu 100%[0m│[0m
-│lane-gpu 1530062 [0m[2m    23  omn-cup…  52%[0m  lane-gpu 1530067 [0m[2m     2  lanes-m…  50%[0m  [0m[2mUVM GPU1 … 101403     4  cuda-Ev… 100%[0m│[0m
-│lanes-ma… 1529959[0m[2m    19  lane-gpu  37%[0m  lane-gpu 1530064 [0m[2m     1  lanes-m… 100%[0m  [0m[2mUVM global q… 311     2  cuda-Ev… 100%[0m│[0m
-│lane-b 1529974   [0m[2m     9  lane-a    67%[0m  [0m[2mkworker/… 1492143    33  cuda-Ev… 100%[0m  [0m[2mUVM Tools Ev… 313     2  cuda-Ev… 100%[0m│[0m
-│lane-c 1529975   [0m[2m     7  lane-b    86%[0m  [0m[2mghostty 1980         26  lane-gpu 100%[0m  [0m[2mtailscaled 1059       2  lanes-m…  50%[0m│[0m
-│[0m[2;3mthreads 1-21 of 26, ↑/↓ to move; 14 dimmed: outside the target, woken by it[0m                                           │[0m
+│[0m[1;7mcuda-Evt… 2622151[0m[2m    65  lane-gpu  48%[0m  lane-c 2621958   [0m[2m     8  lane-b    88%[0m  [0m[2mnv_mem_pool_… 275    22  lane-gpu 100%[0m│[0m
+│lane-gpu 2622145 [0m[2m    63  cuda-Ev…  49%[0m  lane-a 2621956   [0m[2m     6  lane-c    83%[0m  [0m[2momn 2621812           5  lane-gpu  80%[0m│[0m
+│lane-gpu 2622147 [0m[2m    26  omn-cup…  46%[0m  lane-gpu 2622152 [0m[2m     5  hardirq   80%[0m  [0m[2mUVM GPU1 … 101403     4  lane-gpu 100%[0m│[0m
+│omn-cupt… 2622148[0m[2m    25  lane-gpu  48%[0m  cuda0000… 2622146[0m[2m     3  lane-gpu  67%[0m  [0m[2mUVM global q… 311     2  lane-gpu 100%[0m│[0m
+│lanes-ma… 2621955[0m[2m    21  lane-gpu  33%[0m  lane-gpu 2622149 [0m[2m     2  lanes-m…  50%[0m  [0m[2mUVM Tools Ev… 313     2  lane-gpu 100%[0m│[0m
+│lane-gpu 2622150 [0m[2m    19  nv_mem_…  37%[0m  [0m[2mkworker/… 2620836    34  lane-gpu 100%[0m  [0m[2mUVM GPU1 … 101404     2  lane-gpu 100%[0m│[0m
+│lane-b 2621957   [0m[2m     8  lane-a    88%[0m  [0m[2mnvidia-modes… 309    24  lane-gpu  50%[0m  [0m[2mksoftirqd/0 15        1  lane-gpu 100%[0m│[0m
+│[0m[2;3mthreads 1-21 of 27, ↑/↓ to move; 15 dimmed: outside the target, woken by it[0m                                           │[0m
 │                                                                                                                      │[0m
-│[0m[1;32mlane-gpu 1530060[0m (pid 1529959)[0m[2m was woken 78 times, 34.77/s[0m                                                            │[0m
+│[0m[1;32mcuda-EvtHandlr 2622151[0m (pid 2621955)[0m[2m was woken 65 times, 28.98/s[0m                                                      │[0m
 │[0m[2;4m<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         [0m│[0m
-│[0m[2m├─ [0m[1mcuda-EvtHandlr 1530068[0m                            [0m[2m    31   40%   60.6µs   40.1µs    399µs[0m  [0m[2;32m                 ▄▁▁▁▁▁ [0m│[0m
-│[0m[2m│  ├─ [0m[1mlane-gpu 1530060[0m[2m  ↺ back on the chain[0m          [0m[2m    16   21%    185µs    174µs   46.4ms[0m  [0m[2;32m                 ▃      [0m│[0m
-│[0m[2m│  └─ [0m[36mhardirq[0m[2m  a device[0m                              [0m[2m    15   19%   16.0ms       --       --[0m  [0m[2;32m                 ▁▁▁▁▁▁ [0m│[0m
-│[0m[2m├─ [0momn 1529940                                       [0m[2m    24   31%   14.2µs   20.5ms   20.7ms[0m  [0m[2;32m                ▅       [0m│[0m
-│[0m[2m│  └─ [0m[1mlane-gpu 1530060[0m[2m  ↺ back on the chain[0m          [0m[2m    24   31%   1.41ms   1.41ms   17.4ms[0m  [0m[2;32m                ▅       [0m│[0m
-│[0m[2m├─ [0mghostty 1980[0m[2m  outside the target: stops x1[0m        [0m[2m    19   24%   46.7µs   52.0µs   6.05ms[0m  [0m[2;32m                ▄       [0m│[0m
-│[0m[2m│  └─ [0m[1mlane-gpu 1530060[0m[2m  ↺ back on the chain[0m          [0m[2m    18   23%    285µs    285µs   8.21ms[0m  [0m[2;32m                ▄       [0m│[0m
-│[0m[2m   ... 3 smaller links not drawn (4 wakeups)[0m                                                                          │[0m
+│[0m[2m├─ [0m[1mlane-gpu 2622145[0m                                  [0m[2m    31   48%    154µs    154µs   29.8ms[0m  [0m[2;32m                ▁▇▁▂▁▂▁ [0m│[0m
+│[0m[2m│  ├─ [0m[1mcuda-EvtHandlr 2622151[0m[2m  ↺ back on the chain[0m    [0m[2m    28   43%   16.6µs   13.6µs   34.2µs[0m  [0m[2;32m                 ▇▁▂▁▂▁ [0m│[0m
+│[0m[2m│  ├─ [0momn 2621812                                    [0m[2m     1    2%    654µs    695µs    695µs[0m  [0m[2;32m                ▁       [0m│[0m
+│[0m[2m├─ [0m[36mhardirq[0m[2m  a device[0m                                 [0m[2m    23   35%   8.39ms       --       --[0m  [0m[2;32m                 ▂▁▃▂▂▂ [0m│[0m
+│[0m[2m├─ [0m[1mlane-gpu 2622147[0m                                  [0m[2m    10   15%   14.6ms   41.1µs    202µs[0m  [0m[2;32m                  ▁▁▁▁▁ [0m│[0m
+│[0m[2m│  ├─ [0m[1momn-cupti-flush 2622148[0m                        [0m[2m     9   14%   50.1ms   22.6µs   24.3µs[0m  [0m[2;32m                  ▁▁▁▁▁ [0m│[0m
+│[0m[2m│  │  └─ [0m[36mhardirq[0m[2m  a device[0m                           [0m[2m     9   14%   50.1ms       --       --[0m  [0m[2;32m                  ▁▁▁▁▁ [0m│[0m
+│[0m[2m   ... 8 smaller links not drawn (5 wakeups)[0m                                                                          │[0m
 │                                                                                                                      │[0m
 │[0m[2;4mwoken at      held   the longest chains, link by link: each waker and its hold                                        [0m│[0m
-│[0m[2m+1.60s   [0m[1;2m   46.5ms[0m [0m[2m  <- [0mcuda-EvtHandlr 1530068[0m[2;32m 49.2µs[0m[2m  <- [0mlane-gpu 1530060[0m[2;32m 46.4ms[0m[2m ↺[0m                                   │[0m
-│[0m[2m+1.66s   [0m[1;2m   32.2ms[0m [0m[2m  <- [0mcuda-EvtHandlr 1530068[0m[2;32m 42.7µs[0m[2m  <- [0mlane-gpu 1530060[0m[2;32m 32.1ms[0m[2m ↺[0m                                   │[0m
-│[0m[2m+1.53s   [0m[1;2m   22.1ms[0m [0m[2m  <- [0momn 1529940[0m[2;32m 20.7ms[0m[2m  <- [0mlane-gpu 1530060[0m[2;32m 1.41ms[0m[2m ↺  x21[0m                                         │[0m
-│[0m[2m+1.55s   [0m[1;2m   17.7ms[0m [0m[2m  <- [0momn 1529940[0m[2;32m 329µs[0m[2m  <- [0mlane-gpu 1530060[0m[2;32m 17.4ms[0m[2m ↺[0m                                               │[0m
+│[0m[2m+1.58s   [0m[1;2m   41.1ms[0m [0m[2m  <- [0mlane-gpu 2622145[0m[2;32m 25.3ms[0m[2m  <- [0momn 2621812[0m[2;32m 695µs[0m[2m  <- [0mlane-gpu 2622145[0m[2;32m 15.2ms[0m[2m ↺[0m                   │[0m
+│[0m[2m+1.64s   [0m[1;2m   29.8ms[0m [0m[2m  <- [0mlane-gpu 2622145[0m[2;32m 29.8ms[0m[2m  <- [0mcuda-EvtHandlr 2622151[0m[2;32m 12.1µs[0m[2m ↺[0m                                   │[0m
+│[0m[2m+1.61s   [0m[1;2m   9.83ms[0m [0m[2m  <- [0mlane-gpu 2622145[0m[2;32m 9.82ms[0m[2m  <- [0mcuda-EvtHandlr 2622151[0m[2;32m 13.4µs[0m[2m ↺[0m                                   │[0m
+│[0m[2m+1.60s   [0m[1;2m   9.42ms[0m [0m[2m  <- [0mlane-gpu 2622145[0m[2;32m 9.41ms[0m[2m  <- [0mcuda-EvtHandlr 2622151[0m[2;32m 13.0µs[0m[2m ↺[0m                                   │[0m
 │                                                                                                                      │[0m
-│[0m[1m-> it woke in turn: [0mcuda-EvtHandlr 1530068[0m[2m x31[0m, ghostty 1980[0m[2m x26[0m, nvidia-modeset/ 309[0m[2m x11[0m, lanes-main 1529959[0m[2m x7, and [0m│[0m
+│[0m[1m-> it woke in turn: [0mlane-gpu 2622145[0m[2m x31[0m, lane-gpu 2622147[0m[2m x10[0m                                                        │[0m
 │[0m[1;2mquiet[0m[2m: the woken thread's time with no sign of life in the run (no wakeup received or issued) before this one -- an[0m   │[0m
 │[0m[2mupper bound: it was blocked no longer than this. [0m[1;2mhold[0m[2m: the waker's time from its own wakeup to the one it issued --[0m   │[0m
 │[0m[2mhow long the chain sat with it. A chain stops at an interrupt, at a thread already on it, or at a waker whose own[0m     │[0m

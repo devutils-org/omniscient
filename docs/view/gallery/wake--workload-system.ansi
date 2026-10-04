@@ -1,20 +1,20 @@
-[0m[1momn top[0m │ fixture workload-system │ 2.01s                         [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥14.2%[0m[35m │ target 90.5% cpu[0m [0m
+[0m[1momn top[0m │ fixture workload-system │ 2.00s                         [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥14.6%[0m[35m │ target 92.6% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes [0m[1;7m 8 wake [0m 9 flows  0 process                      [0m
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐[0m
-│[0m[33m21 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m147 wakeups of 10 threads -- from a task 14.3%, hardirq 4.08%, softirq 81.6%, in 2.01s[0m     │[0m
+│[0m[33m23 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m151 wakeups of 10 threads -- from a task 14.6%, hardirq 4.64%, softirq 80.8%, in 2.00s[0m     │[0m
 │                                                                                                                      │[0m
 │[0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m│[0m
-│[0m[1;7mThread-1… 1529839[0m[2m   119  softirq  100%[0m  [0m[2mkworker/8:1H 459      1  system-… 100%[0m  [0m[2mgmain 1128318         1  system-… 100%[0m│[0m
-│system-m… 1529755[0m[2m    19  hardirq   32%[0m  [0m[2mkworker/21:1H 463     1  system-… 100%[0m  [0m[2momn 1529007           1  system-… 100%[0m│[0m
-│[0m[2mtailscaled 1026       2  system-…  50%[0m  [0m[2mtailscaled 966        1  system-… 100%[0m                                        │[0m
-│[0m[2mmigration/3 38        1  system-… 100%[0m  [0m[2mtailscaled 1266       1  system-… 100%[0m                                        │[0m
+│[0m[1;7mThread-1… 2621802[0m[2m   122  softirq  100%[0m  [0m[2mmigration/13 100      1  system-… 100%[0m  [0m[2mgmain 1128318         1  system-… 100%[0m│[0m
+│system-m… 2621722[0m[2m    19  hardirq   37%[0m  [0m[2mkworker/0:1H 446      1  system-… 100%[0m  [0m[2momn 2621719           1  system-… 100%[0m│[0m
+│[0m[2mtailscaled 3898       2  system-…  50%[0m  [0m[2mkworker/2:1H 447      1  system-… 100%[0m                                        │[0m
+│[0m[2mtailscaled 18352      2  system-…  50%[0m  [0m[2mkworker/14:1H 449     1  system-… 100%[0m                                        │[0m
 │[0m[2;3m8 dimmed: outside the target, woken by it[0m                                                                             │[0m
 │                                                                                                                      │[0m
-│[0m[1;32mThread-1 (drain 1529839[0m (pid 1529755)[0m[2m was woken 119 times, 59.12/s[0m                                                    │[0m
+│[0m[1;32mThread-1 (drain 2621802[0m (pid 2621722)[0m[2m was woken 122 times, 61.01/s[0m                                                    │[0m
 │[0m[2;4m<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         [0m│[0m
-│[0m[2m└─ [0m[36msoftirq[0m[2m  a device, or a loopback send[0m             [0m[2m   119  100%   19.2µs       --       --[0m  [0m[2;32m                █       [0m│[0m
+│[0m[2m└─ [0m[36msoftirq[0m[2m  a device, or a loopback send[0m             [0m[2m   122  100%   18.8µs       --       --[0m  [0m[2;32m                █       [0m│[0m
 │                                                                                                                      │[0m
-│[0m[1m-> it woke in turn: [0msystem-main 1529755[0m[2m x4[0m                                                                            │[0m
+│[0m[1m-> it woke in turn: [0msystem-main 2621722[0m[2m x5[0m                                                                            │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

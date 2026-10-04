@@ -1,40 +1,40 @@
-omn top │ fixture workload-flame │ 2.07s                          view: snapshot │ collectors ≥14.9% │ target 62.4% cpu
+omn top │ fixture workload-flame │ 2.05s                          view: snapshot │ collectors ≥13.2% │ target 61.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ heatmap -- sched.runqlat latency over time ──────────────────────────────────────────────────────────────────────────┐
-│ io.latency 0   sched.runqlat 42 in 32 rows   net.socket 0   gpu.kernel 0                                             │
-│42 run queue waits, 0ns to 129µs, p50 0ns, p99 129µs ~low det degraded                                                │
-│2 regimes  ~0ns 98% (41) in 13 bursts, all through  │  ~129µs 2.4% (1) once, at 10.9ms                                │
+│ io.latency 0   sched.runqlat 53 in 42 rows   net.socket 0   gpu.kernel 0                                             │
+│53 run queue waits, 0ns to 41.6µs, p50 6.20µs, p99 41.6µs ~low det degraded                                           │
+│one regime  ~6.20µs 100% (53) in 19 bursts, all through                                                               │
 │                                                                                                                      │
-│  count ▃▆███▄▂▂▁                ▁▁▁▁▁                ▂▅▅▅▄▃▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▂▂▁   ▁▂▂▂▂▂▁▁▁▂▁▁▁▁▁▁▁▁▃▇  the whole run  │
-│       │░░░░░░                                                                                         ▏             1│
-│       │  │                                                                                                           │
-│  100µs┤· │ ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
-│       │  │                                                                                                           │
-│       │  │                                                                                                           │
-│       │  │                                                                                                           │
-│       │  │                                                                                                           │
-│       │  │                                                                                                           │
-│       │  │                                                                                                           │
-│       │  │                                                                                                           │
-│       │  │                                                                                                           │
-│       │  │                                                                                        ░▓  ▏             1│
-│       │  │                                                                                                           │
-│       │  │                                                                                                           │
-│       │▒▒▒▒▒░                                         ▒▒▒░                                            █             3│
-│       │  │                      ░▒▒▒░                                                                 ▏             1│
-│       │ ░▒▒▒░                                                                                         ▏             1│
-│       │░░░░░░                                                                                         ▏             1│
-│       │░▒▒▒▒▒▒▒░                                                                ░▒▒▒▒░                ██            6│
-│       │  │                                                                                                           │
-│   10µs┤░▒▒▒▒░  ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  █             2│
-│       │ ░▒▒▒▒                                                                                         █             2│
-│      0┤░▒▓▓▓▒  ·   ·   ·   ·   ·   ·   ·   ·   ·   · ▒███▓▓░░░░░░░░▒░░░▒▒▒▒▒░  ·░░░░░▒░░░▒▒▒▒░░░░░▒█  █████████    24│
-│       └┬─▲───────────────────┬─────────────────────┬──────────────────────┬─────────────────────┬───                 │
-│        0                   500ms                 1.00s                  1.50s                 2.00s                  │
+│  count ▃▇█▄ ▁▂▂▃▃       ▁▁▁▁▁ ▁▁▁▂▂▂▂▁▁▁▁▁▂▂▂▁       ▁▄▄▄▄▅   ▁▁▁▁▁▁▂▂▂▂▁▁▂▂▂▁▁▁▁▁▂▂▂▂▁▁▁▁▁▁▁▁▁▁▁▁▁▅  the whole run  │
+│       │       │                                                                                                      │
+│       │       │                                                                                                      │
+│       │       │                                                                                                      │
+│ 39.6µs┤·   ·░░░░░  ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  ▏             1│
+│       │       │                                                                                                      │
+│       │       │               ░░░░░░                                                                  ▏             1│
+│       │     ░░░░░                                                                                     ▏             1│
+│       │       │                                                                                                      │
+│       │       │                                                                                                      │
+│ 18.6µs┤·   ·  │·   ·   ·   ·   ·   ·   · ░░░░░ ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  ▏             1│
+│       │       │                                                                   ░▒▒░                ▏             1│
+│       │       │                                                                                                      │
+│       │       │                                                          ░▒▒▒                         ▏             1│
+│       │░▒▒▒ ░▒▒▒▒               ░░░▒▒░░░░                                                             ██            6│
+│       │▒▒▒▒   │                                                                                       █             2│
+│ 8.72µs┤·   ·  │·   ·   ·░░░░░  · ░▒▒▒░ ·   ·   ·   ·   ·   ·   ·   ░░░░░░  ·   ·  ░▒▒░ ·   ·   ·   ·  █             4│
+│       │▒▒▒░   │▒▒                                    ░▒▒▒▒▒                                           ██            5│
+│       │░▒▒░   │                                                                                       ▏             1│
+│       │       │                          ░░░░░        ░░░░░                       ░▒▒░                █             3│
+│       │       │                                                                                                      │
+│       │       │                                                                                                      │
+│ 4.10µs┤·   ·  │·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
+│      0┤▒██▓·  │·   ·   ·   ·   ·   ·   ·   ·   ·   · ░▓▓▓▓▓·  ░░░░░░░░░░▒░░░▒░░░░░░░░░░░░░░░░░░░░░░█  █████████    26│
+│       └┬──────▲──────────────┬──────────────────────┬──────────────────────┬─────────────────────┬──                 │
+│        0                   500ms                  1.00s                  1.50s                 2.00s                 │
 │   lost nothing lost                                                                                                  │
 │                                                                                                                      │
-│▲ 44.5ms to 66.8ms   4 run queue waits   p50 10.2µs   p99 129µs   max 129µs                                           │
-│  its slowest 129µs: python3 tid 1524065 (alone in a 110ms kernel window)                                             │
-│per cell ░<1 ▓1 █2   rows 5.5/octave, columns 22.3ms each, kernel rows spread over their ~99.0ms window               │
+│▲ 154ms to 176ms   1 run queue wait   p50 11.9µs   p99 41.6µs   max 41.6µs                                            │
+│  its slowest 41.6µs: hot tid 2620697 (alone in a 94.9ms kernel window)                                               │
+│per cell ░<1 ▒1 ▓2 █3   rows 5.5/octave, columns 22.0ms each, kernel rows spread over their ~94.9ms window            │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it

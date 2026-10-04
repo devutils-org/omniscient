@@ -1,4 +1,4 @@
-[0m[1momn top[0m │ fixture cpython-hot │ 5.68s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥11.2%[0m[35m │ target 85.1% cpu[0m [0m
+[0m[1momn top[0m │ fixture cpython-hot │ 3.99s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥9.54%[0m[35m │ target 93.1% cpu[0m [0m
  1 system  2 flame  3 ledger [0m[1;7m 4 request [0m 5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────┐[0m
 │[0m[31m┌ net.request refused ───────────────────────────────────────────────────────────────────────────────────────────────┐[0m│[0m

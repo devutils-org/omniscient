@@ -1,23 +1,23 @@
-[0m[1momn top[0m │ fixture many-requests │ 15.8s                           [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥6.10%[0m[35m │ target 0.50% cpu[0m [0m
+[0m[1momn top[0m │ fixture many-requests │ 15.8s                           [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥5.21%[0m[35m │ target 0.35% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  9 flows  0 process                      [0m
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐[0m
-│[0m[1msched.switches [0m[2m1.84k[0m [0m[33m336 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.wakeup [0m[2m1.76k[0m [0m[33m336 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.offcpu [0m[2m1.28k[0m [0m[33m3[0m  │[0m
-│[0m[33mlate[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1mgpu.kernel [0m0 [0m[33m127 late[0m [0m[33mdegraded[0m                                                                │[0m
-│[0m[2m191ms a cell[0m           [0m[2m╷0ns[0m                      [0m[2m╷5.00s[0m                    [0m[2m╷10.0s[0m                          [0m[2mof the span[0m│[0m
-│[0m[1;7mserver         1504111[0m[2m│[0m[2;32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m[2;7;32m▁[0m[2;32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m[2m│awake 0.55%[0m│[0m
-│server         1504266[0m[2m│[0m[2;32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m[2;7;32m▁[0m[2;32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m[2m│awake 0.76%[0m│[0m
-│server         1504265[0m[2m│[0m[2;32m▁▁▁▁▁[0m[2;34m─[0m[2;32m▁▁▁▁▁▁▁▁▁▁[0m[2;34m─[0m[2;32m▁▁▁▁▁▁▁▁▁▁[0m[2;34m─[0m[2;32m▁▁▁▁▁▁▁▁▁▁[0m[2;7;34m─[0m[2;32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m[2;34m─[0m[2;32m▁▁▁▁▁▁▁▁▁▁[0m[2;34m─[0m[2;32m▁▁▁▁▁▁▁[0m[2;34m─[0m[2m│awake 0.10%[0m│[0m
-│[0m[2m─────────────────────────────────────────────────────────────[0m[2;32m▲ 7.27s[0m[2m──────────────────────────────────────────────────[0m│[0m
-│[0m[1mserver 1504111 (pid 1504111) at 7.27s: [0m[2;34mblocked, sleeping[0m[2m 54.6ms, 7.24s → 7.29s, left cpu 7[0m                            │[0m
+│[0m[1msched.switches [0m[2m1.76k[0m [0m[33m168 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.wakeup [0m[2m1.75k[0m [0m[33m169 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.offcpu [0m[2m1.36k[0m    │[0m
+│[0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1mgpu.kernel [0m0 [0m[33m118 late[0m [0m[33mdegraded[0m                                                                     │[0m
+│[0m[2m190ms a cell[0m           [0m[2m╷0ns[0m                      [0m[2m╷5.00s[0m                    [0m[2m╷10.0s[0m                          [0m[2mof the span[0m│[0m
+│[0m[1;7mserver         2619831[0m[2m│[0m[2;32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m[2;7;32m▁[0m[2;32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m[2m│awake 0.29%[0m│[0m
+│server         2619833[0m[2m│[0m[2;32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m[2;7;32m▁[0m[2;32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m[2m│awake 0.31%[0m│[0m
+│server         2619832[0m[2m│[0m[2;32m▁▁▁▁[0m[2;34m─[0m[2;32m▁▁▁▁▁▁▁▁▁▁[0m[2;34m─[0m[2;32m▁▁[0m[2;7;32m▁[0m[2;32m▁▁▁▁▁▁[0m[2;34m─[0m[2;32m▁▁▁▁▁▁▁▁▁▁[0m[2;34m─[0m[2;32m▁▁▁▁▁▁▁▁▁[0m[2;34m─[0m[2;32m▁▁▁▁▁▁▁▁▁▁[0m[2;34m─[0m[2;32m▁▁▁▁▁▁▁▁▁▁[0m[2;34m─[0m[2;32m▁▁▁▁▁▁▁▁▁[0m[2;34m─[0m[2;32m▁▁▁▁[0m[2m│awake 0.06%[0m│[0m
+│[0m[2m─────────────────────────────────────────[0m[2;32m▲ 3.56s[0m[2m──────────────────────────────────────────────────────────────────────[0m│[0m
+│[0m[1mserver 2619831 (pid 2619831) at 3.56s: [0m[2;34mblocked, sleeping[0m[2m 50.6ms, 3.54s → 3.59s, left cpu 4[0m                            │[0m
 │  woken by [0m[1man interrupt (softirq)[0m[2m; state, stack: its window's sched.offcpu row nearest in size[0m                        │[0m
 │[0m[2m  in [0m[2;34mlibc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start[0m                                                        │[0m
-│[0m[2m  762 switch-outs and 707 wakeups seen; awake 0.55% of the run[0m                                                        │[0m
-│[0m[2m  meanwhile [0m[34mblocked: [0mserver 1504266, server 1504265                                                                   │[0m
-│[0m[2m  where it was off a cpu over the run, 15.6s in all (sched.offcpu, by state and stack)[0m [0m[33m3 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m[2m:[0m      │[0m
-│  [0m[2m   15.3s 97.7%[0m [0m[2;34msleeping  [0m[2m  471 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start[0m                    │[0m
-│  [0m[2m   197ms 1.26%[0m [0m[2;33muninterr. [0m[2m  150 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start[0m                    │[0m
-│  [0m[2m   157ms 1.01%[0m [0m[2;34msleeping  [0m[2m   75 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start[0m                    │[0m
-│  [0m[2m  5.91ms 0.04%[0m [0m[2;33muninterr. [0m[2m    7 blocks  fsync ← libc.so.6 ← __libc_start_main ← _start[0m                               │[0m
+│[0m[2m  706 switch-outs and 690 wakeups seen; awake 0.29% of the run[0m                                                        │[0m
+│[0m[2m  meanwhile [0m[34mblocked: [0mserver 2619833, server 2619832                                                                   │[0m
+│[0m[2m  where it was off a cpu over the run, 15.7s in all (sched.offcpu, by state and stack)[0m [0m[36m~low det[0m [0m[33mdegraded[0m[2m:[0m             │[0m
+│  [0m[2m   15.2s 96.7%[0m [0m[2;34msleeping  [0m[2m  455 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start[0m                    │[0m
+│  [0m[2m   357ms 2.27%[0m [0m[2;33muninterr. [0m[2m  150 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start[0m                    │[0m
+│  [0m[2m   162ms 1.03%[0m [0m[2;34msleeping  [0m[2m   75 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start[0m                    │[0m
+│  [0m[2m  5.95ms 0.04%[0m [0m[2;33muninterr. [0m[2m    7 blocks  fsync ← libc.so.6 ← __libc_start_main ← _start[0m                               │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

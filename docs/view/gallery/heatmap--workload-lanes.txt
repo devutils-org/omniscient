@@ -1,40 +1,40 @@
-omn top │ fixture workload-lanes │ 2.24s                          view: snapshot │ collectors ≥11.5% │ target 69.5% cpu
+omn top │ fixture workload-lanes │ 2.24s                          view: snapshot │ collectors ≥9.70% │ target 73.8% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ heatmap -- gpu.kernel latency over time ─────────────────────────────────────────────────────────────────────────────┐
-│ io.latency 0   sched.runqlat 652 in 232 rows   net.socket 15 in 12 rows   gpu.kernel 12                              │
-│12 GPU operations, 31.2ms to 48.2ms, p50 32.4ms, p99 48.2ms 26 late ±289ns                                            │
-│one regime  ~32.4ms 100% (12) 1.68s to 2.10s                                                                          │
+│ io.latency 0   sched.runqlat 350 in 117 rows   net.socket 15 in 11 rows   gpu.kernel 12                              │
+│12 GPU operations, 31.3ms to 49.2ms, p50 35.6ms, p99 49.2ms 9 late ±276ns                                             │
+│one regime  ~35.6ms 100% (12) 1.65s to 2.07s                                                                          │
 │                                                                                                                      │
-│  count                                                                      █ █ █ █ █ ███ ███ █       the whole run  │
-│       │                                                                       │                                      │
-│       │                                                                       │                                      │
-│       │                                                                       │                                      │
-│       │                                                                       │                                      │
-│       │                                                                       │                                      │
-│       │                                                                       █                       ██            1│
-│       │                                                                       │ █ █ █                 █████         3│
-│       │                                                                     █ │                       ██            1│
-│       │                                                                       │                                      │
-│       │                                                                       │                                      │
-│ 34.6ms┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  │·   ·  █·   ·   ·   ·  ██            1│
-│       │                                                                       │                                      │
-│       │                                                                       │        ██ ███ █       █████████     6│
-│       │                                                                       │                                      │
-│       │                                                                       │                                      │
-│       │                                                                       │                                      │
-│       │                                                                       │                                      │
-│       │                                                                       │                                      │
-│       │                                                                       │                                      │
-│       │                                                                       │                                      │
-│       │                                                                       │                                      │
-│       │                                                                       │                                      │
-│ 16.8ms┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  │·   ·   ·   ·   ·   ·                 │
-│       └┬───────────────────┬────────────────────┬────────────────────┬────────▲──────────┬──────────                 │
+│  count                                                                     █ █ ██ █ ██ ██ ███         the whole run  │
+│       │                                                                      │                                       │
+│       │                                                                      │                                       │
+│       │                                                                      │                                       │
+│       │                                                                      │                                       │
+│       │                                                                      │                                       │
+│       │                                                                      █                        ██            1│
+│       │                                                                      │                                       │
+│       │                                                                    █ │                        ██            1│
+│       │                                                                      │ █                      ██            1│
+│       │                                                                      │  █                     ██            1│
+│ 34.6ms┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   · │ ·  █·██ ██ █·   ·   ·  █████████     6│
+│       │                                                                      │                                       │
+│       │                                                                      │             ██         ███           2│
+│       │                                                                      │                                       │
+│       │                                                                      │                                       │
+│       │                                                                      │                                       │
+│       │                                                                      │                                       │
+│       │                                                                      │                                       │
+│       │                                                                      │                                       │
+│       │                                                                      │                                       │
+│       │                                                                      │                                       │
+│       │                                                                      │                                       │
+│ 16.8ms┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   · │ ·   ·   ·   ·   ·   ·                 │
+│       └┬───────────────────┬────────────────────┬────────────────────┬───────▲───────────┬──────────                 │
 │        0                 500ms                1.00s                1.50s               2.00s                         │
-│   lost nothing lost; 26 rounds of reads came late: nothing is missing, the drains were further apart than asked      │
+│   lost nothing lost; 9 rounds of reads came late: nothing is missing, the drains were further apart than asked       │
 │                                                                                                                      │
-│▲ 1.71s to 1.74s   1 GPU operation   p50 48.2ms   p99 48.2ms   max 48.2ms                                             │
-│  its slowest 48.2ms: tid 1529959 spin                                                                                │
+│▲ 1.69s to 1.71s   1 GPU operation   p50 49.2ms   p99 49.2ms   max 49.2ms                                             │
+│  its slowest 49.2ms: tid 2621955 spin                                                                                │
 │per cell █1   rows 11.5/octave, columns 24.1ms each                                                                   │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it

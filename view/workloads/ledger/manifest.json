@@ -27,7 +27,8 @@
     "net.tcp.retransmit": "loopback does not retransmit, and a retransmission cannot be chosen without a lossy link, which needs privilege (netem)",
     "gpu.mem": "the lanes workload uses the device; a footprint on it is a later addition here",
     "gpu.kernel": "the lanes workload launches a known number of kernels",
-    "power.energy": "the machine's energy, which no program sets to a known figure"
+    "power.energy": "the machine's energy, which no program sets to a known figure",
+    "sched.offcpu": "this workload sets no blocked time it knows; the timebar workload's sleep and lock wait are the blocked time held to a manifest"
   },
   "trust": {
     "cpu_s": "exact to a few microseconds on the main thread's cpu clock; the process's on-cpu time is that plus the interpreter's start, the page touching and the copies, a few hundred milliseconds at most",

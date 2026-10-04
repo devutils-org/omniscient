@@ -1,31 +1,31 @@
-omn top │ fixture http-server │ 3.24s                             view: snapshot │ collectors ≥24.3% │ target 90.6% cpu
+omn top │ fixture http-server │ 2.85s                             view: snapshot │ collectors ≥19.9% │ target 90.9% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
-on cpu: 3.21k · hottest own link_path_walk 5.57% │ off cpu: 6.27s · hottest own libc+0xa08f2 50.3%
-┌ off cpu sched.offcpu 6.27s ~low det degraded ────────────────────────────────────────────────────────────────────────┐
+on cpu: 2.83k · hottest own link_path_walk 5.51% │ off cpu: 5.50s · hottest own libc+0xa08f2 50.1%
+┌ off cpu sched.offcpu 5.50s ~low det degraded ────────────────────────────────────────────────────────────────────────┐
 │width ∝ time off cpu · heaviest left                                                                   26 frames deep │
-│▏all 6.27s                                                                                                            │
-│▏[python3 1493220] › ⋯13⋯ › libc+0xa08f2 49.9%             ▏[python3 1493224] › ⋯10⋯ › libpython3.14+0x1b9172 49.7%   │
-│                                                           ▏libpython3.14+0x65c00 › ⋯12⋯ › __recv 47.5%            ▏__│
+│▏all 5.50s                                                                                                            │
+│▏[python3 2618476] › ⋯13⋯ › libc+0xa08f2 50.0%             ▏[python3 2618477] › ⋯10⋯ › libpython3.14+0x1b9172 49.8%   │
+│                                                           ▏libpython3.14+0x65c00 › ⋯12⋯ › __recv 47.6%            ▏__│
 │                                                                                                                      │
 │heaviest on their own (where it ends, every path summed)                                                              │
-│ 50.3% ████████████ libc+0xa08f2                                                                                      │
-│ 49.7% ████████████ __recv                                                                                            │
-│ 0.03% ▏            __poll                                                                                            │
+│ 50.1% ████████████ libc+0xa08f2                                                                                      │
+│ 49.8% ████████████ __recv                                                                                            │
+│ 0.08% ▏            __poll                                                                                            │
+│ 0.02% ▏            clock_nanosleep                                                                                   │
 │ 0.01% ▏            __read                                                                                            │
 │ 0.00% ▏            libc+0x12071d                                                                                     │
-│ 0.00% ▏            getdents64                                                                                        │
-│ 0.00% ▏            __open_nocancel                                                                                   │
-│ 0.00% ▏            ld-linux-x86-64+0x1071a                                                                           │
-│ 0.00% ▏            libpython3.14+0x5c76c                                                                             │
 │                                                                                                                      │
 │‼ bpf:raw_tp: user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the│
 │  task state                                                                                                          │
-│‼ names came from -- python3.14: its dynamic symbols only: its internal functions are unnamed; ld-linux-x86-64.so.2:  │
-│  its dynamic symbols only: its internal functions are unnamed; libc.so.6: its dynamic symbols only: its internal     │
-│  functions are unnamed; libpython3.14.so.1.0: its dynamic symbols only: its internal functions are unnamed;          │
-│  _socket.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are unnamed;              │
-│  select.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are unnamed                │
+│‼ names came from -- python3.14: its dynamic symbols only: its internal functions are unnamed; libc.so.6: its dynamic │
+│  symbols only: its internal functions are unnamed; libpython3.14.so.1.0: its dynamic symbols only: its internal      │
+│  functions are unnamed; _socket.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are│
+│  unnamed; select.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are unnamed       │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -35,6 +35,6 @@ on cpu: 3.21k · hottest own link_path_walk 5.57% │ off cpu: 6.27s · hottest 
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 off cpu ▸ all
-6.27s · 100% of all · own 0ns · 135 blocks
+5.50s · 100% of all · own 0ns · 135 blocks
 ⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

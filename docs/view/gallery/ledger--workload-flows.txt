@@ -1,40 +1,40 @@
-omn top │ fixture workload-flows │ 1.00s                          view: snapshot │ collectors ≥14.4% │ target 5.80% cpu
+omn top │ fixture workload-flows │ 993ms                          view: snapshot │ collectors ≥16.4% │ target 5.63% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ ledger -- what task 1783958 and 1 more cost over 1.00s of wall-clock ────────────────────────────────────────────────┐
+┌ ledger -- what task 2621407 and 1 more cost over 993ms of wall-clock ────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
-│▸ cpu time        74.4ms on cpu    7.44% of one cpu          ██████▅▅▅▅▅▅▁▁▁▁▁▁▁▁▁▁▁▁    ≥19.3ms  ~low det            │
-│    1783958 flows-…    40.4ms  ███████      54.3%                                                                     │
-│    1784066 python3    34.1ms  █████        45.7%                                                                     │
+│▸ cpu time        73.2ms on cpu    7.37% of one cpu          ██████▅▅▅▅▅▅▅▁▁▁▁▁▁▁▁▁▁▁    ≥13.9ms  ~low det            │
+│    2621407 flows-…    39.0ms  ██████       53.2%                                                                     │
+│    2621408 python3    34.2ms  ██████       46.8%                                                                     │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
-│    own account        76.0ms  with its descendants, as the scheduler counts them                                     │
-│    machine busy        2.05s  ▏            3.71%                                                                     │
-│  blocked time    948ms            0.95 threads                        ▅            █    ≥33.0ms  ~low det degraded x3│
-│    1783958 flows-…     944ms  ████████████ 99.7%                                                                     │
-│    1784066 python3    3.21ms  ▏            0.34%                                                                     │
-│  memory held     14.1MiB peak     +192KiB from 13.9MiB      ▁▁▁▁▁▁▁▁▁▁▁█████████████      371µs                      │
-│  memory faulted  3.95k faults     3.95k/s                   a total only                ≥4.18ms  11 late             │
-│    1784066 python3     2.02k  ██████       51.1%                                                                     │
-│    1783958 flows-…     1.93k  ██████       48.9%                                                                     │
-│  I/O syscalls    445 calls        3.38ms inside them        256ns ▃▃▂▄▅█▂▁▁ 131µs       ≥25.2ms  ~low det degraded x2│
+│    own account        72.9ms  with its descendants, as the scheduler counts them                                     │
+│    machine busy        770ms  █            9.47%                                                                     │
+│  blocked time    942ms            0.95 threads                        ▅            █    ≥39.9ms  ~low det degraded x3│
+│    2621407 flows-…     942ms  ████████████ 99.9%                                                                     │
+│    2621408 python3     761µs  ▏            0.08%                                                                     │
+│  memory held     14.1MiB peak     +192KiB from 13.9MiB      ▁▁▁▁▁▁▁▁▁▁▁▁████████████      624µs                      │
+│  memory faulted  3.95k faults     3.98k/s                   a total only                ≥4.63ms  11 late             │
+│    2621408 python3     2.02k  ██████       51.1%                                                                     │
+│    2621407 flows-…     1.93k  ██████       48.9%                                                                     │
+│  I/O syscalls    445 calls        3.19ms inside them        256ns ▄▂▂▇▂█▂▁▁ 131µs       ≥37.3ms  ~low det degraded x2│
 │    bytes             9.63MiB  read, 9.00MiB written                                                                  │
-│  network         5.00MiB moved    4.00MiB out, 1.00MiB in             █                 ≥30.8ms  ~low det degraded x3│
-│    82 socket calls                                                                                                   │
-│  retransmits     0 sent again     machine-wide              a total only                 ≥132µs  7 late ~low det     │
-│  GPU memory      0B peak          of 718MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁      735µs                      │
-│  GPU time        0ns on GPU       0 kernels and copies      no series kept               ≥110µs  7 late degraded     │
-│  energy          61.7J machine    61.7W on average          ▇▇▇▇▇▇███████▇▇▇▇▇          ≥32.0µs                      │
-│    ≈ the target's      2.29J  an estimate, not a measurement: its share of the machine's busy cpu, 76.0ms of 2.05s   │
+│  network         5.00MiB moved    4.00MiB out, 1.00MiB in              █                ≥33.9ms  ~low det degraded x3│
+│    84 socket calls                                                                                                   │
+│  retransmits     0 sent again     machine-wide              a total only                 ≥166µs  7 late ~low det     │
+│  GPU memory      0B peak          of 675MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁      864µs                      │
+│  GPU time        0ns on GPU       0 kernels and copies      no series kept               ≥121µs  7 late degraded     │
+│  energy          44.2J machine    44.5W on average          ██████▇▇▇▇▇▇▆▆▆▆▆▆          ≥38.6µs                      │
+│    ≈ the target's      4.19J  an estimate, not a measurement: its share of the machine's busy cpu, 72.9ms of 770ms   │
 │                                                                                                                      │
-│  to know all of this: ≥114ms of omn's cpu, ≥150% of what the target spent                                            │
+│  to know all of this: ≥131ms of omn's cpu, ≥180% of what the target spent                                            │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
 │· the source is not reproducible between two runs of the same workload                                                │
-│· to know it: 19.3ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
+│· to know it: 13.9ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
 │run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl       │
 │kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable                 │
 │· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │
-│where it could not be read, of 1783958 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │
-│in microseconds once it was reaped)                                                                                   │
+│where it could not be read, of 2621407 and of every process it started while they ran, its orphans adopted by omn     │
+│included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line

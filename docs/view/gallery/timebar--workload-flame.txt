@@ -1,30 +1,30 @@
-omn top │ fixture workload-flame │ 2.07s                          view: snapshot │ collectors ≥14.9% │ target 62.4% cpu
+omn top │ fixture workload-flame │ 2.05s                          view: snapshot │ collectors ≥13.2% │ target 61.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
 │ the view's reading  one bar per thread, whole: the run's window                                                      │
 │                                                                                                                      │
-│ ▶ first suspect  1524065 flame-main (the program): blocked: sleeping, on a futex 2.01s (97.3% of its wall clock)     │
+│ ▶ first suspect  2620696 flame-main (the program): blocked: sleeping, on a futex 2.01s (98.1% of its wall clock)     │
 │   asleep on a lock another thread held: lock-contended                                                               │
-│   2.01s waiting in futex(2) over 8 wait(s), from `sched.futex`                                                       │
-│   decisive: ahead of the next state (33.4ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
+│   2.01s waiting in futex(2) over 11 wait(s), from `sched.futex`                                                      │
+│   decisive: ahead of the next state (27.7ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
 │                                                                                                                      │
-│ ▸ 1524065 flame-main  ├█▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 97.3% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ ┤    2.07s  ▶ lock 97.3%        │
-│   1524143 warm        ├████████████░░ sleep 29.0% ░░░                                ┤    2.07s  ▶ sleep 29.0%       │
-│   1524067 hot         ├████████ on cpu 48.4% ████████                                ┤    2.07s  ▶ on cpu 48.4%      │
-│                      0 ───────────────────────────┼ 1.03s ───────────────────────────┤ 2.07s                         │
+│ ▸ 2620696 flame-main  ├█▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 98.1% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞┤    2.05s  ▶ lock 98.1%        │
+│   2620698 warm        ├████████████░░ sleep 29.3% ░░░                                ┤    2.05s  ▶ sleep 29.3%       │
+│   2620697 hot         ├████████ on cpu 48.8% ████████                                ┤    2.05s  ▶ on cpu 48.8%      │
+│                      0 ───────────────────────────┼ 1.03s ───────────────────────────┤ 2.05s                         │
 │                        █ on cpu   ▚ run queue   ▞ lock   ░ sleep                                                     │
 │                                                                                                                      │
 │   state                            source          amount          share   ±         reads  trust                    │
-│   whole: the run's window                          2.07s           100%    exact                                     │
-│ █ on-cpu                           cpu.oncpu_time  33.4ms          1.61%   exact     0      ~low det                 │
-│     ↳ most-sampled leaf `PyNumber_Remainder`: 105 of 1342 samples, every thread's: the samples are spread, no one f… │
-│ ▚ runnable                         sched.runqlat   255µs           0.01%   exact     11     ~low det degraded        │
-│ ▞ blocked: sleeping, on a futex    sched.offcpu    2.01s           97.3%   exact     8      ~low det degraded        │
-│     ↳ 2.01s waiting in futex(2) over 8 wait(s), from `sched.futex`                                                   │
+│   whole: the run's window                          2.05s           100%    exact                                     │
+│ █ on-cpu                           cpu.oncpu_time  27.7ms          1.35%   exact     0      ~low det                 │
+│     ↳ most-sampled leaf `__tls_get_addr`: 121 of 1399 samples, every thread's: the samples are spread, no one funct… │
+│ ▚ runnable                         sched.runqlat   50.4µs          0.00%   exact     8      ~low det degraded        │
+│ ▞ blocked: sleeping, on a futex    sched.offcpu    2.01s           98.1%   exact     10     ~low det degraded        │
+│     ↳ 2.01s waiting in futex(2) over 11 wait(s), from `sched.futex`                                                  │
 │     ↳ 50 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- libc.so.6+0xa0800 <- _PySemaphore_Wait <- _PyPark… │
-│   residue: the whole less the rows                 22.8ms          1.10%   exact     time no row accounts for        │
+│   residue: the whole less the rows                 10.2ms          0.50%   exact     time no row accounts for        │
 │                                                                                                                      │
-│ task:1524065 is the program's: its main thread, the one whose id is its process's.                                   │
+│ task:2620696 is the program's: its main thread, the one whose id is its process's.                                   │
 │ No decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread    │
 │   over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn │
 │   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │

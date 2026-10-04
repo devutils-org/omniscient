@@ -1,35 +1,35 @@
-[0m[1momn top[0m │ fixture vertical-requests │ 409ms                       [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥1.19%[0m[35m │ target 4.31% cpu[0m [0m
+[0m[1momn top[0m │ fixture vertical-requests │ 413ms                       [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥0.73%[0m[35m │ target 4.00% cpu[0m [0m
  1 system  2 flame  3 ledger [0m[1;7m 4 request [0m 5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────┐[0m
-│[0m[1m5 requests served by server (pid 1499921)[0m · slowest a001 40.2ms · median 30.1ms[0m[2m · in order of arrival  [0m[33mdegraded x2[0m    │[0m
+│[0m[1m5 requests served by server (pid 2619020)[0m · slowest a001 40.8ms · median 30.3ms[0m[2m · in order of arrival  [0m[33mdegraded x2[0m    │[0m
 │                                                                                                                      │[0m
-│[0m[1m  req      span  its life by state, to one scale: the slowest is 40.2ms             mostly[0m                            │[0m
-│[0m[32m  [0ma001   40.2ms  [0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m  lock/sleep 99.8%                  │[0m
-│[0m[32m  [0ma002   9.35ms  [0m[32m█[0m[34m▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m                                                    disk 90.2% · on cpu 7.47%         │[0m
-│[0m[32m▶ [0m[1;32ma003 [0m[1m  22.3ms  [0m[32m█[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m[34m▄▄▄[0m                               lock/sleep 89.7% · disk 8.30%     │[0m
-│[0m[32m  [0ma004   30.1ms  [0m[36m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░[0m                  net in 99.9%                      │[0m
-│[0m[32m  [0ma005   33.2ms  [0m[32m█[0m[96m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░[0m             net out 99.0%                     │[0m
+│[0m[1m  req      span  its life by state, to one scale: the slowest is 40.8ms             mostly[0m                            │[0m
+│[0m[32m  [0ma001   40.8ms  [0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m  lock/sleep 99.8%                  │[0m
+│[0m[32m  [0ma002   10.3ms  [0m[32m█[0m[33m▓[0m[34m▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m                                                   disk 88.4% · on cpu 8.56%         │[0m
+│[0m[32m▶ [0m[1;32ma003 [0m[1m  23.6ms  [0m[32m█[0m[33m▓[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m[34m▄▄▄▄[0m                             lock/sleep 85.9% · disk 10.8%     │[0m
+│[0m[32m  [0ma004   30.3ms  [0m[36m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░[0m                   net in 99.9%                      │[0m
+│[0m[32m  [0ma005   34.4ms  [0m[32m█[0m[96m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░[0m            net out 98.8%                     │[0m
 │  [0m[36m░░ [0m[2mnet in   [0m[32m██ [0m[2mon cpu   [0m[33m▓▓ [0m[2mrun queue   [0m[35m▀▀ [0m[2mlock/sleep   [0m[34m▄▄ [0m[2mdisk   [0m[96m░░ [0m[2mnet out   [0m                                      │[0m
 │                                                                                                                      │[0m
-│[0m[1;32m── a003 · 22.3ms from its first byte in to its last byte out · thread 1499921 [0m[2m────────────────────────────────────────[0m│[0m
-│[0m[2m            ┊0            ┊5.00ms        ┊10.0ms        ┊15.0ms        ┊20.0ms[0m                                        │[0m
-│[0m[36m  net in    ░[0m                                                                   10.4µs before start                   │[0m
-│[0m[1m  serving   [0m[32m█[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m[34m▄▄▄▄▄▄[0m  22.3ms from start to done             │[0m
-│[0m[34m  on device [0m                                                           [0m[2;34m▄▄▄▄▄▄▄[0m[2m  32 block requests, 128KiB[0m             │[0m
+│[0m[1;32m── a003 · 23.6ms from its first byte in to its last byte out · thread 2619020 [0m[2m────────────────────────────────────────[0m│[0m
+│[0m[2m            ┊0            ┊5.00ms       ┊10.0ms       ┊15.0ms       ┊20.0ms   [0m                                        │[0m
+│[0m[36m  net in    ░[0m                                                                   19.0µs before start                   │[0m
+│[0m[1m  serving   [0m[32m█[0m[33m▓[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m[34m▄▄▄▄▄▄▄[0m  23.5ms from start to done             │[0m
+│[0m[34m  on device [0m                                                         [0m[2;34m▄▄▄▄▄▄▄▄▄[0m[2m  32 block requests, 128KiB[0m             │[0m
 │[0m[96m  net out   [0m                                                                  [0m[2m  gone when done[0m                        │[0m
 │[0m[2;3m  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order[0m                 │[0m
 │                                                                                                                      │[0m
-│[0m[1m  where its 22.3ms went              [0m[2mevidence[0m                       [0m[1mits share of each resource[0m                        │[0m
-│[0m[36m  ░ [0mnet in       10.4µs   0.05% [0m[36m▏    [0m[2mKEY      by socket 113618[0m      [0m[1mcpu        [0m318µs: 1.79% of the 17.8ms server took │[0m
-│[0m[32m  █ [0mon cpu        318µs   1.42% [0m[32m▏    [0mIDENTITY                                  off cpu 34 times, preempted 0          │[0m
-│[0m[33m  ▓ [0mrun queue     118µs   0.53% [0m[33m▏    [0mIDENTITY                       [0m[1mdisk       [0m[2m32 requests, 1.80ms on nvme0n1p6[0m       │[0m
-│[0m[35m  ▀ [0mlock/sleep   20.0ms   89.7% [0m[35m▀▀▀▀ [0mIDENTITY [0m[2mwoken by tid 1500253[0m             [0m[2m1.14% of the run's device time[0m         │[0m
-│[0m[34m  ▄ [0mdisk         1.86ms   8.30% [0m[34m▏    [0mIDENTITY                                  [0m[2mwaited 1.86ms, 54.7µs off the device[0m   │[0m
+│[0m[1m  where its 23.6ms went              [0m[2mevidence[0m                       [0m[1mits share of each resource[0m                        │[0m
+│[0m[36m  ░ [0mnet in       19.0µs   0.08% [0m[36m▏    [0m[2mKEY      by socket 196636[0m      [0m[1mcpu        [0m539µs: 3.18% of the 16.9ms server took │[0m
+│[0m[32m  █ [0mon cpu        539µs   2.29% [0m[32m▏    [0mIDENTITY                                  off cpu 36 times, preempted 0          │[0m
+│[0m[33m  ▓ [0mrun queue     217µs   0.92% [0m[33m▏    [0mIDENTITY                       [0m[1mdisk       [0m[2m32 requests, 2.09ms on nvme0n1p6[0m       │[0m
+│[0m[35m  ▀ [0mlock/sleep   20.2ms   85.9% [0m[35m▀▀▀  [0mIDENTITY [0m[2mwoken by tid 2619021[0m             [0m[2m1.30% of the run's device time[0m         │[0m
+│[0m[34m  ▄ [0mdisk         2.55ms   10.8% [0m[34m▏    [0mIDENTITY                                  [0m[2mwaited 2.55ms, 456µs off the device[0m    │[0m
 │[0m[96m  ░ [0m[2mnet out           ·         [0m[96m     [0m[2mKEY      [0m                                 [0m[36m~low det[0m [0m[33mdegraded x3[0m                   │[0m
-│[0m[2m  IDENTITY: read off the serving thread  KEY: joined by the socket[0m  [0m[1mnetwork    [0min 10.4µs · out 0ns                    │[0m
-│                                                                    [0m[1mlock/sleep [0mlongest 20.0ms, woken by tid 1500253   │[0m
+│[0m[2m  IDENTITY: read off the serving thread  KEY: joined by the socket[0m  [0m[1mnetwork    [0min 19.0µs · out 0ns                    │[0m
+│                                                                    [0m[1mlock/sleep [0mlongest 20.2ms, woken by tid 2619021   │[0m
 │                                                                                                                      │[0m
-│[0m[1m  what sets it apart from the other 4 requests: [0m[35m▀ [0m[31mlock/sleep +20.0ms[0m[2m (theirs 0ns) · [0m[34m▄ [0m[31mdisk +1.86ms[0m[2m (theirs 0ns)[0m       │[0m
+│[0m[1m  what sets it apart from the other 4 requests: [0m[35m▀ [0m[31mlock/sleep +20.2ms[0m[2m (theirs 0ns) · [0m[34m▄ [0m[31mdisk +2.55ms[0m[2m (theirs 0ns)[0m       │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

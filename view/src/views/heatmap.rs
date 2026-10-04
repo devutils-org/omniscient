@@ -2265,6 +2265,16 @@ mod tests {
         let unfocused = Focus::default();
         let ctx = ctx(&data, &unfocused);
         let mut view = Heatmap::default();
+        // The cursor on the slowest block request made for a request: the
+        // slowest of the run may be the server's setup, which serves none.
+        let samples = Samples::of(&ctx, view.selected(&data));
+        let made_for_one = samples
+            .points
+            .iter()
+            .filter(|point| point.request.is_some())
+            .max_by(|one, two| one.value.total_cmp(&two.value))
+            .expect("a block request made for a request");
+        view.cursor_ns = Some((made_for_one.start + made_for_one.span_ns / 2.0) as u64);
         let opened = view.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ctx);
         let Action::Goto {
             view: "request",

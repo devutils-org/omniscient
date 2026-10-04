@@ -1,16 +1,16 @@
-[0m[1momn top[0m │ fixture workload-timebar │ 3.28s                        [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥14.7%[0m[35m │ target 35.9% cpu[0m [0m
+[0m[1momn top[0m │ fixture workload-timebar │ 2.69s                        [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥11.2%[0m[35m │ target 42.9% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows [0m[1;7m 0 process [0m                     [0m
- [0m[1mtimebar-main[0m  pid 1525319 · 4 threads · 3.70s · [0m[35momn costs ≥14.7% cpu[0m                                                   [0m
+ [0m[1mtimebar-main[0m  pid 2620821 · 4 threads · 2.68s · [0m[35momn costs ≥11.2% cpu[0m                                                   [0m
 [0m[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
- [0m[1;7mCPU     [0m[34m▄▄▅▅▆▇▆▃▂▁▁▂▃▇██▆▅▁▁▁▁[0m     [0m[1;34m0.0436 cores[0m   avg 0.359   peak 0.911  [0m[36m~low det[0m                                     [0m
- [0m[1mMemory  [0m[34m▆███████████████████[0m       [0m[1;34m14.3MiB     [0m   +1.08MiB/s   peak 14.3MiB                                            [0m
+ [0m[1;7mCPU     [0m[34m▇███▇▅▄▁▁▁▁▂▃▅████▃▃▂▁▁▁[0m   [0m[1;34m0.0125 cores[0m   avg 0.473   peak 1.01  [0m[36m~low det[0m                                      [0m
+ [0m[1mMemory  [0m[34m███████████████████████[0m    [0m[1;34m14.3MiB     [0m   +179KiB/s   peak 14.3MiB                                             [0m
  [0m[1;2mDisk    [0m                           [0m[2mno block request of the process[0m                                                     [0m
  [0m[1;2mNetwork [0m                           [0m[2mno socket bytes   0 retrans (machine)[0m                                               [0m
  [0m[1;2mGPU     [0m                           [0m[2mno kernel launched   VRAM 0B[0m                                                        [0m
- [0m[1mEnergy  [0m[34m▇▇▇▇█████████████████▂[0m     [0m[1;34m31.2 W      [0m   avg 123 W   the machine's, not apportioned                           [0m
- [0m[1mTime    [0m[32m█[0m[35m▚[0m[31m▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞[0m[37m░░░░[0m   [0m[31mlock 77.1%[0m   [0m[37msleep 18.1%[0m   [0m[35mrun queue 2.49%[0m   [0m[32mon cpu 2.13%[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m [0m[33m2 la[0m
+ [0m[1mEnergy  [0m[34m██▇▇▇█▇▅▅▅▅▅▆▆▇▇▇▇▇▇▅▅▅▅[0m   [0m[1;34m35.9 W      [0m   avg 48.7 W   the machine's, not apportioned                          [0m
+ [0m[1mTime    [0m[31m▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞[0m[37m░░░░░░[0m   [0m[31mlock 75.9%[0m   [0m[37msleep 22.3%[0m   [0m[32mon cpu 1.27%[0m   [0m[35mrun queue 0.00%[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m     [0m
 [0m[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
-[0m[1m▶ suspect: [0m[1;31mlock (blocked: sleeping, on a futex)  77.1%[0m                                              [0m[2mEnter/click → detail[0m
+[0m[1m▶ suspect: [0m[1;31mlock (blocked: sleeping, on a futex)  75.9%[0m                                              [0m[2mEnter/click → detail[0m
                                                                                                                         [0m
 [0m[2mCPU in one hue: the machine's cores are not in the recording[0m                                                            [0m
 [0m[2mMemory in one hue: the machine's memory is not in the recording[0m                                                         [0m

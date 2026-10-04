@@ -1,22 +1,22 @@
-[0m[1momn top[0m │ fixture workload-system │ 2.01s                         [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥14.2%[0m[35m │ target 90.5% cpu[0m [0m
+[0m[1momn top[0m │ fixture workload-system │ 2.00s                         [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥14.6%[0m[35m │ target 92.6% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  9 flows  0 process                      [0m
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐[0m
-│[0m[1msched.switches [0m[2m193[0m [0m[33m21 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m  [0m[1msched.wakeup [0m[2m147[0m [0m[33m21 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.offcpu [0m[2m19[0m [0m[36m~low det[0m │[0m
-│[0m[33mdegraded[0m  [0m[1mgpu.kernel [0m0 [0m[33m22 late[0m [0m[33mdegraded[0m                                                                               │[0m
-│[0m[2m24.3ms a cell[0m          [0m[2m╷0ns[0m                [0m[2m╷500ms[0m               [0m[2m╷1.00s[0m              [0m[2m╷1.50s[0m                 [0m[2mof the span[0m│[0m
-│[0m[1;7msystem-main    1529755[0m[2m│[0m[2;32m█▂[0m[2m           [0m[2;32m▄█████████████████████████████████████████▂▃▃[0m[2m           [0m[2;7m [0m[2m             │awake 52.2%[0m│[0m
-│[0m[2m              off cpu │ [0m[2;34m▇███████████▅[0m[2m                                         [0m[2;34m▇▆▆███████████[0m[2;7;34m█[0m[2;34m████████████▁[0m[2m│ blkd 46.6%[0m│[0m
-│Thread-1 (drai 1529839[0m[2m│                                                         [0m[2;32m▁[0m[2m           [0m[2;7m [0m[2m             │awake 0.05%[0m│[0m
-│[0m[2m────────────────────────────────────────────────────────────────────────────────────────────[0m[2;32m▲ 1.69s[0m[2m───────────────────[0m│[0m
-│[0m[1msystem-main 1529755 (pid 1529755) at 1.69s: [0m[2;34mblocked, sleeping[0m[2m 600ms, 1.39s → 1.99s, left cpu 6[0m                        │[0m
+│[0m[1msched.switches [0m[2m156[0m [0m[33m23 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m  [0m[1msched.wakeup [0m[2m151[0m [0m[33m23 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.offcpu [0m[2m18[0m [0m[36m~low det[0m │[0m
+│[0m[33mdegraded[0m  [0m[1mgpu.kernel [0m0 [0m[33m12 late[0m [0m[33mdegraded[0m                                                                               │[0m
+│[0m[2m24.1ms a cell[0m          [0m[2m╷0ns[0m                [0m[2m╷500ms[0m               [0m[2m╷1.00s[0m               [0m[2m╷1.50s[0m                [0m[2mof the span[0m│[0m
+│[0m[1;7msystem-main    2621722[0m[2m│[0m[2;32m█▁[0m[2m           [0m[2;32m▄█████████████████████████████████████████▃▂▃[0m[2m           [0m[2;7m [0m[2m             │awake 52.3%[0m│[0m
+│[0m[2m              off cpu │ [0m[2;34m████████████▅[0m[2m                                         [0m[2;34m▆▇▆███████████[0m[2;7;34m█[0m[2;34m████████████▃[0m[2m│ blkd 46.9%[0m│[0m
+│Thread-1 (drai 2621802[0m[2m│                                                         [0m[2;32m▁[0m[2m           [0m[2;7m [0m[2m             │awake 0.09%[0m│[0m
+│[0m[2m────────────────────────────────────────────────────────────────────────────────────────────[0m[2;32m▲ 1.68s[0m[2m───────────────────[0m│[0m
+│[0m[1msystem-main 2621722 (pid 2621722) at 1.68s: [0m[2;34mblocked, sleeping[0m[2m 600ms, 1.38s → 1.98s, left cpu 0[0m                        │[0m
 │  woken by [0m[1man interrupt (hardirq)[0m[2m, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone[0m │[0m
 │[0m[2m  in [0m[2;34mlibc.so.6 ← libpython3.14.so.1.0 x3 ← PyEval_EvalCode ← libpython3.14.so.1.0 x4 ← Py_RunMain ← Py_BytesMain ← …[0m  │[0m
-│[0m[2m  73 switch-outs and 19 wakeups seen; awake 52.2% of the run[0m                                                          │[0m
-│[0m[2m  where it was off a cpu over the run, 939ms in all (sched.offcpu, by state and stack)[0m [0m[36m~low det[0m [0m[33mdegraded[0m[2m:[0m             │[0m
-│  [0m[2m   600ms 63.9%[0m [0m[2;34msleeping  [0m[2m    1 blocks  libc.so.6 ← libpython3.14.so.1.0 x3 ← PyEval_EvalCode ← …[0m                    │[0m
+│[0m[2m  34 switch-outs and 19 wakeups seen; awake 52.3% of the run[0m                                                          │[0m
+│[0m[2m  where it was off a cpu over the run, 937ms in all (sched.offcpu, by state and stack)[0m [0m[36m~low det[0m [0m[33mdegraded[0m[2m:[0m             │[0m
+│  [0m[2m   600ms 64.0%[0m [0m[2;34msleeping  [0m[2m    1 blocks  libc.so.6 ← libpython3.14.so.1.0 x3 ← PyEval_EvalCode ← …[0m                    │[0m
 │  [0m[2m   300ms 32.0%[0m [0m[2;34msleeping  [0m[2m    1 blocks  clock_nanosleep ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m              │[0m
-│  [0m[2m  32.6ms 3.47%[0m [0m[2;34msleeping  [0m[2m    1 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m                        │[0m
-│  [0m[2m  6.02ms 0.64%[0m [0m[2;33muninterr. [0m[2m   10 blocks  fsync ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m                        │[0m
+│  [0m[2m  30.7ms 3.28%[0m [0m[2;34msleeping  [0m[2m    1 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m                        │[0m
+│  [0m[2m  6.18ms 0.66%[0m [0m[2;33muninterr. [0m[2m    9 blocks  fsync ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m                        │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
