@@ -421,6 +421,15 @@ impl Collector for StallCollector {
         "stall_ns"
     }
 
+    fn row_stamp(&self) -> Option<crate::collect::RowStamp> {
+        use crate::collect::RowStamp;
+        Some(if self.counting() {
+            RowStamp::DrainClose
+        } else {
+            RowStamp::FirstEvent
+        })
+    }
+
     fn start(&mut self) -> Result<(), String> {
         let program = StallProgram::load(self.stall, self.tgid)?;
         self.absent = program.absent().to_vec();

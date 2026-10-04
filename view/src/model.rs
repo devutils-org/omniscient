@@ -80,6 +80,15 @@ pub struct Results {
     /// recording made before `omn` wrote it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_attr: Option<String>,
+    /// How a drained source stamped a row it read from a table the kernel
+    /// filled between drains: `drain_close` or `first_event`. Absent when the
+    /// run did not say, or from a recording made before it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_stamp: Option<String>,
+    /// The kernel's drops placed in time: each drain that found the count
+    /// grown, with what it had grown by.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drains: Vec<Drain>,
     /// The worst time error of the events this result was made from, when
     /// something saw them before they were aggregated: `omn top` writes it
     /// in `view.json`, and a live run's events carry it. Not part of
@@ -87,6 +96,14 @@ pub struct Results {
     /// it; `None` is unknown, never zero.
     #[serde(skip)]
     pub ts_err_ns: Option<u64>,
+}
+
+/// One drain that found the kernel had dropped events since the drain before
+/// it: when it read, on `CLOCK_MONOTONIC`, and how many.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Drain {
+    pub ts_ns: u64,
+    pub dropped: u64,
 }
 
 impl Results {

@@ -514,6 +514,11 @@ impl Collector for OffCpuCollector {
         "block_ns"
     }
 
+    fn row_stamp(&self) -> Option<crate::collect::RowStamp> {
+        use crate::collect::RowStamp;
+        Some(RowStamp::DrainClose)
+    }
+
     fn start(&mut self) -> Result<(), String> {
         let program = OffCpuProgram::load(self.filter)?;
         // Said at the start, because `stop` drops the program before the

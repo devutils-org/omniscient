@@ -225,3 +225,37 @@ fn the_flame_view_s_difference_is_the_triage_s() {
         );
     }
 }
+
+/// What `omn` writes of a drained source -- how it stamped its rows, and its
+/// drops placed at the drains that read them -- is what the view reads.
+#[test]
+fn the_view_reads_a_result_s_row_stamp_and_drains_as_omn_writes_them() {
+    let fixture = fixtures_dir().join(&fixtures()[0]).join("results.json");
+    let run: RunOutput = serde_json::from_str(&read(&fixture)).expect("a run");
+    let mut written = run.results[0].clone();
+    written.row_stamp = Some(omn::collect::RowStamp::DrainClose);
+    written.drains = vec![
+        omn::collect::DrainDrop {
+            ts_ns: 1_000,
+            dropped: 3,
+        },
+        omn::collect::DrainDrop {
+            ts_ns: 2_000,
+            dropped: 4,
+        },
+    ];
+    let json = serde_json::to_value(&written).expect("serialized");
+    let read: omn_view::model::Results = serde_json::from_value(json).expect("read back");
+    assert_eq!(read.row_stamp.as_deref(), Some("drain_close"));
+    let drains: Vec<(u64, u64)> = read
+        .drains
+        .iter()
+        .map(|drain| (drain.ts_ns, drain.dropped))
+        .collect();
+    assert_eq!(drains, [(1_000, 3), (2_000, 4)]);
+    // The first-event spelling, too.
+    written.row_stamp = Some(omn::collect::RowStamp::FirstEvent);
+    let read: omn_view::model::Results =
+        serde_json::from_value(serde_json::to_value(&written).unwrap()).unwrap();
+    assert_eq!(read.row_stamp.as_deref(), Some("first_event"));
+}

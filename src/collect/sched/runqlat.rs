@@ -332,6 +332,11 @@ impl Collector for RunqLatCollector {
         "wait_ns"
     }
 
+    fn row_stamp(&self) -> Option<crate::collect::RowStamp> {
+        use crate::collect::RowStamp;
+        Some(RowStamp::FirstEvent)
+    }
+
     fn start(&mut self) -> Result<(), String> {
         let program = RunqLatProgram::load(self.filter)?;
         // Said at the start, because `stop` drops the program before the

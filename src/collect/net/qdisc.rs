@@ -271,6 +271,11 @@ impl Collector for QdiscCollector {
         "wait_ns"
     }
 
+    fn row_stamp(&self) -> Option<crate::collect::RowStamp> {
+        use crate::collect::RowStamp;
+        Some(RowStamp::FirstEvent)
+    }
+
     fn start(&mut self) -> Result<(), String> {
         // A named interface is this process's namespace's: that is where
         // `if_nametoindex` looked it up.

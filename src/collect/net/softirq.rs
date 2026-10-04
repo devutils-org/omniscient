@@ -394,6 +394,11 @@ impl Collector for SoftIrqCollector {
         "duration_ns"
     }
 
+    fn row_stamp(&self) -> Option<crate::collect::RowStamp> {
+        use crate::collect::RowStamp;
+        Some(RowStamp::FirstEvent)
+    }
+
     fn start(&mut self) -> Result<(), String> {
         self.program = Some(SoftIrqProgram::load(&self.vectors)?);
         self.kernel_runs_at_start = self.kernel_runs();
