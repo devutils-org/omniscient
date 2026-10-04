@@ -1543,15 +1543,15 @@ Below the milestones, and not scheduled:
   A consumer of one more format, not a source: `DECISIONS.md` boundary 6 says
   why LTTng is a peer rather than a backend. Low priority; nothing depends on
   it and no measurement here is worse without it.
-- **Six decisions are open** (`DECISIONS.md`): the phase 6 criterion for
+- **Five decisions are open** (`DECISIONS.md`): the phase 6 criterion for
   the in-kernel histogram, pending what `tp_btf` leaves; what the budget's
   first check may stop a run on (its one-time half landed in the twentieth
   wave, the 10 ms slack proposed with numbers); a cost per regime in the
   catalog's schema (proposed with numbers); whether a range in the GPU's
   performance levels can be read as free clocks, pending the `-lgc` run;
-  since the twentieth wave, whether the latency session asks `sched.wakeup`;
-  and since the twenty-second, how a reference pair reads a value `omn`
-  computes rather than holds. How a byte counter's direction becomes a
+  and since the twentieth wave, whether the latency session asks
+  `sched.wakeup`. How a reference pair reads a value `omn` computes was
+  settled before the twenty-third wave: a parser of `omn`'s output. How a byte counter's direction becomes a
   series was settled in the twenty-first wave: a key, `dir`.
 - **An `lbr` collector** waits on a cpu with a branch call stack (Intel from
   Haswell) to be tested against, and **`sframe`** on a kernel that reads

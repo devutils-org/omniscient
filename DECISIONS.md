@@ -1255,6 +1255,23 @@ reads a value `omn` computes, which the families each answered their own way.
 
 ---
 
+## Settled before the twenty-third wave
+
+- **A reference pair reads a value `omn` computes through a parser of
+  `omn`'s output.** The runner reads one dotted path into `omn`'s JSON,
+  summing what `*` and filters match; most families' values are not at one
+  path (a series total is a mean times a count, a function's share is its
+  leaves summed over the stack table over the total). The twenty-second
+  wave's families answered three ways -- a jq expression, a parser in the
+  family's module, and five path grammars of their own -- and the runner
+  could run none of them. Settled: `compare.omn_parse: <name>` names a
+  `Parser` in the family's module, beside the tool's parsers and
+  unit-tested on a captured `omn` output the same way; the dotted path stays
+  for a value `omn` holds at one place. Code beside the tool's parser keeps
+  both sides of a comparison reviewable in one file and tested on real
+  output; jq would add a dependency to the test and a second language to
+  read, and per-family grammars are what left 105 pairs unrunnable.
+
 ## Open
 
 - **The phase 6 criterion for the in-kernel histogram** (io, pending the
@@ -1329,23 +1346,6 @@ reads a value `omn` computes, which the families each answered their own way.
   answers who it waited on with no frame names, at the price of one more
   source in the cheap pass. Leaving it open costs C servers whose libc frames
   are unnamed their slow client.
-
-- **How a reference pair reads a value `omn` computes** (twenty-second
-  wave, every family against the runner). The runner reads one dotted path
-  into `omn`'s JSON, summing what `*` and filters match. Most families' values
-  are not at one path: a series total is a mean times a count, an attach is
-  compared per on-cpu nanosecond, a function's share is its leaves summed
-  over the stack table over the total. The families answered three ways:
-  `compare.omn_jq`, a jq expression (perfstat, top, gpu); `compare.omn_parse`,
-  a parser of `omn`'s JSON in the family's module (perfrecord); and a path
-  grammar of their own (`<emit>[<glob>].<field>`, io; `series[<key>].sum`,
-  net; `<emit>.<field>`, heap, perfsched, bpftrace). **Proposed**: the runner
-  takes a family's parser of `omn`'s output (`compare.omn_parse`), which is
-  code beside the tool's parser and unit-tested on a captured `omn` output
-  the same way, and the dotted path stays for a value `omn` holds; no jq
-  dependency in the test. Leaving it open costs every one of the nine
-  families' pairs its run through the runner, and so every verdict in
-  `docs/replaces/` its claim to be the runner's.
 
 A new open line goes here with what it costs to leave it open, which is the
 habit that kept this section honest.
