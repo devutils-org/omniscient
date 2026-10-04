@@ -11378,3 +11378,33 @@ starts 6.9 to 39 us after the host's `before` and ends 1.0 to 1.8 us before
 its `after`. The cupti stream measured +1.0 to +1.3 us with other tenants:
 the offset is CUPTI's dispatch and drain, as the decision says, not a
 neighbour's kernels.
+
+## The twentieth wave, coordinator, after the merge
+
+Every stream merged (`25632bd`). Three regressions where streams met, fixed
+on `main`: `96b4741` (the limit-spelling open finding the triage stream
+closed, still listed in `gcc-shell` and `make-sqlite`) and `d661d67` (two
+tests that read `cpu.oncpu_time` of a launched program as its own process,
+now that `bpf:raw_tp` follows its descendants; a heatmap test whose
+re-recorded fixture stamps the stop's drain after the run's end). Two
+failures need more than a merge fix:
+
+### `portability::every_cell_covers_the_whole_catalog`: the matrix cells predate `gpu.profile`
+
+Red on every full run. The cells under `target/matrix/cells/` were swept on
+2026-10-02, before `gpu.profile` joined the catalog; the test refuses them as
+stale, as it should. Not a code regression, and the same as the nineteenth
+wave's. The end-of-wave matrix sweep refreshes them; until it runs,
+`make check` cannot go green on this machine.
+
+### `cross_machine::a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_its_rung`: reclaimed pages outside the program's intervals
+
+Failed in the coordinator's third `make check` (*"64 of the 42100 credited
+lie in intervals the program did not overlap"*); passed alone on its one
+rerun, and in the `--no-fail-fast` run before it. The view stream saw it
+fail twice, once alone (72 of 39 281, `docs/fixes/w20-view.md`). Not on the
+flaky tally. A handful of reclaimed pages per run credited to the cgroup
+outside the program's intervals: either the intervals' edges or a reclaim
+landing on the cgroup after the program's last interval. For the mem
+family's owner: worth reading which edge the 64 pages sit on before adding
+it to the tally.
