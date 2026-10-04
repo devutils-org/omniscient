@@ -2,4 +2,174 @@
 # established tool on the same workload and holds them to a declared
 # tolerance. Read by tests/reference.rs, never by omn itself. Schema:
 # BRIEF.md, "Decided before this wave".
-[]
+#
+# Two fields are this family's own:
+#
+# - `alongside: {lead_ms: N}`. Every net source compared here is
+#   system-wide or per interface, and omn refuses a program to launch beside
+#   `--system` or `--iface`. So omn runs for its `--duration` with no `--`,
+#   and the reference command (which runs the workload) starts `lead_ms`
+#   later, once omn's first read has been taken: the same run of the
+#   workload, seen by both.
+# - `compare.omn` paths, over the first result of omn's JSON:
+#   `series[<key>].sum` (a summary series' mean times its count: the total
+#   increment of a counter), `series[<key>].mean`, `events.count` (raw
+#   events), `events.<attr>.sum` (an attribute summed over raw events).
+#
+# The reference commands go through the wrappers in
+# tests/reference/workloads/net/: `around.py` reads a counter tool before
+# and after the workload, `sample.py` runs a snapshot tool while it lives,
+# `bracket.py` runs a tool that tallies until interrupted.
+
+- source: net.bytes
+  tool: ip -s link
+  use: "ip -s link show dev lo, before and after: bytes received"
+  workload: [python3, tests/reference/workloads/net/push.py, "64", "1"]
+  omn: [trace, net.bytes, --iface, lo, -m, count, -e, summary, --keys, "iface,dir", --format, json, --duration, 4s]
+  alongside: {lead_ms: 1500}
+  reference:
+    command: [python3, tests/reference/workloads/net/around.py, ip, -s, link, show, dev, lo, --]
+    parse: ip_s_link_delta
+    requires: [ip, python3]
+    privileged: false
+  compare:
+    key: rx_bytes
+    omn: "series[iface:lo dir:rx].sum"
+    tolerance: {rel: 0.03}
+    why: "both read the kernel's rtnl_link_stats64 for lo (omn through /proc/net/dev) around the same run; omn's window is wider than the tool's two readings, so other loopback traffic on a loaded machine lands only on omn's side, diluted by 64 MiB"
+
+- source: net.bytes
+  tool: ip -s link
+  use: "ip -s link show dev lo, before and after: bytes sent"
+  workload: [python3, tests/reference/workloads/net/push.py, "64", "1"]
+  omn: [trace, net.bytes, --iface, lo, -m, count, -e, summary, --keys, "iface,dir", --format, json, --duration, 4s]
+  alongside: {lead_ms: 1500}
+  reference:
+    command: [python3, tests/reference/workloads/net/around.py, ip, -s, link, show, dev, lo, --]
+    parse: ip_s_link_delta
+    requires: [ip, python3]
+    privileged: false
+  compare:
+    key: tx_bytes
+    omn: "series[iface:lo dir:tx].sum"
+    tolerance: {rel: 0.03}
+    why: "the same counters as rx_bytes, the other direction; on lo the two are equal by construction"
+
+- source: net.packets
+  tool: ip -s link
+  use: "ip -s link show dev lo, before and after: packets"
+  workload: [python3, tests/reference/workloads/net/pingpong.py, "47313", "2"]
+  omn: [trace, net.packets, --iface, lo, -m, count, -e, summary, --format, json, --duration, 4s]
+  alongside: {lead_ms: 1500}
+  reference:
+    command: [python3, tests/reference/workloads/net/around.py, ip, -s, link, show, dev, lo, --]
+    parse: ip_s_link_delta
+    requires: [ip, python3]
+    privileged: false
+  compare:
+    key: packets
+    omn: "series[iface:lo].sum"
+    tolerance: {rel: 0.05}
+    why: "net.packets has no `dir` key and counts received plus sent, so it is compared with ip's rx + tx. The workload is small round trips, thousands of packets: a bulk push is ~1700 64 KiB segments, against which the other streams' loopback traffic in omn's wider window was 5.4 % (3692 against 3502)"
+
+- source: net.iface
+  tool: ip -s link
+  use: "ip -s link show dev lo, before and after: receive errors"
+  workload: [python3, tests/reference/workloads/net/push.py, "64", "1"]
+  omn: [trace, net.iface, --iface, lo, -m, count, -e, summary, --format, json, --duration, 4s]
+  alongside: {lead_ms: 1500}
+  reference:
+    command: [python3, tests/reference/workloads/net/around.py, ip, -s, link, show, dev, lo, --]
+    parse: ip_s_link_delta
+    requires: [ip, python3]
+    privileged: false
+  compare:
+    key: rx_errors
+    omn: "series[iface:lo/errors].sum"
+    tolerance: {abs: 0}
+    why: "the same generic error counter; lo never errs, so this shows the series is there and agrees at zero, not that a non-zero count would"
+
+- source: net.backlog
+  tool: nstat
+  use: "nstat -saz TcpExtListenOverflows TcpExtListenDrops, before and after"
+  workload: [python3, tests/reference/workloads/net/backlog.py, "64", "1"]
+  omn: [trace, net.backlog, --system, -m, count, -e, raw, --format, json, --duration, 4s]
+  alongside: {lead_ms: 1500}
+  reference:
+    command: [python3, tests/reference/workloads/net/around.py, nstat, -saz, TcpExtListenOverflows, TcpExtListenDrops, TcpRetransSegs, --]
+    parse: nstat_delta
+    requires: [nstat, python3]
+    privileged: false
+  compare:
+    key: TcpExtListenOverflows
+    omn: "events.overflows.sum"
+    tolerance: {abs: 2}
+    why: "both read /proc/net/netstat's ListenOverflows around the same run; any other listener overflowing in omn's wider window would add to omn's side only"
+
+- source: net.backlog
+  tool: nstat
+  use: "nstat -saz TcpExtListenDrops, before and after"
+  workload: [python3, tests/reference/workloads/net/backlog.py, "64", "1"]
+  omn: [trace, net.backlog, --system, -m, count, -e, raw, --format, json, --duration, 4s]
+  alongside: {lead_ms: 1500}
+  reference:
+    command: [python3, tests/reference/workloads/net/around.py, nstat, -saz, TcpExtListenOverflows, TcpExtListenDrops, TcpRetransSegs, --]
+    parse: nstat_delta
+    requires: [nstat, python3]
+    privileged: false
+  compare:
+    key: TcpExtListenDrops
+    omn: "events.drops.sum"
+    tolerance: {abs: 2}
+    why: "the same file's ListenDrops, the same run"
+
+- source: net.tcp.retransmit
+  tool: nstat
+  use: "nstat -saz TcpRetransSegs, before and after"
+  workload: [python3, tests/reference/workloads/net/backlog.py, "64", "2.5"]
+  omn: [trace, net.tcp.retransmit, --system, -m, count, -e, summary, --format, json, --duration, 5s]
+  alongside: {lead_ms: 1500}
+  reference:
+    command: [python3, tests/reference/workloads/net/around.py, nstat, -saz, TcpRetransSegs, --]
+    parse: nstat_delta
+    requires: [nstat, python3]
+    privileged: false
+  compare:
+    key: TcpRetransSegs
+    omn: "series[system].sum"
+    tolerance: {abs: 8}
+    why: "the SYNs the full queue dropped are retransmitted after a second; nstat reads the MIB counter, omn counts the tcp_retransmit_skb tracepoint system-wide over a wider window, which also takes any real network's retransmits on this machine"
+
+- source: net.tcp.rtt
+  tool: ss -ti
+  use: "ss -tin sport = :47311, every 500 ms: the connection's rtt"
+  workload: [python3, tests/reference/workloads/net/pingpong.py, "47311", "2.5"]
+  omn: [trace, net.tcp.rtt, --system, -m, "poll@200ms", -e, summary, --filter, "sport == 47311", --format, json, --duration, 5s]
+  alongside: {lead_ms: 1500}
+  reference:
+    command: [python3, tests/reference/workloads/net/sample.py, "0.5", ss, -tinH, sport, "=", ":47311", --]
+    parse: ss_ti_rtt
+    requires: [ss, python3]
+    privileged: false
+  compare:
+    key: rtt_ns_mean
+    omn: "series[*].mean"
+    tolerance: {rel: 0.15}
+    why: "both read tcp_info's srtt of the same connection through sock_diag, at different instants of one run (ss every 500 ms, omn every 200 ms, and omn's last poll catches the close); the estimate drifts by a few percent over the run"
+
+- source: net.capture
+  tool: tcpdump
+  use: "tcpdump -i lo 'tcp dst port 47312': the packets captured"
+  workload: [python3, tests/reference/workloads/net/pingpong.py, "47312", "2"]
+  omn: [trace, net.capture, --iface, lo, -m, trace, -e, raw, --filter, "dport == 47312", --format, json, --duration, 5s]
+  alongside: {lead_ms: 1500}
+  reference:
+    command: [python3, tests/reference/workloads/net/bracket.py, tcpdump, -i, lo, -w, /dev/null, tcp dst port 47312, --]
+    parse: tcpdump_count
+    requires: [tcpdump, python3]
+    privileged: true
+  compare:
+    key: captured
+    omn: "events.count"
+    tolerance: {rel: 0.01}
+    why: "both are AF_PACKET sockets on lo with a filter on the destination port, open over the same run; tcpdump opens a second before the workload and closes after it, inside omn's window"
