@@ -216,7 +216,35 @@ one; and the never-ended / unborn / replaced counts as structured fields of
 `net.request`'s result rather than sentences (coordinator, the collector's
 owner).
 
-## The suite
+## The suite, review round
+
+While iterating: `cargo test -p omn-view --lib views::request` (17 pass),
+`cargo test --test view_snapshots` (15 pass, snapshots unchanged), `cargo
+clippy -p omn-view --all-targets -- -D warnings` (clean), and `cargo test
+--test cli` for the documents: 25 of 26, the one red
+(`a_refusal_for_an_unwritten_backend_leads_with_the_one_passed_over`, "Text
+file busy" executing a binary it had just copied) passes rerun alone.
+
+`/tmp` was over its quota on this machine during the round (26 GB of
+`omn-*` test directories from every stream's runs), so the suite ran with
+`TMPDIR` under the worktree's `target/`.
+
+- `make` then `make check`: red in `omn`'s lib on
+  `collect::cpu::profile::tests::a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned`
+  (a machine-wide profile, under the other streams' load); it passed in the
+  run below.
+- `cargo test --workspace --no-fail-fast`: **2375 passed, 8 failed, 11
+  ignored**, none in `view/`. Rerun alone once: `budget::the_extra_cpu_a_faster_poll_costs...`,
+  `join_engine::a_program_s_life_is_a_whole...`,
+  `scenario_net::every_datagram_sent_to_a_closed_port...`,
+  `scenario_proc::defect_1...`, `unwind::symbols_from_debuginfod...` and
+  `unwind::dwarf_recovers_the_whole_tree...` pass;
+  `runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`
+  fails again (the open finding below), and
+  `cases::every_case_names_its_known_cause_both_ways` (575 s, the open
+  finding below) was not rerun.
+
+## The suite, first round
 
 While iterating: `cargo test -p omn-view --lib views::request` (11 pass),
 `cargo test --test view_snapshots request`, and `cargo clippy -p omn-view
