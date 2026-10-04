@@ -58,7 +58,8 @@ unsigned short omn_request__done_semaphore __attribute__((section(".probes"))) =
 
 #define PAGE 4096
 #define STRIDE (64 * 1024)
-#define MAX_PLAN 64
+/* Requests a plan may hold: a few hundred is what a recording asks for. */
+#define MAX_PLAN 1024
 #define MAX_READS 4096
 /* The slow reader's buffers: the client's receive buffer as it asks for it, the
  * server's send buffer, and the pause after each read. */
@@ -204,6 +205,11 @@ int main(int argc, char **argv) {
         return 2;
     }
     path = argv[1];
+    if (argc - 2 > MAX_PLAN) {
+        fprintf(stderr, "server: a plan of %d requests is over the %d this build holds\n",
+                argc - 2, MAX_PLAN);
+        return 2;
+    }
     for (int i = 2; i < argc && plan_n < MAX_PLAN; i++, plan_n++)
         if (sscanf(argv[i], "%ld:%ld:%ld:%ld", &plan_lock[plan_n], &plan_reads[plan_n],
                    &plan_gap[plan_n], &plan_body[plan_n]) < 2) return 2;
