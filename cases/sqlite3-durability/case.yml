@@ -82,6 +82,10 @@ causes:
         program changes; only the database's settings. The process started
         beside it only watches: it reads the program's `schedstat`, from
         outside, once a millisecond.
+      # Watched as sqlite3, from its exec: the shell before it, which copies
+      # the database, lives 10 to 20 ms, less than one pass over /proc takes
+      # on a loaded machine, and a watcher that waits for it can miss it and
+      # never find the target (docs/fixes/w18-cases.md).
       run: [python3, '{case}/../shared/watch.py', sqlite3, '{dir}/work/delete.db']
       ready: ready
     # A fresh copy of the empty database, then sqlite3 by an `exec` that keeps
@@ -193,8 +197,11 @@ causes:
 
 open_findings:
   - check: every-cited-number-agrees-with-the-reference
+    sometimes: true
     filed: >-
       docs/fixes/w17-build.md, "a blocked row called exact is short of the
-      kernel's": over 500 commits, `blocked` is 50 to 60 ms (3 %) under the
-      program's own `schedstat` (life less cpu less wait) and under sqlite's
-      `.timer`, and `runnable` twice the kernel's run delay
+      kernel's", re-measured in docs/fixes/w18-cases.md, "the durability
+      case's blocked row": over 500 commits `blocked` is now within 7 to 20
+      ms of the program's `schedstat`, either side, where it was 50 to 60 ms
+      (3 %) under; beyond the 6 ms the two resolutions allow in most runs,
+      within it in about one in four

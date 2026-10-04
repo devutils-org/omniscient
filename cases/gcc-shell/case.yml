@@ -1,13 +1,9 @@
 # Case 5: `gcc` on a known translation unit.
 #
-# HELD BACK: `tests/cases.rs` discovers `cases/<name>/case.yml` only, so this
-# case does not run. One of its checks cannot be made to give the same answer
-# every run (`both-ways-name-the-same-suspect` on the passes, below and in
-# docs/fixes/w17-build.md, "the build stream's review"), and a listed check
-# that passes fails the test as surely as an unlisted one that fails. It goes
-# back to `cases/gcc-shell/` (`git mv`; `{case}/../shared/watch.py` resolves
-# from there) once the triage follows a wait for a child, or the agent's way
-# stops reading whichever table weighs most.
+# Held back in `cases/held/` from the seventeenth wave to the eighteenth: the
+# person's way named the driver's `wait4`, and the agent's read whichever
+# table weighed most. Both ways now follow the wait into the compiler
+# (`docs/fixes/w18-cases.md`).
 #
 # ROADMAP phase 12. A compiler is a process tree: the driver `gcc` starts the
 # compiler proper `cc1`, then the assembler `as`, and waits for each. The
@@ -101,9 +97,12 @@ causes:
     expect:
       limit: cpu
       state: on-cpu
-      # The main thread waits for its child in wait4: not a timer, a pipe or
-      # a socket, which is what the sentence for a sleep says it is.
-      never_says: [a timer, a pipe or a socket]
+      # The main thread waits for its child in wait4, and the time is the
+      # child's: the verdict must not stop at the wait and call the run
+      # asleep, which is what the sentence for a sleep says.
+      never_says: [asleep on something that is not a lock]
+      # The verdict follows the driver's wait into the compiler.
+      says: ['for a child, in `wait4`']
       agrees:
         - row: on-cpu
           with: ftime.o2_total_ns
@@ -145,7 +144,9 @@ causes:
     expect:
       limit: cpu-queue
       state: runnable
-      never_says: [a timer, a pipe or a socket]
+      never_says: [asleep on something that is not a lock]
+      # The verdict follows the driver's wait into the compiler.
+      says: ['for a child, in `wait4`']
       agrees:
         - row: runnable
           # The compile's critical path is the driver, then cc1, then `as`,
@@ -157,39 +158,17 @@ causes:
           relative: 0.02
 
 open_findings:
-  - check: the-first-suspect-is-the-known-cause
-    filed: >-
-      docs/fixes/w17-build.md, "a program is its main thread, and the compiler driver's
-      waits for its children": the verdict decomposes the launched process's
-      main thread, which spends the run in wait4, and names that sleep; the
-      children that did the work are listed under `also`, and the agent's
-      way reads the heaviest task's table
   - check: every-cited-number-agrees-with-the-reference
+    cause: a-cpu-shared-with-two-competitors
     filed: >-
-      docs/fixes/w17-build.md, "a program is its main thread": the rows are
-      the main thread's, and a child's table has no `runnable` or `blocked`
-      row at all, since `sched.runqlat` and `sched.offcpu` follow the
-      launched process only
-  - check: the-sentence-claims-nothing-false
+      docs/fixes/w18-cases.md, "a job is a chain of processes": the contended
+      compile's `runnable` is the one process the wait was followed into
+      (cc1, 3.4 s), against the wait for a cpu of the whole chain the driver
+      ran one after the other (3.8 s: the driver, cc1 and `as`); the
+      decomposition takes the wait's place with one process's rows
+  - check: the-verdict-s-json-spells-its-limit-as-the-text-does
+    cause: a-cpu-shared-with-two-competitors
     filed: >-
-      docs/fixes/w17-cases.md, "a polled lock is called not a lock", and
-      docs/fixes/w17-build.md, "a program is its main thread": a wait for a
-      child is called a timer, a pipe or a socket
-  - check: both-ways-name-the-same-suspect
-    filed: >-
-      docs/fixes/w17-build.md, "a budget weighs the launched process alone",
-      and "the build stream's review": on the passes, the person's way names
-      the driver's wait4 and the agent's way reads the heaviest table, the
-      driver's `blocked` (6.8 s) or cc1's `on-cpu` (5 to 7 s): cc1's in 3
-      runs of 4, the fourth the run whose budget held. Not deterministic
-      either way, which is why the case is held back
-  - check: the-person-s-way-says-where-names-came-from
-    filed: >-
-      docs/fixes/w17-cases.md, "the verdict drops where its names came from"
-  - check: the-agent-s-way-answers-within-a-model-s-budget
-    filed: >-
-      docs/fixes/w17-cases.md, "a waiting program exceeds every budget", and
-      docs/fixes/w17-build.md, "a budget weighs the launched process alone":
-      the collectors' cpu is weighed against the main thread's few
-      milliseconds, not the children's seconds they also watched, and the
-      stop kills the main thread and leaves its children running
+      docs/fixes/w18-cases.md, "The JSON's `limit` is `cpu_queue`, the text's
+      `cpu-queue`": `Limit` is serialised in snake_case where `Limit::as_str`,
+      the text and the catalog say `cpu-queue`
