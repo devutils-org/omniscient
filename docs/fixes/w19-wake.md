@@ -226,3 +226,22 @@ words, the two chain fixes); no other view's.
   full run, on a quieter machine, is the one that says whether any is real.
 - `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt
   --check`: clean (run on their own, since `make check` stops at the tests).
+
+### The review round's suite
+
+- While iterating: `cargo test -p omn-view --lib wake` (14) and
+  `cargo test --test view_snapshots` (15, every `wake--*` re-blessed and no
+  other view's), green; `cargo clippy --workspace --all-targets -D warnings`
+  and `cargo fmt --check` clean.
+- **`make check`** on `47fc6d9`: red on one failure in `omn --lib`,
+  `collect::mem::page_faults::tests::sampled_in_user_mode_the_weighed_samples_are_the_faults_the_thread_took`;
+  rerun alone once, it passes.
+- **`cargo test --workspace --no-fail-fast`** at a load average of 37: 2368
+  passed, 13 failed, 11 ignored. The page-fault test passed this time. The 13
+  are all integration tests that launch and measure a real `omn` run, in
+  `family_mem`, `runner`, `scenario_gpu`, `scenario_io`, `scenario_net`,
+  `scenario_proc` and `triage`. None of them goes through `omn top`, the only
+  thing that draws this view, and this round changes nothing else. `omn_view`
+  (34), `view_snapshots` (15) and `cli` (26) are all green. I did not
+  investigate the 13; the merge's full run on a quieter machine will show
+  whether any of them is real.
