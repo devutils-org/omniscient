@@ -1557,6 +1557,23 @@ pub trait Escalate {
     /// is over: the decisions taken, and the layers named that could not be
     /// served. Pairs of a request's index and a sentence.
     fn close(&mut self, run: &Progress<'_>) -> Vec<(usize, String)>;
+
+    /// What each request's collector says of its own events so far, shown
+    /// before [`Escalate::decide`] each round: what a live view reads a value
+    /// by, how a drained row is stamped, and the drops placed at their drains.
+    /// Ignored unless an escalation draws the run as it goes.
+    fn described(&mut self, _said: &[Described<'_>]) {}
+}
+
+/// What one request's collector says of its events while the run goes: the
+/// fields the run's results carry at the end ([`Collection::value_attr`],
+/// [`Collection::row_stamp`], [`Collection::drains`]), as they stand now.
+/// Empty and `None` for a request not attached yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Described<'a> {
+    pub value_attr: &'static str,
+    pub row_stamp: Option<RowStamp>,
+    pub drains: &'a [DrainDrop],
 }
 
 /// What the escalation is shown of a run in progress.
@@ -4039,6 +4056,26 @@ fn drive(
         // nothing; and before the budget, so a layer attached now is weighed
         // from its first round.
         if let Some(escalation) = escalation.as_deref_mut() {
+            let said: Vec<Described<'_>> = slots
+                .iter()
+                .zip(&ledger.drains)
+                .map(|(slot, drains)| {
+                    let (value_attr, row_stamp) = match slot {
+                        Slot::Attached(collector) => {
+                            (collector.value_attr(), collector.row_stamp())
+                        }
+                        Slot::Detached(record) => (record.value_attr, record.row_stamp),
+                        Slot::Waiting(_) | Slot::Missed => ("", None),
+                    };
+                    Described {
+                        value_attr,
+                        row_stamp,
+                        drains: &drains.placed,
+                    }
+                })
+                .collect();
+            escalation.described(&said);
+            drop(said);
             let standing = standing_of(slots, &ledger.closed_because);
             let switches = escalation.decide(&Progress {
                 opened_ns,

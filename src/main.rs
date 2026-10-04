@@ -1747,6 +1747,9 @@ fn assemble(
     // Where each collection ends in `merged`: the joins walk them apart, in the
     // engine's order, with no index of the whole run (`join::apply_merging`).
     let mut bounds = vec![0];
+    // Only the sources a join or a decomposition reads: every other
+    // collection's events are consumed by `aggregate` and never cloned.
+    let read = join::sources_read(&session.joins, &session.decompose);
     let mut run = encode::RunOutput {
         results: Vec::new(),
         joins: Vec::new(),
@@ -1783,7 +1786,9 @@ fn assemble(
                 ));
             }
         }
-        merged.extend(collection.events.iter().cloned());
+        if read.contains(resolved[index].request.source.as_str()) {
+            merged.extend(collection.events.iter().cloned());
+        }
         bounds.push(merged.len());
         let unit = catalog
             .get(&serving.request.source)
@@ -1829,7 +1834,12 @@ fn assemble(
     }
     let streams: Vec<&[omn::event::Event]> =
         bounds.windows(2).map(|at| &merged[at[0]..at[1]]).collect();
-    for rule in &session.joins {
+    // A query-tier rule is applied to the stored run (`omn join`), not here.
+    for rule in session
+        .joins
+        .iter()
+        .filter(|rule| rule.tier == join::Tier::Agent)
+    {
         run.joins
             .push(join::apply_merging(rule, &streams, &windows)?);
     }
@@ -2879,7 +2889,12 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
             None
         }
         Some(screen) => {
-            let start_on = args.view.clone();
+            // A target and no `--view`: the system view for that one process
+            // is the first screen; the machine's is, without one.
+            let start_on = args.view.clone().or_else(|| {
+                (args.file.is_none() && (!args.program.is_empty() || !args.pid.is_empty()))
+                    .then(|| "process".to_owned())
+            });
             let opening = opening.clone();
             let quit = std::sync::Arc::clone(&quit);
             let handover = std::sync::Arc::clone(&handover);
@@ -2911,7 +2926,7 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
     let (collections, ladder) = loop {
         let mut ladder = Ladder::new(catalog, &capabilities, &resolutions);
         let mut tap = Tap::new(
-            resolutions.len(),
+            opening.clone(),
             sender.clone(),
             std::sync::Arc::clone(&quit),
             view_cpu.as_mut(),
@@ -3103,6 +3118,10 @@ struct Tap<'a> {
     unheard: bool,
     /// What the view spends, kept for taking it out of the collectors'.
     view_cpu: Option<&'a mut ViewCpu>,
+    /// The view's opening data, which it is given again with what the
+    /// collectors say of their events ([`collect::Described`]) for as long as
+    /// no event was handed over: a restart then loses nothing.
+    shell: omn_view::model::Data,
 }
 
 impl<'a> Tap<'a> {
@@ -3111,19 +3130,59 @@ impl<'a> Tap<'a> {
     const EVERY: std::time::Duration = std::time::Duration::from_millis(200);
 
     fn new(
-        count: usize,
+        shell: omn_view::model::Data,
         sender: std::sync::mpsc::Sender<omn_view::feed::Update>,
         quit: std::sync::Arc<std::sync::atomic::AtomicBool>,
         view_cpu: Option<&'a mut ViewCpu>,
     ) -> Self {
         Self {
-            sent: vec![0; count],
+            sent: vec![0; shell.run.results.len()],
             sender,
             quit,
             last: None,
             unheard: view_cpu.is_none(),
             view_cpu,
+            shell,
         }
+    }
+
+    /// The opening data with what the collectors say, when that changes it
+    /// and nothing was handed over yet.
+    ///
+    /// A source attached after the first events, or drops placed after them,
+    /// reach the view at the end: the feed has no update that sets them on a
+    /// result already drawing.
+    fn describe(&mut self, said: &[collect::Described<'_>]) -> Option<omn_view::model::Data> {
+        if self.sent.iter().any(|sent| *sent > 0) {
+            return None;
+        }
+        let mut changed = false;
+        for (results, said) in self.shell.run.results.iter_mut().zip(said) {
+            let value_attr = (!said.value_attr.is_empty()).then(|| said.value_attr.to_owned());
+            let row_stamp = said.row_stamp.and_then(|stamp| {
+                serde_json::to_value(stamp)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+            });
+            let drains: Vec<omn_view::model::Drain> = said
+                .drains
+                .iter()
+                .map(|drain| omn_view::model::Drain {
+                    ts_ns: drain.ts_ns,
+                    dropped: drain.dropped,
+                })
+                .collect();
+            if results.value_attr != value_attr
+                || results.row_stamp != row_stamp
+                || results.drains != drains
+            {
+                results.value_attr = value_attr;
+                results.row_stamp = row_stamp;
+                results.drains = drains;
+                changed = true;
+            }
+        }
+        changed.then(|| self.shell.clone())
     }
 
     /// Hands the events read since the last hand-over to the drawing thread.
@@ -3192,6 +3251,18 @@ fn to_view_events(
 }
 
 impl collect::Escalate for Tap<'_> {
+    fn described(&mut self, said: &[collect::Described<'_>]) {
+        if self.unheard {
+            return;
+        }
+        if let Some(described) = self.describe(said) {
+            let restart = omn_view::feed::Update::Restart(Box::new(described));
+            if self.sender.send(restart).is_err() {
+                self.unheard = true;
+            }
+        }
+    }
+
     fn decide(&mut self, run: &collect::Progress<'_>) -> Vec<collect::Switch> {
         if self.quit.load(std::sync::atomic::Ordering::SeqCst) {
             return run
@@ -3654,5 +3725,49 @@ mod tests {
         assert!(written.get("failure").is_none(), "{written}");
         let written = serde_json::to_value(collection(Some(killed))).unwrap();
         assert_eq!(written["failure"], killed);
+    }
+
+    /// A live view is given what each collector says of its events -- the
+    /// value attribute, the row stamp, the drops at their drains -- while no
+    /// event was handed over, once per change, and never after: a restart
+    /// then would lose what it holds.
+    #[test]
+    fn a_live_view_is_told_how_to_read_its_results_before_its_first_events() {
+        let mut shell = omn_view::model::Data::default();
+        shell.run.results = vec![omn_view::model::Results::default(); 2];
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        let quit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut tap = Tap::new(shell, sender, quit, None);
+        let drains = [collect::DrainDrop {
+            ts_ns: 40,
+            dropped: 3,
+        }];
+        let said = [
+            collect::Described {
+                value_attr: "latency_ns",
+                row_stamp: Some(collect::RowStamp::DrainClose),
+                drains: &drains,
+            },
+            collect::Described {
+                value_attr: "",
+                row_stamp: None,
+                drains: &[],
+            },
+        ];
+        let described = tap.describe(&said).expect("the first description is given");
+        let first = &described.run.results[0];
+        assert_eq!(first.value_attr.as_deref(), Some("latency_ns"));
+        assert_eq!(first.row_stamp.as_deref(), Some("drain_close"));
+        assert_eq!(first.drains.len(), 1);
+        assert_eq!(first.drains[0].dropped, 3);
+        assert_eq!(described.run.results[1].value_attr, None);
+        assert!(tap.describe(&said).is_none(), "an unchanged one is not");
+        tap.sent[1] = 5;
+        let mut later = said;
+        later[1].value_attr = "bytes";
+        assert!(
+            tap.describe(&later).is_none(),
+            "nor any once events went over"
+        );
     }
 }
