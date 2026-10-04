@@ -1,43 +1,51 @@
 # Reference pairs for the `bpftrace` family of tools: each entry runs omn and an
 # established tool on the same workload and holds them to a declared
-# tolerance. Read by tests/reference.rs, never by omn itself. Schema:
-# BRIEF.md, "Decided before this wave".
+# tolerance. Read by tests/reference.rs through the shared runner, never by
+# omn itself. Schema: catalog/references/README.md.
 #
 # Every tool here is a script in /usr/share/bpftrace/tools/, system-wide, and
-# needs root: `privileged: true` on each. `under.sh TOOL --` runs the tool with
-# the workload as bpftrace's `-c` child, so the tool sees one whole run and
-# prints its END maps when the workload exits. omn runs the workload a second
-# time (two runs, not one: bpftrace launches its child itself and omn cannot
-# attach to a child that has not been created yet), which is why every
-# compared quantity is one the workload fixes -- a number of calls, signals,
-# connections, block requests -- or, for a latency, a median held to one log2
-# bucket above it (see "Medians" below). The workloads name themselves `omnref` (a symlink to python3), so
-# the tool's per-comm key and omn's `comm` filter select the same events.
+# needs root: `privileged: true` on each, so every pair skips where `sudo -n`
+# does not grant root.
 #
-# Paths into omn's results.json (`compare.omn`), over the request's first
-# output; the runner is asked to read them this way (docs/fixes/w22-bpftrace.md):
-#   summary.count  the sum of `count` over every series: events seen
-#   summary.last   the sum of `last` over every series: a count-mode counter
-#   hist.count     the sum of every bucket's count over every series
-#   hist.p50       the lower bound of the bucket holding the median, the
-#                  series' buckets merged by their bounds
+# Two shapes:
+#
+# - `separate` (the default), for a tool that can launch its program:
+#   `under.sh TOOL --` runs the tool with the workload as bpftrace's `-c`
+#   child, so the tool sees one whole run and prints its END maps when the
+#   workload exits; omn launches the workload a second time. Two runs, not one
+#   (bpftrace launches its child itself, and neither observer can attach to a
+#   child the other has created), which is why every compared quantity is one
+#   the workload fixes -- a number of calls, signals, connections, block
+#   requests -- or, for a latency, a median held to log2 buckets (below).
+# - `alongside`, for a source omn serves system-wide only (proc.exec,
+#   net.tcp.lifetime): omn `--system -d 6s` and the tool under `timeout -s
+#   INT` (bpftrace prints its END maps on SIGINT and exits 0, which
+#   `--preserve-status` passes on) start together; after `settle_ms` (bpftrace
+#   compiles and attaches in about a second) the runner launches the workload;
+#   both observers end on their own clock.
+#
+# The workloads name themselves `omnref` (a symlink to python3, so the comm
+# is set at exec), and the tool's per-comm key and omn's `comm` filter select
+# the same events.
+#
+# omn's side is a path into its JSON where omn holds the value at one place
+# (`.series.*.count` sums every series: one per task, device or socket), and
+# the parser `omn_hist_usecs` for a histogram's median, which omn does not
+# report. Each pair's omn output on this machine is captured under
+# tests/reference/captures/bpftrace/omn/<id>.json, and
+# `bpftrace::tests::every_omn_side_resolves_on_its_capture` evaluates every
+# compare on it.
 #
 # Medians. The two grids differ: bpftrace's buckets are powers of two in
 # microseconds, which bpftrace_hist_usecs multiplies by 1000, so the
-# reference p50 is r = 1000 * 2^k ns; omn's are powers of two in ns
-# (src/bpf/insn.rs, push_log2_bucket). The same latency lands omn in
-# 2^(k+9) = 0.512 r or 2^(k+10) = 1.024 r; one omn bucket higher is
-# 2^(k+11) = 2.048 r, off by 1.048 r. The runner allows rel * r, so
-# `rel: 1.1` admits that bucket and refuses 2^(k+12) = 4.096 r. Below r it
-# bounds nothing: any lower median passes, since rel >= 1 admits 0. A
-# tolerance on bucket indices (log2) would be symmetric; the runner has none
-# (docs/fixes/w22-bpftrace.md, "Requests").
-#
-# A family field the runner does not know: `alongside: true` says omn takes
-# no program (its source has no per-launch target) and runs `--system` for
-# its `-d`, while the runner starts the workload beside it.
+# reference p50 is r = 1000 * 2^k ns and floor(log2 r) = k + 9; omn's are
+# powers of two in ns (src/bpf/insn.rs, push_log2_bucket). The same latency L
+# in [1000 * 2^k, 2000 * 2^k) ns lands omn's p50 in bucket k + 9 (L below
+# 1024 * 2^k) or k + 10. `log2_buckets: 1` is that offset and nothing more:
+# it refuses a median two buckets away on either side.
 
-- source: proc.syscall
+- id: syscount
+  source: proc.syscall
   tool: syscount.bt
   use: "syscount.bt: system calls per process"
   workload: [tests/reference/workloads/bpftrace/omnref, tests/reference/workloads/bpftrace/act.py, getppid, "20000"]
@@ -49,11 +57,12 @@
     privileged: true
   compare:
     key: "@process[omnref]"
-    omn: summary.count
+    omn: results.0.outputs[emit=summary].series.*.count
     tolerance: {rel: 0.05}
     why: "both count every raw_syscalls:sys_enter of the comm; two runs, so python3's startup (run as root under bpftrace) may differ by a few dozen calls against 20000 getppid"
 
-- source: proc.syscall
+- id: opensnoop
+  source: proc.syscall
   tool: opensnoop.bt
   use: "opensnoop.bt: which process opens files, how often"
   workload: [tests/reference/workloads/bpftrace/omnref, tests/reference/workloads/bpftrace/act.py, open, "500"]
@@ -65,11 +74,12 @@
     privileged: true
   compare:
     key: "comm:omnref"
-    omn: summary.count
+    omn: results.0.outputs[emit=summary].series.*.count
     tolerance: {rel: 0.05}
     why: "one opensnoop line per openat returned, failures included, against omn's openat calls; python3 opens only through openat, so open/openat2 add nothing; two runs, 500 opens plus about 120 at startup"
 
-- source: proc.signals
+- id: killsnoop
+  source: proc.signals
   tool: killsnoop.bt
   use: "killsnoop.bt: who sends which signal"
   workload: [tests/reference/workloads/bpftrace/omnref, tests/reference/workloads/bpftrace/act.py, signal, "50"]
@@ -81,28 +91,31 @@
     privileged: true
   compare:
     key: "omnref/SIGUSR2"
-    omn: summary.last
+    omn: results.0.outputs[emit=summary].series.*.last
     tolerance: {abs: 0}
-    why: "the workload sends itself exactly 50 SIGUSR2 with kill(2): killsnoop sees 50 sends, omn 50 deliveries (ignored, still generated)"
+    why: "the workload sends itself exactly 50 SIGUSR2 with kill(2): killsnoop sees 50 sends, omn's count-mode counter 50 deliveries (ignored, still generated)"
 
-- source: proc.exec
+- id: execsnoop
+  source: proc.exec
   tool: execsnoop.bt
   use: "execsnoop.bt: every program executed"
   workload: [sh, tests/reference/workloads/bpftrace/execs.sh, "20"]
-  omn: [trace, proc.exec, --system, -d, 3s, -m, trace, -e, summary, --filter, 'comm == "true"', --format, json]
-  alongside: true
+  omn: [trace, proc.exec, --system, -d, 6s, -m, trace, -e, summary, --filter, 'comm == "true"', --format, json]
+  run: alongside
+  settle_ms: 2000
   reference:
-    command: [sh, tests/reference/workloads/bpftrace/under.sh, /usr/share/bpftrace/tools/execsnoop.bt, --]
+    command: [timeout, --preserve-status, -s, INT, "6", bpftrace, /usr/share/bpftrace/tools/execsnoop.bt]
     parse: execsnoop
-    requires: [bpftrace]
+    requires: [bpftrace, timeout]
     privileged: true
   compare:
     key: "argv0:/bin/true"
-    omn: summary.count
+    omn: results.0.outputs[emit=summary].series.*.count
     tolerance: {abs: 0}
-    why: "the workload executes /bin/true exactly 20 times; nothing else on the machine runs `true` by that path in three seconds unless a shell script does, which the rerun shows"
+    why: "one run, both observers system-wide over the same seconds: the workload executes /bin/true exactly 20 times; anything else on the machine running `true` by that path would show on both sides"
 
-- source: io.size
+- id: bitesize
+  source: io.size
   tool: bitesize.bt
   use: "bitesize.bt: block I/O size histogram per process"
   workload: [tests/reference/workloads/bpftrace/omnref, tests/reference/workloads/bpftrace/act.py, read, "500"]
@@ -113,12 +126,13 @@
     requires: [bpftrace]
     privileged: true
   compare:
-    key: "@[omnref]/count"
-    omn: hist.count
+    key: "@[omnref]/4096"
+    omn: results.0.outputs[emit=hist].series.*.buckets[low=4096].count
     tolerance: {rel: 0.05}
-    why: "500 O_DIRECT 4 KiB reads issue 500 requests from the workload's own task, plus the few its setup write and fsync issue; both read block_rq_issue"
+    why: "the [4K, 8K) bucket on both sides, in bytes: 500 O_DIRECT 4 KiB reads issue 500 requests from the workload's own task, plus the few its setup write and fsync issue; both read block_rq_issue. The other buckets (python3's own reads, which the page cache serves or not depending on the run before) are left out: two runs do not fix them"
 
-- source: io.latency
+- id: biosnoop
+  source: io.latency
   tool: biosnoop.bt
   use: "biosnoop.bt: one line per block request with its latency"
   workload: [tests/reference/workloads/bpftrace/omnref, tests/reference/workloads/bpftrace/act.py, read, "500"]
@@ -130,11 +144,12 @@
     privileged: true
   compare:
     key: "comm:omnref"
-    omn: summary.count
+    omn: results.0.outputs[emit=summary].series.*.count
     tolerance: {rel: 0.05}
-    why: "one biosnoop line per request the workload issued and saw complete, against omn's completed requests by the same comm"
+    why: "one biosnoop line per request the workload issued and saw complete, against omn's completed requests by the same comm; two runs, 500 O_DIRECT reads plus the setup's few"
 
-- source: io.latency
+- id: biolatency
+  source: io.latency
   tool: biolatency.bt
   use: "biolatency.bt: block I/O latency histogram"
   workload: [tests/reference/workloads/bpftrace/omnref, tests/reference/workloads/bpftrace/act.py, read, "500"]
@@ -146,11 +161,12 @@
     privileged: true
   compare:
     key: "@usecs/p50"
-    omn: hist.p50
-    tolerance: {rel: 1.1}
-    why: "a median, held to one omn log2 bucket above its own (2.048 times the reference; unbounded below, see the header): two runs, biolatency is system-wide and starts at block_bio_queue where omn starts at submit, and the 500 reads dominate both distributions"
+    omn_parse: omn_hist_usecs
+    tolerance: {log2_buckets: 1}
+    why: "a median on two log2 grids a factor 1000/1024 apart (the header): one bucket is the grids' offset; biolatency is system-wide and starts at block_bio_queue where omn starts at submit, and the 500 reads dominate both distributions"
 
-- source: sched.runqlat
+- id: runqlat
+  source: sched.runqlat
   tool: runqlat.bt
   use: "runqlat.bt: run queue latency histogram"
   workload: [tests/reference/workloads/bpftrace/omnref, tests/reference/workloads/bpftrace/act.py, spin, "2"]
@@ -162,11 +178,12 @@
     privileged: true
   compare:
     key: "@usecs/p50"
-    omn: hist.p50
-    tolerance: {rel: 1.1}
-    why: "two busy children per CPU for two seconds: their waits dominate runqlat's system-wide histogram and are all of omn's; a median held to one omn log2 bucket above its own (2.048 times the reference; unbounded below, see the header), over two runs"
+    omn_parse: omn_hist_usecs
+    tolerance: {log2_buckets: 1}
+    why: "two busy children per CPU for two seconds: their waits dominate runqlat's system-wide histogram and are all of omn's; a median on two log2 grids a factor 1000/1024 apart (the header), one bucket being the grids' offset"
 
-- source: net.tcp.connect
+- id: tcpconnect
+  source: net.tcp.connect
   tool: tcpconnect.bt
   use: "tcpconnect.bt: active TCP connections"
   workload: [tests/reference/workloads/bpftrace/omnref, tests/reference/workloads/bpftrace/act.py, connect, "10"]
@@ -178,23 +195,25 @@
     privileged: true
   compare:
     key: "comm:omnref"
-    omn: summary.count
+    omn: results.0.outputs[emit=summary].series.*.count
     tolerance: {abs: 0}
     why: "exactly 10 connections to a local listener: tcpconnect prints one line per tcp_connect, omn one handshake per socket"
 
-- source: net.tcp.lifetime
+- id: tcplife
+  source: net.tcp.lifetime
   tool: tcplife.bt
   use: "tcplife.bt: TCP sessions with duration and volume"
   workload: [tests/reference/workloads/bpftrace/omnref, tests/reference/workloads/bpftrace/act.py, connect, "10"]
-  omn: [trace, net.tcp.lifetime, --system, -d, 3s, -m, trace, -e, summary, --filter, 'comm == "omnref"', --format, json]
-  alongside: true
+  omn: [trace, net.tcp.lifetime, --system, -d, 6s, -m, trace, -e, summary, --filter, 'comm == "omnref"', --format, json]
+  run: alongside
+  settle_ms: 2000
   reference:
-    command: [sh, tests/reference/workloads/bpftrace/under.sh, /usr/share/bpftrace/tools/tcplife.bt, --]
+    command: [timeout, --preserve-status, -s, INT, "6", bpftrace, /usr/share/bpftrace/tools/tcplife.bt]
     parse: tcplife
-    requires: [bpftrace]
+    requires: [bpftrace, timeout]
     privileged: true
   compare:
     key: "comm:omnref"
-    omn: summary.count
+    omn: results.0.outputs[emit=summary].series.*.count
     tolerance: {abs: 0}
-    why: "10 local connections close 20 sockets, both ends in the workload: tcplife prints one line per socket, omn one session per socket"
+    why: "one run, both observers system-wide over the same seconds: 10 local connections close 20 sockets, both ends in the workload; tcplife prints one line per socket, omn one session per socket"

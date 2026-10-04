@@ -1,0 +1,139 @@
+{
+  "results": [
+    {
+      "label": "net.tcp.connect",
+      "source": "net.tcp.connect",
+      "unit": "ns",
+      "backend": "bpf:fentry",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "sock:4117",
+              "count": 1,
+              "min": 71860.0,
+              "max": 71860.0,
+              "mean": 71860.0,
+              "last": 71860.0
+            },
+            {
+              "key": "sock:4118",
+              "count": 1,
+              "min": 17090.0,
+              "max": 17090.0,
+              "mean": 17090.0,
+              "last": 17090.0
+            },
+            {
+              "key": "sock:4119",
+              "count": 1,
+              "min": 15960.0,
+              "max": 15960.0,
+              "mean": 15960.0,
+              "last": 15960.0
+            },
+            {
+              "key": "sock:4120",
+              "count": 1,
+              "min": 16170.0,
+              "max": 16170.0,
+              "mean": 16170.0,
+              "last": 16170.0
+            },
+            {
+              "key": "sock:4121",
+              "count": 1,
+              "min": 15730.0,
+              "max": 15730.0,
+              "mean": 15730.0,
+              "last": 15730.0
+            },
+            {
+              "key": "sock:4122",
+              "count": 1,
+              "min": 20510.0,
+              "max": 20510.0,
+              "mean": 20510.0,
+              "last": 20510.0
+            },
+            {
+              "key": "sock:4123",
+              "count": 1,
+              "min": 15690.0,
+              "max": 15690.0,
+              "mean": 15690.0,
+              "last": 15690.0
+            },
+            {
+              "key": "sock:4124",
+              "count": 1,
+              "min": 15030.0,
+              "max": 15030.0,
+              "mean": 15030.0,
+              "last": 15030.0
+            },
+            {
+              "key": "sock:4125",
+              "count": 1,
+              "min": 15080.0,
+              "max": 15080.0,
+              "mean": 15080.0,
+              "last": 15080.0
+            },
+            {
+              "key": "sock:4126",
+              "count": 1,
+              "min": 14810.0,
+              "max": 14810.0,
+              "mean": 14810.0,
+              "last": 14810.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 10,
+      "observed_ns": 37128904,
+      "window": {
+        "run_opened_ns": 2074137193972,
+        "opened_ns": 2074137193972,
+        "closed_ns": 2074174322876,
+        "attached": true
+      },
+      "stopped_because": "the launched program exited with exit status 0",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "lifetime": {
+        "released_ns": 2074137111202,
+        "exited_ns": 2074174312406,
+        "exited_err_ns": 6704644,
+        "cpu_ns": 35965000
+      },
+      "degradations": [
+        "10 established, 0 refused or timed out, 0 failed before a SYN left: the latency of each is to its own outcome, and a refusal is not a slow connection"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 64415000,
+        "attributed_cpu_ns": 64415000,
+        "observed_cpu_ns": 35796050,
+        "observed_from": "the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 182682 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)",
+        "wall_ns": 101875383,
+        "measurement_ns": 36100,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel is not timing eBPF programs on this run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable",
+        "before_window_cpu_ns": 352385000,
+        "after_window_cpu_ns": 82000
+      },
+      "served_by": [
+        "bpf:fentry"
+      ],
+      "value_attr": "lat_ns"
+    }
+  ]
+}

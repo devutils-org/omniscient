@@ -1,0 +1,68 @@
+{
+  "results": [
+    {
+      "label": "proc.signals",
+      "source": "proc.signals",
+      "unit": "count",
+      "backend": "bpf:raw_tp",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "task:182373",
+              "count": 1,
+              "min": 50.0,
+              "max": 50.0,
+              "mean": 50.0,
+              "last": 50.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 1,
+      "observed_ns": 27154469,
+      "window": {
+        "run_opened_ns": 2070105553037,
+        "opened_ns": 2070105553037,
+        "closed_ns": 2070132707506,
+        "attached": true
+      },
+      "stopped_because": "the launched program exited with exit status 0",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "lifetime": {
+        "released_ns": 2070105515827,
+        "exited_ns": 2070132699896,
+        "exited_err_ns": 6930226,
+        "cpu_ns": 26991000
+      },
+      "degradations": [
+        "counted: one row per (task, signal) over the whole run. The program still published one record per signal, so this mode costs what `trace` costs and reports less",
+        "the predicate `sig == 12` was applied here, over the drained records, not in the program: every signal on the machine was published and paid for, and it removed 1 and kept 50"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 623000,
+        "attributed_cpu_ns": 623000,
+        "observed_cpu_ns": 26847610,
+        "observed_from": "the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 182373 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)",
+        "wall_ns": 27530910,
+        "measurement_ns": 31250,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel is not timing eBPF programs on this run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable",
+        "before_window_cpu_ns": 160623000,
+        "after_window_cpu_ns": 70000
+      },
+      "served_by": [
+        "bpf:raw_tp"
+      ],
+      "value_attr": "count"
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+{
+  "results": [
+    {
+      "label": "io.latency",
+      "source": "io.latency",
+      "unit": "ns",
+      "backend": "bpf:raw_tp",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "dev:259+6",
+              "count": 507,
+              "min": 7210.0,
+              "max": 6559104.0,
+              "mean": 400026.3865877712,
+              "last": 9070.0
+            },
+            {
+              "key": "dev:259+9",
+              "count": 1,
+              "min": 9405628.0,
+              "max": 9405628.0,
+              "mean": 9405628.0,
+              "last": 9405628.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 508,
+      "observed_ns": 265021529,
+      "window": {
+        "run_opened_ns": 2070809027010,
+        "opened_ns": 2070809027010,
+        "closed_ns": 2071074048539,
+        "attached": true
+      },
+      "stopped_because": "the launched program exited with exit status 0",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "lifetime": {
+        "released_ns": 2070808974910,
+        "exited_ns": 2071074034799,
+        "exited_err_ns": 4687163,
+        "cpu_ns": 33752000
+      },
+      "degradations": [
+        "a process target sees the requests submitted in its own context, which is reads; a write leaves through writeback in a kworker minutes later and carries no submitter at all, so it is absent here rather than counted as zero",
+        "322 block_rq_complete events had no opening this run recorded and were not measured: they belong to another process, or were already in flight when the programs attached. Nothing was dropped -- there was nothing to subtract from",
+        "the filter kept 508 requests and removed 0; it ran here, over the drained records, not in the kernel, so the removed ones were carried up before they were dropped"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 4253000,
+        "attributed_cpu_ns": 4253000,
+        "observed_cpu_ns": 33578060,
+        "observed_from": "the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 182379 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)",
+        "wall_ns": 265287641,
+        "measurement_ns": 33120,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel is not timing eBPF programs on this run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable",
+        "before_window_cpu_ns": 174580000,
+        "after_window_cpu_ns": 92000
+      },
+      "served_by": [
+        "bpf:raw_tp"
+      ],
+      "value_attr": "latency_ns"
+    }
+  ]
+}
