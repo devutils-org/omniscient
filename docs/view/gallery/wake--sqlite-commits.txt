@@ -1,40 +1,40 @@
 omn top │ fixture sqlite-commits │ 4.97s                          view: snapshot │ collectors ≥5.82% │ target 87.8% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐
-│Not drawn yet. What this view needs, and what this run holds of it:                                                   │
+│50 late ~low det degraded  1.46k wakeups of 34 threads -- from a task 53.7%, hardirq 38.0%, softirq 8.31%, in 4.97s   │
 │                                                                                                                      │
-│sched.wakeup             1.46k events via bpf:raw_tp [raw] 50 late ~low det degraded                                  │
-│                         the wake chain                                                                               │
+│woken thread      wakes  mostly by      woken thread      wakes  mostly by      woken thread      wakes  mostly by    │
+│sqlite3 2759238   1.02k  hardirq   54%  kworker/3:1H 448     15  sqlite3  100%  migration/18 130      3  sqlite3  100%│
+│gmain 1128318       204  sqlite3  100%  kworker/1:1H 465     15  sqlite3  100%  kworker/4:1H 481      3  sqlite3  100%│
+│kworker/14:1H 449    37  sqlite3  100%  kworker/2:1H 447     14  sqlite3  100%  kworker/10:1H 482     3  sqlite3  100%│
+│kworker/12:1H 466    36  sqlite3  100%  kworker/6:1H 457      7  sqlite3  100%  kworker/16:1H 964     3  sqlite3  100%│
+│kworker/0:1H 446     30  sqlite3  100%  migration/13 100      6  sqlite3  100%  migration/8 68        2  sqlite3  100%│
+│migration/1 26       19  sqlite3  100%  migration/3 38        4  sqlite3  100%  migration/15 112      2  sqlite3  100%│
+│kworker/13:1H 451    16  sqlite3  100%  kworker/5:1H 676      4  sqlite3  100%  migration/0 20        1  sqlite3  100%│
+│threads 1-21 of 34, ↑/↓ to move; 33 dimmed: outside the target, woken by it                                           │
 │                                                                                                                      │
+│sqlite3 2759238 was woken 1.02k times, 205.10/s                                                                       │
+│<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         │
+│├─ hardirq  a device                                    553   54%    378µs       --       --  ▆▄▄▂▃▂▃▃▄▄▃▄▂▂▂▄▂▁▄▄▂▄▄▂│
+│├─ softirq  a device, or a loopback send                121   12%    398µs       --       --   ▁  ▁▃     ▁▃▂▁▁▃▂▁ ▁  ▁│
+│├─ tid 2141290  outside the target: stops                99   10%    132µs       --       --  ▁▁▁▁▁▁ ▁▂▁▁▁▁▁ ▁▁ ▁▁▁▁▂▁│
+│├─ tid 2364727  outside the target: stops                98   10%    139µs       --       --  ▂▁▁▁▁▁▁▁▁▁▁ ▁▁ ▁▁▁▁▁▁▁▁▁│
+│├─ tid 2541829  outside the target: stops                82    8%    141µs       --       --  ▁▁▁▁▁▁▁▁▁▁▁▂▁▂ ▁▁▁▁▁▁▁▁ │
+│├─ tid 2716423  outside the target: stops                19    2%    147µs       --       --      ▁    ▁  ▁ ▁         │
+│├─ tid 2364228  outside the target: stops                16    2%    137µs       --       --              ▁ ▁ ▁  ▁    │
+│├─ tid 2644223  outside the target: stops                11    1%    119µs       --       --      ▁    ▁  ▁      ▁    │
+│├─ tid 2541835  outside the target: stops                 7    1%    145µs       --       --    ▁   ▁                 │
+│├─ tid 2716801  outside the target: stops                 4    0%   50.1µs       --       --                    ▁     │
+│├─ tid 2717230  outside the target: stops                 4    0%    140µs       --       --    ▁   ▁                 │
+│├─ tid 2644230  outside the target: stops                 3    0%    200µs       --       --    ▁                     │
+│├─ tid 2700277  outside the target: stops                 1    0%    258µs       --       --                    ▁     │
+│└─ omn 2759227  outside the target: stops                 1    0%       --       --       --  ▁                       │
 │                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
+│-> it woke in turn: gmain 1128318 x204, kworker/14:1H 449 x37, kworker/12:1H 466 x36, kworker/0:1H 446 x30, and 29 mor│
+│quiet: the woken thread's time with no sign of life in the run (no wakeup received or issued) before this one -- an   │
+│upper bound: it was blocked no longer than this. hold: the waker's time from its own wakeup to the one it issued --   │
+│how long the chain sat with it. A chain stops at an interrupt, at a thread already on it, or at a waker whose own     │
+│wakeup the run did not see. A softirq may be a loopback send served in its sender's context: the sender is not named. │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ thread  +/- chain depth  enter focus it  l its lanes

@@ -1,0 +1,40 @@
+omn top │ fixture http-server │ 2.84s │ focus: tid 2758974        view: snapshot │ collectors ≥16.1% │ target 92.0% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
+┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐
+│29 late ~low det degraded  220 wakeups of 9 threads -- from a task 26.4%, hardirq 3.18%, softirq 70.5%, in 2.84s      │
+│                                                                                                                      │
+│woken thread      wakes  mostly by      woken thread      wakes  mostly by      woken thread      wakes  mostly by    │
+│python3 2758972     176  softirq   86%  tailscaled 1055       5  python3   60%  tailscaled 1024       1  python3  100%│
+│python3 2758953      18  Thread-…  56%  tailscaled 3898       4  ldconfig  50%  tailscaled 1062       1  python3  100%│
+│Thread-1… 2758974    12  python3   75%  migration/1 26        2  python3  100%  systemd 1221          1  python3  100%│
+│6 dimmed: outside the target, woken by it                                                                             │
+│                                                                                                                      │
+│Thread-1 (proce 2758974 (pid 2758953) was woken 12 times, 4.22/s                                                      │
+│<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         │
+│├─ python3 2758953                                        9   75%   48.6µs   39.2µs   7.34ms  ▂   ▂    ▂   ▂   ▂   ▂ ▆│
+││  ├─ Thread-1 (proce 2758974  ↺ back on the chain        6   50%   27.8µs    249ms    501ms  ▂   ▂                ▂ ▆│
+││  └─ hardirq  a device                                   3   25%    501ms       --       --           ▂   ▂   ▂      │
+│├─ softirq  a device, or a loopback send                  2   17%    111ms       --       --   ▂▂                     │
+│└─ hardirq  a device                                      1    8%   5.07ms       --       --                         ▂│
+│                                                                                                                      │
+│woken at      held   the longest chains, link by link: each waker and its hold                                        │
+│+2.57s       501ms   <- python3 2758953 32.5µs  <- Thread-1 (proce 2758974 501ms ↺                                    │
+│+566ms       273ms   <- python3 2758953 23.8µs  <- Thread-1 (proce 2758974 273ms ↺                                    │
+│+2.82s       257ms   <- python3 2758953 7.34ms  <- Thread-1 (proce 2758974 249ms ↺  x3                                │
+│+1.57s      41.4µs   <- python3 2758953 41.4µs  <- hardirq                                                            │
+│+2.07s      39.2µs   <- python3 2758953 39.2µs  <- hardirq                                                            │
+│+1.07s      30.5µs   <- python3 2758953 30.5µs  <- hardirq                                                            │
+│+65.0ms     21.3µs   <- python3 2758953 21.3µs  <- Thread-1 (proce 2758974 ↺                                          │
+│                                                                                                                      │
+│-> it woke in turn: python3 2758953 x10, tailscaled 1055 x1                                                           │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│quiet: the woken thread's time with no sign of life in the run (no wakeup received or issued) before this one -- an   │
+│upper bound: it was blocked no longer than this. hold: the waker's time from its own wakeup to the one it issued --   │
+│how long the chain sat with it. A chain stops at an interrupt, at a thread already on it, or at a waker whose own     │
+│wakeup the run did not see. A softirq may be a loopback send served in its sender's context: the sender is not named. │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ thread  +/- chain depth  enter focus it  l its lanes

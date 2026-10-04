@@ -1,20 +1,18 @@
 [0m[1momn top[0m │ fixture cpython-hot-heavier │ 7.93s                     [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥5.29%[0m[35m │ target 96.5% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes [0m[1;7m 8 wake [0m 9 flows                                 [0m
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐[0m
-│[0m[3mNot drawn yet. What this view needs, and what this run holds of it:[0m                                                   │[0m
+│[0m[33m79 late[0m [0m[36m~low det[0m  [0m[2m4 wakeups of 4 threads -- from a task 100%, in 7.93s[0m                                                │[0m
 │                                                                                                                      │[0m
-│[0m[1msched.wakeup             [0m[2m4 events via bpf:raw_tp [raw][0m [0m[33m79 late[0m [0m[36m~low det[0m                                               │[0m
-│[0m[2m                         the wake chain[0m                                                                               │[0m
+│[0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m                                        │[0m
+│[0m[1;7mpython3 2779622  [0m[2m     1  2779531  100%[0m  [0m[2mtailscaled 18352      1  python3  100%[0m                                        │[0m
+│[0m[2mmigration/13 100      1  python3  100%[0m  [0m[2mtailscal… 1374243     1  python3  100%[0m                                        │[0m
+│[0m[2;3m3 dimmed: outside the target, woken by it[0m                                                                             │[0m
 │                                                                                                                      │[0m
+│[0m[1;32mpython3 2779622[0m[2m was woken 1 time, 0.13/s[0m                                                                              │[0m
+│[0m[2;4m<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         [0m│[0m
+│[0m[2m└─ [0mtid 2779531[0m[2m  outside the target: stops[0m            [0m[2m     1  100%       --       --       --[0m  [0m[2;32m█                       [0m│[0m
 │                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
+│[0m[1m-> it woke in turn: [0mmigration/13 100[0m[2m x1[0m, tailscaled 18352[0m[2m x1[0m, tailscaled 1374243[0m[2m x1[0m                                   │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
@@ -33,8 +31,10 @@
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
+│[0m[1;2mquiet[0m[2m: the woken thread's time with no sign of life in the run (no wakeup received or issued) before this one -- an[0m   │[0m
+│[0m[2mupper bound: it was blocked no longer than this. [0m[1;2mhold[0m[2m: the waker's time from its own wakeup to the one it issued --[0m   │[0m
+│[0m[2mhow long the chain sat with it. A chain stops at an interrupt, at a thread already on it, or at a waker whose own[0m     │[0m
+│[0m[2mwakeup the run did not see. A softirq may be a loopback send served in its sender's context: the sender is not named.[0m │[0m
 │                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
-[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help                                                                   [0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m thread  [0m[1m+/-[0m chain depth  [0m[1menter[0m focus it  [0m[1ml[0m its lanes         [0m
