@@ -1,0 +1,40 @@
+omn top │ fixture workload-request │ 1.18s                        view: snapshot │ collectors ≥11.1% │ target 0.90% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ heatmap -- io.latency latency over time ─────────────────────────────────────────────────────────────────────────────┐
+│ io.latency 154   sched.runqlat 233 in 48 rows   net.socket 88   gpu.kernel 0                                         │
+│154 block requests, 29.5µs to 796µs, p50 55.6µs, p99 404µs 11 late ~low det degraded x3                               │
+│one regime  ~55.6µs 100% (154) in bursts every ~253ms, all through                                                    │
+│                                                                                                                      │
+│  count ▇              █                    █▁                    █                     █              the whole run  │
+│    1ms┤│   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
+│       │▒                                                                                              ▏             1│
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│       │▒                                    ▒                                                         ▏             2│
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│       ││              ▒                    ▒                     ▒                                    ▏             4│
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│       │▓                                                                               ▒              █             9│
+│  100µs┤│   ·   ·   ·   ·   ·   ·   ·   ·   ▒   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  ▏             1│
+│       ││                                                                                                             │
+│       ││              ▒                                                                               ▏             1│
+│       │▒                                   ▒                     ▒                                    ▏             3│
+│       ││              █                    █▒                    █                     █              █████████   118│
+│       ││                                                                                                             │
+│       │▓                                                                                              ▏             6│
+│       │▓                                                                                              █             9│
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│       └▲──────────────┬───────────────┬───────────────┬───────────────┬──────────────┬──────────────                 │
+│        0            200ms           400ms           600ms           800ms          1.00s                             │
+│   lost nothing lost; 11 rounds of reads came late: nothing is missing, the drains were further apart than asked      │
+│                                                                                                                      │
+│▲ 0 to 12.7ms   26 block requests   p50 37.4µs   p99 796µs   max 796µs                                                │
+│  its slowest 796µs: server tid 1530298 WFSM 4.00KiB on nvme0n1p6                                                     │
+│per cell ▒1 ▒3 ▓5 ▓10 █17   rows 3.8/octave, columns 12.7ms each                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it

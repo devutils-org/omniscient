@@ -1,0 +1,40 @@
+omn top │ fixture workload-timebar │ 3.28s                        view: snapshot │ collectors ≥14.7% │ target 35.9% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+ flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
+on cpu: 1.31k · hottest own __tls_get_addr 9.89% │ off cpu: 4.41s · hottest own libc+0xa08f2 99.9%
+┌ on cpu cpu.profile 1.31k 69 late ~low det degraded x5 ───┐┌ off cpu sched.offcpu 4.41s ~low det degraded x2 ─────────┐
+│width ∝ samples · heaviest left           113 frames deep ││width ∝ time off cpu · heaviest left       34 frames deep │
+│▏all 1.31k                                                ││▏all 4.41s                                                │
+│▏⋯libpython3.14+0x16af1c 68.0%          ▏Py_RunMain 29.2% ││▏⋯libpython3.14+0x5dfc1 70.8%            ▏py::Thread._boo…│
+│▏py::burn:/omniscient/vie…▏py::burn:/o… ▏PyEval_EvalCo…   ││▏⋯libc+0xa08f2 57.1%             ▏libc+0…▏+0x16af1c  ▏lib…│
+│▏_P▏lib▏Py▏li▏_▏_         ▏l ▏l ▏_      ▏+0x1b9172        ││                                         ▏lib…▏libc…      │
+│                                         ▏_▏_             ││                                                          │
+│                                                          ││heaviest on their own (where it ends, every path summed)  │
+│                                                          ││ 99.9% ████████████ libc+0xa08f2                          │
+│heaviest on their own (where it ends, every path summed)  ││ 0.06% ▏            [no stack]                            │
+│ 9.89% ████████████ __tls_get_addr                        ││ 0.02% ▏            libc+0x12071d                         │
+│ 5.86% ███████      _Py_Dealloc                           ││                                                          │
+│ 5.48% ███████      PyNumber_Remainder                    ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
+│ 3.50% ████         _raw_spin_unlock_irqrestore           ││  is always the scheduler, and what it was waiting for is │
+│ 2.21% ███          libpython3.14+0x19cf1e                ││  the task state                                          │
+│                                                          ││‼ 1 blocks were walked and their stack not kept: the      │
+│‼ pmu:sw: time-based sampling: blind to phases running at ││  kernel's stack map holds one stack per bucket over 4096 │
+│  reduced frequency                                       ││  buckets and refuses a second, so a stack that hashed    │
+│‼ 4 frames fell in no mapping of the target and are       ││  onto one already taken is not kept -- the blocks are    │
+│  reported by address                                     ││  counted, and cannot be placed                           │
+│‼ 3 tasks the target started were found on a tick after   ││‼ names came from -- perf-1525319.map: perf-map, the 574  │
+│  they began, and had used 32.35 ms of cpu by then, by the││  lines the program wrote for code no file holds;         │
+│  kernel's own account: that time is in no sample here. A ││  python3.14: its dynamic symbols only: its internal      │
+│  task that started and ended between two ticks is in none││  functions are unnamed; libc.so.6: its dynamic symbols   │
+│  at all                                                  ││  only: its internal functions are unnamed;               │
+│‼ 1 process the target started was sampled too, each      ││  libpython3.14.so.1.0: its dynamic symbols only: its     │
+│  symbolized against its own mappings                     ││  internal functions are unnamed                          │
+│‼ stacks unwound by `fp`: the caller of a function that   ││                                                          │
+│  sets up no frame pointer is lost -- every frameless     ││                                                          │
+│  leaf, and whole stacks of a target built without them   ││                                                          │
+│‼ 2 more on the last line; ! lists every caveat whole     ││                                                          │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+on cpu ▸ all
+1.31k samples ≈ 1.32s · 100% of all · own 0 · 1.31k events
+cpu.profile (+1 more, ! lists them): names came from -- perf-1525319.map: perf-map, the 570 lines the program wrote for…
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

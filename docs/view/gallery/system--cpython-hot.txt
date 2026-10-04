@@ -1,40 +1,40 @@
-omn top │ fixture cpython-hot │ 3.89s                             view: snapshot │ collectors ≥5.56% │ target 95.3% cpu
+omn top │ fixture cpython-hot │ 5.68s                             view: snapshot │ collectors ≥11.2% │ target 85.1% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ system -- the overview: cpu, memory, disk, network, GPU and power, and the processes ────────────────────────────────┐
 ├ cpu busy, as a share of the whole machine ───────────────────────────────────────────────────────────────── ~low det ┤
-│   10.0% ┤                                                                        last 4.86%                          │
-│         │                                                                        mean 4.82%                          │
-│         │                  ▂▂▂▂▂▁▁▁▁                                             peak 6.98%                          │
-│         │                  █████████                                             1.12 cpus busy, on average          │
-│         │         ▂▂▂▂▂▂▂▂▂█████████              ▂▂▂▂▃▃▃▃▃         ▂▂▂▂▂▂▂▂▂  ▃ by state: in the events only        │
-│         │▇▇▇▇████████████████████████████████▇▇▇▇▇█████████████▇▇▇▇▇█████████▆▆█                                     │
-│         │███████████████████████████████████████████████████████████████████████                                     │
-│         │███████████████████████████████████████████████████████████████████████                                     │
-│       0 ┤███████████████████████████████████████████████████████████████████████                                     │
-├ gpu the device, as its driver says ───────────────────────────────────────────────────── ±1.00s ~low det degraded x2 ┤
-│busy      ██████████████████████                                                  1.29% mean  2.00% peak              │
-│ ≤2.00%   ███████████████████████████████████████████████████████████████████████                                     │
-│when      ├───────────────────────────────────┤                                   ±1.00s: the driver's sampling window│
-│memory    held the whole run, unmoved (the device's size: in its events)          692MiB held                         │
+│    100% ┤                               ▇▇▇▇▇▇▇▇▇███▇▇▇▇▇▇▇████████████▇▇▇▇▇▇██▆ last 97.8%                          │
+│         │                               ████████████████████████████████████████ mean 65.4%                          │
+│         │                               ████████████████████████████████████████ peak 99.8%                          │
+│         │                            ▆▆▆████████████████████████████████████████ 16.67 cpus busy, on average         │
+│         │            ▄▄▄             ███████████████████████████████████████████ by state: in the events only        │
+│         │            ███             ███████████████████████████████████████████                                     │
+│         │            ███             ███████████████████████████████████████████                                     │
+│         │            ███▁▁▁          ███████████████████████████████████████████                                     │
+│       0 ┤▆▆▆▆▆▆▄▄▄▇▇▇██████▄▄▄▆▆▆▆██████████████████████████████████████████████                                     │
+├ gpu the device, as its driver says ───────────────────────────────────────────────────── ±1.00s ~low det degraded x3 ┤
+│busy      ▂▂▂▂▂▂▂▂▂▂▂▂▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅███ 3.92% mean  5.00% peak              │
+│ ≤5.00%   ███████████████████████████████████████████████████████████████████████                                     │
+│when      ├─────────────────────────┤                                             ±1.00s: the driver's sampling window│
+│memory    held the whole run, unmoved (the device's size: in its events)          734MiB held                         │
 ├ memory time the machine stalled waiting for it ──────────────────────────────────────────────────────────── ~low det ┤
-│stalled       ··································································· never stalled                       │
-│target    ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇████████████████████████   17.4MiB held, peak 17.4MiB          │
+│stalled      ···································································· never stalled                       │
+│target    ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇█████████████████████████████████  17.7MiB held, peak 17.7MiB          │
 ├ power watts, from the RAPL counters; per domain by name: in the events only ─────────────────────────────────────────┤
-│all           ▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▇▇▇▇████▇▇▇▇▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇ 53.6W mean  64.1W peak  208J        │
+│all          ▄▄▄▄▄▄▄▄▄▆▆▆▄▄▄▄▄▄▄▄▄▄▄▄▄▇▇▇██████████████████████▇▇▇████████████▇▇█ 117W mean  146W peak  664J          │
 ├ disk bytes moved, per device; read apart from written: in the events only ──────────────────────── ~low det degraded ┤
-│259:0         ································█████······························ 144KiB  peak 576KiB/s               │
+│259:0        ······▁▁▁▁▁▁··········▁▁▁···▁▁▁·········▁▁▁▁▁▁▁············▁▁▁···██· 21.5MiB  peak 71.9MiB/s             │
 │          +2 moved nothing: 253:0 7:0                                                                                 │
 ├ network bytes moved, per interface; in apart from out: in the events only ──────────────────────── ~low det degraded ┤
-│wlan0         ▁▁▁▁▁····▁▁▁▁▁·····▁▁▁▁████·····▁▁▁▁▁▁▁▁▁·········▁▁▁▁▁▁▁▁▁·····▁▁▁ 56.2KiB  peak 223KiB/s              │
-│          +6 moved nothing: br-bf6c2e1afced br-cb843b6eb1dd docker0 enp38s0 lo tailscale0                             │
-│          └0s──────────────────────────────1.94s───────────────────────────3.89s┘ a cell is 54.8ms, drawn at its peak │
+│wlan0        ▁▁▁▁▁▁▁▁▁▁▁▁███▁▁▁▁▁▁▁▁▁▁···▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁···▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ 1.53MiB  peak 4.97MiB/s             │
+│tailscale    ▁▁▁▁▁▁▁▁▁▁▁▁▇▇▇▁▁▁▁▁▁▁▁▁▁······▁▁▁▁▁▁·······▁▁▁·········▁▁▁▁▁▁▁▁▁▁▁▁ 1.26MiB  peak 4.35MiB/s             │
+│          +5 moved nothing: br-bf6c2e1afced br-cb843b6eb1dd docker0 enp38s0 lo                                        │
+│          └0s──────────────────────────────2.84s───────────────────────────5.68s┘ a cell is 80.0ms, drawn at its peak │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ processes the target's, by cpu ────────────────────────────────────────────────────┐┌ cost, share of one cpu ────────┐
-│       ID    CPU cpu over the run  ON CPU      RSS FAULTS RUN QUEUE I/O CALLS       ││gpu.engine_busy  ███████  0.16% │
-│  2779350  95.7% ·███████████████   3.72s  17.4MiB      ·         ·         ·       ││cpu.util         █        0.02% │
-│ t2779350      ·                        ·        ·  3.04k    1.17ms        82       ││io.bytes         █        0.01% │
-│                                                                                    ││net.bytes        █        0.01% │
-│                                                                                    ││+4 more                  ≥0.02% │
-│CPU ~low det degraded  FAULTS 40 late  I/O CALLS ~low det degraded x2               ││all of them              ≥0.22% │
+│       ID    CPU cpu over the run  ON CPU      RSS FAULTS RUN QUEUE I/O CALLS       ││cpu.oncpu_time   ███████ ≥0.73% │
+│ t1488431  90.9% ███████▇▇█▇█▆▇▇▆   5.16s        ·  3.07k     406ms       258       ││gpu.engine_busy  ████     0.45% │
+│  1488431      ·                        ·  17.7MiB      ·         ·         ·       ││cpu.util         ▏        0.02% │
+│                                                                                    ││+5 more                  ≥0.07% │
+│CPU ~low det  FAULTS 65 late  RUN QUEUE ~low det degraded  I/O CALLS -4 lost (18.2%)││all of them              ≥1.27% │
 └────────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ process  enter its ledger  s sort  i idle devices

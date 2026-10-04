@@ -1,40 +1,40 @@
-omn top │ fixture cpython-hot │ 3.89s                             view: snapshot │ collectors ≥5.56% │ target 95.3% cpu
+omn top │ fixture cpython-hot │ 5.68s                             view: snapshot │ collectors ≥11.2% │ target 85.1% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
-on cpu: 3.87k → 7.88k (x2.03, scaled to one) · shapes: no function's own cost moved beyond 3σ of a sample count's noise
-┌ on cpu cpu.profile 3.87k vs 7.88k 120 late ~low det degraded x8 ─────────────────────────────────────────────────────┐
-│width ∝ the mean of the two runs · heaviest left                                                       21 frames deep │
-│▏all › ⋯10⋯ › libpython3.14+0x1b9172 3.86k                                                                            │
-│▏+0x64ef5 16.0%    ▏+0x596ab 14.0% ▏PyNumber_Re…▏+0x5e970 ▏libpyt…▏lib…▏l▏l▏P ▏l▏l  ▏l                                │
-│▏li▏li▏_▏l         ▏_Py_Dealloc  ▏_             ▏_Py_Dea…         ▏PyL                                                │
-│                   ▏li▏l▏_                                                                                            │
+on cpu: 5.21k → 8.38k (x1.61, scaled to one) · shapes: the difference is `__tls_get_addr` -151 own (x0.76, 4.9σ); 13 mor
+┌ on cpu cpu.profile 5.21k vs 8.38k 149 late ~low det degraded x8 ─────────────────────────────────────────────────────┐
+│width ∝ the mean of the two runs · heaviest left                                                       31 frames deep │
+│▏all › ⋯20⋯ › py::score:/omniscient/cases/cpython-interpreter/hot.py 5.17k                                            │
+│▏+0x64ef5 15.6%   ▏+0x596ab 13.7%  ▏PyNumber_…▏+0x5e970  ▏+0x5eae3▏lib… ▏l ▏l ▏l    ▏l                                │
+│▏__▏l▏li▏l        ▏_Py_Dealloc  ▏_            ▏_Py_Dea…           ▏Py                                                 │
+│                  ▏li▏_                       ▏_                                                                      │
 │                                                                                                                      │
 │moved on their own -- this run → the other                                                                            │
-│      -26  x0.80   1.9σ libpython3.14+0x19cf1e                                                                        │
-│      +24  x1.07   1.0σ __tls_get_addr                                                                                │
-│      +20  x1.43   2.2σ libpython3.14+0x64ed8                                                                         │
+│     -151  x0.76   4.9σ __tls_get_addr                                                                                │
+│      +57  x1.45   3.7σ libpython3.14+0x1f999e                                                                        │
+│      +45  x2.49   5.1σ libpython3.14+0x5efee                                                                         │
+│      +40  x1.28   2.5σ PyNumber_Remainder                                                                            │
+│      +38  x1.93   4.0σ libpython3.14+0x64ec6                                                                         │
 │                                                                                                                      │
 │‼ pmu:sw: time-based sampling: blind to phases running at reduced frequency                                           │
-│‼ 516 of 969 samples landed in a function that sets up no frame pointer (348 in ld-linux-x86-64.so.2, 164 in          │
+│‼ 866 of 1425 samples landed in a function that sets up no frame pointer (638 in ld-linux-x86-64.so.2, 224 in         │
 │  libpython3.14.so.1.0, 4 in libc.so.6), so the frames under the leaf are not its callers: most of them are outside   │
 │  the target's own code, which is where the callers are lost; `--stack fp+leaf` recovers the leaf's caller and        │
 │  `--stack dwarf` the whole chain                                                                                     │
 │‼ 1 frames fell in no mapping of the target and are reported by address                                               │
 │‼ stacks unwound by `fp`: the caller of a function that sets up no frame pointer is lost -- every frameless leaf, and │
 │  whole stacks of a target built without them                                                                         │
-│‼ names came from -- python3.14: its dynamic symbols only: its internal functions are unnamed; ld-linux-x86-64.so.2:  │
-│  its dynamic symbols only: its internal functions are unnamed; libc.so.6: its dynamic symbols only: its internal     │
-│  functions are unnamed; libpython3.14.so.1.0: its dynamic symbols only: its internal functions are unnamed           │
-│‼ the other run: 1129 of 2088 samples landed in a function that sets up no frame pointer (757 in ld-linux-x86-64.so.2,│
-│  369 in libpython3.14.so.1.0, 3 in libc.so.6), so the frames under the leaf are not its callers: most of them are    │
-│  outside the target's own code, which is where the callers are lost; `--stack fp+leaf` recovers the leaf's caller and│
-│  `--stack dwarf` the whole chain                                                                                     │
+│‼ names came from -- perf-1488431.map: perf-map, the 176 lines the program wrote for code no file holds; python3.14:  │
+│  its dynamic symbols only: its internal functions are unnamed; ld-linux-x86-64.so.2: its dynamic symbols only: its   │
+│  internal functions are unnamed; libc.so.6: its dynamic symbols only: its internal functions are unnamed;            │
+│  libpython3.14.so.1.0: its dynamic symbols only: its internal functions are unnamed                                  │
+│‼ 2 more on the last line; ! lists every caveat whole                                                                 │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ off cpu sched.offcpu ────────────────────────────────────────────────────────────────────────────────────────────────┐
 │no block was recorded: the target never waited, or never long enough for `sched.offcpu` to see it (0 events) ~low det │
 │degraded x2                                                                                                           │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-on cpu ▸ libpython3.14.so.1.0+0x1b9172  the last of 12 frames called in one chain from all
-this run 3.86k → the other 3.87k samples (+5, x1.00, 0.1σ: within the noise)
-⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits
+on cpu ▸ py::score:/omniscient/cases/cpython-interpreter/hot.py  the last of 22 frames called in one chain from all
+this run 5.16k → the other 5.19k samples (+30, x1.01, 0.3σ: within the noise)
+cpu.profile (+1 more, ! lists them): the other run: 1153 of 2156 samples landed in a function that sets up no frame poi…
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

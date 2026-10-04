@@ -1,0 +1,40 @@
+omn top │ fixture vertical-abandoned │ 184ms                      view: snapshot │ collectors ≥0.55% │ target 1.44% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐
+│over 184ms   █ out █ in █ the machine's                                                                               │
+│ network · net.socket not in this run · net.bytes not in this run ────────────────────────────────────────────────────│
+│         thread             socket                                             stack         interface, the machine's │
+│ bytes per socket: not in this run                                                 net.bytes was not asked for in this│
+│ net.socket was not asked for in this run.                                         run                                │
+│ docs/view/flows.md has the session that draws it.                                                                    │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│ storage · io.syscall not in this run · io.bytes not in this run ─────────────────────────────────────────────────────│
+│         thread             file                                               cache         device, the machine's    │
+│ bytes per file: not in this run                                                   io.bytes was not asked for in this │
+│ io.syscall was not asked for in this run.                                         run                                │
+│ docs/view/flows.md has the session that draws it.                                                                    │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│nothing to select: bytes per socket were not measured; bytes per file were not measured                               │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ socket or file  enter focus its thread

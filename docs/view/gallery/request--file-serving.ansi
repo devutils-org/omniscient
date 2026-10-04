@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture file-serving │ 2.58s                            [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥0.85%[0m[35m │ target 11.4% cpu[0m [0m
+ 1 system  2 flame  3 ledger [0m[1;7m 4 request [0m 5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
+┌ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────┐[0m
+│[0m[1mThis run did not ask for net.request: there is no request to draw.[0m                                                    │[0m
+│                                                                                                                      │[0m
+│[0m[1m How to see what one request costs[0m                                                                                    │[0m
+│                                                                                                                      │[0m
+│[0m[2m A request is what the program says it is: net.request follows it from a[0m                                              │[0m
+│[0m[2m request__start(id) probe to a request__done(id) probe the program fires itself,[0m                                      │[0m
+│[0m[2m and nothing is inferred from a connection instead. A server that fires them:[0m                                         │[0m
+│                                                                                                                      │[0m
+│[0m[2m     omn top -f examples/vertical-one-request.yml[0m                                                                     │[0m
+│                                                                                                                      │[0m
+│[0m[2m Each request is then drawn as its life by state -- the network on either side,[0m                                       │[0m
+│[0m[2m on cpu, run queue, a lock, the disk -- with the block requests it issued, its[0m                                        │[0m
+│[0m[2m share of its process's cpu and of the run's device time.[0m                                                             │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m request  [0m[1ms[0m sort  [0m[1menter[0m focus it, then its lanes  [0m[1ml[0m its thread[0m

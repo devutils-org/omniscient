@@ -1,0 +1,40 @@
+omn top │ fixture many-requests │ 15.8s                           view: snapshot │ collectors ≥6.10% │ target 0.50% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ heatmap -- io.latency latency over time ─────────────────────────────────────────────────────────────────────────────┐
+│ io.latency 159   sched.runqlat 1.84k in 853 rows   net.socket 1.65k in 1.62k rows   gpu.kernel 0                     │
+│159 block requests, 16.7µs to 4.69ms, p50 62.8µs, p99 4.68ms 336 late ~low det degraded x3                            │
+│2 regimes  ~59.5µs 75% (120) all through  │  ~4.67ms 25% (39) every ~411ms, all through                               │
+│                                                                                                                      │
+│  count █ ▂▂▂▂ ▂▂▂▂ ▂▂▂▂▂ ▂▂▂▂ ▂▂▂▂ ▂▂▂▂▂ ▂▂▂▂ ▂▂▂▂ ▂▂▂▂ ▂▂▂▂▂ ▂▂▂▂▂ ▂▂▂▂▂ ▂▂▂▂ ▂▂▂▂ ▂▂▂▂▂ ▂▂▂▂ ▂▂▂▂   the whole run  │
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│       │▓ ▒▒▒▒ ▒▒▒    ▒▒▒ ▒ ▒▒ ▒▒▒▒ ▒▒▒▒▒                                       ▒▒▒▒ ▒▒ ▒  ▒▒▒▒ ▒▒▒▒   █████        39│
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│       ││                                                                                                             │
+│    1ms┤│   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
+│       │▒                                                                                              ▏             1│
+│       ││                                                                                                             │
+│       │▒                                                                                              ▏             1│
+│       ││                                                                                                             │
+│       ││                                              ▒                                               ▏             1│
+│       ││                                                              ▒ ▒ ▒                           ▏             3│
+│       ││                                         ▒                                                    ▏             1│
+│       ││                                       ▒                                                      ▏             1│
+│  100µs┤│   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  ▒·   ·   ·   ·   ·   ·   ·   ·   ·  ▏             1│
+│       ││         ▒ ▒▒                    ▒▒▒   ▒▒  ▒▒▒  ▒▓▒▒▒ ▒▒▒▒▒ ▒▒▒▒  ▒▒ ▒          ▒             ████         30│
+│       │▒ ▒▒▒▒ ▒▒▒▒ ▒▒▒▒▒ ▒▓▒▒ ▒▒▒▒ ▒▒▒▒▒ ▒▒▒▓ ▓ ▒▒ ▒▒▒▒ ▒ ▒▒▒ ▒▒▒▒  ▒▒ ▒▒  ▒▓▒ ▒▒▒▒ ▒▒▓▒▒ ▒▒▒▒ ▒▒▒▒   █████████    75│
+│       ││                                                                                                             │
+│       │▒                                                                                              ▏             1│
+│       │▒                                                                                              ▏             1│
+│       │█                                                                                              ▏             4│
+│       └▲────────────────────────────┬────────────────────────────┬─────────────────────────────┬────                 │
+│        0                          5.00s                        10.0s                         15.0s                   │
+│   lost nothing lost; 336 rounds of reads came late: nothing is missing, the drains were further apart than asked     │
+│                                                                                                                      │
+│▲ 0 to 170ms   11 block requests   p50 34.0µs   p99 4.69ms   max 4.69ms                                               │
+│  its slowest 4.69ms: server tid 1504111 RA 16.0KiB on nvme0n1p6 request a003                                         │
+│per cell ▒1 ▓2 █3   rows 2.6/octave, columns 170ms each                                                               │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it

@@ -1,0 +1,13 @@
+{
+  "origin": "live: examples/vertical-abandoned.yml",
+  "facts": {
+    "net.request": {
+      "determinism": "medium",
+      "summary": "One request's life by state, and the network on either side of it"
+    }
+  },
+  "refused": [],
+  "ts_err_ns": {
+    "requests": 0
+  }
+}

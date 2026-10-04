@@ -1,0 +1,13 @@
+{
+  "origin": "live: /work/system-wakeup.yml",
+  "facts": {
+    "sched.wakeup": {
+      "determinism": "low",
+      "summary": "Wakeup chain: who unblocks whom"
+    }
+  },
+  "refused": [],
+  "ts_err_ns": {
+    "sched.wakeup": 0
+  }
+}

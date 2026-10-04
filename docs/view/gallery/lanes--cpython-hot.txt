@@ -1,18 +1,18 @@
-omn top │ fixture cpython-hot │ 3.89s                             view: snapshot │ collectors ≥5.56% │ target 95.3% cpu
+omn top │ fixture cpython-hot │ 5.68s                             view: snapshot │ collectors ≥11.2% │ target 85.1% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐
-│sched.switches 102 39 late ~low det degraded  sched.wakeup 5 39 late ~low det  sched.offcpu 0 ~low det degraded       │
-│gpu.kernel refused                                                                                                    │
-│46.9ms a cell          ╷0ns                 ╷1.00s               ╷2.00s                ╷3.00s              of the span│
-│python3        2779350│█████████████████████████████████████████████████████████████████████████████      │awake 92.7%│
+│sched.switches 662 60 late ~low det degraded  sched.wakeup 5 60 late ~low det  sched.offcpu 0 ~low det degraded       │
+│gpu.kernel 0 58 late degraded                                                                                         │
+│68.4ms a cell          ╷0ns          ╷1.00s         ╷2.00s        ╷3.00s         ╷4.00s         ╷5.00s     of the span│
+│python3        1488431│██████████████████████████████████████████████████████████████████████████████████▂│awake 99.0%│
 │              off cpu │                                                                                   │ blkd 0.00%│
-│┌ gpu.kernel refused ────────────────────────────────────────────────────────────────────────────────────────────────┐│
-││gpu.kernel was not served:                                                                                          ││
-││no collector is written for `gpu.kernel` on backend `vendor:cupti` yet                                              ││
-│└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘│
-│────────────────────────────────────────────────────────────────▲ 1.94s───────────────────────────────────────────────│
-│python3 2779350 (pid 2779350) at 1.94s: awake 3.61s, 0ns → 3.61s, on a cpu or queued for one                          │
-│  102 switch-outs and 1 wakeups seen; awake 92.7% of the run                                                          │
+│────────────────────────────────────────────────────────────────▲ 2.84s───────────────────────────────────────────────│
+│python3 1488431 (pid 1488431) at 2.84s: awake 5.62s, 0ns → 5.62s, on a cpu or queued for one                          │
+│  662 switch-outs and 1 wakeups seen; awake 99.0% of the run                                                          │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

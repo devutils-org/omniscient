@@ -1,35 +1,35 @@
-omn top │ fixture sqlite-latency │ 284ms                          view: snapshot │ collectors ≥4.79% │ target 9.78% cpu
+omn top │ fixture sqlite-latency │ 347ms                          view: snapshot │ collectors ≥4.48% │ target 8.15% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
 │ where-the-time-went  one bar per task, whole: the program's life, gate to reap                                       │
 │                                                                                                                      │
-│ ▶ first suspect  task 2759527: blocked 242ms (85.3% of its wall clock)                                               │
+│ ▶ first suspect  task 1497910: blocked 232ms (67.0% of its wall clock)                                               │
 │   off cpu, blocked -- not split by task state here, so a disk and a sleep are not told apart                         │
-│   48 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <- sq… │
-│   decisive: ahead of the next state (43.1ms) and of what no row read (1.00ms) -- omn latency's rule, on the run's d… │
+│   50 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <- sq… │
+│   decisive: ahead of the next state (58.2ms) and of what no row read (1.00ms) -- omn latency's rule, on the run's d… │
 │                                                                                                                      │
-│ ▸ task 2759527        ├█████████▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ blocked 85.3% ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤    284ms  ▶ blocked 85.3%     │
-│                      0 ───────────────────────────┼ 144ms ───────────────────────────┤ 287ms                         │
+│ ▸ task 1497910        ├██████████▚▚▚▓▓▓▓▓▓▓▓▓▓▓▓▓ blocked 67.0% ▓▓▓▓▓▓▓▓▓▓▓▓▓▓       ┤    347ms  ▶ blocked 67.0%     │
+│                      0 ───────────────────────────┼ 173ms ───────────────────────────┤ 347ms                         │
 │                        █ on cpu   ▚ run queue   ▓ blocked                                                            │
 │                                                                                                                      │
 │   state                            source          amount          share   ±         reads  trust                    │
-│   whole: the program's life, gate…                 284ms           100%    ±8.54ms                                   │
-│ █ on-cpu                           cpu.profile     43.1ms          15.2%   ±1.00ms   43     3 late ~low det degraded │
-│     ↳ most-sampled leaf `_raw_spin_unlock_irqrestore`: 3 of 43 samples: the samples are spread, no one function dom… │
-│     ↳ 43 samples x 1.003 ms                                                                                          │
-│ ▚ runnable                         sched.runqlat   1.72ms          0.61%   exact     49     ~low det degraded        │
-│ ▓ blocked                          sched.offcpu    242ms           85.3%   exact     69     ~low det degraded        │
-│     ↳ 48 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <… │
+│   whole: the program's life, gate…                 347ms           100%    ±50.3ms                                   │
+│ █ on-cpu                           cpu.profile     58.2ms          16.8%   ±1.00ms   58     3 late ~low det degraded │
+│     ↳ most-sampled leaf `__btrfs_check_leaf`: 7 of 58 samples: the samples are spread, no one function dominates     │
+│     ↳ 58 samples x 1.003 ms                                                                                          │
+│ ▚ runnable                         sched.runqlat   15.0ms          4.32%   exact     170    ~low det degraded        │
+│ ▓ blocked                          sched.offcpu    232ms           67.0%   exact     68     ~low det degraded x2     │
+│     ↳ 50 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <… │
 │     ↳ `total_ns` less `queued_ns`, summed                                                                            │
-│   residue: the whole less the rows                 -3.26ms         -1.15%  ±9.54ms   within its resolution           │
+│   residue: the whole less the rows                 41.2ms          11.9%   ±51.3ms   within its resolution           │
 │                                                                                                                      │
-│ The whole: exact at the gate; the exit is bracketed to the last 8.540 ms, which is how long before the reap the      │
+│ The whole: exact at the gate; the exit is bracketed to the last 50.315 ms, which is how long before the reap the     │
 │   program was last seen alive.                                                                                       │
 │ `blocked` is drawn whole: the run holds `sched.offcpu`'s stacks, not its events, so a block cannot be split by the   │
 │   task state it recorded (`omn latency` splits it from the events it holds while it runs). Its stack is the run's    │
 │   heaviest.                                                                                                          │
 │ Trust: 3 rounds of reads came late: nothing is missing, but the series is not spaced as asked; the source is not     │
-│   reproducible between two runs of the same workload; served by a fallback that says what it gives up (5).           │
+│   reproducible between two runs of the same workload; served by a fallback that says what it gives up (6).           │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

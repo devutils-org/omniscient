@@ -1,0 +1,40 @@
+omn top │ fixture workload-ledger │ 1.28s                         view: snapshot │ collectors ≥16.4% │ target 42.8% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐
+│13 late ~low det degraded  76 wakeups of 14 threads -- from a task 47.4%, hardirq 6.58%, softirq 46.1%, in 1.28s      │
+│                                                                                                                      │
+│woken thread      wakes  mostly by      woken thread      wakes  mostly by      woken thread      wakes  mostly by    │
+│ledger-p… 1528877    32  softirq  100%  rcu_exp_gp_kt… 19     1  ledger-… 100%  kworker/5:1H 676      1  ledger-… 100%│
+│ledger-m… 1528848    30  1033143   63%  migration/5 50        1  ledger-… 100%  tailscaled 1266       1  ledger-… 100%│
+│ksoftirqd/15 113      2  ledger-… 100%  migration/18 130      1  ledger-… 100%  gmain 1128318         1  ledger-… 100%│
+│tailscaled 1055       2  ledger-… 100%  migration/22 154      1  ledger-… 100%  tailscal… 1374244     1  ledger-… 100%│
+│rcub/1 17             1  ledger-… 100%  migration/23 160      1  ledger-… 100%                                        │
+│12 dimmed: outside the target, woken by it                                                                            │
+│                                                                                                                      │
+│ledger-peer 1528877 was woken 32 times, 25.08/s                                                                       │
+│<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         │
+│└─ softirq  a device, or a loopback send                 32  100%   19.3µs       --       --              █           │
+│                                                                                                                      │
+│-> it woke in turn: tailscaled 1055 x2, ledger-main 1528848 x2                                                        │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│quiet: the woken thread's time with no sign of life in the run (no wakeup received or issued) before this one -- an   │
+│upper bound: it was blocked no longer than this. hold: the waker's time from its own wakeup to the one it issued --   │
+│how long the chain sat with it. A chain stops at an interrupt, at a thread already on it, or at a waker whose own     │
+│wakeup the run did not see. A softirq may be a loopback send served in its sender's context: the sender is not named. │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ thread  +/- chain depth  enter focus it, then its lanes  l it

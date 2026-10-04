@@ -1,24 +1,24 @@
-omn top │ fixture sqlite-commits │ 4.97s                          view: snapshot │ collectors ≥5.82% │ target 87.8% cpu
+omn top │ fixture sqlite-commits │ 6.84s                          view: snapshot │ collectors ≥8.41% │ target 79.5% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐
-│sched.switches 1.54k 50 late ~low det degraded  sched.wakeup 1.46k 50 late ~low det degraded  sched.offcpu 521 ~low   │
-│det degraded  gpu.kernel refused                                                                                      │
-│59.9ms a cell          ╷0ns            ╷1.00s           ╷2.00s           ╷3.00s          ╷4.00s            of the span│
-│sqlite3        2759238│██▆█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇███████▇█▇█▇█▇█▇█▇█▇███▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇│awake 91.8%│
-│              off cpu │▁ ▃ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂▁▂▁▁▁▁▁▁ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▁ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂  │ blkd 7.98%│
-│┌ gpu.kernel refused ────────────────────────────────────────────────────────────────────────────────────────────────┐│
-││gpu.kernel was not served:                                                                                          ││
-││no collector is written for `gpu.kernel` on backend `vendor:cupti` yet                                              ││
-│└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘│
-│─────────────────────────▲ 125ms──────────────────────────────────────────────────────────────────────────────────────│
-│sqlite3 2759238 (pid 2759238) at 125ms: blocked, uninterruptible 4.77ms, 123ms → 128ms, left cpu 2                    │
-│  woken by an interrupt (hardirq), then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone │
+│sched.switches 1.75k 109 late ~low det degraded  sched.wakeup 1.17k 109 late ~low det degraded  sched.offcpu 507 ~low │
+│det degraded  gpu.kernel 0 60 late degraded                                                                           │
+│82.4ms a cell          ╷0ns        ╷1.00s      ╷2.00s      ╷3.00s      ╷4.00s      ╷5.00s      ╷6.00s      of the span│
+│sqlite3        1494341│▇████████████████████████████████████████████████████████████████████████████████▇▆│awake 94.8%│
+│              off cpu │▂▁ ▁▁ ▁▁ ▁▁ ▁▁▁▁ ▁▁ ▁▁ ▁ ▁▁ ▁ ▁  ▁▁  ▁     ▁   ▁  ▁  ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▂ │ blkd 4.89%│
+│────────────────────────────────────────────────────────────────────────────────────────────────────────▲ 6.69s───────│
+│sqlite3 1494341 (pid 1494341) at 6.69s: blocked, uninterruptible 5.77ms, 6.69s → 6.69s, left cpu 2                    │
+│  woken by tid 1248339, outside the target, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this    │
+│block alone                                                                                                           │
 │  in fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3                                                │
-│  1540 switch-outs and 1019 wakeups seen; awake 91.8% of the run                                                      │
-│  where it was off a cpu over the run, 410ms in all (sched.offcpu, by state and stack) ~low det degraded:             │
-│     297ms 72.5% uninterr.   515 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │
-│    56.4ms 13.8% uninterr.   254 blocks  fdatasync ← sqlite3 x10 ← libc.so.6 ← __libc_start_main ← sqlite3            │
-│    56.1ms 13.7% uninterr.   249 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │
+│  1751 switch-outs and 975 wakeups seen; awake 94.8% of the run                                                       │
+│  where it was off a cpu over the run, 385ms in all (sched.offcpu, by state and stack) ~low det degraded:             │
+│     261ms 67.7% uninterr.   477 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │
+│    62.6ms 16.2% uninterr.   248 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │
+│    61.9ms 16.1% uninterr.   249 blocks  fdatasync ← sqlite3 x10 ← libc.so.6 ← __libc_start_main ← sqlite3            │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

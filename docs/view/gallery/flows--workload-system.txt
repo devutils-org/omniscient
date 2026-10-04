@@ -1,0 +1,40 @@
+omn top │ fixture workload-system │ 2.01s                         view: snapshot │ collectors ≥14.2% │ target 90.5% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐
+│pid 1529755 over 2.01s   8.00MiB sent, 8.00MiB received   █ out █ in █ the machine's                                  │
+│ network · net.socket bpf:fentry ~low det degraded x3 · net.bytes fs:proc ~low det degraded ──────────────────────────│
+│         thread             socket                                             stack         interface, the machine's │
+│    system-main ┃██▄   ▄██┃▶inet :58704        █   ↓8.00MiB            ┃█████████┃█████████┃ lo       36.8MiB     █▃▃ │
+│    tid 1529755 ┃████▄████┃  3.97MiB/s, 158 calls, 15.3µs each         ┃█████████┃█████████┃                          │
+│                ┃██▀██████┃                                            ┃█████████┃█████████┃                          │
+│Thread-1 (drain ┃██████▀██┃ inet :43069        █   ↑8.00MiB            ┃█████████┃█████████┃                          │
+│    tid 1529839 ┃████▀████┃  3.97MiB/s, 128 calls, 19.2µs each         ┃█████████┃█████████┃                          │
+│                ┃██▀   ▀██┃                                            ┃█████████┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃ wlan0     146KiB ▃▁▁ █▂▁ │
+│                                                                                 ┃█████████┃ tailsca… 44.3KiB █   ▇▇  │
+│sockets 16.0MiB -> interfaces 37.0MiB = 2.31x · 4 interfaces idle · lo counts a byte twice; sockets are not tied to in│
+│ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
+│         thread             file                                               cache         device, the machine's    │
+│ bytes per file: not in this run                                                 ┃█████████┃ 259:0    16.2MiB     █   │
+│ io.syscall is in this run as a summary and a histogram: latency per             ┃█████████┃                          │
+│ thread, which carries no bytes. Its `raw` rows (per descriptor) or              ┃█████████┃                          │
+│ io.fs's (per file) do.                                                          ┃█████████┃                          │
+│ docs/view/flows.md has the session that draws it.                               ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃                          │
+│devices 16.2MiB · 2 devices idle · page-cache hits never reach a device; writes reach it later                        │
+│▶ socket 113640 (inet, peer port 58704): 8.00MiB received in 158 calls, 3.97MiB/s                                     │
+│pid 1529755, thread 1529839 -- enter narrows every view to it                                                         │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ socket or file  enter focus its thread

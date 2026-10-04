@@ -1,4 +1,4 @@
-omn top │ fixture http-server │ 2.84s        view: snapshot
+omn top │ fixture http-server │ 3.24s        view: snapshot
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatma
 ┌ process -- one process at a glance: pid 2758953, ran 2.84┐
 │first suspect: ▶ sleep 96.9% -- the cpu tile (flame) has t│

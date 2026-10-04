@@ -1,35 +1,35 @@
-omn top │ fixture vertical-requests │ 408ms                       view: snapshot │ collectors ≥0.70% │ target 4.10% cpu
+omn top │ fixture vertical-requests │ 409ms                       view: snapshot │ collectors ≥1.19% │ target 4.31% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────┐
-│5 requests served by server (pid 2759757) · slowest a001 40.2ms · median 30.1ms · in order of arrival  degraded x2    │
+│5 requests served by server (pid 1499921) · slowest a001 40.2ms · median 30.1ms · in order of arrival  degraded x2    │
 │                                                                                                                      │
 │  req      span  its life by state, to one scale: the slowest is 40.2ms             mostly                            │
 │  a001   40.2ms  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  lock/sleep 99.8%                  │
-│  a002   10.1ms  ██▓▄▄▄▄▄▄▄▄▄▄▄▄▄                                                   disk 81.8% · on cpu 11.1%         │
-│▶ a003   23.0ms  █▓▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▄▄▄                              lock/sleep 87.4% · disk 8.56%     │
+│  a002   9.35ms  █▄▄▄▄▄▄▄▄▄▄▄▄▄▄                                                    disk 90.2% · on cpu 7.47%         │
+│▶ a003   22.3ms  █▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▄▄▄                               lock/sleep 89.7% · disk 8.30%     │
 │  a004   30.1ms  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░                  net in 99.9%                      │
-│  a005   33.1ms  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░             net out 98.8%                     │
+│  a005   33.2ms  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░             net out 99.0%                     │
 │  ░░ net in   ██ on cpu   ▓▓ run queue   ▀▀ lock/sleep   ▄▄ disk   ░░ net out                                         │
 │                                                                                                                      │
-│── a003 · 23.0ms from its first byte in to its last byte out · thread 2759757 ────────────────────────────────────────│
-│            ┊0            ┊5.00ms       ┊10.0ms        ┊15.0ms       ┊20.0ms                                          │
-│  net in    ░                                                                   18.8µs before start                   │
-│  serving   █▓▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▄▄▄▄▄▄  22.9ms from start to done             │
-│  on device                                                          ▄▄▄▄▄▄▄▄▄  32 block requests, 128KiB             │
+│── a003 · 22.3ms from its first byte in to its last byte out · thread 1499921 ────────────────────────────────────────│
+│            ┊0            ┊5.00ms        ┊10.0ms        ┊15.0ms        ┊20.0ms                                        │
+│  net in    ░                                                                   10.4µs before start                   │
+│  serving   █▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▄▄▄▄▄▄  22.3ms from start to done             │
+│  on device                                                            ▄▄▄▄▄▄▄  32 block requests, 128KiB             │
 │  net out                                                                       gone when done                        │
 │  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order                 │
 │                                                                                                                      │
-│  where its 23.0ms went              evidence                       its share of each resource                        │
-│  ░ net in       18.8µs   0.08% ▏    KEY      by socket 17495       cpu        546µs: 3.22% of the 16.9ms server took │
-│  █ on cpu        546µs   2.38% ▏    IDENTITY                                  off cpu 34 times, preempted 1          │
-│  ▓ run queue     362µs   1.58% ▏    IDENTITY                       disk       32 requests, 1.80ms on nvme0n1p6       │
-│  ▀ lock/sleep   20.1ms   87.4% ▀▀▀  IDENTITY woken by tid 2759758             1.15% of the run's device time         │
-│  ▄ disk         1.97ms   8.56% ▏    IDENTITY                                  waited 1.97ms, 161µs off the device    │
+│  where its 22.3ms went              evidence                       its share of each resource                        │
+│  ░ net in       10.4µs   0.05% ▏    KEY      by socket 113618      cpu        318µs: 1.79% of the 17.8ms server took │
+│  █ on cpu        318µs   1.42% ▏    IDENTITY                                  off cpu 34 times, preempted 0          │
+│  ▓ run queue     118µs   0.53% ▏    IDENTITY                       disk       32 requests, 1.80ms on nvme0n1p6       │
+│  ▀ lock/sleep   20.0ms   89.7% ▀▀▀▀ IDENTITY woken by tid 1500253             1.14% of the run's device time         │
+│  ▄ disk         1.86ms   8.30% ▏    IDENTITY                                  waited 1.86ms, 54.7µs off the device   │
 │  ░ net out           ·              KEY                                       ~low det degraded x3                   │
-│  IDENTITY: read off the serving thread  KEY: joined by the socket  network    in 18.8µs · out 0ns                    │
-│                                                                    lock/sleep longest 20.1ms, woken by tid 2759758   │
+│  IDENTITY: read off the serving thread  KEY: joined by the socket  network    in 10.4µs · out 0ns                    │
+│                                                                    lock/sleep longest 20.0ms, woken by tid 1500253   │
 │                                                                                                                      │
-│  what sets it apart from the other 4 requests: ▀ lock/sleep +20.1ms (theirs 0ns) · ▄ disk +1.97ms (theirs 0ns)       │
+│  what sets it apart from the other 4 requests: ▀ lock/sleep +20.0ms (theirs 0ns) · ▄ disk +1.86ms (theirs 0ns)       │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

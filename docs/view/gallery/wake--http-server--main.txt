@@ -1,32 +1,32 @@
-omn top │ fixture http-server │ 2.84s │ focus: tid 2758953        view: snapshot │ collectors ≥16.1% │ target 92.0% cpu
+omn top │ fixture http-server │ 3.24s │ focus: tid 1493220        view: snapshot │ collectors ≥24.3% │ target 90.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐
-│29 late ~low det degraded  220 wakeups of 9 threads -- from a task 26.4%, hardirq 3.18%, softirq 70.5%, in 2.84s      │
+│50 late ~low det degraded  205 wakeups of 12 threads -- from a task 27.8%, hardirq 3.41%, softirq 68.8%, in 3.24s     │
 │                                                                                                                      │
 │woken thread      wakes  mostly by      woken thread      wakes  mostly by      woken thread      wakes  mostly by    │
-│python3 2758972     176  softirq   86%  tailscaled 1055       5  python3   60%  tailscaled 1024       1  python3  100%│
-│python3 2758953      18  Thread-…  56%  tailscaled 3898       4  ldconfig  50%  tailscaled 1062       1  python3  100%│
-│Thread-1… 2758974    12  python3   75%  migration/1 26        2  python3  100%  systemd 1221          1  python3  100%│
-│6 dimmed: outside the target, woken by it                                                                             │
+│python3 1493224     160  softirq   86%  tailscaled 1266       3  python3   67%  ksoftirqd/9 75        1  python3  100%│
+│python3 1493220      16  hardirq   38%  tailscal… 1374244     2  python3   50%  ksoftirqd/13 101      1  Thread-… 100%│
+│Thread-1… 1493226    15  python3   67%  migration/0 20        1  Thread-… 100%  ksoftirqd/14 107      1  Thread-… 100%│
+│tailscaled 1060       3  ldconfig  67%  migration/8 68        1  python3  100%  tailscaled 984        1  python3  100%│
+│9 dimmed: outside the target, woken by it                                                                             │
 │                                                                                                                      │
-│python3 2758953 was woken 18 times, 6.33/s                                                                            │
+│python3 1493220 was woken 16 times, 4.94/s                                                                            │
 │<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         │
-│├─ Thread-1 (proce 2758974  its wakeup unseen x4         10   56%   28.2µs    273ms    501ms  ▆   ▄                ▂ ▃│
-││  ├─ python3 2758953  ↺ back on the chain                3   17%   32.5µs   32.5µs   39.2µs                       ▂ ▃│
-││  └─ softirq  a device, or a loopback send               3   17%    111ms       --       --      ▄                   │
-│├─ hardirq  a device                                      5   28%    501ms       --       --      ▂    ▂   ▂   ▂   ▂  │
-│├─ tid 2758854  outside the target: stops                 1    6%       --       --       --  ▂                       │
-│├─ python3 2758972                                        1    6%    249ms    165µs    165µs                         ▂│
-││  └─ softirq  a device, or a loopback send               1    6%   19.9µs       --       --                         ▂│
-│└─ softirq  a device, or a loopback send                  1    6%   3.21ms       --       --  ▂                       │
+│├─ hardirq  a device                                      6   38%    501ms       --       --      ▁  ▁   ▁   ▁   ▁  ▁ │
+│├─ Thread-1 (proce 1493226  its wakeup unseen x4          5   31%   83.1µs    128ms    128ms  ▄                      ▁│
+││  └─ python3 1493220  ↺ back on the chain                1    6%    357ms    200µs    200µs                         ▁│
+│├─ python3 1493224                                        3   19%   2.33ms   2.33ms   4.33ms  ▂                      ▁│
+││  ├─ python3 1493220  ↺ back on the chain                2   12%    726µs   4.40ms   4.40ms  ▂                       │
+││  └─ softirq  a device, or a loopback send               1    6%   89.3µs       --       --                         ▁│
+│├─ tid 1493173  outside the target: stops                 1    6%       --       --       --  ▁                       │
+│└─ softirq  a device, or a loopback send                  1    6%   2.03ms       --       --  ▁                       │
 │                                                                                                                      │
 │woken at      held   the longest chains, link by link: each waker and its hold                                        │
-│+2.57s       501ms   <- Thread-1 (proce 2758974 501ms  <- python3 2758953 39.2µs ↺                                    │
-│+566ms       273ms   <- Thread-1 (proce 2758974 273ms  <- softirq  x3                                                 │
-│+2.82s       249ms   <- Thread-1 (proce 2758974 249ms  <- python3 2758953 32.5µs ↺  x2                                │
-│+2.82s       165µs   <- python3 2758972 165µs  <- softirq                                                             │
+│+3.20s       129ms   <- Thread-1 (proce 1493226 128ms  <- python3 1493220 200µs ↺                                     │
+│+8.39ms     8.72ms   <- python3 1493224 4.33ms  <- python3 1493220 4.40ms ↺  x2                                       │
+│+3.20s       294µs   <- python3 1493224 294µs  <- softirq                                                             │
 │                                                                                                                      │
-│-> it woke in turn: Thread-1 (proce 2758974 x9, tailscaled 1055 x3, migration/1 26 x2, tailscaled 1062 x1, and 2 more │
+│-> it woke in turn: Thread-1 (proce 1493226 x10, tailscaled 1266 x2, migration/8 68 x1, ksoftirqd/9 75 x1, and 3 more │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

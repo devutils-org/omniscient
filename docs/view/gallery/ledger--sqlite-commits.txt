@@ -1,36 +1,36 @@
-omn top │ fixture sqlite-commits │ 4.97s                          view: snapshot │ collectors ≥5.82% │ target 87.8% cpu
+omn top │ fixture sqlite-commits │ 6.84s                          view: snapshot │ collectors ≥8.41% │ target 79.5% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ ledger -- what task 2759238 cost over 4.97s of wall-clock ───────────────────────────────────────────────────────────┐
+┌ ledger -- what task 1494341 cost over 6.84s of wall-clock ───────────────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
-│▸ cpu time        4.31s on cpu     86.8% of one cpu          █▇▇██████▇██████████████     81.0µs  ~low det degraded   │
+│▸ cpu time        5.64s on cpu     82.5% of one cpu          ▇███▇▇█▇▇▆▅▅▄▅▆▇▇█▇▇██▇▇    ≥35.8ms  ~low det            │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
-│    own account         4.52s  with its descendants, as the scheduler counts them                                     │
-│    machine busy        12.6s  ████         35.9%                                                                     │
-│  memory held     4.75MiB peak     +92.0KiB from 4.66MiB     ▁███████████████████████      317µs                      │
-│  memory faulted  219 faults       44/s                      a total only                 ≥198µs  51 late             │
-│  I/O syscalls    537 calls        3.98ms inside them        512ns ▁▂▄█▄▂ 32.8µs         ≥52.1ms  ~low det degraded x2│
+│    own account         5.64s  with its descendants, as the scheduler counts them                                     │
+│    machine busy        1m45s  █            5.38%                                                                     │
+│  memory held     4.80MiB peak     +0B from 4.80MiB          ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄      727µs                      │
+│  memory faulted  217 faults       32/s                      a total only                 ≥532µs  119 late            │
+│  I/O syscalls    537 calls        5.38ms inside them        1.02µs ▁▄█▆▂▁   ▁ 1.05ms    ≥99.8ms  ~low det degraded x2│
 │    bytes read and written: on the raw rows only, which this run did not keep                                         │
-│  network         0B moved         0B out, 0B in             no socket call              ≥53.5ms  ~low det degraded x2│
-│  retransmits     0 sent again     machine-wide              a total only                 ≥176µs  46 late ~low det    │
-│  GPU memory      0B peak          of 692MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁      908µs                      │
-│  GPU time        refused: no collector is written for `gpu.kernel` on backend `vendor:cupti` yet                     │
-│  energy          342J machine     68.8W on average          ▅▆▆▆▆▆▆▇▇█████████▇▇▇▇▇▇    ≥33.9µs                      │
-│    ≈ the target's       123J  an estimate, not a measurement: its share of the machine's busy cpu, 4.52s of 12.6s    │
+│  network         0B moved         0B out, 0B in             no socket call              ≥94.0ms  2 late ~low det degr│
+│  retransmits     1 sent again     machine-wide              a total only                 ≥530µs  61 late ~low det deg│
+│  GPU memory      0B peak          of 756MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁     8.72ms                      │
+│  GPU time        0ns on GPU       0 kernels and copies      no series kept               ≥754µs  60 late degraded    │
+│  energy          845J machine     124W on average           ▆▆▆▆▆▆▅▆████████▇▇████▇▆    ≥78.0µs                      │
+│    ≈ the target's      45.5J  an estimate, not a measurement: its share of the machine's busy cpu, 5.64s of 1m45s    │
 │                                                                                                                      │
-│  to know all of this: ≥107ms of omn's cpu, ≥2.37% of what the target spent                                           │
+│  to know all of this: ≥241ms of omn's cpu, ≥4.27% of what the target spent                                           │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
-│cpu.oncpu_time via fs:proc -- cpu time, per thread                                                                    │
+│cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
 │· the source is not reproducible between two runs of the same workload                                                │
-│· served by a fallback that says what it gives up (1)                                                                 │
-│· the fallback says: fs:proc: tick granularity, no per-site attribution                                               │
-│· to know it: 81.0µs of omn's cpu, and 0ns inside the target -- nothing of this collector runs in the target's        │
-│context: it reads the kernel's account, or a file, from its own                                                       │
+│· to know it: 35.8ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
+│run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl       │
+│kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable                 │
 │· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │
-│where it could not be read, of 2759238 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │
+│where it could not be read, of 1494341 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │
 │in microseconds once it was reaped)                                                                                   │
 │· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│
 │own account's                                                                                                         │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

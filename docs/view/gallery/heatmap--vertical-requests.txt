@@ -1,14 +1,14 @@
-omn top │ fixture vertical-requests │ 408ms                       view: snapshot │ collectors ≥0.70% │ target 4.10% cpu
+omn top │ fixture vertical-requests │ 409ms                       view: snapshot │ collectors ≥1.19% │ target 4.31% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ heatmap -- io.latency latency over time ─────────────────────────────────────────────────────────────────────────────┐
 │ io.latency 142   sched.runqlat not asked   net.socket not asked   gpu.kernel not asked                               │
-│142 block requests, 21.2µs to 4.70ms, p50 56.4µs, p99 4.64ms ~low det degraded x3                                     │
-│3 regimes  ~56.0µs 75% (107) in bursts every ~110ms, 18.3ms to 243ms  │  ~400µs 1.4% (2) 19.1ms to 19.5ms  │  ~4.52ms │
-│23% (33) in two bursts, 17.1ms to 165ms                                                                               │
-│  count    ▄▅                                ▄█               ▃▄                                       the whole run  │
+│142 block requests, 29.0µs to 4.69ms, p50 57.5µs, p99 4.63ms ~low det degraded x3                                     │
+│3 regimes  ~57.2µs 75% (107) in bursts every ~110ms, 19.7ms to 243ms  │  ~415µs 1.4% (2) 20.5ms to 20.9ms  │  ~4.56ms │
+│23% (33) 18.3ms to 167ms                                                                                              │
+│  count     ▇                                ▂█               ▂▄                                       the whole run  │
 │       │                                     │                                                                        │
 │       │                                     │                                                                        │
-│       │   ▓▓                                ▒                                                         ███          33│
+│       │    █                                ▒                                                         ███          33│
 │       │                                     │                                                                        │
 │       │                                     │                                                                        │
 │       │                                     │                                                                        │
@@ -24,17 +24,17 @@ omn top │ fixture vertical-requests │ 408ms                       view: snap
 │       │                                     │                                                                        │
 │  100µs┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·│  ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
 │       │                                     │                                                                        │
-│       │                                     ▓█               ▓▓                                       █████████    95│
-│       │    ▒                                │                                                         ▏             3│
-│       │    ▓                                │                                                         █             6│
-│       │    ▒                                │                                                         ▏             2│
-│       │    ▒                                │                                                         ▏             1│
+│       │                                     ▒█               ▒▓                                       █████████    95│
+│       │    ▓                                │                                                         █             7│
+│       │    ▒                                │                                                         ▏             5│
+│       │                                     │                                                                        │
+│       │                                     │                                                                        │
 │       └┬─────────────────────┬──────────────▲───────┬──────────────────────┬──────────────────────┬─                 │
 │        0                   100ms                  200ms                  300ms                  400ms                │
 │   lost nothing lost                                                                                                  │
 │                                                                                                                      │
-│▲ 162ms to 167ms   21 block requests   p50 56.4µs   p99 4.70ms   max 4.70ms                                           │
-│  its slowest 4.70ms: server tid 2759757 RA 16.0KiB on nvme0n1p6 request a002                                         │
-│per cell ▒1 ▒3 ▓6 ▓12 █23   rows 2.6/octave, columns 4.39ms each                                                      │
+│▲ 163ms to 167ms   7 block requests   p50 55.3µs   p99 4.69ms   max 4.69ms                                            │
+│  its slowest 4.69ms: server tid 1499921 RA 16.0KiB on nvme0n1p6 request a002                                         │
+│per cell ▒1 ▒3 ▓7 ▓14 █29   rows 2.6/octave, columns 4.39ms each                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it

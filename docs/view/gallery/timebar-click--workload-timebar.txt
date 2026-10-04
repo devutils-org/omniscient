@@ -1,0 +1,40 @@
+omn top │ fixture workload-timebar │ 3.28s                        view: snapshot │ collectors ≥14.7% │ target 35.9% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
+│ the view's reading  one bar per thread, whole: the run's window                                                      │
+│                                                                                                                      │
+│ ▶ first suspect  1525671 worker: on-cpu 902ms (27.5% of its wall clock)                                              │
+│   on a cpu, doing its own work: cpu-bound                                                                            │
+│   most-sampled leaf `__tls_get_addr`: 130 of 1314 samples, every thread's: the samples are spread, no one function … │
+│   decisive: ahead of the next state (882ms) and of what no row read (0ns) -- omn latency's rule, on the view's read… │
+│                                                                                                                      │
+│   1525319 timebar-main├█▚▚▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 95.1% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞┤    3.28s  ▶ lock 95.1%        │
+│ ▸ 1525671 worker      ├█ on cpu 27.5% ██▚▚▚▚▚▚▚▚▚▚▚▚▚▚░░ sleep 26.9% ░░              ┤    3.28s  ▶ on cpu 27.5%      │
+│   1526045 holder      ├░░░░░░░░                                                      ┤    3.28s  ▶ sleep 12.2%       │
+│   1526152 rival       ├███████▚▚▚▚▚▚▚                                                ┤    3.28s  ▶ run queue 11.8%   │
+│                      0 ───────────────────────────┼ 1.64s ───────────────────────────┤ 3.28s                         │
+│                        █ on cpu   ▚ run queue   ▞ lock   ▓ I/O   ░ sleep                                             │
+│                                                                                                                      │
+│   state                            source          amount          share   ±         reads  trust                    │
+│   whole: the run's window                          3.28s           100%    exact                                     │
+│ █ on-cpu                           cpu.oncpu_time  902ms           27.5%   exact     0      ~low det                 │
+│     ↳ most-sampled leaf `__tls_get_addr`: 130 of 1314 samples, every thread's: the samples are spread, no one funct… │
+│ ▚ runnable                         sched.runqlat   722ms           22.0%   exact     131    2 late ~low det degraded │
+│ ▓ blocked: uninterruptible         sched.offcpu    1.08ms          0.03%   exact     1      ~low det degraded x2     │
+│     ↳ 100 % of it from one stack, leaf first: libc.so.6+0x12071d <- 0x1001000                                        │
+│ ░ blocked: sleeping                sched.offcpu    882ms           26.9%   exact     8      ~low det degraded x2     │
+│     ↳ 45 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- libpython3.14.so.1.0+0x36de91 <- libpython3.14.so… │
+│     ↳ 405ms waiting in futex(2) over 6 wait(s): less than half the sleep                                             │
+│   residue: the whole less the rows                 773ms           23.6%   exact     time no row accounts for        │
+│                                                                                                                      │
+│ No decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread    │
+│   over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn │
+│   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │
+│ Trust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it  │
+│   gives up (3); 2 rounds of reads came late: nothing is missing, but the series is not spaced as asked.              │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ bar  d decomposition  s scale  enter open

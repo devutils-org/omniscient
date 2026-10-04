@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture workload-flame │ 2.07s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥14.9%[0m[35m │ target 62.4% cpu[0m [0m
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  9 flows  0 process                      [0m
+┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐[0m
+│[0m[1msched.switches [0m[2m39[0m [0m[33m23 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.wakeup [0m[2m25[0m [0m[33m23 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.offcpu [0m[2m21[0m [0m[36m~low det[0m      │[0m
+│[0m[33mdegraded[0m  [0m[1mgpu.kernel [0m0 [0m[33m19 late[0m [0m[33mdegraded[0m                                                                               │[0m
+│[0m[2m24.9ms a cell[0m          [0m[2m╷0ns[0m                [0m[2m╷500ms[0m              [0m[2m╷1.00s[0m              [0m[2m╷1.50s[0m                  [0m[2mof the span[0m│[0m
+│[0m[1;7mflame-main     1524065[0m[2m│[0m[2;32m█▂[0m[2m                   [0m[2;7m [0m[2m                   [0m[2;32m▁[0m[2m                                       [0m[2;32m▁▁[0m[2m│awake 1.61%[0m│[0m
+│[0m[2m              off cpu │ [0m[2;34m▇███████████████████[0m[2;7;34m█[0m[2;34m████████████████████████████████████████████████████████████[0m[2m │ blkd 97.3%[0m│[0m
+│[0m[4;32mhot            1524067[0m[2m│ [0m[2;32m▇███████████████████[0m[2;7;32m█[0m[2;32m▇[0m[2m                                                            │awake 26.1%[0m│[0m
+│[0m[2m              off cpu │ [0m[2;34m▁[0m[2m                   [0m[2;7m [0m[2m                                                             │ blkd 0.00%[0m│[0m
+│warm           1524143[0m[2m│                     [0m[2;7m [0m[2m                   [0m[2;32m▂█▂[0m[2m [0m[2;32m▄█▂[0m[2m [0m[2;32m▃█▃[0m[2m [0m[2;32m▃█▃[0m[2m [0m[2;32m▃█▃[0m[2m [0m[2;32m▃█▃[0m[2m [0m[2;32m▂█▃[0m[2m [0m[2;32m▂█▄[0m[2m [0m[2;32m▂█▄[0m[2m [0m[2;32m▂█▄[0m[2m   │awake 19.3%[0m│[0m
+│[0m[2m              off cpu │                     [0m[2;7m [0m[2m                   [0m[2;34m▁[0m[2m [0m[2;34m▇█▅[0m[2m [0m[2;34m▇█▆[0m[2m [0m[2;34m▆█▆[0m[2m [0m[2;34m▆█▆[0m[2m [0m[2;34m▆█▆[0m[2m [0m[2;34m▆█▇[0m[2m [0m[2;34m▆█▇[0m[2m [0m[2;34m▅█▇[0m[2m [0m[2;34m▅█▇[0m[2m [0m[2;34m▅██[0m[2m │ blkd 29.0%[0m│[0m
+│[0m[2m────────────────────────────────────────────[0m[2;32m▲ 533ms[0m[2m───────────────────────────────────────────────────────────────────[0m│[0m
+│[0m[1mflame-main 1524065 (pid 1524065) at 533ms: [0m[2;34mblocked, sleeping[0m[2m 1.01s, 28.6ms → 1.04s, left cpu 0[0m                        │[0m
+│  woken by [0m[1mhot 1524067[0m[2m, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone[0m            │[0m
+│[0m[2m  in [0m[2;34mlibc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← PyEvent_WaitTimed ← libpython3.14.so.1.0 x4 ← …[0m          │[0m
+│[0m[2m  16 switch-outs and 9 wakeups seen; awake 1.61% of the run[0m                                                           │[0m
+│[0m[2m  meanwhile [0m[32mawake: [0mhot 1524067                                                                                        │[0m
+│[0m[2m  where it was off a cpu over the run, 2.01s in all (sched.offcpu, by state and stack)[0m [0m[36m~low det[0m [0m[33mdegraded[0m[2m:[0m             │[0m
+│  [0m[2m   1.01s 50.1%[0m [0m[2;34msleeping  [0m[2m    1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …[0m                    │[0m
+│  [0m[2m   999ms 49.7%[0m [0m[2;34msleeping  [0m[2m    1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …[0m                    │[0m
+│  [0m[2m  5.09ms 0.25%[0m [0m[2;34msleeping  [0m[2m    2 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …[0m             │[0m
+│  [0m[2m  91.2µs 0.00%[0m [0m[2;34msleeping  [0m[2m    1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …[0m                    │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│[0m[32m▆[0m awake: on a cpu or queued  [0m[34m─[0m blocked  [0m[33m━[0m uninterruptible  [0m[35m▆[0m kernel  [0m[36m▆[0m copy  [0m[2mheight: share of the cell[0m                │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m lane  [0m[1mh/l H/L[0m cursor  [0m[1m[/][0m prev/next change  [0m[1mz/Z[0m zoom  [0m[1mw[0m to wa[0m

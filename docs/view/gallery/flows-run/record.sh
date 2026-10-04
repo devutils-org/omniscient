@@ -1,7 +1,10 @@
 #!/bin/sh
 # Records the run the flows view is judged on, through `omn top` itself.
 #
-#   make && docs/view/gallery/flows-run/record.sh
+#   make && docs/view/gallery/flows-run/record.sh [OUT]
+#
+# Into OUT when given (the fixtures' `record.sh` records it as
+# `file-serving`), into `data/` beside this script otherwise.
 #
 # The common fixtures (`tests/view_fixtures/`) carry `io.syscall` as a summary
 # and a histogram -- latency per thread, no bytes -- and no `io.fs` at all, so
@@ -117,7 +120,7 @@ requests:
 - {source: io.bytes, label: io.bytes@system, mode: poll@250ms, emit: [timeline, summary], target: system}
 YML
 
-out="$here/data"
+out=${1:-$here/data}
 rm -rf "$out"
 "$omn" top --headless -f "$work/session.yml" -o "$out" >/dev/null
 rm -f "$out/resolved.json" "$out/cost.json"

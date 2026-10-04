@@ -1,0 +1,40 @@
+omn top │ fixture many-requests │ 15.8s                           view: snapshot │ collectors ≥6.10% │ target 0.50% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
+│ the view's reading  one bar per thread, whole: the run's window                                                      │
+│                                                                                                                      │
+│ ▶ first suspect  1504111 server (the program): blocked: sleeping 15.4s (97.4% of its wall clock)                     │
+│   asleep on something that is not a lock seen here: a timer, a pipe, a socket, a condition                           │
+│   98 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <- _st… │
+│   decisive: ahead of the next state (195ms) and of what no row read (0ns) -- omn latency's rule, on the view's read… │
+│                                                                                                                      │
+│ ▸ 1504111 server      ├▓░░░░░░░░░░░░░░░░░░░░░░░ sleep 97.4% ░░░░░░░░░░░░░░░░░░░░░░░░ ┤    15.8s  ▶ sleep 97.4%       │
+│   1504265 server      ├░░░░░░░░░░░░░░░░░░░░░░░░ sleep 99.0% ░░░░░░░░░░░░░░░░░░░░░░░░ ┤    15.8s  ▶ sleep 99.0%       │
+│   1504266 server      ├░░░░░░░░░░░░░░░░░░░░░░░░ sleep 98.4% ░░░░░░░░░░░░░░░░░░░░░░░░ ┤    15.8s  ▶ sleep 98.4%       │
+│                      0 ───────────────────────────┼ 7.91s ───────────────────────────┤ 15.8s                         │
+│                        █ on cpu   ▚ run queue   ▓ I/O   ░ sleep                                                      │
+│                                                                                                                      │
+│   state                            source          amount          share   ±         reads  trust                    │
+│   whole: the run's window                          15.8s           100%    exact                                     │
+│ █ on-cpu                           cpu.oncpu_time  40.9ms          0.26%   exact     0      1 late ~low det          │
+│     ↳ most-sampled leaf `htab_map_update_elem`: 6 of 112 samples, every thread's: the samples are spread, no one fu… │
+│ ▚ runnable                         sched.runqlat   30.3ms          0.19%   exact     366    4 late ~low det degraded │
+│ ▓ blocked: uninterruptible         sched.offcpu    195ms           1.23%   exact     158    3 late ~low det degraded │
+│     ↳ 97 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <-… │
+│ ░ blocked: sleeping                sched.offcpu    15.4s           97.4%   exact     548    3 late ~low det degraded │
+│     ↳ 98 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <-… │
+│     ↳ 158ms waiting in futex(2) over 77 wait(s): less than half the sleep                                            │
+│   residue: the whole less the rows                 144ms           0.91%   exact     time no row accounts for        │
+│                                                                                                                      │
+│ task:1504111 is the program's: its main thread, the one whose id is its process's.                                   │
+│ No decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread    │
+│   over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn │
+│   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │
+│ Trust: 8 rounds of reads came late: nothing is missing, but the series is not spaced as asked; the source is not     │
+│   reproducible between two runs of the same workload; served by a fallback that says what it gives up (2).           │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ bar  d decomposition  s scale  enter open

@@ -1,26 +1,26 @@
-omn top │ fixture cpython-hot │ 3.89s                             view: snapshot │ collectors ≥5.56% │ target 95.3% cpu
+omn top │ fixture cpython-hot │ 5.68s                             view: snapshot │ collectors ≥11.2% │ target 85.1% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐
-│over 3.89s   █ out █ in █ the machine's                                                                               │
-│ network · net.socket bpf:fentry ~low det degraded x2 · net.bytes fs:proc ~low det degraded ──────────────────────────│
+│over 5.68s   █ out █ in █ the machine's                                                                               │
+│ network · net.socket bpf:fentry ~low det degraded x3 · net.bytes fs:proc ~low det degraded ──────────────────────────│
 │         thread             socket                                             stack         interface, the machine's │
-│ no socket moved a byte                                                          ┃█████████┃ wlan0    56.2KiB ▁▁█▁▁▁▁▁│
+│ no socket moved a byte                                                          ┃█████████┃ wlan0    1.53MiB ▁█▁▁▁▁▁▁│
 │ 0 rows in this run, none with bytes                                             ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃ tailsca… 1.26MiB ▁█▁▁▁ ▁▁│
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│interfaces 56.2KiB · 6 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                   │
-│ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
+│interfaces 2.79MiB · 5 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                   │
+│ storage · io.syscall bpf:fentry -4 lost (18.2%) ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────│
 │         thread             file                                               cache         device, the machine's    │
-│ bytes per file: not in this run                                                 ┃█████████┃ 259:0     144KiB    █    │
+│ bytes per file: not in this run                                                 ┃█████████┃ 259:0    21.5MiB ▁▁▁▂▁ ▁█│
 │ io.syscall is in this run as a summary and a histogram: latency per             ┃█████████┃                          │
 │ thread, which carries no bytes. Its `raw` rows (per descriptor) or              ┃█████████┃                          │
 │ io.fs's (per file) do.                                                          ┃█████████┃                          │
@@ -33,7 +33,7 @@ omn top │ fixture cpython-hot │ 3.89s                             view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│devices 144KiB · 2 devices idle · page-cache hits never reach a device; writes reach it later                         │
+│devices 21.5MiB · 2 devices idle · page-cache hits never reach a device; writes reach it later                        │
 │nothing to select: no socket of the target's moved a byte; bytes per file were not measured                           │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

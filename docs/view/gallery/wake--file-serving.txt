@@ -1,0 +1,40 @@
+omn top │ fixture file-serving │ 2.58s                            view: snapshot │ collectors ≥0.85% │ target 11.4% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐
+│This run did not trace sched.wakeup: there is no wake chain to draw.                                                  │
+│                                                                                                                      │
+│`omn top -- prog` asks for it, and so does `omn top --headless -o DIR -- prog`; a machine-wide recording made for the │
+│overview alone does not.                                                                                              │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ thread  +/- chain depth  enter focus it, then its lanes  l it

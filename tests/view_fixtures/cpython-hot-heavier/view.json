@@ -1,5 +1,5 @@
 {
-  "origin": "live: python3 /omniscient/cases/cpython-interpreter/hot.py /work/heavier.txt",
+  "origin": "live: python3 -X perf /omniscient/cases/cpython-interpreter/hot.py /work/heavier.txt",
   "facts": {
     "cpu.oncpu_time": {
       "determinism": "low",
@@ -92,11 +92,6 @@
   },
   "refused": [
     {
-      "label": "gpu.kernel",
-      "source": "gpu.kernel",
-      "reason": "no collector is written for `gpu.kernel` on backend `vendor:cupti` yet"
-    },
-    {
       "label": "net.request",
       "source": "net.request",
       "reason": "cannot start collecting `net.request`: /usr/bin/python3 declares no request: `net.request` follows a request from a `request__start(id)` probe to a `request__done(id)` probe the program fires itself, any provider, and this one carries no USDT probe at all. Nothing is inferred from the connection instead -- see `docs/scenarios/vertical.md`"
@@ -107,6 +102,7 @@
     "cpu.profile": 0,
     "cpu.util@system": 0,
     "gpu.engine_busy@system": 1000000000,
+    "gpu.kernel": 0,
     "gpu.mem": 0,
     "gpu.mem@system": 0,
     "io.bytes@system": 0,

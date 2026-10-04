@@ -1,4 +1,4 @@
-[0m[1momn top[0m │ fixture http-server │ 2.84s        [0m[35mview: snapshot[0m [0m
+[0m[1momn top[0m │ fixture http-server │ 3.24s        [0m[35mview: snapshot[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatma[0m
 ┌ process -- one process at a glance: pid 2758953, ran 2.84┐[0m
 │[0m[1mfirst suspect: [0m[1;2;37m▶ sleep 96.9%[0m -- the cpu tile (flame) has t│[0m

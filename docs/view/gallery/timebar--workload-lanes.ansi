@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture workload-lanes │ 2.24s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥11.5%[0m[35m │ target 69.5% cpu[0m [0m
+ 1 system  2 flame  3 ledger  4 request [0m[1;7m 5 timebar [0m 6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
+┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐[0m
+│ [0m[1;32mthe view's reading[0m[2m  one bar per thread, whole: the run's window[0m                                                      │[0m
+│                                                                                                                      │[0m
+│ [0m[1m▶ first suspect  1529959 lanes-main (the program): [0m[1;31mblocked: sleeping, on a futex 2.11s (94.1% of its wall clock)[0m     │[0m
+│   asleep on a lock another thread held: lock-contended                                                               │[0m
+│   2.11s waiting in futex(2) over 22 wait(s)                                                                          │[0m
+│ [0m[2m  decisive: ahead of the next state (30.7ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea…[0m │[0m
+│                                                                                                                      │[0m
+│ [0m[1;32m▸ 1529959 lanes-main  [0m[2m├[0m[2;32m█[0m[2;31m▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞[0m[1;2;7;31m lock 94.1% [0m[2;31m▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞[0m[2m   ┤    2.24s [0m[1;31m ▶ lock 94.1%      [0m  │[0m
+│   1529975 lane-c      [0m[2m├[0m[2;32m█████████████[0m[2;31m▞▞▞▞▞▞▞[0m[1;2;7;31m lock 43.2% [0m[2;31m▞▞▞▞▞▞▞▞[0m[2m                      ┤    2.24s [0m[1;31m ▶ lock 43.2%      [0m  │[0m
+│   1529974 lane-b      [0m[2m├[0m[2;32m█████████████[0m[2;31m▞▞▞▞▞▞[0m[1;2;7;31m lock 39.6% [0m[2;31m▞▞▞▞▞▞▞[0m[2m                        ┤    2.24s [0m[1;31m ▶ lock 39.6%      [0m  │[0m
+│   1529973 lane-a      [0m[2m├[0m[2;32m█████████████[0m[2;31m▞▞▞▞▞[0m[1;2;7;31m lock 36.0% [0m[2;31m▞▞▞▞▞[0m[2m                           ┤    2.24s [0m[1;31m ▶ lock 36.0%      [0m  │[0m
+│   1530068 cuda-EvtHan…[0m[2m├[0m[2;32m██[0m[2;37m░[0m[1;2;7;37m sleep 26.1% [0m[2;37m░░[0m[2m                                            ┤    2.24s [0m[1;37m ▶ sleep 26.1%     [0m  │[0m
+│   1530061 cuda0000140…[0m[2m├[0m[2;37m░░[0m[1;2;7;37m sleep 29.3% [0m[2;37m░░░[0m[2m                                            ┤    2.24s [0m[1;37m ▶ sleep 29.3%     [0m  │[0m
+│   1530062 lane-gpu    [0m[2m├[0m[2;31m▞▞▞[0m[1;2;7;31m lock 29.0% [0m[2;31m▞▞▞[0m[2m                                            ┤    2.24s [0m[1;31m ▶ lock 29.0%      [0m  │[0m
+│   1530060 lane-gpu    [0m[2m├[0m[2;32m█████[0m[2;31m▞▞▞▞▞▞▞▞▞▞▞▞▞[0m[2m                                            ┤    2.24s [0m[1;31m ▶ lock 20.2%      [0m  │[0m
+│   1530063 omn-cupti-f…[0m[2m├[0m[2;37m░░[0m[1;2;7;37m sleep 29.0% [0m[2;37m░░░[0m[2m                                            ┤    2.24s [0m[1;37m ▶ sleep 29.0%     [0m  │[0m
+│   1530064 lane-gpu    [0m[2m├[0m[2;31m▞▞[0m[1;2;7;31m lock 27.4% [0m[2;31m▞▞▞[0m[2m                                             ┤    2.24s [0m[1;31m ▶ lock 27.4%      [0m  │[0m
+│   1530067 lane-gpu    [0m[2m├[0m[2;31m▞▞[0m[1;2;7;31m lock 26.3% [0m[2;31m▞▞[0m[2m                                              ┤    2.24s [0m[1;31m ▶ lock 26.3%      [0m  │[0m
+│   1530125 lane-gpu    [0m[2m├[0m[2;37m░░░░░░░░░░░░░[0m[2m                                                 ┤    2.24s [0m[1;37m ▶ sleep 21.0%     [0m  │[0m
+│ [0m[2m                     0 ───────────────────────────┼ 1.12s ───────────────────────────┤ 2.24s                        [0m │[0m
+│                        [0m[32m█[0m on cpu   [0m[35m▚[0m run queue   [0m[31m▞[0m lock   [0m[34m▓[0m I/O   [0m[37m░[0m sleep                                             │[0m
+│                                                                                                                      │[0m
+│ [0m[1m  state                            source          amount          share   ±         reads  trust                   [0m │[0m
+│ [0m[2m  whole: the run's window                          2.24s           100%    exact                                    [0m │[0m
+│ [0m[32m█ [0m[2mon-cpu                           cpu.oncpu_time  30.7ms          1.37%   exact     0      [0m[36m~low det[0m                 │[0m
+│ [0m[2m    ↳ most-sampled leaf `PyNumber_Remainder`: 121 of 1605 samples, every thread's: the samples are spread, no one f…[0m │[0m
+│ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   2.18ms          0.10%   exact     15     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[31m▞ [0m[2mblocked: sleeping, on a futex    sched.offcpu    2.11s           94.1%   exact     18     [0m[36m~low det[0m [0m[33mdegraded x2[0m     │[0m
+│ [0m[2m    ↳ 2.11s waiting in futex(2) over 22 wait(s)                                                                     [0m │[0m
+│ [0m[2m  residue: the whole less the rows                 100ms           4.48%   exact     time no row accounts for       [0m │[0m
+│                                                                                                                      │[0m
+│ [0m[2mtask:1529959 is the program's: its main thread, the one whose id is its process's.[0m                                   │[0m
+│ [0m[2mNo decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread[0m    │[0m
+│ [0m[2m  over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn[0m │[0m
+│ [0m[2m  latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.…[0m                             │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓[0m bar  [0m[1md[0m decomposition  [0m[1ms[0m scale  [0m[1menter[0m open                     [0m

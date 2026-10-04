@@ -1,24 +1,24 @@
-[0m[1momn top[0m │ fixture http-server │ 2.84s                            [0m[35mview: snapshot[0m [0m
+[0m[1momn top[0m │ fixture http-server │ 3.24s                            [0m[35mview: snapshot[0m [0m
  1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  [0m
 [0m[1;2m flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs'[0m
-[0m[1mon cpu: [0m[2m2.85k · [0mhottest own [0m[1mlink_path_walk[0m[2m 6.07%[0m │ [0m[1moff cpu: [0m[2m5.51s · [0mhottest own [0m
-[0m[32m┌[0m[1;32m on cpu [0m[2;32mcpu.profile 2.85k [0m[33m29 late[0m[32m [0m[36m~low[0m[32m┐[0m[2m┌[0m[1;2m off cpu [0m[2msched.offcpu 5.51s [0m[2;36m~low det[0m[2m [0m[2;33md[0m[2m┐[0m
-[0m[32m│width ∝ samples · hea…[0m[2m 77 frames deep [0m[32m│[0m[2m│[0m[32mwidth ∝ time off cpu …[0m[2m 25 frames deep │[0m
-[0m[32m│[0m[1;2;97;42m▏all 2.85k                            [0m[32m│[0m[2m│[0m[1;2;30;47m▏all › ⋯4⋯ › Py_RunMain 5.50s         [0m[2m│[0m
-[0m[32m│[0m[2;30;43m▏⋯libpython3.14+0x1e478b 95.1%      [0m[2;30;103m▏P[0m[32m│[0m[2m│[0m[2;30;46m▏libc+0xa08f2 50.0%[0m[2;30;106m▏⋯__recv 47.6%     [0m[2m│[0m
-[0m[32m│[0m[2;30;101m▏+0x67661 56.8%       [0m[2;30;43m▏li[0m[2;30;103m▏_[0m[2;30;101m [0m[2;30;43m [0m[2;30;103m [0m[2;30;101m [0m[2;30;103m [0m[2;30;101m [0m[2;30;103m [0m[2;30;43m [0m[2;30;101m [0m  [0m[32m│[0m[2m│[0m                                      [0m[2m│[0m
-[0m[32m│[0m[2;30;103m▏⋯do_syscall_64 [0m[2;30;43m▏l[0m[2;30;103m [0m[2;30;101m [0m[2;30;103m [0m[2;30;101m [0m[2;30;43m▏l[0m[2;30;103m [0m             [0m[32m│[0m[2m│[0m[1mheaviest on their own[0m[2m (where it ends,…│[0m
-[0m[32m│[0m[2;30;43m▏__do_sys_ne…[0m[2;30;103m [0m[2;30;101m [0m [0m[2;30;43m [0m[2;30;103m [0m[2;30;43m [0m                   [0m[32m│[0m[2m│ 50.1% [0m[36m████████████[0m[2m libc+0xa08f2[0m      [0m[2m│[0m
-[0m[32m│[0m[2;30;103m▏vfs_fstat…[0m[2;30;101m [0m                          [0m[32m│[0m[2m│ 49.8% [0m[36m████████████[0m[2m __recv[0m            [0m[2m│[0m
-[0m[32m│[0m[2;30;101m▏vfs_statx[0m[2;30;103m [0m                           [0m[32m│[0m[2m│ 0.06% [0m[36m▏           [0m[2m __poll[0m            [0m[2m│[0m
-[0m[32m│[0m[2;30;43m▏path_…[0m[2;30;103m▏f[0m[2;30;43m [0m                            [0m[32m│[0m[2m│[0m                                      [0m[2m│[0m
-[0m[32m│[0m[2;30;103m▏lin…[0m[2;30;43m [0m[2;30;103m [0m                               [0m[32m│[0m[2m│[0m[33m‼ [0m[2mbpf:raw_tp: user stacks only: the[0m   [0m[2m│[0m
-[0m[32m│[0m[2;30;43m [0m[2;30;101m [0m[2;30;103m [0m                                   [0m[32m│[0m[2m│[0m[33m  [0m[2mkernel side of a block is always the│[0m
+[0m[1mon cpu: [0m[2m3.21k · [0mhottest own [0m[1mlink_path_walk[0m[2m 5.57%[0m │ [0m[1moff cpu: [0m[2m6.27s · [0mhottest own [0m
+[0m[32m┌[0m[1;32m on cpu [0m[2;32mcpu.profile 3.21k [0m[33m54 late[0m[32m [0m[36m~low[0m[32m┐[0m[2m┌[0m[1;2m off cpu [0m[2msched.offcpu 6.27s [0m[2;36m~low det[0m[2m [0m[2;33md[0m[2m┐[0m
+[0m[32m│width ∝ samples · hea…[0m[2m 80 frames deep [0m[32m│[0m[2m│[0m[32mwidth ∝ time off cpu …[0m[2m 25 frames deep │[0m
+[0m[32m│[0m[1;2;97;42m▏all 3.21k                            [0m[32m│[0m[2m│[0m[1;2;30;47m▏all › ⋯4⋯ › Py_RunMain 6.25s         [0m[2m│[0m
+[0m[32m│[0m[2;30;43m▏⋯libpython3.14+0x1e478b 95.1%      [0m[2;30;101m▏_[0m[32m│[0m[2m│[0m[2;30;46m▏libc+0xa08f2 49.9%[0m[2;30;106m▏⋯__recv 47.5%     [0m[2m│[0m
+[0m[32m│[0m[2;30;101m▏+0x67661 55.6%      [0m[2;30;43m▏lib[0m[2;30;103m [0m[2;30;43m▏_[0m[2;30;103m [0m[2;30;101m [0m[2;30;43m [0m[2;30;103m [0m[2;30;101m [0m[2;30;43m [0m[2;30;101m [0m[2;30;103m [0m  [0m[32m│[0m[2m│[0m                                      [0m[2m│[0m
+[0m[32m│[0m[2;30;103m▏⋯do_syscall_64[0m[2;30;101m▏l[0m[2;30;43m▏l[0m[2;30;103m [0m[2;30;101m [0m[2;30;43m▏li[0m[2;30;103m [0m[2;30;101m [0m            [0m[32m│[0m[2m│[0m[1mheaviest on their own[0m[2m (where it ends,…│[0m
+[0m[32m│[0m[2;30;43m▏__do_sys_n…[0m[2;30;103m [0m[2;30;43m [0m [0m[2;30;101m [0m[2;30;103m [0m[2;30;101m [0m[2;30;43m [0m                   [0m[32m│[0m[2m│ 50.3% [0m[36m████████████[0m[2m libc+0xa08f2[0m      [0m[2m│[0m
+[0m[32m│[0m[2;30;103m▏vfs_fstat…[0m[2;30;101m [0m                          [0m[32m│[0m[2m│ 49.7% [0m[36m████████████[0m[2m __recv[0m            [0m[2m│[0m
+[0m[32m│[0m[2;30;101m▏vfs_sta…[0m[2;30;103m▏_[0m                           [0m[32m│[0m[2m│ 0.03% [0m[36m▏           [0m[2m __poll[0m            [0m[2m│[0m
+[0m[32m│[0m[2;30;43m▏path_…[0m[2;30;101m [0m[2;30;43m [0m                             [0m[32m│[0m[2m│[0m                                      [0m[2m│[0m
+[0m[32m│[0m[2;30;103m▏lin…[0m[2;30;101m [0m                                [0m[32m│[0m[2m│[0m[33m‼ [0m[2mbpf:raw_tp: user stacks only: the[0m   [0m[2m│[0m
+[0m[32m│[0m[2;30;43m [0m[2;30;101m [0m                                    [0m[32m│[0m[2m│[0m[33m  [0m[2mkernel side of a block is always the│[0m
 [0m[32m│[0m                                      [0m[32m│[0m[2m│[0m[33m  [0m[2mscheduler, and what it was waiting[0m  [0m[2m│[0m
 [0m[32m│[0m                                      [0m[32m│[0m[2m│[0m[33m  [0m[2mfor is the task state[0m               [0m[2m│[0m
 [0m[32m│[0m                                      [0m[32m│[0m[2m│[0m[33m‼ 1 more; ! lists every caveat whole[0m  [0m[2m│[0m
 [0m[32m└──────────────────────────────────────┘[0m[2m└──────────────────────────────────────┘[0m
 [0m[1;32mon cpu ▸ [0m[1mall[0m                                                                    [0m
-[0m[2m2.85k samples ≈ 2.86s · 100% of all · own 0 · 2.85k events[0m                      [0m
-[0m[33mcpu.profile (+8 more, ! lists them): [0m[2mpmu:sw: time-based sampling: blind to phas…[0m
+[0m[2m3.21k samples ≈ 3.22s · 100% of all · own 0 · 3.21k events[0m                      [0m
+[0m[33mcpu.profile (+7 more, ! lists them): [0m[2mpmu:sw: time-based sampling: blind to phas…[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓hl[0m move  [0m[1m⏎⌫[0m zoom  [0m[1m/*[0m fi[0m

@@ -1,36 +1,36 @@
-[0m[1momn top[0m │ fixture sqlite-commits │ 4.97s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥5.82%[0m[35m │ target 87.8% cpu[0m [0m
+[0m[1momn top[0m │ fixture sqlite-commits │ 6.84s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥8.41%[0m[35m │ target 79.5% cpu[0m [0m
  1 system  2 flame [0m[1;7m 3 ledger [0m 4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
-┌ ledger -- [0m[1mwhat task 2759238 cost over 4.97s of wall-clock[0m ───────────────────────────────────────────────────────────┐[0m
+┌ ledger -- [0m[1mwhat task 1494341 cost over 6.84s of wall-clock[0m ───────────────────────────────────────────────────────────┐[0m
 │[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
-│[0m[1;32m▸ cpu time        [0m[2m4.31s on cpu[0m     [0m[2m86.8% of one cpu[0m          [0m[2;32m█▇▇██████▇██████████████[0m [0m[35m    81.0µs[0m  [0m[36m~low det[0m [0m[33mdegraded[0m   │[0m
+│[0m[1;32m▸ cpu time        [0m[2m5.64s on cpu[0m     [0m[2m82.5% of one cpu[0m          [0m[2;32m▇███▇▇█▇▇▆▅▅▄▅▆▇▇█▇▇██▇▇[0m [0m[35m   ≥35.8ms[0m  [0m[36m~low det[0m            │[0m
 │[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
-│    own account     [0m[1m    4.52s[0m  [0m[2mwith its descendants, as the scheduler counts them[0m                                     │[0m
-│    machine busy        12.6s  ████         35.9%                                                                     │[0m
-│  [0m[1mmemory held     [0m4.75MiB peak     +92.0KiB from 4.66MiB     [0m[32m▁███████████████████████[0m [0m[35m     317µs[0m                      │[0m
-│  [0m[1mmemory faulted  [0m219 faults       44/s                      [0m[2;3ma total only[0m             [0m[35m    ≥198µs[0m  [0m[33m51 late[0m             │[0m
-│  [0m[1mI/O syscalls    [0m[2m537 calls[0m        [0m[2m3.98ms inside them[0m        [0m[2m512ns [0m[2;32m▁▂▄█▄▂[0m[2m 32.8µs[0m      [0m[35m   ≥52.1ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
+│    own account     [0m[1m    5.64s[0m  [0m[2mwith its descendants, as the scheduler counts them[0m                                     │[0m
+│    machine busy        1m45s  █            5.38%                                                                     │[0m
+│  [0m[1mmemory held     [0m4.80MiB peak     +0B from 4.80MiB          [0m[32m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m [0m[35m     727µs[0m                      │[0m
+│  [0m[1mmemory faulted  [0m217 faults       32/s                      [0m[2;3ma total only[0m             [0m[35m    ≥532µs[0m  [0m[33m119 late[0m            │[0m
+│  [0m[1mI/O syscalls    [0m[2m537 calls[0m        [0m[2m5.38ms inside them[0m        [0m[2m1.02µs [0m[2;32m▁▄█▆▂▁   ▁[0m[2m 1.05ms[0m [0m[35m   ≥99.8ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
 │[0m[2;3m    bytes read and written: on the raw rows only, which this run did not keep[0m                                         │[0m
-│  [0m[1mnetwork         [0m[2m0B moved[0m         [0m[2m0B out, 0B in[0m             [0m[2;3mno socket call[0m           [0m[35m   ≥53.5ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
-│  [0m[1mretransmits     [0m[2m0 sent again[0m     [0m[3mmachine-wide[0m              [0m[2;3ma total only[0m             [0m[35m    ≥176µs[0m  [0m[33m46 late[0m [0m[36m~low det[0m    │[0m
-│  [0m[1mGPU memory      [0m0B peak          [0m[2mof 692MiB on the device[0m   [0m[32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m [0m[35m     908µs[0m                      │[0m
-│  [0m[1mGPU time        [0m[31mrefused: no collector is written for `gpu.kernel` on backend `vendor:cupti` yet[0m                     │[0m
-│  [0m[1menergy          [0m342J machine     68.8W on average          [0m[32m▅▆▆▆▆▆▆▇▇█████████▇▇▇▇▇▇[0m [0m[35m   ≥33.9µs[0m                      │[0m
-│    ≈ the target's  [0m[3m     123J[0m  [0m[2;3man estimate, not a measurement: its share of the machine's busy cpu, 4.52s of 12.6s[0m    │[0m
+│  [0m[1mnetwork         [0m[2m0B moved[0m         [0m[2m0B out, 0B in[0m             [0m[2;3mno socket call[0m           [0m[35m   ≥94.0ms[0m  [0m[33m2 late[0m [0m[36m~low det[0m [0m[33mdegr[0m│[0m
+│  [0m[1mretransmits     [0m[2m1 sent again[0m     [0m[3mmachine-wide[0m              [0m[2;3ma total only[0m             [0m[35m    ≥530µs[0m  [0m[33m61 late[0m [0m[36m~low det[0m [0m[33mdeg[0m│[0m
+│  [0m[1mGPU memory      [0m0B peak          [0m[2mof 756MiB on the device[0m   [0m[32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m [0m[35m    8.72ms[0m                      │[0m
+│  [0m[1mGPU time        [0m0ns on GPU       0 kernels and copies      [0m[2;3mno series kept[0m           [0m[35m    ≥754µs[0m  [0m[33m60 late[0m [0m[33mdegraded[0m    │[0m
+│  [0m[1menergy          [0m845J machine     124W on average           [0m[32m▆▆▆▆▆▆▅▆████████▇▇████▇▆[0m [0m[35m   ≥78.0µs[0m                      │[0m
+│    ≈ the target's  [0m[3m    45.5J[0m  [0m[2;3man estimate, not a measurement: its share of the machine's busy cpu, 5.64s of 1m45s[0m    │[0m
 │                                                                                                                      │[0m
-│[0m[1m  to know all of this[0m[35m: ≥107ms of omn's cpu, ≥2.37% of what the target spent[0m                                           │[0m
+│[0m[1m  to know all of this[0m[35m: ≥241ms of omn's cpu, ≥4.27% of what the target spent[0m                                           │[0m
 │[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
 │[0m[2;32m cpu time -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────────[0m│[0m
-│[0m[1mcpu.oncpu_time via fs:proc[0m -- cpu time, per thread                                                                    │[0m
+│[0m[1mcpu.oncpu_time via bpf:raw_tp[0m -- cpu time, per thread                                                                 │[0m
 │· the source is not reproducible between two runs of the same workload                                                │[0m
-│· served by a fallback that says what it gives up (1)                                                                 │[0m
-│[0m[33m· the fallback says: fs:proc: tick granularity, no per-site attribution[0m                                               │[0m
-│[0m[35m· to know it: 81.0µs of omn's cpu, and 0ns inside the target -- nothing of this collector runs in the target's[0m        │[0m
-│[0m[35mcontext: it reads the kernel's account, or a file, from its own[0m                                                       │[0m
+│[0m[35m· to know it: 35.8ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this[0m    │[0m
+│[0m[35mrun: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl[0m       │[0m
+│[0m[35mkernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable[0m                 │[0m
 │· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │[0m
-│where it could not be read, of 2759238 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │[0m
+│where it could not be read, of 1494341 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │[0m
 │in microseconds once it was reaped)                                                                                   │[0m
 │· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│[0m
 │own account's                                                                                                         │[0m
+│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
