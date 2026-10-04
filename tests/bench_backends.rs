@@ -240,12 +240,19 @@ fn every_served_backend_is_costed_and_the_resolver_is_judged_by_it() {
             _ => None,
         };
         let collector = Stats::of(&one.collector);
+        // The gate's resolution of the row's workload: a dilation within it
+        // reads as zero, as `tests/bench_bands.rs` reads the record.
+        let resolution = baselines
+            .iter()
+            .find(|baseline| baseline.workload == row.workload.name)
+            .map(|baseline| baseline.stats.resolution());
         let band = judge_band(
             row.declared,
             one.elapsed.len(),
             collector,
             Stats::of(&one.percent),
             dilation,
+            resolution,
         );
         if let Band::Over(why) = &band {
             flagged.push(format!("{source} through `{backend}`: {why}"));
