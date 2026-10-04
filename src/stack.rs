@@ -239,7 +239,11 @@ pub struct Provenance {
     /// Each stack's frames' [`NamedBy`], root first, frame for frame with
     /// the labels `stacks` holds under the same id; `null` for a frame
     /// nothing named.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "stack_ids"
+    )]
     pub named_by: BTreeMap<u64, Vec<Option<NamedBy>>>,
     /// The perf maps that named a frame, so a reader need not read
     /// `/tmp/perf-<pid>.map` back after the run, and can tell when it would
@@ -250,6 +254,29 @@ pub struct Provenance {
     /// (`task:<tid>`, `proc:<pidns>+<pid>`), read while it was alive.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub executables: BTreeMap<String, String>,
+}
+
+/// A map keyed by stack id, read back from JSON's string keys.
+///
+/// `Provenance` is flattened into a result, and a flattened field is read
+/// through serde's buffered content, which hands a map's keys over as the
+/// strings JSON wrote and will not parse them as numbers: a result whose
+/// `named_by` was not empty failed to load (`invalid type: string "0",
+/// expected u64`), which is every `cpu.profile` run `omn diff` was given.
+fn stack_ids<'de, D, V>(deserializer: D) -> Result<BTreeMap<u64, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    use serde::de::Error;
+    BTreeMap::<String, V>::deserialize(deserializer)?
+        .into_iter()
+        .map(|(id, value)| {
+            id.parse()
+                .map(|id| (id, value))
+                .map_err(|_| D::Error::custom(format!("`{id}` is not a stack id")))
+        })
+        .collect()
 }
 
 impl Provenance {

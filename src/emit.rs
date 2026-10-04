@@ -2175,6 +2175,13 @@ mod tests {
         );
         let back: Results = serde_json::from_value(json).unwrap();
         assert_eq!(back.provenance, results.provenance);
+        // With the namers kept: a flattened map keyed by number has to read
+        // back from the strings JSON wrote its keys as.
+        let mut kept = results.clone();
+        kept.provenance.named_by = BTreeMap::from([(1, vec![Some(NamedBy::Elf), None])]);
+        let text = serde_json::to_string(&kept).unwrap();
+        let back: Results = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.provenance, kept.provenance);
         let silent = aggregate(
             &resolved,
             two_threads(lost(0, 0), Vec::new()),
