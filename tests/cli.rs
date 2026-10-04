@@ -1684,6 +1684,10 @@ fn patched_catalog(name: &str, file: &str, from: &str, to: &str) -> Scratch {
     let mut patched = false;
     for entry in std::fs::read_dir("catalog").expect("the catalog directory") {
         let path = entry.unwrap().path();
+        // `catalog/references/` holds the test-only reference pairs.
+        if !path.is_file() {
+            continue;
+        }
         let mut text = std::fs::read_to_string(&path).unwrap();
         if path.file_name().is_some_and(|n| n == file) {
             assert!(text.contains(from), "`{from}` is not in {file}");

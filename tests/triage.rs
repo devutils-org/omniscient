@@ -1129,6 +1129,9 @@ fn an_input_this_machine_cannot_serve_is_dropped_by_name_or_fails_the_question()
     let catalog = scratch("catalog");
     for entry in std::fs::read_dir("catalog").unwrap() {
         let path = entry.unwrap().path();
+        if !path.is_file() {
+            continue;
+        }
         std::fs::copy(&path, catalog.join(path.file_name().unwrap())).unwrap();
     }
     let sched = std::fs::read_to_string("catalog/sched.yaml").unwrap();
