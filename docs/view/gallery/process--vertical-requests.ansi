@@ -1,40 +1,40 @@
 [0m[1momn top[0m │ fixture vertical-requests │ 408ms                       [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥0.70%[0m[35m │ target 4.10% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows [0m[1;7m 0 process [0m                     [0m
-┌ process -- one process at a glance: every view's essence, each tile opening its view ────────────────────────────────┐[0m
-│[0m[3mNot drawn yet. What this view needs, and what this run holds of it:[0m                                                   │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
+┌ process -- one process at a glance: ran 408ms ───────────────────────────────────────────────────────────────────────┐[0m
+│[0m[1mfirst suspect: [0m[1;31m▶ lock 99.8%[0m                                                                                           │[0m
+│[0m[2mone view's essence per tile: enter, or a click on the selected tile, opens it[0m                                         │[0m
+│┌[0m[1;7m time [0m[2m→ timebar [0m─────────────────────┐┌[0m[1m cpu [0m[2m→ flame [0m─────────────────────────┐┌[0m[1m cost [0m[2m→ ledger [0m──────────────────────┐│[0m
+││[0m[1;31m▶ lock 99.8%[0m                         ││[0m[2mnot in this run[0m                       ││cpu 16.9ms                           ││[0m
+││[0m[31m▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞[0m             ││[0m[2mneeds cpu.profile or sched.offcpu[0m     ││[0m[2mcpu: the program's own account[0m       ││[0m
+││[0m[2mreq:a001, 40.2ms wall[0m                ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││[0m[33mdegraded x12[0m                         ││                                      ││                                     ││[0m
+│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│[0m
+│┌[0m[1m request [0m[2m→ request [0m──────────────────┐┌[0m[1m latency [0m[2m→ heatmap [0m───────────────────┐┌[0m[1m threads [0m[2m→ lanes [0m────────────────────┐│[0m
+││[0m[1;31ma001 40.2ms ▶ lock 99.8%[0m             ││[0m[2mmax 4.70ms[0m                            ││[0m[2mnot in this run[0m                      ││[0m
+││[0m[2mthe slowest of 5 requests[0m            ││[0m[2;36m █       █▁   ▁         [0m              ││[0m[2mneeds sched.switches or cpu.oncpu_tim[0m││[0m
+││                                     ││[0m[2mio.latency: 142 measured, median 56.4µ[0m││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││[0m[33mdegraded x2[0m                          ││[0m[36m~low det[0m [0m[33mdegraded x3[0m                  ││                                     ││[0m
+│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│[0m
+│┌[0m[1m wake [0m[2m→ wake [0m────────────────────────┐┌[0m[1m flows [0m[2m→ flows [0m───────────────────────┐┌[0m[1m gpu [0m[2m→ lanes [0m────────────────────────┐│[0m
+││[0m[2mnot in this run[0m                      ││[0m[1;36mnet not in this run[0m                   ││[0m[2mnot in this run[0m                      ││[0m
+││[0m[2mneeds sched.wakeup[0m                   ││[0m[2;34mdisk ↓396KiB ↑4.20MiB[0m                 ││[0m[2mneeds gpu.kernel or gpu.mem[0m          ││[0m
+││                                     ││[0m[2m↓ received or read · ↑ sent or written[0m││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
-[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help                                                                   [0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓ hjkl[0m move between tiles  [0m[1menter[0m open the tile's view           [0m
