@@ -108,6 +108,63 @@ fn a_known_loopback_transfer_shows_up_in_the_interface_counters() {
     );
 }
 
+/// `net.bytes` keeps its events to the end of the run under `raw`, and each
+/// carries the two directions apart: loopback moves the transfer once in and
+/// once out, so both `rx` and `tx` hold at least the bytes pushed.
+#[test]
+fn a_raw_run_keeps_the_bytes_in_apart_from_the_bytes_out() {
+    const MOVED: usize = 8 * 1024 * 1024;
+
+    let measuring = Command::new(BINARY)
+        .args([
+            "net.bytes",
+            "--iface",
+            "lo",
+            "--mode",
+            "count",
+            "--duration",
+            "2s",
+            "--emit",
+            "raw",
+            "--format",
+            "json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    push_through_loopback(MOVED);
+
+    let output = measuring.wait_with_output().expect("omn should finish");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json results");
+    let events = run["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .expect("raw events");
+    assert!(!events.is_empty(), "no event in a 2 s run");
+    let number = |value: &serde_json::Value| -> u64 {
+        value.as_u64().unwrap_or_else(|| {
+            value
+                .as_object()
+                .and_then(|object| object.values().find_map(serde_json::Value::as_u64))
+                .unwrap_or(0)
+        })
+    };
+    let sum = |name: &str| -> u64 {
+        events
+            .iter()
+            .flat_map(|event| event["attrs"].as_array().into_iter().flatten())
+            .filter(|attr| attr["name"] == name)
+            .map(|attr| number(&attr["value"]))
+            .sum()
+    };
+    let (rx, tx, bytes) = (sum("rx"), sum("tx"), sum("bytes"));
+    assert!(rx >= MOVED as u64, "{rx} bytes in for {MOVED} pushed");
+    assert!(tx >= MOVED as u64, "{tx} bytes out for {MOVED} pushed");
+    assert_eq!(bytes, rx + tx, "`bytes` is both directions");
+}
+
 /// Per-process network volume is real, but not from `/proc/net/dev`: that file
 /// has no idea which process moved what. The honest outcome is to name the
 /// backend that would answer, not to divide a machine-wide number by something.
