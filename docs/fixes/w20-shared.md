@@ -58,7 +58,7 @@ Reasoned, not shown:
 
 ## Not done, and why
 
-All three live in files this stream does not own; each is filed below.
+The first three live in files this stream does not own; each is filed below.
 
 - **`assemble` skipping a query-tier rule, and cloning only
   `join::sources_read`**: `src/main.rs`, stream budget's.
@@ -66,9 +66,10 @@ All three live in files this stream does not own; each is filed below.
   request's keys**: `src/emit.rs`, stream view's.
 - **The executable of each task a result keys**: `src/stack.rs` (budget) and
   `src/collect/sched/offcpu.rs` (sched).
-- **`net_qdisc`'s namespace offset through `member_offset`**: in `STATE.md`'s
-  item 9 but not in this stream's section; `src/bpf/net_*.rs` is stream
-  net's.
+- **`net_qdisc`'s namespace offset through `member_offset`**: done, by
+  stream net, in `adcf0e0` (`fix(net): net.qdisc reads the namespace pointer
+  through possible_net_t`, merged): `netns_offsets` looks the `net` pointer
+  up inside `possible_net_t` and reads no namespace without `CONFIG_NET_NS`.
 - **Removing `cheaper_equivalents` from `tests/bench_bands.rs`**: the loader
   now holds the rule, so the test's copy is redundant; the file is nobody's
   this wave, so it is left as a second reader.
@@ -108,6 +109,39 @@ gh run watch <the run of the merged main>   # read encoders::a_known_allocation_
 | Which rules `omn join` applies | **Every rule in the file, whatever its `tier:`**; a `kernel` one is refused by `apply_stored`'s own check. | Over a stored run every rule is at the query tier; the agent tier's answer over the same events is the same (shown). |
 | A rule `omn join` cannot answer | **Refuses the whole command with exit 2 and the reason**, never prints the others and drops it. | An invalid combination is refused with the reason, never degraded silently. |
 | An ESRCH from a procfs footprint read | **Read once more if the process is running; the end only for a gone or zombie process.** | The same rule as `wss.rs`; the ESRCH across `execve` is not the process ending. |
+
+## Review
+
+The reviewer: item 9 is only partly closed; four bullets are filed as
+requests, not done, and the coordinator has to route them.
+
+**Agreed, with one correction.** The brief's rule is that "a request to a
+file you do not own is filed there, not made", and the ownership table gives
+`src/main.rs` and `src/stack.rs` to budget, `src/emit.rs` to view,
+`src/collect/sched/offcpu.rs` to sched and `src/bpf/net_*.rs` to net. So this
+round does not make them either: `view` and `rings` are not merged yet, and an
+edit to `emit.rs` from here would be a conflict at their merge, not a fix.
+The correction: `net_qdisc`'s `member_offset` is not open; stream net landed
+it this wave (`adcf0e0`, in `main`). Three bullets remain, to route:
+
+| Bullet | File | Owner this wave | Owner merged into `main`? | State in `main` at `23b1200` | What to route |
+|---|---|---|---|---|---|
+| `assemble` skips a query-tier rule, clones only `join::sources_read` | `src/main.rs` | budget | yes | not applied (no `sources_read` in `main.rs`) | the diff below, as is; to whoever owns `main.rs` next |
+| `NamedBy` kept in `Results::stacks`; stack rows keyed by the request's keys | `src/emit.rs` | view | no | not applied, nor on `feat/w20-view` | to view in its fix round, or to the next wave's owner of `emit.rs` |
+| The executable of each task a result keys | `src/stack.rs`, `src/collect/sched/offcpu.rs` | budget, sched | yes, yes | not applied | to the next wave, one owner for both files, since the field has to agree |
+
+`STATE.md`'s item 9 should keep these three and drop the other seven
+(`cheaper_equivalents`, the footprint re-read, the per-call cgroup, `omn
+join` with `tier:` and the `/tmp` leak by this stream; `net_qdisc` by net).
+
+Received in this round, from budget's handoff ("To shared"): a
+`--program-stderr FILE` flag and `OMN_PROGRAM_STDERR` in the man page. The
+variable is now under ENVIRONMENT in `man/omn.1`. The flag is not: its value
+has to reach `collect::launch::gated`, which reads the variable itself, and
+the plumbing is in `src/main.rs` and `src/collect/launch.rs` (budget's), so
+it is routed with the first row. The stop's adopted children
+(`Lifetime::adopted_ended`, the subreaper) have no stop paragraph in the
+man page to go into yet; they go with the flag.
 
 ## Needs from another stream
 

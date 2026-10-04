@@ -835,6 +835,15 @@ the cache elfutils, gdb and perf share.
 .B OMN_PRELOAD_LIB
 Path to the heap shim, when it is not beside the binary.
 .TP
+.B OMN_PROGRAM_STDERR
+A file, created or truncated, that the launched program's standard error is
+written to instead of the one it would share with
+.BR omn ,
+so the two are told apart at the source. The variable is
+.BR omn 's
+own and is not passed on to the program; a file that cannot be opened stops
+the launch with the reason.
+.TP
 .B OMN_CONTAINER_RUNTIME
 The one container runtime to ask for
 .BR \-\-container ,
