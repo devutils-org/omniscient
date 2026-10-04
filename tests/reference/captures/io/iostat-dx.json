@@ -1,17 +1,18 @@
 {"sysstat": {
 	"hosts": [
 		{
-			"nodename": "reference",
+			"nodename": "arch",
 			"sysname": "Linux",
-			"release": "6.17.0",
+			"release": "7.2.8-arch1-2",
 			"machine": "x86_64",
-			"number-of-cpus": 16,
+			"number-of-cpus": 24,
 			"date": "10/04/2026",
 			"statistics": [
+
 				{
 					"disk": [
-						{"disk_device": "nvme0n1", "r/s": 14612.00, "rkB/s": 58448.00, "rrqm/s": 0.00, "%rrqm": 0.00, "r_await": 0.06, "rareq-sz": 4.00, "w/s": 2.50, "wkB/s": 50.00, "wrqm/s": 0.00, "%wrqm": 0.00, "w_await": 0.40, "wareq-sz": 20.00, "d/s": 0.00, "dkB/s": 0.00, "drqm/s": 0.00, "%drqm": 0.00, "d_await": 0.00, "dareq-sz": 0.00, "f/s": 0.00, "f_await": 0.00, "aqu-sz": 0.82, "util": 99.20},
-						{"disk_device": "sda", "r/s": 0.00, "rkB/s": 0.00, "rrqm/s": 0.00, "%rrqm": 0.00, "r_await": 0.00, "rareq-sz": 0.00, "w/s": 0.00, "wkB/s": 0.00, "wrqm/s": 0.00, "%wrqm": 0.00, "w_await": 0.00, "wareq-sz": 0.00, "d/s": 0.00, "dkB/s": 0.00, "drqm/s": 0.00, "%drqm": 0.00, "d_await": 0.00, "dareq-sz": 0.00, "f/s": 0.00, "f_await": 0.00, "aqu-sz": 0.00, "util": 0.00}
+						{"disk_device": "nvme0n1", "r/s": 5843.75, "w/s": 0.50, "d/s": 0.00, "f/s": 0.00, "rkB/s": 23375.00, "wkB/s": 7.00, "dkB/s": 0.00, "rrqm/s": 0.00, "wrqm/s": 0.25, "drqm/s": 0.00, "rrqm": 0.00, "wrqm": 33.33, "drqm": 0.00, "r_await": 0.06, "w_await": 2.00, "d_await": 0.00, "f_await": 0.00, "rareq-sz": 4.00, "wareq-sz": 14.00, "dareq-sz": 0.00, "aqu-sz": 0.34, "util": 34.77},
+						{"disk_device": "zram0", "r/s": 0.00, "w/s": 0.00, "d/s": 0.00, "f/s": 0.00, "rkB/s": 0.00, "wkB/s": 0.00, "dkB/s": 0.00, "rrqm/s": 0.00, "wrqm/s": 0.00, "drqm/s": 0.00, "rrqm": 0.00, "wrqm": 0.00, "drqm": 0.00, "r_await": 0.00, "w_await": 0.00, "d_await": 0.00, "f_await": 0.00, "rareq-sz": 0.00, "wareq-sz": 0.00, "dareq-sz": 0.00, "aqu-sz": 0.00, "util": 0.00}
 					]
 				}
 			]

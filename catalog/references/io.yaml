@@ -1,198 +1,199 @@
 # Reference pairs for the `io` family of tools: each entry runs omn and an
 # established tool on the same workload and holds them to a declared
-# tolerance. Read by tests/reference.rs, never by omn itself. Schema:
-# BRIEF.md, "Decided before this wave", plus the fields below, which the
-# io pairs need and the runner may not know yet (docs/fixes/w22-io.md,
-# "Needs from another stream"):
+# tolerance. Read by tests/reference.rs, never by omn itself. The schema is
+# catalog/references/README.md.
 #
-#   same_run: omn_launches_tool
-#       fio is both the tool and the workload, so the one same execution is
-#       omn launching it: `omn <omn...> --program-stderr <file> --
-#       <reference.command...> <workload...>`, and the parser reads <file>.
-#       fio is told `--output=/dev/stderr`, so nothing of it reaches omn's
-#       stdout, which stays omn's JSON.
-#   same_run: alongside
-#       omn observes the whole machine (`--system`, which a launched program
-#       may not be given), so it runs for `duration` while the reference
-#       command runs once, started `start_after` into it. The tool is fio
-#       itself (its report is the reference), or a sampler such as iostat
-#       with `workload` run beside it.
-#   compare.omn: "<emit>[<key glob>].<field>"
-#       the series of that emit whose key matches the glob; count, total and
-#       events are summed over the matches, mean is weighted by count.
+# Three shapes:
+#   - fio's own counts and latency: `run: omn_launches_tool`, omn launching
+#     fio, so both read the one execution. The job file is in the command,
+#     not the workload: the runner runs a pair's workload alone before
+#     granting a skip, and a job file alone is not a program.
+#   - fio's bytes and operations: `run: alongside`. io.bytes and io.iops
+#     have one collector here, fs:proc, which answers for the machine only;
+#     omn watches the machine for 4 s and fio starts with `--startdelay=1`,
+#     so its whole run falls inside omn's window once omn has attached.
+#   - iostat's columns: `run: alongside`, omn watching the machine for 4 s
+#     and iostat printing one report over 4 s (`-y 4 1`), with fio's 2 s job
+#     as the workload started a second in (`settle_ms: 1000`). Both windows
+#     hold the whole job, so both rates are the same reads over about the
+#     same four seconds, however the job's own rate moved within its run.
 #
-# Every tolerance below is the schema's symmetric {rel: N}: it bounds the gap
-# either way. Where a `why` says which side omn should fall on, that is the
-# expectation behind the band's width, not something the band enforces; a
-# one-sided tolerance is asked of stream reference (docs/fixes/w22-io.md,
-# "Needs from another stream").
-#
-# The workload's file lives under target/, because /tmp is tmpfs here and a
-# direct read of a tmpfs file never becomes a block request.
+# Every pair's `setup` lays the job's file out first (`--create_only=1`),
+# so no window holds the layout's writes or btrfs' checksum reads of a new
+# file, and every run reads a warm file. The file lives under target/,
+# because /tmp is tmpfs here and a direct read of a tmpfs file never becomes
+# a block request.
 
-- source: io.latency
+- id: fio-reads
+  source: io.latency
   tool: fio
   use: "fio --rw=randread --direct=1: how many reads the job completed"
-  workload: [tests/reference/workloads/io/randread.fio]
-  omn: [trace, io.latency, -m, trace, -e, summary, --format, json]
-  same_run: omn_launches_tool
+  workload: []
+  omn: [trace, io.latency, -m, trace, -e, summary, --format, json, -o, "{out}"]
+  run: omn_launches_tool
+  setup: [fio, --create_only=1, --output=/dev/null, tests/reference/workloads/io/randread.fio]
   reference:
-    command: [fio, --output-format=json, --output=/dev/stderr]
+    command: [fio, --output-format=json, tests/reference/workloads/io/randread.fio]
     parse: fio_json
     requires: [fio]
-    privileged: false
   compare:
     key: read.total_ios
-    omn: "summary[*].count"
-    tolerance: {rel: 0.03}
+    omn: results.0.outputs[emit=summary].series.*.count
+    tolerance: {rel: 0.01}
     why: "the same run: fio counts the reads it completed, omn the block
-      requests the launched process issued. 4 KiB random direct reads leave
-      nothing to merge, so the two are one-to-one -- equal on a warm file
-      (29335/29335, 28837/28837, 29118/29118). On the first run, when fio
-      lays the file out, btrfs reads its checksum tree in fio's context and
-      omn counts 1.9 % more (28562 against 28033): device requests fio did
-      not ask for, which is the catalog's io.bytes caveat, not an error"
+      requests the launched process (fio, exec'd, with `thread`) issued,
+      summed over the devices. 4 KiB random direct reads leave nothing to
+      merge, so the two are one-to-one -- equal on a warm file (23707/23707,
+      26893/26893, 27297/27297). The band is the btrfs metadata a read may
+      still pull in fio's context (1.9 % on a file being laid out, which the
+      setup now does before the run)"
 
-- source: io.latency
+- id: fio-clat
+  source: io.latency
   tool: fio
   use: "fio --rw=randread --direct=1: clat, the mean completion latency"
-  workload: [tests/reference/workloads/io/randread.fio]
-  omn: [trace, io.latency, -m, trace, -e, summary, --format, json]
-  same_run: omn_launches_tool
+  workload: []
+  omn: [trace, io.latency, -m, trace, -e, summary, --format, json, -o, "{out}"]
+  run: omn_launches_tool
+  runs: 3
+  setup: [fio, --create_only=1, --output=/dev/null, tests/reference/workloads/io/randread.fio]
   reference:
-    command: [fio, --output-format=json, --output=/dev/stderr]
+    command: [fio, --output-format=json, tests/reference/workloads/io/randread.fio]
     parse: fio_json
     requires: [fio]
-    privileged: false
   compare:
     key: read.clat_mean_ns
-    omn: "summary[*].mean"
-    tolerance: {rel: 0.25}
-    why: "the same run, two different spans of each read: fio's clat for a
-      synchronous engine times the pread from submission to return, omn's
-      io.latency the request from issue to completion at the device. The
-      gap (68.0 us against 55.9 us, -18 % over three runs) is the syscall
-      and filesystem share above the block layer -- btrfs verifies the
-      checksum of a direct read after the device completes it -- and is the
-      diagnosis the family's three layers exist for. omn is expected below
-      fio; the band is symmetric, so it holds omn within a quarter of fio on
-      either side and would not catch omn above fio by less than that"
+    omn_parse: omn_summary_as_fio
+    tolerance: {rel: 0.5, side: below}
+    why: "the same run, two spans of each read, one inside the other: fio's
+      clat for a synchronous engine times the pread from submission to
+      return, omn's io.latency the request from issue to completion at the
+      device, so omn can only be below. The difference is the share above
+      the block layer -- the syscall, btrfs verifying the checksum after the
+      device completes, and fio being woken and scheduled back -- 18 % of
+      fio's on a quiet machine (55.9 us against 68.0 us) and up to 29 %
+      with a run queue (56.1 us against 74.0, 59.6 against 83.8 at a load
+      of 35) and 36 % with eleven streams testing at once (56.9 us against
+      88.5), because the wake-up waits for a cpu and the device does not:
+      the share grows with the run queue and has no bound of its own, so the
+      band is half of fio's. Medians of three; omn's mean is weighted by
+      each device's requests"
 
-- source: io.bytes
+- id: fio-bytes
+  source: io.bytes
   tool: fio
   use: "fio --rw=randread: io_bytes, what the job read"
   workload: []
-  omn: [trace, io.bytes, --system, -m, count, -e, rate, -k, dir, -d, 4s, --format, json]
-  same_run: alongside
-  duration: 4s
-  start_after: 0.5s
+  omn: [trace, io.bytes, --system, -m, count, -e, rate, -k, dir, -d, 4s, --format, json, -o, "{out}"]
+  run: alongside
+  setup: [fio, --create_only=1, --output=/dev/null, tests/reference/workloads/io/randread.fio]
   reference:
-    command: [fio, --output-format=json, tests/reference/workloads/io/randread.fio]
+    command: [fio, --output-format=json, --startdelay=1, tests/reference/workloads/io/randread.fio]
     parse: fio_json
     requires: [fio]
-    privileged: false
   compare:
     key: read.io_bytes
-    omn: "rate[dir:read].total"
-    tolerance: {rel: 0.05}
+    omn: results.0.outputs[emit=rate].series[key=dir:read].total
+    tolerance: {rel: 0.05, side: above}
     why: "alongside, not the same process: fs:proc is the only io.bytes
-      collector here and it answers for the machine, so the window holds
-      fio's run whole and whatever else read a block device during it. On
-      a quiet disk they are equal (121532416 against 121532416, and
-      122044416 keyed on dev); the band is sized for the other readers of a
-      busy machine, which only add. It is symmetric, so it would also pass
-      omn up to 5 % short of fio, which would be lost requests"
+      collector here and it answers for the machine, so omn's 4 s window
+      holds fio's run whole (one second's delay, two of reading) and
+      whatever else read a block device meanwhile, which only adds. Equal
+      on a quiet disk (109711360/109711360); the band is the other readers
+      of a busy machine, and omn short of fio would be lost reads"
 
-- source: io.iops
+- id: fio-ios
+  source: io.iops
   tool: fio
   use: "fio --rw=randread: total_ios and iops"
   workload: []
-  omn: [trace, io.iops, --system, -m, count, -e, rate, -k, dir, -d, 4s, --format, json]
-  same_run: alongside
-  duration: 4s
-  start_after: 0.5s
+  omn: [trace, io.iops, --system, -m, count, -e, rate, -k, dir, -d, 4s, --format, json, -o, "{out}"]
+  run: alongside
+  setup: [fio, --create_only=1, --output=/dev/null, tests/reference/workloads/io/randread.fio]
   reference:
-    command: [fio, --output-format=json, tests/reference/workloads/io/randread.fio]
+    command: [fio, --output-format=json, --startdelay=1, tests/reference/workloads/io/randread.fio]
     parse: fio_json
     requires: [fio]
-    privileged: false
   compare:
     key: read.total_ios
-    omn: "rate[dir:read].total"
-    tolerance: {rel: 0.05}
-    why: "alongside, for the reason io.bytes is: fs:proc counts every
+    omn: results.0.outputs[emit=rate].series[key=dir:read].total
+    tolerance: {rel: 0.05, side: above}
+    why: "alongside, for the reason fio-bytes is: fs:proc counts every
       completed read on the machine's devices over the window. Equal on a
-      quiet disk (29671 against 29671); the band is sized for other readers,
-      which only add, but is symmetric and would pass omn up to 5 % short.
-      fio's iops is total_ios over its runtime, so the count is the number
-      to hold, not two rates over windows that differ"
+      quiet disk (28036/28036); the band is the other readers, which only
+      add. fio's iops is total_ios over its runtime, so the count is the
+      number to hold, not two rates over windows that differ"
 
-- source: io.iops
+- id: iostat-r-per-s
+  source: io.iops
   tool: iostat
-  use: "iostat -dx 2: r/s, the reads a device completed per second"
-  workload: [fio, --output-format=json, --output=/dev/null, tests/reference/workloads/io/randread.fio]
-  omn: [trace, io.iops, --system, -m, count, -e, rate, -k, dir, -d, 2s, --format, json]
-  same_run: alongside
-  duration: 2s
-  start_after: 0s
+  use: "iostat -dx 4: r/s, the reads a device completed per second"
+  workload: [fio, --output=/dev/null, tests/reference/workloads/io/randread.fio]
+  omn: [trace, io.iops, --system, -m, count, -e, rate, -k, dir, -d, 4s, --format, json, -o, "{out}"]
+  run: alongside
+  settle_ms: 1000
+  setup: [fio, --create_only=1, --output=/dev/null, tests/reference/workloads/io/randread.fio]
   reference:
-    command: [iostat, -d, -x, -y, -o, JSON, "2", "1"]
+    command: [iostat, -d, -x, -y, -o, JSON, "4", "1"]
     parse: iostat_json
     requires: [iostat, fio]
-    privileged: false
   compare:
     key: all.r/s
-    omn: "rate[dir:read].per_second"
-    tolerance: {rel: 0.05}
+    omn: results.0.outputs[emit=rate].series[key=dir:read].per_second
+    tolerance: {rel: 0.02}
     why: "alongside: both read /proc/diskstats' completed-reads column over
-      a two-second window, iostat per whole disk (summed into `all`) and
-      fs:proc per device nothing is stacked on. The windows start together
-      and differ by the time each takes to read the file once"
+      four seconds holding the whole job, iostat per whole disk (summed into
+      `all`), fs:proc per device nothing is stacked on. The windows start
+      omn's start-up apart and last four seconds each, so they hold the same
+      reads (another reader's too, which both see) and divide them by about
+      the same time. Seen within 0.01 % (5879.17/5879.25, 6348.90/6349.00,
+      5197.54/5197.75); the band is the windows' ends, where a reader other
+      than the job may fall inside one window and not the other"
 
-- source: io.bytes
+- id: iostat-rkb-per-s
+  source: io.bytes
   tool: iostat
-  use: "iostat -dx 2: rkB/s, what a device read per second"
-  workload: [fio, --output-format=json, --output=/dev/null, tests/reference/workloads/io/randread.fio]
-  omn: [trace, io.bytes, --system, -m, count, -e, rate, -k, dir, -d, 2s, --format, json]
-  same_run: alongside
-  duration: 2s
-  start_after: 0s
+  use: "iostat -dx 4: rkB/s, what a device read per second"
+  workload: [fio, --output=/dev/null, tests/reference/workloads/io/randread.fio]
+  omn: [trace, io.bytes, --system, -m, count, -e, rate, -k, dir, -d, 4s, --format, json, -o, "{out}"]
+  run: alongside
+  settle_ms: 1000
+  setup: [fio, --create_only=1, --output=/dev/null, tests/reference/workloads/io/randread.fio]
   reference:
-    command: [iostat, -d, -x, -y, -o, JSON, "2", "1"]
+    command: [iostat, -d, -x, -y, -o, JSON, "4", "1"]
     parse: iostat_json
     requires: [iostat, fio]
-    privileged: false
   compare:
     key: all.rB/s
-    omn: "rate[dir:read].per_second"
-    tolerance: {rel: 0.05}
+    omn: results.0.outputs[emit=rate].series[key=dir:read].per_second
+    tolerance: {rel: 0.02}
     why: "alongside, the same column (sectors read) of the same file over
-      the same window; the parser turns iostat's kB/s into bytes"
+      the windows iostat-r-per-s has, for the same reason; the parser turns
+      iostat's kB/s into bytes"
 
-- source: io.latency
+- id: iostat-r-await
+  source: io.latency
   tool: iostat
-  use: "iostat -dx 2: r_await, the mean time a read spent queued and served"
-  workload: [fio, --output-format=json, --output=/dev/null, tests/reference/workloads/io/randread.fio]
-  omn: [trace, io.latency, --system, -m, trace, -e, summary, -d, 2s, --format, json]
-  same_run: alongside
-  duration: 2s
-  start_after: 0s
+  use: "iostat -dx 4: r_await, the mean time a read spent queued and served"
+  workload: [fio, --output=/dev/null, tests/reference/workloads/io/randread.fio]
+  omn: [trace, io.latency, --system, -m, trace, -e, summary, --filter, "rwbs =~ 'R'", -d, 4s, --format, json, -o, "{out}"]
+  run: alongside
+  settle_ms: 1000
+  setup: [fio, --create_only=1, --output=/dev/null, tests/reference/workloads/io/randread.fio]
   reference:
-    command: [iostat, -d, -x, -y, -o, JSON, "2", "1"]
+    command: [iostat, -d, -x, -y, -o, JSON, "4", "1"]
     parse: iostat_json
     requires: [iostat, fio]
-    privileged: false
   compare:
     key: all.r_await_ns
-    omn: "summary[*].mean"
-    tolerance: {rel: 0.30}
-    why: "alongside, two measures of one span: r_await is the read-ticks
-      column of /proc/diskstats over the reads completed, time from the
-      request's start in the block layer to completion; io.latency times
-      issue to completion per request, which leaves the software queue out
-      (io.queue is that part). With 4 KiB random reads at depth one the
-      queue is near empty, so the two are close; iostat prints two decimals
-      of a millisecond (0.06 for 56 us), which is most of the band. omn's
-      mean also holds the window's writes, where r_await does not: on a busy
-      machine writeback widens the gap, and the pair says so rather than
-      passing it"
+    omn_parse: omn_summary_as_iostat
+    tolerance: {abs: 10000}
+    why: "alongside, two measures of one span over reads alone (omn filtered
+      on rwbs): r_await is /proc/diskstats' read ticks over the reads
+      completed, from the request's start in the block layer to
+      completion; io.latency times issue to completion, which leaves the
+      software queue out, near empty at depth one. iostat prints r_await to
+      two decimals of a millisecond, so its 0.06 is anything from 55 to
+      65 us: the band is that rounding (5 us) and the queue time omn leaves
+      out (up to 5 us more). Seen through the runner: 56.9 and 56.0 us
+      against 0.06 ms"

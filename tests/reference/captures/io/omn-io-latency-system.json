@@ -1,0 +1,61 @@
+{
+  "results": [
+    {
+      "label": "io.latency",
+      "source": "io.latency",
+      "unit": "ns",
+      "backend": "bpf:raw_tp",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "dev:259+9",
+              "count": 23375,
+              "min": 8290.0,
+              "max": 4665138.0,
+              "mean": 56733.52337967914,
+              "last": 55650.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 23375,
+      "observed_ns": 4000029389,
+      "window": {
+        "run_opened_ns": 2506008897460,
+        "opened_ns": 2506008897460,
+        "closed_ns": 2510008926849,
+        "attached": true
+      },
+      "stopped_because": "the requested duration elapsed",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "degradations": [
+        "the filter kept 23375 requests and removed 2; it ran here, over the drained records, not in the kernel, so the removed ones were carried up before they were dropped"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 167710000,
+        "attributed_cpu_ns": 167710000,
+        "observed_cpu_ns": 37150000000,
+        "observed_from": "everything but idle on every cpu (/proc/stat)",
+        "wall_ns": 4000307793,
+        "measurement_ns": 116070,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel is not timing eBPF programs on this run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable",
+        "before_window_cpu_ns": 169285000,
+        "after_window_cpu_ns": 445000
+      },
+      "served_by": [
+        "bpf:raw_tp"
+      ],
+      "value_attr": "latency_ns"
+    }
+  ]
+}
