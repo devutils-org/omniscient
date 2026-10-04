@@ -19,8 +19,8 @@ omn top │ fixture cpython-hot │ 3.89s                             view: snap
 │     ↳ its process's 3.72s on cpu, to a tick (10.0ms); the rest of the window, up to 3.89s, is on cpu or before the … │
 │ ▚ runnable                         sched.runqlat   1.17ms          0.03%   exact     55     ~low det degraded        │
 │ ▓ blocked                          sched.offcpu    0ns             0.00%   exact     0      ~low det degraded        │
-│     ↳ `sched.offcpu` watches every switch and lost nothing: it never blocked                                         │
-│   residue: the whole less the rows                 0ns             0.00%   ±10.0ms   within its resolution           │
+│     ↳ `sched.offcpu` lost nothing, missed no process, and left no task off cpu at the end: it never blocked          │
+│   residue: the whole less the rows                 not measured: on cpu is derived from the other rows               │
 │                                                                                                                      │
 │ No decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread    │
 │   over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn │

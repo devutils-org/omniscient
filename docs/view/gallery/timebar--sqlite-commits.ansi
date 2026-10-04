@@ -20,7 +20,7 @@
 │ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   6.69ms          0.13%   exact     382    [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
 │ [0m[34m▓ [0m[2mblocked: uninterruptible         sched.offcpu    408ms           8.21%   exact     1018   [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
 │ [0m[2m    ↳ 73 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <…[0m │[0m
-│ [0m[2m  residue: the whole less the rows                 0ns             0.00%   ±10.0ms   within its resolution          [0m │[0m
+│ [0m[2m  residue: the whole less the rows                 not measured: on cpu is derived from the other rows              [0m │[0m
 │                                                                                                                      │[0m
 │ [0m[2mNo decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread[0m    │[0m
 │ [0m[2m  over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn[0m │[0m

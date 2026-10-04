@@ -19,8 +19,8 @@
 │ [0m[2m    ↳ its process's 3.72s on cpu, to a tick (10.0ms); the rest of the window, up to 3.89s, is on cpu or before the …[0m │[0m
 │ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   1.17ms          0.03%   exact     55     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
 │ [0m[34m▓ [0m[2mblocked                          sched.offcpu    0ns             0.00%   exact     0      [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
-│ [0m[2m    ↳ `sched.offcpu` watches every switch and lost nothing: it never blocked                                        [0m │[0m
-│ [0m[2m  residue: the whole less the rows                 0ns             0.00%   ±10.0ms   within its resolution          [0m │[0m
+│ [0m[2m    ↳ `sched.offcpu` lost nothing, missed no process, and left no task off cpu at the end: it never blocked         [0m │[0m
+│ [0m[2m  residue: the whole less the rows                 not measured: on cpu is derived from the other rows              [0m │[0m
 │                                                                                                                      │[0m
 │ [0m[2mNo decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread[0m    │[0m
 │ [0m[2m  over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn[0m │[0m

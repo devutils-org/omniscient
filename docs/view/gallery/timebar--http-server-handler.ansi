@@ -24,7 +24,7 @@
 │ [0m[31m▞ [0m[2mblocked: sleeping, on a futex    sched.offcpu    8.58ms          0.30%   exact     12     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
 │ [0m[2m    ↳ 5.29ms waiting in futex(2) over 12 wait(s)                                                                    [0m │[0m
 │ [0m[2m    ↳ 59 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- pthread_cond_timedwait <- libpython3.14.so.1.0+0x…[0m │[0m
-│ [0m[2m  residue: the whole less the rows                 0ns             0.00%   ±10.0ms   within its resolution          [0m │[0m
+│ [0m[2m  residue: the whole less the rows                 not measured: on cpu is derived from the other rows              [0m │[0m
 │                                                                                                                      │[0m
 │ [0m[2mNo decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread[0m    │[0m
 │ [0m[2m  over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn[0m │[0m

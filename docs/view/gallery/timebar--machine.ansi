@@ -5,12 +5,12 @@
 │                                                                                                                      │[0m
 │ [0m[1mcpu.profile     [0m[2mnot in this run  -- on cpu[0m                                                                           │[0m
 │ [0m[1msched.runqlat   [0m[2mnot in this run  -- waiting to run[0m                                                                   │[0m
-│ [0m[1msched.offcpu    [0m[2mnot in this run  -- blocked, with the stack it blocked in[0m                                            │[0m
+│ [0m[1msched.offcpu    [0m[2mnot in this run  -- blocked, by the task state each block recorded, with the stack it blocked in[0m     │[0m
+│ [0m[1mcpu.oncpu_time  [0m[31mrefused: no collector is written for `cpu.oncpu_time` on backend `bpf:raw_tp` yet[0m[2m  -- on cpu per pro[0m │[0m
 │ [0m[1msched.futex     [0m[2mnot in this run  -- waiting on a lock[0m                                                                │[0m
 │                                                                                                                      │[0m
 │ [0m[2mA bar per thread needs `sched.offcpu` or `sched.runqlat` on a target; a bar per task as `omn latency` reads it needs[0m │[0m
 │ [0m[2mits session: `omn latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.[0m              │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

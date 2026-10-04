@@ -32,8 +32,13 @@
 //! ahead of the next one and of everything no row read (the rows' own
 //! resolution, the whole's remainder when a row is missing). Otherwise the bar
 //! names no single state, and says why. A view cannot call the triage -- this
-//! crate cannot depend on `omn` -- so the rule is restated here and held to
-//! the fixture `omn latency`'s session recorded.
+//! crate cannot depend on `omn` -- so the rule is restated here, and
+//! `tests/view_timebar.rs` runs the triage itself on every fixture carrying
+//! its decomposition and holds this restatement to the state it names. One
+//! difference is on purpose: the next state counts at the most it can be,
+//! where the triage takes the second-largest amount. The two agree on every
+//! decomposition, whose rows carry no bracket; only the view's own reading
+//! brackets a row.
 //!
 //! The view reads only `ctx`: it never opens a source.
 
@@ -75,11 +80,20 @@ pub const NEEDS: &[Need] = &[
     Need {
         source: "sched.offcpu",
         mode: "trace",
-        emit: &["stack"],
+        emit: &["raw", "stack"],
         keys: &[],
         stack: Some("fp"),
         scope: Scope::Target,
-        why: "blocked, with the stack it blocked in",
+        why: "blocked, by the task state each block recorded, with the stack it blocked in",
+    },
+    Need {
+        source: "cpu.oncpu_time",
+        mode: "poll@250ms",
+        emit: &["timeline", "summary"],
+        keys: &["task"],
+        stack: None,
+        scope: Scope::Target,
+        why: "on cpu per process, which brackets each thread's share",
     },
     Need {
         source: "sched.futex",
@@ -287,6 +301,10 @@ pub struct Bar {
     /// The whole less the parts, signed; `None` when a part is unread.
     pub residue: Option<f64>,
     pub residue_resolution: Option<f64>,
+    /// Why the residue is not given, when it is not for want of a row: the
+    /// view's reading derives on cpu from the window, so its rows add up to
+    /// the whole by construction and their difference measures nothing.
+    pub residue_says: Option<String>,
     pub trust: Trust,
     pub verdict: Verdict,
 }
@@ -297,11 +315,15 @@ impl Bar {
         self.parts.iter().filter_map(|part| part.amount).sum()
     }
 
+    /// The most its parts can add up to: each at its upper end.
+    pub fn most_read(&self) -> f64 {
+        self.parts.iter().filter_map(Part::most).sum()
+    }
+
     /// The longest the bar is drawn: its whole, or its parts' upper ends when
     /// they overshoot it.
     fn extent(&self) -> f64 {
-        let parts: f64 = self.parts.iter().filter_map(Part::most).sum();
-        self.whole.unwrap_or(0.0).max(parts)
+        self.whole.unwrap_or(0.0).max(self.most_read())
     }
 
     /// The bar's name in a few cells: the thread and its command, or the key.
@@ -498,19 +520,46 @@ struct Named {
 /// the view's reading when none of them splits the run by task.
 pub fn sheets(data: &Data) -> Vec<Sheet> {
     let threads = Threads::of(data);
-    let mut sheets: Vec<Sheet> = data
-        .run
-        .decompositions
-        .iter()
-        .filter_map(|value| serde_json::from_value::<Written>(value.clone()).ok())
-        .filter_map(|written| from_decomposition(data, &threads, written))
+    let (written, unreadable) = decompositions(data);
+    let mut sheets: Vec<Sheet> = written
+        .into_iter()
+        .map(|written| from_decomposition(data, &threads, written))
         .collect();
     if !sheets.iter().any(|sheet| sheet.by == "task") {
         if let Some(reading) = reading(data, &threads) {
             sheets.push(reading);
         }
     }
+    for sheet in &mut sheets {
+        sheet
+            .notes
+            .extend(unreadable.iter().map(|why| format!("Not drawn: {why}.")));
+    }
     sheets
+}
+
+/// The run's decompositions the view can draw, and why each other one is not
+/// drawn: never dropped without a word.
+fn decompositions(data: &Data) -> (Vec<Written>, Vec<String>) {
+    let mut drawn = Vec::new();
+    let mut not = Vec::new();
+    for value in &data.run.decompositions {
+        let id = value
+            .get("id")
+            .and_then(|id| id.as_str())
+            .unwrap_or("a decomposition")
+            .to_owned();
+        match serde_json::from_value::<Written>(value.clone()) {
+            Err(error) => not.push(format!("`{id}` could not be read ({error})")),
+            Ok(written) if written.unit != "ns" => not.push(format!(
+                "`{id}` is in `{}`, not nanoseconds, and a bar is a time",
+                written.unit
+            )),
+            Ok(written) if written.tables.is_empty() => not.push(format!("`{id}` holds no table")),
+            Ok(written) => drawn.push(written),
+        }
+    }
+    (drawn, not)
 }
 
 /// The sources whose events describe the thread they are keyed on.
@@ -587,10 +636,7 @@ fn trust_of(data: &Data, source: &str) -> Trust {
 }
 
 /// The decomposition's tables as bars, their rows as written.
-fn from_decomposition(data: &Data, threads: &Threads, written: Written) -> Option<Sheet> {
-    if written.unit != "ns" || written.tables.is_empty() {
-        return None;
-    }
+fn from_decomposition(data: &Data, threads: &Threads, written: Written) -> Sheet {
     let first = &written.tables[0].whole;
     let whole_says = if first.kind == "lifetime" {
         format!("{}, {}", first.source, first.value)
@@ -604,10 +650,15 @@ fn from_decomposition(data: &Data, threads: &Threads, written: Written) -> Optio
     let mut notes = Vec::new();
     let mut bars = Vec::new();
     let mut unsplit = false;
+    let mut disagree: Vec<String> = Vec::new();
     for table in &written.tables {
         let tid = task_of(&table.key);
         let mut parts = Vec::new();
         let mut trust = Trust::clean();
+        // What the split's events add up to beyond the row they replace: the
+        // residue moves by as much, so the bar and its residue still add up
+        // to the whole.
+        let mut shift = 0.0;
         for row in &table.rows {
             trust.merge(trust_of(data, &row.source));
             let class = Class::of(&row.state);
@@ -616,7 +667,19 @@ fn from_decomposition(data: &Data, threads: &Threads, written: Written) -> Optio
                 if let Some(events) = tid.and_then(|tid| offcpu_events.get(&tid)) {
                     let lower = offcpu.iter().any(|results| lossy(results));
                     let waits = futex_of(&futex, tid.unwrap_or_default());
-                    parts.extend(split_blocked(data, events, waits, lower));
+                    let split = split_blocked(data, events, waits, lower);
+                    let summed: f64 = split.iter().filter_map(|part| part.amount).sum();
+                    let row_amount = row.amount.unwrap_or(0.0);
+                    if (summed - row_amount).abs() >= 1.0 {
+                        shift += row_amount - summed;
+                        disagree.push(format!(
+                            "{}: {} in the row, {} in the events split",
+                            table.key,
+                            units::duration(row_amount),
+                            units::duration(summed)
+                        ));
+                    }
+                    parts.extend(split);
                     continue;
                 }
                 unsplit = true;
@@ -643,8 +706,9 @@ fn from_decomposition(data: &Data, threads: &Threads, written: Written) -> Optio
             whole,
             whole_resolution: table.whole.resolution.filter(|res| *res > 0.0),
             parts,
-            residue: table.residue,
+            residue: table.residue.map(|residue| residue + shift),
             residue_resolution: table.residue_resolution,
+            residue_says: None,
             trust,
             verdict,
         });
@@ -657,10 +721,18 @@ fn from_decomposition(data: &Data, threads: &Threads, written: Written) -> Optio
                 .to_owned(),
         );
     }
+    if !disagree.is_empty() {
+        notes.push(format!(
+            "`blocked` is split from `sched.offcpu`'s events, whose sum is not the row's ({}): \
+             the residue carries the difference, so the bar and its residue still add up to \
+             the whole.",
+            disagree.join("; ")
+        ));
+    }
     let main = (written.by == "task")
         .then(|| main_bar(&bars, threads))
         .flatten();
-    Some(Sheet {
+    Sheet {
         id: written.id,
         by: written.by,
         whole_says,
@@ -669,7 +741,7 @@ fn from_decomposition(data: &Data, threads: &Threads, written: Written) -> Optio
         folded: Vec::new(),
         main,
         notes,
-    })
+    }
 }
 
 fn from_row(row: &Row, class: Class) -> Part {
@@ -1018,6 +1090,49 @@ fn process_cpu(oncpu: &[&Results], key: &str) -> Option<(f64, f64)> {
     })
 }
 
+/// The bars too short to draw, set apart: a bar is folded only when the
+/// most its states can be -- a bracket at its upper end -- is under
+/// [`FOLD_BELOW`] of the window. A bracket's lower end says nothing of how
+/// long a thread ran: a busy worker beside a short-lived sibling has a lower
+/// end of zero.
+pub fn fold(bars: Vec<Bar>, whole: Option<f64>) -> (Vec<Bar>, Vec<String>) {
+    let Some(whole) = whole else {
+        return (bars, Vec::new());
+    };
+    let shown = |bar: &Bar| bar.most_read() >= whole * FOLD_BELOW;
+    if !bars.iter().any(shown) {
+        return (bars, Vec::new());
+    }
+    let (kept, small): (Vec<Bar>, Vec<Bar>) = bars.into_iter().partition(shown);
+    (kept, small.iter().map(Bar::label).collect())
+}
+
+/// Why a thread `sched.offcpu` saw no block of may still have blocked, by
+/// what the source said beside its losses: a task still off cpu when the run
+/// ended (its block has no end, and is in no total), or a process it could
+/// not follow.
+fn unseen_blocks(offcpu: &[&Results]) -> Option<String> {
+    let mut why = Vec::new();
+    for results in offcpu {
+        why.extend(
+            results
+                .notes
+                .iter()
+                .filter(|note| note.contains("still off cpu"))
+                .cloned(),
+        );
+        why.extend(
+            results
+                .losses
+                .reasons
+                .keys()
+                .filter(|reason| reason.contains("not followed"))
+                .cloned(),
+        );
+    }
+    (!why.is_empty()).then(|| why.join("; "))
+}
+
 /// The view's own reading, per thread over the run's window, when no
 /// decomposition splits the run by task.
 fn reading(data: &Data, threads: &Threads) -> Option<Sheet> {
@@ -1051,6 +1166,7 @@ fn reading(data: &Data, threads: &Threads) -> Option<Sheet> {
     let runq_by = by_thread(&runq);
     let offcpu_raw = offcpu.iter().any(|results| results.output("raw").is_some());
     let offcpu_lossy = offcpu.iter().any(|results| lossy(results));
+    let offcpu_unseen = unseen_blocks(&offcpu);
     let runq_raw = runq.iter().any(|results| results.output("raw").is_some());
     let runq_lossy = runq.iter().any(|results| lossy(results));
     let mut notes = vec![
@@ -1124,10 +1240,22 @@ fn reading(data: &Data, threads: &Threads) -> Option<Sheet> {
                     );
                 } else {
                     blocked.amount = Some(0.0);
-                    blocked.note = Some(
-                        "`sched.offcpu` watches every switch and lost nothing: it never blocked"
-                            .to_owned(),
-                    );
+                    match &offcpu_unseen {
+                        Some(unseen) => {
+                            blocked.lower_bound = true;
+                            blocked.note = Some(format!(
+                                "a lower bound: no block of it ended in the window, but \
+                                 {unseen}"
+                            ));
+                        }
+                        None => {
+                            blocked.note = Some(
+                                "`sched.offcpu` lost nothing, missed no process, and left no \
+                                 task off cpu at the end: it never blocked"
+                                    .to_owned(),
+                            );
+                        }
+                    }
                 }
                 parts.push(blocked);
             } else {
@@ -1156,6 +1284,7 @@ fn reading(data: &Data, threads: &Threads) -> Option<Sheet> {
             parts,
             residue: None,
             residue_resolution: None,
+            residue_says: None,
             trust,
             verdict: Verdict::Undecided(String::new()),
         });
@@ -1178,6 +1307,9 @@ fn reading(data: &Data, threads: &Threads) -> Option<Sheet> {
         })
         .collect();
     let mut bracketed = false;
+    // Which bars' on cpu is what their other states leave of the window: their
+    // rows then add up to the whole by construction.
+    let mut derived = vec![false; bars.len()];
     for index in 0..bars.len() {
         let tid = bars[index].tid.unwrap_or_default();
         let pid = bars[index].pid;
@@ -1225,6 +1357,7 @@ fn reading(data: &Data, threads: &Threads) -> Option<Sheet> {
                         )
                     });
                     bracketed = true;
+                    derived[index] = true;
                 }
                 _ => {
                     part.missing = Some(
@@ -1262,10 +1395,15 @@ fn reading(data: &Data, threads: &Threads) -> Option<Sheet> {
         );
     }
 
-    for bar in &mut bars {
+    for (bar, derived) in bars.iter_mut().zip(derived) {
         let complete = bar.parts.iter().all(|part| part.amount.is_some());
-        let drawn: f64 = bar.parts.iter().filter_map(Part::most).sum();
-        bar.residue = complete.then(|| whole.map(|whole| whole - drawn)).flatten();
+        let drawn = bar.most_read();
+        if derived {
+            bar.residue_says =
+                Some("not measured: on cpu is derived from the other rows".to_owned());
+        } else {
+            bar.residue = complete.then(|| whole.map(|whole| whole - drawn)).flatten();
+        }
         bar.residue_resolution = Some(bar.parts.iter().filter_map(|part| part.resolution).sum());
         bar.verdict = decide(&bar.parts, bar.whole, bar.residue_resolution);
     }
@@ -1278,18 +1416,9 @@ fn reading(data: &Data, threads: &Threads) -> Option<Sheet> {
         process(a)
             .cmp(&process(b))
             .then(follows(a).cmp(&follows(b)))
-            .then(b.read().total_cmp(&a.read()))
+            .then(b.most_read().total_cmp(&a.most_read()))
     });
-    let mut folded = Vec::new();
-    if let Some(whole) = whole {
-        if bars.iter().any(|bar| bar.read() >= whole * FOLD_BELOW) {
-            let (kept, small): (Vec<Bar>, Vec<Bar>) = bars
-                .into_iter()
-                .partition(|bar| bar.read() >= whole * FOLD_BELOW);
-            folded = small.iter().map(Bar::label).collect();
-            bars = kept;
-        }
-    }
+    let (bars, folded) = fold(bars, whole);
     let main = main_bar(&bars, threads);
     Some(Sheet {
         id: "the view's reading".to_owned(),
@@ -1565,6 +1694,14 @@ impl Timebar {
             lines.push(Line::from(line));
         }
         lines.push(Line::default());
+        for why in decompositions(ctx.data).1 {
+            for text in wrap(&format!("Not drawn: {why}."), width, "", "  ") {
+                lines.push(Line::from(Span::styled(
+                    text,
+                    Style::new().fg(palette::REFUSED),
+                )));
+            }
+        }
         for text in wrap(
             "A bar per thread needs `sched.offcpu` or `sched.runqlat` on a target; a bar per task \
              as `omn latency` reads it needs its session: `omn latency --objective latency \
@@ -1788,9 +1925,12 @@ impl Timebar {
                 )
             }
             None => format!(
-                "  {} {} unknown: a row was not read",
+                "  {} {} {}",
                 fit("residue: the whole less the rows", state_w),
                 fit("", source_w),
+                bar.residue_says
+                    .as_deref()
+                    .unwrap_or("unknown: a row was not read"),
             ),
         };
         lines.push(Line::from(Span::styled(fit(&residue, width), dim())));
@@ -2277,8 +2417,11 @@ mod tests {
         assert_eq!(bar.parts[*part].class, Class::OnCpu);
     }
 
+    /// The split partitions the events it is made of: nothing is counted
+    /// twice or left out. (Whether those events add up to a decomposition's
+    /// row is the residue's business: see `from_decomposition`.)
     #[test]
-    fn blocks_split_by_state_add_up_to_the_blocks() {
+    fn blocks_split_by_state_partition_the_events() {
         let data = fixture("sqlite-commits");
         let events: Vec<&Event> = data
             .of_source("sched.offcpu")
@@ -2317,11 +2460,15 @@ mod tests {
             .find(|sheet| sheet.reading)
             .expect("a reading");
         assert!(sheet.bars[0].trust.dims());
+        // The screen says it is the view's reading, and the first bar's
+        // verdict is the one drawn.
+        let expected = match &sheet.bars[0].verdict {
+            Verdict::Names { .. } => format!("first suspect  {}", sheet.bars[0].label()),
+            Verdict::Undecided(_) => format!("no single suspect  {}", sheet.bars[0].label()),
+        };
         let screen = text(&draw(live, "timebar", WIDTH, HEIGHT));
-        assert!(
-            screen.contains("first suspect") || screen.contains("no single suspect"),
-            "{screen}"
-        );
+        assert!(screen.contains("the view's reading"), "{screen}");
+        assert!(screen.contains(&expected), "{expected}\n{screen}");
     }
 
     #[test]
@@ -2422,5 +2569,119 @@ mod tests {
         let (visible, found) = Timebar::visible(sheet, &elsewhere);
         assert!(!found);
         assert_eq!(visible.len(), sheet.bars.len());
+    }
+
+    fn on_cpu_bracket(least: f64, most: f64) -> Part {
+        let mut on = part(Class::OnCpu, "on-cpu", Some(least), 0.0);
+        on.upper = Some(most);
+        on
+    }
+
+    fn thread(tid: i32, parts: Vec<Part>) -> Bar {
+        Bar {
+            key: format!("task:{tid}"),
+            comm: None,
+            pid: Some(1),
+            tid: Some(tid),
+            request: None,
+            whole: Some(1000.0),
+            whole_resolution: None,
+            parts,
+            residue: None,
+            residue_resolution: None,
+            residue_says: None,
+            trust: Trust::clean(),
+            verdict: Verdict::Undecided(String::new()),
+        }
+    }
+
+    /// A busy worker beside a short-lived helper: the worker's lower end is
+    /// zero, its upper end the window. It is drawn, not folded as a sliver;
+    /// only a thread whose states can be under the threshold even at their
+    /// most is folded.
+    #[test]
+    fn a_thread_is_folded_only_when_its_most_is_a_sliver() {
+        let worker = thread(
+            2,
+            vec![
+                on_cpu_bracket(0.0, 995.0),
+                part(Class::RunQueue, "runnable", Some(3.0), 0.0),
+            ],
+        );
+        let sliver = thread(
+            3,
+            vec![
+                part(Class::OnCpu, "on-cpu", Some(2.0), 0.0),
+                part(Class::RunQueue, "runnable", Some(1.0), 0.0),
+            ],
+        );
+        let main = thread(
+            1,
+            vec![part(Class::Sleep, "blocked: sleeping", Some(990.0), 0.0)],
+        );
+        let (kept, folded) = fold(vec![main, worker, sliver], Some(1000.0));
+        let kept: Vec<Option<i32>> = kept.iter().map(|bar| bar.tid).collect();
+        assert_eq!(kept, vec![Some(1), Some(2)]);
+        assert_eq!(folded, vec!["task 3".to_owned()]);
+    }
+
+    /// On every fixture the view reads itself, a bar whose on cpu is derived
+    /// from the window gives no residue -- it would be zero by construction
+    /// -- and says why instead.
+    #[test]
+    fn a_residue_that_cannot_fail_is_not_printed_as_one() {
+        for name in ["http-server", "cpython-hot"] {
+            let data = fixture(name);
+            let sheets = sheets(&data);
+            let sheet = sheets.iter().find(|sheet| sheet.reading).expect(name);
+            let bracketed: Vec<&Bar> = sheet
+                .bars
+                .iter()
+                .filter(|bar| bar.parts[0].amount.is_some())
+                .collect();
+            assert!(!bracketed.is_empty(), "{name}: no on-cpu read");
+            for bar in bracketed {
+                assert_eq!(bar.residue, None, "{name} {}", bar.key);
+                assert!(bar.residue_says.is_some(), "{name} {}", bar.key);
+            }
+            let screen = text(&draw(data, "timebar", WIDTH, HEIGHT));
+            assert!(
+                screen.contains("not measured: on cpu is derived"),
+                "{name}\n{screen}"
+            );
+        }
+    }
+
+    /// A decomposition the view cannot draw is said, not dropped.
+    #[test]
+    fn a_decomposition_not_drawn_says_why() {
+        let mut data = fixture("vertical-requests");
+        let mut odd = data.run.decompositions[0].clone();
+        odd["id"] = serde_json::json!("in-bytes");
+        odd["unit"] = serde_json::json!("bytes");
+        data.run.decompositions.push(odd);
+        data.run
+            .decompositions
+            .push(serde_json::json!({"id": "broken", "tables": "not a list"}));
+        let sheets = sheets(&data);
+        assert!(sheets.iter().all(|sheet| sheet.id != "in-bytes"));
+        for sheet in &sheets {
+            assert!(
+                sheet
+                    .notes
+                    .iter()
+                    .any(|note| note.contains("`in-bytes` is in `bytes`")),
+                "{:?}",
+                sheet.notes
+            );
+            assert!(
+                sheet
+                    .notes
+                    .iter()
+                    .any(|note| note.contains("`broken` could not be read")),
+                "{:?}",
+                sheet.notes
+            );
+        }
     }
 }

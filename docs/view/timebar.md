@@ -43,11 +43,17 @@ From the top:
   child, `▄` network, `░` sleep -- so a bar reads in plain text as it does in
   colour, and a share wide enough carries its name and percentage inside it.
   `▒` is a bracket (below), `·` time no row read. The bar's suspect is at its
-  end. Threads under 1 % of the window each are folded into one line.
+  end. A thread whose states add up to under 1 % of the window *even at
+  their most* -- a bracket counted at its upper end -- is folded into one
+  line; a busy worker whose bracket's lower end is zero is never folded.
 - **The chosen bar's table**: the whole, every state with its source, amount,
   share, resolution, readings and the source's trust badges, what names it
   (`↳`), and the residue -- the whole less the rows, signed, said to be
-  within its resolution or not. Nothing is rounded into another row.
+  within its resolution or not. Nothing is rounded into another row. In the
+  view's own reading, where on cpu is derived from what the other rows leave
+  of the window, the rows add up to the whole by construction: the residue
+  is then said to be not measured rather than printed as a zero that cannot
+  fail.
 - **Notes**: where the bars came from, what a bracket is, what the whole
   means, and every trust mark of the bar in a sentence.
 
@@ -113,6 +119,13 @@ whole less what was read, plus the residue's resolution, when a row is
 missing; the rows' own resolutions when every row was read. Otherwise no state
 is named, and the reason is the triage's sentence. A lossy source's amount is
 a lower bound, drawn `≥`; a bracket's too.
+
+The restatement is held to the triage by `tests/view_timebar.rs`, which runs
+`omn::triage::latency::read` and `conclude` on every fixture carrying
+`where-the-time-went` and asserts that the timebar names the same state, or
+none when the triage names none. The one deliberate difference -- the next
+state at its most rather than the second-largest amount -- changes nothing on
+a decomposition, whose rows carry no bracket.
 
 Not restated: following the main thread into the child or the thread that ran
 during its wait (`omn latency` does; the view shows every thread side by

@@ -24,7 +24,7 @@ omn top │ fixture http-server │ 2.84s                             view: snap
 │ ░ blocked: sleeping                sched.offcpu    2.76s           96.9%   exact     17     ~low det degraded        │
 │     ↳ 100 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- select.cpython-314-x86_64-linux-gnu.so+0x3fd3 <-… │
 │     ↳ 409µs waiting in futex(2) over 12 wait(s): less than half the sleep                                            │
-│   residue: the whole less the rows                 0ns             0.00%   ±10.0ms   within its resolution           │
+│   residue: the whole less the rows                 not measured: on cpu is derived from the other rows               │
 │                                                                                                                      │
 │ No decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread    │
 │   over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn │

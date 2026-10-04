@@ -20,7 +20,7 @@ omn top │ fixture sqlite-commits │ 4.97s                          view: snap
 │ ▚ runnable                         sched.runqlat   6.69ms          0.13%   exact     382    ~low det degraded        │
 │ ▓ blocked: uninterruptible         sched.offcpu    408ms           8.21%   exact     1018   ~low det degraded        │
 │     ↳ 73 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <… │
-│   residue: the whole less the rows                 0ns             0.00%   ±10.0ms   within its resolution           │
+│   residue: the whole less the rows                 not measured: on cpu is derived from the other rows               │
 │                                                                                                                      │
 │ No decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread    │
 │   over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn │

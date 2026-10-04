@@ -210,8 +210,9 @@ holds this table to the code.
 | request | `net.request` | trace | raw | target | each request's life by state, and the network on either side of it |
 | timebar | `cpu.profile` | sample@997hz | stack (stack fp) | target | on cpu |
 | timebar | `sched.runqlat` | trace | raw,summary (keys task) | target | waiting to run |
-| timebar | `sched.offcpu` | trace | stack (stack fp) | target | blocked, with the stack it blocked in |
+| timebar | `sched.offcpu` | trace | raw,stack (stack fp) | target | blocked, by the task state each block recorded, with the stack it blocked in |
 | timebar | `sched.futex` | trace | summary (keys task) | target | waiting on a lock |
+| timebar | `cpu.oncpu_time` | poll@250ms | timeline,summary (keys task) | target | on cpu per process, which brackets each thread's share |
 | heatmap | `io.latency` | trace | raw,hist | target | block request latency, of the requests the target issued |
 | heatmap | `sched.runqlat` | trace | raw,summary (keys task) | target | run queue latency |
 | heatmap | `net.socket` | trace | raw,hist | target | socket read and write latency |

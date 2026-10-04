@@ -4,7 +4,10 @@ The `timebar` view of `omn top`: where the wall-clock went, one bar per
 thread or task, by state, with the first suspect named on it -- the same one
 `omn latency` names, by its rule. Branch `feat/w19-timebar`. Files touched:
 `view/src/views/timebar.rs`, its snapshots `docs/view/gallery/timebar--*`,
-`docs/view/timebar.md`, and this handoff. Nothing else.
+`docs/view/timebar.md`, and this handoff; in the review round also
+`tests/view_timebar.rs` (new: the parity with `omn latency`) and the
+timebar's rows of `docs/view/README.md`'s table of needs -- both core's to
+own from here.
 
 ## What landed
 
@@ -26,7 +29,10 @@ thread or task, by state, with the first suspect named on it -- the same one
 - **`blocked` split as the triage splits it** when the run holds
   `sched.offcpu`'s events: `uninterruptible` as I/O, `sleeping` as a sleep, a
   sleep `sched.futex` covers half of as a lock, a sleep whose blocking stack
-  is a wait for a child as a child. The split adds up to the row (a test).
+  is a wait for a child as a child. The split partitions the events it is
+  made of (a test); where their sum is not the decomposition's row, the
+  residue carries the difference and a note says so, so the bar and its
+  residue still add up to the whole.
 - **On cpu from a per-process total, as a bracket.** `cpu.oncpu_time` is
   `fs:proc` here: one total per process, keyed on the process id. A thread's
   share is drawn solid to its least (the process's total less a tick less
@@ -38,7 +44,8 @@ thread or task, by state, with the first suspect named on it -- the same one
   like the colour one, an axis, a legend of the states on screen, the chosen
   bar's table (whole, states with source, amount, share, resolution,
   readings, trust badges, what names each; residue), and the notes and trust
-  sentences. Threads under 1 % of the window are folded into one line. `↑↓`
+  sentences. Threads under 1 % of the window even at their most (a bracket
+  at its upper end) are folded into one line. `↑↓`
   choose, `enter` opens the thread in `lanes` or the request in `request`,
   narrowed; a focus narrows the bars. A run with nothing to split (the
   `machine` fixture) says so, what each need holds, and how to get a
@@ -72,14 +79,18 @@ Shown, by tests on the committed recordings:
   the second decomposition; a focus on a tid narrows to that bar, and one on a
   tid not drawn keeps every bar and says so.
 
+- `tests/view_timebar.rs` runs the triage itself (`latency::read`, then
+  `conclude`) on `sqlite-latency`'s results and asserts the timebar names
+  the same state: `blocked` on both.
+
 Reasoned, not shown:
 
-- That `omn latency` itself names `blocked` on this recording. I did not run
-  it: the fixture is its session's output, and the rule is restated from
-  `src/triage/latency.rs` line for line, but with the `blocked` row unsplit,
-  where `omn latency` would split it (it holds the events in memory) and
-  probably name `blocked: uninterruptible` -- the view's suspect is the
-  triage's at the row's level, not at the split's.
+- That `omn latency` *live* names `blocked` on this program. The parity test
+  runs the triage on the recording, which holds `sched.offcpu`'s stacks and
+  not its events, so the triage too leaves `blocked` unsplit; live it holds
+  the events and would probably name `blocked: uninterruptible`. Once core
+  re-records the fixture with the events (below), the same test holds the
+  split.
 - The bracket's lower end assumes the sched sources saw every thread of the
   process: a thread that never blocked and never waited for a cpu would be
   missing from the subtraction and the lower end too high. On the fixtures
@@ -142,7 +153,7 @@ target/debug/omn top -- python3 -m http.server --bind 127.0.0.1 8000   # 5, whil
 
 | Decision | Why |
 |---|---|
-| The timebar's first suspect restates `omn latency`'s rule (largest state, ahead of the next at its most and of what no row read) in the view crate, held to the `sqlite-latency` and `vertical-requests` fixtures | the view crate cannot depend on `omn`; a suspect by another rule would be a second answer to one question |
+| The timebar's first suspect restates `omn latency`'s rule (largest state, ahead of the next at its most and of what no row read) in the view crate, held to the triage itself by `tests/view_timebar.rs`, which runs `latency::read` and `conclude` on every fixture carrying its decomposition | the view crate cannot depend on `omn`; a suspect by another rule would be a second answer to one question |
 | A run without a decomposition by task is drawn as the view's own per-thread reading, said on screen to be the view's, with the commands that give `omn latency`'s | six of seven fixtures and every live run carry no decomposition; an empty view there would hide what the traced sources do say |
 | A per-process cpu total is drawn as a bracket per thread -- least: the total less a tick less what the process's other threads could have run; most: what the thread's own states leave of the window -- never apportioned | a share of a total that no source attributes is a number that was not measured |
 | A `blocked` row from a recording without `sched.offcpu`'s events is drawn whole, named by the run's heaviest blocking stack, and said not split | the split by task state needs the events; guessing it from a stack is a disk-or-sleep call the data does not make |
@@ -156,12 +167,12 @@ target/debug/omn top -- python3 -m http.server --bind 127.0.0.1 8000   # 5, whil
      names `blocked: uninterruptible` rather than `blocked`. Re-recording
      changes the timebar's `sqlite-latency` snapshot: re-bless it with
      `OMN_VIEW_BLESS=1 cargo test --test view_snapshots timebar`.
-  2. In `docs/view/README.md`'s "Two views read what no default request
-     gives" (or beside the timebar's rows): the timebar's per-thread reading
-     also reads `cpu.oncpu_time` (the system and ledger views' need) and
-     `sched.offcpu`'s `raw` events (the lanes view's) when the run has them.
-     I did not add them to the timebar's `NEEDS`: the README's table is held
-     to the code by `tests/view_model.rs`, and the README is core's.
+  2. Done in the review round instead of asked: the timebar's `NEEDS` now
+     carry `cpu.oncpu_time` (as the system and ledger views ask it, so the
+     requests merge) and `sched.offcpu`'s `raw` beside its stacks (as lanes
+     asks it), with the two README rows `tests/view_model.rs` holds them to.
+     Core: review those rows, and take `tests/view_timebar.rs` (the parity
+     with `omn latency`) as yours.
 - **the sched family's owner** (no stream this wave): `sched.wakeup`'s `comm`
   is the waker's on an event keyed on the wakee (above). Either say it in the
   catalog's caveats or name the attribute `waker_comm`.
@@ -190,3 +201,45 @@ the home filesystem was full while fourteen streams built and tested at once.
 Every `omn-view` test and every `view_*` test passed (the timebar's 13, its
 snapshots on every fixture). The red targets want one rerun once the disk has
 room, by the coordinator, alone: they are not the timebar's to fix.
+
+## Review
+
+The adversarial review's seven findings, each fixed:
+
+1. **Folding by the lower end (defect).** Fixed: `fold` keeps a bar when
+   the most its states can be (`Bar::most_read`, a bracket at its upper end)
+   reaches 1 % of the window, and the bars are ordered by the same figure. A
+   busy worker beside a short-lived sibling (lower end zero, upper end the
+   window) is drawn; test
+   `a_thread_is_folded_only_when_its_most_is_a_sliver`. No fixture changed:
+   `ldconfig` on `http-server` is still folded, its on cpu not being read at
+   all (it is a process `cpu.oncpu_time` did not measure).
+2. **No parity with `omn latency` (gap).** Fixed:
+   `tests/view_timebar.rs` builds the triage's `Run` from each fixture's
+   `results.json`, runs `latency::read` and `conclude`, and asserts the
+   timebar's verdict on the same task's bar names the same state (or none).
+   It holds on `sqlite-latency` (`blocked`), and fails if no fixture is
+   held. The deliberate difference (`next` at its most) is said in the
+   module doc and `docs/view/timebar.md`: it only differs on a bracketed
+   row, and a decomposition has none.
+3. **A residue that cannot fail (gap).** Fixed: when on cpu is derived from
+   the window, the bar has no residue and the table says `not measured: on
+   cpu is derived from the other rows`; test
+   `a_residue_that_cannot_fail_is_not_printed_as_one`. A per-thread on-cpu
+   source (a `bpf` backend) would still give a measured residue.
+4. **`NEEDS` incomplete (gap).** Fixed here rather than filed: see "Needs
+   from another stream", item 2. The nothing-to-split screen now lists them.
+5. **"Adds up to the row" (nit).** The handoff's claim is corrected, the
+   test renamed `blocks_split_by_state_partition_the_events`, and a split
+   whose events disagree with the row now moves the residue by the
+   difference, with a note.
+6. **A weak live test (nit).** It now asserts that the screen says it is the
+   view's reading and draws the first bar's own verdict with its label.
+7. **Claims without checking (nit).** A thread with no block is said to have
+   never blocked only when `sched.offcpu` lost nothing, followed every
+   process (no `not followed` loss reason) and reported no task still off cpu
+   at the end; otherwise its zero is a lower bound, drawn `≥`, with the
+   source's words. A decomposition not drawn (not in `ns`, unreadable, no
+   table) is said on every sheet and on the nothing-to-split screen; test
+   `a_decomposition_not_drawn_says_why`.
+
