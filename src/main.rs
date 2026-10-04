@@ -88,6 +88,10 @@ fn restore_own_dumpability() {
 
 fn main() -> ExitCode {
     restore_own_dumpability();
+    // A launched program's orphans are reparented here, where a stop can
+    // still end them (`collect::adopt_orphans`). This process starts nothing
+    // else that outlives the call that started it.
+    omn::collect::adopt_orphans();
     let cli = match Cli::try_parse_from(normalize(std::env::args_os())) {
         Ok(cli) => cli,
         Err(error) => {
@@ -1448,6 +1452,17 @@ fn report_costs(costs: &[MeasuredCost], run: &encode::RunOutput) {
         eprintln!(
             "warning: the stop left {left} process(es) the program started running: they \
              could not be signalled (a setuid child refuses this process's signals)"
+        );
+    }
+    let adopted = run
+        .results
+        .iter()
+        .find_map(|results| results.lifetime)
+        .map_or(0, |life| life.adopted_ended);
+    if adopted > 0 {
+        eprintln!(
+            "note: the stop also ended {adopted} process(es) the program started that had left \
+             its tree before it (orphaned, their parent gone first, and adopted by omn)"
         );
     }
     if let Some(comparison) = compare_backends(costs, &run.results) {

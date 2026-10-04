@@ -2379,3 +2379,54 @@ fn a_session_refused_at_resolution_names_every_request_it_could_not_resolve() {
     );
     assert_eq!(output.status.code(), Some(1), "the machine's gap: {said}");
 }
+
+/// A stop ends what the program started even when it left the program's
+/// tree first: a grandchild whose parent exited, in a session of its own
+/// (`setsid`), was reparented away from the program and outlived the run.
+/// `omn` adopts such orphans now (`PR_SET_CHILD_SUBREAPER`), and its stop
+/// ends them and says how many.
+#[test]
+fn a_stop_ends_an_orphan_that_left_the_program_s_tree_and_group() {
+    // A sleep no other test starts, so finding it afterwards finds this one.
+    let marker = format!(
+        "{}.{}",
+        40 + std::process::id() % 50,
+        std::process::id() % 997
+    );
+    let script = format!("(setsid sleep {marker} &) ; sleep 30");
+    let output = run(&[
+        "trace",
+        "proc.fd",
+        "-m",
+        "poll@50ms",
+        "-e",
+        "summary",
+        "-d",
+        "600ms",
+        "--",
+        "sh",
+        "-c",
+        &script,
+    ]);
+    let said = stderr(&output);
+    assert!(output.status.success(), "{said}");
+    let survivors = Command::new("pgrep")
+        .args(["-f", &format!("^sleep {marker}$")])
+        .output()
+        .map(|found| String::from_utf8_lossy(&found.stdout).trim().to_owned());
+    if let Ok(pids) = &survivors {
+        for pid in pids.lines() {
+            let _ = Command::new("kill").args(["-9", pid]).status();
+        }
+        assert!(
+            pids.is_empty(),
+            "the orphan outlived the run: {pids}; {said}"
+        );
+    }
+    assert!(
+        said.contains(
+            "the stop also ended 1 process(es) the program started that had left its tree"
+        ),
+        "and the run says it ended it: {said}"
+    );
+}

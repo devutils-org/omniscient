@@ -74,6 +74,83 @@ pub struct Lifetime {
     /// nothing.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub left_running: u32,
+    /// How many processes the stop ended that had left the program's tree
+    /// before it -- orphaned, their parent gone first, and adopted by this
+    /// process ([`adopt_orphans`]) -- and that a walk of the program's tree
+    /// no longer finds. Counted, so a run says it reached them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub adopted_ended: u32,
+}
+
+/// Whether this process adopts the orphans of the programs it launches
+/// ([`adopt_orphans`]).
+static ADOPTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Makes this process the subreaper of what it launches: a descendant of the
+/// launched program whose parent exits before it is reparented here rather
+/// than to init, where a stop can still find it. Without it, a process that
+/// was orphaned and left the program's process group (`setsid`, a daemon's
+/// double fork) was in no tree a stop walks, and outlived the run.
+///
+/// For the `omn` binary alone, which starts no process of its own that
+/// outlives the call that started it: at a stop, every child of this process
+/// other than the program is then one of the program's, and is ended with it.
+/// A library caller -- a test harness with other tests' children beside the
+/// program -- never calls this, and a stop then ends the program's tree only.
+pub fn adopt_orphans() -> bool {
+    // SAFETY: a prctl that takes no pointer.
+    let adopted = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0;
+    ADOPTING.store(adopted, std::sync::atomic::Ordering::Relaxed);
+    adopted
+}
+
+/// Ends every process this one adopted, and their descendants, once the
+/// program has been reaped: stopped first, as [`freeze`] stops a tree, then
+/// killed and reaped. Returns how many it ended and how many it could not
+/// signal.
+fn end_adopted() -> (u32, u32) {
+    if !ADOPTING.load(std::sync::atomic::Ordering::Relaxed) {
+        return (0, 0);
+    }
+    // SAFETY: getpid cannot fail.
+    let me = unsafe { libc::getpid() };
+    let mut stopped: Vec<i32> = Vec::new();
+    for _ in 0..64 {
+        let new: Vec<i32> = super::task::descendants(me)
+            .into_iter()
+            .filter(|adopted| !stopped.contains(adopted))
+            .collect();
+        if new.is_empty() {
+            break;
+        }
+        for adopted in new {
+            // SAFETY: stopping a process the launched program started.
+            unsafe { libc::kill(adopted, libc::SIGSTOP) };
+            stopped.push(adopted);
+        }
+    }
+    let (mut ended, mut refused) = (0, 0);
+    for adopted in &stopped {
+        // SAFETY: killing a process the launched program started.
+        if unsafe { libc::kill(*adopted, libc::SIGKILL) } == 0 {
+            ended += 1;
+        } else if std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+            refused += 1;
+        }
+    }
+    // The adopted are this process's children now, and their killed
+    // descendants become so as their parents die: reaped until none is left,
+    // bounded, since a child this process could not signal never ends.
+    for _ in 0..200 {
+        let mut status = 0;
+        // SAFETY: reaping any child; the program was reaped before this.
+        match unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) } {
+            0 => std::thread::sleep(std::time::Duration::from_millis(1)),
+            pid if pid > 0 => {}
+            _ => break,
+        }
+    }
+    (ended, refused)
 }
 
 fn is_zero(count: &u32) -> bool {
@@ -108,6 +185,8 @@ pub struct Gated {
     cpu_ns: Option<u64>,
     /// What the stop could not signal ([`Lifetime::left_running`]).
     left_running: u32,
+    /// What the stop ended outside the program's tree ([`Lifetime::adopted_ended`]).
+    adopted_ended: u32,
 }
 
 impl Gated {
@@ -208,6 +287,9 @@ impl Gated {
             self.status = Some(status);
             self.cpu_ns = Some(cpu_ns(&usage));
         }
+        let (ended, refused) = end_adopted();
+        self.adopted_ended += ended;
+        self.left_running += refused;
         let reaped_ns = monotonic_ns();
         // Its end is somewhere after it was last seen running, which may be
         // before the signal: a program that exited a moment before it was
@@ -230,6 +312,7 @@ impl Gated {
             terminated: self.terminated,
             cpu_ns: self.cpu_ns,
             left_running: self.left_running,
+            adopted_ended: self.adopted_ended,
         })
     }
 }
@@ -476,6 +559,7 @@ fn gated_with(
         exited: None,
         terminated: false,
         left_running: 0,
+        adopted_ended: 0,
     })
 }
 
