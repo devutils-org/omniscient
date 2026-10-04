@@ -2331,3 +2331,51 @@ fn a_target_that_burns_under_a_tick_per_check_is_weighed_and_the_budget_acts_on_
         "the check saw a run over its ceiling and did nothing: {account}"
     );
 }
+
+/// A session of requests this machine cannot serve is refused with every one
+/// of them named, not the first: `examples/sched-forced-backends.yml` pins
+/// five sched sources to their eBPF backends, and the resolution loop used to
+/// return at the first it could not resolve (`docs/scenarios/sched.md`
+/// defect 8). On a machine that serves them the run is a run, and there is
+/// nothing here to check.
+#[test]
+fn a_session_refused_at_resolution_names_every_request_it_could_not_resolve() {
+    let session = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/sched-forced-backends.yml");
+    let output = run(&[
+        "trace",
+        "-f",
+        session.to_str().expect("a utf-8 path"),
+        "-d",
+        "100ms",
+    ]);
+    let said = stderr(&output);
+    if output.status.success() || !said.contains("has no viable backend") {
+        eprintln!("SKIP: this machine resolves the pinned sched backends: {said}");
+        return;
+    }
+    let refused: Vec<&str> = said
+        .lines()
+        .filter(|line| line.starts_with("error: `") && line.contains("has no viable backend"))
+        .collect();
+    for source in [
+        "sched.switches",
+        "sched.wakeup",
+        "sched.migrations",
+        "sched.offcpu",
+    ] {
+        assert!(
+            refused
+                .iter()
+                .any(|line| line.contains(&format!("`{source}`"))),
+            "`{source}` is named among the refused: {said}"
+        );
+    }
+    assert!(
+        said.contains(&format!(
+            "{} of the session's 5 requests cannot be resolved here",
+            refused.len()
+        )),
+        "and the count is said: {said}"
+    );
+    assert_eq!(output.status.code(), Some(1), "the machine's gap: {said}");
+}
