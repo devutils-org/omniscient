@@ -46,7 +46,12 @@
 #
 # `tests/cross_machine.rs` runs the program both ways, reads the program's own
 # `/proc/self/io` and the cgroup's own `memory.stat` as the references, and
-# checks every rung against them.
+# checks every rung against them. It launches the program from this session
+# rather than beside it -- one more request, on the launched program, so the
+# run holds it until every source is attached and ends when it exits -- and
+# the program exits only once its cgroup's writeback has drained. Run by hand
+# as above, `duration:` must outlast the program and its writeback, and the
+# session must be attached before the program starts.
 #
 # **Why everything targets the system.** The limit is the cgroup's but the
 # consequence is the device's. A run observes one workload -- the cgroup --
