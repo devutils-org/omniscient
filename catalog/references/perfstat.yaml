@@ -26,6 +26,9 @@
 # PYTHONHASHSEED is fixed, so what is counted depends on the argument and the
 # tolerance covers the run-to-run spread measured on the development machine
 # under a loaded wave (docs/replaces/perfstat.md).
+#
+# Until tests/reference.rs runs pairs, tests/reference/workloads/perfstat/run_pairs.py
+# runs these, reading the fields above as written here.
 
 - source: cpu.instructions
   tool: perf stat
@@ -252,4 +255,4 @@
     omn: summary.total / overhead.observed_cpu_ns
     omn_jq: "([.results[0].outputs[0].series[].last] | add) / .results[0].overhead.observed_cpu_ns"
     tolerance: {rel: 0.03}
-    why: "the same run, but perf's window is omn's plus omn's start and exit, so the raw counts differ by the cpu time in between (5 to 23 % measured); per on-cpu nanosecond both agree within 1 % (omn 1 % higher on three runs out of three)"
+    why: "the same run, but perf's window is omn's plus omn's start and exit, so the raw counts differ by the cpu time in between (5 to 23 % measured); per on-cpu nanosecond both agree within 1 % (omn 0.4 to 1 % higher on six runs out of six)"
