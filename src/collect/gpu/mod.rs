@@ -12,6 +12,7 @@ mod device;
 #[cfg(test)]
 mod fixture;
 mod job;
+mod kernel;
 mod nvml;
 
 use super::Factory;
@@ -39,6 +40,9 @@ pub fn factories() -> Vec<Factory> {
         // The host side of submission, through the preload shim the heap and
         // mutex sources share; `api.rs` says which programs it can see.
         Factory::new("gpu.api", "preload", |_| api::prepare()),
+        // The device's side of the same calls, through CUPTI loaded into the
+        // program by the driver; `kernel.rs` says why only at exec.
+        Factory::new("gpu.kernel", "vendor:cupti", |_| kernel::prepare()),
         Factory::new("gpu.freq", "vendor:nvml", |resolved| {
             Ok(Box::new(Prepare::new(Metric::Freq, resolved.request.mode)))
         }),

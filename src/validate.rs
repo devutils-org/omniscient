@@ -429,7 +429,15 @@ fn target_rejection_reason(entry: &Entry, kind: TargetKind) -> String {
         }
         TargetKind::Iface => format!("`{}` is not a network interface source", entry.id),
         TargetKind::Cpu => "this source is not attributable to a single core".to_owned(),
-        _ => format!("the catalog declares no `{kind}` support for this source"),
+        // An entry that refuses a target for a reason of its own says so in
+        // a caveat naming the flag, and that caveat is the reason: the
+        // catalog is the data, so the reason lives there, not here.
+        _ => entry
+            .caveats
+            .iter()
+            .find(|caveat| caveat.contains(&format!("`--{kind}`")) && caveat.contains("refused"))
+            .cloned()
+            .unwrap_or_else(|| format!("the catalog declares no `{kind}` support for this source")),
     }
 }
 
@@ -1056,6 +1064,19 @@ mod tests {
         assert_eq!(rejections.len(), 1);
         assert!(
             rejections[0].message.contains("scoped to the package"),
+            "{}",
+            rejections[0]
+        );
+    }
+
+    #[test]
+    fn a_target_refused_for_the_entrys_own_reason_carries_that_reason() {
+        let request = request("gpu.kernel", Target::Pid(vec![1]), "trace", "summary");
+        let rejections = reject(&request);
+        assert_eq!(rejections.len(), 1);
+        let message = &rejections[0].message;
+        assert!(
+            message.contains("CUDA_INJECTION64_PATH") && !message.contains("declares no"),
             "{}",
             rejections[0]
         );
