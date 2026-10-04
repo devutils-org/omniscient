@@ -161,3 +161,21 @@ stands).
 - **src (later)**: the IBS backend's delivered rate against the requested
   one, surfaced; `omn trace --pid` attaching faster than 500 ms (the debug
   build), or saying when it is attached.
+
+## Review
+
+- **`load-latency`'s `why` contradicted the stream's own finding** (gap,
+  fixed). It said both sides "read the same DC miss latency field" and put
+  the spread down to the clock and other programs' memory traffic. It now
+  says what was measured: omn's sampler delivers about 58 % of the requested
+  4000 Hz and calls 18 % of its timed loads `peer` where `perf mem` calls 6 %
+  a cache hit, so the two means are over different populations; that on a
+  quiet machine they land within 10 % (272-317 vs 279-337 cycles); that
+  under load omn read 10-12 % below in 3 of 3 runs; and that if the
+  coordinator's quiet full run goes red the pair becomes a `known_defect`
+  naming the finding, not a wider tolerance. The tolerance stays at 10 % and
+  the pair is not marked `known_defect` yet, because the finding is not
+  filed in `docs/open-findings.md` (the coordinator's file); the reviewer's
+  targeted run held (280.9 vs 286.8). Tested: `cargo test --test reference
+  -- --skip pairs_` (149 passed), clippy, fmt; the pair itself was not
+  rerun.

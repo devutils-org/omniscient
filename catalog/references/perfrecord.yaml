@@ -115,7 +115,7 @@
     key: ""
     omn_parse: omn_hist_mean
     tolerance: {rel: 0.10}
-    why: "both program the same IBS op unit at 4000 Hz and read the same DC miss latency field over a pointer chase through 64 MiB; separate runs (perf mem cannot attach here), so the cycles a miss costs move with the clock and with the memory traffic of whatever else runs: medians of five, and the pair wants a quiet machine (under eleven streams' load one median read 387 against 305 cycles, where five runs by hand read 278-293 for omn and 279-319 for perf)"
+    why: "both program the IBS op unit at a nominal 4000 Hz over a pointer chase through 64 MiB, but they do not time the same loads: omn's sampler delivers about 58 % of the requested rate and calls 18 % of its timed loads `peer` (L3-like, about 38 cycles) where perf mem calls 6 % a cache hit, so the two means are over different mixes of L3 and RAM hits (docs/fixes/w23-perfrecord.md, 'A finding'). On a quiet machine the mixes land within 10 %: medians of five separate runs (perf mem cannot attach here) read 272-317 against 279-337 cycles. Under load the mix moves and omn read 10-12 % below perf mem in 3 of 3 busy runs. If this pair goes red on a quiet run it becomes a known_defect naming that finding, not a wider tolerance"
 
 - id: false-sharing
   source: mem.sharing
