@@ -75,6 +75,11 @@ pub struct Results {
     pub period_ns: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_ring: Vec<Value>,
+    /// The attribute each event's value was read from (`latency_ns`,
+    /// `bytes`, ...): what a view reads a source's value by. Absent from a
+    /// recording made before `omn` wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_attr: Option<String>,
     /// The worst time error of the events this result was made from, when
     /// something saw them before they were aggregated: `omn top` writes it
     /// in `view.json`, and a live run's events carry it. Not part of
@@ -135,6 +140,10 @@ pub enum Output {
     },
     Timeline {
         series: Vec<Series>,
+        /// The moment every point's offset is from, on `CLOCK_MONOTONIC`:
+        /// the result's first event. Absent from a recording made before
+        /// `omn` wrote it.
+        first_ts_ns: Option<u64>,
     },
     Summary {
         series: Vec<SeriesSummary>,
@@ -181,7 +190,13 @@ impl Serialize for Output {
         use serde::ser::Error as _;
         let fields = match self {
             Output::Raw { events } => serde_json::json!({ "events": events }),
-            Output::Timeline { series } => serde_json::json!({ "series": series }),
+            Output::Timeline {
+                series,
+                first_ts_ns,
+            } => match first_ts_ns {
+                Some(first) => serde_json::json!({ "series": series, "first_ts_ns": first }),
+                None => serde_json::json!({ "series": series }),
+            },
             Output::Summary { series } => serde_json::json!({ "series": series }),
             Output::Rate { series } => serde_json::json!({ "series": series }),
             Output::Hist { layout, series } => {
@@ -257,6 +272,7 @@ impl<'de> Deserialize<'de> for Output {
                     events: serde_json::from_value::<RawOut>(value)?.events,
                 },
                 "timeline" => Output::Timeline {
+                    first_ts_ns: value.get("first_ts_ns").and_then(Value::as_u64),
                     series: serde_json::from_value::<SeriesOut<Series>>(value)?.series,
                 },
                 "summary" => Output::Summary {
@@ -915,6 +931,17 @@ impl Data {
     /// Why a source the run asked for is not in it, if it was refused.
     pub fn refusal(&self, source: &str) -> Option<&Refusal> {
         self.refused.iter().find(|refusal| refusal.source == source)
+    }
+
+    /// Whether the run had a target of its own -- a launched program -- rather
+    /// than the machine: what decides the first screen (`process` or
+    /// `system`). Read from the results' `lifetime`, which only a launched
+    /// program has; a live run says it by opening `process` itself.
+    pub fn has_target(&self) -> bool {
+        self.run
+            .results
+            .iter()
+            .any(|results| results.lifetime.is_some())
     }
 
     /// Where the run's time starts, on `CLOCK_MONOTONIC`: the earliest window

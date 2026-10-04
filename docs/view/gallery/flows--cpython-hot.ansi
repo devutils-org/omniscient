@@ -1,5 +1,5 @@
 [0m[1momn top[0m │ fixture cpython-hot │ 3.89s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥5.56%[0m[35m │ target 95.3% cpu[0m [0m
- 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake [0m[1;7m 9 flows [0m                                [0m
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake [0m[1;7m 9 flows [0m 0 process                      [0m
 ┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐[0m
 │over 3.89s   [0m[32m█[0m out [0m[36m█[0m in [0m[90m█[0m the machine's                                                                               │[0m
 │[0m[1;37m network [0m[37m· [0m[1;37mnet.socket[0m[37m bpf:fentry [0m[36m~low det[0m[37m [0m[33mdegraded x2[0m[37m · [0m[1;37mnet.bytes[0m[37m fs:proc [0m[36m~low det[0m[37m [0m[33mdegraded[0m[37m ──────────────────────────[0m│[0m

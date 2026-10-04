@@ -162,6 +162,10 @@ impl Mark {
     }
 }
 
+/// How many times its time error a cell must be for the error not to dim
+/// what the cell draws: ten, so the error is under a tenth of a cell.
+pub const TIME_ERROR_CELLS: f64 = 10.0;
+
 /// How far one figure can be trusted.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Trust {
@@ -263,6 +267,27 @@ impl Trust {
     /// Whether the figure is drawn dimmed.
     pub fn dims(&self) -> bool {
         self.marks.iter().any(Mark::dims)
+    }
+
+    /// Whether a figure drawn at a resolution of `cell_ns` per cell is
+    /// dimmed: a time error under a tenth of a cell cannot move what is drawn
+    /// by a cell, so it is said in the badge and does not dim. Every other
+    /// mark dims as [`Trust::dims`] says. A ±295 ns error on 27 ms cells
+    /// moves nothing on screen; on 1 µs cells it moves a third of one.
+    pub fn dims_at(&self, cell_ns: f64) -> bool {
+        self.marks.iter().any(|mark| match mark {
+            Mark::TimeError { ns } => (*ns as f64) * TIME_ERROR_CELLS >= cell_ns,
+            other => other.dims(),
+        })
+    }
+
+    /// [`Trust::style`] at a resolution: see [`Trust::dims_at`].
+    pub fn style_at(&self, cell_ns: f64) -> Style {
+        if self.dims_at(cell_ns) {
+            Style::new().add_modifier(Modifier::DIM)
+        } else {
+            Style::new()
+        }
     }
 
     /// The style of the figure itself: dimmed when it must not be read at
@@ -381,6 +406,33 @@ pub fn difference_colour(ratio: f64) -> Option<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_time_error_dims_only_at_a_scale_it_can_move() {
+        let trust = Trust {
+            marks: vec![Mark::TimeError { ns: 295 }],
+        };
+        assert!(trust.dims());
+        assert!(!trust.dims_at(27e6), "27 ms cells: 295 ns moves nothing");
+        assert!(
+            trust.dims_at(1_000.0),
+            "1 µs cells: it moves a third of one"
+        );
+        let lossy = Trust {
+            marks: vec![
+                Mark::TimeError { ns: 295 },
+                Mark::Lost {
+                    missing: 3,
+                    fraction: None,
+                },
+            ],
+        };
+        assert!(lossy.dims_at(27e6), "a loss dims at every scale");
+        let unknown = Trust {
+            marks: vec![Mark::TimeErrorUnknown],
+        };
+        assert!(unknown.dims_at(27e6), "an unknown error is never small");
+    }
     use crate::model::{Event, Losses, Output, SourceFacts};
 
     fn results(losses: Losses, ts_err_ns: u64) -> Results {

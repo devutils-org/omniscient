@@ -33,7 +33,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use serde_json::Value;
 
-use super::{Action, Ctx, Focus, Need, Scope, View};
+use super::{Action, Ctx, Focus, Need, Region, Scope, View};
 use crate::model::{Data, Event, Key, Results};
 use crate::trust::{self, palette, Trust};
 use crate::units;
@@ -528,6 +528,8 @@ pub struct RequestView {
     applied: Option<String>,
     /// The ids as last drawn, in order, for the keys.
     shown: Vec<String>,
+    /// The list's rows as last drawn, each its index in `shown`.
+    regions: Vec<Region>,
 }
 
 impl RequestView {
@@ -545,7 +547,7 @@ impl RequestView {
         requests
     }
 
-    fn select(&mut self, focus: &Focus, requests: &[Request]) -> usize {
+    fn settle(&mut self, focus: &Focus, requests: &[Request]) -> usize {
         if focus.request != self.applied {
             self.applied = focus.request.clone();
             if let Some(id) = &focus.request {
@@ -560,6 +562,26 @@ impl RequestView {
         self.selected = requests.get(index).map(|request| request.id.clone());
         self.shown = requests.iter().map(|request| request.id.clone()).collect();
         index
+    }
+
+    /// The selected request's threads, in `view`, narrowed to it.
+    fn open(&self, view: &'static str, ctx: &Ctx<'_>) -> Action {
+        let gathered = Gathered::of(ctx.data);
+        match gathered
+            .requests
+            .iter()
+            .find(|request| Some(&request.id) == self.selected.as_ref())
+        {
+            Some(request) => Action::Goto {
+                view,
+                focus: Focus {
+                    pid: Some(request.pid),
+                    tid: Some(request.tid),
+                    request: Some(request.id.clone()),
+                },
+            },
+            None => Action::None,
+        }
     }
 
     fn step(&mut self, by: isize) {
@@ -592,6 +614,7 @@ impl View for RequestView {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>) {
+        self.regions.clear();
         let block = Block::new()
             .borders(Borders::ALL)
             .title(" request -- what one request costs ");
@@ -606,7 +629,7 @@ impl View for RequestView {
             draw_none(frame, inner, ctx, &gathered);
             return;
         }
-        let selected = self.select(ctx.focus, &requests);
+        let selected = self.settle(ctx.focus, &requests);
         let notice = notice_line(ctx.focus, &requests, &requests[selected], &gathered);
         let trust = Trust::joined(ctx.data, gathered.results.iter().copied());
         let block_trust = Trust::joined(ctx.data, gathered.block_results.iter().copied());
@@ -633,6 +656,16 @@ impl View for RequestView {
             Paragraph::new(list_lines(&requests, selected, list, &trust)),
             list,
         );
+        // The rows as `list_lines` draws them: a heading, then a window
+        // that scrolls with the selection.
+        let rows = usize::from(list.height.saturating_sub(1));
+        let first = selected.saturating_sub(rows.saturating_sub(1));
+        self.regions = (first..requests.len().min(first + rows))
+            .map(|index| {
+                let y = list.y + 1 + (index - first) as u16;
+                Region::new(Rect::new(list.x, y, list.width, 1), index)
+            })
+            .collect();
         frame.render_widget(Paragraph::new(legend_line()), legend);
         draw_detail(
             frame,
@@ -659,29 +692,19 @@ impl View for RequestView {
             }
             KeyCode::Enter => {
                 if let Some(id) = &self.selected {
+                    // Once focused, `Enter` goes in: its threads in lanes,
+                    // on its moment.
+                    if ctx.focus.request.as_ref() == Some(id) {
+                        return self.open("lanes", ctx);
+                    }
                     let mut focus = ctx.focus.clone();
                     focus.request = Some(id.clone());
                     self.applied = Some(id.clone());
                     return Action::Focus(focus);
                 }
             }
-            KeyCode::Char('l') => {
-                let gathered = Gathered::of(ctx.data);
-                if let Some(request) = gathered
-                    .requests
-                    .iter()
-                    .find(|request| Some(&request.id) == self.selected.as_ref())
-                {
-                    return Action::Goto {
-                        view: "lanes",
-                        focus: Focus {
-                            pid: Some(request.pid),
-                            tid: Some(request.tid),
-                            request: Some(request.id.clone()),
-                        },
-                    };
-                }
-            }
+            KeyCode::Char('l') => return self.open("lanes", ctx),
+            KeyCode::Char('w') => return self.open("wake", ctx),
             _ => {}
         }
         Action::None
@@ -691,9 +714,21 @@ impl View for RequestView {
         &[
             ("↑/↓", "request"),
             ("s", "sort"),
-            ("enter", "focus it"),
+            ("enter", "focus it, then its lanes"),
             ("l", "its thread in lanes"),
+            ("w", "its wake-ups"),
         ]
+    }
+
+    fn regions(&self) -> &[Region] {
+        &self.regions
+    }
+
+    fn select(&mut self, id: usize, _ctx: &Ctx<'_>) -> Action {
+        if let Some(request) = self.shown.get(id) {
+            self.selected = Some(request.clone());
+        }
+        Action::None
     }
 }
 
@@ -1923,7 +1958,7 @@ mod tests {
         let mut view = RequestView::default();
         let gathered = Gathered::of(&data);
         let shown = view.visible(&gathered, &focus);
-        assert_eq!(view.select(&focus, &shown), 0);
+        assert_eq!(view.settle(&focus, &shown), 0);
         view.key(press(KeyCode::Down), &ctx);
         view.key(press(KeyCode::Down), &ctx);
         assert_eq!(view.selected.as_deref(), Some("a003"));
@@ -1943,7 +1978,7 @@ mod tests {
         view.key(press(KeyCode::Char('s')), &ctx);
         let shown = view.visible(&gathered, &focus);
         assert_eq!(shown[0].id, "a001");
-        assert_eq!(shown[view.select(&focus, &shown)].id, "a002");
+        assert_eq!(shown[view.settle(&focus, &shown)].id, "a002");
         assert!(matches!(
             view.key(press(KeyCode::Char('l')), &ctx),
             Action::Goto { view: "lanes", .. }

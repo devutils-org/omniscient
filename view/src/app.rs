@@ -1,7 +1,9 @@
 //! The frame every view draws in: the header, the tabs, the help line, the
 //! view's own cost, and the keys that move between views and narrow them.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -12,7 +14,7 @@ use crate::cost::Meter;
 use crate::model::Data;
 use crate::trust::{palette, Mark};
 use crate::units;
-use crate::views::{registry, Action, Ctx, Focus, View};
+use crate::views::{registry, Action, Ctx, Focus, Region, View};
 
 /// How the view's own cost is shown.
 #[derive(Debug, Clone)]
@@ -35,6 +37,16 @@ pub struct App {
     pub gallery: bool,
     pub cost: Cost,
     pub quit: bool,
+    /// Where each `Goto` came from -- the view and its focus -- most recent
+    /// last: `Backspace` and a right click go back one.
+    pub history: Vec<(usize, Focus)>,
+    /// Whether the mouse is captured. On by default; `M` turns it off, which
+    /// gives the terminal its own text selection back.
+    pub mouse: bool,
+    /// The region last clicked, as (view, id): a click on it again goes in.
+    clicked: Option<(usize, usize)>,
+    /// Where each tab was drawn, its id the view's index.
+    tabs: Vec<Region>,
 }
 
 /// The keys the frame takes before a view sees any.
@@ -46,9 +58,22 @@ pub const FRAME_KEYS: &[(&str, &str)] = &[
     ("?", "help"),
 ];
 
+/// The frame's keys the help lists beside [`FRAME_KEYS`]: the footer has no
+/// room for them, and `⌫` is in it whenever there is somewhere to go back to.
+pub const MORE_KEYS: &[(&str, &str)] = &[
+    ("0", "the tenth view"),
+    ("⌫", "back where enter came from"),
+    ("M", "mouse on/off"),
+];
+
+/// What the mouse does, for the help.
+const MOUSE: &str = "Mouse: a click selects, a click on the selection goes in, the wheel scrolls \
+                     (or zooms where the view zooms), a right click goes back; M gives the \
+                     terminal its own text selection back.";
+
 impl App {
     pub fn new(data: Data) -> App {
-        App {
+        let mut app = App {
             data,
             against: None,
             views: registry(),
@@ -58,7 +83,20 @@ impl App {
             gallery: false,
             cost: Cost::Measured(Meter::start()),
             quit: false,
-        }
+            history: Vec::new(),
+            mouse: true,
+            clicked: None,
+            tabs: Vec::new(),
+        };
+        // The first screen: one process's when the run has a target of its
+        // own, the machine's otherwise.
+        let first = if app.data.has_target() {
+            "process"
+        } else {
+            "system"
+        };
+        let _ = app.open(first);
+        app
     }
 
     /// Opens on the view of this name; an unknown name is refused with the
@@ -88,9 +126,19 @@ impl App {
             return;
         }
         let count = self.views.len();
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.quit = true;
+            return;
+        }
+        if self.views[self.current].takes_text() {
+            // A search being typed: every key is the view's.
+            self.pass_on(key);
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
+            KeyCode::Backspace if !self.history.is_empty() => self.back(),
+            KeyCode::Char('M') => self.mouse = !self.mouse,
             KeyCode::Char('?') => self.help = true,
             KeyCode::Right | KeyCode::Tab => self.current = (self.current + 1) % count,
             KeyCode::Char(' ') | KeyCode::Char('n') if self.gallery => {
@@ -98,23 +146,26 @@ impl App {
             }
             KeyCode::Char('p') if self.gallery => self.current = (self.current + count - 1) % count,
             KeyCode::Left | KeyCode::BackTab => self.current = (self.current + count - 1) % count,
-            KeyCode::Char(digit @ '1'..='9') => {
-                let index = digit as usize - '1' as usize;
+            KeyCode::Char(digit @ '0'..='9') => {
+                // `0` is the tenth.
+                let index = (digit as usize + 9 - '0' as usize) % 10;
                 if index < count {
                     self.current = index;
                 }
             }
             KeyCode::Char('f') if !self.focus.is_empty() => self.focus = Focus::default(),
-            _ => {
-                let ctx = Ctx {
-                    data: &self.data,
-                    against: self.against.as_ref(),
-                    focus: &self.focus,
-                };
-                let action = self.views[self.current].key(key, &ctx);
-                self.act(action);
-            }
+            _ => self.pass_on(key),
         }
+    }
+
+    fn pass_on(&mut self, key: KeyEvent) {
+        let ctx = Ctx {
+            data: &self.data,
+            against: self.against.as_ref(),
+            focus: &self.focus,
+        };
+        let action = self.views[self.current].key(key, &ctx);
+        self.act(action);
     }
 
     fn act(&mut self, action: Action) {
@@ -122,9 +173,86 @@ impl App {
             Action::None => {}
             Action::Focus(focus) => self.focus = focus,
             Action::Goto { view, focus } => {
-                self.focus = focus;
-                let _ = self.open(view);
+                let from = (self.current, self.focus.clone());
+                if self.open(view).is_ok() {
+                    if from != (self.current, focus.clone()) {
+                        self.history.push(from);
+                    }
+                    self.focus = focus;
+                }
             }
+        }
+    }
+
+    /// Back to where the last `Goto` came from: its view and its focus.
+    pub fn back(&mut self) {
+        if let Some((view, focus)) = self.history.pop() {
+            self.current = view;
+            self.focus = focus;
+            self.clicked = None;
+        }
+    }
+
+    /// Handles one mouse event: a click selects what is under it, a click on
+    /// what is selected goes in, the wheel moves as `↑`/`↓` do, a right click
+    /// comes back. Every one of these is a key too: nothing is reachable by
+    /// the mouse only.
+    pub fn mouse(&mut self, event: MouseEvent) {
+        if !self.mouse {
+            return;
+        }
+        if self.help {
+            if matches!(event.kind, MouseEventKind::Down(_)) {
+                self.help = false;
+            }
+            return;
+        }
+        let (column, row) = (event.column, event.row);
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(tab) = self.tabs.iter().find(|tab| tab.contains(column, row)) {
+                    self.current = tab.id;
+                    self.clicked = None;
+                    return;
+                }
+                let hit = self.views[self.current]
+                    .regions()
+                    .iter()
+                    .rev()
+                    .find(|region| region.contains(column, row))
+                    .map(|region| region.id);
+                let Some(id) = hit else {
+                    return;
+                };
+                let here = (self.current, id);
+                let ctx = Ctx {
+                    data: &self.data,
+                    against: self.against.as_ref(),
+                    focus: &self.focus,
+                };
+                let action = self.views[self.current].select(id, &ctx);
+                if self.clicked == Some(here) {
+                    // A click on the selection goes in, as `Enter` does.
+                    self.act(action);
+                    self.clicked = None;
+                    self.pass_on(KeyEvent::from(KeyCode::Enter));
+                } else {
+                    self.act(action);
+                    self.clicked = Some(here);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Right) => self.back(),
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                let ctx = Ctx {
+                    data: &self.data,
+                    against: self.against.as_ref(),
+                    focus: &self.focus,
+                };
+                let down = event.kind == MouseEventKind::ScrollDown;
+                let action = self.views[self.current].wheel(down, &ctx);
+                self.act(action);
+            }
+            _ => {}
         }
     }
 
@@ -255,8 +383,9 @@ impl App {
         Line::from(spans)
     }
 
-    fn draw_tabs(&self, frame: &mut Frame<'_>, area: Rect) {
+    fn draw_tabs(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let mut spans = Vec::new();
+        self.tabs.clear();
         if self.gallery {
             spans.push(Span::styled(
                 format!("gallery {}/{} ", self.current + 1, self.views.len()),
@@ -264,7 +393,15 @@ impl App {
             ));
         }
         for (index, view) in self.views.iter().enumerate() {
-            let label = format!(" {} {} ", index + 1, view.name());
+            let label = format!(" {} {} ", (index + 1) % 10, view.name());
+            let x = area.x + spans.iter().map(Span::width).sum::<usize>() as u16;
+            let width = (label.chars().count() as u16).min((area.x + area.width).saturating_sub(x));
+            if width > 0 {
+                self.tabs.push(Region::new(
+                    Rect::new(x, area.y, width, area.height.min(1)),
+                    index,
+                ));
+            }
             if index == self.current {
                 spans.push(Span::styled(
                     label,
@@ -295,6 +432,9 @@ impl App {
         for (key, what) in FRAME_KEYS {
             push(key, what);
         }
+        if let Some((view, _)) = self.history.last() {
+            push("⌫", &format!("back to {}", self.views[*view].name()));
+        }
         for (key, what) in self.views[self.current].keys() {
             push(key, what);
         }
@@ -312,10 +452,15 @@ impl App {
         let mut lines = vec![Line::from(Span::styled("Keys", bold))];
         for (key, what) in FRAME_KEYS
             .iter()
+            .chain(MORE_KEYS.iter())
             .chain(self.views[self.current].keys().iter())
         {
             lines.push(Line::from(format!("  {key:<10} {what}")));
         }
+        lines.push(Line::from(format!(
+            "  {MOUSE}{}",
+            if self.mouse { "" } else { " (off now)" }
+        )));
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
             "How far a figure can be trusted",
@@ -435,6 +580,180 @@ fn ellipsis_start(text: &str, room: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::{click, draw_app, find, fixture, right_click, wheel, HEIGHT, WIDTH};
+
+    fn app(name: &str) -> App {
+        let mut app = App::new(fixture(name));
+        app.cost = Cost::Snapshot;
+        app
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.key(KeyEvent::from(code));
+    }
+
+    fn current(app: &App) -> &'static str {
+        app.views[app.current].name()
+    }
+
+    #[test]
+    fn the_first_screen_is_the_process_s_with_a_target_and_the_machine_s_without() {
+        assert_eq!(current(&app("http-server")), "process");
+        assert_eq!(current(&app("machine")), "system");
+    }
+
+    #[test]
+    fn enter_goes_in_and_backspace_comes_back_with_the_focus_it_had() {
+        let mut app = app("http-server");
+        app.open("system").unwrap();
+        draw_app(&mut app, WIDTH, HEIGHT);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(current(&app), "ledger");
+        assert!(
+            !app.focus.is_empty(),
+            "the process is carried into its ledger"
+        );
+        press(&mut app, KeyCode::Enter);
+        let deeper = current(&app);
+        assert_ne!(deeper, "ledger", "a ledger line opens the view behind it");
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(current(&app), "ledger");
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(current(&app), "system");
+        assert!(app.focus.is_empty(), "back where it was, unfocused");
+        assert!(app.history.is_empty());
+    }
+
+    #[test]
+    fn zero_jumps_to_the_tenth_view() {
+        let mut app = app("machine");
+        press(&mut app, KeyCode::Char('0'));
+        assert_eq!(current(&app), "process");
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!(current(&app), "system");
+    }
+
+    #[test]
+    fn a_view_taking_text_gets_every_key_but_ctrl_c() {
+        let mut app = app("cpython-hot");
+        app.open("flame").unwrap();
+        draw_app(&mut app, WIDTH, HEIGHT);
+        press(&mut app, KeyCode::Char('/'));
+        for c in "q?3f".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert!(!app.quit && !app.help, "q and ? were typed, not obeyed");
+        assert_eq!(current(&app), "flame", "3 was typed, not a jump");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('3'));
+        assert_eq!(current(&app), "ledger", "the search is done: 3 jumps again");
+        app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn a_click_on_a_tab_opens_its_view() {
+        let mut app = app("machine");
+        let screen = draw_app(&mut app, WIDTH, HEIGHT);
+        let (column, row) = find(&screen, "6 heatmap").expect("the tab is drawn");
+        click(&mut app, column + 2, row);
+        assert_eq!(current(&app), "heatmap");
+    }
+
+    #[test]
+    fn a_click_selects_a_second_goes_in_and_a_right_click_comes_back() {
+        let mut app = app("http-server");
+        app.open("system").unwrap();
+        draw_app(&mut app, WIDTH, HEIGHT);
+        let regions = app.views[app.current].regions().to_vec();
+        assert!(regions.len() >= 2, "the process rows are clickable");
+        let second = regions[1];
+        click(&mut app, second.rect.x + 2, second.rect.y);
+        assert_eq!(current(&app), "system", "one click only selects");
+        let mut keyed = self::app("http-server");
+        keyed.open("system").unwrap();
+        draw_app(&mut keyed, WIDTH, HEIGHT);
+        press(&mut keyed, KeyCode::Down);
+        press(&mut keyed, KeyCode::Down);
+        press(&mut keyed, KeyCode::Enter);
+        click(&mut app, second.rect.x + 2, second.rect.y);
+        assert_eq!(current(&app), "ledger", "a click on the selection goes in");
+        assert_eq!(
+            app.focus, keyed.focus,
+            "the click selected what the keys do"
+        );
+        right_click(&mut app, 0, 0);
+        assert_eq!(current(&app), "system");
+    }
+
+    #[test]
+    fn with_the_mouse_off_a_click_does_nothing() {
+        let mut app = app("machine");
+        let screen = draw_app(&mut app, WIDTH, HEIGHT);
+        press(&mut app, KeyCode::Char('M'));
+        let (column, row) = find(&screen, "6 heatmap").unwrap();
+        click(&mut app, column + 2, row);
+        wheel(&mut app, true, 10, 10);
+        assert_eq!(current(&app), "system");
+    }
+
+    /// Every view reports regions inside the area it drew, on every
+    /// fixture: a click can only land on what is on screen.
+    #[test]
+    fn every_region_is_inside_the_view_s_area() {
+        for name in crate::snapshot::fixture_names() {
+            let mut app = app(&name);
+            for index in 0..app.views.len() {
+                app.current = index;
+                draw_app(&mut app, WIDTH, HEIGHT);
+                for region in app.views[index].regions() {
+                    let rect = region.rect;
+                    assert!(
+                        rect.y >= 2
+                            && rect.y + rect.height < HEIGHT
+                            && rect.x + rect.width <= WIDTH
+                            && rect.width > 0,
+                        "{} on {name}: {rect:?} is outside the body",
+                        app.views[index].name()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Each view that draws something to select reports it on a fixture
+    /// that has it, and a click on each region is answered without a panic.
+    #[test]
+    fn every_view_with_a_selection_is_clickable() {
+        for (view, fixture) in [
+            ("system", "http-server"),
+            ("flame", "cpython-hot"),
+            ("ledger", "http-server"),
+            ("request", "vertical-requests"),
+            ("timebar", "sqlite-latency"),
+            ("heatmap", "http-server"),
+            ("lanes", "http-server"),
+            ("wake", "http-server"),
+            ("flows", "http-server"),
+        ] {
+            let mut app = app(fixture);
+            app.open(view).unwrap();
+            draw_app(&mut app, WIDTH, HEIGHT);
+            let regions = app.views[app.current].regions().to_vec();
+            assert!(
+                !regions.is_empty(),
+                "{view} on {fixture} reported no region"
+            );
+            for region in regions.iter().take(20) {
+                app.open(view).unwrap();
+                app.history.clear();
+                draw_app(&mut app, WIDTH, HEIGHT);
+                click(&mut app, region.rect.x, region.rect.y);
+                draw_app(&mut app, WIDTH, HEIGHT);
+            }
+        }
+    }
 
     #[test]
     fn a_long_origin_gives_way_from_its_start() {

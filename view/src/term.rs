@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+};
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -131,7 +133,12 @@ fn enter(mut tty: File) -> io::Result<Terminal<CrosstermBackend<File>>> {
 
 fn leave(terminal: &mut Terminal<CrosstermBackend<File>>) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, cursor::Show)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        cursor::Show
+    )?;
     terminal.backend_mut().flush()
 }
 
@@ -140,7 +147,7 @@ fn leave(terminal: &mut Terminal<CrosstermBackend<File>>) -> io::Result<()> {
 fn leave_raw() -> io::Result<()> {
     disable_raw_mode()?;
     let mut tty = OpenOptions::new().write(true).open("/dev/tty")?;
-    execute!(tty, LeaveAlternateScreen, cursor::Show)
+    execute!(tty, DisableMouseCapture, LeaveAlternateScreen, cursor::Show)
 }
 
 fn event_loop(
@@ -150,7 +157,19 @@ fn event_loop(
 ) -> io::Result<()> {
     let mut drawn_at: Option<Instant> = None;
     let mut dirty = true;
+    // Whether the terminal reports the mouse, kept in step with `app.mouse`
+    // (`M` toggles it): crossterm asks for SGR reports (mode 1006), which
+    // tmux passes through with `set -g mouse on`.
+    let mut captured = false;
     loop {
+        if app.mouse != captured {
+            if app.mouse {
+                execute!(terminal.backend_mut(), EnableMouseCapture)?;
+            } else {
+                execute!(terminal.backend_mut(), DisableMouseCapture)?;
+            }
+            captured = app.mouse;
+        }
         if let Some(receiver) = &updates {
             loop {
                 match receiver.try_recv() {
@@ -183,6 +202,20 @@ fn event_loop(
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     app.key(key);
                     // A key is answered at once, not at the next refresh.
+                    drawn_at = None;
+                    dirty = true;
+                }
+                // Capture reports every motion; only a press or the wheel
+                // changes anything, and only they cost a redraw.
+                Event::Mouse(mouse)
+                    if !matches!(
+                        mouse.kind,
+                        event::MouseEventKind::Moved
+                            | event::MouseEventKind::Drag(_)
+                            | event::MouseEventKind::Up(_)
+                    ) =>
+                {
+                    app.mouse(mouse);
                     drawn_at = None;
                     dirty = true;
                 }

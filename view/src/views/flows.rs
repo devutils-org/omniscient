@@ -35,7 +35,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::{Action, Ctx, Focus, Need, Scope, View};
+use super::{Action, Ctx, Focus, Need, Region, Scope, View};
 use crate::model::{Data, Event, Key, Output, Results};
 use crate::trust::{self, palette, Trust};
 use crate::units;
@@ -238,6 +238,8 @@ impl Band {
 #[derive(Debug, Default)]
 pub struct Flows {
     selected: usize,
+    /// The objects as last drawn, over both bands.
+    regions: Vec<Region>,
 }
 
 impl View for Flows {
@@ -254,6 +256,7 @@ impl View for Flows {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>) {
+        self.regions.clear();
         let bands = bands(ctx);
         let count = selectable(&bands);
         if count > 0 && self.selected >= count {
@@ -292,13 +295,20 @@ impl View for Flows {
         frame.render_widget(Paragraph::new(summary_line(ctx, &bands)), summary);
         let selected = (count > 0).then_some(self.selected);
         let first = bands[0].objects.len();
-        draw_band(frame, network, &bands[0], selected.filter(|&at| at < first));
-        draw_band(
+        self.regions = draw_band(
+            frame,
+            network,
+            &bands[0],
+            selected.filter(|&at| at < first),
+            0,
+        );
+        self.regions.extend(draw_band(
             frame,
             storage,
             &bands[1],
             selected.and_then(|at| at.checked_sub(first)),
-        );
+            first,
+        ));
         frame.render_widget(
             Paragraph::new(detail_lines(&bands, selected)).wrap(Wrap { trim: true }),
             detail,
@@ -333,6 +343,15 @@ impl View for Flows {
 
     fn keys(&self) -> &'static [(&'static str, &'static str)] {
         &[("↑/↓", "socket or file"), ("enter", "focus its thread")]
+    }
+
+    fn regions(&self) -> &[Region] {
+        &self.regions
+    }
+
+    fn select(&mut self, id: usize, _ctx: &Ctx<'_>) -> Action {
+        self.selected = id;
+        Action::None
     }
 }
 
@@ -834,7 +853,7 @@ fn fill_machine(band: &mut Band, data: &Data, source: &str, prefix: &str) {
     let mut timelines = 0;
     for results in &held {
         for output in &results.outputs {
-            let Output::Timeline { series } = output else {
+            let Output::Timeline { series, .. } = output else {
                 continue;
             };
             timelines += 1;
@@ -1141,7 +1160,16 @@ fn ribbon_style(colour: Color, trust: &Trust) -> Style {
     trust.style().fg(colour)
 }
 
-fn draw_band(frame: &mut Frame<'_>, area: Rect, band: &Band, selected: Option<usize>) {
+/// Draws one band, and returns where each of its objects was drawn, each
+/// region's id its index among the band's objects plus `offset`.
+fn draw_band(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    band: &Band,
+    selected: Option<usize>,
+    offset: usize,
+) -> Vec<Region> {
+    let mut regions = Vec::new();
     let name = match band.kind {
         Kind::Network => " network ",
         Kind::Storage => " storage ",
@@ -1171,7 +1199,7 @@ fn draw_band(frame: &mut Frame<'_>, area: Rect, band: &Band, selected: Option<us
             )),
             inner,
         );
-        return;
+        return regions;
     }
     let [heading, diagram, footer] = Layout::vertical([
         Constraint::Length(1),
@@ -1201,6 +1229,24 @@ fn draw_band(frame: &mut Frame<'_>, area: Rect, band: &Band, selected: Option<us
         column_rows(target_total, band.objects.len()),
     );
     let object_spans = stack(&object_rows);
+    // An object is its rows, from its bar to the junction: its bar, its
+    // name, its figures.
+    let object_x = diagram.x + columns.object_bar;
+    let object_width = columns.junction.saturating_sub(columns.object_bar).max(1);
+    for (index, (top, bottom)) in object_spans.iter().enumerate() {
+        let bottom = (*bottom).min(rows);
+        if bottom > *top {
+            regions.push(Region::new(
+                Rect::new(
+                    object_x,
+                    diagram.y + *top as u16,
+                    object_width,
+                    (bottom - top) as u16,
+                ),
+                offset + index,
+            ));
+        }
+    }
     let task_values: Vec<f64> = band.tasks.iter().map(|t| t.bytes as f64).collect();
     let task_rows = allot(&task_values, column_rows(target_total, band.tasks.len()));
     let task_spans = stack(&task_rows);
@@ -1457,6 +1503,7 @@ fn draw_band(frame: &mut Frame<'_>, area: Rect, band: &Band, selected: Option<us
         );
     }
     frame.render_widget(Paragraph::new(footer_line(band, &dropped)), footer);
+    regions
 }
 
 /// How many nodes a column did not draw, each counted for what it stands for

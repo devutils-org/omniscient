@@ -155,17 +155,73 @@ fn the_readme_lists_what_each_view_needs() {
     let readme = read(&Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/view/README.md"));
     for view in omn_view::views::registry() {
         for need in view.needs() {
+            // The whole row: what the view draws from the source (`why`)
+            // drifts as easily as its mode.
+            let mut emits = need.emit.join(",");
+            if !need.keys.is_empty() {
+                emits.push_str(&format!(" (keys {})", need.keys.join(",")));
+            }
+            if let Some(stack) = need.stack {
+                emits.push_str(&format!(" (stack {stack})"));
+            }
+            let scope = match need.scope {
+                omn_view::views::Scope::Target => "target",
+                omn_view::views::Scope::System => "system",
+            };
             let row = format!(
-                "| {} | `{}` | {} | {}",
+                "| {} | `{}` | {} | {emits} | {scope} | {} |",
                 view.name(),
                 need.source,
                 need.mode,
-                need.emit.join(",")
+                need.why
             );
             assert!(
-                readme.contains(&row),
+                readme.lines().any(|line| line == row),
                 "docs/view/README.md does not list `{row}`: the table of needs is out of date"
             );
         }
+    }
+}
+
+/// The flame view's comparison re-states `src/triage/diff.rs` (the view
+/// links nothing of `omn`): on the two CPython recordings both name the same
+/// functions, in the same order, in the same unit. A change to either side's
+/// arithmetic that the other did not follow fails here.
+#[test]
+fn the_flame_view_s_difference_is_the_triage_s() {
+    let dir = fixtures_dir();
+    let (before, after) = ("cpython-hot", "cpython-hot-heavier");
+    // The triage compares one profile per run: the on-cpu one, as the
+    // view's on-cpu pane does.
+    let on_cpu = |name: &str| {
+        let mut run: RunOutput =
+            serde_json::from_str(&read(&dir.join(name).join("results.json"))).unwrap();
+        run.results
+            .retain(|results| results.source == "cpu.profile");
+        let period = run.results.first().and_then(|results| results.period_ns);
+        omn::triage::diff::Profile::from_run(
+            name.to_owned(),
+            &run,
+            period.map(|ns| ns as f64),
+            None,
+        )
+        .expect("the triage reads the run")
+    };
+    for (one, other) in [(before, after), (after, before)] {
+        let triage = omn::triage::diff::diff(on_cpu(one), on_cpu(other));
+        let (unit, named) = omn_view::views::flame::difference(
+            &omn_view::snapshot::fixture(one),
+            &omn_view::snapshot::fixture(other),
+        )
+        .expect("both recordings hold an on-cpu profile");
+        assert_eq!(unit, triage.unit, "{one} against {other}: the unit");
+        assert!(
+            !named.is_empty(),
+            "{one} against {other}: the heavier run moved nothing, and the test holds nothing"
+        );
+        assert_eq!(
+            named, triage.difference,
+            "{one} against {other}: the functions named"
+        );
     }
 }

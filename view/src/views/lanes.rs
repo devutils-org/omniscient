@@ -35,7 +35,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 
-use super::{Action, Ctx, Focus, Need, Scope, View};
+use super::{Action, Ctx, Focus, Need, Region, Scope, View};
 use crate::model::{Data, Event, Refusal, Results};
 use crate::trust::{self, palette, Trust};
 use crate::units;
@@ -115,6 +115,8 @@ pub struct Lanes {
     /// The width of a cell at the last draw, in nanoseconds, for the keys.
     cell_ns: u64,
     cache: Option<(CacheKey, Model)>,
+    /// The lanes as last drawn, each its index among the focus's lanes.
+    regions: Vec<Region>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1200,6 +1202,10 @@ impl Lanes {
                 usize::from(LABEL),
                 label_style,
             );
+            self.regions.push(Region::new(
+                Rect::new(area.x, row, area.width, 1 + u16::from(two)),
+                index,
+            ));
             // The tool's own threads are its cost, not the program's: their
             // cells are drawn apart too, not only their name.
             let own = matches!(lane, Lane::Thread(thread) if thread.comm.starts_with(OWN));
@@ -1211,6 +1217,9 @@ impl Lanes {
                 format!("{of} {}", units::percent(share * 100.0))
             };
             let share = format!("{share:>width$}", width = usize::from(SHARE));
+            // A cell's time error dims it only where it can move what the
+            // cell draws (`Trust::dims_at`).
+            let cell_ns = (high - low) as f64 / f64::from(columns.max(1));
             let mut paint = |row: u16, glyph: &dyn Fn(&Cell) -> (&'static str, Option<Color>)| {
                 buffer.set_string(area.x + LABEL, row, "│", dim);
                 for (column, cell) in lane_cells.iter().enumerate() {
@@ -1218,8 +1227,8 @@ impl Lanes {
                     // A block's colour is `sched.offcpu`'s word: its cells
                     // carry that source's trust as well as the instants'.
                     let mut style = match colour {
-                        Some(SLEEPING | DISK) => model.block_trust.style(),
-                        _ => trust.style(),
+                        Some(SLEEPING | DISK) => model.block_trust.style_at(cell_ns),
+                        _ => trust.style_at(cell_ns),
                     };
                     if own {
                         style = style.add_modifier(Modifier::DIM | Modifier::ITALIC);
@@ -1873,7 +1882,22 @@ impl View for Lanes {
         ));
         let inner = block.inner(area);
         frame.render_widget(block, area);
+        self.regions.clear();
         self.draw_lanes(frame, inner, ctx);
+    }
+
+    fn regions(&self) -> &[Region] {
+        &self.regions
+    }
+
+    fn select(&mut self, id: usize, ctx: &Ctx<'_>) -> Action {
+        self.model(ctx.data);
+        if let Some((_, model)) = &self.cache {
+            if let Some(lane) = model.lanes(ctx.focus).get(id) {
+                self.selected = Some(lane.id());
+            }
+        }
+        Action::None
     }
 
     fn key(&mut self, key: KeyEvent, ctx: &Ctx<'_>) -> Action {
@@ -2008,6 +2032,7 @@ pub fn view() -> Box<dyn View> {
         scroll: 0,
         cell_ns: 1,
         cache: None,
+        regions: Vec::new(),
     })
 }
 
@@ -2278,6 +2303,7 @@ mod tests {
             scroll: 0,
             cell_ns: 1,
             cache: None,
+            regions: Vec::new(),
         };
         lanes.model(&data);
         lanes.settle(&Focus::default());

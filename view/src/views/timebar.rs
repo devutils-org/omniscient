@@ -52,7 +52,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use serde::Deserialize;
 
-use super::{Action, Ctx, Focus, Need, Scope, View};
+use super::{Action, Ctx, Focus, Need, Region, Scope, View};
 use crate::model::{Data, Event, Output, Results};
 use crate::trust::{palette, Trust};
 use crate::units;
@@ -1072,7 +1072,7 @@ fn process_cpu(oncpu: &[&Results], key: &str) -> Option<(f64, f64)> {
             _ => None,
         }
         .or_else(|| match results.output("timeline") {
-            Some(Output::Timeline { series }) => series
+            Some(Output::Timeline { series, .. }) => series
                 .iter()
                 .find(|series| series.key == key)
                 .map(|series| series.points.iter().map(|point| point.value).sum()),
@@ -1629,6 +1629,8 @@ pub struct Timebar {
     selected: usize,
     /// Each bar to its own whole, rather than every bar on one time scale.
     own_scale: bool,
+    /// The bars as last drawn, each its place among the visible ones.
+    regions: Vec<Region>,
 }
 
 impl Timebar {
@@ -2008,7 +2010,17 @@ impl View for Timebar {
         Action::None
     }
 
+    fn regions(&self) -> &[Region] {
+        &self.regions
+    }
+
+    fn select(&mut self, id: usize, _ctx: &Ctx<'_>) -> Action {
+        self.selected = id;
+        Action::None
+    }
+
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>) {
+        self.regions.clear();
         let block = Block::new()
             .borders(Borders::ALL)
             .title(format!(" timebar -- {} ", self.title()));
@@ -2117,6 +2129,11 @@ impl View for Timebar {
             .max(1);
         let first = (self.selected + 1).saturating_sub(room);
         for (shown, &index) in visible.iter().enumerate().skip(first).take(room) {
+            let y = inner.y + lines.len() as u16;
+            if y < inner.y + inner.height {
+                self.regions
+                    .push(Region::new(Rect::new(inner.x, y, inner.width, 1), shown));
+            }
             let one = &sheet.bars[index];
             let picked = shown == self.selected;
             let style = if picked {

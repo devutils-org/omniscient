@@ -29,7 +29,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::{Action, Ctx, Focus, Need, Scope, View};
+use super::{Action, Ctx, Focus, Need, Region, Scope, View};
 use crate::model::{Data, Event, Output, Refusal, Results};
 use crate::trust::{self, palette, Trust};
 use crate::units;
@@ -172,6 +172,8 @@ pub struct System {
     /// Whether devices and interfaces that moved nothing are listed one by
     /// one, rather than folded into one line.
     idle: bool,
+    /// The process rows last drawn, each its index in the sorted list.
+    regions: Vec<Region>,
 }
 
 impl View for System {
@@ -188,6 +190,7 @@ impl View for System {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>) {
+        self.regions.clear();
         let axis = Axis::of(ctx.data);
         let procs = processes(ctx.data, SORTS[self.sort]);
         let held_machine = MACHINE
@@ -282,6 +285,18 @@ impl View for System {
     fn keys(&self) -> &'static [(&'static str, &'static str)] {
         KEYS
     }
+
+    fn regions(&self) -> &[Region] {
+        &self.regions
+    }
+
+    fn select(&mut self, id: usize, ctx: &Ctx<'_>) -> Action {
+        let procs = processes(ctx.data, SORTS[self.sort]);
+        if let Some(row) = procs.rows.get(id) {
+            self.selected = Some(row.key());
+        }
+        Action::None
+    }
 }
 
 pub fn view() -> Box<dyn View> {
@@ -290,6 +305,7 @@ pub fn view() -> Box<dyn View> {
         sort: 0,
         shown: Vec::new(),
         idle: false,
+        regions: Vec::new(),
     })
 }
 
@@ -467,7 +483,7 @@ impl Track {
 fn tracks(data: &Data, results: &Results) -> Vec<Track> {
     let reading = reading(&results.source);
     let timeline = results.outputs.iter().find_map(|output| match output {
-        Output::Timeline { series } => Some(series),
+        Output::Timeline { series, .. } => Some(series),
         _ => None,
     });
     let raw = results.events();
@@ -538,6 +554,17 @@ fn tracks(data: &Data, results: &Results) -> Vec<Track> {
 /// down; its timelines start at the opening, which is right for every
 /// per-task source this view reads (none keeps its first read back).
 fn timeline_origin(data: &Data, results: &Results, offsets: &[u64]) -> u64 {
+    // Said by the run, when it says it: the inference below is for a
+    // recording made before `omn` wrote the timeline's first event.
+    if let Some(first) = results.outputs.iter().find_map(|output| match output {
+        Output::Timeline {
+            first_ts_ns: Some(first),
+            ..
+        } => Some(*first),
+        _ => None,
+    }) {
+        return first.saturating_sub(data.opened_ns());
+    }
     let opened = results.window.opened_ns.saturating_sub(data.opened_ns());
     if names_a_task(results) || results.window.closed_ns == 0 {
         return opened;
@@ -602,7 +629,7 @@ fn lanes(points: Vec<Point>) -> Lanes {
 fn names_a_task(results: &Results) -> bool {
     let keyed = |key: &str| key.split(',').any(|part| part.starts_with("task:"));
     results.outputs.iter().any(|output| match output {
-        Output::Timeline { series } => series.iter().any(|series| keyed(&series.key)),
+        Output::Timeline { series, .. } => series.iter().any(|series| keyed(&series.key)),
         Output::Summary { series } => series.iter().any(|series| keyed(&series.key)),
         Output::Raw { events } => events.iter().any(|event| event.tid().is_some()),
         _ => false,
@@ -2153,6 +2180,11 @@ impl System {
             .and_then(|key| procs.rows.iter().position(|row| row.key() == key));
         let skip = selected.map_or(0, |index| (index + 1).saturating_sub(rows_room));
         for (index, row) in procs.rows.iter().enumerate().skip(skip).take(rows_room) {
+            let y = inner.y + 1 + (index - skip) as u16;
+            if y < inner.y + inner.height {
+                self.regions
+                    .push(Region::new(Rect::new(inner.x, y, inner.width, 1), index));
+            }
             let chosen = selected == Some(index);
             let focused = if row.process {
                 ctx.focus.pid == Some(row.tid)
@@ -2585,6 +2617,7 @@ mod tests {
                 }
             }
             Output::Timeline {
+                first_ts_ns: None,
                 series: vec![crate::model::Series {
                     key: "system".into(),
                     points,
@@ -2677,6 +2710,7 @@ mod tests {
             sort: 0,
             shown: Vec::new(),
             idle: false,
+            regions: Vec::new(),
         };
         let focus = Focus::default();
         let ctx = Ctx {
@@ -2739,6 +2773,7 @@ mod tests {
             sort: 0,
             shown: Vec::new(),
             idle: false,
+            regions: Vec::new(),
         };
         let focus = Focus::default();
         let ctx = Ctx {

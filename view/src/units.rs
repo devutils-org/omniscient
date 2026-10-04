@@ -74,6 +74,33 @@ pub fn count(value: f64) -> String {
     }
 }
 
+/// A measured float in three significant digits: `208`, `53.6`, `7.19`,
+/// `0.0412`; a thousand and above as a count (`1.20k`). What a figure that
+/// is not a count is printed with -- `count` prints `208.47` for a
+/// non-integer under a thousand, more digits than any measurement holds.
+pub fn approx(value: f64) -> String {
+    if !value.is_finite() {
+        return "?".to_owned();
+    }
+    if value.abs() >= 1e3 {
+        return count(value);
+    }
+    if value == 0.0 {
+        return "0".to_owned();
+    }
+    // Rounded to three significant digits first, so 99.96 is `100` and
+    // not `100.0`.
+    let magnitude = value.abs().log10().floor() as i32;
+    let step = 10f64.powi(magnitude - 2);
+    let rounded = (value / step).round() * step;
+    if rounded.abs() >= 1e3 {
+        return count(rounded);
+    }
+    let magnitude = rounded.abs().log10().floor() as i32;
+    let decimals = (2 - magnitude).max(0) as usize;
+    format!("{rounded:.decimals$}")
+}
+
 /// A percentage: `0.42%`, `12.3%`, `100%`.
 pub fn percent(value: f64) -> String {
     three(value, "%")
@@ -116,5 +143,18 @@ mod tests {
         assert_eq!(count(999.0), "999");
         assert_eq!(count(1200.0), "1.20k");
         assert_eq!(percent(0.4242), "0.42%");
+    }
+
+    #[test]
+    fn approximations_keep_three_digits() {
+        assert_eq!(approx(208.47), "208");
+        assert_eq!(approx(53.62), "53.6");
+        assert_eq!(approx(7.194), "7.19");
+        assert_eq!(approx(0.041_23), "0.0412");
+        assert_eq!(approx(99.96), "100");
+        assert_eq!(approx(-7.194), "-7.19");
+        assert_eq!(approx(1234.0), "1.23k");
+        assert_eq!(approx(0.0), "0");
+        assert_eq!(approx(f64::NAN), "?");
     }
 }

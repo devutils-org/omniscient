@@ -34,7 +34,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::{Action, Ctx, Focus, Need, Scope, View};
+use super::{Action, Ctx, Focus, Need, Region, Scope, View};
 use crate::model::{Data, Output, Results};
 use crate::trust::{self, palette, Trust};
 use crate::units;
@@ -76,6 +76,8 @@ pub struct Wake {
     /// The tree last drawn, by the index it was folded from, its thread and
     /// its depth: a live run's 200 000 wakeups are not refolded every frame.
     folded: Option<((usize, i32, usize), Rc<Tree>)>,
+    /// The grid's cells as last drawn, each its row's index.
+    regions: Vec<Region>,
 }
 
 impl View for Wake {
@@ -92,6 +94,7 @@ impl View for Wake {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>) {
+        self.regions.clear();
         let block = Block::new().borders(Borders::ALL).title(format!(
             " {} -- {} ",
             self.name(),
@@ -134,6 +137,7 @@ impl View for Wake {
             head,
         );
         frame.render_widget(Paragraph::new(grid), grid_area);
+        self.regions = grid_regions(&rows, root, grid_area, grid_rows);
         frame.render_widget(
             Paragraph::new(legend).wrap(Wrap { trim: true }),
             legend_area,
@@ -179,7 +183,12 @@ impl View for Wake {
                 self.depth = self.depth.saturating_sub(1).max(1);
                 Action::None
             }
+            // Once its thread is the focus, `Enter` goes in: its lanes.
             KeyCode::Enter => match root {
+                Some(tid) if *ctx.focus == index.focus_of(tid) => Action::Goto {
+                    view: "lanes",
+                    focus: index.focus_of(tid),
+                },
                 Some(tid) => Action::Focus(index.focus_of(tid)),
                 None => Action::None,
             },
@@ -198,15 +207,52 @@ impl View for Wake {
         &[
             ("↑/↓", "thread"),
             ("+/-", "chain depth"),
-            ("enter", "focus it"),
+            ("enter", "focus it, then its lanes"),
             ("l", "its lanes"),
         ]
     }
+
+    fn regions(&self) -> &[Region] {
+        &self.regions
+    }
+
+    fn select(&mut self, id: usize, ctx: &Ctx<'_>) -> Action {
+        let index = self.index(ctx.data);
+        let rows = index.rows(ctx.focus);
+        if let Some(row) = rows.get(id) {
+            self.selected = Some((row.tid, ctx.focus.tid));
+        }
+        Action::None
+    }
+}
+
+/// Where `grid_lines` puts each thread: columns of cells, filled down
+/// first, under one heading line, the page that holds the root.
+fn grid_regions(rows: &[Row], root: Option<i32>, area: Rect, max_rows: usize) -> Vec<Region> {
+    let columns = ((usize::from(area.width) + CELL_GAP) / (CELL + CELL_GAP)).max(1);
+    let height = rows.len().div_ceil(columns).clamp(1, max_rows);
+    let page = columns * height;
+    let at = root
+        .and_then(|tid| rows.iter().position(|row| row.tid == tid))
+        .unwrap_or(0);
+    let start = at / page * page;
+    let mut regions = Vec::new();
+    for index in start..rows.len().min(start + page) {
+        let (column, line) = ((index - start) / height, (index - start) % height);
+        let x = area.x + (column * (CELL + CELL_GAP)) as u16;
+        let y = area.y + 1 + line as u16;
+        if x < area.x + area.width && y < area.y + area.height {
+            let width = (CELL as u16).min(area.x + area.width - x);
+            regions.push(Region::new(Rect::new(x, y, width, 1), index));
+        }
+    }
+    regions
 }
 
 pub fn view() -> Box<dyn View> {
     Box::new(Wake {
         selected: None,
+        regions: Vec::new(),
         depth: DEPTH,
         cache: None,
         folded: None,
@@ -1447,6 +1493,7 @@ mod tests {
             depth: DEPTH,
             cache: None,
             folded: None,
+            regions: Vec::new(),
         };
         assert_eq!(view.root(&rows, &focus), Some(handler));
     }
@@ -1465,6 +1512,7 @@ mod tests {
             depth: DEPTH,
             cache: None,
             folded: None,
+            regions: Vec::new(),
         };
         let key = |code| KeyEvent::from(code);
         let rows = view.index(&data).rows(&focus);
@@ -1597,6 +1645,7 @@ mod tests {
             depth: DEPTH,
             cache: None,
             folded: None,
+            regions: Vec::new(),
         };
         let rows = view.index(&data).rows(&none);
         view.key(KeyEvent::from(KeyCode::Down), &ctx);

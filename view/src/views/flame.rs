@@ -33,7 +33,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Sparkline, Wrap};
 use ratatui::Frame;
 
-use super::{Action, Ctx, Focus, Need, Scope, View};
+use super::{Action, Ctx, Focus, Need, Region, Scope, View};
 use crate::model::{Data, Output, Refusal, Results, StackCount};
 use crate::trust::{self, palette, Trust};
 use crate::units;
@@ -107,6 +107,8 @@ pub struct Flame {
     /// Every caveat of both panes and both runs, whole, over the panes.
     listing: bool,
     cache: Option<(Fingerprint, [Pane; 2])>,
+    /// The boxes as last drawn, each `node * 2 + pane`.
+    regions: Vec<Region>,
 }
 
 /// Where a pane is: its zoom and selection as paths of frame names from the
@@ -842,6 +844,40 @@ fn compare(tree: &Tree, first: &[&Results], second: &[&Results], shape: bool) ->
     compare
 }
 
+/// The on-cpu comparison of `data` against `against` as the view draws it:
+/// the unit it is in and the functions it names as moved beyond the noise,
+/// largest first. `None` when either run has no on-cpu profile to compare.
+///
+/// The view re-states `src/triage/diff.rs`'s arithmetic, since it links
+/// nothing of `omn`; this is what a test in the root crate, which links
+/// both, holds to the triage's answer on the same two recordings.
+pub fn difference(data: &Data, against: &Data) -> Option<(String, Vec<String>)> {
+    let focus = Focus::default();
+    let pane = build(
+        data,
+        Some(against),
+        &NEEDS[ON],
+        "on cpu",
+        false,
+        &Reading {
+            by_thread: false,
+            focus: &focus,
+        },
+    );
+    let Body::Tree(tree) = pane.body else {
+        return None;
+    };
+    let compare = tree.compare.as_ref()?;
+    Some((
+        compare.unit.to_owned(),
+        compare
+            .difference
+            .iter()
+            .map(|change| change.function.clone())
+            .collect(),
+    ))
+}
+
 /// A live pane: what has arrived, over time. The runner names stacks only
 /// when the run ends.
 fn live_body(data: &Data, held: &[&Results]) -> Body {
@@ -1369,6 +1405,28 @@ impl View for Flame {
         Action::None
     }
 
+    fn takes_text(&self) -> bool {
+        self.typing.is_some()
+    }
+
+    fn regions(&self) -> &[Region] {
+        &self.regions
+    }
+
+    /// A box clicked is selected in its pane, which becomes the one the keys
+    /// move in; clicked again, it is zoomed into, as `Enter` does.
+    fn select(&mut self, id: usize, ctx: &Ctx<'_>) -> Action {
+        let (node, pane) = (id / 2, id % 2);
+        let panes = self.panes(ctx);
+        if let Body::Tree(tree) = &panes[pane].body {
+            if node < tree.nodes.len() {
+                self.active = pane;
+                self.panes[pane].selected = tree.path(node);
+            }
+        }
+        Action::None
+    }
+
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>) {
         // The view's name and title on a rule, as every view says what it is.
         let rule = Block::new()
@@ -1385,6 +1443,7 @@ impl View for Flame {
         };
         self.last_width = area.width;
         self.caveats_said = [0; 2];
+        self.regions.clear();
         let panes = self.panes(ctx);
         let active = self.active_pane(&panes);
         self.active = active;
@@ -2034,6 +2093,12 @@ impl Flame {
                     .fg(text_on(background))
                     .add_modifier(modifier);
                 buffer.set_stringn(body.x + cell.x0, y, &text, width, style);
+                if width > 0 {
+                    self.regions.push(Region::new(
+                        Rect::new(body.x + cell.x0, y, width as u16, 1),
+                        cell.node * 2 + index,
+                    ));
+                }
             }
         }
         if icicle.rows.len() > scroll + height {
@@ -2979,23 +3044,12 @@ mod tests {
     /// alone arrives empty -- which a live run, handing over its samples as
     /// they come, would not. That is said on the screen, as a degradation of
     /// the replay, rather than drawn as a run that sampled nothing.
+    /// A recording as it looked half way, live: `as_live_until` says itself
+    /// that a source kept as `stack` only arrives empty.
     fn live_half_way(name: &str) -> Data {
         let data = fixture(name);
         let half = data.opened_ns() + (data.closed_ns() - data.opened_ns()) / 2;
-        let mut live = crate::feed::as_live_until(&data, half);
-        for (was, now) in data.run.results.iter().zip(live.run.results.iter_mut()) {
-            if was.events().is_empty() && was.output("stack").is_some() {
-                now.degradations.insert(
-                    0,
-                    format!(
-                        "this recording kept `{}` as `stack` only: replayed as live it has no \
-                     samples to count, where a live run hands them over as they arrive",
-                        was.source
-                    ),
-                );
-            }
-        }
-        live
+        crate::feed::as_live_until(&data, half)
     }
 
     #[test]
