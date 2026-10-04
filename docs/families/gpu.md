@@ -685,3 +685,22 @@ streams used the board. `docs/scenarios/gpu.md` has the tables and the tests.
   gap is the counter starved by the poll, not the integral overstating. A
   `gpu.power` poll whose counter falls below half the draw says so; energy is
   `--mode count`.
+
+# What a GPU tracer costs (nineteenth wave, stream bench)
+
+Measured in `docs/bench.md`, "The GPU tracers, nineteenth wave", on three
+regimes (`examples/bench/gpu.c`) and against a negative control -- the
+injection library loaded by the driver and disarmed:
+
+| backend | launch-bound (a kernel every 2 us) | compute- or memory-bound (a kernel every ms) | band |
+|---|---|---|---|
+| `gpu.kernel` through `vendor:cupti` | +74 to +78 %, against the control | under 1 % | `extreme` (was `med`) |
+| `gpu.api` through `preload` | 7.6 to 8.9 % of the target's cpu, +9.6 % at a load of 8 | about 1 % | `high` (was `low`) |
+| the NVML polls | what the poll reads | the same | unchanged |
+| the library loaded, disarmed | inside the floor | inside the floor | - |
+
+CUPTI's price is paid inside each launch, by the launching thread (the cpu
+dilation equals the time dilation), about 1.5 us a launch; `nsys` on the same
+program costs +112 to +125 %. A band per backend holds the worst regime, and
+each source's caveat names it. `gpu.counters` and `gpu.profile` are pending in
+the record until their collectors land.

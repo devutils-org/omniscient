@@ -195,9 +195,15 @@
   summary: "GPU time per compute kernel"
   unit: ns
   backends:
-    - {id: "vendor:cupti", requires: ["cupti"], cost: med}
-    - {id: "vendor:rocprof", requires: ["rocprofiler"], cost: med, equivalent: true}
-    - {id: "vendor:l0", requires: ["level-zero"], cost: med, equivalent: true}
+    # The band is the worst regime's (docs/bench.md, "The GPU tracers,
+    # nineteenth wave"): +74 to +78 % on a launch-bound program, against the
+    # library loaded and disarmed, and under 1 % on a compute- or
+    # memory-bound one.
+    # The caveat on cost says so where a reader of `--budget` looks.
+    - {id: "vendor:cupti", requires: ["cupti"], cost: extreme}
+    # Unmeasured, and no cheaper than what they stand in for.
+    - {id: "vendor:rocprof", requires: ["rocprofiler"], cost: extreme, equivalent: true}
+    - {id: "vendor:l0", requires: ["level-zero"], cost: extreme, equivalent: true}
   modes: [trace]
   emits: [hist, topk, raw, timeline, summary]
   # A launch only. CUPTI records the activity of the process it is loaded
@@ -238,13 +244,25 @@
        because forcing it hands back kernels still running, with no time. A
        program that is killed rather than exiting loses its last buffer, and
        the run says so."
+    - "What it costs depends on the program's regime, by two orders of
+       magnitude. CUPTI does its work inside every kernel launch: about 1.5 us
+       a launch here, so a launch-bound program (a kernel every 2 us) ran 74
+       to 78 % longer than with the library loaded and disarmed, and a
+       compute- or memory-bound one (a kernel every millisecond or more) under 1 %. The
+       band, `extreme`, is the launch-bound case; on a program of long kernels
+       the run's own cost line is the figure to read. Loading the library
+       disarmed costs nothing measurable."
 
 - id: gpu.api
   family: gpu
   summary: "Host-side submission latency (CUDA / Vulkan)"
   unit: ns
   backends:
-    - {id: "preload", requires: ["dynamic-linking"], cost: low}
+    # The worst regime's band: 7.6 to 8.9 % of the target's cpu and +9.6 %
+    # (at a load of 8; +38.7 % at 41, preemption) on a launch-bound program,
+    # about 1 % on a compute- or memory-bound one (docs/bench.md, "The GPU
+    # tracers, nineteenth wave").
+    - {id: "preload", requires: ["dynamic-linking"], cost: high}
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {launch: native}
@@ -268,6 +286,10 @@
        synchronize and allocation calls and Vulkan's submit, present and wait
        calls; `api` names them without their ABI suffix. OpenGL is not among
        them."
+    - "Its cost is a price per call: a launch-bound program (a launch every
+       2 us) paid 7.6 to 8.9 % of its cpu and ran 9.6 % longer here, a
+       program of millisecond kernels about 1 %. The band, `high`, is the launch-bound
+       case."
 
 - id: gpu.counters
   family: gpu
