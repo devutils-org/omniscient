@@ -448,6 +448,28 @@ pub struct Followed {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<String>,
     pub reading: Reading,
+    /// For a child: the other processes off the way that were busy in the
+    /// run, which a job's wait (`sh` -> `gcc` -> `cc1`, `as`) covers beside
+    /// the child decomposed in its place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<Job>,
+}
+
+/// The rest of a job: the processes the program started, other than the
+/// child decomposed in a wait's place, and how long they were busy.
+///
+/// The run does not say which of them ran within the wait, nor which is
+/// whose parent: these are every busy task a source placed in a process off
+/// the way, so for a program that waits for its job most of its life they
+/// are the rest of the wait, and for one that does not they may be more.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Job {
+    /// The tasks, busiest first.
+    pub tasks: Vec<String>,
+    /// Their time on a cpu, added up.
+    pub on_cpu: f64,
+    /// Their time runnable and waiting for a cpu, added up; what was read.
+    pub runnable: f64,
 }
 
 impl Reading {
@@ -668,6 +690,17 @@ fn write_reading(out: &mut String, run: &Reading, title: &str, indent: &str) {
             span(followed.amount)
         );
         write_reading(out, &followed.reading, "", &format!("{indent}  "));
+        if let Some(job) = &followed.job {
+            let _ = writeln!(
+                out,
+                "{indent}  the rest of the job, {} other busy task(s) off the way: on a cpu {}, \
+                 runnable {} ({})",
+                job.tasks.len(),
+                span(job.on_cpu),
+                span(job.runnable),
+                job.tasks.join(", ")
+            );
+        }
     }
 }
 
@@ -991,9 +1024,24 @@ fn latency(run: &Reading, runs: usize) -> Verdict {
                 span(room)
             )
         } else {
+            let job =
+                reached
+                    .and_then(|followed| followed.job.as_ref())
+                    .map_or(String::new(), |job| {
+                        format!(
+                            "; the program's {} other busy task(s) off the way -- the rest of the \
+                         job, which the wait may cover -- were on a cpu {} and runnable {} \
+                         ({}), so the rest of the wait is in other children rather than in no \
+                         row",
+                            job.tasks.len(),
+                            span(job.on_cpu),
+                            span(job.runnable),
+                            job.tasks.join(", ")
+                        )
+                    });
             format!(
                 "`{}` is {}, and {} of the wall clock is in no row that was read ({}): the \
-                 largest row could still be overtaken",
+                 largest row could still be overtaken{job}",
                 top.state,
                 span(amount),
                 span(room),
@@ -1556,6 +1604,9 @@ impl Tasks<'_> {
         };
         let is_placed = self.pid_of.contains_key(&table.key);
         let task = table.key.clone();
+        let job = (relation == Relation::Child)
+            .then(|| self.job(&task))
+            .flatten();
         let (whole, because) = match relation {
             Relation::Child => (
                 GivenWhole {
@@ -1671,6 +1722,7 @@ impl Tasks<'_> {
                 None
             },
             reading: followed,
+            job,
         }));
     }
 
@@ -1704,6 +1756,41 @@ impl Tasks<'_> {
             }
         }
         best.map(|(table, _)| table)
+    }
+
+    /// The busy tasks a source placed in a process off the way, other than
+    /// `chosen`: the rest of the job a child was chosen from.
+    fn job(&self, chosen: &str) -> Option<Job> {
+        let mut busy_tasks: Vec<(&Breakdown, f64)> = self
+            .tables
+            .iter()
+            .filter(|table| table.key != chosen && !self.seen.contains(&table.key))
+            .filter(|table| {
+                self.pid_of
+                    .get(&table.key)
+                    .is_some_and(|pid| !self.processes.contains(pid))
+            })
+            .map(|table| (table, busy(table)))
+            .filter(|(_, busy)| *busy > 0.0)
+            .collect();
+        if busy_tasks.is_empty() {
+            return None;
+        }
+        busy_tasks.sort_by(|a, b| b.1.total_cmp(&a.1));
+        Some(Job {
+            tasks: busy_tasks
+                .iter()
+                .map(|(table, _)| table.key.clone())
+                .collect(),
+            on_cpu: busy_tasks
+                .iter()
+                .map(|(table, _)| row_amount(table, ON_CPU))
+                .sum(),
+            runnable: busy_tasks
+                .iter()
+                .map(|(table, _)| row_amount(table, RUNNABLE))
+                .sum(),
+        })
     }
 
     /// The busiest task no source placed in a process, not already read.
@@ -2397,6 +2484,7 @@ mod tests {
             amount: top.amount.unwrap(),
             wait: wait.map(str::to_owned),
             reading: below,
+            job: None,
         }));
         above
     }
@@ -3005,6 +3093,77 @@ mod tests {
         ] {
             assert!(!is_connection_frame(frame), "{frame}");
         }
+    }
+
+    /// Once `cpu.profile` carries `pid` on its samples, as the sched sources
+    /// do, a child only the profile saw is placed in its process and followed
+    /// as a child, not as unplaced: nothing here waits on which source said
+    /// it.
+    #[test]
+    fn a_profile_sample_that_carries_its_pid_places_its_task() {
+        let tables = || vec![main_table(), table("task:200", 250.0 * MS, None, None)];
+        let unplaced = read_launched(&run_of(
+            tables(),
+            vec![main_thread_asleep(300.0 * MS)],
+            false,
+        ));
+        assert_eq!(
+            unplaced.followed.as_deref().map(|f| f.relation),
+            Some(Relation::Unplaced)
+        );
+        let sample = event("cpu.profile", 200, vec![Attr::uint("pid", 200)]);
+        let placed = read_launched(&run_of(
+            tables(),
+            vec![main_thread_asleep(300.0 * MS), sample],
+            false,
+        ));
+        assert_eq!(
+            placed.followed.as_deref().map(|f| f.relation),
+            Some(Relation::Child)
+        );
+    }
+
+    /// `make-sqlite`: the shell waits for its job, and the busiest compiler
+    /// is decomposed in the wait's place while a second compiler and an
+    /// assembler ran too. The rest of the job is carried as a field, and an
+    /// undecided verdict says the wait's unread rest is in other children.
+    #[test]
+    fn a_job_of_several_processes_carries_the_rest_of_the_job_beside_the_child() {
+        let run = run_of(
+            vec![
+                main_table(),
+                table("task:200", 120.0 * MS, None, None),
+                table("task:300", 90.0 * MS, None, None),
+                table("task:400", 20.0 * MS, Some(5.0 * MS), None),
+            ],
+            vec![
+                main_thread_asleep(300.0 * MS),
+                placing(200, 200),
+                placing(300, 300),
+                placing(400, 400),
+            ],
+            false,
+        );
+        let reading = read_launched(&run);
+        let followed = reading.followed.as_deref().expect("followed");
+        assert_eq!(followed.relation, Relation::Child);
+        assert_eq!(followed.reading.task, "task:200");
+        let job = followed.job.as_ref().expect("the rest of the job");
+        assert_eq!(job.tasks, ["task:300", "task:400"]);
+        assert!((job.on_cpu - 110.0 * MS).abs() < 1.0, "{job:?}");
+        assert!((job.runnable - 5.0 * MS).abs() < 1.0, "{job:?}");
+        let verdict = latency(&reading, 1);
+        assert!(verdict.undecided.is_some(), "{}", verdict.sentence);
+        assert!(
+            verdict
+                .sentence
+                .contains("in other children rather than in no row")
+                && verdict.sentence.contains("task:300"),
+            "{}",
+            verdict.sentence
+        );
+        let json = serde_json::to_value(&reading).unwrap();
+        assert_eq!(json["followed"]["job"]["tasks"][0], "task:300");
     }
 
     /// A child process a source placed, with no wait on the stack: followed
