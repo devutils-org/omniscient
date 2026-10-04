@@ -22,6 +22,7 @@ mod cpu;
 pub mod gpu;
 pub(crate) mod io;
 mod launch;
+pub(crate) use launch::helper_output;
 pub use launch::{adopt_orphans, PROGRAM_STDERR_VARIABLE};
 pub mod mem;
 /// Public for its probes: `net::probe` answers the PTP-clock and ethtool
@@ -1433,14 +1434,26 @@ impl Meter {
                 // and every child reaped is in this process's children
                 // account: one walk, and no orphan's work missing from the
                 // denominator while it runs.
+                // The helpers `omn` runs itself (`launch::helper_output`) are
+                // its children too, and are no part of the program: the live
+                // ones are left out of the walk, and what the reaped ones spent
+                // out of the children account -- read after the account, so
+                // that a helper reaped between the two reads is not counted.
+                let children = || {
+                    let account = rusage_ns(libc::RUSAGE_CHILDREN);
+                    account.saturating_sub(launch::helpers_spent_ns())
+                };
                 let spent = if launch::adopting() {
                     // SAFETY: getpid cannot fail.
-                    rusage_ns(libc::RUSAGE_CHILDREN)
-                        + task::descendants_cpu(unsafe { libc::getpid() })
+                    children()
+                        + task::descendants_cpu(
+                            unsafe { libc::getpid() },
+                            &launch::helpers_running(),
+                        )
                 } else {
                     task::tree_cpu(*pid)
                         .map(|read| read.ns)
-                        .unwrap_or_else(|| rusage_ns(libc::RUSAGE_CHILDREN))
+                        .unwrap_or_else(children)
                 };
                 Some(high.keep(spent))
             }
@@ -1472,7 +1485,7 @@ impl Meter {
                 "the launched program's cpu time and its descendants' ({}, of {pid} and of \
                  every process it started while they ran, its orphans adopted by omn \
                  included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was \
-                 reaped)",
+                 reaped, the helpers omn ran itself left out)",
                 task::tree_cpu(*pid).map_or(
                     "the scheduler's own nanoseconds, or clock ticks where it could not be read",
                     |read| read.grain.says()

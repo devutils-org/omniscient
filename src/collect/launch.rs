@@ -123,6 +123,100 @@ fn is_zombie(pid: i32) -> bool {
     })
 }
 
+/// The helpers this process is running now ([`helper_output`]), by pid.
+static HELPERS: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+
+/// What the helpers already reaped spent, in nanoseconds: the share of this
+/// process's children account that is not the launched program's.
+static HELPERS_SPENT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The helpers this process is running now: `omn`'s own children, which a
+/// walk of its descendants must not take for the program's or its orphans.
+pub(crate) fn helpers_running() -> Vec<i32> {
+    HELPERS.lock().map(|live| live.clone()).unwrap_or_default()
+}
+
+/// What the helpers reaped so far spent, to be taken out of
+/// `getrusage(RUSAGE_CHILDREN)`. Read *after* that account: a helper's share is
+/// added here before it is reaped into the account, so a read in between
+/// weighs the program short by the helper, never long.
+pub(crate) fn helpers_spent_ns() -> u64 {
+    HELPERS_SPENT_NS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Runs a helper this process needs -- `curl` fetching a debug file, a
+/// container runtime naming a pid -- as `Command::output` runs it, but kept
+/// apart from the launched program. While it runs it is in
+/// [`helpers_running`], so neither the program's cpu account nor the end of
+/// the run ([`end_adopted`]) takes it for an orphan; once it has exited, what
+/// it spent (its children's included, as `getrusage` gives a zombie's) is
+/// added to [`helpers_spent_ns`] *before* it is reaped into this process's
+/// children account, so the program's denominator never holds it.
+pub(crate) fn helper_output(
+    command: &mut std::process::Command,
+) -> io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let pid = child.id() as i32;
+    if let Ok(mut live) = HELPERS.lock() {
+        live.push(pid);
+    }
+    let mut stderr = child.stderr.take();
+    let reading = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(stderr) = stderr.as_mut() {
+            let _ = stderr.read_to_end(&mut bytes);
+        }
+        bytes
+    });
+    let mut stdout = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_end(&mut stdout);
+    }
+    let stderr = reading.join().unwrap_or_default();
+    // Waited for without being reaped, which hands over the zombie's whole
+    // usage: the amount the reap is about to add to the children account.
+    // SAFETY: `waitid` fills a siginfo and an rusage this function owns.
+    let spent = unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        let mut usage: libc::rusage = std::mem::zeroed();
+        loop {
+            let result = libc::syscall(
+                libc::SYS_waitid,
+                libc::P_PID,
+                pid,
+                &mut info as *mut libc::siginfo_t,
+                libc::WEXITED | libc::WNOWAIT,
+                &mut usage as *mut libc::rusage,
+            );
+            if result == 0 {
+                break Some(cpu_ns(&usage));
+            }
+            if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break None;
+            }
+        }
+    };
+    if let Some(spent) = spent {
+        HELPERS_SPENT_NS.fetch_add(spent, std::sync::atomic::Ordering::SeqCst);
+    }
+    let status = child.wait();
+    if let Ok(mut live) = HELPERS.lock() {
+        live.retain(|helper| *helper != pid);
+    }
+    Ok(std::process::Output {
+        status: status?,
+        stdout,
+        stderr,
+    })
+}
+
 /// Ends every process this one adopted, and their descendants, once the
 /// program has been reaped: stopped first, as [`freeze`] stops a tree, then
 /// killed and reaped. Returns how many it ended and how many it could not
@@ -135,9 +229,11 @@ fn end_adopted() -> (u32, u32) {
     let me = unsafe { libc::getpid() };
     let mut stopped: Vec<i32> = Vec::new();
     for _ in 0..64 {
+        // A helper of this process's own is not an orphan, nor what it runs.
+        let helpers = super::task::with_descendants(&helpers_running());
         let new: Vec<i32> = super::task::descendants(me)
             .into_iter()
-            .filter(|adopted| !stopped.contains(adopted))
+            .filter(|adopted| !stopped.contains(adopted) && !helpers.contains(adopted))
             .collect();
         if new.is_empty() {
             break;
@@ -613,6 +709,41 @@ fn gated_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A helper's cpu is set aside before it reaches the children account, and
+    /// its output is what `Command::output` would have handed back.
+    #[test]
+    fn a_helper_s_cpu_is_set_aside_from_the_children_account() {
+        let children = || {
+            // SAFETY: `getrusage` fills a struct this closure owns.
+            let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+            unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) };
+            cpu_ns(&usage)
+        };
+        let (account, set_aside) = (children(), helpers_spent_ns());
+        let output = helper_output(std::process::Command::new("python3").args([
+            "-c",
+            "import sys, time\nt = time.process_time()\n\
+             while time.process_time() - t < 0.2: pass\nprint('burnt')\n\
+             print('said', file=sys.stderr)",
+        ]));
+        let Ok(output) = output else {
+            return eprintln!("skipped: no python3 to run as a helper");
+        };
+        let (account, set_aside) = (children() - account, helpers_spent_ns() - set_aside);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "burnt\n");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "said\n");
+        assert!(
+            set_aside >= 200_000_000,
+            "the helper's 200 ms are set aside: {set_aside} ns"
+        );
+        assert!(
+            account >= set_aside,
+            "what is set aside is in the children account once reaped, so taking it out \
+             takes out nothing else: {set_aside} ns set aside, {account} ns reaped"
+        );
+    }
 
     #[test]
     fn a_child_waits_at_the_gate_until_it_is_released() {

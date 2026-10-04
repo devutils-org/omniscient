@@ -399,21 +399,32 @@ pub fn tree_cpu(pid: i32) -> Option<CpuRead> {
 }
 
 /// The cpu time of every live (or not yet reaped) descendant of `me`, each
-/// on its own account as [`tree_cpu`] reads them, in one walk; zero when there
-/// are none.
+/// on its own account as [`tree_cpu`] reads them, in one walk, leaving out
+/// `except` and their descendants; zero when there are none.
 ///
 /// For the `omn` binary, the subreaper of what it launches
 /// ([`super::launch::adopt_orphans`]): its descendants are the launched
-/// program's tree and the orphans that left it, so this with this process's
-/// own children account is the program's whole spend, orphans included. What
-/// else it starts is a helper that ends within the call that started it
-/// (`nvidia-smi`, `curl` for a debug file), and is counted with it.
-pub fn descendants_cpu(me: i32) -> u64 {
+/// program's tree, the orphans that left it, and the helpers `omn` runs itself
+/// ([`super::launch::helper_output`]), which are `except`. This with this
+/// process's own children account, less the helpers reaped, is the program's
+/// whole spend, orphans included.
+pub fn descendants_cpu(me: i32, except: &[i32]) -> u64 {
+    let except = with_descendants(except);
     descendants(me)
         .into_iter()
+        .filter(|pid| !except.contains(pid))
         .filter_map(process_cpu)
         .map(|read| read.ns)
         .sum()
+}
+
+/// `pids` and every descendant of each.
+pub fn with_descendants(pids: &[i32]) -> Vec<i32> {
+    let mut all = pids.to_vec();
+    for pid in pids {
+        all.extend(descendants(*pid));
+    }
+    all
 }
 
 #[cfg(test)]
@@ -468,6 +479,46 @@ mod tests {
             tree >= own + 300_000_000,
             "the tree holds the child's 300 ms beside the shell's {own} ns: {tree} ns \
              ({found:?})"
+        );
+    }
+
+    /// A process left out of the walk is left out with what it started: the
+    /// helpers `omn` runs itself, and their children, are not the program's.
+    #[test]
+    fn a_process_left_out_of_the_descendants_cpu_takes_its_own_children_with_it() {
+        const BURN: &str = "python3 -c 'import time\nt = time.process_time()\n\
+             while time.process_time() - t < 0.3: pass\ntime.sleep(30)'; :";
+        let mut root = std::process::Command::new("/bin/sh")
+            .args(["-c", "sh -c \"$BURN\"; :"])
+            .env("BURN", BURN)
+            .spawn()
+            .expect("a shell");
+        let pid = root.id() as i32;
+        let mut all = 0;
+        for _ in 0..500 {
+            std::thread::sleep(Duration::from_millis(20));
+            all = descendants_cpu(pid, &[]);
+            if all >= 300_000_000 {
+                break;
+            }
+        }
+        let found = descendants(pid);
+        let left_out = found.first().map(|inner| descendants_cpu(pid, &[*inner]));
+        for child in &found {
+            // SAFETY: signalling a process this test's shell started.
+            unsafe { libc::kill(*child, libc::SIGKILL) };
+        }
+        let _ = root.kill();
+        let _ = root.wait();
+        if all < 300_000_000 {
+            eprintln!("skipped: no python3 grandchild burnt its 300 ms ({found:?})");
+            return;
+        }
+        assert_eq!(
+            left_out,
+            Some(0),
+            "the inner shell left out takes its burning child with it ({found:?}, {all} ns \
+             with them)"
         );
     }
 
