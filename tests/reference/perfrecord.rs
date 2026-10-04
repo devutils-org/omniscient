@@ -1,13 +1,14 @@
-//! Parsers for the `perfrecord` family's reference tools. Each turns a tool's
-//! output into the values a pair compares (BRIEF.md, "Decided before this
-//! wave").
+//! Parsers for the `perfrecord` family's reference pairs. Each turns a tool's
+//! output, or omn's, into the values a pair compares
+//! (`catalog/references/README.md`); the shared runner runs both sides.
 //!
 //! The tools here are `perf record`/`report`, `perf top`, `perf mem` and
 //! `perf c2c`. Their omn counterparts do not print one value at a JSON path:
 //! a profile's top functions are its stacks' leaves summed, a latency mean is
 //! a histogram's sum over its count, a line's share of the HITMs is a top-k
 //! row over the run's total. So this module also parses omn's side, under
-//! names a pair gives as `compare.omn_parse`.
+//! names a pair gives as `compare.omn_parse`, reading the `results.json`
+//! that `omn -o {out}` writes.
 //!
 //! A function's key is its symbol where the tool names it, and its object's
 //! name where it prints an address (`libcrypto.so.3` for any unnamed address
@@ -272,7 +273,6 @@ fn omn_topk_share(stdout: &str, _stderr: &str) -> Result<Values, String> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::process::Command;
 
     fn root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -368,116 +368,5 @@ mod tests {
             function_key("[kernel.kallsyms]", "psi_account_irqtime"),
             "psi_account_irqtime"
         );
-    }
-
-    fn strings(v: &Value) -> Vec<String> {
-        v.as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|s| s.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn on_path(binary: &str) -> bool {
-        std::env::var_os("PATH")
-            .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(binary).is_file()))
-            .unwrap_or(false)
-    }
-
-    fn run(argv: &[String]) -> (String, String) {
-        let out = Command::new(&argv[0])
-            .args(&argv[1..])
-            .current_dir(root())
-            .output()
-            .unwrap_or_else(|e| panic!("{}: {e}", argv[0]));
-        (
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-        )
-    }
-
-    /// Every pair in `catalog/references/perfrecord.yaml`, run here with this
-    /// module's parsers on both sides, until the shared runner reads
-    /// `compare.omn_parse`. Ignored by default: it runs every workload twice
-    /// (some 40 s). `cargo test --test reference perfrecord -- --ignored
-    /// --nocapture` prints every pair's two values.
-    #[test]
-    #[ignore]
-    fn pairs_hold_on_this_machine() {
-        let path = root().join("catalog/references/perfrecord.yaml");
-        let pairs: Vec<Value> =
-            serde_norway::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        let parser = |name: &str| {
-            parsers()
-                .into_iter()
-                .find(|p| p.name == name)
-                .unwrap_or_else(|| panic!("no parser `{name}`"))
-                .parse
-        };
-        let omn = root().join("target/debug/omn").display().to_string();
-        let mut failed = Vec::new();
-        for pair in &pairs {
-            let key = pair["compare"]["key"].as_str().unwrap_or("");
-            let label = format!("{} vs {} [{key}]", pair["source"], pair["tool"]);
-            let missing: Vec<String> = strings(&pair["reference"]["requires"])
-                .into_iter()
-                .filter(|b| !on_path(b))
-                .collect();
-            if !missing.is_empty() {
-                eprintln!("SKIP {label}: not installed: {missing:?}");
-                continue;
-            }
-            let workload = strings(&pair["workload"]);
-            let mut tool = strings(&pair["reference"]["command"]);
-            tool.extend(workload.iter().cloned());
-            let (out, err) = run(&tool);
-            let theirs = parser(pair["reference"]["parse"].as_str().unwrap())(&out, &err);
-            let mut ours = vec![omn.clone()];
-            ours.extend(strings(&pair["omn"]));
-            ours.push("--".into());
-            ours.extend(workload.iter().cloned());
-            let (out, err) = run(&ours);
-            let ours = parser(pair["compare"]["omn_parse"].as_str().unwrap())(&out, &err);
-            let (theirs, ours) = match (theirs, ours) {
-                (Ok(t), Ok(o)) => (t, o),
-                (t, o) => {
-                    failed.push(format!("{label}: tool {:?}, omn {:?}", t.err(), o.err()));
-                    continue;
-                }
-            };
-            // A side without the key fails the pair with its reason: read as
-            // zero, two sides that both lost it would agree vacuously.
-            let find = |v: &Values| v.iter().find(|(k, _)| k == key).map(|(_, x)| *x);
-            let (t, o) = match (find(&theirs), find(&ours)) {
-                (Some(t), Some(o)) => (t, o),
-                (t, o) => {
-                    let keys = |v: &Values| v.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
-                    let reason = format!(
-                        "{label}: key missing (tool {}, omn {}); tool has {:?}, omn has {:?}",
-                        if t.is_some() { "has it" } else { "lacks it" },
-                        if o.is_some() { "has it" } else { "lacks it" },
-                        keys(&theirs),
-                        keys(&ours),
-                    );
-                    eprintln!("FAIL {reason}");
-                    failed.push(reason);
-                    continue;
-                }
-            };
-            let tolerance = &pair["compare"]["tolerance"];
-            let ok = match (tolerance["abs"].as_f64(), tolerance["rel"].as_f64()) {
-                (Some(abs), _) => (t - o).abs() <= abs,
-                (None, Some(rel)) => (t - o).abs() <= rel * t.abs(),
-                _ => panic!("{label}: no tolerance"),
-            };
-            let verdict = if ok { "PASS" } else { "FAIL" };
-            eprintln!("{verdict} {label}: tool {t:.4}, omn {o:.4}, tolerance {tolerance}");
-            if !ok {
-                failed.push(label);
-            }
-        }
-        assert!(failed.is_empty(), "{failed:#?}");
     }
 }
