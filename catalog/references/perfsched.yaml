@@ -1,0 +1,5 @@
+# Reference pairs for the `perfsched` family of tools: each entry runs omn and an
+# established tool on the same workload and holds them to a declared
+# tolerance. Read by tests/reference.rs, never by omn itself. Schema:
+# BRIEF.md, "Decided before this wave".
+[]
