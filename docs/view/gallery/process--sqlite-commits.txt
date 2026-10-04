@@ -1,40 +1,40 @@
 omn top │ fixture sqlite-commits │ 6.84s                          view: snapshot │ collectors ≥8.41% │ target 79.5% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ process -- one process at a glance: pid 1494341, ran 6.82s ──────────────────────────────────────────────────────────┐
-│first suspect: ▶ on cpu 82.5% -- the cpu tile (flame) has the detail                                                  │
-│one view's essence per tile: enter, or a click on the selected tile, opens it                                         │
-│┌ time → timebar ─────────────────────┐┏ cpu → flame ━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ cost → ledger ──────────────────────┐│
-││▶ on cpu 82.5%                       │┃__libc_start_main 98.8%               ┃│cpu 5.64s                            ││
-││████████████████████▚▚▚▓             │┃on cpu: the hottest own code          ┃│rss peak 4.80MiB · 217 faults        ││
-││sqlite3 (1494341), 6.84s wall        │┃off cpu: __libc_start_main ›          ┃│cpu: the program's own account       ││
-││                                     │┃fdatasync 100%                        ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││~low det degraded x2 3 late          │┃115 late ~low det degraded x5         ┃│~low det 119 late                    ││
-│└─────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└─────────────────────────────────────┘│
-│┌ request → request ──────────────────┐┌ latency → heatmap ───────────────────┐┌ threads → lanes ────────────────────┐│
-││no request declared                  ││max 4.65ms                            ││1 thread                             ││
-││refused: cannot start collecting     ││██▂▂███████ ███▂████████              ││█▅▄▅█▆▆▅▅▅▆▄▅▅▅▄▅▅▃▅▆▅▅▅             ││
-││`net.request`: /usr/bin/sqlite3      ││io.latency: 1.56k measured, median    ││1.75k context switches               ││
-││declares no request: `net.request`   ││28.9µs                                ││                                     ││
-││follows a request from a             ││                                      ││                                     ││
-││`request__start(id)` probe to a      ││                                      ││                                     ││
-││`request__done(id)` probe the        ││                                      ││                                     ││
-││program fires itself, any provider,  ││                                      ││                                     ││
-││and this one carries no USDT probe…  ││109 late ~low det degraded x2         ││109 late ~low det degraded           ││
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
-│┌ wake → wake ────────────────────────┐┌ flows → flows ───────────────────────┐┌ gpu → lanes ────────────────────────┐│
-││hardirq ×517                         ││net ↓0B ↑0B                           ││no kernel launched                   ││
-││53.0% of 975 wake-ups; 17 wakers     ││disk ↓0B ↑19.7MiB                     ││device memory peak 0B                ││
-││                                     ││↓ received or read · ↑ sent or written││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││109 late ~low det degraded           ││2 late ~low det degraded x3           ││60 late degraded                     ││
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ hjkl move between tiles  enter open the tile's view
+ sqlite3  pid 1494341 · 1 thread · 6.82s · omn costs ≥8.41% cpu
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ CPU     ▇███████▇▆▅▄▄▅▇▇▇███████   0.909 cores    avg 0.826   peak 0.962  ~low det
+ Memory  ████████████████████████   4.80MiB        +0B/s   peak 4.80MiB
+ Disk    █▅▅▅▆▅▅▅▅▃▃▁▃▃▃▃▆▆▃▆▆▆▃▆   R 0B/s         W 2.88MiB/s   p99 4.62ms  109 late ~low det degraded x2
+ Network                            no socket bytes   1 retrans (machine)
+ GPU                                no kernel launched   VRAM 0B
+ Energy  ▆▆▆▆▆▆▆▅▇███████▇▆▇████▆   105 W          avg 124 W   the machine's, not apportioned
+ Time    ████████████████████▚▚▚▓   on cpu 82.5%   run queue 11.3%   I/O 5.10%  ~low det degraded x2 3 late
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▶ suspect: on cpu (on-cpu)  82.5%                                                                   Enter/click → detail
+
+CPU in one hue: the machine's cores are not in the recording
+Memory in one hue: the machine's memory is not in the recording
+Disk in one hue: a device's speed is not known
+Energy in one hue: energy has no capacity
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ jk move between lines  enter open the line's page

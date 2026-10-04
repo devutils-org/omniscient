@@ -1,40 +1,40 @@
 omn top │ fixture many-requests │ 15.8s                           view: snapshot │ collectors ≥6.10% │ target 0.50% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ process -- one process at a glance: pid 1504111, ran 15.8s ──────────────────────────────────────────────────────────┐
-│first suspect: ▶ sleep 97.4% -- the cpu tile (flame) has the detail                                                   │
-│one view's essence per tile: enter, or a click on the selected tile, opens it                                         │
-│┌ time → timebar ─────────────────────┐┏ cpu → flame ━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ cost → ledger ──────────────────────┐│
-││▶ sleep 97.4%                        │┃bpf_prog_772db7720b2728e9_sd_fw_egress┃│cpu 86.9ms                           ││
-││░░░░░░░░░░░░░░░░░░░░░░░░             │┃on cpu: the hottest own code          ┃│rss peak 2.14MiB · 103 faults        ││
-││server (1504111), 15.8s wall         │┃off cpu: __libc_start_main › main     ┃│cpu: the program's own account       ││
-││                                     │┃33.3%                                 ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││8 late ~low det degraded x2          │┃329 late ~low det degraded x5         ┃│322 late ~low det                    ││
-│└─────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└─────────────────────────────────────┘│
-│┌ request → request ──────────────────┐┌ latency → heatmap ───────────────────┐┌ threads → lanes ────────────────────┐│
-││a0ef 5.12ms ▶ I/O 97.1%              ││max 4.69ms                            ││3 threads                            ││
-││the slowest of 300 requests          ││█████████▁▁▁▁▁▁▁▁▁██████              ││▇▆▆▆▆▆▆▇▇▇█▆▆▇▆▆▇▇▆▇▆▆▆▄             ││
-││                                     ││io.latency: 159 measured, median      ││1.84k context switches               ││
-││                                     ││62.8µs                                ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││325 late degraded x2                 ││336 late ~low det degraded x3         ││336 late ~low det degraded           ││
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
-│┌ wake → wake ────────────────────────┐┌ flows → flows ───────────────────────┐┌ gpu → lanes ────────────────────────┐│
-││softirq ×873                         ││net ↓32.2KiB ↑32.2KiB                 ││no kernel launched                   ││
-││51.4% of 1.70k wake-ups; 20 wakers   ││disk ↓612KiB ↑232KiB                  ││device memory peak 0B                ││
-││                                     ││↓ received or read · ↑ sent or written││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││336 late ~low det degraded           ││3 late ~low det degraded x3           ││128 late degraded                    ││
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ hjkl move between tiles  enter open the tile's view
+ server  pid 1504111 · 3 threads · 15.8s · omn costs ≥6.10% cpu
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ CPU     ▅▅▆▆▅▆▆▅▅▇█▇▇▆▅▆▅▅▅▆▅▅▅▄   0.00369 cores   avg 0.00549   peak 0.00800  1 late ~low det
+ Memory  ████████████████████████   2.14MiB        +0B/s   peak 2.14MiB  1 late
+ Disk    █▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂   R 38.7KiB/s    W 14.7KiB/s   p99 4.68ms  336 late ~low det degraded x3
+ Network ▇███▇▇█▇▇█▇█▇█▇███████▇▆   ↓ 2.04KiB/s    ↑ 2.04KiB/s   0 retrans (machine)  3 late ~low det degraded x3
+ GPU                                no kernel launched   VRAM 0B
+ Energy  ▄▄▅▅▅▅▄▄▆████▇▇▇▆▇▇▆▆▆▇▄   68.2 W         avg 104 W   the machine's, not apportioned  1 late
+ Time    ░░░░░░░░░░░░░░░░░░░░░░░░   sleep 97.4%   I/O 1.23%   on cpu 0.26%   run queue 0.19%  8 late ~low det degraded x
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▶ suspect: sleep (blocked: sleeping)  97.4%                                                         Enter/click → detail
+
+CPU in one hue: the machine's cores are not in the recording
+Memory in one hue: the machine's memory is not in the recording
+Disk in one hue: a device's speed is not known
+Network in one hue: a link's speed is not known
+Energy in one hue: energy has no capacity
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ jk move between lines  enter open the line's page

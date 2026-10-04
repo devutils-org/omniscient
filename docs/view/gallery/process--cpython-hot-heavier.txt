@@ -1,40 +1,40 @@
 omn top │ fixture cpython-hot-heavier │ 8.49s                     view: snapshot │ collectors ≥7.69% │ target 94.5% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ process -- one process at a glance: pid 1492174, ran 8.47s ──────────────────────────────────────────────────────────┐
-│first suspect: ▶ on cpu 98.3% -- the cpu tile (flame) has the detail                                                  │
-│one view's essence per tile: enter, or a click on the selected tile, opens it                                         │
-│┌ time → timebar ─────────────────────┐┏ cpu → flame ━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ cost → ledger ──────────────────────┐│
-││▶ on cpu 98.3%                       │┃main › score 99.6%                    ┃│cpu 8.34s                            ││
-││████████████████████████             │┃on cpu: the hottest own code          ┃│rss peak 17.7MiB · 3.08k faults      ││
-││python3 (1492174), 8.49s wall        │┃off cpu: no block recorded            ┃│cpu: the program's own account       ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││~low det degraded x2                 │┃88 late ~low det degraded x4          ┃│~low det 90 late                     ││
-│└─────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└─────────────────────────────────────┘│
-│┌ request → request ──────────────────┐┌ latency → heatmap ───────────────────┐┌ threads → lanes ────────────────────┐│
-││no request declared                  ││max 131µs                             ││1 thread                             ││
-││refused: cannot start collecting     ││▂▁ ▂▂ ▂▂█  ▂ ▁▅  ▅  ▅▃▁▂              ││▂▁ ▁▁ ▂▁▁  ▁ ▁▁  ▁  ▄▇█▆             ││
-││`net.request`: /usr/bin/python3      ││sched.runqlat: 73 measured, median    ││296 context switches                 ││
-││declares no request: `net.request`   ││8.19µs                                ││                                     ││
-││follows a request from a             ││                                      ││                                     ││
-││`request__start(id)` probe to a      ││                                      ││                                     ││
-││`request__done(id)` probe the        ││                                      ││                                     ││
-││program fires itself, any provider,  ││                                      ││                                     ││
-││and this one carries no USDT probe…  ││~low det degraded                     ││89 late ~low det degraded            ││
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
-│┌ wake → wake ────────────────────────┐┌ flows → flows ───────────────────────┐┌ gpu → lanes ────────────────────────┐│
-││omn (1491255) ×1                     ││net ↓0B ↑0B                           ││no kernel launched                   ││
-││100% of 1 wake-ups; 1 wakers         ││disk ↓0B ↑0B                          ││device memory peak 0B                ││
-││                                     ││↓ received or read · ↑ sent or written││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││89 late ~low det                     ││~low det degraded x3                  ││89 late degraded                     ││
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ hjkl move between tiles  enter open the tile's view
+ python3  pid 1492174 · 1 thread · 8.47s · omn costs ≥7.69% cpu
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ CPU     ███████████████████████▇   0.814 cores    avg 0.985   peak 1.01  ~low det
+ Memory  ▇▇▇▇▇▇▇▇▇▇▇▇▇███████████   17.7MiB        +359KiB/s   peak 17.7MiB
+ Disk                               no block request of the process
+ Network                            no socket bytes   1 retrans (machine)
+ GPU                                no kernel launched   VRAM 0B
+ Energy  ██████████████████████▇█   89.8 W         avg 91.5 W   the machine's, not apportioned
+ Time    ████████████████████████   on cpu 98.3%   run queue 0.04%  ~low det degraded x2
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▶ suspect: on cpu (on-cpu)  98.3%                                                                   Enter/click → detail
+
+CPU in one hue: the machine's cores are not in the recording
+Memory in one hue: the machine's memory is not in the recording
+Energy in one hue: energy has no capacity
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ jk move between lines  enter open the line's page

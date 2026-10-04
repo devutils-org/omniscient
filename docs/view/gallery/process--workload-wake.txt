@@ -1,40 +1,40 @@
 omn top │ fixture workload-wake │ 280ms                           view: snapshot │ collectors ≥41.7% │ target 61.9% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ process -- one process at a glance: pid 1527161, ran 527ms ──────────────────────────────────────────────────────────┐
-│first suspect: ▶ child 82.8% -- the cost tile (ledger) has the detail                                                 │
-│one view's essence per tile: enter, or a click on the selected tile, opens it                                         │
-│┌ time → timebar ─────────────────────┐┌ cpu → flame ─────────────────────────┐┏ cost → ledger ━━━━━━━━━━━━━━━━━━━━━━┓│
-││▶ child 82.8%                        ││Py_RunMain › PyEval_EvalCode 29.9%    │┃cpu 325ms                            ┃│
-││███▙▙▙▙▙▙▙▙▙▙▙▙▙▙▙▙▙▙▙▙·             ││on cpu: the hottest own code          │┃rss peak 13.6MiB · 7.79k faults      ┃│
-││wake-main (1527161), 280ms wall      ││off cpu: PyEval_EvalCode › __read     │┃cpu: the program's own account       ┃│
-││                                     ││63.4%                                 │┃                                     ┃│
-││                                     ││                                      │┃                                     ┃│
-││                                     ││                                      │┃                                     ┃│
-││                                     ││                                      │┃                                     ┃│
-││                                     ││                                      │┃                                     ┃│
-││~low det degraded x3                 ││5 late ~low det degraded x10          │┃~low det 5 late                      ┃│
-│└─────────────────────────────────────┘└──────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│
-│┌ request → request ──────────────────┐┌ latency → heatmap ───────────────────┐┌ threads → lanes ────────────────────┐│
-││no request declared                  ││max 131µs                             ││4 threads                            ││
-││refused: cannot start collecting     ││▂ ▅▅ █▁▁▁▁▂▁▁▂▂█▁▁▁▁▁▃▂               ││▆ █                   ▆              ││
-││`net.request`: /usr/bin/python3      ││sched.runqlat: 137 measured, median   ││10 context switches                  ││
-││declares no request: `net.request`   ││0ns                                   ││                                     ││
-││follows a request from a             ││                                      ││                                     ││
-││`request__start(id)` probe to a      ││                                      ││                                     ││
-││`request__done(id)` probe the        ││                                      ││                                     ││
-││program fires itself, any provider,  ││                                      ││                                     ││
-││and this one carries no USDT probe…  ││~low det degraded                     ││5 late ~low det degraded x2          ││
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
-│┌ wake → wake ────────────────────────┐┌ flows → flows ───────────────────────┐┌ gpu → lanes ────────────────────────┐│
-││relay-c (1527174) ×301               ││net ↓0B ↑0B                           ││no kernel launched                   ││
-││33.3% of 904 wake-ups; 7 wakers      ││disk ↓0B ↑0B                          ││device memory peak 0B                ││
-││                                     ││↓ received or read · ↑ sent or written││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││5 late ~low det                      ││~low det degraded x3                  ││5 late degraded                      ││
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ hjkl move between tiles  enter open the tile's view
+ wake-main  pid 1527161 · 4 threads · 527ms · omn costs ≥41.7% cpu
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ CPU     ▁▁▁▁▁▁▁▁▁▁▁▁█              13.3 cores     avg 0.617   peak 13.3  ~low det
+ Memory   █                         13.6MiB        +0B/s   peak 13.6MiB
+ Disk                               no block request of the process
+ Network                            no socket bytes   0 retrans (machine)
+ GPU                                no kernel launched   VRAM 0B
+ Energy              █              1.30k W        avg 54.0 W   the machine's, not apportioned
+ Time    ███▙▙▙▙▙▙▙▙▙▙▙▙▙▙▙▙▙▙▙▙·   child 82.8%   on cpu 12.4%   I/O 0.19%   run queue 0.02%  ~low det degraded x3
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▶ suspect: child (blocked: sleeping, in a wait for a child)  82.8%                                  Enter/click → detail
+
+CPU in one hue: the machine's cores are not in the recording
+Memory in one hue: the machine's memory is not in the recording
+Energy in one hue: energy has no capacity
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ jk move between lines  enter open the line's page

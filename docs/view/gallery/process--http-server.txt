@@ -1,40 +1,40 @@
 omn top │ fixture http-server │ 3.24s                             view: snapshot │ collectors ≥24.3% │ target 90.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ process -- one process at a glance: pid 1493220, ran 3.23s ──────────────────────────────────────────────────────────┐
-│first suspect: ▶ sleep 96.7% -- the cpu tile (flame) has the detail                                                   │
-│one view's essence per tile: enter, or a click on the selected tile, opens it                                         │
-│┌ time → timebar ─────────────────────┐┏ cpu → flame ━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ cost → ledger ──────────────────────┐│
-││▶ sleep 96.7%                        │┃_PyObject_MakeTpCall 22.0%            ┃│cpu 3.17s                            ││
-││█░░░░░░░░░░░░░░░░░░░░░░░             │┃on cpu: the hottest own code          ┃│rss peak 27.3MiB · 24.0k faults      ││
-││python3 (1493220), 3.24s wall        │┃off cpu: Py_RunMain › PyEval_EvalCode ┃│cpu: the program's own account       ││
-││                                     │┃49.9%                                 ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││                                     │┃                                      ┃│                                     ││
-││~low det degraded x2 2 late          │┃54 late ~low det degraded x8          ┃│~low det 59 late                     ││
-│└─────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└─────────────────────────────────────┘│
-│┌ request → request ──────────────────┐┌ latency → heatmap ───────────────────┐┌ threads → lanes ────────────────────┐│
-││no request declared                  ││max 524µs                             ││4 threads                            ││
-││refused: cannot start collecting     ││▁██▂ ▁▁▁▁▂▂▂▂▂▂ ▂▂▂█▅▅ ▂              ││█▂▃ ▂  ▂  ▁▃   ▂ ▁▁▂▂▆▂▃             ││
-││`net.request`: /usr/bin/sh declares  ││net.socket: 86 measured, median 32.8µs││59 context switches                  ││
-││no request: `net.request` follows a  ││                                      ││                                     ││
-││request from a `request__start(id)`  ││                                      ││                                     ││
-││probe to a `request__done(id)` probe ││                                      ││                                     ││
-││the program fires itself, any        ││                                      ││                                     ││
-││provider, and this one carries no    ││                                      ││                                     ││
-││USDT probe at all. Nothing is…       ││1 late ~low det degraded x3           ││50 late ~low det degraded x2         ││
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
-│┌ wake → wake ────────────────────────┐┌ flows → flows ───────────────────────┐┌ gpu → lanes ────────────────────────┐│
-││softirq ×141                         ││net ↓1.76KiB ↑28.3MiB                 ││no kernel launched                   ││
-││73.8% of 191 wake-ups; 10 wakers     ││disk ↓0B ↑0B                          ││device memory peak 0B                ││
-││                                     ││↓ received or read · ↑ sent or written││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││50 late ~low det degraded            ││1 late ~low det degraded x3           ││22 late degraded                     ││
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ hjkl move between tiles  enter open the tile's view
+ python3  pid 1493220 · 4 threads · 3.23s · omn costs ≥24.3% cpu
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ CPU     ▆█▇▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆   0.962 cores    avg 0.981   peak 1.31  ~low det
+ Memory  ▆▆██▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇    25.1MiB        +2.05MiB/s   peak 27.3MiB
+ Disk                               no block request of the process
+ Network ▁▆▅█▅▇▇▄▅▇▆▃▇▇▆▆▄▇▅▆▅▇▄▂   ↓ 558B/s       ↑ 8.76MiB/s   0 retrans (machine)  1 late ~low det degraded x3
+ GPU                                no kernel launched   VRAM 0B
+ Energy  ▅▇▆▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇████   143 W          avg 115 W   the machine's, not apportioned
+ Time    █░░░░░░░░░░░░░░░░░░░░░░░   sleep 96.7%   on cpu 2.45%   run queue 0.01%   I/O 0.00%  ~low det degraded x2 2 lat
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▶ suspect: sleep (blocked: sleeping)  96.7%                                                         Enter/click → detail
+
+CPU in one hue: the machine's cores are not in the recording
+Memory in one hue: the machine's memory is not in the recording
+Network in one hue: a link's speed is not known
+Energy in one hue: energy has no capacity
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ jk move between lines  enter open the line's page

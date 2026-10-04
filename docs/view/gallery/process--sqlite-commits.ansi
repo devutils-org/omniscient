@@ -1,40 +1,40 @@
 [0m[1momn top[0m │ fixture sqlite-commits │ 6.84s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥8.41%[0m[35m │ target 79.5% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows [0m[1;7m 0 process [0m                     [0m
-┌ process -- one process at a glance: pid 1494341, ran 6.82s ──────────────────────────────────────────────────────────┐[0m
-│[0m[1mfirst suspect: [0m[1;2;32m▶ on cpu 82.5%[0m -- the cpu tile (flame) has the detail                                                  │[0m
-│[0m[2mone view's essence per tile: enter, or a click on the selected tile, opens it[0m                                         │[0m
-│┌[0m[1;7m time [0m[2m→ timebar [0m─────────────────────┐[0m[32m┏[0m[1;32m cpu [0m[2;32m→ flame [0m[32m━━━━━━━━━━━━━━━━━━━━━━━━━┓[0m┌[0m[1m cost [0m[2m→ ledger [0m──────────────────────┐│[0m
-││[0m[1;2;32m▶ on cpu 82.5%[0m                       │[0m[32m┃[0m[1;2;32m__libc_start_main 98.8%[0m               [0m[32m┃[0m│[0m[2mcpu 5.64s[0m                            ││[0m
-││[0m[32m████████████████████[0m[35m▚▚▚[0m[34m▓[0m             │[0m[32m┃[0m[2mon cpu: the hottest own code[0m          [0m[32m┃[0m│[0m[2mrss peak 4.80MiB · 217 faults[0m        ││[0m
-││[0m[2msqlite3 (1494341), 6.84s wall[0m        │[0m[32m┃[0m[2;34moff cpu: __libc_start_main ›[0m          [0m[32m┃[0m│[0m[2mcpu: the program's own account[0m       ││[0m
-││                                     │[0m[32m┃[0m[2;34mfdatasync 100%[0m                        [0m[32m┃[0m│                                     ││[0m
-││                                     │[0m[32m┃[0m                                      [0m[32m┃[0m│                                     ││[0m
-││                                     │[0m[32m┃[0m                                      [0m[32m┃[0m│                                     ││[0m
-││                                     │[0m[32m┃[0m                                      [0m[32m┃[0m│                                     ││[0m
-││                                     │[0m[32m┃[0m                                      [0m[32m┃[0m│                                     ││[0m
-││[0m[36m~low det[0m [0m[33mdegraded x2[0m [0m[33m3 late[0m          │[0m[32m┃[0m[33m115 late[0m [0m[36m~low det[0m [0m[33mdegraded x5[0m         [0m[32m┃[0m│[0m[36m~low det[0m [0m[33m119 late[0m                    ││[0m
-│└─────────────────────────────────────┘[0m[32m┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛[0m└─────────────────────────────────────┘│[0m
-│┌[0m[1m request [0m[2m→ request [0m──────────────────┐┌[0m[1m latency [0m[2m→ heatmap [0m───────────────────┐┌[0m[1m threads [0m[2m→ lanes [0m────────────────────┐│[0m
-││[0m[2mno request declared[0m                  ││[0m[2mmax 4.65ms[0m                            ││[0m[2m1 thread[0m                             ││[0m
-││[0m[2mrefused: cannot start collecting[0m     ││[0m[2;36m██▂▂███████ ███▂████████[0m              ││[0m[2;32m█▅▄▅█▆▆▅▅▅▆▄▅▅▅▄▅▅▃▅▆▅▅▅[0m             ││[0m
-││[0m[2m`net.request`: /usr/bin/sqlite3[0m      ││[0m[2mio.latency: 1.56k measured, median[0m    ││[0m[2m1.75k context switches[0m               ││[0m
-││[0m[2mdeclares no request: `net.request`[0m   ││[0m[2m28.9µs[0m                                ││                                     ││[0m
-││[0m[2mfollows a request from a[0m             ││                                      ││                                     ││[0m
-││[0m[2m`request__start(id)` probe to a[0m      ││                                      ││                                     ││[0m
-││[0m[2m`request__done(id)` probe the[0m        ││                                      ││                                     ││[0m
-││[0m[2mprogram fires itself, any provider,[0m  ││                                      ││                                     ││[0m
-││[0m[2mand this one carries no USDT probe…[0m  ││[0m[33m109 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m         ││[0m[33m109 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m           ││[0m
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│[0m
-│┌[0m[1m wake [0m[2m→ wake [0m────────────────────────┐┌[0m[1m flows [0m[2m→ flows [0m───────────────────────┐┌[0m[1m gpu [0m[2m→ lanes [0m────────────────────────┐│[0m
-││[0m[2mhardirq ×517[0m                         ││[0m[1;2;36mnet ↓0B ↑0B[0m                           ││[0m[2mno kernel launched[0m                   ││[0m
-││[0m[2m53.0% of 975 wake-ups; 17 wakers[0m     ││[0m[2;34mdisk ↓0B ↑19.7MiB[0m                     ││[0m[2mdevice memory peak 0B[0m                ││[0m
-││                                     ││[0m[2m↓ received or read · ↑ sent or written[0m││                                     ││[0m
-││                                     ││                                      ││                                     ││[0m
-││                                     ││                                      ││                                     ││[0m
-││                                     ││                                      ││                                     ││[0m
-││                                     ││                                      ││                                     ││[0m
-││                                     ││                                      ││                                     ││[0m
-││[0m[33m109 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m           ││[0m[33m2 late[0m [0m[36m~low det[0m [0m[33mdegraded x3[0m           ││[0m[33m60 late[0m [0m[33mdegraded[0m                     ││[0m
-│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│[0m
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
-[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓ hjkl[0m move between tiles  [0m[1menter[0m open the tile's view           [0m
+ [0m[1msqlite3[0m  pid 1494341 · 1 thread · 6.82s · [0m[35momn costs ≥8.41% cpu[0m                                                         [0m
+[0m[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+ [0m[1;7mCPU     [0m[34m▇███████▇▆▅▄▄▅▇▇▇███████[0m   [0m[1;34m0.909 cores [0m   avg 0.826   peak 0.962  [0m[36m~low det[0m                                     [0m
+ [0m[1mMemory  [0m[34m████████████████████████[0m   [0m[1;34m4.80MiB     [0m   +0B/s   peak 4.80MiB                                                 [0m
+ [0m[1mDisk    [0m[34m█▅▅▅▆▅▅▅▅▃▃▁▃▃▃▃▆▆▃▆▆▆▃▆[0m   [0m[1;34mR 0B/s      [0m   W 2.88MiB/s   p99 4.62ms  [0m[33m109 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m              [0m
+ [0m[1;2mNetwork [0m                           [0m[2mno socket bytes   1 retrans (machine)[0m                                               [0m
+ [0m[1;2mGPU     [0m                           [0m[2mno kernel launched   VRAM 0B[0m                                                        [0m
+ [0m[1mEnergy  [0m[34m▆▆▆▆▆▆▆▅▇███████▇▆▇████▆[0m   [0m[1;34m105 W       [0m   avg 124 W   the machine's, not apportioned                           [0m
+ [0m[1mTime    [0m[32m████████████████████[0m[35m▚▚▚[0m[34m▓[0m   [0m[32mon cpu 82.5%[0m   [0m[35mrun queue 11.3%[0m   [0m[34mI/O 5.10%[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m [0m[33m3 late[0m             [0m
+[0m[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[0m[1m▶ suspect: [0m[1;32mon cpu (on-cpu)  82.5%[0m                                                                   [0m[2mEnter/click → detail[0m
+                                                                                                                        [0m
+[0m[2mCPU in one hue: the machine's cores are not in the recording[0m                                                            [0m
+[0m[2mMemory in one hue: the machine's memory is not in the recording[0m                                                         [0m
+[0m[2mDisk in one hue: a device's speed is not known[0m                                                                          [0m
+[0m[2mEnergy in one hue: energy has no capacity[0m                                                                               [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+                                                                                                                        [0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓ jk[0m move between lines  [0m[1menter[0m open the line's page             [0m
