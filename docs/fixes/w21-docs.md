@@ -87,7 +87,9 @@ carries no `MODEL_BUDGET` or `budget is required` fallback.
   Not measured: no GPU bench runs in this wave's streams.
 - Reasoned: that adding the job makes `make-sqlite` and `gcc-shell` agree.
   The MCP way's "job" is every task off the chain, since a decomposition
-  table does not say which process a task is in.
+  table does not say which process a task is in. That is an upper bound
+  (`src/triage/latency.rs`, `Job`: "they may be more"), so `gcc-shell`'s
+  pass is a loosened comparison, not a fix in triage; see "Review".
 - Reasoned: the CATALOG rows against `catalog/*.yaml`, read entry by entry;
   no test reads `CATALOG.md`'s rows.
 
@@ -166,6 +168,30 @@ machine):
   path the job overshoots by the build's other work (7.1 s against 5.3 s).
   A job restricted to the processes under the followed child's parent (the
   driver the wait named) would be the reference's account.
-- **coordinator (`cases/`)**: `cases/gcc-shell/case.yml` lost its open
-  finding and `cases/make-sqlite/case.yml`'s text changed, in this branch;
-  `cases/` is in no row of the streams table.
+- **coordinator (`cases/`), to sign off at the merge**: two edits outside
+  this row's files. `cases/gcc-shell/case.yml` lost its open finding on
+  `every-cited-number-agrees-with-the-reference` /
+  `a-cpu-shared-with-two-competitors`, and `cases/make-sqlite/case.yml`'s
+  finding text changed; `cases/` is in no row of the streams table. The
+  merge message should say that `gcc-shell`'s finding closes on a loosened
+  comparison (the row plus `followed.job`, an upper bound on the MCP way),
+  not on a change in triage.
+- **triage (`src/triage/latency.rs`, `Job`)**, the same request as above
+  seen from `gcc-shell`: once the job is restricted to the followed child's
+  parent, `gcc-shell`'s pass would rest on the job itself rather than on an
+  upper bound, and `tests/cases.rs` could read it as such.
+
+## Review
+
+- **"Edits outside the docs row's owned files; the gcc-shell pass rests on
+  a loosened comparison" (gap).** Agreed, and kept as is. The two `cases/`
+  edits are needed by this row's own test: `every_case_names_its_known_cause_both_ways`
+  fails on an open finding that passes, so leaving `gcc-shell`'s entry in
+  place reds the suite. What passes is the row plus `followed.job`, and on
+  the MCP way that job is every busy task off the chain -- an upper bound,
+  as triage's `Job` doc comment says. So the finding is closed by the
+  comparison, not by triage. Fixed by saying so where a reader meets it:
+  the two comments in `tests/cases.rs` (the MCP job, and where the job is
+  added to a row), the "Shown versus reasoned" bullet above, and the
+  coordinator's and triage's lines under "Needs from another stream", which
+  ask for the sign-off and for the merge message to state it.

@@ -1025,7 +1025,10 @@ fn read_mcp(
     let task = table["key"].as_str().map(str::to_owned);
     // The rest of the job, as the person's way reads it: every busy task off
     // the followed chain, once the chain left the main thread. The tables do
-    // not say which process a task is in, so this is every other task.
+    // not say which process a task is in, so this is every other task: an
+    // upper bound on the job, as triage's own `Job` says ("may be more").
+    // A row that agrees once this is added agrees on a loosened comparison,
+    // not because triage's decomposition changed.
     let mut job = BTreeMap::new();
     if !followed.is_empty() {
         for state in ["on-cpu", "runnable"] {
@@ -1476,7 +1479,9 @@ fn check_answer(
                 .ok_or_else(|| format!("no `{}` row has an amount", agree.row))?;
             // A row decomposed in place of a wait for a child is that child's;
             // the rest of its job ran beside it, and a reference that counts
-            // the job counts both.
+            // the job counts both. The job is every busy task off the way
+            // (`triage::latency::Job`), so this can only raise the row: a
+            // check that passes with it is loosened, not fixed in triage.
             let job = if for_a_child {
                 answer.job.get(&agree.row).copied()
             } else {
