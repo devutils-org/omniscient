@@ -390,3 +390,28 @@ fn a_device_run_records_the_state_of_the_clocks_it_read_and_never_set() {
         other => eprintln!("persistence not compared: nvidia-smi answered {other:?}"),
     }
 }
+
+/// `gpu.profile`'s stacks are the device's -- kernel, line, stall -- and
+/// nothing is unwound: the resolver's unwinding warning is not raised for
+/// it, and still is for a host profile in the same session.
+#[test]
+fn a_device_stack_raises_no_unwinding_warning() {
+    let session = std::env::temp_dir().join(format!("omn-gpu-unwind-{}.yml", std::process::id()));
+    std::fs::write(
+        &session,
+        "requests:\n  \
+         - {source: gpu.profile, target: {launch: [x]}, mode: trace, emit: [stack]}\n  \
+         - {source: cpu.profile, target: {launch: [x]}, mode: sample, emit: [stack]}\n",
+    )
+    .unwrap();
+    let output = run(&["validate", "-f", session.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&session);
+    let text = stdout(&output);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let warned: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("no --stack given"))
+        .collect();
+    assert_eq!(warned.len(), 1, "{text}");
+    assert!(warned[0].contains("[cpu.profile #2]"), "{text}");
+}

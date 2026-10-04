@@ -24,6 +24,11 @@ use crate::capabilities::Probe;
 
 pub use counters::launch_refusals;
 
+/// The sources whose stacks are the device's -- kernel, source line, stall
+/// reason -- and never a host stack: nothing is unwound, so `--stack` has no
+/// mode to pick and the resolver's unwinding warning has nothing to say.
+pub const DEVICE_STACKS: &[&str] = &["gpu.profile"];
+
 /// The collectors this family provides.
 ///
 /// The sysfs backends of these same sources -- `fs:sys:amdgpu`, `fs:sys:i915`

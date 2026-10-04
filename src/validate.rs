@@ -774,6 +774,7 @@ fn check_stack(
             .emit
             .iter()
             .any(|emit| emit.kind() == EmitKind::Stack)
+            && !crate::collect::gpu::DEVICE_STACKS.contains(&request.source.as_str())
         {
             report.push("no --stack given (or `auto`), so the resolver picks the best unwind mode this machine and this target serve, and says why it passed over the others");
         }
