@@ -896,6 +896,11 @@ pub fn executable_names(argv0: &str) -> Vec<String> {
 /// program's perf map, or by its leaf. A flat profile of an interpreter
 /// whose hottest functions were charged by their leaves names none of them
 /// as the suspect, and says why.
+///
+/// A sample taken while the kernel ran an eBPF program -- a frame of
+/// [`is_ebpf_frame`] anywhere on its stack -- is the tool's own cost charged
+/// to the program's cpu, not the program's work: it is counted and said, and
+/// never ranked, so the tool's programs are never the named suspect.
 pub fn hottest<'a>(
     samples: impl IntoIterator<Item = Option<&'a [String]>>,
     perf: &PerfMapNames,
@@ -905,8 +910,13 @@ pub fn hottest<'a>(
     let mut by: BTreeMap<&str, (u64, bool)> = BTreeMap::new();
     let mut total = 0u64;
     let mut through_map = 0u64;
+    let mut ebpf = 0u64;
     let mut stacks: Vec<&'a [String]> = Vec::new();
     for frames in samples {
+        if frames.is_some_and(|frames| frames.iter().any(|frame| is_ebpf_frame(frame))) {
+            ebpf += 1;
+            continue;
+        }
         total += 1;
         let (charged, mapped) = match frames {
             Some(frames) => {
@@ -925,13 +935,28 @@ pub fn hottest<'a>(
         .map(|(name, (count, mapped))| (name, count, mapped))
         .collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    let (name, count, mapped) = *ranked.first()?;
+    let tool = if ebpf > 0 {
+        format!(
+            "; {ebpf} more sample(s) ran eBPF programs -- the tool's own cost on the program's \
+             cpu -- and are not ranked"
+        )
+    } else {
+        String::new()
+    };
+    let Some(&(name, count, mapped)) = ranked.first() else {
+        return (ebpf > 0).then(|| {
+            format!(
+                "no function is named: every one of the {ebpf} samples ran eBPF programs, the \
+                 tool's own cost on the program's cpu"
+            )
+        });
+    };
     let share = |count: u64| count as f64 / total as f64 * 100.0;
     if mapped {
         return Some(format!(
             "hottest function `{name}`, {count} of {total} samples ({:.0} %), charged to the \
              innermost frame the program's perf map named ({through_map} of the {total} samples \
-             had one; the leaf under it is the runtime's)",
+             had one; the leaf under it is the runtime's){tool}",
             share(count)
         ));
     }
@@ -960,13 +985,13 @@ pub fn hottest<'a>(
                  half the samples ({} of {total}, each by its leaf{partly}): {unnamed}, so \
                  which of them these ran for is not known, and none is named as the suspect -- \
                  each may be the interpreter's own work or a library's the program called. A \
-                 perf map would name the program's functions: {map}",
+                 perf map would name the program's functions: {map}{tool}",
                 spread.join(", ")
             ));
         }
     }
     Some(format!(
-        "hottest function `{name}`, {count} of {total} samples ({:.0} %){}",
+        "hottest function `{name}`, {count} of {total} samples ({:.0} %){}{tool}",
         share(count),
         if partly.is_empty() {
             String::new()
@@ -974,6 +999,22 @@ pub fn hottest<'a>(
             format!(", charged by its leaf{partly}")
         }
     ))
+}
+
+/// Whether a frame is the kernel running an eBPF program: the program
+/// itself (`bpf_prog_<tag>_<name>`), or the code that calls one from a
+/// tracepoint, a kprobe or a trampoline (`bpf_trace_run2`,
+/// `__bpf_trace_sched_switch`, `trace_call_bpf`, `bpf_trampoline_...`). The
+/// tool attaches such programs to the program's own tracepoints, and their
+/// time lands on its cpu.
+pub fn is_ebpf_frame(frame: &str) -> bool {
+    let name = frame.split(['+', ' ', '(']).next().unwrap_or("");
+    name.starts_with("bpf_prog_")
+        || name.starts_with("bpf_trace_run")
+        || name.starts_with("__bpf_trace_")
+        || name.starts_with("__bpf_prog_")
+        || name.starts_with("bpf_trampoline_")
+        || name == "trace_call_bpf"
 }
 
 /// A blocking stack's frames, leaf first, as far as the program's own frame:
@@ -1122,6 +1163,52 @@ mod tests {
 
     fn labels(stack: &str) -> Vec<String> {
         stack.split(';').map(str::to_owned).collect()
+    }
+
+    /// `sqlite3-durability`'s commits: the leaf of the samples the tool's
+    /// programs took is `bpf_trace_run2` or a helper under it, and it
+    /// outnumbered the program's own leaf.
+    #[test]
+    fn the_tool_s_own_ebpf_programs_are_said_and_never_named_as_the_hottest_function() {
+        let tool = labels("main;fsync;schedule;__traceiter_sched_switch;bpf_trace_run2");
+        let helper = labels(
+            "main;futex_wait;bpf_trace_run2;bpf_prog_6deef7357e7b4530_omn_futex_out;\
+             _raw_spin_unlock_irqrestore",
+        );
+        let own = labels("main;sqlite3VdbeExec");
+        let mut samples: Vec<Option<&[String]>> = Vec::new();
+        samples.extend(std::iter::repeat_n(Some(tool.as_slice()), 57));
+        samples.extend(std::iter::repeat_n(Some(helper.as_slice()), 34));
+        samples.extend(std::iter::repeat_n(Some(own.as_slice()), 40));
+        let says = hottest(samples.iter().copied(), &PerfMapNames::default(), &[]).unwrap();
+        assert!(
+            says.starts_with("hottest function `sqlite3VdbeExec`, 40 of 40 samples"),
+            "{says}"
+        );
+        assert!(
+            says.contains("91 more sample(s) ran eBPF programs"),
+            "{says}"
+        );
+        let only_tool: Vec<Option<&[String]>> = vec![Some(tool.as_slice()); 3];
+        let says = hottest(only_tool, &PerfMapNames::default(), &[]).unwrap();
+        assert!(says.starts_with("no function is named"), "{says}");
+        assert!(!says.contains("hottest function"), "{says}");
+        for frame in [
+            "bpf_trace_run2",
+            "bpf_trace_run4+0x7a",
+            "bpf_prog_6deef7357e7b4530_omn_futex_out",
+            "__bpf_trace_sched_switch",
+            "trace_call_bpf",
+        ] {
+            assert!(is_ebpf_frame(frame), "{frame}");
+        }
+        for frame in [
+            "schedule",
+            "bpf_map_lookup_elem_user",
+            "__traceiter_sched_switch",
+        ] {
+            assert!(!is_ebpf_frame(frame), "{frame}");
+        }
     }
 
     fn mapped(symbols: &[&str]) -> PerfMapNames {

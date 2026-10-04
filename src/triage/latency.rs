@@ -275,12 +275,17 @@ impl Ask {
 }
 
 /// What a state's time was spent on, which is what a verdict names.
+///
+/// The JSON spells it as the text and the catalog do (`cpu-queue`,
+/// `other-block`, [`Limit::as_str`]); the snake-case spelling earlier answers
+/// were written with is still read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum Limit {
     /// On a cpu, doing its own work.
     Cpu,
     /// Runnable and waiting for a cpu: the cpu is shared, and busy.
+    #[serde(alias = "cpu_queue")]
     CpuQueue,
     /// Blocked uninterruptibly, which is usually a disk.
     Disk,
@@ -293,6 +298,7 @@ pub enum Limit {
     /// socket, a lock polled with a sleep between tries, a wait for a child.
     Sleep,
     /// Blocked in a state that is neither: stopped, traced, idle.
+    #[serde(alias = "other_block")]
     OtherBlock,
 }
 
@@ -420,6 +426,13 @@ pub enum Relation {
     /// the program or a child, the run cannot say which. Decomposed in the
     /// block's place, its whole the block, and its silent rows unread.
     Unplaced,
+    /// Another thread of the same process that was itself blocked on a
+    /// connection -- in a send or a receive -- for a quarter of the block or
+    /// more, while no thread ran in it: the request it serves is what the
+    /// program waited on (a server's `select` while its serving thread
+    /// writes to a slow client). Named beside the block as a busy thread is,
+    /// its whole what its own rows account for.
+    Waiting,
 }
 
 /// A task followed from the block it ran in.
@@ -646,7 +659,7 @@ fn write_reading(out: &mut String, run: &Reading, title: &str, indent: &str) {
     if let Some(followed) = &run.followed {
         let how = match followed.relation {
             Relation::Child | Relation::Unplaced => "in its place",
-            Relation::Thread => "beside it",
+            Relation::Thread | Relation::Waiting => "beside it",
         };
         let _ = writeln!(
             out,
@@ -845,6 +858,15 @@ fn path_clause(chain: &[(Option<&Followed>, &Reading)]) -> String {
                 span(followed.amount),
                 below.task
             ),
+            (Relation::Waiting, _) => format!(
+                "{} was `{}` {}{share} while no thread ran in it, and beside it {}, a thread of \
+                 the process blocked on a connection through it -- the request it serves -- is \
+                 decomposed",
+                above.task,
+                followed.during,
+                span(followed.amount),
+                below.task
+            ),
             (Relation::Unplaced, _) => format!(
                 "{} was `{}` {}{share} while {} ran, a task no source placed in a process -- a \
                  thread of the program or a child, the run cannot say which -- and it is \
@@ -880,7 +902,7 @@ fn latency(run: &Reading, runs: usize) -> Verdict {
             format!("for latency, in {which}, {path}: it"),
             "of the wait it ran in",
         ),
-        Some(Relation::Thread) => (
+        Some(Relation::Thread | Relation::Waiting) => (
             format!("for latency, in {which}, {path}: it"),
             "of what its rows account for",
         ),
@@ -1175,7 +1197,9 @@ pub fn read(run: &Run, target: &Target) -> Result<Reading, TriageError> {
     }
     tasks.follow(&mut reading, process, 0);
     let elsewhere = reading.chain().iter().any(|(followed, _)| {
-        followed.is_some_and(|followed| followed.relation != Relation::Thread)
+        followed.is_some_and(|followed| {
+            !matches!(followed.relation, Relation::Thread | Relation::Waiting)
+        })
     });
     reading.costly = costly(run, elsewhere);
     Ok(reading)
@@ -1436,6 +1460,28 @@ pub fn is_wait_for_child(frame: &str) -> bool {
         || name.starts_with("waitid")
 }
 
+/// Whether a frame is a send or a receive on a connection, by its
+/// function's name -- `send`, `sendto`, `sendmsg`, `recv`, `recvfrom`,
+/// `recvmsg`, whatever the C library calls its own copy, and a `sendall` --
+/// or by its module, Python's socket module (`_socket.cpython-...so+0x...`).
+/// An `accept`, a `select` or a `poll` is not one: a thread waiting there
+/// waits for a connection to begin, not on one it serves.
+pub fn is_connection_frame(frame: &str) -> bool {
+    if frame.starts_with("_socket.") {
+        return true;
+    }
+    let name = frame
+        .split(['+', '@', ' ', '('])
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('_');
+    let name = name.strip_prefix("libc_").unwrap_or(name);
+    matches!(
+        name,
+        "send" | "sendto" | "sendmsg" | "sendmmsg" | "recv" | "recvfrom" | "recvmsg" | "recvmmsg"
+    ) || name.contains("sendall")
+}
+
 /// What the run can tell about which task is which, while a reading is
 /// followed from task to task.
 struct Tasks<'a> {
@@ -1482,7 +1528,7 @@ impl Tasks<'_> {
         // Busy -- on a cpu or queued for one -- for a quarter of the block: a
         // helper that slept beside it did not run in it.
         let enough = |table: &Breakdown| busy(table) >= block * RAN_IN_IT;
-        let chosen = match (&wait, child, thread, unplaced) {
+        let mut chosen = match (&wait, child, thread, unplaced) {
             (Some(_), Some(child), _, _) => Some((Relation::Child, child)),
             // The stack names a wait for a child, and no source placed the
             // busiest task it could be: taken for the child on the stack's
@@ -1493,6 +1539,18 @@ impl Tasks<'_> {
             (_, _, _, Some(task)) if enough(task) => Some((Relation::Unplaced, task)),
             _ => None,
         };
+        // Nothing ran in the block: a thread of the process blocked on a
+        // connection through it is what the program waited on.
+        let mut on_connection = None;
+        if chosen.is_none() {
+            if let Some((table, frame, amount)) = self.waiting_on_connection(process, &reading.task)
+            {
+                if amount >= block * RAN_IN_IT {
+                    on_connection = Some((frame, amount));
+                    chosen = Some((Relation::Waiting, table));
+                }
+            }
+        }
         let Some((relation, table)) = chosen else {
             return;
         };
@@ -1543,6 +1601,30 @@ impl Tasks<'_> {
                     reading.task
                 ),
             ),
+            Relation::Waiting => (
+                GivenWhole {
+                    amount: accounted(table),
+                    state: "whole: its rows".to_owned(),
+                    source: "the rows, added up".to_owned(),
+                    kind: block_kind,
+                    resolution: table
+                        .rows
+                        .iter()
+                        .map(|row| row.resolution)
+                        .sum::<Option<f64>>(),
+                },
+                {
+                    let (frame, amount) = on_connection.clone().unwrap_or_default();
+                    format!(
+                        "the thread of the process blocked longest on a connection ({} in \
+                         `{frame}`) while {} was `{during}` and no thread ran in it: the request \
+                         it serves is what the program waited on; its whole is what its own rows \
+                         account for",
+                        span(amount),
+                        reading.task
+                    )
+                },
+            ),
             Relation::Unplaced => (
                 GivenWhole {
                     amount: block,
@@ -1561,11 +1643,11 @@ impl Tasks<'_> {
         };
         let placed = match relation {
             Relation::Child => Placed::Other,
-            Relation::Thread => Placed::Own,
+            Relation::Thread | Relation::Waiting => Placed::Own,
             Relation::Unplaced => Placed::Unknown,
         };
         let mut followed = read_table(self.run, table, &task, because, Some(whole), placed);
-        if relation == Relation::Thread {
+        if matches!(relation, Relation::Thread | Relation::Waiting) {
             // A thread of the program is watched by every source: its zeros
             // stand, and its residue is zero by construction, so none is said.
             followed.residue = None;
@@ -1573,7 +1655,7 @@ impl Tasks<'_> {
         self.seen.insert(task.clone());
         let below = match relation {
             Relation::Child | Relation::Unplaced => self.pid_of.get(&task).copied(),
-            Relation::Thread => process,
+            Relation::Thread | Relation::Waiting => process,
         };
         if let Some(below) = below {
             self.processes.insert(below);
@@ -1634,6 +1716,54 @@ impl Tasks<'_> {
             .filter(|(_, busy)| *busy > 0.0)
             .max_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(table, _)| table)
+    }
+
+    /// The other thread of `process` blocked longest on a connection, with
+    /// the frame that says so and that time: the off-cpu time of its blocks
+    /// whose stack goes through a send or a receive ([`is_connection_frame`]).
+    fn waiting_on_connection(
+        &self,
+        process: Option<u64>,
+        task: &str,
+    ) -> Option<(&Breakdown, String, f64)> {
+        let process = process?;
+        let results = self.run.result(BLOCKED)?;
+        let mut best: Option<(&Breakdown, String, f64)> = None;
+        for table in self.tables {
+            if table.key == task
+                || self.seen.contains(&table.key)
+                || self.pid_of.get(&table.key) != Some(&process)
+            {
+                continue;
+            }
+            let mut by_frame: BTreeMap<&str, f64> = BTreeMap::new();
+            for event in self
+                .run
+                .events_of("sched.offcpu")
+                .filter(|event| is_task(event, &table.key))
+            {
+                let Some(frames) =
+                    attr(event, STACK_ID_ATTR).and_then(|id| results.stacks.get(&(id as u64)))
+                else {
+                    continue;
+                };
+                let Some(frame) = frames.iter().rev().find(|frame| is_connection_frame(frame))
+                else {
+                    continue;
+                };
+                *by_frame.entry(frame.as_str()).or_default() += attr(event, "total_ns")
+                    .unwrap_or(0.0)
+                    - attr(event, "queued_ns").unwrap_or(0.0);
+            }
+            let amount: f64 = by_frame.values().sum();
+            let Some((frame, _)) = by_frame.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)) else {
+                continue;
+            };
+            if amount > 0.0 && best.as_ref().is_none_or(|(_, _, most)| amount > *most) {
+                best = Some((table, frame.to_owned(), amount));
+            }
+        }
+        best
     }
 
     /// The busiest other thread of `process`: the most time on a cpu or
@@ -2090,6 +2220,31 @@ mod tests {
             notes: Vec::new(),
             costly: Vec::new(),
             followed: None,
+        }
+    }
+
+    #[test]
+    fn the_json_spells_every_limit_as_the_text_does_and_still_reads_the_old_spelling() {
+        for limit in [
+            Limit::Cpu,
+            Limit::CpuQueue,
+            Limit::Disk,
+            Limit::Lock,
+            Limit::Futex,
+            Limit::Sleep,
+            Limit::OtherBlock,
+        ] {
+            let written = serde_json::to_value(limit).unwrap();
+            assert_eq!(written, serde_json::json!(limit.as_str()));
+            let back: Limit = serde_json::from_value(written).unwrap();
+            assert_eq!(back, limit);
+        }
+        for (old, limit) in [
+            ("cpu_queue", Limit::CpuQueue),
+            ("other_block", Limit::OtherBlock),
+        ] {
+            let read: Limit = serde_json::from_value(serde_json::json!(old)).unwrap();
+            assert_eq!(read, limit);
         }
     }
 
@@ -2739,6 +2894,117 @@ mod tests {
         let reading = read_launched(&run);
         assert!(reading.followed.is_none(), "{:?}", reading.followed);
         assert_eq!(latency(&reading, 1).limit, Some(Limit::Sleep));
+    }
+
+    /// `http-server-stdlib`'s slow client: the main thread in `select` for
+    /// 300 ms, a serving thread of the same process blocked 160 ms in a
+    /// `send` to the client, and an idle helper asleep the whole time. No
+    /// thread ran in the block, and the serving thread is named beside it as
+    /// a busy one would be; the helper, whose sleep is no connection, is not.
+    #[test]
+    fn a_thread_blocked_on_a_connection_beside_the_block_is_named_beside_it() {
+        let blocked_in = |tid: i32, sleep: f64, stack: u64| {
+            event(
+                "sched.offcpu",
+                tid,
+                vec![
+                    Attr::uint("pid", 100),
+                    Attr::uint("tid", tid as u64),
+                    Attr::text("state", "sleeping"),
+                    Attr::float("total_ns", sleep),
+                    Attr::float("queued_ns", 0.0),
+                    Attr::uint(STACK_ID_ATTR, stack),
+                ],
+            )
+        };
+        let with_stacks = |mut run: Run| {
+            let offcpu = run
+                .output
+                .results
+                .iter_mut()
+                .find(|results| results.source == "sched.offcpu")
+                .expect("sched.offcpu");
+            offcpu.label = BLOCKED.to_owned();
+            offcpu.stacks = BTreeMap::from([
+                (
+                    1,
+                    vec!["main".to_owned(), "select.cpython-312.so+0x1f2".to_owned()],
+                ),
+                (
+                    2,
+                    vec![
+                        "thread_start".to_owned(),
+                        "_socket.cpython-312.so+0x5a1".to_owned(),
+                        "send".to_owned(),
+                    ],
+                ),
+                (
+                    3,
+                    vec!["thread_start".to_owned(), "pthread_cond_wait".to_owned()],
+                ),
+            ]);
+            run
+        };
+        let tables = |serving: f64| {
+            vec![
+                main_table(),
+                table("task:101", 2.0 * MS, Some(0.0), Some(serving)),
+                table("task:102", 1.0 * MS, Some(0.0), Some(299.0 * MS)),
+            ]
+        };
+        let events = |serving: f64| {
+            vec![
+                blocked_in(100, 300.0 * MS, 1),
+                blocked_in(101, serving, 2),
+                blocked_in(102, 299.0 * MS, 3),
+            ]
+        };
+        let run = with_stacks(run_of(tables(160.0 * MS), events(160.0 * MS), false));
+        let reading = read_launched(&run);
+        let followed = reading.followed.as_deref().expect("the serving thread");
+        assert_eq!(followed.relation, Relation::Waiting);
+        assert_eq!(followed.reading.task, "task:101");
+        assert!(
+            followed.reading.chosen_because.contains("`send`"),
+            "{}",
+            followed.reading.chosen_because
+        );
+        let verdict = latency(&reading, 1);
+        assert_eq!(verdict.task.as_deref(), Some("task:101"));
+        assert_eq!(verdict.limit, Some(Limit::Sleep), "{}", verdict.sentence);
+        assert!(
+            verdict.sentence.contains("blocked on a connection"),
+            "{}",
+            verdict.sentence
+        );
+        // Blocked on it for less than a quarter of the block: not named.
+        let run = with_stacks(run_of(tables(60.0 * MS), events(60.0 * MS), false));
+        assert!(read_launched(&run).followed.is_none());
+    }
+
+    #[test]
+    fn a_send_or_a_receive_is_a_connection_and_a_select_is_not() {
+        for frame in [
+            "send",
+            "__libc_send",
+            "__send",
+            "recvfrom",
+            "__libc_recvmsg",
+            "sock_sendall",
+            "_socket.cpython-312-x86_64-linux-gnu.so+0x5a1",
+        ] {
+            assert!(is_connection_frame(frame), "{frame}");
+        }
+        for frame in [
+            "select",
+            "accept4",
+            "poll",
+            "epoll_wait",
+            "select.cpython-312-x86_64-linux-gnu.so+0x1f2",
+            "sendfile",
+        ] {
+            assert!(!is_connection_frame(frame), "{frame}");
+        }
     }
 
     /// A child process a source placed, with no wait on the stack: followed
