@@ -169,25 +169,54 @@ impl FootprintCollector {
         }
     }
 
-    fn read_bytes(&self) -> Result<u64, SampleError> {
-        let text = std::fs::read_to_string(&self.path).map_err(|error| {
-            // A process that dies between two reads is the end of the run, not
-            // a lost sample. procfs reports it as ENOENT when the directory is
-            // already gone and as ESRCH when it is going: counting either as a
-            // failed read would make every clean run look lossy.
-            let gone = error.kind() == std::io::ErrorKind::NotFound
-                || error.raw_os_error() == Some(libc::ESRCH);
-            if gone {
-                SampleError::TargetGone(format!("process {} exited", self.pid))
-            } else if error.kind() == std::io::ErrorKind::PermissionDenied {
-                SampleError::TargetGone(format!(
-                    "{} is no longer readable: {error}",
-                    self.path.display()
-                ))
-            } else {
-                SampleError::Transient(format!("{}: {error}", self.path.display()))
+    /// The file's text, from `open_and_read` (a fresh open each call): once,
+    /// and once more when the first answer is ESRCH from a process that is
+    /// still running.
+    ///
+    /// `smaps_rollup` and `smaps` are bound at their open to the address space
+    /// the process had then, and an `execve` between the open and the read
+    /// leaves them bound to one that no longer exists: the read answers ESRCH
+    /// although the process is alive and has a new address space to measure.
+    /// A launched program is in `execve` right when the run's first reads are
+    /// taken, and a read that straddled it ended the run as *"process exited"*
+    /// with nothing measured. A fresh open is bound to the new address space.
+    /// A second failure is the first's verdict: transient from a running
+    /// process, the end from a gone one.
+    fn text(
+        &self,
+        open_and_read: impl Fn() -> std::io::Result<String>,
+    ) -> Result<String, SampleError> {
+        match open_and_read() {
+            Ok(text) => Ok(text),
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) && still_running(self.pid) => {
+                open_and_read().map_err(|error| self.gone_or_transient(error))
             }
-        })?;
+            Err(error) => Err(self.gone_or_transient(error)),
+        }
+    }
+
+    /// A process that dies between two reads is the end of the run, not a
+    /// lost sample. procfs reports it as ENOENT when the directory is already
+    /// gone and as ESRCH when it is going -- or when the process is a zombie,
+    /// whose address space is gone too. An ESRCH from a process that is still
+    /// running is neither: it is a read that failed, counted as one.
+    fn gone_or_transient(&self, error: std::io::Error) -> SampleError {
+        let gone = error.kind() == std::io::ErrorKind::NotFound
+            || (error.raw_os_error() == Some(libc::ESRCH) && !still_running(self.pid));
+        if gone {
+            SampleError::TargetGone(format!("process {} exited", self.pid))
+        } else if error.kind() == std::io::ErrorKind::PermissionDenied {
+            SampleError::TargetGone(format!(
+                "{} is no longer readable: {error}",
+                self.path.display()
+            ))
+        } else {
+            SampleError::Transient(format!("{}: {error}", self.path.display()))
+        }
+    }
+
+    fn read_bytes(&self) -> Result<u64, SampleError> {
+        let text = self.text(|| std::fs::read_to_string(&self.path))?;
 
         match self.source {
             // `size resident shared text lib data dt`, in pages. Resident size
@@ -277,6 +306,20 @@ impl Collector for FootprintCollector {
 /// Returns `None` when not one of them appears, which means the file is not
 /// what this collector thinks it is -- a kernel without `smaps_rollup`
 /// support answers with an empty block rather than an error.
+/// Whether `pid` is a process with an address space: present in procfs and
+/// neither a zombie nor dead. A zombie's `smaps_rollup` answers ESRCH too, and
+/// that one is the end of the run. The same test as `wss.rs`'s.
+fn still_running(pid: i32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The state is the first field after the command, which is in
+    // parentheses and may itself hold spaces and parentheses.
+    stat.rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .is_some_and(|state| !matches!(state, "Z" | "X" | "x"))
+}
+
 fn sum_fields(text: &str, fields: &[&str]) -> Option<u64> {
     let mut total = 0u64;
     let mut seen = false;
@@ -705,6 +748,87 @@ mod tests {
         assert_eq!(events[0].kind, "mem.rss");
         assert_eq!(events[0].seq, 3);
         assert!(events[0].ts_ns > 0);
+    }
+
+    /// The second read, driven: an ESRCH from a running process is read once
+    /// more and the second answer stands; an ESRCH that persists is a failed
+    /// read, not the end, and is not read a third time; any other error is not
+    /// read again; from a zombie it is the end at once, with no second read.
+    #[test]
+    fn an_esrch_from_a_running_process_is_read_once_more_and_never_ends_the_run() {
+        let esrch = || std::io::Error::from_raw_os_error(libc::ESRCH);
+        let alive = FootprintCollector::new(
+            std::process::id() as i32,
+            Metric::Rss,
+            Source::SmapsRollup,
+            Duration::ZERO,
+        );
+
+        let calls = std::cell::Cell::new(0);
+        let text = alive.text(|| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Err(esrch())
+            } else {
+                Ok("Rss: 4 kB\n".to_string())
+            }
+        });
+        assert_eq!(
+            calls.get(),
+            2,
+            "an ESRCH from a running process is read again"
+        );
+        assert!(text.is_ok_and(|t| t.contains("Rss")));
+
+        calls.set(0);
+        let verdict = alive.text(|| {
+            calls.set(calls.get() + 1);
+            Err(esrch())
+        });
+        assert_eq!(calls.get(), 2, "read twice, not more");
+        assert!(
+            matches!(verdict, Err(SampleError::Transient(_))),
+            "a persisting ESRCH from a running process is a failed read: {verdict:?}"
+        );
+
+        calls.set(0);
+        let other = alive.text(|| {
+            calls.set(calls.get() + 1);
+            Err(std::io::Error::from_raw_os_error(libc::EIO))
+        });
+        assert_eq!(calls.get(), 1, "only ESRCH is read again");
+        assert!(matches!(other, Err(SampleError::Transient(_))), "{other:?}");
+
+        // SAFETY: the child only exits.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork must succeed");
+        if pid == 0 {
+            // SAFETY: the only call the child makes.
+            unsafe { libc::_exit(0) };
+        }
+        // Wait for the zombie without reaping it.
+        let mut zombie = false;
+        for _ in 0..1000 {
+            if !still_running(pid) {
+                zombie = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let gone = FootprintCollector::new(pid, Metric::Rss, Source::SmapsRollup, Duration::ZERO);
+        calls.set(0);
+        let verdict = gone.text(|| {
+            calls.set(calls.get() + 1);
+            Err(esrch())
+        });
+        // SAFETY: reaping a child of this process.
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+        assert!(zombie, "the child never became a zombie");
+        assert_eq!(calls.get(), 1, "a zombie's ESRCH is not read again");
+        assert!(
+            matches!(verdict, Err(SampleError::TargetGone(_))),
+            "a zombie has no address space left: {verdict:?}"
+        );
     }
 
     #[test]
