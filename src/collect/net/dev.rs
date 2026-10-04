@@ -357,7 +357,8 @@ mod tests {
 
     #[test]
     fn a_process_target_is_refused_with_the_reason() {
-        let Err(error) = Box::new(Prepare(Counted::Bytes, false)).attach(&Target::Pid(vec![1])) else {
+        let Err(error) = Box::new(Prepare(Counted::Bytes, false)).attach(&Target::Pid(vec![1]))
+        else {
             panic!("a process target has no interface counters and must be refused");
         };
         assert!(error.contains("--iface"), "{error}");
