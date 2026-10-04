@@ -199,9 +199,10 @@
        sampling, not the device."
     - "The kernel counts what is outstanding twice, and the two can part: the
        I/O accounting in /proc/diskstats (scheduler queue included) and the
-       requests the driver holds in /sys/block/<dev>/inflight. On one 6.17
-       kernel the disk's diskstats line read 0 under a queue of 199
-       (docs/scenarios/io.md, defect 20; the cause is still open). `inflight`
+       requests the driver holds in /sys/block/<dev>/inflight. Before 7.2 the
+       first counted a request on the partition it came through and never on
+       the disk, so a 6.17 disk's line read 0 under a queue of 199
+       (docs/scenarios/io.md, defect 20). `inflight`
        is the larger of the two, each a count of requests really outstanding;
        `diskstats_inflight` and `sysfs_inflight` carry each, and
        `sysfs_inflight` is absent, not zero, where the file could not be read."

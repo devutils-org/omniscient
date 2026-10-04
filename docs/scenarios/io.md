@@ -1353,6 +1353,37 @@ Held also by `diskstats::tests::a_queue_one_account_misses_is_read_from_the_othe
 Shown green here; **whether the CI's cells go green is the next CI run's to
 show**.
 
+**The cause, settled from the kernel's source (the twentieth wave).** The
+partition reading was right. In 6.17, `/proc/diskstats`' ninth column is
+`bdev_count_inflight(hd)` (`block/genhd.c`), which sums the per-cpu
+`in_flight` counters of that one `block_device`; `blk_account_io_start`
+(`block/blk-mq.c`) increments them with `part_stat_local_inc(req->part, ...)`,
+and `part_stat_local_inc` touches only the partition it is given -- unlike
+`part_stat_inc`, which adds to the whole disk too. So a request through
+`nvme0n1p1` was outstanding on `nvme0n1p1`'s line and on no other, and the
+disk's line read 0. `/sys/block/nvme0n1/inflight` on a multi-queue device goes
+through `blk_mq_in_driver_rw` instead, which walks the driver's tags for the
+whole disk: 199. Upstream fixed it in 7.2 (`5bdb8ec58b54`, "block: propagate
+in_flight to whole disk on partition I/O", committed 2026-06-09; its message
+traces the loss back to `e016b78201a2` and the removal of
+`generic_{start,end}_io_acct`): `bdev_inc_in_flight` now adds to the disk
+when the request came through a partition. v7.1's `block/blk.h` has no
+`bdev_inc_in_flight`, v7.2's does, which is why this machine (7.2.7) reads
+the two lines alike. Read from the tags `v6.17` and `v7.2` of the kernel's
+tree, not run on a 6.17 machine; the CI's next log, whose
+`diskstats_inflight` should read 0 where `sysfs_inflight` does not, is what
+would show it.
+
+The workaround stays right, and is now explained: on a kernel before 7.2,
+a disk's diskstats column counts only I/O addressed to the whole disk, and the
+sysfs walk is the account that holds the rest. What it still misses there is
+a request through a partition that is in the scheduler and not yet in the
+driver (`blk_mq_in_driver_rw` counts only the driver's); the partition's own
+line holds those, and adding the partitions' columns to the disk's where the
+disk's is the smaller would recover them. Not done: the partitions are lines
+the collector leaves out on purpose, and the CI's `none` scheduler holds
+nothing there.
+
 ### 21. The program statistics read 0 runs while the histogram counted 26.8 M — **fixed for `io.latency`; the rest filed**
 
 The coordinator's `null_blk` run with `kernel.bpf_stats_enabled=1` printed
