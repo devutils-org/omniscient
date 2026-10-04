@@ -52,8 +52,10 @@ readable in a third of the screen.
 - the tile whose view explains that suspect gets a thick border in the same
   colour: on cpu, sleep and blocked → `cpu` (the flame's two panes), run
   queue → `threads`, lock → `wake`, I/O and network → `flows`, child and
-  other → `cost`. A tile the run holds nothing for is never the one marked:
-  the verdict line then names the suspect alone;
+  other → `cost`. A tile with nothing to read is never the one marked --
+  refused, not in the run, or held but empty (`no wake-up of the target`,
+  `no cpu sample` with nothing off cpu either, `no switch recorded`, `no
+  request ended`): the verdict line then names the suspect alone;
 - a request's cause is in its state's colour; the on-cpu function in the
   on-cpu colour, the off-cpu one in the blocked colour; bytes in the
   network's and the device's;
@@ -63,7 +65,10 @@ readable in a third of the screen.
 A tile with nothing to read says so: `not in this run` and what it needs, or
 `<source> refused` and the reason in the refusing layer's words. A program
 that declares no request is the common case: the request tile says `no
-request declared` in dim with the refusal's reason, not in red.
+request declared` in dim with the refusal's reason, not in red. A detail
+line is wrapped to the tile, not cut, so a reason is read in its own words;
+one longer than the tile ends its last row in `…`, and the view the tile
+opens draws it whole.
 
 ## Keys and the mouse
 

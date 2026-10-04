@@ -136,3 +136,38 @@ docs/view/gallery/process-run`, then click a tile twice and right click.
 - **timebar's owner, next wave**: whether a `sched.futex` summary per task
   should split a lock out of sleep on the program's bar (the process
   workload's 0.25 s on a lock reads as sleep).
+
+## Review
+
+Two findings, both fixed in one commit on `feat/w20-process` after merging
+`main`.
+
+- **A refusal's reason was cut to the tile's width** (gap). The detail
+  lines are now wrapped to the tile at word boundaries, the spans keeping
+  their styles (`wrap` in `process.rs`); when the wrapped lines exceed the
+  tile's height, the last row ends in `…` (`ellipsis`), and the view the
+  tile opens draws the reason whole (`request`'s `render_refusal`). The
+  request tile's line is now `refused: <reason>` (the headline already says
+  no request is declared, and the reason names `net.request` itself). On
+  `process--process-run`, re-blessed, the request tile reads the reason
+  down to `and this one carries no USDT probe…`; only the closing pointer
+  to `docs/scenarios/vertical.md` falls off at 120×40.
+- **An empty tile could be marked** (defect). `held` is now set by what the
+  tile draws, not only by `absent()`: `plain()` sets it false, `headline()`
+  true; the cpu tile sets it true again when off cpu holds a function
+  (that is what explains a sleep or a block), and the threads tile false
+  when no switch is recorded (a thread count alone does not explain a run
+  queue). So `no wake-up of the target`, `no cpu sample` with nothing off
+  cpu, `no switch recorded` and `no request ended` are never the tile with
+  the thick border.
+
+Shown: `cargo test -p omn-view` 182 passed (three new tests:
+`a_long_reason_is_wrapped_not_cut`, `a_row_cut_short_ends_in_an_ellipsis_within_the_width`,
+`an_empty_tile_is_never_marked`; `the_tiles_find_what_the_workload_did`
+now checks the request tile carries the reason through `no USDT probe`);
+only `process--process-run` changed among the snapshots; clippy `-p
+omn-view --all-targets -D warnings` and `cargo fmt --all --check` clean.
+
+Reasoned, not shown: that no live run marks an empty tile -- the unit test
+covers `plain()` and `headline()`, not a run whose suspect lands on an empty
+tile, since no recording here has one.

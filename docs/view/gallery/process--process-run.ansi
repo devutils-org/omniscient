@@ -16,14 +16,14 @@
 │└─────────────────────────────────────┘[0m[37m┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛[0m└─────────────────────────────────────┘│[0m
 │┌[0m[1m request [0m[2m→ request [0m──────────────────┐┌[0m[1m latency [0m[2m→ heatmap [0m───────────────────┐┌[0m[1m threads [0m[2m→ lanes [0m────────────────────┐│[0m
 ││[0m[2mno request declared[0m                  ││[0m[2mmax 926µs[0m                             ││[0m[2m3 threads[0m                            ││[0m
-││[0m[2mnet.request refused: cannot start col[0m││[0m[2;36m                █       [0m              ││[0m[2;32m▁ ▁▁ ▂█▇▃  ▁  ▂▁▂▁     ▂[0m             ││[0m
-││                                     ││[0m[2mio.latency: 38 measured, median 31.7µs[0m││[0m[2m854 context switches[0m                 ││[0m
-││                                     ││                                      ││                                     ││[0m
-││                                     ││                                      ││                                     ││[0m
-││                                     ││                                      ││                                     ││[0m
-││                                     ││                                      ││                                     ││[0m
-││                                     ││                                      ││                                     ││[0m
-││                                     ││[0m[33m-79 lost (67.5%)[0m [0m[33m22 late[0m [0m[36m~low det[0m [0m[33mdegr[0m││[0m[33m21 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m         ││[0m
+││[0m[2mrefused: cannot start collecting[0m     ││[0m[2;36m                █       [0m              ││[0m[2;32m▁ ▁▁ ▂█▇▃  ▁  ▂▁▂▁     ▂[0m             ││[0m
+││[0m[2m`net.request`: /usr/bin/python3[0m      ││[0m[2mio.latency: 38 measured, median 31.7µs[0m││[0m[2m854 context switches[0m                 ││[0m
+││[0m[2mdeclares no request: `net.request`[0m   ││                                      ││                                     ││[0m
+││[0m[2mfollows a request from a[0m             ││                                      ││                                     ││[0m
+││[0m[2m`request__start(id)` probe to a[0m      ││                                      ││                                     ││[0m
+││[0m[2m`request__done(id)` probe the[0m        ││                                      ││                                     ││[0m
+││[0m[2mprogram fires itself, any provider,[0m  ││                                      ││                                     ││[0m
+││[0m[2mand this one carries no USDT probe…[0m  ││[0m[33m-79 lost (67.5%)[0m [0m[33m22 late[0m [0m[36m~low det[0m [0m[33mdegr[0m││[0m[33m21 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m         ││[0m
 │└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│[0m
 │┌[0m[1m wake [0m[2m→ wake [0m────────────────────────┐┌[0m[1m flows [0m[2m→ flows [0m───────────────────────┐┌[0m[1m gpu [0m[2m→ lanes [0m────────────────────────┐│[0m
 ││[0m[2mhardirq ×7[0m                           ││[0m[1;2;36mnet ↓256KiB ↑1.00MiB[0m                  ││[0m[2mno kernel launched[0m                   ││[0m
