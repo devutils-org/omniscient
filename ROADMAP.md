@@ -38,7 +38,11 @@ To be recalled at every phase — these are the project's natural drifts:
 - ❌ **Do not chase bit-exact determinism.** That lives outside the kernel-level
   core (it is dynamic binary translation). An accepted boundary, to be documented.
 - ❌ **Do not promise the inside of NVIDIA GPUs.** CUPTI is closed, there is no
-  kernel path. An accepted boundary.
+  kernel path. An accepted boundary. *Amended in the nineteenth wave: for a
+  launched program, CUPTI is reached from an injection library the driver
+  loads, and `gpu.kernel`, `gpu.counters` and `gpu.profile` are served
+  through it -- nothing wrapped, nothing on the device changed. A process
+  `omn` did not launch stays out (`DECISIONS.md`, boundary 2).*
 - ❌ **Do not tune anything.** No `madvise`, no `sched_setaffinity`, no queueing
   discipline, no cgroup limit, and nothing that modifies the target in order to
   read it. A tool that measures and changes in the same run produces numbers
@@ -686,6 +690,15 @@ finally earns its place.
       `tests/bench_bands.rs` fails when a band and its row disagree or the
       record loses a row (`docs/fixes/w18-bench.md`). A table re-measured
       after the wave's fixes is the coordinator's next bench run.*
+      *Nineteenth wave: the GPU tracers have their own table
+      (`docs/bench.md`, "The GPU tracers, nineteenth wave";
+      `tests/bench_gpu.rs`), on a launch-bound, a compute-bound and a
+      memory-bound program, CUPTI against a negative control (the library
+      loaded and disarmed): `gpu.kernel` +67 % launch-bound and under 1 %
+      otherwise, `gpu.api` +11.3 %, both bands set from it and held by the
+      record's test. Taken on a shared machine; `gpu.counters` and
+      `gpu.profile` are `pending` until the quiet run (`STATE.md`, "Needs
+      privilege").*
 - [x] The resolver's choices are confirmed by measurement, or corrected.
       *Confirmed for the seven chains with two served backends. The table's
       correction is to the cost bands: an in-kernel collector's cost is in the
@@ -718,6 +731,11 @@ finally earns its place.
       window when it outweighs the window's, held to `cost.json` and to
       `wait4` by the same budget test. The separation from the dilation is
       unchanged. Left `[~]`.*
+      *Nineteenth wave: the GPU table reports the launching thread's cpu,
+      every other thread's, and `omn`'s own cpu decoding CUPTI's records
+      (about 1.3 us a record) apart from the dilation, and `omn top` takes
+      the view's own cpu out of the collectors'. Still asserted only in an
+      ignored run. Left `[~]`.*
 
 ---
 
@@ -744,6 +762,13 @@ under test would pass the tool's own defect in that source (`docs/bench.md`).
 
 **Criterion per added source**: catalog entry + backend + fallback chain + ground
 truth test + automatic appearance in `omn list`.
+
+*Nineteenth wave: 99 of 102 sources have a collector (111 of 206 backends):
+`gpu.kernel`, `gpu.counters` and the new `gpu.profile`, each with its ground
+truth -- kernel counts exact against the workload's own, durations held to a
+self-timing kernel, counter verdicts held to two workloads that disagree, the
+known hot loop first. The three left wait on hardware this machine lacks
+(`STATE.md`).*
 
 ---
 
@@ -1021,7 +1046,9 @@ it has no "obviously wrong" output.
    never exact: skid, speculation, IRQs, SMT. Strict determinism belongs to
    dynamic binary translation, outside the kernel-level core.
 2. **No inside view of NVIDIA GPUs.** CUPTI is closed, there is no kernel path.
-   AMD and Intel are covered.
+   AMD and Intel are covered. *Amended in the nineteenth wave: a launched
+   program's kernels, counters and PC samples are served through CUPTI from an
+   injection library; a process `omn` did not launch is not (`DECISIONS.md`).*
 3. **Writes are less attributable than reads.** Writeback leaves in a kworker, the
    originating context is lost: `KEY` evidence, not `IDENTITY`.
 4. **Single machine first.** Inter-machine clock drift is a different class of

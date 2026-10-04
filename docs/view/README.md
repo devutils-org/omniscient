@@ -250,8 +250,6 @@ catalog's facts and the refusals), recorded through `omn top --headless -o`
 itself by `tests/view_fixtures/record.sh`, once, and committed. Paths in them
 are rewritten to `/work` and `/omniscient`.
 
-| Fixture | Workload | What it is for |
-|---|---|---|
 | Fixture | Run | Workload | What it is for |
 |---|---|---|---|
 | `machine` | 20 s | no target: the machine, through the system view's own needs | the overview's panels and sparklines (80 points each) |

@@ -928,6 +928,110 @@ stays open, below.
 
 ---
 
+## Settled in the nineteenth wave
+
+What was decided before the wave (`docs/briefs/wave-19-gpu-view.md`,
+"Decided before this wave") and what the fourteen streams settled, from the
+decision lines of their handoffs (`docs/fixes/w19-*.md`). Accepted boundary 2
+is amended by the first line: the inside of an NVIDIA GPU is served, for a
+launched program, through the vendor's own library.
+
+**Decided before the wave**, each landed by the stream named:
+
+| Decision | Choice | Reason |
+|---|---|---|
+| How CUPTI is reached | **From an injection library**, `cupti/` (`libomn_cupti.so`), a workspace member like the preload shim, named in `CUDA_INJECTION64_PATH` and loaded by the driver inside `cuInit`; CUPTI itself opened at runtime, nothing linked. `gpu.kernel`, `gpu.counters` and `gpu.profile` serve a **launch** and refuse a `pid`, the refusal quoting the entry's caveat. Landed by cupti. | CUPTI's activity and profiling APIs record only the process they are loaded in. |
+| Nothing is wrapped | **`gpu.counters` reads CUPTI's range profiler from the injection library**; `vendor:ncu` left the chain. `ncu` and `nsys` may be second readers in a test, never what `omn` runs. Landed by profiler; `nsys` measured once by bench as a reference reader. | Boundary 4: a tool's output parsed is a tool wrapped. |
+| Lost records | **Counted and said**: CUPTI's drop count asked after every buffer, unsent batches and records returned unfinished counted, each with its reason, into the run's losses. A flush thread drains every 50 ms. Landed by cupti: with two 64 KiB buffers, 50 000 launches kept 41 263 and dropped 8 737, kept + dropped = launched exactly. | A tracer that drops silently undercounts the device's time. |
+| A GPU timestamp's error | **Measured by brackets** (monotonic, CUPTI, monotonic; the tightest of several) at the start, at each flush and at the end; the map is the line through the first and last, its error the widest half-bracket plus the furthest bracket from the line, at least 1 ns, and widened by the slope's error past the last bracket. *Amended by cupti: `ts_err_ns` is the conversion's error only* (below). | `CLOCK_MONOTONIC` is the one clock domain; a converted timestamp carries a non-zero, measured `ts_err_ns`. |
+| The device's clocks | **Reported, never changed**: every NVML run states each device's shader clock lock, application clocks, persistence mode and clock event reasons at its start and where they moved at its end, and `gpu.kernel`, `gpu.counters` and `gpu.profile` carry the same in their facts (`timing_clock_facts()`, wired at the merge). A lock is claimed only from evidence; a range in the driver's performance levels reads **"not shown locked"**, never "unlocked"; unknown is never locked. Landed by device. The run's environment does not carry it yet (`STATE.md`, "What remains"). | Locking needs root and does not survive a reboot; an unlocked clock makes a timing depend on what ran before it; and NVML has no reader for a `-lgc` lock, so "unlocked" would be a confident guess. |
+| A counter's reproducibility | **Measured per kernel and per run**, never a fixed list: the interquartile spread over the median of the undisturbed launches, at 10 %, with a verdict per counter (`reproducible here`, `not dominated by this workload`, `measured once`, `disturbed on every launch`) and the outliers beside it. Landed by profiler: `dram__bytes_read.sum` reproducible on a 64 MiB copy and not dominated on a compute spin; instruction counts bit for bit on both. | A full-range spread let one disturbed launch turn a count that repeats bit for bit into one that does not. |
+| `gpu.profile` | **A new source: CUPTI's PC sampling in continuous mode**, aggregated per program counter and stall reason per drain, resolved to a source line from the modules the library keeps. Landed by profiler: the known hot loop's line held 95.9 % of the samples. | Where time goes inside a kernel, as `cpu.profile` says it on the cpu; continuous mode does not serialise the program's kernels. |
+| A GPU tracer's cost | **Against a negative control**: the injection library loaded by the driver and disarmed (`OMN_CUPTI_REPORT=0`), the control against bare reported apart. Landed by bench: the control inside the floor on every regime. | Without it the dynamic loader's cost is published as the tracer's. |
+| Ground truth for the GPU | **Toolkit-free**: PTX driven through `libcuda.so.1` opened at runtime (`tests/gpu_workload.py`, `tests/gpu_inside.py`, `examples/bench/gpu.c`), and a self-timing kernel writing `%globaltimer`, `clock64` and `%smid` per block as the reference `gpu.kernel` and `gpu.profile` are held to. Landed by cupti and profiler. | No `nvcc` to run the suite; a reference independent of CUPTI. |
+| The view | **A projection, never a collector**: a view reads only `ctx` -- the event stream, live or replayed -- and never opens a source, reads a file or starts a program. Landed by core and held by every view. | What a view needs that no source gives is a request against that source's owner, not a second collector. |
+| Unused, the view costs nothing | **Nothing outside `omn top` changed for it**: no collector, runner path or encoder; `omn trace` never constructs the view's tap. Landed by core. *Reasoned, not measured: the binary's startup against the previous one was not timed.* | The view is an opt-in bonus. |
+| Every view runs on a recording | **`omn top --replay <run>` draws any view from a `results.json` or a flight recorder's document as it draws a live one, and `--gallery <run>` steps through all nine.** Landed by core. | All views compared on the same data, reproducible tests, a demonstration that is the same every time. |
+| Trust is drawn | **One style, core's** (`view/src/trust.rs`): losses, a time error (`±?` when unknown), low determinism and a live run dim a figure; a late round and a degradation are a badge only; a refused source draws its reason in place. Landed by core, used by all nine. | A figure that cannot be trusted is shown as such where it is read, not in a footnote. |
+| One binary carries the capabilities | **The view is a workspace member (`view/`, ratatui and crossterm) linked into `omn` as `top`.** Landed by core. | The privilege model settled in the eighteenth wave stays one file to grant. |
+
+**CUPTI and the channel** (`docs/fixes/w19-cupti.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| How the library talks to `omn` | **A sequenced-packet `AF_UNIX` socket per launch, in batches of at most 60 KiB, sends bounded by 2 s**; an unsent batch's records, drop and unfinished counts are counted and a name it carried is sent again. *This departs from the brief's shared ring.* | CUPTI hands records over a buffer at a time on a thread that is not the program's, so a send per batch costs nothing per record and needs no mapping set up before `cuInit`; sequenced packets keep a forked child's messages whole; the timeout bounds the program's exit when `omn` stops reading. |
+| A forked child | **Reports nothing**: the exit handler and every send check the pid that initialised. | A child forked after `cuInit` cannot use CUDA and holds the parent's locks without its threads; flushing there hung the child for good (measured). A child that execs loads the library afresh. |
+| `ts_err_ns` on a GPU event, and a duration's ground truth | **`ts_err_ns` is the clock conversion's error, not CUPTI's placement of the device's work nor the dispatch and drain inside a duration**; a kernel's duration is held to `span <= duration <= span + max(10 us, 1 %)` of its own `%globaltimer` span, and its times to containment in the host's launch window. | Measured, the difference is 1.0-1.3 us against a 68 ns calibration: block dispatch and drain that `%globaltimer` inside the kernel cannot see. Folding a declared microsecond into `ts_err_ns` would make every event's error a guess. |
+| A refused target's reason | **Comes from the entry**: the validator quotes a caveat naming the flag and saying "refused", before the generic "declares no support". | The catalog is the data; a reason written per source in the validator is code per source. The stricter `targets: {pid: "no: <reason>"}` form is open for review (`docs/open-findings.md`). |
+| The flush | **Never forced before exit.** | A forced flush returned 482 of 500 kernels with zero timestamps and never redelivered them; latency, a buffer (about 1 000 kernels) at a time, is the price. |
+| Several CUPTI sources on one launch | **One socket, shared**, each source adding its `REPORT_*` bit; the inside readers' ops are 13 to 31 and a reader of activity skips them; their unsent records are counted apart. | A program has one `CUDA_INJECTION64_PATH`; one reader must not be billed for another's records. |
+| What `gpu.kernel` carries | **Kernels, memcpy and memset**, marked by `op`. | They are device time as much as kernels are. |
+
+**The device** (`docs/fixes/w19-device.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A reading the driver had not refreshed | **Counted and said, not dropped and not re-paced**: `driver_sample: repeat` per event and a degradation per run with the refresh observed; only for figures whose repeat can be told from a steady value -- the energy counter by its value, the occupancy by the driver's own sample timestamp. | The driver refreshes energy and draw every 100 ms and occupancy about once a second; a repeat read as a measurement is a figure twice. |
+| The default poll | **Stays 1 s**, at or above the energy counter's and the draw's 100 ms and just under the occupancy's 1.0-1.13 s; the occasional occupancy repeat is counted and said. | One cadence for every source; a per-source default would need the request layer. |
+| GPU energy | **`--mode count`**; a poll whose counter implies under half the draw read beside it says so with both figures. | Polling the energy counter makes it under-count, for every reader of the board (defect 7 of `docs/scenarios/gpu.md`: 23 W idle read at the ends, about 3 W read every 10 ms). |
+
+**Inside a kernel** (`docs/fixes/w19-profiler.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| `gpu.counters`' mechanism | **CUPTI's range profiler in kernel replay with automatic ranges**, from the injection library; clocks never locked. | Kernel replay gives a counter per launch without the program's cooperation. |
+| A launch's window | **Witnessed by `sm__ctas_launched.sum` against the launch's own grid**: more blocks is a disturbed launch, counted and left out; fewer is a range that is not its launch's. | Measured, another process's kernels added the same 283 million instructions to every launch of a run, so the wrong count repeated and no spread could tell. |
+| Pairing ranges with launches | **By order only when a batch's counts agree and no range has fewer blocks than its launch**; any other batch is not reported and counted unpaired. | A range carries no launch's identity, and one range with no recorded launch (a graph's kernel) would shift every later launch onto its neighbour's counters. |
+| Counters beside kernel times or PC sampling | **Refused**, before the program runs. *Today at attach, labelled the machine's; the request's exit 2 is filed.* | Kernel replay makes kernel times those of replayed kernels; CUPTI cannot run the range profiler and PC sampling in one process. |
+| A PC sampling configuration | **Checked by what CUPTI applied and by its effect**, not by the status code: attribute statuses, the period and mode read back, a run with no sample at all a lost read, CUPTI's sample count held to the samples reported. | The PC-sampling API accepts configurations it does not apply. |
+| `_not_issued` stall reasons | **Left out.** | A subset of their reason; counted beside it, a sample counts twice. |
+
+**The GPU bench** (`docs/fixes/w19-bench.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Where a GPU tracer is costed | **On GPU workloads, per regime** (launch-bound, compute-bound, memory-bound); a `gpu` source served on a launch alone leaves the backends table. | On workloads that make no GPU call a tracer reads as free (the shim at 0.14 %), and a per-launch tracer's cost moves by two orders of magnitude with the regime. |
+| A GPU band | **Its worst regime, named in a caveat**: `gpu.kernel` `extreme` (+67 % of the time and +83 % of the cpu launch-bound, under 1 % otherwise), `gpu.api` `high` (+11.3 %). A cost per regime is open (below). | A band is a worst case (`worst_case_percent`) and the catalog has one per backend. |
+| How a GPU row is judged | **On the largest of the share of the target's cpu, the time dilation and the process-cpu dilation**, a dilation under the workload's floor reading as zero; the floor from the IQR (`IQR / 1.349`). | A tracer inside the target can cost it cpu without stretching its time; one held-up repetition moved a standard-deviation floor to 24 % on a series whose IQR was 1.4 %. |
+| A GPU workload's threads | **Placed apart**: the launching thread alone on one cpu for the timed section, every other thread on three others, the two reported apart. | On one shared cpu a tracer thread's work is the launching thread's wall time (+74-78 % then, +67 % placed apart). |
+| A lossy GPU row | **Refused above one record in a hundred**, every loss in the record as `<lost> of <seen>`. | A tracer that drops records skips the work they cost. |
+| The device's clocks before a timing | **Warmed, never set**: 500 ms of spin kernels in the workload. | An idle second slowed a 78 ms section to 119 ms, which a tracer with a slow start would be billed for. |
+
+**`omn top`'s frame** (`docs/fixes/w19-core.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| The view's crate | **`view/` depends on nothing of `omn`**, reading runs through a field-for-field mirror of `results.json` held to `omn`'s types on every fixture by `tests/view_model.rs`. | `omn` links it, and a crate cannot depend on the crate that links it; a mirror nobody checks drifts. |
+| How the view watches a live run | **Through `collect::Escalate`**: an escalation that attaches nothing, hands the events read since the last hand-over to the drawing thread at most every 200 ms, and detaches everything when the view is quit. | The one hook the runner already shows a run in progress through; no collector or runner path changes. |
+| A live figure | **A result's `raw` events until the run ends; every figure provisional (`live`) until then.** | Aggregates, losses, cost and stack names are what the runner says at its end. |
+| A view's need | **Asked alone** -- validated, resolved, checked for a collector, set aside on a runner refusal before launch -- **and one that cannot be served is drawn as its refusal**; two views asking one source and scope in different modes are refused, naming both; a session file whose joins would lose a request is refused whole. | A source this machine lacks is no reason to show nothing of the others. |
+| The view's own cost | **The drawing thread's cpu, beside the collectors' and the target's, as shares of one cpu, and taken out of the collectors' figures** (sampled against `getrusage` at every hand-over). | One unit for the three; without it the collectors read about 450 ms, twice their cost. |
+| An aggregated figure's time error | **Unknown unless something saw its events**: `omn top -o` writes each result's worst `ts_err_ns` in `view.json`; elsewhere it is drawn `±?` and dimmed. | Unknown is never zero. |
+| Fixtures and snapshots | **Recorded through `omn top --headless -o` by a committed script; every snapshot carries an `.ansi` twin that is compared too.** | Real runs that can be made again; the dimming is the trust style and plain text cannot show it. |
+| A view may carry a recording of its own | **In its gallery, when no common fixture holds what it draws** (`lanes-gpu/`, `flows-run/`), recorded through `omn top` by a script beside it and drawn by the view's own test. From flows and lanes. | The common fixtures, and every other view's snapshots, do not move. |
+| A view reads a source it did not declare | **Allowed when the run holds it, and it says where the run lacks it** (request reads `io.latency`'s `req`-keyed events). From request. | Its declared needs stay what it cannot draw without. |
+
+**The nine views** (`docs/fixes/w19-<view>.md`; the user's verdict on each is
+`docs/view/gallery/README.md`'s last column):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| system: one time axis | **One box, a section per resource, every chart in the same columns over the same run, each cell the peak of what fell in it**; a finished run's timelines placed on the run's axis by inference until `results.json` records each one's origin. | Side-by-side panels scaled to their own widths cannot line up a disk burst with the cpu that caused it. |
+| system: colour | **Trust only**; charts in the terminal's colour. | Where most sources are `low` determinism, the exceptions must stand out. |
+| system: zero and unmeasured | **Drawn apart**: a dot and a blank; a table cell nothing measured is `·`, never `0`. | An empty series and a series of zeros say different things. |
+| flame: depth | **A chain that never visibly branches is one box** at the current zoom; the detail line says what it folds. | An icicle's depth is then where it branches: 88 frames under CPython fit 40 rows. |
+| flame: two runs | **Drawn on the mean of the two, judged by the triage's arithmetic restated** (absolute, 3σ Poisson, losses said); `d` compares shapes, the second run scaled to the first's total. Off-cpu time has no noise model: ±5 % above a 0.25 % speck, said so. No icicle while live. | "The same program doing more" and "a different program" are different answers. |
+| ledger: energy per process | **Machine joules times the target's share of the machine's busy cpu, in italics, labelled an estimate.** | RAPL counts a package; an unlabelled split would read as a measurement. |
+| ledger: every line's price | **What knowing it cost `omn`** (attributed plus in-target cpu, `≥` where unknown), per line and in total. A line with nothing of the focused task says so, never zero. | On `http-server` the I/O line cost over twenty times the time it measured. |
+| request: states inside a request | **By share, never in sequence**; only what was timed is placed in time (the network before and after, each block request). What sets a request apart is each state against the median of its siblings', above a twentieth of its span. | `net.request` keeps sums per state, so an order would be invented; on the vertical case the rule names every injected cause. |
+| timebar: the suspect | **`omn latency`'s rule restated in the view crate**, held to the triage itself by `tests/view_timebar.rs`. A run without a decomposition by task is drawn as the view's own per-thread reading, said so. A per-process cpu total is a bracket per thread, never apportioned; `blocked` without `sched.offcpu`'s events is drawn whole. | A suspect by another rule would be a second answer to one question; a share no source attributes was not measured. |
+| heatmap: what it draws | **`raw` events only**; a kernel-bucketed row at `total_ns / weight`, spread over its drain window as its collector stamps it; a whole-run kernel row not drawn; log2 rows, logarithmic density; a loss shaded only where the run can place it. | A view that drew `hist` at the end and events while live would change shape when the run ended; a point at a row's stamp claims a moment the kernel never measured. |
+| lanes: states | **Rebuilt from instants** (switch-out to wakeup is a block), `sched.offcpu`'s windowed rows only labelling them; a GPU lane lines up with host threads in time, never by attribution; the cursor opens on a wait for the GPU. | A windowed total spread over columns draws a precision the source does not have; `gpu.kernel` is keyed on the process. |
+| wake: chains | **Through each waker's latest wakeup before the one it issued, folded per thread into a tree**, two times per link (the waker's hold, the woken thread's quiet as an upper bound), stopping with its reason at an interrupt, a cycle, an unseen waker or the depth. | The waker's previous wakeup is the only link the source holds; an unseen waker on a launch target is the source's scope, not an origin. |
+| flows: the kernel layer | **A junction, never edges**: the target's bytes left, the machine's right, on one scale, the ratio drawn and said; a ribbon is a sum of call rows, never a multiplication. | No source ties a socket to an interface or a file's bytes to a device. |
+
+---
+
 ## Open
 
 - **The phase 6 criterion for the in-kernel histogram** (io, pending the
@@ -958,6 +1062,20 @@ stays open, below.
   costs every budgeted run of a waiting program with `--symbols debuginfod`
   its answer (`sqlite3-durability`'s agent way, whenever a budget is asked).
 
+- **A cost per regime, or a `cost_note`, in the catalog's schema** (nineteenth
+  wave, bench). A band is a backend's worst regime, so `gpu.kernel` is
+  `extreme` for its +67 % on a launch-bound program though it costs under
+  1 % on long kernels. Leaving it open costs every `--budget` under 20 % its
+  `gpu.kernel` on a program of long kernels, refused for a cost it would not
+  pay.
+- **Whether a range in the GPU's performance levels can be read as free
+  clocks** (nineteenth wave, device, pending the `nvidia-smi -lgc` run in
+  `STATE.md`, "Needs privilege"). NVML has no reader for a locked clock, so a
+  range reads "not shown locked". If a `-lgc` lock shows as one frequency at
+  every level, a range can say "unlocked" again; if not, the lock needs
+  another source of evidence. Leaving it open costs every GPU timing on this
+  board a hedge where it could state a fact.
+
 A new open line goes here with what it costs to leave it open, which is the
 habit that kept this section honest.
 
@@ -972,6 +1090,12 @@ Restated from `ROADMAP.md` because they are decisions, not omissions.
    binary translation, outside the kernel-level core.
 2. **No inside view of NVIDIA GPUs.** CUPTI is closed and there is no kernel
    path. AMD and Intel are covered through the DRM scheduler and kernel PMUs.
+   *Amended in the nineteenth wave: CUPTI is closed but loadable, and from an
+   injection library the driver loads at `cuInit` it serves `gpu.kernel`,
+   `gpu.counters` and `gpu.profile` for a **launched** program -- nothing
+   wrapped, no `nvcc`, nothing on the device changed. What stays out: a
+   process `omn` did not launch, and a machine without the vendor's library.
+   There is still no kernel path.*
 3. **Writes are less attributable than reads.** Writeback leaves in a kworker and
    the originating context is lost: `KEY` evidence, not `IDENTITY`.
 4. **No wrapping of `perf`, `bpftrace` or `bcc`.** Omniscient talks to

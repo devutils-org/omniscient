@@ -6631,6 +6631,11 @@ each item is a request to whoever owns the file this wave or the next.
 - **NVML's power query costs 34 ms a read** (`gpu.power`, 21 % of the target at
   100 ms), `gpu.freq` 15 ms. The default poll for those two may want to be
   slower than the family's. To whoever owns `catalog/gpu.yaml`.
+  *Corrected in the nineteenth wave (`docs/fixes/w19-device.md`): 34 ms and
+  15 ms were the bench's figures per **run**, not per read. Measured per call
+  kind in the thread's own cpu, a `gpu.power` reading costs 6 to 11 ms (the
+  energy counter 2.8-4.4 ms, the draw 2.8-7 ms), one clock domain 0.8-2.1 ms.
+  The default poll stays 1 s.*
 - **`runtime.jit` reports 360 losses on a run with no event.** Not diagnosed.
   To whoever owns `src/collect/runtime/jit_map.rs`.
 - **Tracing a contended program shortens it**: `sched.lock` −21 %,
@@ -10873,3 +10878,440 @@ At paranoid 2, a capability-less `cpu.profile --symbols debuginfod` over
 `sqlite3`'s 500 commits cost 11.52 % and the first check did not stop it:
 the debuginfod cache was warm, so the one-time load was not paid. The stop the
 open decision is about needs a cold cache to reproduce.
+
+## Needs from another stream — the nineteenth wave, stream cupti
+
+Stream cupti's handoff is `docs/fixes/w19-cupti.md`, "Needs from another
+stream". Landed at the merges: `mod kernel;` and its factory in
+`src/collect/gpu/mod.rs`; `gpu.kernel`'s facts carrying the clock state
+(`91a0cef`); the profiler sharing the launch's socket (profiler, through
+`InsidePrepared`); the `vendor:cupti` cost line (bench, `extreme`);
+`docs/install.md` listing `bin/libomn_cupti.so` (`91a0cef`).
+
+### To the coordinator (`src/validate.rs`): a refused target's reason
+
+The nine lines in `target_rejection_reason` quote the entry's caveat that
+names the flag and says "refused", before the generic "declares no support".
+Data-driven, and only `gpu.kernel`, `gpu.counters` and `gpu.profile` carry
+such a caveat. Wanted: a review, or the stricter form, a reason in the
+`targets:` line itself (`targets: {pid: "no: <reason>"}`), which the loader
+could hold.
+
+### To lanes and every reader of `gpu.kernel`: records a buffer at a time
+
+Records arrive a buffer (about 1 000 kernels) at a time, at exit for a short
+run, because a forced flush loses times. A smaller default buffer trades
+callbacks for latency; 256 KiB was chosen with no view to judge it by.
+
+## Needs from another stream — the nineteenth wave, stream device
+
+Stream device's handoff is `docs/fixes/w19-device.md`, section 7. Landed:
+`timing_clock_facts()` in `gpu.kernel`'s, `gpu.counters`' and `gpu.profile`'s
+facts.
+
+### To the coordinator (`src/capabilities.rs`, `src/render.rs`): the clocks in the run's environment
+
+`Environment.gpus`, or a sibling `gpu_clocks`, filled from
+`collect::gpu::clock_states()` only when the request names a `gpu` source
+(`nvmlInit` costs 3-5 ms), and `render.rs` printing `ClockState::fact()`.
+Until then the clock state is in each GPU source's facts and not in the
+resolved file.
+
+### To the bench's owner and `CATALOG.md`: NVML's cost cells
+
+The per-call table (`docs/scenarios/gpu.md`, "What can a poll get from the
+driver?") is what `gpu.freq` and `gpu.power`'s bands can be checked against;
+`CATALOG.md`'s NVML cost cells are stale since the eighteenth wave. A bench
+measuring GPU energy must not run beside anything polling NVML.
+
+### Cross-cutting: another NVML poller skews every energy figure
+
+Reading the energy counter often makes it under-count, for every reader of
+the board, across processes: a count window read 22.5 W alone, 3.5 W while
+another process polled the counter every 10 ms, 23.4 W after it stopped
+(defect 7 of `docs/scenarios/gpu.md`). Any energy figure on this machine is at
+the mercy of whatever else polls NVML; `gpu.power` says so when its own
+counter implies under half the draw beside it, and cannot see another
+process's poll.
+
+## Needs from another stream — the nineteenth wave, stream core
+
+Stream core's handoff is `docs/fixes/w19-core.md`, "Needs from another
+stream". Landed: `make check` and the CI's clippy over `--workspace`
+(`91a0cef`); the root `Cargo.toml`'s members merged; this wave's `STATE.md`.
+`Gated`'s drop in `src/collect/launch.rs` (an unreleased child killed at its
+gate, not released first) went through both merges' full runs.
+
+### To the coordinator (`man/omn.1`, `GUIDE.md`): `omn top`
+
+Neither the manual page nor the guide has `omn top` or its flags.
+
+### Cross-cutting: a session of seventeen requests runs late
+
+`omn top --dump-session`'s session (17 requests) makes every 10 ms-tick
+source late in about one round of ten, worst 50-110 ms, under `omn trace -f`
+as under `omn top`, on a terminal as headless; removing any one request does
+not remove the late rounds. The runner serves every request from one thread;
+a view that wants dense series pays this. The late rounds are counted and
+said, never silent.
+
+### To the coordinator (fixtures): a GPU recording
+
+Every common fixture records `gpu.kernel` as refused (they predate its
+collector). One re-recording, alone on the device, gives lanes, heatmap and
+ledger a GPU to draw; lanes' and heatmap's sections below say which workload.
+
+## Needs from another stream — the nineteenth wave, stream profiler
+
+Stream profiler's handoff is `docs/fixes/w19-profiler.md`, "Needs from
+another stream". Landed at the merge: its edits to `CATALOG.md` section 8,
+`cupti/src/{lib,api,channel,wire}.rs`, `src/collect/gpu/{kernel,mod}.rs` and
+`tests/{family,scenario}_gpu.rs`.
+
+### To the coordinator (`src/collect/mod.rs` or `src/validate.rs`): a combination refused as the request's
+
+Counters beside `gpu.kernel` or `gpu.profile` on one launch are refused at
+attach, the only point where every reader's bit is known, and the runner
+labels an attach refusal as the machine's (`Whose::Machine`). The program
+never runs, but the exit and the words say the machine. Wanted: a
+`Prepared` method answering a refusal after `share_launches`, or a validator
+rule over the session's sources, so it is exit 2 and the request's.
+
+### To the resolver's owner: no unwinding warning for `gpu.profile`
+
+`--emit stack` on `gpu.profile` warns "no --stack given (or `auto`), so the
+resolver picks the best unwind mode", which means nothing for stacks built
+from program counters and lines. A catalog flag, or the warning restricted to
+the `cpu` family's samplers.
+
+### To device's files (`docs/scenarios/gpu.md`) and bench's (`docs/bench.md`): `vendor:ncu`
+
+`docs/scenarios/gpu.md` lines 425-428 and 517-522 still say `gpu.counters`
+has no collector and name `vendor:ncu`; `docs/bench.md` lines 617-618 too.
+`vendor:ncu` left the chain.
+
+### To bench: `gpu.counters` and `gpu.profile` unmeasured
+
+Their `cost:` lines (`extreme`, `med`) are placeholders, `pending` in the GPU
+record until the quiet run (`STATE.md`, "Needs privilege", item 3).
+
+## Needs from another stream — the nineteenth wave, stream bench
+
+Stream bench's handoff is `docs/fixes/w19-bench.md`, "Needs from another
+stream". Landed: the `gpu` step of `scripts/bench.sh`, in the default
+sequence after `backends` (`c6bd2b8`).
+
+### To cupti's owner (`src/collect/gpu/kernel.rs`): the read path
+
+`omn` spends about 1.3 us decoding a record in a release build (67 ms for
+53 000 records), as much as CUPTI spends on a launch inside the program:
+worth a profile. And the per-launch price is CUPTI's concurrent-kernel
+activity: whether a lighter kind, or a sampling of launches, is worth a
+degraded fallback in the chain.
+
+### To the coordinator (the catalog's schema): a cost per regime
+
+Open in `DECISIONS.md`: a band is the worst regime, so `--budget` under 20 %
+refuses `gpu.kernel` on a program of long kernels, where it costs 1 %.
+
+## Needs from another stream — the nineteenth wave, stream system
+
+Stream system's handoff is `docs/fixes/w19-system.md`, section 6. Landed: the
+header's cell before the cost corner (`c6bd2b8`).
+
+### To core (`src/emit.rs`, `view/src/model.rs`): where a timeline starts
+
+A timeline's offsets are measured from its result's first event, and
+`results.json` does not say when that was; the system view infers it for the
+machine's pollers from the runner's polling discipline, and every view that
+lines up two timelines has the same problem. Wanted: each result's
+`first_ts_ns` beside its timeline (which keeps every existing `results.json`
+meaning what it meant), or offsets from `window.run_opened_ns`.
+
+### To core (`docs/view/README.md`, fixtures): `raw` on three needs
+
+`raw` added to the system view's `cpu.util`, `io.bytes` and `gpu.mem`, with
+the README rows `raw,timeline,summary`, then the fixtures re-recorded: about
+20 events a second, about 10 MB for a 10-minute run. It keeps the cpu by
+state, read apart from written and the GPU's memory size after a run ends.
+
+### To the owners of `net.bytes`, `power.energy`, `gpu.engine_busy` and `cpu.oncpu_time`: accept `raw`
+
+They refuse `raw`, so a finished run drops what only their events carry:
+rx and tx, the RAPL domains by name, a process's `comm`.
+
+## Needs from another stream — the nineteenth wave, stream flame
+
+Stream flame's handoff is `docs/fixes/w19-flame.md`, "Needs from another
+stream". Landed: the header's cell (`c6bd2b8`).
+
+### To core (`view/src/app.rs`, `views.rs`): a view that takes text
+
+`View::takes_text(&self) -> bool`, consulted before the frame's keys, so a
+search can hold `q`, `?`, digits and `f`; today `/sqlite3` jumps to view 3.
+
+### To core (`tests/view_*.rs`): the restated diff held to the triage's
+
+A test, in the root crate which can link both, holding the flame view's diff
+to `src/triage/diff.rs` on the two cpython fixtures; or the arithmetic moved
+into a crate both depend on.
+
+### To core (`tests/view_fixtures/record.sh`): a CPython fixture with its perf map
+
+Recorded with `PYTHONPERFSUPPORT=1` and `--stack fp+leaf`, the perf map's
+names in the mirror, so the view charges to Python functions as the triage
+does.
+
+### To core (`view/src/feed.rs`): `as_live_until` says what arrives empty
+
+A source the recording kept without `raw` arrives empty when replayed as
+live; `as_live_until` could add that degradation, so every view's live
+snapshot says it, not only flame's.
+
+## Needs from another stream — the nineteenth wave, stream ledger
+
+Stream ledger's handoff is `docs/fixes/w19-ledger.md`, "Needs from another
+stream".
+
+### To core (`docs/view/README.md`, fixtures): `raw` on two needs
+
+`raw` added to the ledger's `cpu.oncpu_time` (16-32 events a run) and
+`io.syscall` (7 to 364 kernel rows on the fixtures) needs, with their rows,
+then re-recorded: the user/system split and the bytes read and written on a
+recording.
+
+### To core (`view/src/snapshot.rs`): `--against` and a focus in the harness
+
+So views that compare or narrow are judged in the gallery's standard set,
+not from each view's own unit test.
+
+### To core (`view/src/units.rs`): `approx`
+
+Three significant digits for a measured float (`208`, `53.6`, `7.19`);
+`units::count` prints `208.47`.
+
+## Needs from another stream — the nineteenth wave, stream request
+
+Stream request's handoff is `docs/fixes/w19-request.md`, "Needs from another
+stream".
+
+### To core (`docs/view/README.md`, `Need`): an optional need
+
+The request view reads `io.latency`'s `req`-keyed events when the run holds
+them. The README row could say so, or `Need` could gain an optional form
+(drawn when present, never asked alone).
+
+### To core (fixtures): `vertical-abandoned`, and many requests
+
+A recording of `examples/vertical-abandoned.yml`, so the loss path is held on
+a real run rather than a rewritten one; and a vertical run with a few
+hundred requests of mixed causes, for the list's scrolling and the "apart"
+median on a population.
+
+### To the coordinator (`src/bpf/request.rs`, `src/collect/net/request.rs`): three fields
+
+The bytes received and sent per request; the start of its longest sleep (so
+the lock wait can be placed in time); and the never-ended, unborn and
+replaced counts as fields of the result, not sentences the view parses.
+
+## Needs from another stream — the nineteenth wave, stream timebar
+
+Stream timebar's handoff is `docs/fixes/w19-timebar.md`, "Needs from another
+stream". Landed in its own branch: the timebar's `NEEDS` (`cpu.oncpu_time`,
+`sched.offcpu`'s `raw`) with their README rows, and `tests/view_timebar.rs`,
+which core now owns.
+
+### To core (`tests/view_fixtures/record.sh`): `sqlite-latency` with its events
+
+`raw` appended to the `blocked` request of the dumped session before `omn
+top -f`, so the timebar splits `blocked` as `omn latency` does live, and
+`tests/view_timebar.rs` holds the split.
+
+### To the sched family's owner (`catalog/sched.yaml`): `sched.wakeup`'s `comm`
+
+Events keyed on the wakee carry the **waker's** `comm` (a wakeup of `sqlite3`
+reads `comm: omn`). A caveat, or the attribute named `waker_comm`.
+
+### To the cpu family's owner: a per-thread `cpu.oncpu_time`
+
+The catalog declares `bpf:raw_tp` and `bpf:tp` for `cpu.oncpu_time`; the
+build has `fs:proc` only, which keys a process's total `task:<pid>` -- a key
+that reads as a thread's. A per-thread collector turns the timebar's bracket
+into a figure.
+
+## Needs from another stream — the nineteenth wave, stream heatmap
+
+Stream heatmap's handoff is `docs/fixes/w19-heatmap.md`, "Needs from another
+stream". Landed: the header's cell (`c6bd2b8`).
+
+### To the coordinator (the drain loops, `src/main.rs`): losses placed in time
+
+Each drain round's drop count with its timestamp, kept beside the result (a
+short `(ts_ns, dropped)` series in `losses`), so a loss is shaded where it
+happened; today every drop is shaded across the whole window.
+
+### To core and the collectors: the value attribute and the stamp
+
+`results.json` carrying each result's value attribute (`value_attr`), and how
+a drained source stamps its rows (at the drain's close, or at the row's first
+event). The heatmap keeps a table of both; a new drained source would miss
+it silently.
+
+### To core (`docs/view/README.md`): `frame--gallery` and `frame--live`
+
+Both draw the heatmap, so every heatmap change re-blesses two of core's
+snapshots: draw them on a view that changes less, or say in the README that a
+view stream re-blesses them.
+
+### To the coordinator (fixtures): a phased GPU run
+
+`launches 3000; compute 200; memory 40 64; launches 3000` of
+`tests/gpu_workload.py` under `omn top --headless -d 30s -o`, for regimes
+rather than one band (14 MB here; `launches 1000` twice keeps the shape at a
+third).
+
+## Needs from another stream — the nineteenth wave, stream lanes
+
+Stream lanes' handoff is `docs/fixes/w19-lanes.md`, "Needs from another
+stream". Landed: `sched.wakeup` in `lanes::NEEDS` with its README row and the
+lanes rows' `why` text (`c6bd2b8`); the header's cell (`c6bd2b8`).
+
+### To core (fixtures): a GPU fixture every view draws
+
+`docs/view/gallery/lanes-gpu/workload.py` recorded as `record.sh` records the
+others (`omn top --headless -d 20s -o "$here/gpu-feeder" -- python3
+"$root/docs/view/gallery/lanes-gpu/workload.py"`); then `lanes--gpu-feeder`
+moves to the shared harness and the recording under the gallery can go.
+
+### To core (`tests/view_model.rs`): the `why` column
+
+`the_readme_lists_what_each_view_needs` passed while lanes' strings differed
+from the table's; it could compare the `why` column too.
+
+### To core (`view/src/trust.rs`): a scale-aware dimming
+
+A time error far below the resolution a figure is drawn at (±295 ns on
+27 ms cells) dims it as one that is not; on lanes every lane is dimmed, so
+the dimming tells no lane from another. To decide.
+
+### To the sched family's owner (`catalog/sched.yaml`): `sched.offcpu`'s stamp
+
+The caveat says a row is stamped at its window's first wait; the `bpf:raw_tp`
+collector stamps it at the drain (`ts_ns: closed_ns`), and the recordings
+agree. The caveat or the stamp.
+
+## Needs from another stream — the nineteenth wave, stream wake
+
+Stream wake's handoff is `docs/fixes/w19-wake.md`, "Needs from another
+stream".
+
+### To the sched family's owner (`sched.wakeup`): two fields
+
+The irq number on a `hardirq` wakeup, and, on a `softirq` one served in a
+task's `local_bh_enable`, that task as `served_in_tid`. A want, not a defect:
+the view says today what it cannot name.
+
+### To core (fixtures, optional): a system-scope recording
+
+A `sched.wakeup@system` request beside a launched server
+(`docs/fixes/w19-wake.md`, "Privileged runs wanted", the session as written),
+to judge chains through threads outside the target.
+
+## Needs from another stream — the nineteenth wave, stream flows
+
+Stream flows' handoff is `docs/fixes/w19-flows.md`, "Needs from another
+stream".
+
+### To core (`docs/view/README.md` and `flows.rs`'s `NEEDS`, together): `raw` on `io.syscall`
+
+`emit: &["raw", "summary", "hist"]` in `NEEDS` and the row
+`| flows | io.syscall | trace | raw,summary,hist | target | bytes per descriptor |`
+in one commit (`tests/view_model.rs` holds them together), then re-recorded:
+the default `omn top` gets bytes per descriptor.
+
+### To core (fixtures, optional): the file server
+
+`docs/view/gallery/flows-run/record.sh` adopted as a common fixture once the
+row above lands.
+
+### To the net and io owners: the edges flows cannot draw
+
+`net.socket` carrying the interface index of its route; a filesystem's
+superblock device mapped to the block devices under it, so `io.fs` and
+`io.bytes` meet; `io.bytes` and `net.bytes` split by direction.
+
+## The nineteenth wave, the coordinator's
+
+### At the merges
+
+Phase A (`6c62e14`, `95170e8`, `1f88f1f`, then `91a0cef`) and phase B
+(`b1e8f6f` to `3efe46f`, then `c6bd2b8`); `STATE.md`, "The nineteenth wave is
+merged". One regression, clippy on the device stream's NVML code on the
+merged tree, fixed in `91a0cef`. `make check` is red on the ring-loss gap at
+both merges and, after the second, on
+`portability::every_cell_covers_the_whole_catalog`: the cells under
+`target/matrix/cells/` were swept before this wave added `gpu.profile`. Not a
+code regression; the next sweep refreshes them.
+
+### For the flaky tally
+
+Each seen at the merges or in a handoff, passing when rerun alone once:
+
+- `family_sched::a_launched_programs_children_are_followed_and_wait_what_their_schedstat_says`
+  (phase A's `make check`): a child counted 359 160 of 368 470 ns of wait,
+  2.5 % against 2 % allowed. Nothing this wave touched sched wait accounting.
+- `scenario_sched::a_lock_held_for_a_known_time_is_the_wait_the_other_thread_reports`
+  (phase A's full run): no wait over 250 ms reported.
+- `budget::a_waiting_program_is_weighed_with_the_process_it_started_and_its_stop_ends_both`
+  (cupti, device): the child's pid file not there, under the other streams'
+  load.
+- `perf::following_tests::a_task_sampler_finds_a_thread_started_after_the_open_and_samples_it`
+  (cupti).
+- `scenario_runtime::a_probe_follows_every_thread_of_the_process` (core): one
+  thread 501 calls and another 499 where each made 500.
+- `scenario_sched::a_launched_programs_rows_carry_the_name_it_exec_d_into`
+  (cupti).
+- `unwind::user_only_stacks_carry_no_kernel_frame_and_leave_the_system_calls_out`
+  (bench, lanes).
+- `scenario_mem::the_two_roads_to_a_footprint_arrive_at_the_same_number`
+  (flame: passed on a second alone run).
+- `scenario_cpu::a_core_with_one_tenant_reads_the_same_through_two_files`
+  (flows).
+- `omn-mcp`'s `walkthrough::the_walk_through_hands_over_what_the_runs_wrote_and_what_the_program_did`
+  (system, heatmap, ledger, wake): `cpu.profile` over its 25 % budget on a
+  loaded machine.
+- `collect::cpu::profile::tests::a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned`,
+  `collect::mem::page_faults::tests::sampled_in_user_mode_...` and `cases`
+  (already in the tally) failed in most streams' runs at loads of 20 to 85.
+- Not flaky: `runner::a_profile_s_losses_land_...` (the gap, red in every
+  stream's run and at both merges), and the stale matrix cell above.
+
+### How the wave ran
+
+- **The machine was shared by fourteen streams**, at load averages up to 85,
+  and most full runs had failures nobody could read: every stream's handoff
+  lists timing failures outside its files. The merges' runs, on a quieter
+  machine, are the ones the tally above is read from.
+- **`/tmp` filled its per-user quota** twice: about 2 400 leaked
+  `/tmp/omn-*` test directories, 24 to 26 GB, among them
+  `/tmp/omn-cli-<pid>-no-shim` directories of 154 MB each that `tests/cli.rs`
+  leaves behind. Streams pointed `TMPDIR` under their worktree's `target/`.
+  The leak is filed in `STATE.md`'s "What remains", item 9.
+- **The home filesystem filled too**: doc tests failed with "Disk quota
+  exceeded" in one stream's run; the merges removed the worktrees' `target/`
+  directories (121 to 168 GB free).
+- **The scratchpad's `nff.log` collided again**, as the eighteenth wave's
+  note said it would: several streams' runs wrote one file. The next brief
+  should give each stream a log directory of its own, said in the brief.
+- **One stream ran `pkill -f 'make check'`** on the shared machine (core,
+  around 06:17 on 2026-10-04), which matches any stream's `make check`. No
+  stream reported a run that died then. A brief should say never to kill by
+  pattern on a shared machine.
+- **No view stream had a terminal**: an agent shell has none, and `omn top`
+  refuses at once without one, by design. Every view was judged on snapshots
+  and `--headless`; the look on a terminal is the user's
+  (`docs/view/gallery/README.md`).
+- **The GPU was shared** by the four GPU streams and the bench: profiler saw
+  another worktree's kernels in its counters (the witness's reason), and the
+  bench's record was taken at a load falling from 13 to 1. The quiet reruns
+  are in `STATE.md`, "Needs privilege".
