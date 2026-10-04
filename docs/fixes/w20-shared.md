@@ -104,7 +104,7 @@ its budget) passes alone. Four fail again, none in a file this branch
 touches, all `main`'s as merged:
 
 - `cases::every_case_names_its_known_cause_both_ways`: the MCP case reads a
-  `key=value` number from `said_by_omn`, which holds `omn`'s lines only since
+  `key=value` number from `said_by_omn`; reasoned, not shown: it holds `omn`'s lines only since
   budget's `program_stderr` -- the request budget filed to docs
   (`tests/cases.rs`).
 - `runner::a_profile_s_losses_land_on_the_series_...`: 77295 against 76224,
