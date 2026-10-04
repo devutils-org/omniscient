@@ -385,7 +385,23 @@ gives the lanes more kernels to draw. Better still: add it to
 
 ## The suite
 
-On `fde9d3a`, with the other streams sharing the machine:
+The review round, on `8e8adc2`, with the other streams sharing the machine:
+
+- While iterating: `cargo test -p omn-view` (20), `--test view_snapshots`
+  (15), `--test view_model` (4), `--test view_live` (5), `cargo test --lib
+  collect::launch` (8), the two new unit tests in `src/main.rs`; `cargo
+  clippy --workspace --all-targets -- -D warnings` clean.
+- **`make check`**: red on its first failure, the same
+  `runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`
+  as before (filed as a gap red under load).
+- **`cargo test --workspace --no-fail-fast`**: 2320 passed, 3 failed, 11
+  ignored. That `runner` test, and two in the flaky tally
+  (`docs/open-findings.md`):
+  `collect::mem::page_faults::tests::sampled_in_user_mode_the_weighed_samples_are_the_faults_the_thread_took`
+  and `collect::cpu::profile::tests::a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned`;
+  each rerun alone once, each passes. None is in this round's paths.
+
+The first round, on `fde9d3a`:
 
 - While iterating: `cargo test -p omn-view` (15), `--test view_snapshots`
   (15), `--test view_model` (4), `--test view_live` (4), all green;
