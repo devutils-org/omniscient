@@ -959,13 +959,21 @@ fn consumed_cpu(spec: &str, axes: &[&str]) -> Option<Consumed> {
         }
     };
     let result = &document["results"][0];
-    let series = &result["outputs"][0]["series"][0];
     // A polled source reports a difference per tick, so the cpu time consumed
-    // over the window is the sum of the readings, not the last of them.
-    let reads = series["count"].as_f64().expect("a polled series");
-    let mean = series["mean"].as_f64().expect("a mean");
+    // over the window is the sum of the readings, not the last of them; and
+    // through `bpf:raw_tp` every thread is its own series, so it is the sum
+    // over the series too.
+    let consumed = result["outputs"][0]["series"]
+        .as_array()
+        .expect("polled series")
+        .iter()
+        .map(|series| {
+            series["count"].as_f64().expect("a polled series")
+                * series["mean"].as_f64().expect("a mean")
+        })
+        .sum();
     Some(Consumed {
-        consumed: mean * reads,
+        consumed,
         window: result["observed_ns"].as_f64().expect("a window"),
     })
 }
@@ -1904,8 +1912,12 @@ fn a_core_with_one_tenant_reads_the_same_through_two_files() {
         eprintln!("skipped: this machine will not report per-core utilisation");
         return;
     };
+    // Pinned to the file this test is about: the chain's first backend, where
+    // the machine serves it, reads the scheduler rather than `/proc`.
     let process = run(&[
         "cpu.oncpu_time",
+        "--backend",
+        "force:fs:proc",
         "--pid",
         &spinner.pid(),
         "-m",
@@ -2342,9 +2354,13 @@ fn a_poll_faster_than_the_kernels_tick_gets_the_kernels_resolution() {
     );
 
     // The same cadence against the same tick, through the other source that
-    // reads it. This one has to say what the reader is holding.
+    // reads it. This one has to say what the reader is holding. Pinned: on a
+    // machine that serves the `sched_stat_runtime` program, the chain's first
+    // backend reads the scheduler's nanoseconds and not the tick.
     let Outcome::Measured { rendered, .. } = run(&[
         "cpu.oncpu_time",
+        "--backend",
+        "force:fs:proc",
         "--pid",
         &tenant.pid(),
         "-m",
@@ -4719,5 +4735,164 @@ fn a_container_is_counted_as_the_cgroup_its_runtime_names() {
         counted < child * 1.25,
         "the container was counted at {counted:.0}, against its own loop of {child:.0}: the \
          parent's {parent:.0}, outside it, is in the count"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `cpu.oncpu_time` through `bpf:raw_tp`: each thread, held to the scheduler
+// ---------------------------------------------------------------------------
+
+/// The events of a run of `cpu.oncpu_time` through the `sched_switch`
+/// program, or `None` where this machine resolved it elsewhere -- which is
+/// every machine that does not grant the binary `CAP_BPF` and `CAP_PERFMON`.
+fn oncpu_rows(args: &[&str]) -> Option<(serde_json::Value, Vec<serde_json::Value>)> {
+    let mut command = vec!["cpu.oncpu_time", "-m", "poll@100ms", "-e", "raw"];
+    command.extend_from_slice(args);
+    let document = match run(&command) {
+        Outcome::Measured { document, .. } => document,
+        Outcome::Refused { message, .. } => {
+            eprintln!("skipped: {}", machine_s_reason(&message));
+            return None;
+        }
+    };
+    let backend = document["results"][0]["backend"]["id"]
+        .as_str()
+        .or_else(|| document["results"][0]["backend"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    if backend != "bpf:raw_tp" {
+        eprintln!(
+            "skipped: cpu.oncpu_time resolved to `{backend}` here; the sched_switch program \
+             needs CAP_BPF and CAP_PERFMON on target/debug/omn (`make` grants them)"
+        );
+        return None;
+    }
+    let rows = raw_events(&document);
+    Some((document, rows))
+}
+
+/// The first field of `/proc/<pid>/schedstat`: the scheduler's own
+/// nanoseconds on a cpu for that task, `se.sum_exec_runtime`.
+fn schedstat_ns(tid: u32) -> Option<u64> {
+    std::fs::read_to_string(format!("/proc/{tid}/schedstat"))
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// A shell that waits, spins, then waits again: blocked at both ends, so its
+/// `schedstat` is still when it is read, and every slice of its spin begins
+/// and ends inside the run.
+fn shell_that_spins_between_two_waits(first_s: u32, last_s: u32) -> Option<std::process::Child> {
+    let script = format!(
+        "sleep {first_s}; i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done; sleep {last_s}"
+    );
+    Command::new("/bin/sh").args(["-c", &script]).spawn().ok()
+}
+
+/// A thread's on-cpu time over the window is exactly what the scheduler
+/// credited it with over the same window, to the nanosecond.
+///
+/// Ground truth: `/proc/<pid>/schedstat`, read before the run and after it,
+/// while the shell is blocked -- so neither read is in the middle of a slice
+/// -- and the shell's spin falls between the two. The program reads the same
+/// `sum_exec_runtime` at each slice's start and end, so the rows of the shell's
+/// own thread add up to the difference of the two reads with no tolerance at
+/// all. Its children (the two `sleep`s) are their own threads and their own
+/// rows, and are left out of the comparison.
+#[test]
+fn a_threads_rows_add_up_to_what_the_scheduler_credited_it_to_the_nanosecond() {
+    let Some(mut shell) = shell_that_spins_between_two_waits(2, 6) else {
+        eprintln!("skipped: no /bin/sh to spin");
+        return;
+    };
+    let pid = shell.id();
+    // Past the shell's own start, into its first wait.
+    std::thread::sleep(Duration::from_millis(500));
+    let before = schedstat_ns(pid);
+    let rows = oncpu_rows(&[
+        "--pid",
+        &pid.to_string(),
+        "--duration",
+        "5s",
+        "--format",
+        "json",
+    ]);
+    let after = schedstat_ns(pid);
+    let _ = shell.kill();
+    let _ = shell.wait();
+    let Some((document, rows)) = rows else { return };
+    let (Some(before), Some(after)) = (before, after) else {
+        panic!("the shell was gone before its second wait ended: {document}");
+    };
+    let own: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|row| attr_of(row, "tid") == Some(f64::from(pid)))
+        .collect();
+    let summed: u64 = own
+        .iter()
+        .map(|row| attr_of(row, "ns").expect("a row's ns") as u64)
+        .sum();
+    assert!(
+        after - before > 10_000_000,
+        "the shell spun for {} ns inside the window, which is not a spin: the run did not \
+         cover it",
+        after - before
+    );
+    assert_eq!(
+        summed,
+        after - before,
+        "the program summed {summed} ns for the shell's thread, and the scheduler credited it \
+         {} ns over the same window; rows:\n{own:#?}",
+        after - before
+    );
+    // Every row is the process's, and says so.
+    for row in &rows {
+        assert_eq!(
+            row["keys"][0]["task"]["tid"].as_f64(),
+            attr_of(row, "tid"),
+            "the key is the thread: {row}"
+        );
+    }
+}
+
+/// A launched program's rows add up to the cpu time the reap reports for it,
+/// less what it ran before the window opened.
+///
+/// Ground truth: `wait4`'s `rusage`, which the runner carries as the
+/// lifetime's `cpu_ns`. The kernel splits the same `sum_exec_runtime` into
+/// `utime` and `stime` and truncates each to the microsecond, so the reap is
+/// at most two microseconds below the true total. The program is attached
+/// while the forked child waits at the gate, so it sees every slice from the
+/// exec to the exit; what the child ran between the fork and the gate is in
+/// the reap and before the window -- tens of microseconds of the tool's own
+/// code, measured at 47 to 68 us here. The separation asserted: never more
+/// than the reap, and short of it by less than a millisecond against a spin
+/// of more than a hundred.
+#[test]
+fn a_launched_programs_rows_add_up_to_its_reaped_cpu_time() {
+    let Some((document, rows)) = oncpu_rows(&[
+        "--format",
+        "json",
+        "--",
+        "/bin/sh",
+        "-c",
+        "i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done",
+    ]) else {
+        return;
+    };
+    let reaped = document["results"][0]["lifetime"]["cpu_ns"]
+        .as_f64()
+        .expect("the reap's cpu figure");
+    let summed: f64 = rows.iter().filter_map(|row| attr_of(row, "ns")).sum();
+    assert!(reaped > 100e6, "the spin took {reaped} ns: not a spin");
+    let short = reaped - summed;
+    assert!(
+        (-2_000.0..1_000_000.0).contains(&short),
+        "the program summed {summed} ns and the reap {reaped} ns: the rows may fall short of \
+         the reap by what the child ran before the gate, never by a millisecond, and may \
+         exceed it by the reap's truncation, never by more than 2 us; short by {short} ns"
     );
 }

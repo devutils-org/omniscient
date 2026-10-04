@@ -14,10 +14,10 @@
 //! one per cent. The interval is the request's to choose, and what it costs is
 //! said on the event rather than left to be worked out.
 //!
-//! What this is *not*: the `bpf:tp` backend above it in the chain watches
-//! `sched_switch` and knows a task's time to the nanosecond, with the stack
-//! that was running. This is the fallback that needs no privileges at all, and
-//! it reports a total rather than an attribution.
+//! What this is *not*: the `bpf:raw_tp` backend above it in the chain
+//! (`oncpu_bpf.rs`) adds up the scheduler's own nanoseconds per thread. This is
+//! the fallback that needs no privileges at all, and it reports a process's
+//! total rather than its threads.
 
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
@@ -242,7 +242,7 @@ impl Collector for OnCpuTime {
             self.notes.push(format!(
                 "the kernel credits cpu time in ticks of {:.0} ms and this polls every {:.0} ms, \
                  so each reading is one tick -- up to {:.0} % -- away from what was consumed; \
-                 the `bpf:tp` backend is the one that resolves below a tick",
+                 the `bpf:raw_tp` backend is the one that resolves below a tick",
                 per_tick_ns as f64 / 1e6,
                 interval_ns as f64 / 1e6,
                 100.0 * per_tick_ns as f64 / interval_ns as f64,
@@ -460,7 +460,7 @@ mod tests {
             .next()
             .expect("a poll at one tick is worth a note");
         assert!(note.contains("ticks"), "{note}");
-        assert!(note.contains("bpf:tp"), "{note}");
+        assert!(note.contains("bpf:raw_tp"), "{note}");
 
         let mut slow = OnCpuTime::new(0, PathBuf::from("/proc/self/stat"), poll(1_000));
         slow.start().expect("this process exists");
