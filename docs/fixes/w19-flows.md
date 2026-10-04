@@ -233,3 +233,20 @@ average 37-41):
   None is in `view/`, and this branch touches nothing else that runs: its
   diff is `view/src/views/flows.rs` and documents. Every `omn-view` test and
   every view snapshot passed.
+
+After the review round (commit `86d8a17` and this one), load average 30-37:
+
+- `make check`: red on the lib tests, 1509 passed and 1 failed -- the same
+  `collect::cpu::profile::...a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned`,
+  in the flaky tally; alone, it passed.
+- `cargo test --workspace --no-fail-fast`: 5 tests failed, every other
+  passed. Each rerun alone, once:
+  - passed alone: `family_sched::a_program_that_sleeps_a_known_time_is_off_cpu_for_that_time`,
+    `scenario_cpu::a_profile_of_a_cgroup_samples_its_task_and_not_the_one_beside_it`,
+    `scenario_net::two_mechanisms_measuring_one_wire_agree_to_the_link_header`,
+    `unwind::a_stripped_build_is_named_from_debuginfod_only_when_asked_and_as_the_unstripped_one_is`;
+  - failed again: `runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`,
+    the same gap as the first round, filed for stream profile.
+  None is in `view/`; the round's diff is `view/src/views/flows.rs`, the
+  flows snapshots and documents. All 13 flows tests and the 15 view
+  snapshot tests passed; clippy and fmt clean.
