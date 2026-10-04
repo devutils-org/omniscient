@@ -51,14 +51,15 @@ The same pointer under two open timestamps, four milliseconds apart, is why the
 milliseconds, and a pointer alone would have credited one request's latency to
 another.
 
-**2656 tests passed** in the twentieth wave's last full run (`cargo test
+**2660 tests passed, 0 failed, 13 ignored** across 64 binaries in the
+`make check` run after the twentieth wave's matrix sweep (at `3a1aaa1`, green on its first
+run, clippy and fmt clean): the first green `make check` since the
+seventeenth wave. The wave's last full run before the sweep (`cargo test
 --workspace --no-fail-fast` after its merges and the merge's first fix,
-`96b4741`), 4 failed, 13 ignored, across 64 binaries. Three of the four were
-merge regressions where two streams met, each red alone too and fixed after
-the run in `d661d67`; the fourth is `portability::every_cell_covers_the_whole_catalog`, a matrix cell
-under `target/matrix/` swept before the nineteenth wave added `gpu.profile` (a
-local build output the next sweep refreshes), which keeps `make check` red on
-this machine until the sweep. **The test that was red in every run since the
+`96b4741`) had 2656 passed and 4 failed: three merge regressions where two
+streams met, fixed in `d661d67`, and
+`portability::every_cell_covers_the_whole_catalog`, whose cells predated
+`gpu.profile` until the sweep refreshed them. **The test that was red in every run since the
 eighteenth wave is green**:
 `runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`,
 since `cpu.profile`'s `losses_by_ring` carries each ring's throttles beside its
@@ -1396,10 +1397,10 @@ build or test.
 
 ### Still to run, after the twentieth wave
 
-Nothing privileged ran during or after the twentieth wave: the coordinator ran
-the full suite only. **Carried from the nineteenth wave**, deferred because
-this wave changed the catalog and the collectors: the matrix and the backends
-bench. **New**: the GPU bench again (`gpu.profile` can be measured since its
+Item 1, the matrix, ran after the merge (2026-10-04, "What the earlier runs
+found" below); nothing else privileged ran during or after the twentieth
+wave. **Carried from the nineteenth wave**, deferred because this wave changed
+the catalog and the collectors: the backends bench. **New**: the GPU bench again (`gpu.profile` can be measured since its
 double free is fixed), the budget's two runs, and the net stream's namespace
 run. Items 6 and 7 need a password (`sudo -n` refuses them); item 9 is the
 user's.
@@ -1410,9 +1411,11 @@ holds it (`nvidia-smi --query-compute-apps=pid,process_name --format=csv`
 prints only its header), and run nothing that polls NVML beside it -- a
 poller makes the energy counter under-count for every reader of the board.
 
-1. **The matrix** (alone, about 70 minutes; the cells under
-   `target/matrix/cells/` predate `gpu.profile`, which is all that keeps
-   `make check` red):
+1. ~~**The matrix**~~ -- **ran after the twentieth wave's merge**, every
+   judge green and `make check` green after it (below). Kept for the next
+   sweep (alone, about 30 minutes for the twenty guests here, plus
+   `scripts/matrix.sh here` for `here-caps` and the `here-nocaps` recipe in
+   `docs/portability.md`, "The twentieth wave's sweep"):
 
    ```console
    cd /home/moha/repos/omniscient && make matrix
@@ -1568,6 +1571,46 @@ poller makes the energy counter under-count for every reader of the board.
    ```
 
 ### What the earlier runs found
+
+**Ran after the twentieth wave's merge** (2026-10-04, at `3a1aaa1`, alone on
+the machine; `docs/portability.md`, "The twentieth wave's sweep"):
+
+- **Item 1, the matrix: every judge green.** `make matrix` swept the twenty
+  guest cells (4 kernels x `caps`, `root`, `nocaps`, `nobtf`, `notracefs`)
+  in 27 minutes, every one complete with 0 broken; `make matrix` itself
+  stopped red because it does not sweep `here-*`, which still predated
+  `gpu.profile`. `scripts/matrix.sh here` then swept `here-caps`, and
+  `here-nocaps` was swept from an unlinked copy of the binary (the script's
+  own `make` puts the capabilities back, so the sweep binary was run directly);
+  `make` restored them. All 22 cells from one build (`a0fa46876ef690f3`),
+  102 sources each. `cargo test --test portability`: **25 passed**, 1 ignored;
+  `every_cell_covers_the_whole_catalog` green; every gap between the 22 cells
+  explained by a recorded field (`privileges` 2528, `kernel_btf` 1748,
+  `tracefs` 1570, `kernel_release` 383, `virtualization` 280, `gpus` 200,
+  `perf_event_paranoid` 24), none the build's. Usable per cell class:
+
+  | Kernel | caps | root | notracefs | nobtf | nocaps |
+  |---|---|---|---|---|---|
+  | 5.15.221 | 74 | 78 | 78 | 48 | 44 |
+  | 6.1.188 | 77 | 81 | 81 | 48 | 44 |
+  | 6.6.157 | 81 | 82 | 82 | 48 | 44 |
+  | 7.2.7 | 83 | 84 | 84 | 48 | 44 |
+  | here (7.2.7, no guest) | 95 | | | | 59 |
+
+  Read as item 1 asked: the sched sources serve through `bpf:raw_tp` from 6.1
+  up; on 5.15 `sched.runqlat`, `sched.offcpu` and `sched.lock` are refused
+  with each reason named (the three-argument `sched_switch`, the floor, and a
+  fallback with no collector), as before. `cpu.oncpu_time` falls back to
+  `fs:proc` on 5.15 and 6.1, where `sched_stat_runtime` has three arguments,
+  and serves through `bpf:raw_tp` on **6.6.157** as on 7.2.7: the two-argument
+  prototype is already in that 6.6 stable kernel, so "before 6.8" in
+  `docs/fixes/w20-cpu.md` is the mainline boundary, not the one a 6.6 LTS
+  meets. `net.qdisc` serves through `bpf:raw_tp` on every kernel with the
+  capabilities, so the `member_offset` lookups it makes (`possible_net_t`
+  among them) resolved on each.
+- **Then one `make check`: green on its first run**, 2660 passed, 0 failed,
+  13 ignored across 64 binaries, clippy and fmt clean. Nothing from the flaky
+  tally fired, so nothing was rerun.
 
 **Ran after the nineteenth wave's merge** (2026-10-04, at `a71d9cf`, alone on
 the machine and the device: `nvidia-smi --query-compute-apps` empty before

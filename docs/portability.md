@@ -1391,3 +1391,59 @@ The five `7.2.6-*` cells on disk predate the host's move to 7.2.7 and record
 none of the new fields; they alone account for the judge's 1316 "not
 explained yet". `rm -r target/matrix/cells/7.2.6-*` clears them. Logs:
 `target/matrix-here.log`, `target/matrix-all.log`.
+
+## The twentieth wave's sweep
+
+All 22 cells swept again on 2026-10-04, alone, with one binary
+(`cell.build` `a0fa46876ef690f3`, `main` at `3a1aaa1`, after the twentieth
+wave's merge), 102 sources a cell now that `gpu.profile` is in the catalog.
+`make matrix` swept the twenty guests in about 27 minutes, every one complete
+with 0 broken, and then went red on its own judging: it does not sweep the
+`here-*` cells, which still predated `gpu.profile`
+(`every_cell_covers_the_whole_catalog`) and so gave every guest a
+"`gpu.kernel` is Yes and No with every requirement answered alike" gap. After
+`scripts/matrix.sh here` (`here-caps`) and `here-nocaps`, every judge passes:
+`cargo test --test portability` 25 passed, 1 ignored. Usable sources:
+
+| Kernel | caps | root | notracefs | nobtf | nocaps |
+|---|---|---|---|---|---|
+| 5.15.221 | 74 | 78 | 78 | 48 | 44 |
+| 6.1.188 | 77 | 81 | 81 | 48 | 44 |
+| 6.6.157 | 81 | 82 | 82 | 48 | 44 |
+| 7.2.7 | 83 | 84 | 84 | 48 | 44 |
+| here (7.2.7, no guest) | 95 | | | | 59 |
+
+Every gap between the 22 cells is explained by a recorded field that differs
+(`privileges` 2528, `kernel_btf` 1748, `tracefs` 1570, `kernel_release` 383,
+`virtualization` 280, `gpus` 200, `perf_event_paranoid` 24); none is the
+build's.
+
+- **`cpu.oncpu_time` through `bpf:raw_tp` serves on 6.6.157.** The program is
+  written for the two-argument `sched_stat_runtime(task_struct *, u64)`; 5.15
+  and 6.1 declare three arguments and fall back to `fs:proc` with the
+  prototype named, but this 6.6 stable kernel already carries the two-argument
+  one, and both its runs exit 0 through `bpf:raw_tp`. The boundary a user meets
+  is the prototype the probe reads from BTF, not a version: "older than 6.8"
+  (`docs/fixes/w20-cpu.md`) is mainline's, and a 6.6 LTS is on the new side.
+- **The sched sources**: `bpf:raw_tp` from 6.1 up on every configuration with
+  the capabilities. On 5.15 `sched.runqlat`, `sched.offcpu` and `sched.lock`
+  refuse with each cause named (the three-argument `sched_switch`, the 6.1
+  floor, and a fallback with no collector), under `root` too.
+- **`net.qdisc`** attaches through `bpf:raw_tp` and exits 0 on every kernel
+  with the capabilities: the `member_offset` lookups its program makes
+  resolved on each.
+- **`here-nocaps` cannot be swept by `scripts/matrix.sh here` any more**: the
+  script runs `make`, which puts the capabilities back on a stripped binary
+  (and `setcap -r` is not in the sudoers file). What worked, with the
+  capabilities restored by `make` afterwards:
+
+  ```console
+  cp target/debug/omn target/debug/omn.nocaps && mv target/debug/omn.nocaps target/debug/omn
+  OMN_MATRIX_CELL=here-nocaps OMN_MATRIX_CONFIG=nocaps \
+      target/debug/deps/portability-<hash> --ignored --exact sweep_this_machine --nocapture
+  make
+  ```
+
+  The sweep binary has to be named directly: `cargo test --no-run` relinks
+  `target/debug/omn` from its capable `deps` copy first, and the cell is then
+  swept with the capabilities (seen here once, 95 usable, and swept again).
