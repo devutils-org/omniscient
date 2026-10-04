@@ -12868,3 +12868,27 @@ machine (load about 1 on 24 cpus), the GPU free:
   readable is a chmod of every `events/*/*/id` at boot, outside the
   project's privilege model -- the example's comment already names 1 as the
   answer on such a machine.
+
+### Items 6 to 8, typed by the user (2026-10-05)
+
+- **A socket in another namespace**: a TCP pair inside `omn-w20` (port
+  47001) and one on the host (47002), `net.socket --system` for 2 s: 41 send
+  rows for the namespace's pair, none with an `iface`; 40 for the host's, all
+  `lo`. As expected.
+- **The device's clocks**: under `nvidia-smi -lgc 1500,1500` the
+  performance levels still read up to 2205 MHz, and `omn` says "not shown
+  locked". Settled in `DECISIONS.md` ("Settled after the twenty-third wave"):
+  a range is never "unlocked"; a lock needs another source (`shader_lock`).
+  Persistence mode read back on, then off. A snapshot's cost line reads
+  2856 % and 4349 % against `true`'s 0.6 ms of cpu: a percentage of a target
+  that does nothing, true and useless; a snapshot could say its cost in
+  time alone.
+- **The known-latency device at 3 ms**: green, 64 requests from 3001729 to
+  3005338 ns (median 3002280), all in [2097152, 4194304).
+- **The script ran under `sudo bash`**, so its `cargo test` built as root:
+  794 files under `target/` owned by root, `target/debug/omn` among them,
+  without its capabilities. `sudo chown -R moha: target && make` puts it
+  back.
+- **The views' size** (item 9, the user's one remark): the views other than
+  `system` draw in a fraction of the terminal and leave the rest empty; they
+  should fill the screen the way `system` does.

@@ -1711,13 +1711,12 @@ Below the milestones, and not scheduled:
   A consumer of one more format, not a source: `DECISIONS.md` boundary 6 says
   why LTTng is a peer rather than a backend. Low priority; nothing depends on
   it and no measurement here is worse without it.
-- **Five decisions are open** (`DECISIONS.md`): the phase 6 criterion for
+- **Four decisions are open** (`DECISIONS.md`): the phase 6 criterion for
   the in-kernel histogram, pending what `tp_btf` leaves; what the budget's
   first check may stop a run on (its one-time half landed in the twentieth
   wave, the 10 ms slack proposed with numbers); a cost per regime in the
-  catalog's schema (proposed with numbers); whether a range in the GPU's
-  performance levels can be read as free clocks, pending the `-lgc` run;
-  and since the twentieth wave, whether the latency session asks
+  catalog's schema (proposed with numbers); and since the twentieth wave,
+  whether the latency session asks
   `sched.wakeup`. How a reference pair reads a value `omn` computes was
   settled before the twenty-third wave: a parser of `omn`'s output. How a byte counter's direction becomes a
   series was settled in the twenty-first wave: a key, `dir`.
@@ -1841,7 +1840,9 @@ build or test.
 driver (`docs/open-findings.md`, "The runs carried since the nineteenth
 wave"): GPU tests, cases and views green; the GPU bench red on `gpu.freq`'s
 two lost records; the backends bench green with 16 bands outside, to move.
-Items 6 to 10 remain.
+Items 6 to 8 ran the same night, typed by the user (below, and
+`docs/open-findings.md`); item 9's one remark is the views' size; item 10 is
+the reference pairs, done after the reboot.
 
 Item 1, the matrix, ran after the twentieth wave's merge (2026-10-04, "What
 the earlier runs found" below). In the twenty-first to twenty-third waves

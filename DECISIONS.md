@@ -1308,6 +1308,17 @@ as they were.
 | A GPU pair without a loaded driver | **Skips through `requires: [/dev/nvidiactl]`** (gpu). | A CUDA workload without a driver exits 2, which would fail every pair for the machine's reason. |
 | A cross-machine session whose window must contain a program | **The session launches the program, and the program says when it is done**; a `/proc/<pid>/io` reference is net of the cgroup's `pswpin` delta over the run; a filesystem's devices are its members (`/sys/fs/btrfs/*/devices`), not its mount's source (cross). | Neither a duration nor a head start holds under load; zram swap-ins are reads no block source sees; btrfs spreads a file's chunks over its members. |
 
+## Settled after the twenty-third wave
+
+- **A range in the GPU's performance levels is not free clocks** (the
+  `nvidia-smi -lgc` run, 2026-10-05). With `nvidia-smi -lgc 1500,1500` in
+  force on the RTX 2080 Ti, NVML's performance levels still read 300 to
+  645, 2100, then 2205 MHz at every level above: the lock does not show
+  there. So the reading stays "not shown locked", never "unlocked", and a
+  lock needs another source of evidence (filed against `shader_lock` in
+  `src/collect/gpu/mod.rs`). Persistence mode was read back both ways, on
+  and off.
+
 ## Open
 
 - **The phase 6 criterion for the in-kernel histogram** (io, pending the
@@ -1367,14 +1378,6 @@ as they were.
   `--budget` under 20 % its `gpu.kernel` on a program of long kernels,
   refused for a cost it would not pay, and the cost line saying `extreme`
   where the measurement says `med`.
-- **Whether a range in the GPU's performance levels can be read as free
-  clocks** (nineteenth wave, device, pending the `nvidia-smi -lgc` run in
-  `STATE.md`, "Needs privilege"). NVML has no reader for a locked clock, so a
-  range reads "not shown locked". If a `-lgc` lock shows as one frequency at
-  every level, a range can say "unlocked" again; if not, the lock needs
-  another source of evidence. Leaving it open costs every GPU timing on this
-  board a hedge where it could state a fact.
-
 - **Whether the latency session asks `sched.wakeup`** (twentieth wave,
   triage). A thread blocked on a connection beside the main thread's block is
   recognised by its stack's send and receive frames; a C program's `send`
