@@ -259,3 +259,29 @@ fn the_view_reads_a_result_s_row_stamp_and_drains_as_omn_writes_them() {
         serde_json::from_value(serde_json::to_value(&written).unwrap()).unwrap();
     assert_eq!(read.row_stamp.as_deref(), Some("first_event"));
 }
+
+/// A launched program's life read through the view's typed mirror and
+/// written back is the life `omn` wrote, every field kept, `adopted_ended`
+/// among them.
+#[test]
+fn the_lifetime_mirror_keeps_every_field() {
+    let written = omn::collect::Lifetime {
+        released_ns: 10,
+        exited_ns: 2_000,
+        exited_err_ns: 7,
+        terminated: true,
+        cpu_ns: Some(1_234),
+        left_running: 1,
+        adopted_ended: 3,
+    };
+    let value = serde_json::to_value(written).unwrap();
+    let results = omn_view::model::Results {
+        lifetime: Some(value),
+        ..Default::default()
+    };
+    let read = results.launched().expect("a lifetime");
+    assert_eq!(read.adopted_ended, 3);
+    let back: omn::collect::Lifetime =
+        serde_json::from_value(serde_json::to_value(&read).unwrap()).unwrap();
+    assert_eq!(back, written);
+}

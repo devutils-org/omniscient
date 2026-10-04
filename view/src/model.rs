@@ -96,6 +96,52 @@ pub struct Results {
     /// it; `None` is unknown, never zero.
     #[serde(skip)]
     pub ts_err_ns: Option<u64>,
+    /// What a collector counted and said in a sentence, as numbers a program
+    /// can read (`net.request`'s `never_ended`, `unborn`, `replaced`,
+    /// `filtered_out`). Written only when not empty; absent from a recording
+    /// made before `omn` wrote it, where the sentences are all there is.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, Value>,
+}
+
+/// A launched program's life, as `omn` writes it in a result's `lifetime`:
+/// the typed reading of the fields a view uses.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lifetime {
+    #[serde(default)]
+    pub released_ns: u64,
+    #[serde(default)]
+    pub exited_ns: u64,
+    #[serde(default)]
+    pub exited_err_ns: u64,
+    /// The tool ended the program (the duration elapsed, a collector failed).
+    #[serde(default)]
+    pub terminated: bool,
+    /// The program's user plus system cpu at the reap.
+    #[serde(default)]
+    pub cpu_ns: Option<u64>,
+    /// Processes the stop could not signal, still running.
+    #[serde(default)]
+    pub left_running: u32,
+    /// Processes that had left the program's tree, orphaned and adopted by
+    /// `omn`, that the end of the run ended.
+    #[serde(default)]
+    pub adopted_ended: u32,
+}
+
+impl Results {
+    /// The launched program's life, when this result carries one.
+    pub fn launched(&self) -> Option<Lifetime> {
+        serde_json::from_value(self.lifetime.clone()?).ok()
+    }
+
+    /// A field the collector published as a whole number.
+    pub fn field_u64(&self, name: &str) -> Option<u64> {
+        let value = self.fields.get(name)?;
+        value
+            .as_u64()
+            .or_else(|| value.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64))
+    }
 }
 
 /// One drain that found the kernel had dropped events since the drain before

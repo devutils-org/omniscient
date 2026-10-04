@@ -6,9 +6,13 @@
 //! - **One time axis.** Every chart spans the run, from its first window to
 //!   its last (or to now, live), so in a column of panels a disk burst and
 //!   the cpu that caused it sit one above the other.
-//! - **Colour is trust.** The charts are drawn in the terminal's own colour;
-//!   every coloured cell on this screen is the trust style -- a loss, a time
-//!   error, a refusal, a cost -- so what is coloured is what to read twice.
+//! - **Colour is how full.** A chart and its figures take the usage gradient
+//!   ([`usage`]): green where the resource is free, through yellow, to red
+//!   where it is full, by its share of a capacity the run knows (the
+//!   machine's cores, an engine's time, the VRAM). A resource with no known
+//!   capacity (energy, bytes on a device of unknown speed) keeps one neutral
+//!   hue and its section says so. Trust does not wash the colour out: a lossy
+//!   figure keeps its hue, is underlined, and carries its badge.
 //!   `gpu.engine_busy`'s one-second sampling window is drawn as a ruler on
 //!   the run's own time axis, not as a footnote.
 //! - **What it costs.** A corner lists what each panel's collector cost, as a
@@ -31,7 +35,7 @@ use ratatui::Frame;
 
 use super::{Action, Ctx, Focus, Need, Region, Scope, View};
 use crate::model::{Data, Event, Output, Refusal, Results};
-use crate::trust::{self, palette, Trust};
+use crate::trust::{self, palette, usage, Trust};
 use crate::units;
 
 /// What this view needs measured.
@@ -57,20 +61,20 @@ pub const NEEDS: &[Need] = &[
     Need {
         source: "io.bytes",
         mode: "poll@250ms",
-        emit: &["timeline", "summary"],
+        emit: &["raw", "timeline", "summary"],
         keys: &[],
         stack: None,
         scope: Scope::System,
-        why: "the disk panel: bytes read and written per device",
+        why: "the disk panel: bytes read and written per device, apart, from the events",
     },
     Need {
         source: "net.bytes",
         mode: "poll@250ms",
-        emit: &["timeline", "summary"],
+        emit: &["raw", "timeline", "summary"],
         keys: &[],
         stack: None,
         scope: Scope::System,
-        why: "the network panel: bytes in and out per interface",
+        why: "the network panel: bytes in and out per interface, apart, from the events",
     },
     Need {
         source: "gpu.engine_busy",
@@ -996,6 +1000,55 @@ fn chart(cells: &[Option<f64>], max: f64, rows: usize, style: Style) -> Vec<Line
         .collect()
 }
 
+/// [`chart`] in the usage gradient: each cell takes the colour of its own
+/// value's share of `capacity` (green free, red full), or one neutral hue
+/// when the capacity is not known; the trust underlines rather than dims, so
+/// a lossy chart keeps its colour ([`Trust::hued`]).
+fn usage_chart(
+    cells: &[Option<f64>],
+    max: f64,
+    rows: usize,
+    trust: &Trust,
+    capacity: Option<f64>,
+) -> Vec<Line<'static>> {
+    let plain = chart(cells, max, rows, Style::new());
+    plain
+        .into_iter()
+        .map(|line| {
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut run = String::new();
+            let mut run_style: Option<Style> = None;
+            for (glyph, cell) in text
+                .chars()
+                .zip(cells.iter().chain(std::iter::repeat(&None)))
+            {
+                let style = trust.hued(usage::of(cell.unwrap_or(0.0), capacity));
+                if run_style != Some(style) {
+                    if let Some(done) = run_style {
+                        spans.push(Span::styled(std::mem::take(&mut run), done));
+                    }
+                    run_style = Some(style);
+                }
+                run.push(glyph);
+            }
+            if let Some(done) = run_style {
+                spans.push(Span::styled(run, done));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// The style of a figure in the usage gradient: see [`usage_chart`].
+fn hue(trust: &Trust, value: f64, capacity: Option<f64>) -> Style {
+    trust.hued(usage::of(value, capacity))
+}
+
 /// The smallest round ceiling at or above `peak`: 1, 2 or 5 times a power of
 /// ten, so an axis reads at a glance.
 fn ceiling(peak: f64) -> f64 {
@@ -1291,7 +1344,9 @@ impl<'a> Strips<'a> {
             &unlabelled("busy, as a share of the whole machine", assumed),
             Some(&trust),
         );
-        let style = trust.style();
+        // A share of the whole machine: its capacity is one.
+        let whole_machine = Some(1.0);
+        let style = trust.hued(usage::NEUTRAL);
         let top = ceiling(track.peak());
         let cells = self.axis.cells(&track.points, self.chart);
         let name = |word: &str| Span::styled(format!("{word:<5}"), dim());
@@ -1306,11 +1361,24 @@ impl<'a> Strips<'a> {
                 name(last),
                 Span::styled(
                     track.last().map_or("-".to_owned(), share),
-                    style.add_modifier(Modifier::BOLD),
+                    hue(&trust, track.last().unwrap_or(0.0), whole_machine)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ],
-            vec![name("mean"), Span::styled(share(track.mean()), style)],
-            vec![name("peak"), Span::styled(share(track.peak()), style)],
+            vec![
+                name("mean"),
+                Span::styled(
+                    share(track.mean()),
+                    hue(&trust, track.mean(), whole_machine),
+                ),
+            ],
+            vec![
+                name("peak"),
+                Span::styled(
+                    share(track.peak()),
+                    hue(&trust, track.peak(), whole_machine),
+                ),
+            ],
         ];
         // The kernel's own account of the same machine over the window, from
         // the run's cost: busy cpu-seconds per second, the figure a person
@@ -1334,7 +1402,10 @@ impl<'a> Strips<'a> {
             figures.push(vec![Span::styled("by state: in the events only", dim())]);
         }
         let rows = self.cpu_rows.max(figures.len());
-        for (index, line) in chart(&cells, top, rows, style).into_iter().enumerate() {
+        for (index, line) in usage_chart(&cells, top, rows, &trust, whole_machine)
+            .into_iter()
+            .enumerate()
+        {
             let scale = if index == 0 {
                 format!("{:>8} ┤", share(top))
             } else if index == rows - 1 {
@@ -1398,7 +1469,8 @@ impl<'a> Strips<'a> {
         );
         match busy {
             Some(Held::Served(results, trust, _)) => {
-                let style = trust.style();
+                // A share of the engine's time: its capacity is one.
+                let engine = Some(1.0);
                 let all = self.tracks_of(&results);
                 let several = all.len() > 1;
                 for track in all {
@@ -1420,7 +1492,7 @@ impl<'a> Strips<'a> {
                     }
                     let cells = self.axis.cells(&track.points, self.chart);
                     let top = ceiling(track.peak());
-                    let lines = chart(&cells, top, 2, style);
+                    let lines = usage_chart(&cells, top, 2, &trust, engine);
                     let mut lines = lines.into_iter();
                     // Several engines or devices: each row says which.
                     let name = if several {
@@ -1432,9 +1504,12 @@ impl<'a> Strips<'a> {
                         label(&name),
                         lines.next().map(|line| line.spans).unwrap_or_default(),
                         vec![
-                            Span::styled(share(track.mean()), style.add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                share(track.mean()),
+                                hue(&trust, track.mean(), engine).add_modifier(Modifier::BOLD),
+                            ),
                             Span::styled(" mean  ", dim()),
-                            Span::styled(share(track.peak()), style),
+                            Span::styled(share(track.peak()), hue(&trust, track.peak(), engine)),
                             Span::styled(" peak", dim()),
                         ],
                     );
@@ -1473,18 +1548,25 @@ impl<'a> Strips<'a> {
         }
         match memory {
             Some(Held::Served(results, trust, _)) => {
-                let style = trust.style();
                 for track in self.tracks_of(&results) {
                     let now = track.last().unwrap_or(0.0);
+                    // VRAM against the device's size, when the run read it.
+                    let style = hue(&trust, now, track.ceiling);
                     let flat = track
                         .points
                         .iter()
                         .all(|point| point.shown == track.points[0].shown);
                     let (chart_spans, figure) = match track.ceiling {
                         Some(total) => (
-                            chart(&self.axis.cells(&track.points, self.chart), total, 1, style)
-                                .remove(0)
-                                .spans,
+                            usage_chart(
+                                &self.axis.cells(&track.points, self.chart),
+                                total,
+                                1,
+                                &trust,
+                                Some(total),
+                            )
+                            .remove(0)
+                            .spans,
                             vec![
                                 Span::styled(units::bytes(now), style.add_modifier(Modifier::BOLD)),
                                 Span::styled(format!(" held of {}", units::bytes(total)), dim()),
@@ -1545,30 +1627,37 @@ impl<'a> Strips<'a> {
             &unlabelled("time the machine stalled waiting for it", assumed),
             Some(&trust),
         );
-        let style = trust.style();
+        // A share of the wall time stalled: always stalled is full.
+        let always = Some(1.0);
         for track in self.tracks_of(&results) {
             let peak = track.peak();
             let figure = if peak <= 0.0 {
-                vec![Span::styled("never stalled", style)]
+                vec![Span::styled("never stalled", hue(&trust, 0.0, always))]
             } else {
                 vec![
-                    Span::styled(share(track.mean()), style.add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        share(track.mean()),
+                        hue(&trust, track.mean(), always).add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(" mean  ", dim()),
-                    Span::styled(share(peak), style),
+                    Span::styled(share(peak), hue(&trust, peak, always)),
                     Span::styled(" peak", dim()),
                 ]
             };
             let cells = self.axis.cells(&track.points, self.chart);
             self.row(
                 label("stalled"),
-                chart(&cells, ceiling(peak), 1, style).remove(0).spans,
+                usage_chart(&cells, ceiling(peak), 1, &trust, always)
+                    .remove(0)
+                    .spans,
                 figure,
             );
         }
         // What the target holds, when the run measured it: the one memory
         // figure that is the target's rather than the machine's.
         if let Some(Held::Served(rss, rss_trust, _)) = on_target(self.data, "mem.rss") {
-            let rss_style = rss_trust.style();
+            // The machine's memory is not in the run: one neutral hue.
+            let rss_style = rss_trust.hued(usage::NEUTRAL);
             let rss_tracks = self.tracks_of(&rss);
             let several = rss_tracks.len() > 1;
             for track in rss_tracks {
@@ -1592,7 +1681,9 @@ impl<'a> Strips<'a> {
                 };
                 self.row(
                     label(&name),
-                    chart(&cells, peak, 1, rss_style).remove(0).spans,
+                    usage_chart(&cells, peak, 1, &rss_trust, None)
+                        .remove(0)
+                        .spans,
                     figure,
                 );
             }
@@ -1612,13 +1703,15 @@ impl<'a> Strips<'a> {
         let named = all
             .iter()
             .all(|track| track.key != "system" && !track.lane && track.tangled.is_none());
+        // Energy has no capacity to be a share of: one neutral hue, said.
         let note = if named {
-            "watts per RAPL domain"
+            "watts per RAPL domain; no capacity, so one hue"
         } else {
-            "watts, from the RAPL counters; per domain by name: in the events only"
+            "watts, from the RAPL counters, no capacity so one hue; per domain by name: in the \
+             events only"
         };
         self.section("power", &unlabelled(note, scope), Some(&trust));
-        let style = trust.style();
+        let style = trust.hued(usage::NEUTRAL);
         let top = all.iter().map(Track::peak).fold(0.0, f64::max);
         for track in &all {
             if let Some(most) = track.tangled {
@@ -1645,7 +1738,7 @@ impl<'a> Strips<'a> {
             };
             self.row(
                 label(name),
-                chart(&cells, top, 1, style).remove(0).spans,
+                usage_chart(&cells, top, 1, &trust, None).remove(0).spans,
                 vec![
                     Span::styled(
                         watts(track.total() * 1e9 / self.axis.span_ns as f64),
@@ -1673,16 +1766,18 @@ impl<'a> Strips<'a> {
                 .then_with(|| one.key.cmp(&other.key))
         });
         let split = all.iter().any(|track| !track.parts.is_empty());
+        // Neither a device's speed nor a link's is in the run: bytes have no
+        // capacity to be a share of, so one neutral hue, and the note says so.
         let note = if split {
-            what.note.to_owned()
+            format!("{}; speed unknown, so one hue", what.note)
         } else {
             format!(
-                "{}; {} apart from {}: in the events only",
+                "{}, speed unknown so one hue; {} apart from {}: in the events only",
                 what.note, what.parts.0, what.parts.1
             )
         };
         self.section(what.name, &unlabelled(&note, assumed), Some(&trust));
-        let style = trust.style();
+        let style = trust.hued(usage::NEUTRAL);
         // One scale for every row, so two devices compare by height.
         let top = all.iter().map(Track::peak).fold(0.0, f64::max);
         let idle: Vec<String> = all
@@ -1713,7 +1808,7 @@ impl<'a> Strips<'a> {
             };
             self.row(
                 label(&device_name(&track.key)),
-                chart(&cells, top, 1, style).remove(0).spans,
+                usage_chart(&cells, top, 1, &trust, None).remove(0).spans,
                 figure,
             );
         }
@@ -2440,6 +2535,48 @@ mod tests {
         assert!(!screen.contains("cpu.oncpu_time refused"), "{screen}");
         assert!(screen.contains("by cpu"), "{screen}");
         assert!(screen.contains(" more "), "{screen}");
+    }
+
+    #[test]
+    fn usage_is_coloured_by_how_full_and_bytes_keep_one_hue() {
+        let buffer = draw(fixture("machine"), "system", 120, 40);
+        let row_of = |needle: &str| {
+            (0..buffer.area.height)
+                .find(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, *y)].symbol())
+                        .collect::<String>()
+                        .contains(needle)
+                })
+                .unwrap_or_else(|| panic!("no {needle:?}"))
+        };
+        let glyphs = |y: u16| -> Vec<ratatui::style::Color> {
+            (0..buffer.area.width)
+                .filter(|x| {
+                    let symbol = buffer[(*x, y)].symbol();
+                    EIGHTHS[1..].iter().any(|glyph| symbol == glyph.to_string())
+                })
+                .map(|x| buffer[(x, y)].fg)
+                .collect()
+        };
+        // The cpu chart's cells, under its rule: each in the ramp, by its
+        // share of the machine.
+        let cpu = row_of("├ cpu");
+        let cpu_cells: Vec<_> = (cpu + 1..cpu + 4).flat_map(glyphs).collect();
+        assert!(!cpu_cells.is_empty());
+        assert!(
+            cpu_cells.iter().all(|fg| usage::RAMP.contains(fg)),
+            "{cpu_cells:?}"
+        );
+        // A network's bytes have no capacity the run knows: one hue.
+        let net = row_of("├ network");
+        let net_cells: Vec<_> = (net + 1..net + 3).flat_map(glyphs).collect();
+        assert!(!net_cells.is_empty());
+        assert!(
+            net_cells.iter().all(|fg| *fg == usage::NEUTRAL),
+            "{net_cells:?}"
+        );
+        assert!(text(&buffer).contains("speed unknown"));
     }
 
     #[test]

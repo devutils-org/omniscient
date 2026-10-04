@@ -1707,6 +1707,9 @@ struct Losses {
     evicted: u64,
     evicted_until: f64,
     late: u64,
+    /// The kernel's drops each drain found, placed at the drain that read
+    /// them (`Results::drains`): `(when, how many)`.
+    drains: Vec<(f64, u64)>,
 }
 
 impl Losses {
@@ -1716,16 +1719,31 @@ impl Losses {
             evicted: 0,
             evicted_until: samples.first_ns() as f64,
             late: 0,
+            drains: Vec::new(),
         };
         for results in results {
+            let placed: u64 = results.drains.iter().map(|drain| drain.dropped).sum();
             losses.evicted += results.losses.evicted;
             losses.unplaced += results
                 .losses
                 .missing()
-                .saturating_sub(results.losses.evicted);
+                .saturating_sub(results.losses.evicted)
+                .saturating_sub(placed);
             losses.late += results.losses.late_ticks;
+            losses.drains.extend(
+                results
+                    .drains
+                    .iter()
+                    .filter(|drain| drain.dropped > 0)
+                    .map(|drain| (drain.ts_ns as f64, drain.dropped)),
+            );
         }
         losses
+    }
+
+    /// The drops placed at their drains.
+    fn placed(&self) -> u64 {
+        self.drains.iter().map(|(_, dropped)| dropped).sum()
     }
 
     /// The strip under the time axis, `width` cells from the map's left
@@ -1741,7 +1759,7 @@ impl Losses {
                 self.late
             )
         });
-        if self.unplaced == 0 && self.evicted == 0 {
+        if self.unplaced == 0 && self.evicted == 0 && self.placed() == 0 {
             let mut text = "nothing lost".to_owned();
             if let Some(late) = late {
                 text.push_str(&format!("; {late}"));
@@ -1751,6 +1769,12 @@ impl Losses {
         let mut words = String::new();
         if self.evicted > 0 {
             words.push_str(&format!(" -{} let go", units::count(self.evicted as f64)));
+        }
+        if self.placed() > 0 {
+            words.push_str(&format!(
+                " -{} dropped, ▓ at the drain that found them",
+                units::count(self.placed() as f64)
+            ));
         }
         if self.unplaced > 0 {
             words.push_str(&format!(
@@ -1770,6 +1794,28 @@ impl Losses {
                 .min(room);
             spans.push(Span::styled("▒".repeat(usize::from(until)), shade));
             spans.push(Span::raw(" ".repeat(usize::from(room - until))));
+        } else if !self.drains.is_empty() {
+            // Each drop where the drain that found it read: the column of
+            // the drain, and lightly the rest when some are from no known
+            // moment.
+            let mut cells: Vec<char> =
+                vec![if self.unplaced > 0 { '░' } else { ' ' }; usize::from(room)];
+            let cell_ns = (grid.window.1 - grid.window.0) / f64::from(grid.cols.max(1));
+            for (ts, _) in &self.drains {
+                // The stop's drain reads a moment after the run's end: within
+                // a cell of the window's end, it is the last column. A drain
+                // outside a zoomed window is not drawn in it.
+                let ts = if *ts > grid.window.1 && *ts - grid.window.1 <= cell_ns {
+                    grid.window.1
+                } else {
+                    *ts
+                };
+                let at = grid.column_of(ts).map(usize::from);
+                if let Some(cell) = at.and_then(|at| cells.get_mut(at)) {
+                    *cell = '▓';
+                }
+            }
+            spans.push(Span::styled(cells.into_iter().collect::<String>(), shade));
         } else {
             // Nothing says when: shaded lightly across the whole window.
             spans.push(Span::styled("░".repeat(usize::from(room)), shade));
@@ -2103,6 +2149,45 @@ mod tests {
         assert!(total <= in_window + 1e-6, "{total} of {in_window}");
     }
 
+    /// A drop is shaded in the column of the drain that found it, and the
+    /// rest of the strip is blank when every drop is placed.
+    #[test]
+    fn a_drop_is_shaded_in_the_column_of_its_drain() {
+        let losses = Losses {
+            unplaced: 0,
+            evicted: 0,
+            evicted_until: 0.0,
+            late: 0,
+            drains: vec![(25.0, 7), (100.5, 2), (500.0, 1)],
+        };
+        let grid = Grid {
+            cols: 40,
+            window: (0.0, 100.0),
+            cells: Vec::new(),
+            per_col: Vec::new(),
+            per_row: Vec::new(),
+        };
+        let line = losses.strip(&grid, 40, 120);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        let shaded: Vec<usize> = text
+            .chars()
+            .take(40)
+            .enumerate()
+            .filter(|(_, c)| *c == '▓')
+            .map(|(at, _)| at)
+            .collect();
+        // At 25 ns of 100 over 40 columns: column 10; the stop's drain half
+        // a nanosecond past the end: the last column; one far outside: not
+        // drawn.
+        assert_eq!(shaded, vec![10, 39], "{text}");
+        assert!(!text.contains('░'), "{text}");
+        assert!(text.contains("-10 dropped"), "{text}");
+    }
+
     /// The loss strip's words survive a narrow screen: the shading gives way.
     #[test]
     fn the_loss_strip_keeps_its_words_without_a_margin() {
@@ -2111,6 +2196,7 @@ mod tests {
             evicted: 56,
             evicted_until: 50.0,
             late: 0,
+            drains: Vec::new(),
         };
         let grid = Grid {
             cols: 40,

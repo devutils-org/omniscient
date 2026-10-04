@@ -3,38 +3,38 @@ omn top │ fixture workload-lanes │ 2.24s                          view: snap
 ┌ ledger -- what task 1529959 and 11 more cost over 2.24s of wall-clock ───────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        1.75s on cpu     78.0% of one cpu          ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇█▅▅▁▁▁▃▃    ≥16.5ms  ~low det            │
-│    task 1529975        481ms  ███          27.5%                                                                     │
-│    task 1529973        481ms  ███          27.5%                                                                     │
-│    task 1529974        480ms  ███          27.5%                                                                     │
+│    1529975 lane-c      481ms  ███          27.5%                                                                     │
+│    1529973 lane-a      481ms  ███          27.5%                                                                     │
+│    1529974 lane-b      480ms  ███          27.5%                                                                     │
 │    1530060 lane-g…     193ms  █            11.0%                                                                     │
 │    and 8 more tasks: 115ms                                                                                           │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
 │    own account         1.75s  with its descendants, as the scheduler counts them                                     │
 │    machine busy        30.1s  █            5.82%                                                                     │
+│  blocked time    9.46s            4.22 threads              ▁ ▂▂ ▂▂▂▂ ▂▂▂ ▂▆▁▂▂▃▃ ▃█    ≥48.6ms  ~low det degraded x2│
+│    1529959 python3     2.11s  ███          22.3%                                                                     │
+│    1529975 lane-c      969ms  █            10.2%                                                                     │
+│    1529974 lane-b      888ms  █            9.39%                                                                     │
+│    1529973 lane-a      808ms  █            8.54%                                                                     │
+│    and 8 more tasks: 4.68s                                                                                           │
 │  memory held     129MiB peak      +116MiB from 12.8MiB      ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂██████     1.84ms                      │
 │  memory faulted  9.31k faults     4.15k/s                   a total only                ≥4.29ms  36 late             │
 │    1530060 lane-g…     7.54k  ██████████   80.9%                                                                     │
-│    1529959 lanes-…     1.74k  ██           18.6%                                                                     │
-│    task 1529973            8  ▏            0.09%                                                                     │
-│    task 1530062            8  ▏            0.09%                                                                     │
+│    1529959 python3     1.74k  ██           18.6%                                                                     │
+│    1529973 lane-a          8  ▏            0.09%                                                                     │
+│    1530062 lane-g…         8  ▏            0.09%                                                                     │
 │    and 8 more tasks: 24                                                                                              │
 │  I/O syscalls    331 calls        2.13ms inside them        256ns ▃▇█▅▄▆▂▂▂ 131µs       ≥46.8ms  ~low det degraded x2│
 │    1530060 lane-g…    1.17ms  ███████      54.6%                                                                     │
-│    1529959 lanes-…     865µs  █████        40.5%                                                                     │
-│    task 1530062       51.7µs  ▏            2.42%                                                                     │
+│    1529959 python3     865µs  █████        40.5%                                                                     │
+│    1530062 lane-g…    51.7µs  ▏            2.42%                                                                     │
 │    and 3 more tasks: 52.5µs                                                                                          │
 │    bytes read and written: on the raw rows only, which this run did not keep                                         │
 │  network         1.70KiB moved    1.70KiB out, 0B in                         ▃▂▅ ▅█▅    ≥46.2ms  ~low det degraded x3│
 │    1530063 omn-cu…   1.36KiB  ██████████   80.2%                                                                     │
-│    1529959 lanes-…      264B  ██           15.2%                                                                     │
+│    1529959 python3      264B  ██           15.2%                                                                     │
 │    1530060 lane-g…       80B  █            4.61%                                                                     │
 │    15 socket calls                                                                                                   │
 │  retransmits     10 sent again    machine-wide              a total only                 ≥147µs  26 late ~low det deg│
-│  GPU memory      170MiB peak      of 904MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁██████     1.43ms                      │
-│  GPU time        452ms on GPU     12 kernels and copies                      ▄▅█▇▆█▃     ≥252µs  26 late ±289ns      │
-│    spin                452ms  ████████████  100%                                                                     │
-│  energy          243J machine     108W on average           ▆▆▆▆▆▆▅▅▆▆▆▆▆▇▇▇▇█████      ≥28.2µs                      │
-│    ≈ the target's      14.1J  an estimate, not a measurement: its share of the machine's busy cpu, 1.75s of 30.1s    │
-│                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line

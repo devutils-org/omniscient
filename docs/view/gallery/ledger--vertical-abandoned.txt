@@ -3,6 +3,7 @@ omn top │ fixture vertical-abandoned │ 184ms                      view: snap
 ┌ ledger -- what the target cost over 184ms of wall-clock ─────────────────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        not in this run: cpu.oncpu_time was not asked for                                                   │
+│  blocked time    not in this run: sched.offcpu was not asked for                                                     │
 │  memory held     not in this run: mem.rss was not asked for                                                          │
 │  memory faulted  not in this run: mem.faults was not asked for                                                       │
 │  I/O syscalls    not in this run: io.syscall was not asked for                                                       │
@@ -19,7 +20,6 @@ omn top │ fixture vertical-abandoned │ 184ms                      view: snap
 │cpu.oncpu_time -- cpu time, per thread                                                                                │
 │This run did not ask for it. `omn top` live asks for every line of the sheet; a recording made by another session     │
 │holds what that session asked.                                                                                        │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

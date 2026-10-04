@@ -34,7 +34,7 @@ omn top │ fixture file-serving │ 2.58s                            view: snap
 │                ┃██▀██████┃ btrfs 3760309 █        →256KiB             ┃█████████┃                                    │
 │        python3 ┃██████▀▀▀┃ 181 more fil… █ ▃▂▃▂▂▁ →2.50MiB ←2.91MiB   ┃▀▀▀▀▀▀▀▀▀┃                                    │
 │files 115MiB -> devices 25.9MiB = 0.23x · 2 devices idle · page-cache hits never reach a device; writes reach it later│
-│▶ btrfs inode 3760287 on 0:28: 96.0MiB read in 396 calls, 37.2MiB/s                                                   │
+│▶ btrfs inode 3760287 on 0:28, above block device 259:0: 96.0MiB read in 396 calls, 37.2MiB/s                         │
 │pid 1523237, thread 1523252 -- enter narrows every view to it                                                         │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ socket or file  enter focus its thread

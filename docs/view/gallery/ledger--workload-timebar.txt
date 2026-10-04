@@ -3,23 +3,27 @@ omn top │ fixture workload-timebar │ 3.28s                        view: snap
 ┌ ledger -- what task 1525319 and 3 more cost over 3.28s of wall-clock ────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        1.33s on cpu     40.5% of one cpu          ▅▅▅▅▆▇█▅▃▂▁▁▁▁▁███▆▅▅▁▁▁    ≥35.6ms  ~low det            │
-│    task 1525671        902ms  ████████     67.9%                                                                     │
+│    1525671 worker      902ms  ████████     67.9%                                                                     │
 │    task 1526152        356ms  ███          26.8%                                                                     │
-│    task 1525319       69.9ms  █            5.26%                                                                     │
-│    task 1526045        577µs  ▏            0.04%                                                                     │
+│    1525319 timeba…    69.9ms  █            5.26%                                                                     │
+│    1526045 holder      577µs  ▏            0.04%                                                                     │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
 │    own account         1.33s  with its descendants, as the scheduler counts them                                     │
 │    machine busy        1m28s  ▏            1.51%                                                                     │
+│  blocked time    4.41s            1.34 threads               ▁         ▂   ▃    █  ▃    ≥89.7ms  ~low det degraded x2│
+│    1525319 timeba…     3.12s  ████████     70.8%                                                                     │
+│    1525671 worker      887ms  ██           20.1%                                                                     │
+│    1526045 holder      400ms  █            9.07%                                                                     │
 │  memory held     14.3MiB peak     +3.99MiB from 10.3MiB     ▁▁▇▇▇▇▇▇▇▇▇▇▇▇▇█████████     1.95ms                      │
 │  memory faulted  3.97k faults     1.21k/s                   a total only                ≥4.80ms  73 late             │
-│    task 1525319        1.99k  ██████       50.1%                                                                     │
+│    1525319 timeba…     1.99k  ██████       50.1%                                                                     │
 │    task 1526152        1.96k  ██████       49.4%                                                                     │
-│    task 1525671           14  ▏            0.35%                                                                     │
-│    task 1526045            8  ▏            0.20%                                                                     │
+│    1525671 worker         14  ▏            0.35%                                                                     │
+│    1526045 holder          8  ▏            0.20%                                                                     │
 │  I/O syscalls    744 calls        67.3ms inside them        512ns █▂▂▁▁   ▁ 67.1ms      ≥70.0ms  ~low det degraded x2│
-│    task 1525671       63.8ms  ███████████  94.8%                                                                     │
-│    task 1525319       3.47ms  █            5.15%                                                                     │
-│    task 1526045       22.9µs  ▏            0.03%                                                                     │
+│    1525671 worker     63.8ms  ███████████  94.8%                                                                     │
+│    1525319 timeba…    3.47ms  █            5.15%                                                                     │
+│    1526045 holder     22.9µs  ▏            0.03%                                                                     │
 │    bytes read and written: on the raw rows only, which this run did not keep                                         │
 │  network         0B moved         0B out, 0B in             no socket call              ≥79.2ms  ~low det degraded x3│
 │  retransmits     0 sent again     machine-wide              a total only                ≥1.12ms  47 late ~low det    │
@@ -28,13 +32,9 @@ omn top │ fixture workload-timebar │ 3.28s                        view: snap
 │  energy          453J machine     138W on average           ▇▇█████████████████████      ≥113µs                      │
 │    ≈ the target's      6.82J  an estimate, not a measurement: its share of the machine's busy cpu, 1.33s of 1m28s    │
 │                                                                                                                      │
-│  to know all of this: ≥197ms of omn's cpu, ≥14.8% of what the target spent                                           │
+│  to know all of this: ≥287ms of omn's cpu, ≥21.6% of what the target spent                                           │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
-│ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
-│cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
-│· the source is not reproducible between two runs of the same workload                                                │
-│· to know it: 35.6ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
-│run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl       │
-│kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable                 │
+│                                                                                                                      │
+│                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line

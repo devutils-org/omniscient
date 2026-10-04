@@ -3,21 +3,25 @@
 ┌ ledger -- [0m[1mwhat task 1524065 and 2 more cost over 2.07s of wall-clock[0m ────────────────────────────────────────────────┐[0m
 │[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
 │[0m[1;32m▸ cpu time        [0m[2m1.43s on cpu[0m     [0m[2m69.3% of one cpu[0m          [0m[2;32m████████████▂▂▂▄▄▄▄▄▄▃▃▃[0m [0m[35m   ≥24.6ms[0m  [0m[36m~low det[0m            │[0m
-│    task 1524067    [0m[2m    1.00s  ████████     69.7%[0m                                                                     │[0m
-│    task 1524143    [0m[2m    401ms  ███          27.9%[0m                                                                     │[0m
-│    task 1524065    [0m[2m   33.4ms  ▏            2.33%[0m                                                                     │[0m
+│    1524067 hot     [0m[2m    1.00s  ████████     69.7%[0m                                                                     │[0m
+│    1524143 warm    [0m[2m    401ms  ███          27.9%[0m                                                                     │[0m
+│    1524065 python3 [0m[2m   33.4ms  ▏            2.33%[0m                                                                     │[0m
 │[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
 │    own account     [0m[1m    1.44s[0m  [0m[2mwith its descendants, as the scheduler counts them[0m                                     │[0m
 │    machine busy        23.8s  █            6.04%                                                                     │[0m
+│  [0m[1mblocked time    [0m[2m2.61s[0m            [0m[2m1.26 threads[0m              [0m[2;32m ▁          ▇ ▁▁▁▁▁ ▁▁▁█[0m [0m[35m   ≥51.6ms[0m  [0m[36m~low det[0m [0m[33mdegraded[0m   │[0m
+│    1524065 python3 [0m[2m    2.01s  █████████    77.0%[0m                                                                     │[0m
+│    1524143 warm    [0m[2m    601ms  ███          23.0%[0m                                                                     │[0m
+│    1524067 hot     [0m[2m   25.2µs  ▏            0.00%[0m                                                                     │[0m
 │  [0m[1mmemory held     [0m13.2MiB peak     +320KiB from 12.9MiB      [0m[32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁██████████[0m [0m[35m     790µs[0m                      │[0m
 │  [0m[1mmemory faulted  [0m1.70k faults     820/s                     [0m[2;3ma total only[0m             [0m[35m   ≥1.15ms[0m  [0m[33m30 late[0m             │[0m
-│    task 1524065        1.69k  ████████████ 99.4%                                                                     │[0m
-│    task 1524067            8  ▏            0.47%                                                                     │[0m
-│    task 1524143            3  ▏            0.18%                                                                     │[0m
+│    1524065 python3     1.69k  ████████████ 99.4%                                                                     │[0m
+│    1524067 hot             8  ▏            0.47%                                                                     │[0m
+│    1524143 warm            3  ▏            0.18%                                                                     │[0m
 │  [0m[1mI/O syscalls    [0m[2m618 calls[0m        [0m[2m1.40ms inside them[0m        [0m[2m256ns [0m[2;32m▁█▄▁▁▁▁▁▁[0m[2m 131µs[0m    [0m[35m   ≥54.2ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
-│    task 1524065    [0m[2m   1.38ms  ████████████ 98.0%[0m                                                                     │[0m
-│    task 1524067    [0m[2m   23.9µs  ▏            1.70%[0m                                                                     │[0m
-│    task 1524143    [0m[2m   4.24µs  ▏            0.30%[0m                                                                     │[0m
+│    1524065 python3 [0m[2m   1.38ms  ████████████ 98.0%[0m                                                                     │[0m
+│    1524067 hot     [0m[2m   23.9µs  ▏            1.70%[0m                                                                     │[0m
+│    1524143 warm    [0m[2m   4.24µs  ▏            0.30%[0m                                                                     │[0m
 │[0m[2;3m    bytes read and written: on the raw rows only, which this run did not keep[0m                                         │[0m
 │  [0m[1mnetwork         [0m[2m0B moved[0m         [0m[2m0B out, 0B in[0m             [0m[2;3mno socket call[0m           [0m[35m   ≥54.2ms[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m│[0m
 │  [0m[1mretransmits     [0m[2m0 sent again[0m     [0m[3mmachine-wide[0m              [0m[2;3ma total only[0m             [0m[35m    ≥276µs[0m  [0m[33m19 late[0m [0m[36m~low det[0m    │[0m
@@ -26,15 +30,11 @@
 │  [0m[1menergy          [0m232J machine     112W on average           [0m[32m█████████████████████   [0m [0m[35m   ≥46.5µs[0m                      │[0m
 │    ≈ the target's  [0m[3m    14.1J[0m  [0m[2;3man estimate, not a measurement: its share of the machine's busy cpu, 1.44s of 23.8s[0m    │[0m
 │                                                                                                                      │[0m
-│[0m[1m  to know all of this[0m[35m: ≥137ms of omn's cpu, ≥9.53% of what the target spent[0m                                           │[0m
+│[0m[1m  to know all of this[0m[35m: ≥188ms of omn's cpu, ≥13.1% of what the target spent[0m                                           │[0m
 │[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
 │[0m[2;32m cpu time -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────────[0m│[0m
 │[0m[1mcpu.oncpu_time via bpf:raw_tp[0m -- cpu time, per thread                                                                 │[0m
 │· the source is not reproducible between two runs of the same workload                                                │[0m
 │[0m[35m· to know it: 24.6ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this[0m    │[0m
-│[0m[35mrun: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl[0m       │[0m
-│[0m[35mkernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable[0m                 │[0m
-│· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │[0m
-│where it could not be read, of 1524065 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m line  [0m[1mt[0m next task  [0m[1menter[0m the view behind the line            [0m

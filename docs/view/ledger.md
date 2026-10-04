@@ -13,7 +13,7 @@ cat docs/view/gallery/ledger--http-server.ansi            # the snapshot, in col
 
 ## What it draws
 
-One line per resource, in this order: **cpu time**, **memory held**,
+One line per resource, in this order: **cpu time**, **blocked time**, **memory held**,
 **memory faulted**, **I/O syscalls**, **network**, **retransmits**, **GPU memory**,
 **GPU time**, **energy**. Each line has six columns:
 
@@ -70,9 +70,20 @@ The last line of the sheet is **what knowing all of it cost**: the lines'
 collectors' cpu summed, and as a share of what the target spent.
 
 Keys: `↑`/`↓` select a line, `t` steps the focus through the tasks then
-clears it, `enter` opens the view behind the line (cpu time to `flame`, I/O
+clears it, `enter` opens the view behind the line (cpu time to `flame`,
+blocked time to `timebar`, I/O
 network and retransmits to `flows`, GPU time to `lanes`, memory and energy to
 `system`).
+
+**Blocked time** is `sched.offcpu`'s time off cpu, per thread: from the
+switch out to the switch back in, the wait to run once woken included (the
+timebar splits the two, and the states). Its rate is the threads blocked at
+once, on average; a run whose target never blocked says `no block seen`.
+
+**Read by another view.** `ledger::reading(data, focus)` returns every line
+as the sheet holds it -- its resource, source, the view it opens, and its
+amount, value and trust, or its refusal, or that the run did not ask -- so
+`process` says what the ledger says rather than reckoning a second time.
 
 ## Drawn from
 

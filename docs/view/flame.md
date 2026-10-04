@@ -121,6 +121,13 @@ blocks (`t`, a focus). A run that kept no blocks cannot weigh them, and the
 pane says how many are in no box; a block that carries no `total_ns` is
 counted and said the same way, never summed as a count in a tree of time.
 
+## Read by another view
+
+`flame::hottest(data, focus, off_cpu)` is the function the header names:
+the frame with the most weight of its own, its share of the pane, its own and
+the whole weight in the pane's unit (samples on cpu, nanoseconds off cpu) and
+the pane's trust. `None` when the run holds no stack of it, or live.
+
 ## Live
 
 The runner names stacks when a run ends, so while it goes each pane says how

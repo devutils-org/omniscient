@@ -41,6 +41,16 @@ pub const NEEDS: &[Need] = &[
         why: "cpu time, per thread",
     },
     Need {
+        source: "sched.offcpu",
+        mode: "trace",
+        emit: &["summary"],
+        keys: &["task"],
+        // The stacks the flame, timebar and lanes ask the same request for.
+        stack: Some("fp"),
+        scope: Scope::Target,
+        why: "blocked time, per thread: the line that opens the timebar",
+    },
+    Need {
         source: "mem.rss",
         mode: "poll@250ms",
         emit: &["timeline", "summary"],
@@ -227,6 +237,12 @@ const ITEMS: &[ItemSpec] = &[
         label: "cpu.oncpu_time",
         source: "cpu.oncpu_time",
         goto: Some("flame"),
+    },
+    ItemSpec {
+        resource: "blocked time",
+        label: "sched.offcpu",
+        source: "sched.offcpu",
+        goto: Some("timebar"),
     },
     ItemSpec {
         resource: "memory held",
@@ -875,6 +891,59 @@ impl Sheet {
     }
 }
 
+/// One line of the sheet as another view reads it: what `process` says of a
+/// resource is then the number the ledger draws, never a second reckoning.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CostLine {
+    /// The line's name on the sheet (`cpu time`, `blocked time`, ...).
+    pub resource: &'static str,
+    /// The source it reads.
+    pub source: &'static str,
+    /// The view `Enter` on the line opens.
+    pub goto: Option<&'static str>,
+    pub reading: Reading,
+}
+
+/// What a line holds.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reading {
+    Served {
+        /// The figure as the sheet prints it.
+        amount: String,
+        /// The one number behind it, in the source's unit (ns, bytes, ...).
+        value: f64,
+        /// Nothing of the focus in the result: `value` is not the focus's.
+        blank: bool,
+        trust: Trust,
+    },
+    Refused(Refusal),
+    /// The run did not ask for it.
+    Absent,
+}
+
+/// The ledger's lines for `focus` (empty: the whole target), in its order.
+pub fn reading(data: &Data, focus: &Focus) -> Vec<CostLine> {
+    Sheet::of(data, focus)
+        .items
+        .into_iter()
+        .map(|item| CostLine {
+            resource: item.spec.resource,
+            source: item.spec.source,
+            goto: item.spec.goto,
+            reading: match item.state {
+                State::Served(served) => Reading::Served {
+                    amount: served.amount,
+                    value: served.value,
+                    blank: served.blank,
+                    trust: served.trust,
+                },
+                State::Refused(refusal) => Reading::Refused(refusal),
+                State::Absent => Reading::Absent,
+            },
+        })
+        .collect()
+}
+
 /// Every task a per-task result of the sheet names, in the order first met,
 /// with its command where an event said it.
 fn tasks_of(data: &Data) -> Vec<(i32, Option<String>)> {
@@ -942,6 +1011,7 @@ impl Context<'_> {
         let mut served = match spec.label {
             "cpu.oncpu_time" => self.cpu(results, style),
             "mem.rss" => self.held(results, style),
+            "sched.offcpu" => self.blocked(results, style),
             "mem.faults" => self.faults(results, style),
             "io.syscall" => self.syscalls(results, style),
             "net.socket" => self.network(results, style),
@@ -1145,6 +1215,62 @@ impl Context<'_> {
                 units::bytes(first),
                 units::bytes(last)
             ))],
+        }
+    }
+
+    /// Time off cpu: what the threads spent not running, blocked or waiting
+    /// to be run once woken, per thread. The timebar splits it by state.
+    fn blocked(&self, results: &[&Results], style: Style) -> Served {
+        let attr = results
+            .iter()
+            .find_map(|one| one.value_attr.clone())
+            .unwrap_or_else(|| "block_ns".to_owned());
+        let stats = stats(results, &attr, true, self.focus);
+        let total: f64 = stats.values().map(|stat| stat.sum).fold(0.0, |a, b| a + b);
+        let series = results.iter().any(|one| !one.events().is_empty());
+        let blocks: f64 = stats.values().map(|stat| stat.count).sum();
+        Served {
+            amount: units::duration(total),
+            value: total,
+            rate: self
+                .per_second(total)
+                .map(|rate| {
+                    vec![Span::styled(
+                        format!("{} threads", approx(rate / 1e9)),
+                        style,
+                    )]
+                })
+                .unwrap_or_default(),
+            graph: if total <= 0.0 {
+                Graph::Words("no block seen")
+            } else if series {
+                self.spark(results, &attr, Shape::Occurrence, true, Scale::Zero)
+            } else {
+                Graph::Words("a total only")
+            },
+            cost: None,
+            compared_as: None,
+            blank: false,
+            trust: Trust::clean(),
+            subs: per_task(
+                &stats,
+                |stat| stat.sum,
+                units::duration,
+                self.tasks,
+                style,
+                4,
+            ),
+            detail: vec![
+                Line::from(format!(
+                    "· {} blocks; off cpu from the switch out to the switch back in, the wait \
+                     to run once woken included",
+                    units::count(blocks.round())
+                )),
+                Line::from(
+                    "· the rate is the threads blocked at once on average; enter opens the \
+                     timebar, which splits it by state",
+                ),
+            ],
         }
     }
 
@@ -2133,6 +2259,36 @@ mod tests {
         assert!(cpu > 3e9, "a cpu-bound run of four seconds: {cpu}");
     }
 
+    /// The blocked line is the sum of what `sched.offcpu` saw off cpu, and
+    /// `Enter` on it opens the timebar; the public reading says the same.
+    #[test]
+    fn the_blocked_line_sums_the_time_off_cpu_and_opens_the_timebar() {
+        let data = fixture("workload-timebar");
+        let results = data.first("sched.offcpu").expect("served");
+        let expected: f64 = results
+            .events()
+            .iter()
+            .filter_map(|event| event.number("total_ns"))
+            .sum();
+        assert!(expected > 0.0);
+        let blocked = line(&sheet("workload-timebar"), "blocked time").value;
+        assert!(
+            (blocked - expected).abs() < 1.0,
+            "{blocked} against {expected}"
+        );
+        let lines = reading(&data, &Focus::default());
+        let read = lines
+            .iter()
+            .find(|line| line.resource == "blocked time")
+            .expect("a blocked line");
+        assert_eq!(read.goto, Some("timebar"));
+        assert!(matches!(read.reading, Reading::Served { value, .. } if value == blocked));
+        // Every line of the sheet is in the reading, in its order.
+        let names: Vec<&str> = lines.iter().map(|line| line.resource).collect();
+        let sheet_names: Vec<&str> = ITEMS.iter().map(|spec| spec.resource).collect();
+        assert_eq!(names, sheet_names);
+    }
+
     /// The heavier run costs well more cpu than the lighter one: the
     /// separation the comparison column is there to show.
     #[test]
@@ -2639,7 +2795,11 @@ mod tests {
             ..Focus::default()
         };
         // The I/O line selected, so its detail is the one drawn.
-        for _ in 0..3 {
+        let io = ITEMS
+            .iter()
+            .position(|spec| spec.resource == "I/O syscalls")
+            .expect("an I/O line");
+        for _ in 0..io {
             app.key(KeyEvent::from(KeyCode::Down));
         }
         let buffer = snapshot::draw_app(&mut app, snapshot::WIDTH, snapshot::HEIGHT);

@@ -3,15 +3,18 @@ omn top │ fixture workload-heatmap │ 1.96s                        view: snap
 ┌ ledger -- what task 1528232 and 1 more cost over 1.96s of wall-clock ────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        93.8ms on cpu    4.79% of one cpu          ████▃▂▁▁▁▁▁▁▁▁▁▁▂▂▂▂▂▂▃▂    ≥18.2ms  ~low det            │
-│    1528232 heatma…    47.0ms  ██████       50.2%                                                                     │
-│    task 1528242       46.7ms  ██████       49.8%                                                                     │
+│    1528232 python3    47.0ms  ██████       50.2%                                                                     │
+│    1528242 python3    46.7ms  ██████       49.8%                                                                     │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
 │    own account        95.1ms  with its descendants, as the scheduler counts them                                     │
 │    machine busy        7.17s  ▏            1.33%                                                                     │
+│  blocked time    3.45s            1.76 threads               ▃▆ ▆▅▆▅ ▆▆▆▆▅ ▆▆▆▆▅ ▃ █    ≥48.9ms  ~low det degraded   │
+│    1528232 python3     1.89s  ███████      54.9%                                                                     │
+│    1528242 python3     1.56s  █████        45.1%                                                                     │
 │  memory held     13.8MiB peak     +128KiB from 13.7MiB      ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁███      485µs                      │
 │  memory faulted  3.92k faults     2.00k/s                   a total only                ≥1.76ms  23 late             │
-│    task 1528242        1.98k  ██████       50.4%                                                                     │
-│    1528232 heatma…     1.95k  ██████       49.6%                                                                     │
+│    1528242 python3     1.98k  ██████       50.4%                                                                     │
+│    1528232 python3     1.95k  ██████       49.6%                                                                     │
 │  I/O syscalls    174 calls        1.24ms inside them        256ns ▆█▅▄▃▃▃▂▂ 131µs       ≥42.3ms  ~low det degraded x2│
 │    bytes read and written: on the raw rows only, which this run did not keep                                         │
 │  network         1.27KiB moved    650B out, 650B in          ▅ ▇▇▆█▂ ▂ ▂▂ ▂▅▇▇█ ▇▁      ≥45.9ms  ~low det degraded x3│
@@ -22,7 +25,7 @@ omn top │ fixture workload-heatmap │ 1.96s                        view: snap
 │  energy          141J machine     71.9W on average          █████████████████████       ≥30.3µs                      │
 │    ≈ the target's      1.87J  an estimate, not a measurement: its share of the machine's busy cpu, 95.1ms of 7.17s   │
 │                                                                                                                      │
-│  to know all of this: ≥110ms of omn's cpu, ≥115% of what the target spent                                            │
+│  to know all of this: ≥159ms of omn's cpu, ≥167% of what the target spent                                            │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
@@ -33,8 +36,5 @@ omn top │ fixture workload-heatmap │ 1.96s                        view: snap
 │· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │
 │where it could not be read, of 1528232 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │
 │in microseconds once it was reaped)                                                                                   │
-│· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│
-│own account's                                                                                                         │
-│                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line

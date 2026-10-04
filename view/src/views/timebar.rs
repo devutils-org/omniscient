@@ -20,8 +20,8 @@
 //! - **The view's own reading** of the traced sources, per thread over the
 //!   run's window, when no decomposition splits the run by task: blocked by
 //!   task state from `sched.offcpu`'s events, the run queue from
-//!   `sched.runqlat`, a sleep named a lock when `sched.futex` covers half of it,
-//!   and on cpu from `cpu.oncpu_time`. That last one is a per-process total on
+//!   `sched.runqlat`, the part of a sleep `sched.futex` saw waiting in
+//!   futex(2) split out of it as a lock, and on cpu from `cpu.oncpu_time`. That last one is a per-process total on
 //!   this machine (`fs:proc`), so a thread's share of it is a **bracket**: at
 //!   least the process's total less what its other threads could have run, at
 //!   most what its own other states leave of the window -- drawn solid to the
@@ -865,8 +865,8 @@ type Blocks = (f64, u64, BTreeMap<u64, f64>);
 
 /// A task's blocks, split by the task state each recorded -- `total_ns` less
 /// `queued_ns`, summed, as `omn latency` splits its `blocked` row -- with a
-/// sleep whose stack waits for a child drawn apart, and a sleep `sched.futex`
-/// covers half of drawn as a lock.
+/// sleep whose stack waits for a child drawn apart, and the part of a sleep
+/// `sched.futex` saw waiting in futex(2) split out of it as a lock.
 fn split_blocked(
     data: &Data,
     events: &[&Event],
@@ -904,55 +904,72 @@ fn split_blocked(
             *entry.2.entry(id).or_default() += blocked;
         }
     }
+    // The futex waits come out of the sleep: as much of it as `sched.futex`
+    // saw waiting in futex(2), never more than the sleep itself (a wait
+    // counts its wake-to-run too, which is not sleep). What is left is
+    // sleep; a sleep wholly on futexes is a lock and nothing else.
     let sleeping = by_state.get("sleeping").map_or(0.0, |entry| entry.0);
-    let futex_covers = futex.is_some_and(|(waited, _)| sleeping > 0.0 && waited >= sleeping / 2.0);
-    let futex_says = futex
-        .filter(|(waited, _)| *waited > 0.0)
-        .map(|(waited, waits)| {
-            format!(
-                "{} waiting in futex(2) over {waits} wait(s)",
-                units::duration(waited)
-            )
-        });
+    let lock = futex
+        .filter(|(waited, _)| *waited > 0.0 && sleeping > 0.0)
+        .map(|(waited, waits)| (waited.min(sleeping), waited, waits));
     let mut parts = Vec::new();
-    let mut push = |state: String, class: Class, (amount, blocks, stacks): Blocks| {
-        let mut part = Part::new(class, state, "sched.offcpu");
-        part.amount = Some(amount);
-        part.resolution = Some(0.0);
-        part.readings = blocks;
-        part.kind = "traced".to_owned();
-        part.lower_bound = lower_bound;
-        part.named.extend(stack_naming(data, &stacks));
-        parts.push(part);
-    };
+    let mut push =
+        |state: String, class: Class, (amount, blocks, stacks): Blocks, says: Option<String>| {
+            let mut part = Part::new(class, state, "sched.offcpu");
+            part.amount = Some(amount);
+            part.resolution = Some(0.0);
+            part.readings = blocks;
+            part.kind = "traced".to_owned();
+            part.lower_bound = lower_bound;
+            part.named.extend(says);
+            part.named.extend(stack_naming(data, &stacks));
+            parts.push(part);
+        };
     if child.1 > 0 {
         push(
             "blocked: sleeping, in a wait for a child".to_owned(),
             Class::Child,
             child,
+            None,
         );
     }
     for (state, entry) in by_state {
-        let (label, class) = match state.as_str() {
-            "uninterruptible" => ("blocked: uninterruptible".to_owned(), Class::Io),
-            "sleeping" if futex_covers => ("blocked: sleeping, on a futex".to_owned(), Class::Lock),
-            "sleeping" => ("blocked: sleeping".to_owned(), Class::Sleep),
-            other => (format!("blocked: {other}"), Class::Other),
-        };
-        push(label, class, entry);
-    }
-    if let Some(says) = futex_says {
-        if let Some(sleep) = parts
-            .iter_mut()
-            .find(|part| matches!(part.class, Class::Lock | Class::Sleep))
-        {
-            if sleep.class == Class::Lock {
-                sleep.named.insert(0, says);
-            } else {
-                sleep
-                    .named
-                    .push(format!("{says}: less than half the sleep"));
+        match state.as_str() {
+            "uninterruptible" => push(
+                "blocked: uninterruptible".to_owned(),
+                Class::Io,
+                entry,
+                None,
+            ),
+            "sleeping" => {
+                let Some((taken, waited, waits)) = lock else {
+                    push("blocked: sleeping".to_owned(), Class::Sleep, entry, None);
+                    continue;
+                };
+                let (amount, blocks, stacks) = entry;
+                let says = format!(
+                    "{} waiting in futex(2) over {waits} wait(s), from `sched.futex`",
+                    units::duration(waited)
+                );
+                let rest = amount - taken;
+                // The sleep's stacks name the lock too: they are the same
+                // blocks, and which of them were the futex's is not known.
+                push(
+                    "blocked: sleeping, on a futex".to_owned(),
+                    Class::Lock,
+                    (taken, waits.min(blocks), stacks.clone()),
+                    Some(says),
+                );
+                if rest > amount * 1e-6 {
+                    push(
+                        "blocked: sleeping".to_owned(),
+                        Class::Sleep,
+                        (rest, blocks.saturating_sub(waits), stacks),
+                        Some("the sleep less the futex waits `sched.futex` saw".to_owned()),
+                    );
+                }
             }
+            other => push(format!("blocked: {other}"), Class::Other, entry, None),
         }
     }
     parts
@@ -2454,6 +2471,53 @@ mod tests {
         let summed: f64 = split.iter().filter_map(|part| part.amount).sum();
         assert!((summed - total).abs() < 1.0, "{summed} != {total}");
         assert!(split.iter().any(|part| part.class == Class::Io));
+    }
+
+    /// `sched.futex`'s waits come out of the sleep as a lock, however small a
+    /// part of it they are, and never more than the sleep.
+    #[test]
+    fn futex_waits_are_split_out_of_the_sleep() {
+        let data = fixture("workload-timebar");
+        let events: Vec<&Event> = data
+            .of_source("sched.offcpu")
+            .flat_map(|results| results.events())
+            .filter(|event| {
+                event.attr("state").map(ToString::to_string).as_deref() == Some("sleeping")
+            })
+            .collect();
+        let blocked = |event: &&Event| {
+            event.number("total_ns").unwrap_or(0.0) - event.number("queued_ns").unwrap_or(0.0)
+        };
+        let sleeping: f64 = events.iter().map(blocked).sum();
+        assert!(sleeping > 0.0);
+        let amount = |parts: &[Part], class: Class| -> f64 {
+            parts
+                .iter()
+                .filter(|part| part.class == class)
+                .filter_map(|part| part.amount)
+                .sum()
+        };
+        let none = split_blocked(&data, &events, None, false);
+        let whole = amount(&none, Class::Sleep) + amount(&none, Class::Child);
+        assert!((whole - sleeping).abs() < 1.0);
+        // A quarter of the sleep on a futex: a quarter is a lock.
+        let quarter = split_blocked(&data, &events, Some((whole / 4.0, 3)), false);
+        assert!((amount(&quarter, Class::Lock) - whole / 4.0).abs() < 1.0);
+        assert!(
+            (amount(&quarter, Class::Sleep) - (whole * 0.75 - amount(&none, Class::Child))).abs()
+                < 1.0
+                || amount(&none, Class::Child) > 0.0
+        );
+        let summed: f64 = quarter.iter().filter_map(|part| part.amount).sum();
+        assert!((summed - sleeping).abs() < 1.0, "{summed} != {sleeping}");
+        assert!(quarter
+            .iter()
+            .any(|part| part.named.iter().any(|named| named.contains("futex(2)"))));
+        // More futex wait than sleep: the sleep is a lock, and only that.
+        let all = split_blocked(&data, &events, Some((sleeping * 2.0, 9)), false);
+        let summed: f64 = all.iter().filter_map(|part| part.amount).sum();
+        assert!((summed - sleeping).abs() < 1.0);
+        assert_eq!(amount(&all, Class::Sleep), 0.0);
     }
 
     #[test]

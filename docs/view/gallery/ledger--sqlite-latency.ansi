@@ -3,6 +3,7 @@
 ┌ ledger -- [0m[1mwhat the target cost over 347ms of wall-clock[0m ─────────────────────────────────────────────────────────────┐[0m
 │[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
 │[0m[1;32m▸ cpu time        [0m[2;3mnot in this run: cpu.oncpu_time was not asked for[0m                                                   │[0m
+│  [0m[1mblocked time    [0m[2m0ns[0m              [0m[2m0.00 threads[0m              [0m[2;3mno block seen[0m            [0m[35m   ≥8.24ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
 │  [0m[1mmemory held     [0m[2;3mnot in this run: mem.rss was not asked for[0m                                                          │[0m
 │  [0m[1mmemory faulted  [0m[2;3mnot in this run: mem.faults was not asked for[0m                                                       │[0m
 │  [0m[1mI/O syscalls    [0m[2;3mnot in this run: io.syscall was not asked for[0m                                                       │[0m
@@ -12,9 +13,8 @@
 │  [0m[1mGPU time        [0m[2;3mnot in this run: gpu.kernel was not asked for[0m                                                       │[0m
 │  [0m[1menergy          [0m[2;3mnot in this run: power.energy@system was not asked for[0m                                              │[0m
 │                                                                                                                      │[0m
-│[0m[1m  to know all of this[0m[35m: nothing was measured[0m                                                                           │[0m
-│                                                                                                                      │[0m
-│[0m[2;3m    This run asked for none of the sheet's sources: another session made it; `omn top -- prog` asks for all of them.[0m  │[0m
+│[0m[1m  to know all of this[0m[35m: ≥8.24ms of omn's cpu, ≥15.1% of what the target spent[0m                                          │[0m
+│[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
 │[0m[2;32m cpu time -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────────[0m│[0m
 │cpu.oncpu_time -- cpu time, per thread                                                                                │[0m
 │This run did not ask for it. `omn top` live asks for every line of the sheet; a recording made by another session     │[0m

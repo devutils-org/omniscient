@@ -3,13 +3,13 @@ omn top │ fixture workload-timebar │ 3.28s                        view: snap
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
 │ the view's reading  one bar per thread, whole: the run's window                                                      │
 │                                                                                                                      │
-│ ▶ first suspect  1525319 timebar-main: blocked: sleeping, on a futex 3.12s (95.1% of its wall clock)                 │
+│ ▶ first suspect  1525319 timebar-main: blocked: sleeping, on a futex 2.53s (77.1% of its wall clock)                 │
 │   asleep on a lock another thread held: lock-contended                                                               │
-│   2.53s waiting in futex(2) over 5 wait(s)                                                                           │
-│   decisive: ahead of the next state (81.8ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
+│   2.53s waiting in futex(2) over 5 wait(s), from `sched.futex`                                                       │
+│   decisive: ahead of the next state (593ms) and of what no row read (0ns) -- omn latency's rule, on the view's read… │
 │                                                                                                                      │
-│ ▸ 1525319 timebar-main├█▚▚▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 95.1% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞┤    3.28s  ▶ lock 95.1%        │
-│   1525671 worker      ├█ on cpu 27.5% ██▚▚▚▚▚▚▚▚▚▚▚▚▚▚░░ sleep 26.9% ░░              ┤    3.28s  ▶ on cpu 27.5%      │
+│ ▸ 1525319 timebar-main├█▚▚▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 77.1% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞░░░░░░░░░░░┤    3.28s  ▶ lock 77.1%        │
+│   1525671 worker      ├█ on cpu 27.5% ██▚▚▚▚▚▚▚▚▚▚▚▚▚▚▞▞▞▞▞▞▞▞░░░░░░░░░              ┤    3.28s  ▶ on cpu 27.5%      │
 │   1526045 holder      ├░░░░░░░░                                                      ┤    3.28s  ▶ sleep 12.2%       │
 │   1526152 rival       ├███████▚▚▚▚▚▚▚                                                ┤    3.28s  ▶ run queue 11.8%   │
 │                      0 ───────────────────────────┼ 1.64s ───────────────────────────┤ 3.28s                         │
@@ -20,8 +20,11 @@ omn top │ fixture workload-timebar │ 3.28s                        view: snap
 │ █ on-cpu                           cpu.oncpu_time  69.9ms          2.13%   exact     0      ~low det                 │
 │     ↳ most-sampled leaf `__tls_get_addr`: 130 of 1314 samples, every thread's: the samples are spread, no one funct… │
 │ ▚ runnable                         sched.runqlat   81.8ms          2.49%   exact     24     2 late ~low det degraded │
-│ ▞ blocked: sleeping, on a futex    sched.offcpu    3.12s           95.1%   exact     6      ~low det degraded x2     │
-│     ↳ 2.53s waiting in futex(2) over 5 wait(s)                                                                       │
+│ ▞ blocked: sleeping, on a futex    sched.offcpu    2.53s           77.1%   exact     5      ~low det degraded x2     │
+│     ↳ 2.53s waiting in futex(2) over 5 wait(s), from `sched.futex`                                                   │
+│     ↳ 81 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- libc.so.6+0xa0800 <- _PySemaphore_Wait <- _PyPark… │
+│ ░ blocked: sleeping                sched.offcpu    593ms           18.1%   exact     1      ~low det degraded x2     │
+│     ↳ the sleep less the futex waits `sched.futex` saw                                                               │
 │     ↳ 81 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- libc.so.6+0xa0800 <- _PySemaphore_Wait <- _PyPark… │
 │   residue: the whole less the rows                 7.70ms          0.23%   exact     time no row accounts for        │
 │                                                                                                                      │
@@ -30,9 +33,6 @@ omn top │ fixture workload-timebar │ 3.28s                        view: snap
 │   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │
 │ Trust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it  │
 │   gives up (3); 2 rounds of reads came late: nothing is missing, but the series is not spaced as asked.              │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

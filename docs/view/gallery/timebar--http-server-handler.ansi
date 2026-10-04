@@ -6,25 +6,28 @@
 │ [0m[1m▶ first suspect  1493226 Thread-1 (proce: [0m[1;32mon-cpu 3.09s (95.2% of its wall clock)[0m                                     │[0m
 │   on a cpu, doing its own work: cpu-bound                                                                            │[0m
 │   most-sampled leaf `link_path_walk`: 179 of 3213 samples, every thread's: the samples are spread, no one function … │[0m
-│ [0m[2m  decisive: ahead of the next state (18.0ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea…[0m │[0m
+│ [0m[2m  decisive: ahead of the next state (10.6ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea…[0m │[0m
 │                                                                                                                      │[0m
 │   1493220 python3     [0m[2m├[0m[2;32m█[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 96.7% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░░[0m[2m ┤    3.24s [0m[1;37m ▶ sleep 96.7%     [0m  │[0m
 │ [0m[1;32m▸ 1493226 Thread-1 (p…[0m[2m├[0m[2;32m██████████████████████[0m[1;2;7;32m on cpu 95.2% [0m[2;32m███████████████████████[0m[2m   ┤    3.24s [0m[1;32m ▶ on cpu 95.2%    [0m  │[0m
 │   1493224 python3     [0m[2m├[0m[2;32m██[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 96.1% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░[0m[2m ┤    3.24s [0m[1;37m ▶ sleep 96.1%     [0m  │[0m
 │ [0m[2m  + 1 thread(s) under 1.00% of the window each: 1493225 ldconfig                                                    [0m │[0m
 │ [0m[2m                     0 ───────────────────────────┼ 1.62s ───────────────────────────┤ 3.24s                        [0m │[0m
-│                        [0m[32m█[0m on cpu   [0m[35m▚[0m run queue   [0m[34m▓[0m I/O   [0m[37m░[0m sleep                                                      │[0m
+│                        [0m[32m█[0m on cpu   [0m[35m▚[0m run queue   [0m[31m▞[0m lock   [0m[34m▓[0m I/O   [0m[37m░[0m sleep                                             │[0m
 │                                                                                                                      │[0m
 │ [0m[1m  state                            source          amount          share   ±         reads  trust                   [0m │[0m
 │ [0m[2m  whole: the run's window                          3.24s           100%    exact                                    [0m │[0m
 │ [0m[32m█ [0m[2mon-cpu                           cpu.oncpu_time  3.09s           95.2%   exact     0      [0m[36m~low det[0m                 │[0m
 │ [0m[2m    ↳ most-sampled leaf `link_path_walk`: 179 of 3213 samples, every thread's: the samples are spread, no one funct…[0m │[0m
 │ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   5.32ms          0.16%   exact     30     [0m[33m2 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m │[0m
+│ [0m[31m▞ [0m[2mblocked: sleeping, on a futex    sched.offcpu    7.42ms          0.23%   exact     12     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[2m    ↳ 7.42ms waiting in futex(2) over 12 wait(s), from `sched.futex`                                                [0m │[0m
+│ [0m[2m    ↳ 57 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- libpython3.14.so.1.0+0x42370 <- PyEval_RestoreThr…[0m │[0m
 │ [0m[34m▓ [0m[2mblocked: uninterruptible         sched.offcpu    43.1µs          0.00%   exact     1      [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
 │ [0m[2m    ↳ 100 % of it from one stack, leaf first: getdents64 <- libpython3.14.so.1.0+0x2e8dfe <- libpython3.14.so.1.0+0…[0m │[0m
-│ [0m[37m░ [0m[2mblocked: sleeping                sched.offcpu    18.0ms          0.56%   exact     14     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[37m░ [0m[2mblocked: sleeping                sched.offcpu    10.6ms          0.33%   exact     2      [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[2m    ↳ the sleep less the futex waits `sched.futex` saw                                                              [0m │[0m
 │ [0m[2m    ↳ 57 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- libpython3.14.so.1.0+0x42370 <- PyEval_RestoreThr…[0m │[0m
-│ [0m[2m    ↳ 7.42ms waiting in futex(2) over 12 wait(s): less than half the sleep                                          [0m │[0m
 │ [0m[2m  residue: the whole less the rows                 132ms           4.06%   exact     time no row accounts for       [0m │[0m
 │                                                                                                                      │[0m
 │ [0m[2mNo decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread[0m    │[0m
@@ -32,9 +35,6 @@
 │ [0m[2m  latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.[0m                              │[0m
 │ [0m[2mTrust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it[0m  │[0m
 │ [0m[2m  gives up (2); 2 rounds of reads came late: nothing is missing, but the series is not spaced as asked.[0m              │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓[0m bar  [0m[1md[0m decomposition  [0m[1ms[0m scale  [0m[1menter[0m open                     [0m

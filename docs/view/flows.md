@@ -127,14 +127,16 @@ thread's 112 MiB.
 
 ## What it does not do
 
-- **It does not draw the socket -> interface or file -> device edges**, because
-  nothing measures them: `net.socket` carries the peer's port, not the route
-  or the interface, and `io.fs`'s device is the filesystem's superblock
-  (`0:28`, btrfs's anonymous device), which no source maps to the block
-  device `io.bytes` counts (`259:0`). The junction is the honest drawing of
-  that; the edges would need `net.socket` to carry the interface of the
-  socket's route, and a mapping from a filesystem to the block devices under
-  it.
+- **The file -> device edge is said in words, not drawn as a band.**
+  `io.fs` now names the block devices under each file's filesystem
+  (`blk_devs`, in the keys `io.bytes` uses), so a device a file of the
+  target sits above says `◂ N files` beside it, and the file's detail line
+  says `above block device 259:0`. A file over several devices is counted on
+  each: how its bytes split between them is not measured. Drawing the edge
+  as a Sankey ribbon from the file's row to the device's is the next step.
+- **It does not draw the socket -> interface edge**: `net.socket` does not
+  carry the interface of the socket's route yet (`net.socket`'s `iface`, a
+  collector's field), so the junction stays the honest drawing.
 - **It does not name a file**: `io.fs` keys a file by device and inode, and a
   path is not something it records.
 - **The machine's side is everybody's.** On a busy machine the interface or

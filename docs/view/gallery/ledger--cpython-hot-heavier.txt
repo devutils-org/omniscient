@@ -6,6 +6,7 @@ omn top │ fixture cpython-hot-heavier │ 8.49s                     view: snap
 │    user and system apart: on the raw events only, which this run did not keep                                        │
 │    own account         8.35s  with its descendants, as the scheduler counts them                                     │
 │    machine busy        47.1s  ██           17.7%                                                                     │
+│  blocked time    0ns              0.00 threads              no block seen                ≥106ms  ~low det degraded   │
 │  memory held     17.7MiB peak     +3.05MiB from 14.6MiB     ▁▁▁▂▂▂▃▃▃▄▄▅▅▅▅▅▆▆▇▇▇▇██     1.48ms                      │
 │  memory faulted  3.08k faults     362/s                     a total only                ≥1.36ms  90 late             │
 │  I/O syscalls    258 calls        371µs inside them         256ns ▁█▅▁▁▁ 16.4µs          ≥115ms  ~low det degraded x2│
@@ -17,7 +18,7 @@ omn top │ fixture cpython-hot-heavier │ 8.49s                     view: snap
 │  energy          775J machine     91.3W on average          █▇█▇██████████▇█████▇█▇█    ≥68.1µs                      │
 │    ≈ the target's       137J  an estimate, not a measurement: its share of the machine's busy cpu, 8.35s of 47.1s    │
 │                                                                                                                      │
-│  to know all of this: ≥285ms of omn's cpu, ≥3.42% of what the target spent                                           │
+│  to know all of this: ≥392ms of omn's cpu, ≥4.69% of what the target spent                                           │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
@@ -30,7 +31,6 @@ omn top │ fixture cpython-hot-heavier │ 8.49s                     view: snap
 │in microseconds once it was reaped)                                                                                   │
 │· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│
 │own account's                                                                                                         │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

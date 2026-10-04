@@ -52,16 +52,22 @@ read is its last before it exits, which ties nothing down, and no per-task
 source this view reads keeps its first read back. Core is asked (in the
 handoff) to record a timeline's origin, which would make this exact.
 
-**Colour is trust, and only trust.** The charts are drawn in the
-terminal's own colour. Every coloured cell on the screen is the trust style
-that `view/src/trust.rs` defines for every view: yellow for losses and late
-reads, cyan for time error and low determinism, red for a refusal, magenta
-for cost. A section's badges sit on its rule, on the right; a section with a
-mark that dims (low determinism, a time error, losses) has its charts and
-figures dimmed. On this machine most of the screen is dimmed, because most
-of these sources are `low` determinism in the catalog. That is the brief's
-rule applied as written. The power section is the exception (`medium`, no
-badge), and it reads as the one plain figure.
+**Colour is how full; trust is a mark beside it.** A chart and its figures
+take the usage gradient of `view/src/trust.rs` (`trust::usage`), shared with
+`process`: six steps of the 256-colour cube from green, free, through yellow,
+to red, full, by the share of a capacity the run knows -- the whole machine
+for the cpu, an engine's time for the GPU, the device's size for VRAM, the
+wall time for memory stalls. Each cell takes its own value's colour, so a
+burst is red where it happened. A resource with no capacity in the run keeps
+one neutral hue and its rule says so: energy (`no capacity, so one hue`),
+bytes on a device or an interface whose speed the run does not hold
+(`speed unknown, so one hue`), a target's resident memory (the machine's
+total is not in the run). Trust does not wash the colour out: a figure with
+a loss, a time error or low determinism keeps its hue, is underlined
+(`Trust::hued`) and carries its badge on the section's rule -- yellow for
+losses and late reads, cyan for time error and low determinism, red for a
+refusal, magenta for cost -- so the screen is never grey because the data
+is honest.
 
 **The time error drawn on the axis.** `gpu.engine_busy` is NVML's
 occupancy, averaged by the driver over a window of up to a second, and

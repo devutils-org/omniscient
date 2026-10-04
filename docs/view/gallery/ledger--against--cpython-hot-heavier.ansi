@@ -6,6 +6,7 @@
 │[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
 │    own account     [0m[1m    5.16s[0m  [0m[2mwith its descendants, as the scheduler counts them[0m                                     │[0m
 │    machine busy        1m41s  █            5.10%                                                                     │[0m
+│  [0m[1mblocked time    [0m[2m0ns[0m              [0m[2m0ns [0m[1;2m×1.00[0m                 [0m[2;3mno block seen[0m            [0m[35m    ≥100ms[0m  [0m[36m~low det[0m [0m[33mdegraded[0m   │[0m
 │  [0m[1mmemory held     [0m17.7MiB peak     17.7MiB peak [0m[1m×1.00[0m        [0m[32m▁▁▂▂▃▃▃▄▄▄▅▅▆▆▆▆▆▇▇▇▇███[0m [0m[35m    2.89ms[0m                      │[0m
 │  [0m[1mmemory faulted  [0m3.07k faults     3.08k faults [0m[1m×1.00[0m        [0m[2;3ma total only[0m             [0m[35m   ≥4.04ms[0m  [0m[33m65 late[0m             │[0m
 │  [0m[1mI/O syscalls    [0m[2m258 calls[0m        [0m[2m371µs inside [0m[1;2m×0.96[0m        [0m[2m256ns [0m[2;32m▁█▅▁▁▁[0m[2m 16.4µs[0m      [0m[35m    ≥103ms[0m  [0m[33m-4 lost (18.2%)[0m [0m[36m~low[0m│[0m
@@ -17,7 +18,7 @@
 │  [0m[1menergy          [0m664J machine     775J machine [0m[1;31m×1.17[0m        [0m[32m▄▄▅▆▄▄▄▅▇█████████████▇█[0m [0m[35m    ≥129µs[0m                      │[0m
 │    ≈ the target's  [0m[3m    33.9J[0m  [0m[2;3man estimate, not a measurement: its share of the machine's busy cpu, 5.16s of 1m41s[0m    │[0m
 │                                                                                                                      │[0m
-│[0m[1m  to know all of this[0m[35m: ≥267ms of omn's cpu, ≥5.18% of what the target spent[0m                                           │[0m
+│[0m[1m  to know all of this[0m[35m: ≥368ms of omn's cpu, ≥7.12% of what the target spent[0m                                           │[0m
 │[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
 │[0m[2;32m cpu time -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────────[0m│[0m
 │[0m[1mcpu.oncpu_time via bpf:raw_tp[0m -- cpu time, per thread                                                                 │[0m
@@ -30,7 +31,6 @@
 │in microseconds once it was reaped)                                                                                   │[0m
 │· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│[0m
 │own account's                                                                                                         │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

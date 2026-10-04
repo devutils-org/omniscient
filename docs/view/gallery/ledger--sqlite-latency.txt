@@ -3,6 +3,7 @@ omn top │ fixture sqlite-latency │ 347ms                          view: snap
 ┌ ledger -- what the target cost over 347ms of wall-clock ─────────────────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        not in this run: cpu.oncpu_time was not asked for                                                   │
+│  blocked time    0ns              0.00 threads              no block seen               ≥8.24ms  ~low det degraded x2│
 │  memory held     not in this run: mem.rss was not asked for                                                          │
 │  memory faulted  not in this run: mem.faults was not asked for                                                       │
 │  I/O syscalls    not in this run: io.syscall was not asked for                                                       │
@@ -12,9 +13,8 @@ omn top │ fixture sqlite-latency │ 347ms                          view: snap
 │  GPU time        not in this run: gpu.kernel was not asked for                                                       │
 │  energy          not in this run: power.energy@system was not asked for                                              │
 │                                                                                                                      │
-│  to know all of this: nothing was measured                                                                           │
-│                                                                                                                      │
-│    This run asked for none of the sheet's sources: another session made it; `omn top -- prog` asks for all of them.  │
+│  to know all of this: ≥8.24ms of omn's cpu, ≥15.1% of what the target spent                                          │
+│    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time -- cpu time, per thread                                                                                │
 │This run did not ask for it. `omn top` live asks for every line of the sheet; a recording made by another session     │

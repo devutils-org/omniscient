@@ -34,7 +34,7 @@
 │                [0m[2;37m┃[0m[2;36m██[0m[2;32;46m▀[0m[2;32m██████[0m[2;37m┃[0m[1m btrfs 3760309 [0m[2;37m█       [0m[2;32m →256KiB[0m             [0m[2;37m┃[0m[2;32m█████████[0m[37m┃[0m                                    │[0m
 │        python3 [0m[2;37m┃[0m[2;36m██████[0m[2;32;46m▀▀▀[0m[2;37m┃[0m[1m 181 more fil… [0m[2;37m█ ▃▂▃▂▂▁[0m[2;32m →2.50MiB[0m[2;36m ←2.91MiB[0m   [0m[2;37m┃[0m[2;32;46m▀▀▀▀▀▀▀▀▀[0m[37m┃[0m                                    │[0m
 │[0m[2mfiles 115MiB[0m -> [0m[2mdevices 25.9MiB[0m[1;2m = 0.23x[0m[2m · 2 devices idle · page-cache hits never reach a device; writes reach it later[0m│[0m
-│[0m[32m▶ btrfs inode 3760287 on 0:28: [0m[2;36m96.0MiB read in 396 calls, 37.2MiB/s[0m                                                   │[0m
+│[0m[32m▶ btrfs inode 3760287 on 0:28, above block device 259:0: [0m[2;36m96.0MiB read in 396 calls, 37.2MiB/s[0m                         │[0m
 │[0m[2mpid 1523237, thread 1523252 -- enter narrows every view to it[0m                                                         │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m socket or file  [0m[1menter[0m focus its thread                       [0m

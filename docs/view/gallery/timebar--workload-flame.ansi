@@ -5,7 +5,7 @@
 │                                                                                                                      │[0m
 │ [0m[1m▶ first suspect  1524065 flame-main (the program): [0m[1;31mblocked: sleeping, on a futex 2.01s (97.3% of its wall clock)[0m     │[0m
 │   asleep on a lock another thread held: lock-contended                                                               │[0m
-│   2.01s waiting in futex(2) over 8 wait(s)                                                                           │[0m
+│   2.01s waiting in futex(2) over 8 wait(s), from `sched.futex`                                                       │[0m
 │ [0m[2m  decisive: ahead of the next state (33.4ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea…[0m │[0m
 │                                                                                                                      │[0m
 │ [0m[1;32m▸ 1524065 flame-main  [0m[2m├[0m[2;32m█[0m[2;31m▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞[0m[1;2;7;31m lock 97.3% [0m[2;31m▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞[0m[2m ┤    2.07s [0m[1;31m ▶ lock 97.3%      [0m  │[0m
@@ -20,7 +20,7 @@
 │ [0m[2m    ↳ most-sampled leaf `PyNumber_Remainder`: 105 of 1342 samples, every thread's: the samples are spread, no one f…[0m │[0m
 │ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   255µs           0.01%   exact     11     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
 │ [0m[31m▞ [0m[2mblocked: sleeping, on a futex    sched.offcpu    2.01s           97.3%   exact     8      [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
-│ [0m[2m    ↳ 2.01s waiting in futex(2) over 8 wait(s)                                                                      [0m │[0m
+│ [0m[2m    ↳ 2.01s waiting in futex(2) over 8 wait(s), from `sched.futex`                                                  [0m │[0m
 │ [0m[2m    ↳ 50 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- libc.so.6+0xa0800 <- _PySemaphore_Wait <- _PyPark…[0m │[0m
 │ [0m[2m  residue: the whole less the rows                 22.8ms          1.10%   exact     time no row accounts for       [0m │[0m
 │                                                                                                                      │[0m

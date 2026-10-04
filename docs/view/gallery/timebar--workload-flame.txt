@@ -5,7 +5,7 @@ omn top │ fixture workload-flame │ 2.07s                          view: snap
 │                                                                                                                      │
 │ ▶ first suspect  1524065 flame-main (the program): blocked: sleeping, on a futex 2.01s (97.3% of its wall clock)     │
 │   asleep on a lock another thread held: lock-contended                                                               │
-│   2.01s waiting in futex(2) over 8 wait(s)                                                                           │
+│   2.01s waiting in futex(2) over 8 wait(s), from `sched.futex`                                                       │
 │   decisive: ahead of the next state (33.4ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
 │                                                                                                                      │
 │ ▸ 1524065 flame-main  ├█▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 97.3% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ ┤    2.07s  ▶ lock 97.3%        │
@@ -20,7 +20,7 @@ omn top │ fixture workload-flame │ 2.07s                          view: snap
 │     ↳ most-sampled leaf `PyNumber_Remainder`: 105 of 1342 samples, every thread's: the samples are spread, no one f… │
 │ ▚ runnable                         sched.runqlat   255µs           0.01%   exact     11     ~low det degraded        │
 │ ▞ blocked: sleeping, on a futex    sched.offcpu    2.01s           97.3%   exact     8      ~low det degraded        │
-│     ↳ 2.01s waiting in futex(2) over 8 wait(s)                                                                       │
+│     ↳ 2.01s waiting in futex(2) over 8 wait(s), from `sched.futex`                                                   │
 │     ↳ 50 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- libc.so.6+0xa0800 <- _PySemaphore_Wait <- _PyPark… │
 │   residue: the whole less the rows                 22.8ms          1.10%   exact     time no row accounts for        │
 │                                                                                                                      │

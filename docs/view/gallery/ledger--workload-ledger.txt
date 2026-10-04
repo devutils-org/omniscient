@@ -3,15 +3,18 @@ omn top │ fixture workload-ledger │ 1.28s                         view: snap
 ┌ ledger -- what task 1784901 and 1 more cost over 1.28s of wall-clock ────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        636ms on cpu     49.7% of one cpu          ██████████▄▄▄▄▂▁▁▁▁▁▁▁▁▁    ≥18.1ms  ~low det            │
-│    1784901 python3     603ms  ███████████  94.8%                                                                     │
-│    task 1785025       33.1ms  █            5.21%                                                                     │
+│    1784901 ledger…     603ms  ███████████  94.8%                                                                     │
+│    1785025 python3    33.1ms  █            5.21%                                                                     │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
 │    own account         637ms  with its descendants, as the scheduler counts them                                     │
 │    machine busy        3.08s  ██           20.7%                                                                     │
+│  blocked time    641ms            0.50 threads                         ▁ ▁         █    ≥37.7ms  ~low det degraded   │
+│    1784901 ledger…     641ms  ████████████ 99.9%                                                                     │
+│    1785025 python3     472µs  ▏            0.07%                                                                     │
 │  memory held     78.2MiB peak     +64.3MiB from 13.9MiB     ▁▁▁▁▁▁▁▁▁▁▁▁▁▁██████████     1.25ms                      │
 │  memory faulted  17.0k faults     13.3k/s                   a total only                ≥11.1ms  15 late             │
-│    1784901 python3     15.1k  ███████████  88.3%                                                                     │
-│    task 1785025        2.00k  █            11.7%                                                                     │
+│    1784901 ledger…     15.1k  ███████████  88.3%                                                                     │
+│    1785025 python3     2.00k  █            11.7%                                                                     │
 │  I/O syscalls    237 calls        1.84ms inside them        256ns ▆▄▄▂▂█▃▂▁ 131µs       ≥42.5ms  ~low det degraded x2│
 │    bytes             1.63MiB  read, 4.00MiB written                                                                  │
 │  network         2.25MiB moved    2.00MiB out, 256KiB in                █               ≥43.5ms  ~low det degraded x3│
@@ -22,7 +25,7 @@ omn top │ fixture workload-ledger │ 1.28s                         view: snap
 │  energy          85.1J machine    66.5W on average          ██████████▇▇▇▇█████         ≥29.7µs                      │
 │    ≈ the target's      17.6J  an estimate, not a measurement: its share of the machine's busy cpu, 637ms of 3.08s    │
 │                                                                                                                      │
-│  to know all of this: ≥117ms of omn's cpu, ≥18.4% of what the target spent                                           │
+│  to know all of this: ≥155ms of omn's cpu, ≥24.4% of what the target spent                                           │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
@@ -33,8 +36,5 @@ omn top │ fixture workload-ledger │ 1.28s                         view: snap
 │· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │
 │where it could not be read, of 1784901 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │
 │in microseconds once it was reaped)                                                                                   │
-│· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│
-│own account's                                                                                                         │
-│                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line

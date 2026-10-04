@@ -320,9 +320,42 @@ struct Undrawn {
 }
 
 impl Undrawn {
-    /// Read off the collector's notes, which the run carries as its
-    /// result's notes or degradations.
+    /// Read off the fields the collector published (`never_ended`,
+    /// `unborn`, `replaced`, `filtered_out`) and, for a recording made
+    /// before it published them, off its notes, which the run carries as its
+    /// result's notes or degradations. The first few names are in the notes
+    /// only.
     fn of<'a>(results: impl IntoIterator<Item = &'a Results>) -> Undrawn {
+        let results: Vec<&Results> = results.into_iter().collect();
+        let mut from_notes = Undrawn::from_notes(results.iter().copied());
+        let published = |name: &str| -> Option<u64> {
+            let mut any = false;
+            let mut total = 0;
+            for results in &results {
+                if let Some(count) = results.field_u64(name) {
+                    any = true;
+                    total += count;
+                }
+            }
+            any.then_some(total)
+        };
+        if let Some(count) = published("never_ended") {
+            from_notes.never_ended = count;
+        }
+        if let Some(count) = published("unborn") {
+            from_notes.unborn = count;
+        }
+        if let Some(count) = published("replaced") {
+            from_notes.replaced = count;
+        }
+        if let Some(count) = published("filtered_out") {
+            from_notes.filtered = count;
+        }
+        from_notes
+    }
+
+    /// The counts in the collector's sentences.
+    fn from_notes<'a>(results: impl IntoIterator<Item = &'a Results>) -> Undrawn {
         let mut undrawn = Undrawn::default();
         let leading = |text: &str| -> Option<u64> { text.split_whitespace().next()?.parse().ok() };
         for text in results
@@ -2210,6 +2243,26 @@ mod tests {
         assert!(Gathered::of(&snapshot::fixture("vertical-requests"))
             .undrawn
             .is_empty());
+    }
+
+    /// The published fields are read before the sentences: a count the
+    /// collector gave as a number wins, and the names stay the notes'.
+    #[test]
+    fn requests_in_no_event_are_read_off_the_published_fields() {
+        let mut data = abandoned();
+        for results in &mut data.run.results {
+            if results.source == "net.request" {
+                results.fields.insert("never_ended".into(), 4.into());
+                results.fields.insert("unborn".into(), 0.into());
+                results.fields.insert("filtered_out".into(), 3.into());
+            }
+        }
+        let undrawn = Gathered::of(&data).undrawn;
+        assert_eq!(undrawn.never_ended, 4);
+        assert_eq!(undrawn.unborn, 0);
+        assert_eq!(undrawn.filtered, 3);
+        assert_eq!(undrawn.replaced, 1, "not published: the note's count");
+        assert_eq!(undrawn.named, "req:1 in task 7");
     }
 
     /// With `io.latency` losses, a request with no block request is "none

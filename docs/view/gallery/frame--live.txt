@@ -1,9 +1,13 @@
 omn top │ fixture http-server │ 1.62s live                           view: snapshot │ collectors and target: at the end
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ ledger -- what Thread-1 (proce (task 1493226) cost over 1.62s of wall-clock, so far ─────────────────────────────────┐
+┌ ledger -- what task 1493224 and 2 more cost over 1.62s of wall-clock, so far ────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        0ns on cpu       0.00% of one cpu          no series kept           at the end  ~low det live degrad│
 │    user and system apart: on the raw events only, which this run did not keep                                        │
+│  blocked time    2.93s            1.81 threads              ▁ ▁ ▂▂  ▂█ ▂   ▂ █ ▂ ▂ ▇ at the end  ~low det live degrad│
+│    1493220 python3     1.50s  ██████       51.3%                                                                     │
+│    1493224 python3     1.42s  ██████       48.6%                                                                     │
+│    1493226 Thread…    1.65ms  ▏            0.06%                                                                     │
 │  memory held     0B peak                                    no series kept           at the end  live degraded       │
 │  memory faulted  0 faults         0/s                       a total only             at the end  live degraded       │
 │  I/O syscalls    0 calls          0ns inside them           no series kept           at the end  ~low det live degrad│
@@ -23,10 +27,6 @@ omn top │ fixture http-server │ 1.62s live                           view: s
 │· served by a fallback that says what it gives up (1)                                                                 │
 │· the fallback says: this recording kept `cpu.oncpu_time` as `timeline`, `summary` only, without `raw`: replayed as   │
 │live it arrives empty, where a live run hands its events over as they come                                            │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

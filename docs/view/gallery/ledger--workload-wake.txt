@@ -3,19 +3,24 @@ omn top │ fixture workload-wake │ 280ms                           view: snap
 ┌ ledger -- what task 1527161 and 3 more cost over 280ms of wall-clock ────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        325ms on cpu     116% of one cpu           ████████████████████████    ≥17.1ms  ~low det            │
-│    task 1527174       99.1ms  ████         30.5%                                                                     │
-│    task 1527173       96.3ms  ████         29.7%                                                                     │
-│    task 1527172       94.7ms  ███          29.1%                                                                     │
-│    task 1527161       34.8ms  █            10.7%                                                                     │
+│    1527174 python3    99.1ms  ████         30.5%                                                                     │
+│    1527173 python3    96.3ms  ████         29.7%                                                                     │
+│    1527172 python3    94.7ms  ███          29.1%                                                                     │
+│    1527161 python3    34.8ms  █            10.7%                                                                     │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
 │    own account         326ms  with its descendants, as the scheduler counts them                                     │
 │    machine busy        4.59s  █            7.11%                                                                     │
+│  blocked time    635ms            2.27 threads                       ▃       ▅     █    ≥43.5ms  ~low det degraded x2│
+│    1527161 python3     232ms  ████         36.6%                                                                     │
+│    1527172 python3     136ms  ███          21.5%                                                                     │
+│    1527173 python3     134ms  ███          21.2%                                                                     │
+│    1527174 python3     132ms  ██           20.8%                                                                     │
 │  memory held     13.6MiB peak     +0B from 13.6MiB          ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄      370µs                      │
 │  memory faulted  7.79k faults     27.8k/s                   a total only                ≥18.4ms  5 late              │
-│    task 1527161        1.95k  ███          25.0%                                                                     │
-│    task 1527172        1.95k  ███          25.0%                                                                     │
-│    task 1527174        1.95k  ███          25.0%                                                                     │
-│    task 1527173        1.95k  ███          25.0%                                                                     │
+│    1527161 python3     1.95k  ███          25.0%                                                                     │
+│    1527172 python3     1.95k  ███          25.0%                                                                     │
+│    1527174 python3     1.95k  ███          25.0%                                                                     │
+│    1527173 python3     1.95k  ███          25.0%                                                                     │
 │  I/O syscalls    170 calls        1.30ms inside them        256ns ▃█▄▃▂▂▂▂▂ 131µs       ≥21.0ms  ~low det degraded x2│
 │    bytes read and written: on the raw rows only, which this run did not keep                                         │
 │  network         0B moved         0B out, 0B in             no socket call              ≥23.0ms  ~low det degraded x3│
@@ -25,16 +30,11 @@ omn top │ fixture workload-wake │ 280ms                           view: snap
 │  energy          28.5J machine    102W on average                                       ≥36.6µs                      │
 │    ≈ the target's      2.02J  an estimate, not a measurement: its share of the machine's busy cpu, 326ms of 4.59s    │
 │                                                                                                                      │
-│  to know all of this: ≥80.6ms of omn's cpu, ≥24.7% of what the target spent                                          │
+│  to know all of this: ≥124ms of omn's cpu, ≥38.0% of what the target spent                                           │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
 │· the source is not reproducible between two runs of the same workload                                                │
 │· to know it: 17.1ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
-│run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl       │
-│kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable                 │
-│· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │
-│where it could not be read, of 1527161 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │
-│in microseconds once it was reaped)                                                                                   │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line

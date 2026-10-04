@@ -92,9 +92,11 @@ latencies before the scheduler's, which every run has.
   is drawn as its refusal where the map would be (`heatmap--http-server--gpu.kernel`).
 - **Losses** are placed where the run can place them: a live run's evicted
   events were the oldest, so the strip shades from the start to the first
-  event kept; records dropped by a collector carry no time, so the strip shades
-  the whole width lightly and says "when unknown". Late rounds are said, not
-  shaded: nothing is missing.
+  event kept; a drained source's drops are shaded `▓` in the column of the
+  drain that found them (`Results::drains`), the stop's drain, a moment past
+  the run's end, in the last column; records dropped from no known moment
+  shade the rest of the width lightly and say "when unknown". Late rounds are
+  said, not shaded: nothing is missing.
 
 ## What the fixtures show
 
@@ -124,11 +126,9 @@ beside the figure.
 
 ## Limits
 
-- Losses are shaded across the whole window: the fixtures predate the run
-  placing them. `results.json` now carries each drained source's drops at
-  the drains that read them (`drains`: `ts_ns`, `dropped`); shading a drop
-  in the column of its drain is the strip's next step, once a recording
-  holds them.
+- The fixtures predate the run placing its drops (`drains`), so their
+  strips still shade the whole window; the next recording draws each drop
+  at its drain.
 - The value attribute and how a drained source stamps its rows are read
   from `results.json` (`value_attr`, `row_stamp`) when it says them; the
   view's own table (`latency_ns`, `wait_ns`, `lat_ns`, `duration_ns`; at the
