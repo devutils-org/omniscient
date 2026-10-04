@@ -207,10 +207,6 @@ open_findings:
       docs/fixes/w17-python.md, "a server's request is not its main thread's
       life": the block the sentence names is the accept loop's `select`, for
       the listing and for the slow client alike
-  - check: the-person-s-way-says-where-names-came-from
-    filed: >-
-      docs/fixes/w17-cases.md, "the verdict drops where its names came from",
-      and docs/fixes/w17-python.md, "dynamic symbols only is not said"
   - check: both-ways-name-the-same-suspect
     filed: >-
       docs/fixes/w18-triage.md, section 7, "cases": the person's way now

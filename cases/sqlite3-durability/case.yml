@@ -192,18 +192,9 @@ causes:
           relative: 0.01
 
 open_findings:
-  - check: the-block-s-frames-are-named
-    filed: >-
-      docs/fixes/w17-cases.md, "an off-cpu stack cannot ask debuginfod": the
-      commit under the sync (`sqlite3PagerCommitPhaseOne`) is an address both
-      ways, since `sched.offcpu` reads no `--symbols`
   - check: every-cited-number-agrees-with-the-reference
     filed: >-
       docs/fixes/w17-build.md, "a blocked row called exact is short of the
       kernel's": over 500 commits, `blocked` is 50 to 60 ms (3 %) under the
       program's own `schedstat` (life less cpu less wait) and under sqlite's
       `.timer`, and `runnable` twice the kernel's run delay
-  - check: the-person-s-way-says-where-names-came-from
-    filed: >-
-      docs/fixes/w17-cases.md, "the verdict drops where its names came from":
-      the profile's `names came from` note is not among the verdict's notes

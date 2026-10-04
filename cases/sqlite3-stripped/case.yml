@@ -158,23 +158,6 @@ causes:
 # got it wrong. A listed check that fails is reported as the open finding it
 # is; one that passes fails the test, so the line is removed once it is fixed.
 open_findings:
-  - check: the-person-s-way-names-the-hottest-function
-    filed: >-
-      docs/fixes/w17-cases.md, "the triage cannot ask debuginfod":
-      `omn latency` takes no `--symbols`, so a stripped binary's hottest
-      function is an address, ranked per instruction
-  - check: the-person-s-way-says-where-names-came-from
-    filed: >-
-      docs/fixes/w17-cases.md, "the verdict drops where its names came from":
-      the profile's `names came from` note is not among the verdict's notes
-  - check: the-block-s-frames-are-named
-    filed: >-
-      docs/fixes/w17-cases.md, "an off-cpu stack cannot ask debuginfod":
-      `--symbols` is read by `cpu.profile` only, so the busy handler under
-      the sleep is an address. Closed by two fixes: `sched.offcpu` reading
-      `--symbols` (the agent's way asks it as soon as `omn` accepts it), and
-      `omn latency --symbols` setting it on `sched.offcpu` too (the person's
-      way)
   - check: the-sentence-claims-nothing-false
     filed: >-
       docs/fixes/w17-cases.md, "a polled lock is called not a lock": the

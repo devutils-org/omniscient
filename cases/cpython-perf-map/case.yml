@@ -155,14 +155,9 @@ open_findings:
       frame; the perf map names the trampoline, a caller, so the leaf is
       the interpreter's `__tls_get_addr` while `py::score` is on 99 % of
       the stacks, as cProfile says it should be
-  - check: the-person-s-way-says-where-names-came-from
+  - check: both-ways-name-the-same-suspect
     filed: >-
-      docs/fixes/w17-cases.md, "the verdict drops where its names came from":
-      the profile says `perf-<pid>.map: perf-map` and the verdict does not
-  - check: the-block-s-frames-are-named
-    filed: >-
-      docs/fixes/w17-python.md, "the verdict cuts a block's stack at four
-      frames": `blocking_stack` in src/triage/latency.rs prints the four
-      frames nearest the leaf, `__read` and three of libpython's, and the
-      Python function the perf map names, `py::wait_for_input`, is the fifth;
-      the agent's way, which reads the whole stack, passes
+      docs/fixes/w18-names.md, section 5, "cases": the person's way charges
+      each sample to the innermost frame the perf map named (`py::score`),
+      while the agent's way (`read_mcp` in tests/cases.rs) still ranks by
+      leaf (`__tls_get_addr`), not yet as docs/mcp.md says to

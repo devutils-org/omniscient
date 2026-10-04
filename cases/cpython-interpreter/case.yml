@@ -150,20 +150,3 @@ causes:
         - row: blocked
           with: account.read_ns
           outside: account.read_ns
-
-# Checks this case shows failing, each filed against the file that owns what
-# got it wrong. A listed check that fails is reported as the open finding it
-# is; one that passes fails the test, so the line is removed once it is fixed.
-open_findings:
-  - check: the-sentence-claims-nothing-false
-    filed: >-
-      docs/fixes/w17-python.md, "an interpreter's C function is named as the
-      suspect": `hottest()` in src/triage/latency.rs ranks leaves, and with no
-      perf map every leaf is the interpreter's (`__tls_get_addr`, 9 to 11 %
-      of a flat profile), so the verdict names it where it should say the
-      time is in the interpreter's frames and that `-X perf` would name them
-  - check: the-person-s-way-says-where-names-came-from
-    filed: >-
-      docs/fixes/w17-cases.md, "the verdict drops where its names came from",
-      and here also docs/fixes/w17-python.md, "dynamic symbols only is not
-      said": the profile itself has no such note to copy

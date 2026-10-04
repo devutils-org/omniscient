@@ -152,9 +152,6 @@ open_findings:
       the main thread's, and a child's table has no `runnable` or `blocked`
       row at all, since `sched.runqlat` and `sched.offcpu` follow the
       launched process only
-  - check: the-person-s-way-says-where-names-came-from
-    filed: >-
-      docs/fixes/w17-cases.md, "the verdict drops where its names came from"
   - check: both-ways-name-the-same-suspect
     filed: >-
       docs/fixes/w18-triage.md, section 7, "cases": the person's way now
