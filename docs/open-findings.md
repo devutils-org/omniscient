@@ -12490,3 +12490,41 @@ forked children (0 requests for fio's forked job, "29678 block_rq_complete
 events had no opening"); gaps 2 to 5 in the handoff (`io.bytes` and
 `io.iops` per process, `%util`, `summary` over `fs:proc` keyed `dir`
 folding devices).
+
+## The twenty-third wave, coordinator, after the merge
+
+The full suite at `1edb677`, every stream merged and nothing else running.
+`make check` stopped at `cross_memory::the_resident_size_is_live_plus_retained_plus_a_residue_that_is_printed`
+(already in the twentieth wave's list; passed alone at once). One
+`cargo test --workspace --no-fail-fast`: 2848 passed, 6 failed, 14 ignored over
+65 binaries, and each of the six passed alone at once:
+`budget::a_traced_series_over_its_ceiling_counts_what_the_task_did_and_moves_only_onto_weighed_samples`,
+`scenario_power::the_two_roads_to_rapl_agree_where_both_are_open` (67.6 W
+through perf against 81.7 W through powercap),
+`triage::a_detailed_layer_over_its_budget_is_let_go_and_the_escalation_goes_on`,
+`triage::a_join_from_a_held_source_counts_what_fell_outside_its_window`,
+`unwind::dwarf_recovers_the_whole_tree_of_a_build_without_frame_pointers`
+(106 of 2021 samples short of their path) and `reference::pairs_perfstat`
+(`cpu.branch_misses`, +5.2 % where 4 % is allowed). None needed a merge fix.
+`cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check`
+are clean.
+
+`cargo test --test reference -- --nocapture`: 159 passed, 1 failed. The tally
+per family, in held / skipped / gaps / known defects / failed: bpftrace
+0/10/0/0/0, perfsched 3/6/0/0/0, power 5/2/0/0/0, heap 8/1/0/0/0, perfstat
+13/0/0/0/0, net 7/1/0/0/0, io 7/0/0/0/0, top 10/0/0/0/1, sysstat 12/0/0/1/0,
+perfrecord 5/0/0/0/0, gpu 21/0/0/0/0. Every skip is `sudo -n` not granting root.
+
+### To stream top: `top-cpus` sits at the edge of its band on a quiet machine
+
+`top-cpus` failed in the reference run: busy 0.140 by `omn` against 0.204 by
+`top`, off by 0.064 where 0.05 is allowed. It held when rerun alone
+(`OMN_REFERENCE_PAIR=top-cpus`), but at 0.044 of the 0.05 (0.076 against
+0.120), where the handoff (`docs/fixes/w23-top.md`) measured 0.0003 to 0.019
+apart. Both reds read `omn` below `top`. With the machine itself as the target,
+the windows' offset (`omn`'s startup) is the band's stated cause; a gap that
+is one-sided twice suggests a second one: `top`'s own start-up and its first
+`/proc` walk count as busy in its interval, and `omn`'s do not in its own. Wanted:
+three runs on a quiet machine, recording which side is higher; if `top` is
+higher every time, the pair names the bias in its `why`, or `omn` starts its
+window at `top`'s first sample.
