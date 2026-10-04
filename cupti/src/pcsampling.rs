@@ -30,8 +30,10 @@
 //! does not apply. So every attribute's own status is checked, what CUPTI
 //! applied is read back and sent beside what was asked
 //! ([`wire::OP_PC_CONFIG`]), and the launches the library saw are sent with
-//! every drain: kernels that ran and took no sample at all are a
-//! configuration accepted and not applied, which `omn` says.
+//! every drain: a run whose kernels took no sample at all is a
+//! configuration accepted and not applied, which `omn` says. (One kernel
+//! without a sample among others is not: shorter than the period, it takes
+//! none.)
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr};
@@ -359,14 +361,25 @@ fn resolve(cupti: &'static Cupti) -> Result<Api, String> {
     })
 }
 
-/// The period asked: [`wire::PC_PERIOD_VARIABLE`] within CUPTI's 5 to 31,
-/// or the default.
-fn period_asked() -> u32 {
-    std::env::var(wire::PC_PERIOD_VARIABLE)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|period| (5..=31).contains(period))
-        .unwrap_or(wire::DEFAULT_PC_PERIOD)
+/// The period [`wire::PC_PERIOD_VARIABLE`] asks for, and why it was not used when it was not:
+/// a setting set and ignored is said, never replaced by the default
+/// silently -- the read-back would then show the default as both asked and
+/// applied.
+fn period_from(setting: Option<&str>) -> (u32, Option<String>) {
+    let Some(setting) = setting else {
+        return (wire::DEFAULT_PC_PERIOD, None);
+    };
+    match setting.trim().parse::<u32>() {
+        Ok(period) if (5..=31).contains(&period) => (period, None),
+        _ => (
+            wire::DEFAULT_PC_PERIOD,
+            Some(format!(
+                "gpu.profile: {}={setting:?} is not a period CUPTI takes (2^5 to 2^31 cycles,                  given as the exponent): it was ignored, and the default 2^{} used",
+                wire::PC_PERIOD_VARIABLE,
+                wire::DEFAULT_PC_PERIOD
+            )),
+        ),
+    }
 }
 
 pub fn arm(cupti: &'static Cupti) -> Result<(), String> {
@@ -374,7 +387,12 @@ pub fn arm(cupti: &'static Cupti) -> Result<(), String> {
     let api = API.get_or_init(|| api);
     {
         let mut state = lock();
-        state.period = period_asked();
+        let (period, ignored) =
+            period_from(std::env::var(wire::PC_PERIOD_VARIABLE).ok().as_deref());
+        if let Some(reason) = ignored {
+            crate::error(&reason);
+        }
+        state.period = period;
         state.modules = Some(HashMap::new());
         state.lines = Some(HashMap::new());
     }
@@ -913,9 +931,13 @@ mod tests {
     }
 
     #[test]
-    fn a_period_outside_cupti_s_range_falls_back_to_the_default() {
-        if std::env::var_os(wire::PC_PERIOD_VARIABLE).is_none() {
-            assert_eq!(period_asked(), wire::DEFAULT_PC_PERIOD);
+    fn a_period_outside_cupti_s_range_falls_back_to_the_default_and_says_so() {
+        assert_eq!(period_from(None), (wire::DEFAULT_PC_PERIOD, None));
+        assert_eq!(period_from(Some("14")), (14, None));
+        for ignored in ["4", "32", "fast"] {
+            let (period, reason) = period_from(Some(ignored));
+            assert_eq!(period, wire::DEFAULT_PC_PERIOD);
+            assert!(reason.unwrap().contains("ignored"), "{ignored}");
         }
     }
 }

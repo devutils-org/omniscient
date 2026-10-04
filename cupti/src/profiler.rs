@@ -15,8 +15,10 @@
 //! every range into the counters' values, sends one [`wire::OP_COUNTER`] per
 //! counter and launch, and starts the image over. A range is paired with the
 //! launch it measured by order: launches are recorded at the exit of their
-//! launch call, in the order the ranges are. Anything that does not pair --
-//! a range the decode dropped, a launch with no range -- is counted
+//! launch call, in the order the ranges are. A batch is paired only when
+//! nothing can have shifted it -- as many ranges as launches, none dropped,
+//! and no range with fewer blocks than its launch's grid; otherwise none of
+//! it is reported, and every launch or range of it is counted as unpaired
 //! ([`wire::OP_INSIDE_LOST`]) rather than guessed at.
 //!
 //! **Clocks are left alone.** CUPTI since 13.4 locks the device's clocks only
@@ -60,11 +62,14 @@ pub(crate) const DOMAIN_RESOURCE: u32 = 3;
 pub(crate) const CONTEXT_CREATED: u32 = 1;
 pub(crate) const CONTEXT_DESTROY_STARTING: u32 = 2;
 pub(crate) const MODULE_LOADED: u32 = 6;
+pub(crate) const API_ENTER: u32 = 0;
 pub(crate) const API_EXIT: u32 = 1;
 /// Every driver entry point that launches a kernel: `cuLaunchKernel`,
 /// its per-thread-stream form, the cooperative and extended launches.
 /// A graph launch is not among them: its kernels are ranges the library
-/// cannot name from the call, and are counted as unpaired.
+/// cannot name from the call, so a batch that holds one has more ranges
+/// than launches, and the whole batch is counted as unpaired (see
+/// [`pairing`]).
 pub(crate) const LAUNCHES: [u32; 6] = [307, 442, 477, 478, 652, 653];
 
 type ParamsFn = unsafe extern "C" fn(*mut c_void) -> u32;
@@ -341,13 +346,70 @@ struct Context {
 unsafe impl Send for Context {}
 
 /// One launch, as its call said it: the kernel's interned name, CUPTI's
-/// correlation id, and the blocks of its grid (zero when the call's
-/// parameters were not read).
+/// correlation id, the blocks of its grid (zero when the call's parameters
+/// were not read), and when its call was entered, in `CLOCK_MONOTONIC`:
+/// the work it launched ran after that.
 #[derive(Debug, Clone, Copy)]
 struct Launch {
     kernel: u32,
     correlation: u32,
     blocks: u64,
+    entered_ns: u64,
+}
+
+thread_local! {
+    /// When this thread entered the launch call whose exit comes next.
+    static ENTERED_NS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How the ranges of a decoded image pair with the launches recorded since
+/// the last decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pairing {
+    /// One range per launch, in launch order.
+    ByOrder,
+    /// The counts differ, so which range is which launch is not known: a
+    /// range with no tracked launch (a CUDA graph's kernel node) anywhere
+    /// in the batch would shift every launch after it onto its neighbour's
+    /// counters. None of the batch is reported; this many launches or
+    /// ranges -- whichever is more, past those CUPTI said it dropped -- are
+    /// counted as unpaired.
+    Unpaired(u64),
+}
+
+fn pairing(ranges: usize, launches: usize, dropped: usize) -> Pairing {
+    if ranges == launches && dropped == 0 {
+        Pairing::ByOrder
+    } else {
+        Pairing::Unpaired(ranges.max(launches.saturating_sub(dropped)) as u64)
+    }
+}
+
+/// The witness of every evaluated range against its launch's grid, or
+/// `None` when one range launched **fewer** blocks than the launch it is
+/// paired with: other work only adds blocks, so fewer means the range is
+/// not that launch's, and the pairing of the whole batch is in doubt.
+fn witnesses(
+    rows: &[Option<Vec<f64>>],
+    pending: &VecDeque<Launch>,
+    witness: Option<usize>,
+) -> Option<Vec<u32>> {
+    rows.iter()
+        .zip(pending)
+        .map(|(row, launch)| match (row, witness) {
+            (Some(values), Some(at)) if launch.blocks > 0 => {
+                let blocks = launch.blocks as f64;
+                if values[at] == blocks {
+                    Some(wire::WITNESS_CLEAN)
+                } else if values[at] > blocks {
+                    Some(wire::WITNESS_DISTURBED)
+                } else {
+                    None
+                }
+            }
+            _ => Some(wire::WITNESS_UNKNOWN),
+        })
+        .collect()
 }
 
 /// `cuLaunchKernel`, `cuLaunchCooperativeKernel` and their per-thread
@@ -552,9 +614,14 @@ extern "C" fn callback(_user: *mut c_void, domain: u32, id: u32, data: *const c_
                     read::<u32>(data, callback_data::CORRELATION),
                 )
             };
+            if site == API_ENTER {
+                ENTERED_NS.with(|entered| entered.set(crate::monotonic_ns()));
+                return;
+            }
             if site != API_EXIT {
                 return;
             }
+            let entered_ns = ENTERED_NS.with(|entered| entered.replace(0));
             // SAFETY: the parameter block of this very launch entry point,
             // valid for the callback.
             let blocks = unsafe { grid_blocks(launch, params) };
@@ -581,6 +648,7 @@ extern "C" fn callback(_user: *mut c_void, domain: u32, id: u32, data: *const c_
                 kernel: id,
                 correlation,
                 blocks,
+                entered_ns,
             });
             if context.pending.len() >= BATCH {
                 if let Err(reason) = decode(api, context) {
@@ -911,18 +979,27 @@ fn initialize_image(api: &Api, object: *mut c_void, image: &mut [u8]) -> Result<
 
 /// Decodes what the image holds, sends each launch's counters, and starts
 /// the image over. Whatever happens, the launches pending are accounted
-/// for: measured, or counted as lost with the reason.
+/// for once: measured, or counted as lost with the reason.
 fn decode(api: &Api, context: &mut Context) -> Result<(), String> {
     let pending = std::mem::take(&mut context.pending);
-    let result = decode_into(api, context, &pending);
-    if result.is_err() {
-        lost(pending.len() as u64, wire::LOST_UNDECODED);
+    let mut accounted = 0;
+    let result = decode_into(api, context, &pending, &mut accounted);
+    if result.is_err() && accounted < pending.len() {
+        lost((pending.len() - accounted) as u64, wire::LOST_UNDECODED);
     }
     crate::send_now();
     result
 }
 
-fn decode_into(api: &Api, context: &mut Context, pending: &VecDeque<Launch>) -> Result<(), String> {
+/// `accounted` is set once every launch of `pending` has been sent or
+/// counted lost, so a failure after that point -- starting the image over
+/// -- does not count them a second time.
+fn decode_into(
+    api: &Api,
+    context: &mut Context,
+    pending: &VecDeque<Launch>,
+    accounted: &mut usize,
+) -> Result<(), String> {
     let object = context.object as *mut c_void;
     let mut decode = Decode {
         struct_size: struct_size!(Decode, ranges_dropped, usize),
@@ -931,9 +1008,6 @@ fn decode_into(api: &Api, context: &mut Context, pending: &VecDeque<Launch>) -> 
         ranges_dropped: 0,
     };
     api.call("cuptiRangeProfilerDecodeData", api.decode, &mut decode)?;
-    if decode.ranges_dropped > 0 {
-        lost(decode.ranges_dropped as u64, wire::LOST_RANGES);
-    }
     let mut info = CounterDataInfo {
         struct_size: struct_size!(CounterDataInfo, ranges, usize),
         priv_: 0,
@@ -946,10 +1020,20 @@ fn decode_into(api: &Api, context: &mut Context, pending: &VecDeque<Launch>) -> 
         api.data_info,
         &mut info,
     )?;
+    if decode.ranges_dropped > 0 {
+        lost(decode.ranges_dropped as u64, wire::LOST_RANGES);
+    }
+    if let Pairing::Unpaired(count) = pairing(info.ranges, pending.len(), decode.ranges_dropped) {
+        if count > 0 {
+            lost(count, wire::LOST_UNPAIRED);
+        }
+        *accounted = pending.len();
+        return initialize_image(api, object, &mut context.image);
+    }
     let pointers = names(&context.metrics);
-    let mut values = vec![0f64; pointers.len()];
-    let paired = info.ranges.min(pending.len());
-    for (range, launch) in pending.iter().take(paired).enumerate() {
+    let mut rows: Vec<Option<Vec<f64>>> = Vec::with_capacity(pending.len());
+    for range in 0..pending.len() {
+        let mut values = vec![0f64; pointers.len()];
         let mut evaluate = Evaluate {
             struct_size: struct_size!(Evaluate, values, *mut f64),
             priv_: 0,
@@ -961,27 +1045,31 @@ fn decode_into(api: &Api, context: &mut Context, pending: &VecDeque<Launch>) -> 
             count: pointers.len(),
             values: values.as_mut_ptr(),
         };
-        if let Err(reason) = api.call(
+        match api.call(
             "cuptiProfilerHostEvaluateToGpuValues",
             api.evaluate,
             &mut evaluate,
         ) {
-            lost(1, wire::LOST_UNDECODED);
-            crate::error(&format!("gpu.counters: {reason}"));
-            continue;
-        }
-        let witness = match context.witness {
-            Some(at) if launch.blocks > 0 => {
-                if values[at] == launch.blocks as f64 {
-                    wire::WITNESS_CLEAN
-                } else {
-                    wire::WITNESS_DISTURBED
-                }
+            Ok(()) => rows.push(Some(values)),
+            Err(reason) => {
+                lost(1, wire::LOST_UNDECODED);
+                crate::error(&format!("gpu.counters: {reason}"));
+                rows.push(None);
             }
-            _ => wire::WITNESS_UNKNOWN,
-        };
-        crate::with_channel(|channel| {
-            for (metric, value) in context.metric_ids.iter().zip(&values) {
+        }
+    }
+    let Some(witnesses) = witnesses(&rows, pending, context.witness) else {
+        let evaluated = rows.iter().filter(|row| row.is_some()).count();
+        lost(evaluated as u64, wire::LOST_UNPAIRED);
+        *accounted = pending.len();
+        return initialize_image(api, object, &mut context.image);
+    };
+    crate::with_channel(|channel| {
+        for ((row, launch), witness) in rows.iter().zip(pending).zip(witnesses) {
+            let Some(values) = row else {
+                continue;
+            };
+            for (metric, value) in context.metric_ids.iter().zip(values) {
                 let counter = wire::Counter {
                     kernel: launch.kernel,
                     metric: *metric,
@@ -990,15 +1078,13 @@ fn decode_into(api: &Api, context: &mut Context, pending: &VecDeque<Launch>) -> 
                     value: *value,
                     witness,
                     pad: 0,
+                    launched_ns: launch.entered_ns,
                 };
                 channel.frame(wire::OP_COUNTER, counter.encode().as_slice());
             }
-        });
-    }
-    let unpaired = info.ranges.abs_diff(pending.len());
-    if unpaired > 0 {
-        lost(unpaired as u64, wire::LOST_UNPAIRED);
-    }
+        }
+    });
+    *accounted = pending.len();
     initialize_image(api, object, &mut context.image)
 }
 
@@ -1121,5 +1207,50 @@ mod tests {
         assert_eq!(blocks, 68);
         // SAFETY: a null block is answered, not read.
         assert_eq!(unsafe { grid_blocks(307, std::ptr::null()) }, 0);
+    }
+
+    /// A range with no tracked launch -- a graph's kernel node between two
+    /// launches -- makes the counts differ: nothing of the batch is
+    /// credited, and every launch or range of it is counted.
+    #[test]
+    fn ranges_and_launches_pair_only_when_their_counts_agree() {
+        assert_eq!(pairing(3, 3, 0), Pairing::ByOrder);
+        // [A1, G, A2] against [A1, A2]: by order, G would be A2's.
+        assert_eq!(pairing(3, 2, 0), Pairing::Unpaired(3));
+        assert_eq!(pairing(1, 2, 0), Pairing::Unpaired(2));
+        // Two ranges dropped and said: the other launch is unpaired too.
+        assert_eq!(pairing(1, 3, 2), Pairing::Unpaired(1));
+        assert_eq!(pairing(0, 0, 0), Pairing::ByOrder);
+    }
+
+    fn launch(blocks: u64) -> Launch {
+        Launch {
+            kernel: 1,
+            correlation: 1,
+            blocks,
+            entered_ns: 0,
+        }
+    }
+
+    /// More blocks than the grid is other work; fewer is a range that is not
+    /// the launch's, and the batch is not reported.
+    #[test]
+    fn the_witness_tells_other_work_from_a_range_that_is_not_the_launch_s() {
+        let pending: VecDeque<Launch> = [launch(272), launch(272), launch(0)].into();
+        let rows = vec![Some(vec![5.0, 272.0]), Some(vec![5.0, 892.0]), None];
+        assert_eq!(
+            witnesses(&rows, &pending, Some(1)),
+            Some(vec![
+                wire::WITNESS_CLEAN,
+                wire::WITNESS_DISTURBED,
+                wire::WITNESS_UNKNOWN
+            ])
+        );
+        let rows = vec![Some(vec![5.0, 272.0]), Some(vec![5.0, 68.0]), None];
+        assert_eq!(witnesses(&rows, &pending, Some(1)), None);
+        assert_eq!(
+            witnesses(&rows, &pending, None),
+            Some(vec![wire::WITNESS_UNKNOWN; 3])
+        );
     }
 }

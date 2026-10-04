@@ -429,6 +429,10 @@ pub struct Counter {
     /// window, by [`WITNESS_METRIC`]: one of the `WITNESS_*` values.
     pub witness: u32,
     pub pad: u32,
+    /// When the launch call was entered, in the program's
+    /// `CLOCK_MONOTONIC`: the launch's work ran after it. Zero when the
+    /// entry was not seen.
+    pub launched_ns: u64,
 }
 
 /// The counter that says whether a launch's window held only the launch:
@@ -444,7 +448,8 @@ pub const WITNESS_UNKNOWN: u32 = 0;
 /// The blocks launched in the window are the launch's grid, exactly.
 pub const WITNESS_CLEAN: u32 = 1;
 /// More blocks were launched than the grid has: other work was counted
-/// with the launch's.
+/// with the launch's. (Fewer is not a disturbance: the range is then not
+/// the launch's, and the library reports none of its batch.)
 pub const WITNESS_DISTURBED: u32 = 2;
 
 /// What PC sampling was asked on a context, and what CUPTI reports applying
@@ -502,7 +507,7 @@ pub struct PcDrain {
 }
 
 pub const COUNTER_SETUP_FIELDS: usize = 4 * 4;
-pub const COUNTER_FIELDS: usize = 4 * 4 + 8 + 4 * 2;
+pub const COUNTER_FIELDS: usize = 4 * 4 + 8 + 4 * 2 + 8;
 pub const PC_CONFIG_FIELDS: usize = 4 * 6;
 pub const PC_SAMPLE_FIELDS: usize = 8 * 2 + 4 * 6;
 pub const PC_DRAIN_FIELDS: usize = 8 * 5 + 4 * 2 + 8;
@@ -539,7 +544,8 @@ impl Counter {
             .u32(self.device)
             .u64(self.value.to_bits())
             .u32(self.witness)
-            .u32(self.pad);
+            .u32(self.pad)
+            .u64(self.launched_ns);
         fields
     }
 
@@ -553,6 +559,7 @@ impl Counter {
             value: f64::from_bits(read.u64()),
             witness: read.u32(),
             pad: read.u32(),
+            launched_ns: read.u64(),
         })
     }
 }

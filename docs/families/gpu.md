@@ -728,6 +728,25 @@ for `gpu.kernel` is refused before the program runs, with the reason
 in one process. The refusal is made at attach, where every reader of the
 launch has added its bit and the program is still parked at its gate.
 
+**Ranges pair with launches only when nothing can shift them.** Ranges come
+back in launch order and carry no launch's identity, so a batch is paired by
+order only when it holds as many ranges as launches the library recorded and
+no range launched fewer blocks than its launch's grid. A range with no
+recorded launch -- a CUDA graph's kernel node, whose launch call the library
+does not follow -- anywhere in the batch would otherwise shift every launch
+after it onto its neighbour's counters, and the witness would at best call the
+shifted launches disturbed, at worst (equal grids) pass them clean. Such a
+batch is not reported: its launches or ranges, whichever are more, are counted
+as unpaired (`ranges_and_launches_pair_only_when_their_counts_agree`, a unit
+test; no workload here launches a graph).
+
+**When.** Every event stands for all of its kernel's launches: it is stamped
+when the first launch call was entered, in the program's `CLOCK_MONOTONIC`,
+and its `ts_err_ns` reaches to when the last launch's counters reached `omn` --
+a window that holds every launch's work however late the library decoded it
+(about 100 ms for `memory 6 64`; `ts_err_ns` saturates at 4.29 s, the width of
+the field).
+
 **Clocks are left alone.** CUPTI 13.4 locks the device's clocks only when asked
 (`cuptiClockControlLock`), and the library never asks; the clock state is in
 the facts, as for every GPU timing source.
@@ -749,6 +768,8 @@ launch call asked for (read from `cuLaunchKernel`'s parameters, or
 launch's alone, 892 to 1 032 when it was not. A launch with more blocks than its
 grid is `disturbed`, counted and left out of every counter; a kernel disturbed
 on every launch is `disturbed on every launch`, with no value of its own.
+Fewer blocks than the grid is not a disturbance -- other work only adds -- but
+a range that is not the launch's, and then none of its batch is reported.
 Work that launched no block in the window -- a long kernel started before it
 -- escapes the witness and shows as `outliers` or a spread, which is why the
 spread is the middle half's: a few such launches do not turn a count that
@@ -794,12 +815,29 @@ without the directives. Measured here, 6 launches of 100 000 turns:
 **A configuration CUPTI accepted and did not apply is caught by its effect.**
 Every attribute's own status is checked as well as the call's; the period and
 the mode CUPTI applied are read back and a difference said; the launches the
-library saw are sent with every drain, and kernels that ran with no sample at
-all are a lost read, not an empty profile. The period is held by its effect:
+library saw are sent with every drain, and a run whose kernels took no sample at
+all is a lost read, not an empty profile. One kernel with no sample among
+others that have some is not: a kernel shorter than the period on every SM is
+expected to take none. CUPTI's own count of the program's samples is held to
+the samples the program counters carried, and a shortfall past what CUPTI said
+it dropped is counted as lost, with the reason
+(`samples_cupti_counted_and_no_program_counter_carried_are_lost`). A period
+setting outside 5 to 31 is said, and the default used. The period is held by its effect:
 the same work took 667 450 samples at `2^12` and 166 880 at `2^14`, a ratio of
 4.0 (`the_sampling_period_asked_is_the_one_applied_by_its_effect`).
 
-A kernel without line information is placed by offset and named in the facts
+**The samples are held to the kernel's own cycles.** `selftimed` -- one block
+per SM, each reading `clock64` before and after its work and writing `%smid` --
+says how many cycles each SM spent in it; every SM samples once per `2^n` of
+its cycles, so a launch should take its blocks' cycles times its SMs over `2^n`.
+Measured: 233 053 samples against 211 743 for the ten recorded launches, the
+eleventh (a warm-up of the same length) making the ratio 1.0006; 1.0014 at
+`2^14` (`the_samples_are_the_kernel_s_own_cycles_over_the_period`, held within
+10 %).
+
+A kernel without line information is placed by offset and named in the facts,
+and the offset is the hot loop's: the same PTX with line information samples
+hottest at the same offset, on line 20
 (`a_kernel_without_line_information_is_placed_by_offset_and_named`). `gpu.profile`
 and `gpu.kernel` share one launch: both read every frame meant for them, and
 neither counts the other's as unknown (`a_profile_and_kernel_times_share_one_launch`).
@@ -811,8 +849,8 @@ neither counts the other's as unknown (`a_profile_and_kernel_times_share_one_lau
   once per pass; PC sampling's cost was not measured.
 - **Launches through a CUDA graph.** The library follows the launch entry
   points it knows the parameters of; a graph's kernels are ranges with no
-  launch call to pair with, counted as unpaired rather than credited to the
-  wrong kernel.
+  launch call to pair with, and the batch that holds them is counted as
+  unpaired, none of it credited to the wrong kernel.
 - **Another vendor's reading.** `ncu` and `nsys` are present here and could
   cross-check an instruction count or a hot line; the self-built references
   (the two workloads' disagreement, the known hot line) were used instead.

@@ -482,10 +482,13 @@ invisible to every CPU profiler.
   refused. The clocks are reported, never locked: CUPTI locks them only when
   asked, and `omn` never asks. Other work on a shared device is counted with
   the program's; a launch whose window held more blocks than its grid is
-  found, counted as `disturbed` and left out.
+  found, counted as `disturbed` and left out. A batch of launches whose ranges
+  do not pair with them one for one (a CUDA graph's kernels among them) is
+  counted as unpaired, none of it credited to a neighbour.
 - `gpu.profile` samples a program counter per SM every `2^n` cycles: a share of
   samples is a share of SM cycles, placed on a source line when the kernel has
-  line information (`-lineinfo`), by offset when it does not.
+  line information (`-lineinfo`), by offset when it does not. Samples CUPTI
+  counted and did not report are counted as lost.
 
 ---
 

@@ -368,9 +368,12 @@ impl Common {
                 "CUPTI's decode dropped these ranges: their launches' counters are missing"
             }
             wire::LOST_UNPAIRED => {
-                "these ranges and launches did not pair -- a launch through an entry point the \
-                 library does not follow (a CUDA graph), or a range with no launch -- so their \
-                 counters were not reported rather than credited to the wrong kernel"
+                "the ranges of a batch of launches did not pair with its launches -- their \
+                 counts differed (a launch through an entry point the library does not follow, \
+                 such as a CUDA graph's), or a range launched fewer blocks than its launch's \
+                 grid -- so none of the batch's counters was reported rather than any credited \
+                 to the wrong kernel; counted here are its launches or ranges, whichever were \
+                 more"
             }
             wire::LOST_UNDECODED => {
                 "these launches' counters were never decoded: the range profiler was not set up \
@@ -387,7 +390,13 @@ impl Common {
             }
             _ => "the injection library lost these records for a reason this build does not know",
         };
-        self.losses.dropped += count;
+        if kind == wire::LOST_HW_BUFFER_FULL {
+            // A count of times, not of samples: how many samples each time
+            // cost is not knowable, so it is not added to a record count.
+            self.losses.throttled += count;
+        } else {
+            self.losses.dropped += count;
+        }
         self.losses.note(reason);
     }
 
@@ -553,6 +562,7 @@ struct Series {
     disturbed: usize,
     unwitnessed: usize,
     device: u32,
+    /// The first launch call's entry, and the last counters' arrival.
     first_ns: u64,
     last_ns: u64,
 }
@@ -687,11 +697,18 @@ impl CountersCollector {
                             sender.name(counter.kernel),
                             sender.name(counter.metric),
                         );
+                        // The launch's work ran after its call was entered
+                        // and before its counters arrived here.
+                        let launched = match counter.launched_ns {
+                            0 => now,
+                            at => at.min(now),
+                        };
                         let series = self.series.entry(key).or_insert_with(|| Series {
-                            first_ns: now,
+                            first_ns: launched,
                             device: counter.device,
                             ..Default::default()
                         });
+                        series.first_ns = series.first_ns.min(launched);
                         match counter.witness {
                             wire::WITNESS_DISTURBED => series.disturbed += 1,
                             wire::WITNESS_CLEAN => series.values.push(counter.value),
@@ -763,8 +780,10 @@ impl CountersCollector {
             if let Some(spread) = spread {
                 attrs.insert(4, Attr::float("spread", spread));
             }
-            // The event stands for the launches whose counters arrived over
-            // this window: stamped at the first, its error the window.
+            // The event stands for the kernel's launches: stamped when the
+            // first launch call was entered, its error reaching to when the
+            // last launch's counters arrived -- a window that holds all the
+            // work measured, however late the library decoded it.
             let event = self.common.event(
                 *pid,
                 values.first_ns,
@@ -987,6 +1006,7 @@ pub(super) mod tests {
             value,
             witness: wire::WITNESS_CLEAN,
             pad: 0,
+            launched_ns: 1_000,
         };
         (wire::OP_COUNTER, counter.encode().as_slice().to_vec())
     }
@@ -1000,6 +1020,7 @@ pub(super) mod tests {
             value,
             witness: wire::WITNESS_DISTURBED,
             pad: 0,
+            launched_ns: 1_000,
         };
         (wire::OP_COUNTER, counter.encode().as_slice().to_vec())
     }
@@ -1099,7 +1120,10 @@ pub(super) mod tests {
             .find(|event| attr(event, "counter") == "dram__bytes_read.sum")
             .unwrap();
         assert_eq!(attr(dram, "verdict"), "not dominated by this workload");
-        assert!(events.iter().all(|event| event.ts_err_ns > 0));
+        // Stamped at the launches, not at the drain: the error reaches from
+        // the first launch's call to the arrival of its counters.
+        assert!(events.iter().all(|event| event.ts_ns == 1_000));
+        assert!(events.iter().all(|event| event.ts_err_ns > 1_000));
         assert!(collector.losses().is_clean());
         assert!(collector.facts().iter().any(|fact| fact.contains("TU102")));
     }

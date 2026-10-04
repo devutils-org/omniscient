@@ -252,8 +252,8 @@ const DRAM_READ: &str = "dram__bytes_read.sum";
 /// either measured or counted as disturbed, and that the verdicts hold on
 /// the measured ones. A run with fewer than four measured launches of a
 /// kernel has nothing to judge: the next of three attempts is taken, and
-/// when none had enough, the evidence is printed instead of a verdict the
-/// device made impossible.
+/// when none had enough the test **skips**, through the skip gate, naming
+/// the device's tenants -- never a green pass that asserted nothing.
 #[test]
 fn a_counter_s_verdict_is_held_to_two_workloads_that_disagree_about_it() {
     ready_or_skip!();
@@ -351,9 +351,11 @@ fn a_counter_s_verdict_is_held_to_two_workloads_that_disagree_about_it() {
         return;
     }
     eprintln!(
-        "the verdicts were not asserted: in three attempts the device never left four launches \
-         of a kernel undisturbed, so no verdict on it was the workload's.\n{}",
-        disturbed.join("\n")
+        "skipped: the device was never quiet enough to judge a counter: in three attempts \
+         other work disturbed all but three launches of a kernel, so no verdict was the \
+         workload's; on the device now: {}\n  {}",
+        tenants(),
+        disturbed.join("\n  ")
     );
 }
 
@@ -399,10 +401,10 @@ fn a_pid_target_is_refused_with_the_reason() {
         let output = omn(&["trace", source, "--pid", "1", "--duration", "1s"], &[]);
         assert!(!output.status.success());
         let complaint = stderr(&output);
-        assert!(
-            complaint.contains("CUDA_INJECTION64_PATH") || complaint.contains("no viable backend"),
-            "{source}: {complaint}"
-        );
+        // Where CUPTI resolves, the refusal is the pid's, not the machine's.
+        let reason = complaint.contains("CUDA_INJECTION64_PATH")
+            || (ready().is_err() && complaint.contains("no viable backend"));
+        assert!(reason, "{source}: {complaint}");
     }
 }
 
@@ -460,29 +462,126 @@ fn the_known_hot_loop_comes_first() {
     assert!(facts.contains("a sample every 2^12 cycles"), "{facts}");
 }
 
-/// A kernel compiled without line information is placed by offset, the same
-/// offsets the hot loop's are, and the run says which kernel had no lines.
+/// The program counter holding the most samples, and every offset that
+/// holds any.
+fn offsets(run: &Run) -> (u64, std::collections::BTreeMap<u64, f64>) {
+    let mut by_pc: std::collections::BTreeMap<u64, f64> = Default::default();
+    for event in run.events() {
+        *by_pc.entry(number(event, "pc") as u64).or_default() += number(event, "samples");
+    }
+    let hottest = by_pc
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .map(|(pc, _)| *pc)
+        .expect("samples");
+    (hottest, by_pc)
+}
+
+/// A kernel compiled without line information is placed by offset, and the
+/// run says which kernel had no lines. The offsets are the hot loop's: the
+/// same PTX compiled with line information samples hottest at the same
+/// offset, and that offset is on the hot line.
 #[test]
 fn a_kernel_without_line_information_is_placed_by_offset_and_named() {
     ready_or_skip!();
     let _device = device();
-    let run = run(
+    let bare = run(
         "gpu.profile",
         "tests/gpu_inside.py",
         &["hotloop-bare", "3", "100000"],
         &[],
     );
-    let events = run.events();
-    assert!(!events.is_empty(), "{:#}", run.result);
+    let events = bare.events();
+    assert!(!events.is_empty(), "{:#}", bare.result);
     for event in &events {
         assert!(attr(event, "line").is_null(), "{event}");
-        assert!(
-            attr(event, "source").as_str().unwrap().starts_with("+0x"),
+        let source = attr(event, "source").as_str().unwrap();
+        assert_eq!(
+            source,
+            format!("+0x{:x}", number(event, "pc") as u64),
             "{event}"
         );
     }
-    let facts = run.facts();
+    let facts = bare.facts();
     assert!(facts.contains("no line information in hotloop"), "{facts}");
+
+    let lined = run(
+        "gpu.profile",
+        "tests/gpu_inside.py",
+        &["hotloop", "3", "100000"],
+        &[],
+    );
+    let (bare_hottest, _) = offsets(&bare);
+    let (lined_hottest, _) = offsets(&lined);
+    assert_eq!(
+        bare_hottest,
+        lined_hottest,
+        "the same code samples hottest at the same offset, lines or not; on the device: {}",
+        tenants()
+    );
+    let hot = lined.truth["hot_line"].as_u64().unwrap();
+    let on_hot_line = lined.events().into_iter().any(|event| {
+        number(event, "pc") as u64 == lined_hottest && attr(event, "line").as_u64() == Some(hot)
+    });
+    assert!(
+        on_hot_line,
+        "offset {lined_hottest:#x} is not on line {hot}"
+    );
+}
+
+/// The samples are held to the kernel's own account of its cycles. Every SM
+/// takes one sample every `2^n` of its cycles, so a launch of `selftimed`
+/// -- one block per SM, each block reading `clock64` before and after its
+/// work and writing `%smid` -- should take its blocks' cycles times the SMs
+/// it ran on, over `2^n`. The workload launches once more than it records
+/// (a warm-up of the same length), so the reference is scaled by that.
+/// Measured: 1.001 of the reference at `2^12`, 1.001 at `2^14`; held within
+/// 10 %, over the samples of `selftimed` alone (another process's kernels
+/// are CUPTI's `non_user` count, not the program's).
+#[test]
+fn the_samples_are_the_kernel_s_own_cycles_over_the_period() {
+    ready_or_skip!();
+    let _device = device();
+    for period in [12u32, 14] {
+        let run = run(
+            "gpu.profile",
+            "tests/gpu_inside.py",
+            &["selftimed", "10", "100000"],
+            &[("OMN_CUPTI_PC_PERIOD", &period.to_string())],
+        );
+        let samples: f64 = run
+            .events()
+            .into_iter()
+            .filter(|event| attr(event, "kernel") == "selftimed")
+            .map(|event| number(event, "samples"))
+            .sum();
+        let launches = run.truth["selftimed"].as_array().unwrap();
+        let cycles: f64 = launches
+            .iter()
+            .map(|launch| number_of(launch, "max_block_cycles") * number_of(launch, "sms"))
+            .sum();
+        let recorded = launches.len() as f64;
+        let reference = cycles / f64::from(1u32 << period) * (recorded + 1.0) / recorded;
+        let ratio = samples / reference;
+        assert!(
+            (0.9..=1.1).contains(&ratio),
+            "2^{period}: {samples} samples against {reference:.0} from the kernel's own cycles \
+             ({ratio:.3}); on the device: {}; {}",
+            tenants(),
+            run.facts()
+        );
+        assert_eq!(
+            run.result["losses"]["dropped"], 0,
+            "{:#}",
+            run.result["losses"]
+        );
+    }
+}
+
+fn number_of(value: &Value, name: &str) -> f64 {
+    value[name]
+        .as_f64()
+        .unwrap_or_else(|| panic!("no number `{name}` in {value}"))
 }
 
 /// The sampling period CUPTI applied is read back, and checked by its

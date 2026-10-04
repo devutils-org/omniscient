@@ -129,7 +129,15 @@ impl Channel {
             wire::OP_DROPPED | wire::OP_INCOMPLETE => {
                 self.losses_in_batch += count(payload);
             }
-            wire::OP_COUNTER | wire::OP_PC => self.inside_in_batch += 1,
+            // Every record an inside reader reads: the setups, stall names
+            // and drain accounts a batch carries are lost with it as surely
+            // as its counters and program counters.
+            wire::OP_COUNTER_SETUP
+            | wire::OP_COUNTER
+            | wire::OP_STALL
+            | wire::OP_PC_CONFIG
+            | wire::OP_PC
+            | wire::OP_PC_DRAIN => self.inside_in_batch += 1,
             wire::OP_INSIDE_LOST => self.inside_in_batch += count(payload),
             _ => {}
         }
@@ -286,13 +294,15 @@ mod tests {
         channel.frame(wire::OP_KERNEL, &[0; wire::KERNEL_FIELDS]);
         channel.frame(wire::OP_PC, &[0; wire::PC_SAMPLE_FIELDS]);
         channel.frame(wire::OP_COUNTER, &[0; wire::COUNTER_FIELDS]);
+        channel.frame(wire::OP_PC_DRAIN, &[0; 56]);
+        channel.frame(wire::OP_COUNTER_SETUP, &[0; wire::COUNTER_SETUP_FIELDS]);
         channel.frame(
             wire::OP_INSIDE_LOST,
             &[&40u64.to_ne_bytes()[..], &[0; 8]].concat(),
         );
         channel.send();
         assert_eq!(channel.lost, 1);
-        assert_eq!(channel.inside_lost, 2 + 40);
+        assert_eq!(channel.inside_lost, 4 + 40);
     }
 
     #[test]

@@ -318,6 +318,13 @@
        the window escapes that check and shows as `outliers` or a spread. The
        compute processes NVML lists on the device, once a second, are in the
        facts."
+    - "Ranges pair with launches by order, and only when a batch's counts
+       agree and no range launched fewer blocks than its launch's grid; a
+       batch that holds a launch the library does not follow (a CUDA graph's
+       kernel nodes) is not reported at all and counted as unpaired, rather
+       than credited to its neighbours. Each event is stamped at its kernel's
+       first launch call, its ts_err_ns reaching to the arrival of the last
+       launch's counters (saturating at 4.29 s, the field's width)."
 
 - id: gpu.profile
   family: gpu
@@ -349,5 +356,10 @@
        where no instruction issued (`_not_issued`); that subset is left out,
        so every sample counts once."
     - "CUPTI accepts some configurations it does not apply. What it applied is
-       read back and a difference said, and kernels that ran with no sample at
-       all are a lost read, not an empty profile."
+       read back and a difference said (a period setting outside 5 to 31 is
+       said and the default used), and a run whose kernels took no sample at
+       all is a lost read, not an empty profile. One kernel without a sample
+       among others is not a loss: shorter than the period, it takes none.
+       CUPTI's own sample count over the program's kernels is held to the
+       samples reported; a shortfall past what it said it dropped is counted
+       as lost."

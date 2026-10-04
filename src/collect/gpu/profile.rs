@@ -23,9 +23,17 @@
 //!
 //! **A configuration accepted and not applied is caught by its effect.**
 //! The library reads back what CUPTI applied and counts the kernels launched;
-//! a period or a mode that differs from what was asked, or kernels that ran
-//! with no sample at all, are said -- the latter as a lost read, because it is
-//! the whole profile missing.
+//! a period or a mode that differs from what was asked, or a run whose
+//! kernels took no sample at all, are said -- the latter as a lost read,
+//! because it is the whole profile missing. One kernel without a sample among
+//! others that have some is not a loss: a kernel shorter than the period on
+//! every SM is expected to take none.
+//!
+//! **Every sample CUPTI counted is accounted for.** Its own count over the
+//! program's kernels (all samples less those in kernels that are not the
+//! program's) is held to the samples the program counters carried: a
+//! shortfall beyond what CUPTI said it dropped is counted as dropped, with
+//! the reason.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -76,6 +84,11 @@ struct Totals {
     reported: u64,
     with_line: u64,
     launches: u64,
+    /// CUPTI's count of the samples it dropped, already counted as lost.
+    dropped: u64,
+    /// Samples CUPTI counted in the program's kernels that no program
+    /// counter carried, counted as lost at the end.
+    shortfall: u64,
 }
 
 pub struct ProfileCollector {
@@ -154,6 +167,7 @@ impl ProfileCollector {
                         );
                         self.totals.cupti += drain.total;
                         self.totals.non_user += drain.non_user;
+                        self.totals.dropped += drain.dropped;
                         self.totals.launches = self.totals.launches.max(drain.launches);
                     }
                     None => self.common.losses.undecoded += 1,
@@ -229,6 +243,29 @@ impl ProfileCollector {
     }
 }
 
+impl ProfileCollector {
+    /// Holds CUPTI's count of the program's samples to those the program
+    /// counters carried. Whether CUPTI's total includes the samples it
+    /// dropped is not documented, so the shortfall past those -- already
+    /// counted -- is what is added: a loss is never counted twice, and
+    /// whichever reading holds, what is missing is counted.
+    fn account_for_samples(&mut self) {
+        let expected = self.totals.cupti.saturating_sub(self.totals.non_user);
+        let missing = expected.saturating_sub(self.totals.reported);
+        let shortfall = missing.saturating_sub(self.totals.dropped);
+        if shortfall > 0 {
+            self.totals.shortfall = shortfall;
+            self.common.losses.dropped += shortfall;
+            self.common.losses.note(format!(
+                "CUPTI counted {expected} samples in the program's kernels and the program \
+                 counters carried {}: {shortfall} were not reported -- a drain that did not fit \
+                 its buffer, or a batch that never reached `omn`",
+                self.totals.reported
+            ));
+        }
+    }
+}
+
 impl Collector for ProfileCollector {
     fn id(&self) -> &CollectorId {
         &self.id
@@ -261,6 +298,7 @@ impl Collector for ProfileCollector {
                 self.totals.launches
             ));
         }
+        self.account_for_samples();
         events
     }
 
@@ -454,6 +492,42 @@ mod tests {
         assert!(facts.contains("no line information in hotloop"), "{facts}");
         assert!(collector.losses().is_clean());
         assert!(collector.notes().is_empty(), "{:?}", collector.notes());
+    }
+
+    /// Samples CUPTI counted and no program counter carried are a loss,
+    /// past those it said it dropped.
+    #[test]
+    fn samples_cupti_counted_and_no_program_counter_carried_are_lost() {
+        let (write, socket, reader) = pair(Inside::Profile);
+        let mut collector = ProfileCollector::new(socket, reader, 8);
+        let mut account = drain(5_000, 1_000, 1_000, 3);
+        // 1 000 counted, 100 of them not the program's, 50 dropped by
+        // CUPTI's own count: 850 should arrive, and 800 do.
+        let mut decoded = wire::PcDrain::decode(&account.1).unwrap();
+        decoded.non_user = 100;
+        decoded.dropped = 50;
+        account.1 = decoded.encode().as_slice().to_vec();
+        send(
+            write,
+            8,
+            &[
+                (wire::OP_HELLO, vec![0; 24]),
+                stall(3, "smsp__pcsamp_warps_issue_stalled_wait"),
+                config(12, 12, 1),
+                name(1, "hotloop"),
+                name(2, "hotloop.cu"),
+                account,
+                lost(50, wire::LOST_SAMPLES),
+                pc(0x340, 3, 800, 20),
+                (wire::OP_END, vec![0; 24]),
+            ],
+        );
+        collector.sample(0).unwrap();
+        collector.stop();
+        let losses = collector.losses();
+        assert_eq!(losses.dropped, 50 + 50);
+        let reasons = format!("{:?}", losses.reasons);
+        assert!(reasons.contains("50 were not reported"), "{reasons}");
     }
 
     /// A configuration CUPTI accepted and did not apply is said, and kernels
