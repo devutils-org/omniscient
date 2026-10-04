@@ -22,6 +22,9 @@
  *                                      DEPTH-th descendant spins MS, the others wait
  *   workload thread MS                 a second thread spins MS while the main
  *                                      thread waits for it in read(2) on a pipe
+ *   workload job MS N                  a job: the program waits for a driver, which
+ *                                      starts N steps one after the other, each
+ *                                      spinning MS in a process of its own
  *
  * The spin is a chain of dependent multiplies: its speed is the multiplier's
  * latency, which an SMT sibling does not share, so a unit of work costs about
@@ -347,6 +350,49 @@ static int mode_thread(uint64_t ms)
 	return 0;
 }
 
+/* ---------------------------------------------------------------- job */
+
+/* A build's shape: the program waits for a driver, which runs its steps one
+ * after the other, each a process of its own (`sh` -> `gcc` -> `cc1`, `as`).
+ * The work is in every step, not in the busiest one. */
+static int mode_job(uint64_t ms, int steps)
+{
+	uint64_t start = now_ns(CLOCK_MONOTONIC);
+	fflush(stderr);
+	pid_t driver = fork();
+	if (driver < 0)
+		return 1;
+	if (driver == 0) {
+		uint64_t driver_start = now_ns(CLOCK_MONOTONIC);
+		for (int i = 0; i < steps; i++) {
+			fflush(stderr);
+			pid_t step = fork();
+			if (step < 0)
+				_exit(1);
+			if (step == 0) {
+				uint64_t step_start = now_ns(CLOCK_MONOTONIC);
+				spin_cpu_ms(ms);
+				char extra[32];
+				snprintf(extra, sizeof extra, "step=%d", i);
+				truth("job-step", step_start, extra);
+				_exit(0);
+			}
+			int status = 0;
+			if (waitpid(step, &status, 0) != step)
+				_exit(1);
+		}
+		truth("job-driver", driver_start, NULL);
+		_exit(0);
+	}
+	int status = 0;
+	if (waitpid(driver, &status, 0) != driver)
+		return 1;
+	char extra[48];
+	snprintf(extra, sizeof extra, "steps=%d driver=%d", steps, driver);
+	truth("job", start, extra);
+	return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
 /* ---------------------------------------------------------------- diff */
 
 /* Four functions of equal cost, told apart only by their names. */
@@ -393,11 +439,13 @@ int main(int argc, char **argv)
 		return mode_child(strtoull(argv[2], NULL, 10), atoi(argv[3]));
 	if (argc >= 3 && strcmp(argv[1], "thread") == 0)
 		return mode_thread(strtoull(argv[2], NULL, 10));
+	if (argc >= 4 && strcmp(argv[1], "job") == 0)
+		return mode_job(strtoull(argv[2], NULL, 10), atoi(argv[3]));
 	if (argc >= 6 && strcmp(argv[1], "phases") == 0)
 		return mode_phases(strtoull(argv[2], NULL, 10), atoi(argv[3]),
 				   strtoull(argv[4], NULL, 10), argv[5]);
 	fprintf(stderr, "usage: workload cpu MS | io N DIR | lock N HOLD_US | "
 			"tail COUNTER EVERY MS BLOCK_MS | queue THREADS MS | diff FACTOR | "
-			"phases MS N HOLD_US LOG | child MS DEPTH | thread MS\n");
+			"phases MS N HOLD_US LOG | child MS DEPTH | thread MS | job MS N\n");
 	return 2;
 }

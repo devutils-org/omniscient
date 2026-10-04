@@ -284,6 +284,20 @@ fn answer(args: &[&str], would_have_checked: &str) -> Option<Answered> {
             args.join(" ")
         )
     });
+    // Whatever was asked, the tool's own eBPF programs -- run on the
+    // target's cpu by the tracepoints it attached -- are never the named
+    // suspect (`sqlite3-durability`'s `bpf_trace_run2`).
+    for frame in [
+        "bpf_trace_run",
+        "bpf_prog_",
+        "__bpf_trace_",
+        "trace_call_bpf",
+    ] {
+        assert!(
+            !text.contains(&format!("hottest function `{frame}")),
+            "the tool's own eBPF frame `{frame}` named as the hottest function:\n{text}"
+        );
+    }
     let stderr = String::from_utf8_lossy(&output.stderr);
     let truths = stderr
         .lines()
@@ -798,6 +812,142 @@ fn a_program_whose_work_is_in_another_thread_names_that_thread_beside_its_wait()
     );
 }
 
+/// A build's shape (`make-sqlite`, `gcc-shell`): the program waits for a
+/// driver, which runs three steps one after the other, each spinning 150 ms in
+/// a process of its own. The wait is followed into one step, and the rest of
+/// the job -- the two other steps -- is carried beside it: the followed step's
+/// on-cpu row and the job's add up to the three steps' cpu by the kernel.
+#[test]
+fn a_job_s_wait_carries_every_step_of_the_job_beside_the_child_followed() {
+    let workload = needs_fixture!();
+    let _alone = one_at_a_time();
+    let Some(run) = answer(
+        &[
+            "latency",
+            "--objective",
+            "latency",
+            "--",
+            workload.to_str().unwrap(),
+            "job",
+            "150",
+            "3",
+        ],
+        "that a job's wait carries every step of the job, not the busiest one alone",
+    ) else {
+        return;
+    };
+    let steps: Vec<(String, f64)> = run
+        .truths
+        .iter()
+        .filter(|truth| truth.get("mode").map(String::as_str) == Some("job-step"))
+        .map(|truth| {
+            (
+                format!("task:{}", truth["tid"]),
+                truth["oncpu_ns"].parse::<f64>().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(steps.len(), 3, "{}", run.text);
+    let followed = &run.median_run()["followed"];
+    assert_eq!(followed["relation"], "child", "{}", run.text);
+    let decomposed = run.decomposed()["task"].as_str().unwrap().to_owned();
+    assert!(
+        steps.iter().any(|(task, _)| *task == decomposed),
+        "the wait is followed into a step, not {decomposed}:\n{}",
+        run.text
+    );
+    let job = &followed["job"];
+    let tasks: Vec<&str> = job["tasks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no job beside the child:\n{}", run.text))
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for (task, _) in steps.iter().filter(|(task, _)| *task != decomposed) {
+        assert!(
+            tasks.contains(&task.as_str()),
+            "{task}, a step, is not in the rest of the job {tasks:?}:\n{}",
+            run.text
+        );
+    }
+    let on_cpu = run.decomposed()["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|state| state["state"] == "on-cpu")
+        .map(amount)
+        .unwrap_or(0.0);
+    let read = on_cpu + job["on_cpu"].as_f64().unwrap_or(0.0);
+    let truth: f64 = steps.iter().map(|(_, on_cpu)| on_cpu).sum();
+    // The driver's and the main thread's own cpu are in the job too, and each
+    // step is found a tick late at most: a quarter of the steps' cpu below,
+    // the driver's few milliseconds and three periods above.
+    let tolerance = 3.0 * PERIOD_NS * 3.0 + truth * 0.02 + 10e6;
+    assert!(
+        read <= truth + tolerance && read >= truth * 0.75 - tolerance,
+        "the followed step's on-cpu and the rest of the job read {read}, against the steps' \
+         {truth} by the kernel:\n{}",
+        run.text
+    );
+}
+
+/// `http-server-stdlib`'s slow client, in Python as the case is
+/// (`src/triage/serve.py`): the main thread waits on a pipe while the serving
+/// thread blocks in `sendall` on a connection whose peer reads only after
+/// 400 ms. No thread runs in the main thread's wait; the serving thread,
+/// blocked on the connection (its socket module's frames say so), is
+/// followed beside it and decomposed, and the verdict is its own sleep,
+/// against the kernel's figures for it.
+#[test]
+fn a_thread_blocked_on_a_slow_client_is_named_beside_the_main_thread_s_wait() {
+    let python = Command::new("python3").arg("--version").output();
+    if !python.is_ok_and(|output| output.status.success()) {
+        eprintln!("skipped: no `python3` to run the slow client's server");
+        return;
+    }
+    let script = scratch("serve").join("serve.py");
+    std::fs::write(&script, include_str!("../src/triage/serve.py")).unwrap();
+    let _alone = one_at_a_time();
+    let Some(run) = answer(
+        &[
+            "latency",
+            "--objective",
+            "latency",
+            "--",
+            "python3",
+            script.to_str().unwrap(),
+            "400",
+        ],
+        "that a thread blocked on a connection is named beside the main thread's wait",
+    ) else {
+        return;
+    };
+    let worker = run.truth_where("serve-worker", "tid") as u64;
+    let task = format!("task:{worker}");
+    let followed = &run.median_run()["followed"];
+    assert_eq!(followed["relation"], "waiting", "{}", run.text);
+    assert_eq!(followed["reading"]["task"], task.as_str(), "{}", run.text);
+    assert_eq!(run.verdict()["task"], task.as_str(), "{}", run.text);
+    assert_eq!(run.limit(), Some("sleep"), "{}", run.text);
+    let sleeping = followed["reading"]["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|state| state["state"] == "blocked: sleeping")
+        .map(amount)
+        .unwrap_or_else(|| panic!("no sleep for {task}:\n{}", run.text));
+    // Blocked: its wall clock less its time on a cpu and waiting for one.
+    let wall = run.truth_where("serve-worker", "wall_ns");
+    let blocked = wall
+        - run.truth_where("serve-worker", "oncpu_ns")
+        - run.truth_where("serve-worker", "runq_ns");
+    assert!(
+        sleeping >= 0.5 * blocked && sleeping <= wall + 5e6,
+        "{task} slept {sleeping}, where the kernel's figures leave {blocked} blocked:\n{}",
+        run.text
+    );
+}
+
 /// One workload whose answer changes with the objective: a program that
 /// spins 100 ms every run and sleeps 200 ms more in one run of five. Its
 /// typical run is cpu-bound; its slow run is slow because it slept.
@@ -922,13 +1072,51 @@ fn a_verdict_read_off_a_lossy_profile_says_its_amount_is_a_lower_bound() {
         );
         return;
     }
-    assert_eq!(run.limit(), Some("cpu"), "{}", run.text);
-    assert_eq!(run.verdict()["lower_bound"], true, "{}", run.text);
-    assert!(
-        run.verdict()["sentence"].as_str().unwrap().contains(">="),
-        "{}",
-        run.text
+    // Under load the same spin may wait for a cpu longer than it runs on one,
+    // and then `cpu-queue` is the tool being right about the run it measured
+    // (the kernel's figures decide, as for the tail's median). The shortfall
+    // is held where the verdict names the lossy row: a `cpu` verdict is a
+    // lower bound and says so. One that names the queue is right only where
+    // the kernel says so: a lossy on-cpu row that could overtake the queue
+    // leaves the verdict undecided, with that reason.
+    let median = run.answer["median"].as_u64().expect("a median run") as usize;
+    let (expected, close) = cpu_or_queue(
+        run.truth_of(median, "oncpu_ns"),
+        run.truth_of(median, "runq_ns"),
     );
+    match run.limit() {
+        Some("cpu") => {
+            assert!(
+                expected == "cpu" || close,
+                "the kernel says `{expected}`:\n{}",
+                run.text
+            );
+            assert_eq!(run.verdict()["lower_bound"], true, "{}", run.text);
+            assert!(
+                run.verdict()["sentence"].as_str().unwrap().contains(">="),
+                "{}",
+                run.text
+            );
+        }
+        Some("cpu-queue") => {
+            assert!(
+                expected == "cpu-queue" || close,
+                "the kernel says `{expected}`:\n{}",
+                run.text
+            );
+        }
+        // Undecided: right where the two are close, and where the lossy
+        // on-cpu row could overtake the queue -- which it says.
+        None => assert!(
+            close
+                || run.verdict()["undecided"]
+                    .as_str()
+                    .is_some_and(|why| why.contains("`on-cpu` is a lower bound")),
+            "undecided where the kernel says `{expected}` clearly:\n{}",
+            run.text
+        ),
+        Some(other) => panic!("a spin named `{other}`:\n{}", run.text),
+    }
 }
 
 /// The capability sweep, without touching the machine's capabilities: a
