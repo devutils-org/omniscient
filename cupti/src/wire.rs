@@ -7,9 +7,12 @@
 //!
 //! **The channel** is one `AF_UNIX` `SOCK_SEQPACKET` socket `omn` creates
 //! before the launch and names in `OMN_CUPTI_FD`. A sequenced-packet socket
-//! keeps message boundaries and never interleaves two senders' messages, so a
-//! program that forks after initialising CUDA -- two processes writing to one
-//! descriptor -- still sends whole messages, each one saying whose it is.
+//! keeps message boundaries and never interleaves two senders' messages, so
+//! every process of the program that loads the library -- a child that execs
+//! a CUDA program loads it afresh -- sends whole messages on the one
+//! descriptor, each one saying whose it is. A child *forked* after `cuInit`
+//! without an exec sends nothing: it cannot use CUDA, and what it holds is a
+//! copy of its parent's batch (`lib.rs`).
 //!
 //! **A message** is a [`HEADER`]-byte header -- magic, version, sender pid,
 //! frame count -- followed by frames. A message is at most [`MESSAGE_MAX`]
@@ -70,7 +73,9 @@ pub const OP_MEMSET: u8 = 5;
 pub const OP_NAME: u8 = 6;
 /// Records CUPTI itself dropped, from `cuptiActivityGetNumDroppedRecords`.
 pub const OP_DROPPED: u8 = 7;
-/// Records the library had and could not send, cumulative.
+/// Records the library had and could not send, cumulative: activity
+/// records, and the counts of dropped and unfinished records an unsent batch
+/// carried.
 pub const OP_LOST: u8 = 8;
 /// Something the library could not do, in words.
 pub const OP_ERROR: u8 = 9;

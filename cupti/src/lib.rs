@@ -25,6 +25,18 @@
 //! answers success whatever happened, because a failure there fails the
 //! program's `cuInit`.
 //!
+//! **A forked child reports nothing, and exits as it would have.** A program
+//! that forks after `cuInit` gives its child a copy of this library's state:
+//! the `atexit` handler, the channel's batch and its lock, CUPTI's own state
+//! as the parent's threads left it -- but not those threads. The child cannot
+//! use CUDA (the driver does not survive a fork), so it has nothing of its own
+//! to report, and running the closing flush there waits on locks no thread
+//! will ever release: measured, a child forked after 500 kernels hung in
+//! `exit` for good. So everything that runs at exit or sends asks first
+//! whether this is still the process that initialised, and a child returns
+//! at once ([`owner`]). A child that execs a CUDA program is a new process
+//! the driver loads this library into afresh, under its own pid.
+//!
 //! **Disarmed costs one `dlopen`.** With `OMN_CUPTI_REPORT=0` the library
 //! loads and does nothing else: the negative control a tracer's cost is
 //! measured against, so the loader's own work is not billed to CUPTI.
@@ -35,7 +47,7 @@ mod channel;
 mod wire;
 
 use std::ffi::{c_int, c_void, CStr};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use api::Cupti;
@@ -50,6 +62,8 @@ static BUFFERS: AtomicUsize = AtomicUsize::new(wire::DEFAULT_BUFFERS);
 static OUTSTANDING: AtomicUsize = AtomicUsize::new(0);
 static STOPPING: AtomicBool = AtomicBool::new(false);
 static INITIALISED: AtomicBool = AtomicBool::new(false);
+/// The process `InitializeInjection` ran in; zero before it has.
+static OWNER: AtomicU32 = AtomicU32::new(0);
 /// Records of a kind this library does not decode.
 static UNKNOWN: AtomicUsize = AtomicUsize::new(0);
 /// Records handed back before their activity finished: no time to report.
@@ -61,6 +75,7 @@ pub extern "C" fn InitializeInjection() -> c_int {
     if INITIALISED.swap(true, Ordering::SeqCst) {
         return 1;
     }
+    OWNER.store(std::process::id(), Ordering::SeqCst);
     let Some(channel) = Channel::from_environment() else {
         return 1;
     };
@@ -77,6 +92,12 @@ pub extern "C" fn InitializeInjection() -> c_int {
         send_now();
     }
     1
+}
+
+/// Whether this is the process that initialised, rather than a child forked
+/// from it, which holds a copy of the parent's state and none of its threads.
+fn owner() -> bool {
+    OWNER.load(Ordering::SeqCst) == std::process::id()
 }
 
 fn lock() -> std::sync::MutexGuard<'static, Option<Channel>> {
@@ -220,13 +241,21 @@ fn flush_loop(period_ms: u64) {
 }
 
 extern "C" fn at_exit() {
+    // Before any lock or CUPTI call: in a forked child both may be held by
+    // threads that were not copied, and waiting on them never returns.
+    if !owner() {
+        return;
+    }
     STOPPING.store(true, Ordering::Release);
     let Some(cupti) = CUPTI.get() else {
         return;
     };
+    // The bracket first, so that it reaches `omn` before the records the
+    // flush hands back, which all precede it: they are converted between
+    // brackets rather than extrapolated past the last one.
+    calibrate(cupti, 32);
     // SAFETY: a forced flush hands back every buffer, complete or not.
     unsafe { (cupti.flush_all)(c::FLUSH_FORCED) };
-    calibrate(cupti, 32);
     with_channel(|channel| {
         let mut end = wire::Fields::<24>::default();
         end.u64(channel.seen)

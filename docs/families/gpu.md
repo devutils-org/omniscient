@@ -488,7 +488,11 @@ disagree on a number.
 ## What an event is
 
 Stamped at the activity's start on the device, converted to `CLOCK_MONOTONIC`,
-with `ts_err_ns` the calibration's measured error. Attributes: `duration_ns`
+with `ts_err_ns` the calibration's measured error, widened by the slope's
+measured uncertainty for a record later than the last bracket so far (or by a
+declared 500 ppm before a second bracket exists). That is the error of the
+conversion from CUPTI's clock, and of nothing upstream of it: see "Ground
+truth" for what the device's own placement adds. Attributes: `duration_ns`
 (the value: end minus start on the device), `op` (`kernel`, `memcpy`,
 `memset`), `kernel` (the demangled kernel name, or `[memcpy HtoD]`,
 `[memcpy DtoH]`, ..., `[memset]`), `device`, `stream`, `context`,
@@ -502,22 +506,29 @@ does not carry. Rank with `topk:10@kernel`; count only kernels with
 
 A `pid` target is refused: CUPTI records the process it is loaded in, and the
 driver loads it at `cuInit`, which a running program did long ago. The
-catalog's `targets` is `{launch}` and its first caveat says why, because the
-validator's refusal for a target the entry does not list is generic ("the
-catalog declares no `pid` support"); a per-entry refusal reason is filed for
-the coordinator in `docs/fixes/w19-cupti.md`.
+catalog's `targets` is `{launch}` and its first caveat says why; the
+validator quotes a caveat that names the refused flag (`` `--pid` ``) and says
+"refused" as the refusal's reason, so `--pid` prints it.
 
 ## The channel
 
 One `AF_UNIX` `SOCK_SEQPACKET` socket per launch, made by `omn` and named in
 `OMN_CUPTI_FD`. Sequenced packets keep message boundaries and never interleave
-two senders, so a program that forks after `cuInit` sends whole messages, each
-saying whose they are. The library batches frames into messages of at most
+two senders, so every process that loads the library -- a child that execs a
+CUDA program loads it afresh -- sends whole messages, each saying whose they
+are. A child *forked* after `cuInit` without an exec sends nothing and exits
+as it would have: it cannot use CUDA, and it holds a copy of its parent's
+batch, locks and `atexit` handler without the parent's threads. Running the
+closing flush there hung the child for good (500 kernels, then a fork, then
+`exit`), so the handler and every send first check that the pid is still the
+one that initialised (`a_child_forked_after_cuinit_exits_and_reports_nothing`). The library batches frames into messages of at most
 60 KiB, one batch per CUPTI buffer and per flush, so a record costs no system
 call of its own. Sends happen on CUPTI's thread, the flush thread or at exit,
 never on a thread of the program's, and are bounded by a two-second send
 timeout: a batch that could not be sent is dropped, counted, and reported in
-the next one that is.
+the next one that is -- its records, and the counts of dropped and unfinished
+records it carried; a kernel name it carried is sent again with the next
+kernel of that name.
 
 Every collector of a launch that goes through the library reads that one
 socket (`Socket` in `kernel.rs`), the way the preload shim's readers share its
@@ -536,6 +547,7 @@ no toolkit. Each writes what it did to the file `OMN_GPU_TRUTH` names.
 | Command | What it does | What it guarantees |
 |---|---|---|
 | `launches N` | N launches of `tiny`, one block of 32 threads, synchronised every 1024 | exactly N kernels; a launch rate set by the host, about 1 us of device time each: the load that fills CUPTI's buffers fastest |
+| `forked N` | N launches of `tiny`, a synchronise, then a fork whose child exits at once through `exit`; the parent waits for it at most 30 s | exactly N kernels, all the parent's; a child that runs every `atexit` handler the parent registered, and a failure rather than a hang if one of them does not return |
 | `compute N` | N launches of `spin`, about 2.4 ms each here | exactly N kernels whose time is arithmetic: no reads, one write per thread |
 | `memory N MIB` | a memset and a host-to-device copy of MIB, N launches of `copy` (grid-stride, MIB read and MIB written), a copy back | exactly N kernels, 2 copies and 1 memset, each moving exactly MIB |
 | `managed N MIB` | one managed buffer of MIB; the host writes all of it, then one `copy` kernel within it, N times | exactly N kernels, and pages migrating both ways between every two -- which are not kernels |
@@ -559,7 +571,14 @@ no toolkit. Each writes what it did to the file `OMN_GPU_TRUTH` names.
   CUPTI's start and end include and `%globaltimer` inside the kernel cannot.
   That difference is not a clock error: the calibration's error on the same
   run was 68 ns. The test asserts the separation (span <= duration <= span +
-  max(10 us, 1 %)), not the measurement.
+  max(10 us, 1 %)), not the measurement. **This replaces the brief's "within
+  the calibration's error", on purpose**: `ts_err_ns` bounds the conversion of
+  CUPTI's clock into `CLOCK_MONOTONIC`, which a host bracket can measure;
+  CUPTI's own placement of the device's work on its clock, and the dispatch
+  and drain inside its duration, are upstream of any bracket and an order of
+  magnitude larger. Folding a declared microsecond into `ts_err_ns` would make
+  it a guess; the separation and the containment below are what bound the
+  whole chain, and they are asserted.
 - **Placement in time**: every converted kernel starts 7 to 10 us after the
   host's `CLOCK_MONOTONIC` before its launch and ends 1.2 to 1.9 us before the
   host's after its synchronise. Asserted as containment within the error.

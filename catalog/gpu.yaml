@@ -191,7 +191,11 @@
     - "Vendor timestamps live in another clock domain: CUPTI's clock is
        bracketed between two CLOCK_MONOTONIC reads at the start, at every
        flush and at the end, and every event carries the measured error as a
-       non-zero ts_err_ns."
+       non-zero ts_err_ns, widened for a record past the last bracket. It is
+       the error of that conversion only: where CUPTI put the device's work on
+       its own clock is not in it, and a kernel's duration includes its block
+       dispatch and drain (about a microsecond here, against tens of
+       nanoseconds of ts_err_ns)."
     - "CUPTI drops activity records under a launch-bound workload and reports
        how many. An overhead measured on an incomplete trace describes a tracer
        that gave up, so the drop count belongs beside the numbers: it is the

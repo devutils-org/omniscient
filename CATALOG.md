@@ -457,7 +457,7 @@ invisible to every CPU profiler.
 | `gpu.engine_busy` | per-engine occupancy | `pmu` i915/xe/amdgpu · `vendor:nvml` | count, poll | system | free-low | low |
 | `gpu.freq` / `.power` / `.temp` | hardware state | `pmu` · `fs:sys` · `vendor:nvml` | poll | system | free | low |
 | `gpu.mem` | VRAM allocated / used | `fs:sys` amdgpu · `vendor:nvml` | poll | system, pid | free | medium |
-| `gpu.kernel` | GPU time per kernel | `vendor:cupti` (Activity) · `rocprof` · `l0` | trace | pid | med | medium |
+| `gpu.kernel` | GPU time per kernel | `vendor:cupti` (Activity) · `rocprof` · `l0` | trace | launch | med | medium |
 | `gpu.api` | host-side submission latency | `preload` cuLaunchKernel / vkQueueSubmit | trace | pid | low | low |
 | `gpu.counters` | internal counters (SM, cache, stalls) | `vendor:ncu` · `rocprofv3` | snapshot | pid | **extreme** | **high** |
 

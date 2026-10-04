@@ -14,8 +14,9 @@
 //! recorded duration, its start inside the host's launch window -- and a
 //! failure says who else held the device.
 //!
-//! A machine without an NVIDIA device, its driver, or CUPTI skips, saying
-//! which; the refusal of a `pid` target is checked everywhere.
+//! Only the machine skips: no `libcuda`, no device, or no CUPTI, each said.
+//! A missing or broken injection library fails, because it is this build's
+//! (`ready`). The refusal of a `pid` target is checked everywhere.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -66,12 +67,43 @@ fn tenants() -> String {
         .unwrap_or_else(|error| format!("nvidia-smi did not run: {error}"))
 }
 
-/// Whether this machine can run the scenarios: a device, its driver, CUPTI,
-/// and the injection library built. Probed once, with the smallest workload.
+/// Whether this machine can run the scenarios, probed once.
+///
+/// Only the machine may skip them: no `libcuda`, no device the driver will
+/// open, or no CUPTI for the probe to find. Everything else -- the injection
+/// library missing or broken, `OMN_CUPTI_INJECTION` wrong, the library failing
+/// a CUDA call in the workload -- is this build's, and fails every scenario
+/// rather than skipping them. So the question is asked in two steps that
+/// cannot be confused: the workload alone, with no `omn` and no injection,
+/// answers whether there is a device; then the workload under `omn` answers
+/// whether the tool works, and the only refusal that is the machine's is the
+/// resolver's "no viable backend" (no CUPTI).
 fn ready() -> Result<(), String> {
     static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
     PROBE
         .get_or_init(|| {
+            let bare = Command::new("python3")
+                .current_dir(ROOT)
+                .args(["tests/gpu_workload.py", "memory", "1", "1"])
+                .env_remove("CUDA_INJECTION64_PATH")
+                .output()
+                .expect("python3 should run");
+            if !bare.status.success() {
+                let complaint = stderr(&bare);
+                let machine = [
+                    "libcuda.so.1 is not loadable here",
+                    "cuInit refused with CUDA error",
+                    "cuDeviceGet refused with CUDA error",
+                    "cuCtxCreate refused with CUDA error",
+                ];
+                if let Some(line) = complaint
+                    .lines()
+                    .find(|line| machine.iter().any(|reason| line.contains(reason)))
+                {
+                    return Err(format!("no NVIDIA GPU to trace here: {line}"));
+                }
+                panic!("the GPU workload failed on its own, without omn: {complaint}");
+            }
             let truth = scratch("probe");
             let output = omn(
                 &[
@@ -94,21 +126,25 @@ fn ready() -> Result<(), String> {
                 return Ok(());
             }
             let complaint = stderr(&output);
-            let machine = [
-                "libcuda.so.1 is not loadable here",
-                "no viable backend",
-                "cupti",
-                "CUPTI",
-                "CUDA error",
-            ];
-            if machine.iter().any(|reason| complaint.contains(reason)) {
-                Err(format!(
-                    "no NVIDIA GPU with CUPTI to trace here: {}",
-                    complaint.lines().next().unwrap_or("")
-                ))
-            } else {
-                panic!("gpu.kernel failed for a reason that is not the machine's: {complaint}");
+            if let Some(line) = complaint
+                .lines()
+                .find(|line| line.contains("has no viable backend on this machine"))
+            {
+                let why: Vec<&str> = complaint
+                    .lines()
+                    .skip_while(|candidate| *candidate != line)
+                    .take(3)
+                    .collect();
+                return Err(format!(
+                    "no CUPTI beside this GPU to trace with: {}",
+                    why.join(" ")
+                ));
             }
+            panic!(
+                "the workload runs on this device alone, and gpu.kernel failed on it: that is \
+                 this build's failure, not the machine's (is the injection library built? \
+                 `make` builds it beside omn):\n{complaint}"
+            );
         })
         .clone()
 }
@@ -268,7 +304,13 @@ fn a_pid_target_is_refused_and_the_entry_says_why() {
         &[],
     );
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    assert!(stderr(&output).contains("per pid"), "{}", stderr(&output));
+    let complaint = stderr(&output);
+    assert!(complaint.contains("per pid"), "{complaint}");
+    // The refusal itself carries the entry's reason, not only `omn list`.
+    assert!(
+        complaint.contains("CUDA_INJECTION64_PATH") && !complaint.contains("declares no"),
+        "{complaint}"
+    );
     let listing = omn(&["list", "gpu.kernel"], &[]);
     let text = String::from_utf8_lossy(&listing.stdout);
     assert!(text.contains("CUDA_INJECTION64_PATH"), "{text}");
@@ -281,6 +323,29 @@ fn the_launch_bound_load_is_counted_kernel_for_kernel() {
     let _device = device();
     let run = trace("launches", &["launches", "20000"], &[]);
     holds_counts(&run, "launches 20000");
+}
+
+/// A program that forks after `cuInit`: the child inherits the library's
+/// `atexit` handler and a copy of its state without its threads. The child
+/// exits as it would without `omn`, sends nothing, and every kernel is the
+/// parent's, counted once.
+#[test]
+fn a_child_forked_after_cuinit_exits_and_reports_nothing() {
+    ready_or_skip!();
+    let _device = device();
+    let run = trace("forked", &["forked", "500"], &[]);
+    holds_counts(&run, "forked 500");
+    let child = run.truth["child"].as_u64().unwrap();
+    let pids: std::collections::BTreeSet<u64> = run
+        .events()
+        .iter()
+        .map(|event| attr(event, "pid").as_u64().unwrap())
+        .collect();
+    assert_eq!(pids.len(), 1, "one process ran kernels: {pids:?}");
+    assert!(
+        !pids.contains(&child),
+        "the child {child} is credited: {pids:?}"
+    );
 }
 
 #[test]

@@ -457,7 +457,8 @@ impl KernelCollector {
                 if new > 0 {
                     self.losses.note(
                         "the injection library could not send these records to omn within its \
-                         send timeout",
+                         send timeout -- or, in the batches it could not send, the counts of \
+                         records CUPTI had dropped or handed back unfinished",
                     );
                 }
             }
@@ -487,7 +488,8 @@ impl KernelCollector {
                     self.losses.dropped += new;
                     self.losses.note(
                         "the injection library could not send these records to omn within its \
-                         send timeout",
+                         send timeout -- or, in the batches it could not send, the counts of \
+                         records CUPTI had dropped or handed back unfinished",
                     );
                 }
                 if unknown > 0 {
@@ -527,8 +529,11 @@ impl KernelCollector {
     fn stamp(&mut self, pid: u32, start: u64, end: u64) -> Option<(u64, u64, u64)> {
         let sender = self.senders.get(&pid)?;
         let map = sender.calibration.map()?;
-        self.widest_err_ns = self.widest_err_ns.max(map.err_ns);
-        Some((map.to_monotonic(start), map.span(start, end), map.err_ns))
+        // The map as it stands when the record arrives: a record past the
+        // last bracket so far is extrapolated, and carries what that adds.
+        let err_ns = map.err_at(start).max(map.err_at(end));
+        self.widest_err_ns = self.widest_err_ns.max(err_ns);
+        Some((map.to_monotonic(start), map.span(start, end), err_ns))
     }
 
     /// A record before any calibration bracket has no monotonic time; the
@@ -831,7 +836,9 @@ mod tests {
         assert_eq!(events.len(), 1);
         let event = &events[0];
         assert_eq!(event.ts_ns, 1_550);
-        assert_eq!(event.ts_err_ns, 50);
+        // Half the bracket, and the kernel ends 2.5 us past the only
+        // bracket: 500 ppm of that, rounded up, for the extrapolation.
+        assert_eq!(event.ts_err_ns, 50 + 2);
         assert_eq!(event.attr("duration_ns").unwrap().as_f64(), Some(2_000.0));
         assert_eq!(
             event.attr("kernel").unwrap().to_string(),

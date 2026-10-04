@@ -62,6 +62,20 @@ impl Bracket {
 /// sits from the line (how far the two clocks departed from a straight line
 /// between the ends). It is at least a nanosecond, because a converted
 /// timestamp is never exact, and `ts_err_ns` zero would say it was.
+///
+/// **Outside the brackets the error grows.** A timestamp later than the last
+/// bracket -- a record that arrived before the bracket that would have
+/// enclosed it -- is extrapolated along the line, and how wrong the line's
+/// slope may be is measured too: the two ends' half-widths and the furthest
+/// departure, over the span the brackets cover. Before a second bracket
+/// there is no slope to measure, and [`UNMEASURED_RATE`] stands in for it,
+/// declared rather than measured, and wide on purpose.
+///
+/// **What it does not cover.** It bounds the conversion of the other clock's
+/// value into `CLOCK_MONOTONIC`, and nothing upstream of it: how the vendor
+/// placed the device's work on its own clock is not something a bracket taken
+/// on the host can see (`docs/families/gpu.md`, the `gpu.kernel` section, says
+/// what that adds on this machine).
 #[derive(Debug, Clone, Default)]
 pub struct Calibration {
     brackets: Vec<Bracket>,
@@ -76,14 +90,38 @@ pub struct ClockMap {
     pub origin: u64,
     /// Monotonic nanoseconds per nanosecond of the other clock.
     pub slope: f64,
+    /// The error inside the brackets.
     pub err_ns: u64,
+    /// The other clock's first and last bracketed values.
+    pub first: u64,
+    pub last: u64,
+    /// How wrong the slope may be, as a fraction: what an extrapolated
+    /// timestamp's error grows by, per nanosecond outside the brackets.
+    pub rate_err: f64,
 }
+
+/// The slope error assumed before a second bracket measures one: 500 ppm,
+/// the most the kernel slews `CLOCK_MONOTONIC`, and an order of magnitude
+/// past a quartz oscillator's tolerance.
+pub const UNMEASURED_RATE: f64 = 500e-6;
 
 impl ClockMap {
     /// The monotonic time of a timestamp of the other clock.
     pub fn to_monotonic(&self, other: u64) -> u64 {
         let delta = other as f64 - self.origin as f64;
         (self.at_origin + delta * self.slope).round().max(0.0) as u64
+    }
+
+    /// The error of one converted timestamp: the brackets' error, plus what
+    /// extrapolating to it outside them may add.
+    pub fn err_at(&self, other: u64) -> u64 {
+        let outside = if other > self.last {
+            other - self.last
+        } else {
+            self.first.saturating_sub(other)
+        };
+        self.err_ns
+            .saturating_add((outside as f64 * self.rate_err).ceil() as u64)
     }
 
     /// A span of the other clock, in monotonic nanoseconds.
@@ -126,6 +164,9 @@ impl Calibration {
             origin: first.other,
             slope,
             err_ns: 1,
+            first: first.other,
+            last: last.other,
+            rate_err: UNMEASURED_RATE,
         };
         let mut widest = 0.0f64;
         let mut furthest = 0.0f64;
@@ -135,6 +176,9 @@ impl Calibration {
             furthest = furthest.max((predicted - bracket.midpoint()).abs());
         }
         map.err_ns = ((widest + furthest).ceil() as u64).max(1);
+        if self.brackets.len() >= 2 && span_other > 0.0 {
+            map.rate_err = (first.half_width() + last.half_width() + furthest) / span_other;
+        }
         Some(map)
     }
 }
@@ -188,6 +232,25 @@ mod tests {
         calibration.push(bracket(2_000_000, 2_001_000, 2_000_010));
         let map = calibration.map().unwrap();
         assert_eq!(map.err_ns, 5 + 7_000);
+    }
+
+    /// A timestamp past the last bracket is extrapolated, and its error grows
+    /// with the distance, by what the brackets say of the slope -- or by the
+    /// declared bound before there are two of them.
+    #[test]
+    fn a_timestamp_outside_the_brackets_carries_the_extrapolation() {
+        let mut calibration = Calibration::default();
+        calibration.push(bracket(0, 1_000_000, 100));
+        let one = calibration.map().unwrap();
+        assert_eq!(one.err_at(1_000_000), 50);
+        assert_eq!(one.err_at(11_000_000), 50 + 5_000, "500 ppm of 10 ms");
+        calibration.push(bracket(1_000_000_000, 1_001_000_000, 1_000_000_100));
+        let two = calibration.map().unwrap();
+        assert_eq!(two.err_at(500_000_000), two.err_ns, "inside: no growth");
+        // Half-widths 50 + 50 over a second of the other clock: 100 ppb,
+        // so 1 s past the last bracket adds 100 ns.
+        assert_eq!(two.err_at(2_001_000_000), two.err_ns + 100);
+        assert_eq!(two.err_at(0), two.err_ns + 1);
     }
 
     #[test]

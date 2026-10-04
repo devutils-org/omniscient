@@ -364,6 +364,41 @@ def launches(count):
     note(f"{count} launches of tiny")
 
 
+def forked(count):
+    """`count` launches of `tiny`, then a fork: the child exits at once.
+
+    Guarantees the exact number of kernels, all of them the parent's and all
+    of them finished before the fork, and a child that exits through `exit`,
+    so every `atexit` handler the parent registered runs in it -- the
+    injection library's included. The child does not touch CUDA, which the
+    driver does not allow after a fork. The parent waits for it at most
+    30 s, and fails if it has not exited by then: a library that hangs a
+    forked child fails here, with that reason, rather than hanging the run.
+    """
+    cuda = Cuda()
+    kernels = cuda.load_trace()
+    out = cuda.allocate(4 * 32)
+    args = params(out)
+    for _ in range(count):
+        cuda.launch(kernels["tiny"], args, grid=1, block=32)
+    cuda.synchronize()
+    child = os.fork()
+    if child == 0:
+        sys.exit(0)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        done, _status = os.waitpid(child, os.WNOHANG)
+        if done:
+            break
+        time.sleep(0.01)
+    else:
+        os.kill(child, 9)
+        os.waitpid(child, 0)
+        fail(f"the child forked after {count} kernels had not exited after 30 s")
+    truth({"kernels": {"tiny": count}, "memcpy": 0, "memset": 0, "child": child})
+    note(f"{count} launches of tiny, then a fork whose child exited")
+
+
 def compute(count):
     """Compute-bound: `count` launches of `spin`, about 2 ms each here.
 
@@ -522,6 +557,8 @@ def main(argv):
         idle(*args)
     elif command == "launches" and len(args) == 1:
         launches(*args)
+    elif command == "forked" and len(args) == 1:
+        forked(*args)
     elif command == "compute" and len(args) == 1:
         compute(*args)
     elif command == "memory" and len(args) == 2:
