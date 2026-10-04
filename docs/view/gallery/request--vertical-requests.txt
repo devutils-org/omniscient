@@ -1,35 +1,35 @@
 omn top │ fixture vertical-requests │ 408ms                       view: snapshot │ collectors ≥0.70% │ target 4.10% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
-┌ request -- what one request costs: its life by state, and its share of each resource ────────────────────────────────┐
-│Not drawn yet. What this view needs, and what this run holds of it:                                                   │
+┌ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────┐
+│5 requests served by server (pid 2759757) · slowest a001 40.2ms · median 30.1ms · in order of arrival  degraded x2    │
 │                                                                                                                      │
-│net.request              5 events via bpf:usdt [raw,summary] degraded x2                                              │
-│                         each request's life by state, and the network on either side of it                           │
+│  req      span  its life by state, to one scale: the slowest is 40.2ms             mostly                            │
+│▶ a001   40.2ms  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  lock/sleep 99.8%                  │
+│  a002   10.1ms  ██▓▄▄▄▄▄▄▄▄▄▄▄▄▄                                                   disk 81.8% · on cpu 11.1%         │
+│  a003   23.0ms  █▓▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▄▄▄                              lock/sleep 87.4% · disk 8.56%     │
+│  a004   30.1ms  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░                  net in 99.9%                      │
+│  a005   33.1ms  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░             net out 98.8%                     │
+│  ░░ net in   ██ on cpu   ▓▓ run queue   ▀▀ lock/sleep   ▄▄ disk   ░░ net out                                         │
+│                                                                                                                      │
+│── a001 · 40.2ms from its first byte in to its last byte out · thread 2759757 ────────────────────────────────────────│
+│            ┊0              ┊10.0ms         ┊20.0ms          ┊30.0ms                                                  │
+│  net in    ░                                                                   20.7µs before start                   │
+│  serving   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  40.2ms from start to done             │
+│  on device                                                                     no block request                      │
+│  net out                                                                       gone when done                        │
+│  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order                 │
+│                                                                                                                      │
+│  where its 40.2ms went              evidence                       its share of each resource                        │
+│  ░ net in       20.7µs   0.05% ▏    KEY      by socket 17491       cpu        54.0µs: 0.32% of the 16.9ms server took│
+│  █ on cpu       54.0µs   0.13% ▏    IDENTITY                                  off cpu 2 times, preempted 0           │
+│  ▓ run queue    22.6µs   0.06% ▏    IDENTITY                       disk       no block request issued                │
+│  ▀ lock/sleep   40.1ms   99.8% ▀▀▀▀ IDENTITY woken by tid 2759758  network    in 20.7µs · out 0ns                    │
+│  ▄ disk              ·              IDENTITY                       lock/sleep longest 40.1ms, woken by tid 2759758   │
+│  ░ net out           ·              KEY                                                                              │
+│  IDENTITY: read off the serving thread  KEY: joined by the socket                                                    │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
+│  what sets it apart from the other 4 requests: ▀ lock/sleep +40.1ms (theirs 0ns)                                     │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -37,4 +37,4 @@ omn top │ fixture vertical-requests │ 408ms                       view: snap
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ request  s sort  enter focus it  l its thread in lanes

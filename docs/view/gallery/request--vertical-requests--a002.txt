@@ -1,0 +1,40 @@
+omn top │ fixture vertical-requests │ 408ms                       view: snapshot │ collectors ≥0.70% │ target 4.10% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
+┌ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────┐
+│5 requests served by server (pid 2759757) · slowest a001 40.2ms · median 30.1ms · in order of arrival  degraded x2    │
+│                                                                                                                      │
+│  req      span  its life by state, to one scale: the slowest is 40.2ms             mostly                            │
+│  a001   40.2ms  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  lock/sleep 99.8%                  │
+│▶ a002   10.1ms  ██▓▄▄▄▄▄▄▄▄▄▄▄▄▄                                                   disk 81.8% · on cpu 11.1%         │
+│  a003   23.0ms  █▓▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▄▄▄                              lock/sleep 87.4% · disk 8.56%     │
+│  a004   30.1ms  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░                  net in 99.9%                      │
+│  a005   33.1ms  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░             net out 98.8%                     │
+│  ░░ net in   ██ on cpu   ▓▓ run queue   ▀▀ lock/sleep   ▄▄ disk   ░░ net out                                         │
+│                                                                                                                      │
+│── a002 · 10.1ms from its first byte in to its last byte out · thread 2759757 ────────────────────────────────────────│
+│            ┊0           ┊2.00ms      ┊4.00ms      ┊6.00ms      ┊8.00ms                                               │
+│  net in    ░                                                                   18.3µs before start                   │
+│  serving   ███████▓▓▓▓▓▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  10.1ms from start to done             │
+│  on device  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  64 block requests, 268KiB             │
+│  net out                                                                       gone when done                        │
+│  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order                 │
+│                                                                                                                      │
+│  where its 10.1ms went              evidence                       its share of each resource                        │
+│  ░ net in       18.3µs   0.18% ▏    KEY      by socket 17493       cpu        1.12ms: 6.63% of the 16.9ms server took│
+│  █ on cpu       1.12ms   11.1% ▏    IDENTITY                                  off cpu 64 times, preempted 0          │
+│  ▓ run queue     704µs   6.96% ▏    IDENTITY                       disk       64 requests, 8.24ms on nvme0n1p6       │
+│  ▀ lock/sleep        ·              IDENTITY                                  5.26% of the run's device time         │
+│  ▄ disk         8.27ms   81.8% ▄▄▄  IDENTITY                                  waited 8.27ms, 24.3µs off the device   │
+│  ░ net out           ·              KEY                                       ~low det degraded x3                   │
+│  IDENTITY: read off the serving thread  KEY: joined by the socket  network    in 18.3µs · out 0ns                    │
+│                                                                                                                      │
+│                                                                                                                      │
+│  what sets it apart from the other 4 requests: ▄ disk +8.27ms (theirs 0ns) · █ on cpu +974µs (theirs 149µs)          │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ request  s sort  enter focus it  l its thread in lanes
