@@ -243,3 +243,22 @@ The adversarial review's seven findings, each fixed:
    table) is said on every sheet and on the nothing-to-split screen; test
    `a_decomposition_not_drawn_says_why`.
 
+
+### The suite, review round
+
+While iterating: `cargo test -p omn-view` (36 lib tests, the timebar's 16),
+`cargo test --test view_snapshots` (15), `--test view_model` (4, the README
+rows), `--test view_live` (5), `--test view_timebar` (1); clippy on
+`omn-view` and the new test clean.
+
+`make check` at `e2760b6`: red in `omn`'s lib on
+`a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned` (267
+samples where about 199 were expected: other streams' builds on the same
+cpus). Then `cargo test --workspace --no-fail-fast`: 7 targets red (`lib`,
+`family_net`, `recorder`, `runner`, `scenario_mem`, `triage`, `unwind`),
+every view target green. Those seven again, alone: 1635 passed, 5 failed,
+and a different five -- `runner` (2: a phase count and a ring overflow) and
+`unwind` (3: debuginfod, `fp_leaf`, `dwarf`); `lib`, `family_net`,
+`recorder`, `scenario_mem` and `triage` passed. Failures that move from run
+to run on a machine every stream is building and testing on, in files this
+stream did not touch: for the coordinator's run alone, not this stream's.
