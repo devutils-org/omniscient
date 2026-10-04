@@ -159,9 +159,12 @@ make && cargo test --test reference pairs_<family> -- --nocapture
 - **`tool_wraps_omn` requires `-o {out}`**: the two outputs share a stdout,
   and a path into a mixed stream would be luck.
 - **`omn_launches_tool` `exec`s the tool**, so omn watches the tool's own
-  pid (a per-pid key agrees); the price is that the tool's exit status is
-  not seen, so its refusal is read from its stderr when its output does not
-  parse.
+  pid (a per-pid key agrees), and reads the tool's exit status through a
+  pidfd (`PIDFD_INFO_EXIT`, Linux 6.15) held across a fifo handshake, since
+  `omn` reaps the tool and exits 0 whatever it did. A non-zero status with
+  no refusal wording fails the pair even when the output parses; a kernel
+  that cannot tell skips the pair, never counting an unknown status as
+  success. (Fix round; it was previously not seen, see "Review".)
 - A one-sided tolerance allows nothing on the other side, not even noise:
   the pair's `why` says why `omn` can only be on one side.
 - `log2_buckets` stands alone and treats a value not above 0 as no bucket,
@@ -188,4 +191,26 @@ make && cargo test --test reference pairs_<family> -- --nocapture
   for the wave's table.
 - **src (later)**: `omn` telling its two exit-1 cases apart; the launched
   program's exit status in `results.json`, which would let
-  `omn_launches_tool` see the tool's.
+  `omn_launches_tool` see the tool's on kernels before 6.15 too (the runner
+  reads it through a pidfd today, and skips where it cannot).
+
+## Review
+
+- **`omn_launches_tool` set the tool's status to 0** (gap): `omn` exits 0
+  whatever the program it launched did, so a tool failing without a refusal
+  wording but leaving output that parses was compared as a success. Fixed
+  in the runner rather than waiting for src: the launched shell writes its
+  pid and blocks on a fifo, the runner opens a pidfd on that pid while it is
+  alive and then lets it go, and after `omn` ends asks the pidfd how the
+  task exited (`PIDFD_GET_INFO` with `PIDFD_INFO_EXIT`, Linux 6.15; this
+  machine runs 7.2). A non-zero status skips on a refusal wording and
+  otherwise fails the pair; where the kernel cannot tell, the pair skips
+  with the reason. The `exec` is kept, so `omn` still watches the tool's
+  own pid. Shown: `omn_launches_the_tool_in_one_run` now runs a tool that
+  prints a parseable `5` and exits 3, and fails on `exited exit status: 3`
+  (checked to take the failure branch here, not the old-kernel skip); and
+  by hand with the real capable `omn` (`sched.switches --mode count --emit
+  summary -- <the handshake shell> sh -c 'echo 5; echo broken >&2; exit
+  3'`): `omn` exits 0, its key is the tool's pid, and the pidfd reports
+  exit 3. The README's earlier claim that `omn` reports the status on its
+  stderr was wrong (it does not) and is gone.

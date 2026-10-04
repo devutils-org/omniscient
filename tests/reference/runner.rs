@@ -581,6 +581,9 @@ struct RunResult {
     /// `run: attach`: how the workload ended when it ended on its own, `None`
     /// when the runner had to kill it or `omn` launched it.
     workload: Option<ExitStatus>,
+    /// `run: omn_launches_tool`: why the tool's exit status could not be
+    /// read, when it could not.
+    tool_status_unseen: Option<String>,
 }
 
 /// `omn`'s output in one run: the text (stdout, or `{out}/results.json`)
@@ -649,8 +652,31 @@ pub fn run_pair(pair: &Pair, parsers: &[Parser], omn: &Path) -> Outcome {
         if let Some(outcome) = judge_omn(pair, &result.omn, result.omn_results.as_deref()) {
             return outcome;
         }
+        // Launched by omn, the tool's status is read through a pidfd; where
+        // it cannot be, an unknown status never counts as success.
+        if let Some(why) = result.tool_status_unseen {
+            return refusal(pair, &result.tool).unwrap_or_else(|| {
+                Outcome::Skip(
+                    format!(
+                        "the exit status of `{}` launched by omn cannot be seen here",
+                        pair.tool
+                    ),
+                    vec![why],
+                )
+            });
+        }
         if let Some(outcome) = judge_tool(pair, &result.tool) {
             return outcome;
+        }
+        // Its own process, the tool launched by omn answers for its status:
+        // non-zero with no refusal is a failure, whatever its output says.
+        if pair.run == RunMode::OmnLaunchesTool && !result.tool.status.success() {
+            return Outcome::Fail(format!(
+                "`{}` exited {} under omn: {}",
+                pair.tool,
+                result.tool.status,
+                tail(&result.tool.stderr, 3).join(" | ")
+            ));
         }
         let text = result.omn_results.unwrap_or(result.omn.stdout);
         let doc = if needs_json {
@@ -669,13 +695,6 @@ pub fn run_pair(pair: &Pair, parsers: &[Parser], omn: &Path) -> Outcome {
         match (parser.parse)(&result.tool.stdout, &result.tool.stderr) {
             Ok(values) => tool_values.push(values),
             Err(e) => {
-                // Launched by omn, the tool's exit status is not seen: a
-                // refusal is read from its stderr when nothing parses.
-                if pair.run == RunMode::OmnLaunchesTool {
-                    if let Some(outcome) = refusal(pair, &result.tool) {
-                        return outcome;
-                    }
-                }
                 let mut why = format!("parser `{}`: {e}", parser.name);
                 if !result.tool.status.success() {
                     why.push_str(&format!(
@@ -1149,6 +1168,7 @@ fn run_separate(
         omn: omn_side,
         tool: tool_side,
         workload: None,
+        tool_status_unseen: None,
     })
 }
 
@@ -1171,34 +1191,78 @@ fn run_wrapped(pair: &Pair, omn: &Path, tmp: &Path) -> Result<RunResult, String>
         omn: side,
         tool,
         workload: None,
+        tool_status_unseen: None,
     })
 }
 
 /// `omn_launches_tool`: `omn <omn> -- <command> <workload>`. The program
 /// `omn` launches is a shell that becomes the tool (`exec`, so the pid `omn`
 /// watches is the tool's), its stdout and stderr sent to files of the run;
-/// those files are the tool's output. The tool's own exit status is not
-/// seen: `omn` reports it, and a refusal is read from its stderr instead.
+/// those files are the tool's output.
+///
+/// `omn` is the tool's parent and reaps it, and does not report how it
+/// ended, so its exit status is read through a pidfd: the shell writes its
+/// pid and waits on a fifo, the runner opens a pidfd on that pid while it is
+/// alive and lets it go, and once `omn` has ended asks the pidfd how the
+/// task exited (`PIDFD_INFO_EXIT`, Linux 6.15). Where that cannot be read
+/// the status is unknown, and the pair skips rather than count an unknown
+/// status as success.
 fn run_launched(pair: &Pair, omn: &Path, tmp: &Path) -> Result<RunResult, String> {
     let limit = timeout(pair);
     run_setup(pair, tmp)?;
     let (out, err) = (tmp.join("tool.stdout"), tmp.join("tool.stderr"));
+    let (pid_file, go) = (tmp.join("tool.pid"), tmp.join("tool.go"));
+    let go_c =
+        std::ffi::CString::new(go.as_os_str().as_encoded_bytes()).map_err(|e| e.to_string())?;
+    if unsafe { libc::mkfifo(go_c.as_ptr(), 0o600) } != 0 {
+        return Err(format!(
+            "mkfifo {}: {}",
+            go.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    // Read-write, so opening it never blocks and the line written stays in
+    // the pipe until the shell reads it, whenever that is.
+    let go_fd = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&go)
+        .map_err(|e| format!("{}: {e}", go.display()))?;
     let mut program: Vec<String> = vec![
         "sh".into(),
         "-c".into(),
-        "o=$1; e=$2; shift 2; exec \"$@\" >\"$o\" 2>\"$e\"".into(),
+        "p=$1; g=$2; o=$3; e=$4; shift 4; echo $$ >\"$p.new\" && mv \"$p.new\" \"$p\"; \
+         read _ <\"$g\"; exec \"$@\" >\"$o\" 2>\"$e\""
+            .into(),
         "sh".into(),
+        pid_file.display().to_string(),
+        go.display().to_string(),
         out.display().to_string(),
         err.display().to_string(),
     ];
     program.extend(tool_argv(pair, &pair.reference.command, tmp, None));
     program.extend(pair.workload.iter().cloned());
-    let omn_side = finish(
-        spawn(&mut omn_command(pair, omn, tmp, &program, None))?,
-        limit,
-    )?;
+    let child = spawn(&mut omn_command(pair, omn, tmp, &program, None))?;
+    let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let ended = ended.clone();
+        let pid_file = pid_file.clone();
+        std::thread::spawn(move || hold_launched(&pid_file, go_fd, &ended, limit))
+    };
+    let finished = finish(child, limit);
+    ended.store(true, std::sync::atomic::Ordering::Relaxed);
+    let pidfd = watcher.join().unwrap_or(None);
+    let omn_side = finished?;
+    let (status, unseen) = match pidfd.as_ref().map(exit_status) {
+        Some(Ok(status)) => (status, None),
+        Some(Err(why)) => (ExitStatus::from_raw(0), Some(why)),
+        None => (
+            ExitStatus::from_raw(0),
+            Some("the launched shell never wrote its pid".to_string()),
+        ),
+    };
     let tool = Side {
-        status: ExitStatus::from_raw(0),
+        status,
         stdout: std::fs::read_to_string(&out).unwrap_or_default(),
         stderr: std::fs::read_to_string(&err).unwrap_or_default(),
         timed_out: false,
@@ -1209,7 +1273,82 @@ fn run_launched(pair: &Pair, omn: &Path, tmp: &Path) -> Result<RunResult, String
         omn: omn_side,
         tool,
         workload: None,
+        tool_status_unseen: unseen,
     })
+}
+
+/// The launched shell's side of the handshake: waits for its pid, opens a
+/// pidfd on it while it waits on the fifo, then lets it go. `None` when the
+/// shell never wrote its pid (`omn` ended or refused first) or the pidfd
+/// could not be opened; the shell is let go either way.
+fn hold_launched(
+    pid_file: &Path,
+    mut go: std::fs::File,
+    ended: &std::sync::atomic::AtomicBool,
+    limit: Duration,
+) -> Option<std::os::fd::OwnedFd> {
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
+    let started = Instant::now();
+    let pid = loop {
+        if let Some(pid) = std::fs::read_to_string(pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<libc::pid_t>().ok())
+        {
+            break pid;
+        }
+        if ended.load(std::sync::atomic::Ordering::Relaxed) || started.elapsed() > limit {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    let _ = go.write_all(b"go\n");
+    // The line must outlive the shell's read: the fifo is kept open until
+    // `omn` has ended.
+    while !ended.load(std::sync::atomic::Ordering::Relaxed) && started.elapsed() <= limit * 2 {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(go);
+    (fd >= 0).then(|| unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) })
+}
+
+/// `struct pidfd_info` as far as `exit_code` (`PIDFD_INFO_SIZE_VER0`).
+#[repr(C)]
+#[derive(Default)]
+struct PidfdInfo {
+    mask: u64,
+    cgroupid: u64,
+    ids: [u32; 11],
+    exit_code: i32,
+}
+
+const PIDFD_INFO_EXIT: u64 = 1 << 3;
+/// `_IOWR(0xFF, 11, struct pidfd_info)`.
+const PIDFD_GET_INFO: libc::c_ulong =
+    (3 << 30) | ((std::mem::size_of::<PidfdInfo>() as libc::c_ulong) << 16) | (0xFF << 8) | 11;
+
+/// How the task behind a pidfd exited, once it has been reaped.
+fn exit_status(pidfd: &std::os::fd::OwnedFd) -> Result<ExitStatus, String> {
+    use std::os::fd::AsRawFd;
+    let mut info = PidfdInfo {
+        mask: PIDFD_INFO_EXIT,
+        ..Default::default()
+    };
+    let rc = unsafe { libc::ioctl(pidfd.as_raw_fd(), PIDFD_GET_INFO as _, &mut info) };
+    if rc != 0 {
+        return Err(format!(
+            "this kernel does not tell how a reaped task exited (PIDFD_GET_INFO: {}; Linux 6.15 does)",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if info.mask & PIDFD_INFO_EXIT == 0 {
+        return Err(
+            "this kernel does not tell how a reaped task exited (no PIDFD_INFO_EXIT; Linux 6.15 does)"
+                .into(),
+        );
+    }
+    Ok(ExitStatus::from_raw(info.exit_code))
 }
 
 /// `attach` and `alongside`: one run both observers see. The workload, when
@@ -1291,6 +1430,7 @@ fn run_attached(pair: &Pair, omn: &Path, tmp: &Path) -> Result<RunResult, String
         omn: omn_side,
         tool: tool_side,
         workload: ended,
+        tool_status_unseen: None,
     })
 }
 
@@ -1844,7 +1984,8 @@ compare: {omn: a, omn_jq: ".a", tolerance: {abs: 0, side: above, band: 2}, why: 
     }
 
     /// `omn_launches_tool`: `omn -- <command> <workload>`, the tool's output
-    /// in files of its own; a refusal on its stderr skips.
+    /// in files of its own, its exit status read through a pidfd; a refusal
+    /// on its stderr skips.
     #[test]
     fn omn_launches_the_tool_in_one_run() {
         let mut p = pair(BASE);
@@ -1854,6 +1995,19 @@ compare: {omn: a, omn_jq: ".a", tolerance: {abs: 0, side: above, band: 2}, why: 
         p.omn[1] = "shift; \"$@\"; echo '{\"a\":5}'".into();
         p.reference.command[2] = "echo 5; echo noise >&2".into();
         expect_pass(&p);
+
+        // omn reaps the tool and exits 0 whatever it did: its status is read
+        // through a pidfd, and a failure whose output still parses fails.
+        p.reference.command[2] = "echo 5; echo broken >&2; exit 3".into();
+        match run_pair(&p, &parsers(), Path::new(SH)) {
+            Outcome::Fail(why) => {
+                assert!(why.contains("exited exit status: 3"), "{why}");
+                assert!(why.contains("broken"), "{why}");
+            }
+            // A kernel before 6.15 cannot tell, and says so.
+            Outcome::Skip(reason, _) if reason.contains("cannot be seen here") => {}
+            other => panic!("{other:?}"),
+        }
 
         p.reference.command[2] = "echo 'cannot open: Permission denied' >&2; exit 1".into();
         p.workload.clear();
