@@ -259,3 +259,19 @@ rows start one read later on the short fixtures, `last`, `all`, the
 `t<tid>` rows, one column more for the id, and the narrow frame's
 left-out line.
 
+
+### The suite, after the review round
+
+`/tmp` was at its quota (about 2400 leaked `/tmp/omn-*` test directories,
+24 GB, none of them this stream's; I did not remove them), so every run
+below had `TMPDIR` pointed at the worktree's `target/tmp`. One `make check`
+was red at `cases::every_case_names_its_known_cause_both_ways`
+(`make-sqlite`, a load-dependent attribution sentence). One
+`cargo test --workspace --no-fail-fast` then gave 2378 passed, 7 failed,
+11 ignored, with no failure in `view/` (that test passed this time). After
+`make` regranted the capabilities, each of the 7 was rerun alone once: six
+passed (`the_runner_closes_the_window`, the capability refusals, `unwind`'s
+two, the `omn-mcp` walk-through), and
+`runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`
+stays red, the open gap already listed in `docs/open-findings.md`. Clippy
+and fmt were clean.
