@@ -1,40 +1,40 @@
 [0m[1momn top[0m │ fixture cpython-hot-heavier │ 7.93s                     [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥5.29%[0m[35m │ target 96.5% cpu[0m [0m
 [0m[1;7m 1 system [0m 2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
-┌ system -- the overview: cpu, memory, disk, network, GPU and power, and the processes ────────────────────────────────┐[0m
-│[0m[3mNot drawn yet. What this view needs, and what this run holds of it:[0m                                                   │[0m
-│                                                                                                                      │[0m
-│[0m[1mcpu.util@system          [0m[2m33 events via fs:proc [timeline,summary][0m [0m[36m~low det[0m                                            │[0m
-│[0m[2m                         the cpu panel: utilization by state, and its sparkline[0m                                       │[0m
-│[0m[1mmem.pressure@system      [0m[2m32 events via fs:proc [timeline,summary][0m [0m[36m~low det[0m                                            │[0m
-│[0m[2m                         the memory panel: stall time under memory pressure[0m                                           │[0m
-│[0m[1mio.bytes@system          [0m[2m96 events via fs:proc [timeline,summary][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                   │[0m
-│[0m[2m                         the disk panel: bytes read and written per device[0m                                            │[0m
-│[0m[1mnet.bytes@system         [0m[2m224 events via fs:proc [timeline,summary][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                  │[0m
-│[0m[2m                         the network panel: bytes in and out per interface[0m                                            │[0m
-│[0m[1mgpu.engine_busy@system   [0m[2m33 events via vendor:nvml [timeline,summary][0m [0m[36m±1.00s[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m                     │[0m
-│[0m[2m                         the GPU panel: occupancy per engine[0m                                                          │[0m
-│[0m[1mgpu.mem@system           [0m33 events via vendor:nvml [timeline,summary]                                                 │[0m
-│[0m[2m                         the GPU panel: memory held[0m                                                                   │[0m
-│[0m[1mpower.energy@system      [0m32 events via pmu [timeline,summary]                                                         │[0m
-│[0m[2m                         the power panel: watts per RAPL domain[0m                                                       │[0m
-│[0m[1mcpu.oncpu_time           [0m[2m32 events via fs:proc [timeline,summary][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                   │[0m
-│[0m[2m                         the process list: cpu time per thread[0m                                                        │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
+┌ [0m[1msystem --[0m [0m[2mthe overview: cpu, memory, disk, network, GPU and power, and the processes [0m────────────────────────────────┐[0m
+├ [0m[1mcpu[0m [0m[2mbusy, as a share of the whole machine [0m───────────────────────────────────────────────────────────────── [0m[36m~low det[0m ┤[0m
+│[0m[2m   10.0% ┤                                                   ▃▃                ▂ [0m [0m[2mlast [0m[1;2m3.98%[0m                          │[0m
+│[0m[2m         │                                                   ██                █ [0m [0m[2mmean 5.12%[0m                          │[0m
+│[0m[2m         │                                        ▁▁▁▁       ██                █ [0m [0m[2mpeak 9.27%[0m                          │[0m
+│[0m[2m         │                                        ████       ██  ███      ▇▇▇  █ [0m [0m[2m1.23 cpus busy, on average[0m          │[0m
+│[0m[2m         │▆▆▃▃  ▃▃▃▃▃  ▂▂  ▁▁▁    ▄▄▂▂▂    ▂▂     ████▂▂▂▂▂▂▂██  ███▃▃▃▃▄▄███  █ [0m [0m[2mby state: in the events only[0m        │[0m
+│[0m[2m         │███████████▇▇██▇▇███▇▇▇▇█████▆▆▇▇██▆▆▆▇▇██████████████████████████████▅[0m                                     │[0m
+│[0m[2m         │███████████████████████████████████████████████████████████████████████[0m                                     │[0m
+│[0m[2m         │███████████████████████████████████████████████████████████████████████[0m                                     │[0m
+│[0m[2m       0 ┤███████████████████████████████████████████████████████████████████████[0m                                     │[0m
+├ [0m[1mgpu[0m [0m[2mthe device, as its driver says [0m───────────────────────────────────────────────────── [0m[36m±1.00s[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m ┤[0m
+│busy      [0m[2m  ▂▂▂▂▂▂▂▂▂▂▂                                                          [0m [0m[1;2m1.58%[0m[2m mean  3.00% peak[0m              │[0m
+│[0m[2m ≤5.00%   ▆▆███████████▆▆▆▆▆▆▆▆▆▃▃▃▃▃▃▃▃▃▃▃▆▆▆▆▆▆▆▆▆▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃[0m                                     │[0m
+│[0m[2mwhen      [0m[36m├─────────────────┤[0m                                                     [0m[36m±1.00s: the driver's sampling window[0m│[0m
+│memory    [0m[2mheld the whole run, unmoved (the device's size: in its events)[0m          [0m[1m692MiB[0m[2m held[0m                         │[0m
+├ [0m[1mmemory[0m [0m[2mtime the machine stalled waiting for it [0m──────────────────────────────────────────────────────────── [0m[36m~low det[0m ┤[0m
+│stalled   [0m[2m  ·····································································[0m [0m[2mnever stalled[0m                       │[0m
+│target    ▆▆▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇██████████████████████████  [0m[1m17.5MiB[0m[2m held, peak [0m17.5MiB          │[0m
+├ [0m[1mpower[0m [0m[2mwatts, from the RAPL counters; per domain by name: in the events only [0m─────────────────────────────────────────┤[0m
+│all         ▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▇██▇▇▇▇▇▇▇▆▆▆▆▇▇▇▆▆█▆ [0m[1m55.6W[0m[2m mean  [0m70.3W[0m[2m peak  [0m441J        │[0m
+├ [0m[1mdisk[0m [0m[2mbytes moved, per device; read apart from written: in the events only [0m──────────────────────── [0m[36m~low det[0m [0m[33mdegraded[0m ┤[0m
+│259:0     [0m[2m  ·································································██··[0m [0m[1;2m4.86MiB[0m[2m  peak 19.4MiB/s[0m             │[0m
+│          [0m[2m+2 moved nothing: 253:0 7:0[0m                                                                                 │[0m
+├ [0m[1mnetwork[0m [0m[2mbytes moved, per interface; in apart from out: in the events only [0m──────────────────────── [0m[36m~low det[0m [0m[33mdegraded[0m ┤[0m
+│wlan0     [0m[2m  ▁▁▁▁··▁▁▁··▁▁▁▁▁▁▁··▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁··▁▁▁▁▁▁·····▆▆▁▁▆▆▆▂▂▁▁▂▂▆▆▆··█·[0m [0m[1;2m47.1KiB[0m[2m  peak 46.1KiB/s[0m             │[0m
+│tailscale [0m[2m  ·················································▁▁··▁▁▁······▁▁▁··▁·[0m [0m[1;2m1.25KiB[0m[2m  peak 1.25KiB/s[0m             │[0m
+│          [0m[2m+5 moved nothing: br-bf6c2e1afced br-cb843b6eb1dd docker0 enp38s0 lo[0m                                        │[0m
+│          [0m[2m└0s──────────────────────────────3.97s───────────────────────────7.93s┘ a cell is 112ms, drawn at its peak[0m  │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
-[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help                                                                   [0m
+┌[0m[1m processes [0m[2mthe target's, by cpu [0m────────────────────────────────────────────────────┐[0m[35m┌ cost, share of one cpu ────────┐[0m
+│[0m[1m       ID [0m[1;4m   CPU [0m[1mcpu over the run [0m[1;4m ON CPU [0m[1m     RSS FAULTS RUN QUEUE I/O CALLS [0m      │[0m[35m│[0mgpu.engine_busy  [0m[35m███████  0.13%[0m [0m[35m│[0m
+│  2779622 [0m[2m 96.8% ████████████████[0m [0m[2m  7.68s [0m 17.5MiB      · [0m[2m        ·         · [0m      │[0m[35m│[0mcpu.util         [0m[35m█        0.01%[0m [0m[35m│[0m
+│ t2779622 [0m[2m     · [0m                 [0m[2m      · [0m       ·  3.06k [0m[2m   9.01ms        82 [0m      │[0m[35m│[0mio.bytes         [0m[35m█        0.01%[0m [0m[35m│[0m
+│                                                                                    │[0m[35m│[0m[2m+5 more                 [0m[2;35m ≥0.03%[0m [0m[35m│[0m
+│[0m[2mCPU [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2mFAULTS [0m[33m80 late[0m  [0m[2mI/O CALLS [0m[36m~low det[0m [0m[33mdegraded x2[0m               │[0m[35m│[0m[1mall of them             [0m[1;35m ≥0.18%[0m [0m[35m│[0m
+└────────────────────────────────────────────────────────────────────────────────────┘[0m[35m└────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m process  [0m[1menter[0m its ledger  [0m[1ms[0m sort  [0m[1mi[0m idle devices            [0m

@@ -1,40 +1,40 @@
 omn top │ fixture sqlite-commits │ 4.97s                          view: snapshot │ collectors ≥5.82% │ target 87.8% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
 ┌ system -- the overview: cpu, memory, disk, network, GPU and power, and the processes ────────────────────────────────┐
-│Not drawn yet. What this view needs, and what this run holds of it:                                                   │
-│                                                                                                                      │
-│cpu.util@system          21 events via fs:proc [timeline,summary] ~low det                                            │
-│                         the cpu panel: utilization by state, and its sparkline                                       │
-│mem.pressure@system      20 events via fs:proc [timeline,summary] ~low det                                            │
-│                         the memory panel: stall time under memory pressure                                           │
-│io.bytes@system          60 events via fs:proc [timeline,summary] ~low det degraded                                   │
-│                         the disk panel: bytes read and written per device                                            │
-│net.bytes@system         140 events via fs:proc [timeline,summary] ~low det degraded                                  │
-│                         the network panel: bytes in and out per interface                                            │
-│gpu.engine_busy@system   21 events via vendor:nvml [timeline,summary] ±1.00s ~low det degraded x2                     │
-│                         the GPU panel: occupancy per engine                                                          │
-│gpu.mem@system           21 events via vendor:nvml [timeline,summary]                                                 │
-│                         the GPU panel: memory held                                                                   │
-│power.energy@system      20 events via pmu [timeline,summary]                                                         │
-│                         the power panel: watts per RAPL domain                                                       │
-│cpu.oncpu_time           20 events via fs:proc [timeline,summary] ~low det degraded                                   │
-│                         the process list: cpu time per thread                                                        │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
+├ cpu busy, as a share of the whole machine ───────────────────────────────────────────────────────────────── ~low det ┤
+│   20.0% ┤                                                                        last 11.3%                          │
+│         │                                                                        mean 10.1%                          │
+│         │                            ▁▁▁▁       ▂▂▂▁▁▁▁                          peak 14.0%                          │
+│         │                            ████▁▁▁▄▄▄▄███████▄▄▄▄▇▇▇▁▁▁▁▁▁▁    ▁▁▁   ▁ 2.44 cpus busy, on average          │
+│         │                         ▁▁▁███████████████████████████████████████▇▇▇█ by state: in the events only        │
+│         │              ▅▅▅▅▅▅▅██████████████████████████████████████████████████                                     │
+│         │▁▁▁▁▁▁▁▄▄▄▃▃▃▃█████████████████████████████████████████████████████████                                     │
+│         │███████████████████████████████████████████████████████████████████████                                     │
+│       0 ┤███████████████████████████████████████████████████████████████████████                                     │
+├ gpu the device, as its driver says ───────────────────────────────────────────────────── ±1.00s ~low det degraded x2 ┤
+│busy                                  ██████████████████                          1.24% mean  2.00% peak              │
+│ ≤2.00%   ███████████████████████████████████████████████████████████████████████                                     │
+│when      ├───────────────────────────┤                                           ±1.00s: the driver's sampling window│
+│memory    held the whole run, unmoved (the device's size: in its events)          692MiB held                         │
+├ memory time the machine stalled waiting for it ──────────────────────────────────────────────────────────── ~low det ┤
+│stalled      ···································································· never stalled                       │
+│target    ████████████████████████████████████████████████████████████████████    4.75MiB held, peak 4.75MiB          │
+├ power watts, from the RAPL counters; per domain by name: in the events only ─────────────────────────────────────────┤
+│all          ▅▅▅▅▅▅▅▅▅▅▅▆▆▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇██████████████████▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇ 68.8W mean  80.2W peak  342J        │
+├ disk bytes moved, per device; read apart from written: in the events only ──────────────────────── ~low det degraded ┤
+│259:0        ████▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ 28.5MiB  peak 40.0MiB/s             │
+│          +2 moved nothing: 253:0 7:0                                                                                 │
+├ network bytes moved, per interface; in apart from out: in the events only ──────────────────────── ~low det degraded ┤
+│wlan0        ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁···████▄▄▄▃▃▃▃▆▆▆▃▃▃▃▂▂▂▁▁▁▁····▁▁▁▁▁▁▁▁▁▁····▁▁▁▁▁▁▁ 31.9KiB  peak 32.2KiB/s             │
+│          +6 moved nothing: br-bf6c2e1afced br-cb843b6eb1dd docker0 enp38s0 lo tailscale0                             │
+│          └0s──────────────────────────────2.48s───────────────────────────4.97s┘ a cell is 70.0ms, drawn at its peak │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help
+┌ processes the target's, by cpu ────────────────────────────────────────────────────┐┌ cost, share of one cpu ────────┐
+│       ID    CPU cpu over the run  ON CPU      RSS FAULTS RUN QUEUE I/O CALLS       ││gpu.engine_busy  ███████  0.09% │
+│  2759238  86.8% ▇▇▇█▇▇▇█▇▇▇▇▇▇▇▇   4.31s  4.75MiB      ·         ·         ·       ││cpu.util         █        0.01% │
+│ t2759238      ·                        ·        ·    219    6.69ms       537       ││io.bytes         █        0.01% │
+│                                                                                    ││net.bytes        █        0.01% │
+│                                                                                    ││+4 more                  ≥0.01% │
+│CPU ~low det degraded  FAULTS 51 late  I/O CALLS ~low det degraded x2               ││all of them              ≥0.12% │
+└────────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ process  enter its ledger  s sort  i idle devices
