@@ -617,7 +617,6 @@ Measured with /home/moha/repos/omniscient/target/release/omn (release build, car
 | gpu.kernel | vendor:cupti | no collector is written for it |
 | gpu.kernel | vendor:rocprof | no collector is written for it |
 | gpu.kernel | vendor:l0 | no collector is written for it |
-| gpu.counters | vendor:ncu | no collector is written for it |
 | gpu.counters | vendor:rocprof | no collector is written for it |
 | proc.syscall | bpf:tp | no collector is written for it |
 | proc.exec | bpf:tp | no collector is written for it |
@@ -631,6 +630,10 @@ Measured with /home/moha/repos/omniscient/target/release/omn (release build, car
 | mem.heap.alloc | every backend | the gate excluded its workload: `malloc` its workload has no baseline |
 | mem.heap.live | every backend | the gate excluded its workload: `malloc` its workload has no baseline |
 | mem.heap.retained | every backend | the gate excluded its workload: `malloc` its workload has no baseline |
+
+One row of the table as printed is left out: `gpu.counters` through
+`vendor:ncu`. That backend has since left the catalog -- `gpu.counters` is
+`vendor:cupti`, then `vendor:rocprof` -- so the next bench does not list it.
 
 
 What the smoke runs established about the mechanics, without quoting a

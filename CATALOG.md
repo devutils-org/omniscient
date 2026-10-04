@@ -259,7 +259,7 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `cpu.cache_misses` | LLC misses | `pmu` (HW_CACHE_MISSES) | count, sample | all | low | low |
 | `cpu.topdown` | TMA: front-end / back-end / bad-spec / retiring | `pmu` (slots + topdown-*) | count | all | low | medium |
 | `cpu.profile` | on-CPU profile with stacks | `pmu:sw` (CPU_CLOCK) or `pmu` cycles + callchain | sample@freq | all | low / med | low |
-| `cpu.oncpu_time` | effective CPU time | `bpf:tp` sched_switch · `fs:proc` · `fs:cgroup` cpu.stat | trace, poll | pid, cgroup, system | low / free | low |
+| `cpu.oncpu_time` | effective CPU time | `bpf:raw_tp` sched_stat_runtime (poll, per thread) · `bpf:tp` sched_switch · `fs:cgroup` cpu.stat · `fs:proc` | trace, poll | pid, tid, cgroup, system | low / free | low |
 | `cpu.context_switches` | context switches | `pmu:sw` | count, sample | pid, cgroup, cpu | low | low |
 | `cpu.migrations` | cross-core migrations | `pmu:sw` (CPU_MIGRATIONS) | count | pid, cgroup | low | low |
 | `cpu.util` | utilization by state | `fs:proc` /proc/stat · `fs:cgroup` cpu.stat | poll | system, cpu, cgroup | low / free | low |
@@ -280,6 +280,13 @@ never unless asked. Each frame says which of them named it (`elf`,
   measured, and rings that fill a hundred times faster.
 - `cpu.flow`: the kernel provides raw bytes, decoding is a separate concern
   (libipt + binary images + sideband). A late-phase deliverable.
+- `cpu.oncpu_time` through `bpf:raw_tp` adds up each thread's increments of
+  the scheduler's own `sum_exec_runtime` (`sched_stat_runtime`) in the kernel
+  and drains them every poll: `poll` only, one series per thread
+  (`task:<tid>`, its process as `pid`); summing the threads gives the
+  process. `trace`, a slice per event, stays on `bpf:tp` until a view asks
+  for it. `cpu.oncpu_time` emits `raw`, so a view keeps each poll's figure
+  to the end of the run.
 - Disabling SMT or pinning affinity shifts counters by 10-30 %: capture it in the
   resolved environment.
 
@@ -374,8 +381,9 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `net.tcp.rtt` | RTT, cwnd, congestion state | `netlink` sock_diag · `bpf:fentry` on tcp_sock | poll, trace | pid, system | med | low |
 | `net.tcp.retransmit` | retransmissions | `bpf:tp` tcp:tcp_retransmit_skb | trace, count | system, pid | low | low |
 | `net.drops` | dropped packets (+ reason) | `bpf:tp` skb:kfree_skb (reason on recent kernels) | trace, count | system | low | medium |
-| `net.bytes` / `.packets` | volume | `fs:proc` /proc/net/dev · `netlink` · `bpf` socket | poll, count | system, pid, cgroup | free / low | low |
-| `net.socket` | socket read/write latency | `bpf:fentry` sock_sendmsg/recvmsg | trace | pid, cgroup | low / med | low |
+| `net.bytes` / `.packets` | volume | `fs:proc` /proc/net/dev · `netlink` · `bpf:fentry` sock_sendmsg | poll, count | system, iface, pid, cgroup | free / low | low |
+| `net.socket` | socket read/write latency, keyed by socket, task and interface | `bpf:fentry` sock_recvmsg/inet_sendmsg · `bpf:kprobe` | trace, count | pid, tid, cgroup, system | low / med | low |
+| `net.request` | one declared request's life by state, and the network on either side of it | `bpf:usdt` request__start/done + sched_switch + tcp fentry · `bpf:usdt:threads` (no socket) | trace | pid, launch | low | medium |
 | `net.backlog` | accept/SYN queue drops | `fs:proc` netstat (LINUX_MIB) | poll | system | low | medium |
 | `net.qdisc` | TX scheduling latency | `bpf:tp` qdisc:qdisc_dequeue | trace | system | low | low |
 | `net.softirq` | network processing time | `bpf:tp` irq:softirq_entry/exit | trace | cpu, system | med | low |
@@ -396,6 +404,19 @@ never unless asked. Each frame says which of them named it (`elf`,
   yet. What runs is `netlink:ethtool`, per interface, in `poll` or `snapshot`:
   whether a latency measured elsewhere is the card's word or the kernel's guess.
   It refuses `trace`, which would mean a stamp per packet.
+- `net.bytes` emits `raw`: a series is an interface, and each event carries
+  `rx` and `tx` beside its `bytes`, so the split by direction survives to the
+  end of the run.
+- `net.socket`'s `iface` is the interface the socket's cached route leaves by,
+  read at the call: a key, so one series per interface. A unix socket, an
+  unconnected datagram socket and a socket in another network namespace carry
+  none.
+- `net.request` follows only what the program declares --
+  `request__start(id)` and `request__done(id)` USDT probes in the executable,
+  Linux 6.6 or later (`uprobe_multi`); a program that declares none is
+  refused with the probes it does carry. Its rows tile a request's life by
+  state (on cpu, runnable, asleep, disk) plus `net_rx` and `net_tx`, read by
+  the socket's cookie. `catalog/net.yaml` holds the rest of its caveats.
 - `net.capture`: watch buffer drops. A capture that loses packets under load
   silently produces wrong conclusions.
 - Multi-host introduces clock drift between machines, a different class of
@@ -412,11 +433,11 @@ invisible to every CPU profiler.
 |---|---|---|---|---|---|---|
 | `sched.runqlat` | run queue wait | `bpf:raw_tp` · `bpf:tp` sched_switch, read from the task's `sched_info` | trace | all | med | low |
 | `sched.offcpu` | blocked time + stack | `bpf:tp:stacks` sched_switch + callchain · `bpf:raw_tp` · `bpf:tp` (no stack) | trace | pid, tid, cgroup, system | high / med | low |
-| `sched.wakeup` | **wakeup chain** (who unblocks whom) | `bpf:raw_tp` · `bpf:tp` sched_wakeup (waker context) | trace | pid, tid, cgroup, system | med | low |
+| `sched.wakeup` | **wakeup chain** (who unblocks whom) | `bpf:raw_tp` · `bpf:tp` sched_wakeup (waker context) | trace | pid, tid, cgroup, system, launch | med | low |
 | `sched.switches` | context switches | `pmu:sw` · `bpf:raw_tp` sched_switch (count, reached first for a cgroup) · `bpf:tp` | count, trace | all | free / low | low |
 | `sched.migrations` | migrations | `bpf:raw_tp` · `bpf:tp` sched_migrate_task | trace, count | pid, cgroup, system | low | low |
-| `sched.lock` | kernel lock contention | `bpf:raw_tp` · `bpf:tp` lock:contention_begin/end (≥6.1) · `bpf:kprobe` | trace | pid, tid, cgroup, system | med / high | low |
-| `sched.futex` | userspace futex wait | `bpf:raw_tp` · `bpf:tp` raw_syscalls (futex) | trace | pid, tid, cgroup | high | low |
+| `sched.lock` | kernel lock contention | `bpf:raw_tp` · `bpf:tp` lock:contention_begin/end (≥6.1) · `bpf:kprobe` | trace | pid, tid, cgroup, system, launch | med / high | low |
+| `sched.futex` | userspace futex wait | `bpf:raw_tp` · `bpf:tp` raw_syscalls (futex) | trace | pid, tid, cgroup, launch | high | low |
 | `sched.mutex` | pthread contention | `preload` · `bpf:usdt` · `bpf:uprobe` pthread_mutex_* | trace | pid, tid | extreme | low |
 | `sched.irq` | time in interrupt handlers | `bpf:raw_tp` · `bpf:tp` irq:irq_handler_entry/exit | trace, count | cpu, system | med | low |
 | `sched.numa_balance` | automatic NUMA migrations | `bpf:raw_tp` · `bpf:tp` sched:sched_stick_numa etc. | trace, count | system | low | low |
@@ -426,6 +447,12 @@ invisible to every CPU profiler.
 - `sched.wakeup` is the correlator's `WAKEUP` join mechanism: it is the only way
   to attribute latency **across a block** without instrumenting the application.
   Implement it early, the other families depend on it.
+- A `sched.wakeup` event names both sides: `wakee_comm` and `waker_comm`
+  (`comm` stays the wakee's). A wakeup issued from an interrupt carries
+  `served_in_tid` and `served_in_comm`, the task the interrupt was served in,
+  and `irq` (the hard interrupt's number, as `/proc/interrupts` numbers it) or
+  `softirq` (the vector's name). A timer or an inter-processor interrupt has
+  no `irq`.
 - `sched.offcpu` with stacks is expensive on switch-heavy workloads: plan for
   in-kernel aggregation (stack-id → counter) rather than a raw trace.
 - `lock:contention_*` is recent (≥ 6.1): fall back to futex + uprobes on older
@@ -433,7 +460,8 @@ invisible to every CPU profiler.
 - A process target is followed into every process it starts (a descendants
   map the fork tracepoint fills): `sched.offcpu`, `sched.runqlat`,
   `sched.wakeup`, `sched.switches` through `bpf:raw_tp`, `sched.migrations`,
-  `sched.lock` and `sched.futex`. A row keyed by task is still that task's;
+  `sched.lock` and `sched.futex`; each of them takes a launched program as
+  its target. A row keyed by task is still that task's;
   the run's totals include the children.
 - A run-queue wait (`sched.runqlat`, and `sched.offcpu`'s `queued_ns`) is the
   kernel's own account, read from the task's `sched_info` at the switch that
@@ -449,7 +477,7 @@ invisible to every CPU profiler.
 
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
-| `power.energy` | pkg / cores / dram / gpu | `pmu` RAPL (power/energy-*/) | count, poll | **system / package** | free | medium |
+| `power.energy` | pkg / cores / dram / gpu | `pmu` RAPL (power/energy-*/) · `fs:sys` powercap energy_uj | count, poll | **system / package** | free | medium |
 | `power.freq` | effective frequency | `bpf:tp` power:cpu_frequency · `fs:sys` scaling_cur_freq · MSR aperf/mperf | poll, trace | cpu, system | free / low | low |
 | `power.cstate` | idle state residency | `bpf:tp` power:cpu_idle · `fs:sys` | trace, poll | cpu | low / high | low |
 | `power.temp` | temperatures | `fs:sys` hwmon | poll | system | low | low |
@@ -463,6 +491,8 @@ invisible to every CPU profiler.
   and **invalidate any throttled run**.
 - RAPL is per package: `--pid` is invalid. Per-process attribution is a derived
   estimate (share of cycles) and must be labelled as such.
+- `power.energy` emits `raw`: each reading's joules, per domain, kept to the
+  end of the run, beside the summary, rate and timeline.
 
 ---
 
@@ -471,9 +501,11 @@ invisible to every CPU profiler.
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
 | `gpu.job` | submit → fence (DRM job) | `bpf:tp` gpu_scheduler:drm_run_job / drm_sched_process_job | trace | system, pid | low | low |
-| `gpu.engine_busy` | per-engine occupancy | `pmu` i915/xe/amdgpu · `vendor:nvml` | count, poll | system | free / med | low |
-| `gpu.freq` / `.power` / `.temp` | hardware state | `pmu` · `fs:sys` · `vendor:nvml` | poll | system | free / high / low | low |
-| `gpu.mem` | VRAM allocated / used | `fs:sys` amdgpu · `vendor:nvml` | poll | system, pid | free / med | medium |
+| `gpu.engine_busy` | per-engine occupancy | `pmu` i915/xe/amdgpu · `vendor:nvml` | count, poll | system, launch | free / med | low |
+| `gpu.freq` | clock frequency | `fs:sys` amdgpu / i915 · `vendor:nvml` | poll, snapshot | system, launch | free / high | low |
+| `gpu.power` | energy drawn | `fs:sys` amdgpu hwmon · `vendor:nvml` | count, poll, snapshot | system, launch | free / high | low |
+| `gpu.temp` | temperature | `fs:sys` amdgpu hwmon · `vendor:nvml` | poll, snapshot | system, launch | free / low | low |
+| `gpu.mem` | VRAM allocated / used | `fs:sys` amdgpu · `vendor:nvml` | poll, snapshot | system, pid, launch | free / med | medium |
 | `gpu.kernel` | GPU time per kernel | `vendor:cupti` (Activity) · `rocprof` · `l0` | trace | launch | extreme | medium |
 | `gpu.api` | host-side submission latency | `preload` cuLaunchKernel / vkQueueSubmit | trace | pid | high | low |
 | `gpu.counters` | counters inside a kernel, per launch, each with its verdict | `vendor:cupti` (range profiler, kernel replay) · `rocprofv3` | trace | launch | extreme | medium |
@@ -485,6 +517,13 @@ invisible to every CPU profiler.
   scheduler, no exposed PMU. Everything goes through `vendor:*`. AMD and Intel
   have the full kernel stack. The catalog must reflect that asymmetry rather than
   hide it.
+- The polled sources -- `gpu.engine_busy`, `gpu.freq`, `gpu.power`,
+  `gpu.temp`, `gpu.mem` -- emit `raw`, and a launch target sets their window,
+  not their scope: the figure is the whole device's. Through NVML a read
+  costs the tool's cpu in the driver, which is what the Cost cells say:
+  `med` for occupancy and VRAM, `high` for a clock or a power reading, `low`
+  for a temperature (each caveat in `catalog/gpu.yaml` gives the per-call
+  figure).
 - `gpu.job` measures a **command buffer**, not a kernel, IRQ included. It cannot
   tell you whether the GPU is saturating its SMs or waiting on VRAM.
 - `gpu_scheduler` tracepoint fields are **volatile across versions**: discover the
