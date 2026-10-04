@@ -245,3 +245,16 @@ One fix round, after an adversarial review. Each finding, and what came of it.
 - **Nit: the slow power poll's note was checked only when it had no
   repeats.** Fixed: `note_agrees_with_events` holds every run's note to its
   events' marks, both ways, for the power test and the new occupancy test.
+
+### The suite after the fix round
+
+`cargo test --lib collect::gpu` (38), `scenario_gpu` (32) and `family_gpu`
+(10) green, with the capabilities. One `make check`: red at
+`cases::every_case_names_its_known_cause_both_ways` (`gcc-shell`'s on-cpu
+391 ms from the reference under load), not GPU-related. Then one
+`cargo test --workspace --no-fail-fast`: **2 288 passed, 1 failed, 11
+ignored**; the cases test passed this time. The one failure was
+`runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`,
+which also failed alone. That is the known gap in `docs/open-findings.md`
+("The one test that keeps `make check` red": per-ring throttles need
+`src/perf.rs`), red on the wave's base, and not in this stream's files.
