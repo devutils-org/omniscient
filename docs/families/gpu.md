@@ -643,3 +643,45 @@ inside the kernel's duration; a pageable 8 MiB host-to-device copy takes
 - **The clock state.** A timing on unlocked clocks depends on what ran before
   it; reading whether they are locked belongs to the device stream, and the
   facts line here should carry it once it exists (requested).
+
+## The clocks, and what a poll costs (nineteenth wave, stream device)
+
+Measured on the same GeForce RTX 2080 Ti, driver 615.71.09, while other
+streams used the board. `docs/scenarios/gpu.md` has the tables and the tests.
+
+- **Clock state is read and never set.** Every run of an NVML source states,
+  per device, before the run and after it: whether the shader clock is held at
+  one frequency, the application clocks, persistence mode and the driver's
+  clock event reasons. `collect::gpu::ClockState` is the type, serialisable, so
+  the environment of a resolved file can carry it once that capture asks only
+  when a GPU source is in the request (`nvmlInit` costs 3 to 5 ms, "Still
+  open: the GPU in the environment capture" above). `timing_clock_facts()` is
+  the line a GPU timing source adds to its facts.
+- **NVML has no reader for locked clocks.** It can set them
+  (`nvmlDeviceSetGpuLockedClocks`) and cannot say what was set; the
+  applications-clocks event reason is documented as unused, and this board
+  answers "not supported" for application clocks. The verdict comes from the
+  driver's performance levels: locked only where every level runs the shader
+  clock at one frequency. That a `-lgc` lock shows there is reasoned, not shown,
+  so a range there is stated as "not shown locked", never as "not locked".
+- **The driver's pace.** The energy counter and the draw move every 100 ms;
+  the occupancy about once a second (1.0 to 1.13 s), by the driver's own
+  sample timestamps. A faster poll reads the same sample again; the run counts
+  those readings -- the counter by its value, which only rises, the occupancy
+  by that timestamp, because an idle board reads the same value from new
+  samples -- marks each event `driver_sample: repeat` or `new`, and says how
+  often the figure moved. The one-second default poll is at or above the
+  counter's and the draw's refresh, and just under the occupancy's: at the
+  default an occasional occupancy reading is a repeat, counted and said.
+- **What a call costs** is cpu, not waiting: the driver spins. From 6 µs
+  (persistence mode) and 12 to 48 µs (temperature) to 0.8 to 2.1 ms (one clock
+  domain) and 2.8 to 7 ms (the energy counter, the draw). A `gpu.power` read is
+  6 to 11 ms of a core.
+- **Reading the counter often makes it under-count** -- for every reader of
+  the board, across processes. Idle, the counter read at its two ends gives
+  23 W; read every 100 ms, 9 to 14 W; every 10 ms, 3 W, while the draw read
+  beside it rises to 36 W. This revises "integrating sampled power is not
+  energy, and polling faster makes it worse" above: at least part of the 20 Hz
+  gap is the counter starved by the poll, not the integral overstating. A
+  `gpu.power` poll whose counter falls below half the draw says so; energy is
+  `--mode count`.

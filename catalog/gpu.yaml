@@ -58,6 +58,16 @@
        not 0.06 of anything, so this source declares no rate. The mean and the
        maximum over a window are the aggregates that mean something, which is
        what summary and timeline carry."
+    - "Through NVML the driver refreshes the occupancy about once a second: the
+       timestamps of its own sample buffer are 1.0 to 1.13 s apart on the
+       board this was measured on, so even the one-second default poll reads
+       one sample twice now and then. A repeat is told by that timestamp, never
+       by the value: a steadily idle or busy board reads the same figure from
+       new samples. The run counts the readings whose driver sample had not
+       moved, marks each event `driver_sample: repeat` or `new`, and says how
+       often the figure moved. A read costs 0.6 to 1.4 ms of the tool's cpu,
+       and the sample timestamp beside it 0.7 to 2.4 ms more, spent spinning in
+       the driver rather than waiting."
 
 - id: gpu.freq
   family: gpu
@@ -74,9 +84,18 @@
   filter_fields: [device]
   determinism: low
   caveats:
-    - "A clock read through NVML costs about 15 ms of the tool's cpu on this
-       driver, measured by the bench: poll it slower than the default when that
-       matters."
+    - "A clock read through NVML costs 0.8 to 2.1 ms of the tool's cpu per
+       domain on this driver, spent spinning in the driver rather than waiting,
+       and a reading takes three domains (shader, graphics, memory): 2.5 to 6
+       ms a reading, measured per call. Poll it slower when that matters; the
+       bench's per-run figure is in `docs/bench.md`."
+    - "Every run of an NVML source states the device's clock state in its
+       notes, read before the run and again after it and never changed:
+       whether the shader clock is held at one frequency, the application
+       clocks, persistence mode and the driver's clock event reasons. NVML has
+       no reader for clocks locked with `nvidia-smi -lgc`; the verdict comes
+       from the driver's performance levels, and a lock is claimed only where
+       every level runs the shader clock at one frequency."
     - "The reported clock is the one the device is running at when it is asked,
        and a GPU idles at a fraction of its boost clock. A frequency series says
        what the device did, never what it was allowed to do."
@@ -103,9 +122,23 @@
        window. It is a mean over the window, not a peak; the instantaneous draw
        NVML samples travels beside every reading as `watts`, under a name that
        cannot be added up."
-    - "A power read through NVML costs about 34 ms of the tool's cpu on this
-       driver, measured by the bench: at the default 100 ms poll that is a fifth
-       of a core. Poll it slower when that matters more than the resolution."
+    - "A power reading through NVML is two calls, the energy counter (2.8 to
+       4.4 ms of the tool's cpu on this driver) and the instantaneous draw (2.8
+       to 7 ms), spent spinning in the driver rather than waiting, measured per
+       call: at a 100 ms poll that is 6 to 11 % of a core. The bench's 34 ms is
+       per run, not per read."
+    - "Reading the energy counter or the draw often makes the counter
+       under-count, for every reader of the board. Idle, read only at its two
+       ends, the counter gave 23 W; read every 100 ms beside the draw, 9 to 14
+       W; every 10 ms, about 3 W, below anything the board can draw, while the
+       draw read beside it rose to 36 W. A poll whose counter falls below half
+       the draw read beside it says so; another program polling the board does
+       the same to this run and cannot be seen. Energy is `--mode count`, which
+       reads the counter twice."
+    - "The driver refreshes the energy counter and the draw every 100 ms. A
+       faster poll reads the same sample again; the run counts the readings
+       that found the counter unmoved, marks each event `driver_sample: repeat`
+       or `new`, and says how often the counter moved."
     - "Energy is read from the device's own counter, not integrated from sampled
        power. Integrating a 100 ms poll across a workload that swings between 50
        and 300 W is a number with no error bar."

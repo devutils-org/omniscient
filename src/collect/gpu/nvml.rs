@@ -27,10 +27,15 @@ use std::fmt;
 const NVML_SUCCESS: c_int = 0;
 const NVML_ERROR_UNINITIALIZED: c_int = 1;
 const NVML_ERROR_NOT_SUPPORTED: c_int = 3;
+/// `nvmlDeviceGetSamples` with nothing newer than the timestamp it was given.
+const NVML_ERROR_NOT_FOUND: c_int = 6;
 /// The buffer was too small, and `count` now holds what it would have needed.
 const NVML_ERROR_INSUFFICIENT_SIZE: c_int = 7;
 const NVML_ERROR_DRIVER_NOT_LOADED: c_int = 9;
 const NVML_ERROR_GPU_IS_LOST: c_int = 15;
+
+/// `nvmlSamplingType_t`: the driver's own samples of the occupancy.
+const NVML_GPU_UTILIZATION_SAMPLES: c_int = 1;
 
 /// `nvmlClockType_t`.
 const NVML_CLOCK_GRAPHICS: c_int = 0;
@@ -39,6 +44,36 @@ const NVML_CLOCK_MEM: c_int = 2;
 
 /// `nvmlTemperatureSensors_t`: the only sensor the API defines.
 const NVML_TEMPERATURE_GPU: c_int = 0;
+
+/// `nvmlClockId_t`: the clock the device is set to run at when an application
+/// clock is in force, and the one it runs at when none is.
+const NVML_CLOCK_ID_APP_CLOCK_TARGET: c_int = 1;
+const NVML_CLOCK_ID_APP_CLOCK_DEFAULT: c_int = 2;
+
+/// `nvmlEnableState_t`.
+const NVML_FEATURE_ENABLED: c_uint = 1;
+
+/// `NVML_PERF_MODES_BUFFER_SIZE`: the text the performance-mode entry points
+/// write is at most this long, terminator included.
+const PERF_MODES_BUFFER: usize = 2048;
+
+/// The clock event reasons NVML defines (`nvmlClocksEventReason*` and the
+/// `nvmlClocksThrottleReason*` bits it kept), by bit, under the name a reader
+/// sees. A bit this table does not know is reported by its number rather than
+/// dropped: a driver newer than this table has reasons this table cannot name.
+pub const CLOCK_EVENT_REASONS: [(u64, &str); 11] = [
+    (0x1, "gpu_idle"),
+    (0x2, "applications_clocks_setting"),
+    (0x4, "sw_power_cap"),
+    (0x8, "hw_slowdown"),
+    (0x10, "sync_boost"),
+    (0x20, "sw_thermal_slowdown"),
+    (0x40, "hw_thermal_slowdown"),
+    (0x80, "hw_power_brake_slowdown"),
+    (0x100, "display_clock_setting"),
+    (0x200, "board_limit"),
+    (0x400, "reliability"),
+];
 
 /// The library file names, newest ABI first. `.so.1` is what the driver
 /// installs; the unversioned name is only there when the development package
@@ -102,6 +137,16 @@ pub struct Utilization {
     pub memory: c_uint,
 }
 
+/// `nvmlSample_t`: the driver's timestamp in microseconds, then an 8-byte
+/// union whose type the call reports separately. Only the timestamp is read
+/// here, so the union is kept as its bits.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Sample {
+    pub timestamp_us: u64,
+    value: u64,
+}
+
 /// `nvmlProcessInfo_v2_t`, which is what the `_v3` entry points take.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -142,6 +187,31 @@ type FnTemperature = unsafe extern "C" fn(*mut c_void, c_int, *mut c_uint) -> c_
 type FnMemory = unsafe extern "C" fn(*mut c_void, *mut Memory) -> c_int;
 type FnUtilization = unsafe extern "C" fn(*mut c_void, *mut Utilization) -> c_int;
 type FnProcesses = unsafe extern "C" fn(*mut c_void, *mut c_uint, *mut ProcessInfo) -> c_int;
+type FnClockOfId = unsafe extern "C" fn(*mut c_void, c_int, c_int, *mut c_uint) -> c_int;
+type FnEnableState = unsafe extern "C" fn(*mut c_void, *mut c_uint) -> c_int;
+type FnReasons = unsafe extern "C" fn(*mut c_void, *mut u64) -> c_int;
+type FnPerfModes = unsafe extern "C" fn(*mut c_void, *mut PerfModes) -> c_int;
+type FnSamples =
+    unsafe extern "C" fn(*mut c_void, c_int, u64, *mut c_int, *mut c_uint, *mut Sample) -> c_int;
+
+/// `nvmlDevicePerfModes_v1_t`: a version word, then the text.
+#[repr(C)]
+pub struct PerfModes {
+    version: c_uint,
+    text: [c_char; PERF_MODES_BUFFER],
+}
+
+impl PerfModes {
+    /// `NVML_STRUCT_VERSION(DevicePerfModes, 1)`: the struct's size in the
+    /// low bits and the version in the top byte, which is how the library
+    /// tells this layout from a later one.
+    fn new() -> Self {
+        Self {
+            version: (std::mem::size_of::<Self>() as c_uint) | (1 << 24),
+            text: [0; PERF_MODES_BUFFER],
+        }
+    }
+}
 
 /// The library, loaded and initialised.
 pub struct Nvml {
@@ -161,6 +231,12 @@ pub struct Nvml {
     utilization: Option<FnUtilization>,
     compute_processes: Option<FnProcesses>,
     graphics_processes: Option<FnProcesses>,
+    max_clock: Option<FnClock>,
+    clock_of_id: Option<FnClockOfId>,
+    persistence: Option<FnEnableState>,
+    event_reasons: Option<FnReasons>,
+    perf_modes: Option<FnPerfModes>,
+    samples: Option<FnSamples>,
 }
 
 impl Nvml {
@@ -252,6 +328,15 @@ impl Nvml {
                     .or_else(|| optional(library, "nvmlDeviceGetComputeRunningProcesses_v2")),
                 graphics_processes: optional(library, "nvmlDeviceGetGraphicsRunningProcesses_v3")
                     .or_else(|| optional(library, "nvmlDeviceGetGraphicsRunningProcesses_v2")),
+                max_clock: optional(library, "nvmlDeviceGetMaxClockInfo"),
+                clock_of_id: optional(library, "nvmlDeviceGetClock"),
+                persistence: optional(library, "nvmlDeviceGetPersistenceMode"),
+                // The same call under its newer name, then its older one: the
+                // driver renamed "throttle" to "event" and kept both.
+                event_reasons: optional(library, "nvmlDeviceGetCurrentClocksEventReasons")
+                    .or_else(|| optional(library, "nvmlDeviceGetCurrentClocksThrottleReasons")),
+                perf_modes: optional(library, "nvmlDeviceGetPerformanceModes"),
+                samples: optional(library, "nvmlDeviceGetSamples"),
             }
         };
         Ok(nvml)
@@ -345,6 +430,92 @@ impl Nvml {
         self.clock_mhz(device, NVML_CLOCK_MEM)
     }
 
+    /// The highest shader clock the device can run at: the top of the range a
+    /// clock reading is judged against.
+    pub fn max_sm_clock_mhz(&self, device: DeviceHandle) -> Result<u32, NvmlError> {
+        let entry = self
+            .max_clock
+            .ok_or_else(|| self.missing("nvmlDeviceGetMaxClockInfo"))?;
+        let mut mhz: c_uint = 0;
+        // SAFETY: the handle came from this library; `mhz` is a live local.
+        self.check(unsafe { entry(device.0, NVML_CLOCK_SM, &mut mhz) })?;
+        Ok(mhz as u32)
+    }
+
+    /// The application clocks of the graphics and memory domains: the target
+    /// in force, and the default it is compared with. A target that differs
+    /// from its default is a clock someone set. Consumer boards answer "not
+    /// supported", which is a fact about the board: nothing can set one there.
+    pub fn application_clocks(&self, device: DeviceHandle) -> Result<[(u32, u32); 2], NvmlError> {
+        let entry = self
+            .clock_of_id
+            .ok_or_else(|| self.missing("nvmlDeviceGetClock"))?;
+        let mut answer = [(0, 0); 2];
+        for (slot, domain) in answer.iter_mut().zip([NVML_CLOCK_GRAPHICS, NVML_CLOCK_MEM]) {
+            let (mut target, mut default): (c_uint, c_uint) = (0, 0);
+            // SAFETY: the handle came from this library; both outputs are live
+            // locals.
+            unsafe {
+                self.check(entry(
+                    device.0,
+                    domain,
+                    NVML_CLOCK_ID_APP_CLOCK_TARGET,
+                    &mut target,
+                ))?;
+                self.check(entry(
+                    device.0,
+                    domain,
+                    NVML_CLOCK_ID_APP_CLOCK_DEFAULT,
+                    &mut default,
+                ))?;
+            }
+            *slot = (target as u32, default as u32);
+        }
+        Ok(answer)
+    }
+
+    /// Whether the driver keeps the device initialised with no client. Off, the
+    /// first client after an idle spell pays the device's initialisation, and
+    /// a timing taken then includes it.
+    pub fn persistence_mode(&self, device: DeviceHandle) -> Result<bool, NvmlError> {
+        let entry = self
+            .persistence
+            .ok_or_else(|| self.missing("nvmlDeviceGetPersistenceMode"))?;
+        let mut state: c_uint = 0;
+        // SAFETY: the handle came from this library; the output is a live local.
+        self.check(unsafe { entry(device.0, &mut state) })?;
+        Ok(state == NVML_FEATURE_ENABLED)
+    }
+
+    /// Why the clocks are where they are, as the bit mask NVML returns; the
+    /// names are in [`CLOCK_EVENT_REASONS`].
+    pub fn clock_event_reasons(&self, device: DeviceHandle) -> Result<u64, NvmlError> {
+        let entry = self
+            .event_reasons
+            .ok_or_else(|| self.missing("nvmlDeviceGetCurrentClocksEventReasons"))?;
+        let mut reasons: u64 = 0;
+        // SAFETY: the handle came from this library; the output is a live local.
+        self.check(unsafe { entry(device.0, &mut reasons) })?;
+        Ok(reasons)
+    }
+
+    /// The device's performance levels and the clock range of each, as the
+    /// text the driver writes (`perf=0, nvclock=300, nvclockmin=300, ...;
+    /// perf=1, ...`). [`super::perf_levels`] reads it.
+    pub fn performance_modes(&self, device: DeviceHandle) -> Result<String, NvmlError> {
+        let entry = self
+            .perf_modes
+            .ok_or_else(|| self.missing("nvmlDeviceGetPerformanceModes"))?;
+        let mut modes = PerfModes::new();
+        // SAFETY: the handle came from this library; the struct is the v1
+        // layout and carries its own version word.
+        self.check(unsafe { entry(device.0, &mut modes) })?;
+        // A text that filled the buffer to the last byte has no terminator of
+        // its own; this one bounds the read either way.
+        modes.text[PERF_MODES_BUFFER - 1] = 0;
+        Ok(to_string(&modes.text))
+    }
+
     /// Instantaneous draw, in milliwatts, as the driver last sampled it.
     pub fn power_milliwatts(&self, device: DeviceHandle) -> Result<u32, NvmlError> {
         let entry = self
@@ -400,6 +571,69 @@ impl Nvml {
         // `nvmlUtilization_t`.
         self.check(unsafe { entry(device.0, &mut utilization) })?;
         Ok(utilization)
+    }
+
+    /// The timestamp, in the driver's microseconds, of the newest occupancy
+    /// sample the driver took after `after_us`; `None` when it took none since.
+    ///
+    /// This is what tells a refreshed occupancy from a repeated one: the
+    /// figure itself may read the same twice because the board is steadily
+    /// idle or steadily busy, but the driver's sample timestamp only moves
+    /// when the driver sampled. `after_us` of 0 asks for the whole buffer the
+    /// driver keeps, which is how a first reading finds the newest sample.
+    pub fn newest_occupancy_sample_us(
+        &self,
+        device: DeviceHandle,
+        after_us: u64,
+    ) -> Result<Option<u64>, NvmlError> {
+        let entry = self
+            .samples
+            .ok_or_else(|| self.missing("nvmlDeviceGetSamples"))?;
+        let mut value_type: c_int = 0;
+        let mut count: c_uint = 0;
+        // SAFETY: a null buffer is how the API is asked for the number of
+        // samples it would return; both outputs are live locals.
+        let code = unsafe {
+            entry(
+                device.0,
+                NVML_GPU_UTILIZATION_SAMPLES,
+                after_us,
+                &mut value_type,
+                &mut count,
+                std::ptr::null_mut(),
+            )
+        };
+        if code == NVML_ERROR_NOT_FOUND {
+            return Ok(None);
+        }
+        self.check(code)?;
+        if count == 0 {
+            return Ok(None);
+        }
+        let mut buffer = vec![Sample::default(); count as usize];
+        let mut written = count;
+        // SAFETY: the buffer holds `count` samples, the number the library
+        // just asked for, and `written` says so.
+        let code = unsafe {
+            entry(
+                device.0,
+                NVML_GPU_UTILIZATION_SAMPLES,
+                after_us,
+                &mut value_type,
+                &mut written,
+                buffer.as_mut_ptr(),
+            )
+        };
+        if code == NVML_ERROR_NOT_FOUND {
+            return Ok(None);
+        }
+        self.check(code)?;
+        buffer.truncate((written as usize).min(count as usize));
+        Ok(buffer
+            .iter()
+            .map(|sample| sample.timestamp_us)
+            .filter(|&ts| ts > after_us)
+            .max())
     }
 
     /// The processes holding memory on a device, compute and graphics both.
@@ -595,6 +829,7 @@ mod tests {
 
         assert_eq!(size_of::<Utilization>(), 8);
         assert_eq!(align_of::<Utilization>(), 4);
+        assert_eq!(size_of::<Sample>(), 16);
 
         // `{ u32; u64; u32; u32 }` with C padding: the 64-bit field is aligned
         // to 8, which puts the two instance ids at 16 and 20 and the size at
@@ -629,6 +864,101 @@ mod tests {
                     assert!(reason.contains(candidate), "{reason}");
                 }
             }
+        }
+    }
+
+    /// What one call of each kind costs the calling thread, on the device
+    /// this runs on. The figures go into the catalog's caveats, so the test
+    /// prints them; what it asserts is the separation the caveats rest on --
+    /// the reads the driver answers from a sample it keeps are cheap, and the
+    /// ones that go to the board are not -- never a threshold, because the
+    /// board is shared with whatever else is running.
+    ///
+    /// The cost is the thread's own cpu time, not its wall time: a call that
+    /// slept in the driver would cost the collector nothing, and the caveats
+    /// are about the collector's cpu.
+    #[test]
+    fn what_each_kind_of_call_costs_the_calling_thread() {
+        const CALLS: u32 = 40;
+        let Ok(nvml) = Nvml::open() else {
+            return eprintln!("skipped: no NVIDIA management library here");
+        };
+        let Ok(device) = nvml.device(0) else {
+            return eprintln!("skipped: the NVIDIA management library sees no device");
+        };
+        // Forty back-to-back reads of the counter and of the draw starve the
+        // counter for every reader (defect 7), so no test that holds the
+        // counter against the draw may run meanwhile.
+        let _energy = super::super::energy_counter_lock();
+        let thread_cpu_ns = || {
+            let mut now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: `now` is a live local the kernel fills.
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+            now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+        };
+        let mut table = Vec::new();
+        let mut cost = |kind: &'static str, call: &dyn Fn() -> bool| {
+            if !call() {
+                return eprintln!("{kind}: not answered on this device");
+            }
+            let (cpu, wall) = (thread_cpu_ns(), crate::clock::monotonic_ns());
+            for _ in 0..CALLS {
+                std::hint::black_box(call());
+            }
+            let cpu = (thread_cpu_ns() - cpu) / CALLS as u64;
+            let wall = (crate::clock::monotonic_ns() - wall) / CALLS as u64;
+            eprintln!(
+                "{kind:<24} cpu {:>8.1} us   wall {:>8.1} us",
+                cpu as f64 / 1e3,
+                wall as f64 / 1e3
+            );
+            table.push((kind, cpu));
+        };
+        cost("temperature", &|| nvml.temperature_celsius(device).is_ok());
+        cost("memory", &|| nvml.memory(device).is_ok());
+        cost("processes", &|| nvml.processes(device).is_ok());
+        cost("utilization", &|| nvml.utilization(device).is_ok());
+        let newest = nvml
+            .newest_occupancy_sample_us(device, 0)
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        cost("occupancy sample", &|| {
+            nvml.newest_occupancy_sample_us(device, newest).is_ok()
+        });
+        cost("clock (one domain)", &|| nvml.sm_clock_mhz(device).is_ok());
+        cost("power (instantaneous)", &|| {
+            nvml.power_milliwatts(device).is_ok()
+        });
+        cost("energy counter", &|| {
+            nvml.energy_millijoules(device).is_ok()
+        });
+        cost("persistence mode", &|| {
+            nvml.persistence_mode(device).is_ok()
+        });
+        cost("clock event reasons", &|| {
+            nvml.clock_event_reasons(device).is_ok()
+        });
+        cost("performance levels", &|| {
+            nvml.performance_modes(device).is_ok()
+        });
+
+        let of = |kind: &str| table.iter().find(|(k, _)| *k == kind).map(|(_, cpu)| *cpu);
+        if let (Some(cheap), Some(dear)) = (of("temperature"), of("energy counter")) {
+            assert!(
+                cheap * 5 < dear,
+                "a temperature read ({cheap} ns of cpu) should cost a small fraction of an \
+                 energy-counter read ({dear} ns): the caveats say so, and on this board it \
+                 did not hold. What else held the device: {}",
+                std::process::Command::new("nvidia-smi")
+                    .args(["--query-compute-apps=pid,name", "--format=csv,noheader"])
+                    .output()
+                    .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+                    .unwrap_or_default()
+            );
         }
     }
 

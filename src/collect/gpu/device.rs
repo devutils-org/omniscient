@@ -26,6 +26,7 @@ use crate::event::{Attr, AttrValue, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
 
 use super::nvml::{DeviceHandle, Nvml, NvmlError};
+use super::ClockState;
 
 /// NVML averages utilization over a window it chooses and does not report.
 /// NVIDIA documents that window as at most one second, which is therefore how
@@ -66,6 +67,34 @@ impl Metric {
         }
     }
 
+    /// The driver figure whose repeat this collector counts, named for the
+    /// note; `None` for a figure whose repeat cannot be told from a steady
+    /// value. See [`Refresh`].
+    fn refreshed_figure(self) -> Option<&'static str> {
+        match self {
+            Metric::Power => Some("energy counter"),
+            Metric::EngineBusy => Some("occupancy"),
+            Metric::Freq | Metric::Temp | Metric::Mem => None,
+        }
+    }
+
+    /// What identifies one driver sample of the energy counter, from the
+    /// attributes of a reading: the counter itself, which only ever rises
+    /// while the board draws power. The occupancy has no such figure -- an
+    /// idle or saturated board reads the same pair sample after sample -- so
+    /// its identity is the driver's own sample timestamp, read beside it
+    /// ([`occupancy_fingerprint`]), never its value.
+    fn fingerprint(self, attrs: &[Attr]) -> Option<u64> {
+        match self {
+            Metric::Power => attrs
+                .iter()
+                .find(|attr| attr.name == "joules")
+                .and_then(|attr| attr.value.as_f64())
+                .map(f64::to_bits),
+            _ => None,
+        }
+    }
+
     /// The attribute holding the measurement, named rather than inferred from
     /// the unit: these events carry several numbers and only one of them is the
     /// series.
@@ -77,6 +106,41 @@ impl Metric {
             Metric::Mem => "bytes",
             Metric::EngineBusy => "ratio",
         }
+    }
+}
+
+/// The identity of the occupancy sample a reading saw: the timestamp of the
+/// newest sample the driver had taken, asked for after the one the previous
+/// reading saw. No newer sample means the reading is the previous one again,
+/// whatever its value; a newer one means the driver refreshed, even if the
+/// board is so steadily idle or busy that the figure did not move.
+///
+/// `None` -- the reading is not counted either way -- when the driver keeps no
+/// samples or the call failed: a repeat that cannot be shown is not guessed
+/// from the value.
+///
+/// The two calls are not atomic: a sample the driver takes between the
+/// occupancy read and this one is credited to this reading, and the next
+/// reading, which does carry it, is counted as a repeat. That is one reading
+/// in a refresh period at most, and only when a refresh falls inside the
+/// millisecond between two calls.
+fn occupancy_fingerprint(
+    nvml: &Nvml,
+    handle: DeviceHandle,
+    seen_us: &mut Vec<Option<u64>>,
+    device: usize,
+) -> Option<u64> {
+    if seen_us.len() <= device {
+        seen_us.resize(device + 1, None);
+    }
+    let after_us = seen_us[device].unwrap_or(0);
+    match nvml.newest_occupancy_sample_us(handle, after_us) {
+        Ok(Some(newest)) => {
+            seen_us[device] = Some(newest);
+            Some(newest)
+        }
+        Ok(None) => seen_us[device],
+        Err(_) => None,
     }
 }
 
@@ -141,6 +205,172 @@ pub struct NvmlCollector {
     /// device-wide metrics it only sets the window; for `gpu.mem` it decides
     /// whether the figure is a process's or the device's.
     pid: Option<i32>,
+    /// Each device's clock state, read before the observed program runs and
+    /// again when the run stops. Read, never set: see [`ClockState`].
+    clocks_at_start: Vec<ClockState>,
+    clocks_at_end: Vec<ClockState>,
+    /// How many readings found the driver's figure where the previous one
+    /// left it. See [`Refresh`].
+    refresh: Refresh,
+    /// Per device, the timestamp of the newest occupancy sample the driver
+    /// had taken at the last reading. See [`occupancy_fingerprint`].
+    occupancy_seen_us: Vec<Option<u64>>,
+    /// The energy counter held against the draw read beside it. See
+    /// [`CounterCheck`].
+    counter_check: CounterCheck,
+}
+
+/// **Reading the energy counter often makes it under-count.** Measured on the
+/// board this was written on (`docs/scenarios/gpu.md`, defect 7): two reads
+/// four seconds apart give the idle board's 23 W; the same window with the
+/// counter -- or the instantaneous draw -- read every 100 ms gives about half
+/// that, and every 10 ms about 3 W, less than the board can draw at all. The
+/// draw itself goes *up* meanwhile, because the reads keep the board out of
+/// its deepest idle state. Another process polling the board does the same to
+/// this one's counter, which nothing here can see.
+///
+/// What a poll can see is its own case: the energy the counter accumulated
+/// over the run against the mean of the draw sampled beside it. Where the
+/// counter implies less than half the draw, the joules of this run are low,
+/// and the run says so with both figures.
+#[derive(Debug, Default)]
+struct CounterCheck {
+    /// Per device: the sum and count of the draws read, the last cumulative
+    /// joules and the window they cover.
+    devices: Vec<(f64, u64, f64, u64)>,
+}
+
+impl CounterCheck {
+    fn record(&mut self, device: usize, attrs: &[Attr], base_ns: u64, now_ns: u64) {
+        let value = |name: &str| {
+            attrs
+                .iter()
+                .find(|attr| attr.name == name)
+                .and_then(|attr| attr.value.as_f64())
+        };
+        let (Some(joules), Some(watts)) = (value("joules"), value("watts")) else {
+            return;
+        };
+        if self.devices.len() <= device {
+            self.devices.resize(device + 1, (0.0, 0, 0.0, 0));
+        }
+        let entry = &mut self.devices[device];
+        entry.0 += watts;
+        entry.1 += 1;
+        entry.2 = joules;
+        entry.3 = now_ns.saturating_sub(base_ns);
+    }
+
+    /// The note for each device whose counter fell below half its draw.
+    fn notes(&self, poll_ns: u64) -> Vec<String> {
+        let mut notes = Vec::new();
+        for (index, &(sum, count, joules, span_ns)) in self.devices.iter().enumerate() {
+            // Too few draws, or too short a window, to call anything.
+            if count < 3 || span_ns < 200_000_000 {
+                continue;
+            }
+            let counter_w = joules / (span_ns as f64 / 1e9);
+            let draw_w = sum / count as f64;
+            if counter_w * 2.0 < draw_w {
+                notes.push(format!(
+                    "vendor:nvml: device {index}'s energy counter implies {counter_w:.1} W over \
+                     this run while the draw read beside it averaged {draw_w:.1} W: on this \
+                     driver, reading the counter or the draw more often than about once a second \
+                     makes the counter under-count, and this run read both every {} ms, so its \
+                     joules are low; take energy with `--mode count`, which reads the counter \
+                     twice",
+                    poll_ns as f64 / 1e6
+                ));
+            }
+        }
+        notes
+    }
+}
+
+/// The driver refreshes what NVML returns at its own rate, and a poll faster
+/// than that rate returns the same driver sample several times over: points
+/// on a timeline that look like measurements and are one measurement repeated.
+///
+/// Measured on the board this was written on (`docs/scenarios/gpu.md`, "What a
+/// poll can get from the driver"): the energy counter and the instantaneous
+/// draw move every 100 ms, the occupancy about once a second. Neither number
+/// is assumed here. A repeat is *observed* -- the reading carries the driver
+/// sample the previous one carried: the same counter bit for bit, or the same
+/// occupancy sample timestamp -- and counted, and the note says how often the
+/// figure actually moved in this run.
+///
+/// Only the two figures whose repeat can be told from a steady value are
+/// counted. The energy counter only ever rises while the board draws power,
+/// so an unchanged counter is an unrefreshed one. The occupancy's value is not
+/// such a figure -- a steadily idle or saturated board reads 0.02 or 1.0 sample
+/// after sample -- so its repeat is told by the driver's own sample timestamp,
+/// read beside it, and not by the value. A clock or a temperature that reads
+/// the same twice may simply be steady, the driver gives no sample timestamp
+/// for either, and counting them would be counting a guess.
+#[derive(Debug, Default)]
+struct Refresh {
+    /// The last reading's fingerprint, per device.
+    previous: Vec<Option<u64>>,
+    readings: u64,
+    repeats: u64,
+    first_ns: Option<u64>,
+    last_ns: u64,
+}
+
+impl Refresh {
+    /// Records one reading of one device, and answers whether it repeated the
+    /// previous one.
+    fn record(&mut self, device: usize, fingerprint: u64, now_ns: u64) -> bool {
+        if self.previous.len() <= device {
+            self.previous.resize(device + 1, None);
+        }
+        let repeated = self.previous[device] == Some(fingerprint);
+        self.previous[device] = Some(fingerprint);
+        self.readings += 1;
+        if repeated {
+            self.repeats += 1;
+        }
+        self.first_ns.get_or_insert(now_ns);
+        self.last_ns = now_ns;
+        repeated
+    }
+
+    /// The note a run with repeats carries, or nothing.
+    fn note(&self, figure: &str, poll_ns: Option<u64>, devices: usize) -> Option<String> {
+        if self.repeats == 0 {
+            return None;
+        }
+        let span_ns = self
+            .last_ns
+            .saturating_sub(self.first_ns.unwrap_or(self.last_ns));
+        // Each device's first reading is new by definition and is not a move.
+        let moves = self
+            .readings
+            .saturating_sub(self.repeats)
+            .saturating_sub(devices as u64);
+        let moved = if moves == 0 {
+            format!("it did not move once in {} ms", span_ns / 1_000_000)
+        } else {
+            // Per device: the moves are summed over every device read.
+            let every_ns = span_ns.saturating_mul(devices.max(1) as u64) / moves;
+            format!(
+                "it moved {moves} {} in {} ms, about every {} ms",
+                if moves == 1 { "time" } else { "times" },
+                span_ns / 1_000_000,
+                every_ns / 1_000_000
+            )
+        };
+        let polled = match poll_ns {
+            Some(ns) => format!("this run read it every {} ms", ns as f64 / 1e6),
+            None => "this run read it faster than that".to_owned(),
+        };
+        Some(format!(
+            "vendor:nvml: {} of {} readings found the {figure} where the previous reading left \
+             it, so those points are one driver sample read again, not new measurements: {moved} \
+             and {polled}; poll no faster than the driver refreshes it",
+            self.repeats, self.readings
+        ))
+    }
 }
 
 impl NvmlCollector {
@@ -189,6 +419,11 @@ impl NvmlCollector {
             devices,
             driver,
             pid,
+            clocks_at_start: Vec::new(),
+            clocks_at_end: Vec::new(),
+            refresh: Refresh::default(),
+            occupancy_seen_us: Vec::new(),
+            counter_check: CounterCheck::default(),
         })
     }
 
@@ -325,6 +560,8 @@ impl Collector for NvmlCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
+        // The clocks as the observed program will find them, before it runs.
+        self.clocks_at_start = self.clock_states();
         if self.metric != Metric::Power {
             return Ok(());
         }
@@ -417,6 +654,28 @@ impl Collector for NvmlCollector {
             // Taken after the read, so it bounds it: the value existed at or
             // before this instant.
             let ts_ns = monotonic_ns();
+            let mut attrs = attrs;
+            if self.metric == Metric::Power {
+                self.counter_check
+                    .record(offset, &attrs, device.energy_base_ns, ts_ns);
+            }
+            let fingerprint = if self.metric == Metric::EngineBusy {
+                occupancy_fingerprint(
+                    &self.nvml,
+                    device.handle,
+                    &mut self.occupancy_seen_us,
+                    offset,
+                )
+            } else {
+                self.metric.fingerprint(&attrs)
+            };
+            if let Some(fingerprint) = fingerprint {
+                let repeated = self.refresh.record(offset, fingerprint, ts_ns);
+                attrs.push(Attr::text(
+                    "driver_sample",
+                    if repeated { "repeat" } else { "new" },
+                ));
+            }
             let mut keys = Vec::new();
             if let (Metric::Mem, Some(pid)) = (self.metric, self.pid) {
                 keys.push(KeyValue::task(pid));
@@ -449,6 +708,9 @@ impl Collector for NvmlCollector {
     /// to be last: the run stops the moment its target does, and the occupancy
     /// at that moment belongs to the series.
     fn stop(&mut self) -> Vec<Event> {
+        // The clocks as the observed program left them: a thermal or power
+        // limit reached during the run shows here and not at the start.
+        self.clocks_at_end = self.clock_states();
         if self.mode != Mode::Count {
             return Vec::new();
         }
@@ -469,15 +731,64 @@ impl Collector for NvmlCollector {
     /// the error bar is stated once, here, where it reaches the reader whatever
     /// they asked for.
     fn notes(&self) -> Vec<String> {
-        if self.metric != Metric::EngineBusy {
-            return Vec::new();
+        let poll_ns = match self.mode {
+            Mode::Poll { interval } => Some(interval.as_nanos()),
+            Mode::Count => Some(Mode::DEFAULT_POLL_INTERVAL.as_nanos()),
+            _ => None,
+        };
+        let mut notes: Vec<String> = self
+            .metric
+            .refreshed_figure()
+            .and_then(|figure| self.refresh.note(figure, poll_ns, self.devices.len()))
+            .into_iter()
+            .collect();
+        if let (Metric::Power, Mode::Poll { interval }) = (self.metric, self.mode) {
+            notes.extend(self.counter_check.notes(interval.as_nanos()));
         }
-        vec![format!(
+        if self.metric != Metric::EngineBusy {
+            return notes;
+        }
+        notes.push(format!(
             "vendor:nvml: occupancy is averaged by the driver over a window it chooses, \
              documented as up to {} ms wide, so every timestamp in this series is good only to \
              that much and two points closer together than it may be one sample read twice",
             UTILIZATION_WINDOW_NS / 1_000_000
-        )]
+        ));
+        notes
+    }
+
+    /// The clocks of every device, at the start of the run and, where the
+    /// clock event reasons moved, at its end. A fact, not a concession: this
+    /// collector reads the clocks and changes nothing.
+    fn facts(&self) -> Vec<String> {
+        let mut facts: Vec<String> = self.clocks_at_start.iter().map(ClockState::fact).collect();
+        for end in &self.clocks_at_end {
+            let start = self
+                .clocks_at_start
+                .iter()
+                .find(|start| start.device_uuid == end.device_uuid);
+            if start.is_none_or(|start| start.event_reasons != end.event_reasons) {
+                facts.push(format!("at the end of the run: {}", end.fact()));
+            }
+        }
+        facts
+    }
+}
+
+impl NvmlCollector {
+    fn clock_states(&self) -> Vec<ClockState> {
+        self.devices
+            .iter()
+            .map(|device| {
+                ClockState::read(
+                    &self.nvml,
+                    device.handle,
+                    device.index,
+                    &device.name,
+                    &device.uuid,
+                )
+            })
+            .collect()
     }
 }
 
@@ -524,6 +835,9 @@ fn float(name: &'static str, value: f64) -> Attr {
 mod tests {
     use super::*;
     use crate::collect::gpu::fixture::CudaArena;
+
+    // One lock for the whole test binary: see `energy_counter_lock` and `CounterCheck`.
+    use crate::collect::gpu::energy_counter_lock as energy_lock;
 
     /// Builds a collector for this process, or explains why this machine
     /// cannot run the test. Most machines have no NVIDIA device and must skip
@@ -620,6 +934,7 @@ mod tests {
     /// measured in `docs/families/gpu.md`.
     #[test]
     fn the_energy_counter_reads_in_joules_of_the_draw_beside_it() {
+        let _energy = energy_lock();
         let Some(mut collector) = collector(Metric::Power) else {
             return;
         };
@@ -686,6 +1001,7 @@ mod tests {
     /// program is released, and every event is the energy of this run.
     #[test]
     fn energy_is_counted_from_the_start_of_the_run_not_of_the_driver() {
+        let _energy = energy_lock();
         let Some(mut collector) = collector(Metric::Power) else {
             return;
         };
@@ -798,6 +1114,112 @@ mod tests {
         let gone = departed(pid).expect("an unreaped child has exited");
         assert!(gone.contains("reaped"), "{gone}");
         child.wait().expect("reaping the child");
+    }
+
+    /// The repeat count is a count of what was observed, per device: a
+    /// fingerprint seen again on the same device is a repeat, the same value
+    /// on another device is not, and the note says how often the figure
+    /// actually moved.
+    #[test]
+    fn a_reading_that_repeats_the_one_before_it_is_counted_per_device() {
+        let mut refresh = Refresh::default();
+        assert!(!refresh.record(0, 7, 0));
+        assert!(!refresh.record(1, 7, 0));
+        assert!(refresh.record(0, 7, 10_000_000));
+        assert!(refresh.record(1, 7, 10_000_000));
+        assert!(!refresh.record(0, 8, 100_000_000));
+        assert!(!refresh.record(1, 9, 100_000_000));
+        assert_eq!((refresh.readings, refresh.repeats), (6, 2));
+        let note = refresh
+            .note("energy counter", Some(10_000_000), 2)
+            .expect("a run with repeats says so");
+        assert!(note.contains("2 of 6 readings"), "{note}");
+        assert!(
+            note.contains("moved 2 times in 100 ms, about every 100 ms"),
+            "{note}"
+        );
+        assert!(note.contains("every 10 ms"), "{note}");
+
+        assert_eq!(Refresh::default().note("occupancy", None, 1), None);
+    }
+
+    /// The counter is held against the draw read beside it, per device, and
+    /// only a gap of more than half is called: the draw moves on its own
+    /// between two reads, and a check that fired on that would fire always.
+    #[test]
+    fn a_counter_below_half_the_draw_beside_it_is_said_and_a_close_one_is_not() {
+        let reading =
+            |joules: f64, watts: f64| vec![float("joules", joules), float("watts", watts)];
+        let mut check = CounterCheck::default();
+        for step in 1..=10u64 {
+            let ns = step * 100_000_000;
+            // Device 0: 3 W of counter against a 30 W draw. Device 1: 25 W
+            // against 30 W, which is the ordinary disagreement of two figures.
+            check.record(0, &reading(3.0 * ns as f64 / 1e9, 30.0), 0, ns);
+            check.record(1, &reading(25.0 * ns as f64 / 1e9, 30.0), 0, ns);
+        }
+        let notes = check.notes(100_000_000);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("device 0's energy counter implies 3.0 W"),
+            "{notes:?}"
+        );
+        assert!(notes[0].contains("averaged 30.0 W"), "{notes:?}");
+        assert!(notes[0].contains("every 100 ms"), "{notes:?}");
+
+        // Two reads are too few to call anything.
+        let mut short = CounterCheck::default();
+        short.record(0, &reading(0.1, 30.0), 0, 500_000_000);
+        short.record(0, &reading(0.2, 30.0), 0, 1_000_000_000);
+        assert!(short.notes(500_000_000).is_empty());
+    }
+
+    /// The ground truth is the driver's own pace, taken from the counter that
+    /// shows it: polled several times inside one refresh, the energy counter
+    /// comes back unmoved most of the time; polled slower than a refresh, it
+    /// almost never does. Asserted as that separation, not as a period: the
+    /// board is shared, and the period is what the note reports.
+    #[test]
+    fn a_poll_faster_than_the_driver_refreshes_repeats_and_a_slower_one_does_not() {
+        let _energy = energy_lock();
+        let fraction = |pause_ms: u64, reads: u32| -> Option<f64> {
+            let mut power = collector(Metric::Power)?;
+            if let Err(reason) = power.start() {
+                eprintln!("skipped: {reason}");
+                return None;
+            }
+            for seq in 0..reads {
+                power.sample(seq as u64).expect("the device answers");
+                std::thread::sleep(StdDuration::from_millis(pause_ms));
+            }
+            Some(power.refresh.repeats as f64 / power.refresh.readings as f64)
+        };
+        let Some(fast) = fraction(5, 60) else {
+            return;
+        };
+        let Some(slow) = fraction(300, 6) else {
+            return;
+        };
+        assert!(
+            fast > 0.5 && slow < fast / 2.0,
+            "polled every 5 ms the counter repeated on {:.0} % of reads, every 300 ms on {:.0} %",
+            fast * 100.0,
+            slow * 100.0
+        );
+    }
+
+    /// The clocks are read at the start, before the observed program runs,
+    /// and every device's state reaches the run's facts.
+    #[test]
+    fn the_clock_state_of_every_device_is_in_the_facts() {
+        let Some(mut temp) = collector(Metric::Temp) else {
+            return;
+        };
+        temp.start().expect("a temperature source starts");
+        let facts = temp.facts();
+        assert_eq!(facts.len(), temp.devices.len(), "{facts:?}");
+        assert!(facts[0].contains("shader clock"), "{facts:?}");
+        assert!(facts[0].contains("persistence mode"), "{facts:?}");
     }
 
     /// A device figure is averaged over a window the driver chooses and does

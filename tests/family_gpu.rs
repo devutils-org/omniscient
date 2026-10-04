@@ -355,3 +355,34 @@ fn a_filter_on_the_device_keeps_that_device_and_reports_the_rest() {
     // and not a field nothing carried.
     assert!(filtered["unseen_fields"].is_null(), "{filtered}");
 }
+
+/// Every run of a device source carries the device's clock state in its
+/// notes: whether the shader clock is locked, the application clocks,
+/// persistence mode and the clock event reasons, read before the run and never
+/// changed. Persistence mode is held to the vendor's own tool, the one
+/// independent reader this hardware allows, because it does not move while
+/// another program uses the board.
+#[test]
+fn a_device_run_records_the_state_of_the_clocks_it_read_and_never_set() {
+    let run = match measure("gpu.temp", "summary") {
+        Ok(run) => run,
+        Err(reason) => return eprintln!("skipped: {reason}"),
+    };
+    let notes: Vec<String> = run["results"][0]["notes"]
+        .as_array()
+        .expect("a device run states the clocks it found")
+        .iter()
+        .map(|note| note.as_str().unwrap_or_default().to_owned())
+        .collect();
+    let state = notes
+        .iter()
+        .find(|note| note.contains("shader clock"))
+        .unwrap_or_else(|| panic!("no note states the clocks: {notes:?}"));
+    assert!(state.starts_with("vendor:nvml: device 0 ("), "{state}");
+    assert!(state.contains("clock event reasons"), "{state}");
+    match nvidia_smi("persistence_mode").as_deref() {
+        Some("Enabled") => assert!(state.contains("persistence mode on"), "{state}"),
+        Some("Disabled") => assert!(state.contains("persistence mode off"), "{state}"),
+        other => eprintln!("persistence not compared: nvidia-smi answered {other:?}"),
+    }
+}

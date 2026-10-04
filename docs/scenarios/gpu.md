@@ -160,6 +160,145 @@ of it.
 
 Test: `the_reported_clock_stays_inside_what_the_device_says_it_can_do`.
 
+### Were the clocks locked while I measured?
+
+**read, never set; held to the vendor's tool where it has an answer**
+
+An unlocked GPU runs its shader clock wherever the driver puts it, and where
+that is depends on what ran before: a kernel timed a second after another one
+is timed on a boosted, warm board. Locking the clocks needs root and does not
+survive a reboot, so `omn` does not do it. Every run of an NVML source reads
+each device's clock state before the observed program starts and again when the
+run stops, and states it in the run's notes:
+
+```
+note: vendor:nvml: device 0 (NVIDIA GeForce RTX 2080 Ti): shader clock not shown locked
+      (the driver's performance levels let it run from 300 to 2205 MHz; a lock set with
+      `nvidia-smi -lgc` is not known to show there), no application clocks (this board
+      does not have them), persistence mode off, clock event reasons: none
+note: at the end of the run: vendor:nvml: device 0 (...): ..., clock event reasons: reliability
+```
+
+The end-of-run line appears only where the clock event reasons moved, which is
+where a thermal or power limit reached during the run shows.
+
+What each part rests on, on driver 615.71.09:
+
+| part | read through | on this board |
+|---|---|---|
+| shader clock lock | `nvmlDeviceGetPerformanceModes`: the shader clock range of every performance level | three levels (perf 0, 1 and 4), 300 to 645 MHz at the lowest, 300 to 2205 at the highest: not shown locked |
+| application clocks | `nvmlDeviceGetClock`, target against default | "not supported" -- `nvidia-smi` says "deprecated" for the same field |
+| persistence mode | `nvmlDeviceGetPersistenceMode` | off, as `nvidia-smi` says |
+| clock event reasons | `nvmlDeviceGetCurrentClocksEventReasons` | `gpu_idle` or `reliability` at idle |
+
+**NVML has no reader for locked clocks.** `nvmlDeviceSetGpuLockedClocks` and
+its reset exist; nothing returns what they set, and `nvidia-smi -q` prints no
+such field either. The `applications_clocks_setting` event reason is documented
+as "no longer used". So the verdict comes from the driver's performance levels,
+and a lock is claimed only where *every* level runs the shader clock at one and
+the same frequency -- an idle level pinned at its floor, which NVML's own
+header shows at `perf=0`, is not a lock. That a `-lgc` lock shows in those
+levels is **reasoned, not shown**: locking the clocks is a privileged run this
+wave did not make (`docs/fixes/w19-device.md` has the command). So a range in
+the levels is said as what it shows -- "not shown locked" -- and never as
+"not locked": a board someone locked with `-lgc` would otherwise be told, with
+confidence, that its clock was free. Nothing is read as locked without
+evidence, and nothing as free without evidence either.
+
+A GPU **timing** -- `gpu.kernel`, `gpu.profile` -- carries one more line for
+each device whose lock was not shown, from `collect::gpu::timing_clock_facts`:
+"GPU timings on device 0 (...) were taken on clocks not shown to be locked: the shader clock
+ran wherever the driver put it, so a duration depends on what the device did
+before it".
+
+Tests: `a_device_run_records_the_state_of_the_clocks_it_read_and_never_set`
+(`tests/family_gpu.rs`, persistence held to `nvidia-smi`),
+`the_clock_state_agrees_with_the_vendors_own_tool` (the top of the shader range
+held to `nvidia-smi`'s `clocks.max.sm`), and the parser and verdict unit tests
+beside it, held to this board's text and to the example in `nvml.h`.
+
+### What can a poll get from the driver?
+
+**measured: the driver's own pace, and what each call costs**
+
+NVML does not read the board when asked. The driver samples it at its own rate
+and the library returns the last sample, so a poll faster than the driver reads
+the same sample again: points on a timeline that look like measurements and are
+one measurement repeated.
+
+| figure | refreshed | how it was seen |
+|---|---|---|
+| energy counter | every 100 ms | 31 changes in 3 s polled every millisecond, median gap 100.4 ms, idle and under a resident kernel alike |
+| instantaneous draw | every 100 ms | the same, 100.4 ms |
+| occupancy | about once a second | the timestamps of the driver's own sample buffer (`nvmlDeviceGetSamples`), 1.0 to 1.13 s apart over 71 samples |
+| temperature | not observable | a whole number of degrees: an unchanged reading may be a steady board |
+| clocks, memory | at the call | they change when the board does |
+
+So the run counts what it can tell. The energy counter only rises while the
+board draws power, so a counter that has not moved is a sample read again. The
+occupancy is not such a figure -- an idle board reads 0.02 from one sample to
+the next, a saturated one 1.0 -- so its repeat is told by the timestamp of the
+driver's newest sample (`nvmlDeviceGetSamples`, asked only for samples newer
+than the one the previous reading saw), never by the value. Both are counted,
+each event says `driver_sample: repeat` or `new`, and the run says how often
+the figure actually moved:
+
+```
+degraded: vendor:nvml: 90 of 101 readings found the energy counter where the previous
+          reading left it, so those points are one driver sample read again, not new
+          measurements: it moved 10 times in 997 ms, about every 99 ms and this run read
+          it every 10 ms; poll no faster than the driver refreshes it
+```
+
+A clock or a temperature that reads the same twice may simply be steady, and is
+not counted: counting it would be counting a guess.
+
+Counting the occupancy by its value was defect 8 (below): an idle board read
+as a stale one.
+
+**The default poll stays at one second.** It is at or above the 100 ms of the
+counter and the draw. It is *not* at or above the occupancy's 1.0 to 1.13 s:
+at the default, a reading now and then finds the sample the previous one read
+(1 of 9 in the 8 s run measured after defect 8's fix), and the run counts and
+says it. The default is shared by every source
+(`Mode::DEFAULT_POLL_INTERVAL`), and a per-source one would need the request
+layer; an occasional repeat, said, is not worth a cadence special to one
+source.
+A request that asks for faster gets what it asked for, with its repeats
+counted and said, rather than a cadence quietly changed under it.
+
+**What a call costs**, in the tool's own cpu time per call, three runs of
+`what_each_kind_of_call_costs_the_calling_thread` while other streams used the
+board. Thread cpu and wall time agree to within a few per cent: the driver
+spins, it does not sleep, so every millisecond here is a millisecond of a core.
+
+| call | cpu per call |
+|---|---|
+| persistence mode | 6 to 9 µs |
+| temperature | 12 to 48 µs |
+| memory (device totals) | 81 to 86 µs |
+| process list (`gpu.mem` with a process) | 0.13 to 0.66 ms |
+| occupancy | 0.6 to 1.4 ms |
+| occupancy sample timestamp (read beside it) | 0.7 to 2.4 ms |
+| clock event reasons | 0.65 to 2.6 ms |
+| clock, one domain (`gpu.freq` reads three) | 0.8 to 2.1 ms |
+| performance levels | 1.9 to 2.0 ms |
+| energy counter | 2.8 to 4.4 ms |
+| instantaneous draw | 2.8 to 7.0 ms |
+
+A `gpu.power` reading is the last two: 6 to 11 ms, which at a 100 ms poll is a
+tenth of a core. The 34 ms the bench reported for the same source is per run,
+not per read. The clock state above is read twice a run, at its ends: the
+performance levels, the event reasons, the application clocks and persistence
+mode, a few milliseconds each time.
+
+Tests: `a_power_poll_faster_than_the_driver_refreshes_counts_its_repeats_and_says_so`
+(10 ms against 300 ms, as a separation, both runs' notes held to their events'
+marks), `an_occupancy_repeat_is_a_driver_sample_seen_twice_not_a_value_seen_twice`
+(200 ms against 1.5 s, the slow run's claim bounded by the gaps in its own
+offsets), `a_poll_faster_than_the_driver_refreshes_repeats_and_a_slower_one_does_not`
+beside the collector, and the cost test beside the library.
+
 ---
 
 ## The four classes
@@ -390,7 +529,7 @@ its workload.
 
 ## Defects found
 
-Six, none worked around. Each was pinned by a test that asserted today's
+Seven, none worked around. Each was pinned by a test that asserted today's
 behaviour, so fixing any one of them failed that test and brought whoever fixed
 it here.
 
@@ -626,7 +765,74 @@ positive case to be reachable at all.
 
 Pinned by `a_target_that_exits_without_being_reaped_ends_the_run`.
 
+### 7. Reading the energy counter often makes it under-count -- **said, not fixable here**
+
+*The driver's, not this tool's: what can be done is to say it. A `gpu.power`
+poll whose own counter falls below half the draw read beside it says so with
+both figures, and the caveats name `--mode count`, which reads the counter
+twice. Another program polling the board does the same to this run, and that
+cannot be seen.*
+
+Found by a unit test that went red only beside another: the check that the
+counter's joules imply roughly the watts sampled across them failed, every
+time, when the new test polling the counter every 5 ms ran beside it -- 31 W of
+counter against 90 W of draw. Alone, it passed.
+
+The counter's rate over a four-second window on the idle board, read only at
+its two ends, against the same window with the counter and the draw read in
+between (driver 615.71.09, RTX 2080 Ti, quiet moments):
+
+| reads in the window | counter, W | draw read beside it, W |
+|---|---|---|
+| the two ends only | 22.5 to 24.0 | -- |
+| every second | 20.7 to 23.4 | -- |
+| every 250 to 300 ms | 18.5 to 19.7 | -- |
+| every 100 ms | 8.8 to 14.4 | 24 to 29 |
+| every 10 ms | 2.7 to 3.5 | 35 to 37 |
+
+Three watts is less than the board can draw at all, and the draw went *up*
+meanwhile: the board left its P8 idle state for P5 under the reads. The
+counter is losing energy, and losing more the more often it is read. Reading
+the temperature or a clock as fast does not do it; reading the counter or the
+draw does, and either one alone is enough.
+
+**It crosses processes.** A count-mode window -- two reads, four seconds
+apart -- measured 22.5 W; the same window while another process read the
+counter every 10 ms measured 3.5 W; 23.4 W again after it stopped. Every
+`gpu.power` figure on this machine is therefore at the mercy of any other NVML
+client polling the board: a monitor, a dashboard, another test.
+
+Two things follow. The comparison in `docs/families/gpu.md` ("integrating
+sampled power is not energy, and polling faster makes it worse") read a
+counter÷integral of 0.64 to 0.75 at 20 Hz as the integral overstating; with this
+measured, at least part of it is the counter under-counting under the 20 Hz
+poll that sampled the draw. And this suite's own tests that hold the counter
+against the draw now take a lock against the test that polls it fast.
+
+Pinned by `a_counter_below_half_the_draw_beside_it_is_said_and_a_close_one_is_not`
+and, on the board, by the scenario that polls at 10 ms and requires the note.
+
 ---
+
+### 8. The occupancy's repeats were its values seen twice -- **fixed**
+
+Found in review of the nineteenth wave. The first cut of the repeat counter
+fingerprinted the occupancy pair by its bits: the guess the counter refuses
+for temperature and clocks, because a steady value is not a stale one. On an
+idle board at the default poll, `omn gpu.engine_busy --mode poll --emit
+timeline -- sleep 8` read 0.02, 0.04, 0.02, 0.03, 0.05, 0.05, 0.02, 0.02,
+0.02, called 3 of 9 readings one driver sample read again, put the refresh at
+"about every 1600 ms" against the 1.0 to 1.13 s measured, marked new samples
+`driver_sample: repeat`, and told the user to poll slower.
+
+The fix takes the occupancy's identity from the driver: the timestamp of the
+newest sample in its buffer (`nvmlDeviceGetSamples`, asked only for samples
+newer than the one the previous reading saw). The same command now reads 1 of
+9 as a repeat, "about every 1143 ms"; a 1.5 s poll of an idle board, whose
+values repeat, claims none. A driver that keeps no samples gets no occupancy
+count at all rather than a guess.
+
+Test: `an_occupancy_repeat_is_a_driver_sample_seen_twice_not_a_value_seen_twice`.
 
 ## Cost of running these
 
