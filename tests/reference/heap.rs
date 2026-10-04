@@ -1,6 +1,7 @@
 //! Parsers for the `heap` family's reference tools. Each turns a tool's
-//! output into the values a pair compares (BRIEF.md, "Decided before this
-//! wave").
+//! output into the values a pair compares (`catalog/references/README.md`).
+//! Every `omn` side of this family is a dotted path into `results.json`,
+//! so no parser of `omn`'s output is needed here.
 //!
 //! - `dhat_summary`: `valgrind --tool=dhat`'s closing lines on stderr --
 //!   `total_bytes`, `total_blocks`, `gmax_bytes`, `gmax_blocks`,
