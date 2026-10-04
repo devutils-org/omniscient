@@ -18,8 +18,10 @@ against `mem.heap.alloc`, `mem.heap.live` and `mem.heap.retained`.
   (`--depth=1 --detailed-freq=1000 --threshold=10`, 590 lines),
   `heaptrack_print.txt` (the header and the closing summary; the 6,896 lines
   of per-site tables between them cut) -- all three produced on this machine.
-  `memleak.documented.txt` is **written from libbpf-tools memleak's format
-  strings**, not produced: memleak needs root.
+  `memleak.format.txt` is **a format fixture, not a capture**: written by
+  hand from libbpf-tools memleak's format strings, with synthetic numbers
+  (two reports, the last summing to 321 bytes in 6 allocations), because
+  memleak needs root.
 - `docs/replaces/heap.md`: seventeen rows.
 
 ## The pairs, shown vs reasoned
@@ -97,8 +99,9 @@ Found on the way, shown:
 
 ## Not done, and why
 
-- The memleak pair has never run: root. Its capture is written, not
-  produced, so its parser is checked against the format, not the tool.
+- The memleak pair has never run: root. It has no capture, only a format
+  fixture, so its parser is checked against the format, not the tool, and
+  the pair is not evidence until the privileged run below.
 - No pair for massif's timeline: its time axis is instructions executed,
   omn's the monotonic clock.
 - No pair for `mem.heap.retained`: no tool here measures freed pages kept by
@@ -117,8 +120,9 @@ The memleak pair, once the user grants sudo for it or runs the test as root:
 sudo memleak -T 100000 -o 0 -c "python3 tests/reference/workloads/heap/blocks.py 64 1048576 4 0.3" 2 1
 ```
 
-Then replace `tests/reference/captures/heap/memleak.documented.txt` with that
-output (renamed `memleak.txt`, the test's file name with it) and check the
+Then save that output as `tests/reference/captures/heap/memleak.txt`, add a
+test reading it (keep `memleak.format.txt`'s, it covers the multi-report
+case), and check the
 pair passes: `cargo test --test reference` with `sudo -n` granted for
 `memleak`. Whether libbpf-tools' memleak exits when the `-c` command does,
 and still reports its outstanding allocations after, is reasoned, not shown.
@@ -143,3 +147,18 @@ and still reports its outstanding allocations after, is reasoned, not shown.
   against `mem.heap.live`, the bpftrace stream's can keep the kernel mode
   (no `-p`) against `mem.kmalloc`.
 - **src (next wave)**: gaps 1 to 6 above.
+
+## Review
+
+- **The memleak capture was not memleak output** (gap, reviewer right).
+  `memleak.documented.txt` held two stacks whose sums (4,194,304 B in 4 plus
+  411,161 B in 48) were chosen to equal dhat's `At t-end` (4,605,465 B in 52
+  blocks), so its test checked the parser against dhat's numbers dressed as
+  memleak's. Fixed as far as this session can: the file is renamed
+  `memleak.format.txt`, its numbers replaced by synthetic ones that agree
+  with no tool (two reports; the last sums to 321 B in 6 allocations, the
+  first's 1,000 B must be ignored), and the test says it is a format
+  fixture. The privileged capture itself is **still not done**: `sudo -n`
+  is not granted for memleak here (`sudo: a password is required`). It
+  stays under "Privileged runs wanted", and the pair counts as reasoned
+  only until `memleak.txt` exists.

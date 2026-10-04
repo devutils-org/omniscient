@@ -272,9 +272,13 @@ mod tests {
 
     #[test]
     fn memleak_sums_every_stack_of_its_last_report() {
-        let v = memleak_outstanding(&capture("memleak.documented.txt"), "").unwrap();
-        assert_eq!(get(&v, "bytes"), 4_605_465.0);
-        assert_eq!(get(&v, "allocations"), 52.0);
+        // A format fixture, not a capture: written by hand from libbpf-tools
+        // memleak's format strings, with synthetic numbers that agree with
+        // no other tool. It checks the parser, never the pair; the pair
+        // needs a privileged run (`memleak.txt`, docs/fixes/w22-heap.md).
+        let v = memleak_outstanding(&capture("memleak.format.txt"), "").unwrap();
+        assert_eq!(get(&v, "bytes"), 321.0);
+        assert_eq!(get(&v, "allocations"), 6.0);
         let two = "[1] Top 9 stacks with outstanding allocations:\n\t5 bytes in 1 allocations from stack\n\
                    [2] Top 9 stacks with outstanding allocations:\n\t7 bytes in 2 allocations from stack\n";
         let v = memleak_outstanding(two, "").unwrap();
