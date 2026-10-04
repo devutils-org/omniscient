@@ -58,8 +58,17 @@ pub struct Entry {
     pub modes: Vec<ModeKind>,
     pub emits: Vec<EmitKind>,
     /// Target kinds this source supports. An absent kind means `no`.
+    ///
+    /// A kind written `no` says why: `targets: {launch: native, pid: "no:
+    /// <reason>"}`. The reason is moved into [`Entry::refused`] as the file
+    /// is read, so this map holds only the support.
     #[serde(default)]
     pub targets: BTreeMap<TargetKind, TargetSupport>,
+    /// Why each target the `targets:` line writes `no` is refused: the
+    /// reason a refusal quotes, read from that line and from nowhere else,
+    /// so it sits on the axis it explains (`DECISIONS.md`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub refused: BTreeMap<TargetKind, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<KeyKind>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -75,6 +84,16 @@ impl Entry {
     /// cgroup, a thread is a narrower pid.
     pub fn target_support(&self, kind: TargetKind) -> TargetSupport {
         support_in(&self.targets, kind)
+    }
+
+    /// Why this source refuses a target kind, when its `targets:` line says,
+    /// following the same fallbacks as [`Entry::target_support`]: a thread
+    /// refused because its process is.
+    pub fn refusal(&self, kind: TargetKind) -> Option<&str> {
+        if self.targets.contains_key(&kind) {
+            return self.refused.get(&kind).map(String::as_str);
+        }
+        self.refusal(kind.fallback()?)
     }
 
     /// How one backend of this chain supports a target kind.
@@ -997,8 +1016,43 @@ impl Catalog {
 }
 
 fn parse_file(name: &str, text: &str) -> Result<Vec<Entry>, ParseError> {
-    serde_norway::from_str(text)
-        .map_err(|error| ParseError::new(format!("catalog file {name} is invalid: {error}")))
+    let invalid = |error: serde_norway::Error| {
+        ParseError::new(format!("catalog file {name} is invalid: {error}"))
+    };
+    let mut document: serde_norway::Value = serde_norway::from_str(text).map_err(invalid)?;
+    if let serde_norway::Value::Sequence(entries) = &mut document {
+        for entry in entries {
+            move_refusals(entry);
+        }
+    }
+    serde_norway::from_value(document).map_err(invalid)
+}
+
+/// Splits each `no: <reason>` of an entry's `targets:` line into the `no` the
+/// support map holds and the reason [`Entry::refused`] holds. A bare `no`
+/// is left as it is, for the loader to refuse; anything else is left for
+/// serde to refuse in its own words.
+fn move_refusals(entry: &mut serde_norway::Value) {
+    use serde_norway::Value;
+    let Some(Value::Mapping(targets)) = entry.get_mut("targets") else {
+        return;
+    };
+    let mut refused = serde_norway::Mapping::new();
+    for (kind, support) in targets.iter_mut() {
+        let Value::String(text) = support else {
+            continue;
+        };
+        let Some(reason) = text.strip_prefix("no:") else {
+            continue;
+        };
+        refused.insert(kind.clone(), Value::String(reason.trim().to_owned()));
+        *support = Value::String("no".to_owned());
+    }
+    if !refused.is_empty() {
+        if let Value::Mapping(entry) = entry {
+            entry.insert(Value::String("refused".to_owned()), Value::Mapping(refused));
+        }
+    }
 }
 
 impl FromStr for Unit {
@@ -1033,6 +1087,71 @@ mod tests {
 
     fn catalog() -> Catalog {
         Catalog::embedded().expect("the embedded catalog must load")
+    }
+
+    /// A minimal entry with the `targets:` line given, as a catalog file
+    /// writes it.
+    fn entry_with_targets(targets: &str) -> String {
+        format!(
+            "- id: cpu.example\n  family: cpu\n  summary: \"x\"\n  unit: count\n  backends:\n    \
+             - {{id: \"fs:proc\", requires: [], cost: free}}\n  modes: [poll]\n  emits: [summary]\n  \
+             targets:\n{targets}\n  determinism: high\n"
+        )
+    }
+
+    /// A refused target's reason is read from its `targets:` line, quoted by
+    /// the refusal of that target and of one that falls back to it, and a
+    /// bare `no` -- a refusal with nothing to quote -- is refused by the
+    /// loader.
+    #[test]
+    fn a_refused_target_carries_its_reason_on_the_targets_line() {
+        let text = entry_with_targets(
+            "    launch: native\n    pid: \"no: the counter lives in the launched process\"",
+        );
+        let entries = parse_file("test.yaml", &text).unwrap();
+        let entry = &entries[0];
+        assert_eq!(entry.target_support(TargetKind::Pid), TargetSupport::No);
+        assert_eq!(
+            entry.target_support(TargetKind::Launch),
+            TargetSupport::Native
+        );
+        assert_eq!(
+            entry.refusal(TargetKind::Pid),
+            Some("the counter lives in the launched process")
+        );
+        // A thread is a narrower pid: refused for the pid's reason.
+        assert_eq!(
+            entry.refusal(TargetKind::Tid),
+            Some("the counter lives in the launched process")
+        );
+        assert_eq!(entry.refusal(TargetKind::Launch), None);
+        assert_eq!(entry.refusal(TargetKind::System), None);
+        Catalog::from_entries(entries.clone()).expect("a reasoned `no` loads");
+
+        let bare = parse_file(
+            "test.yaml",
+            &entry_with_targets("    launch: native\n    pid: \"no\""),
+        )
+        .unwrap();
+        let refusal = Catalog::from_entries(bare).unwrap_err().to_string();
+        assert!(refusal.contains("`pid: no` without a reason"), "{refusal}");
+
+        // Every `no` the embedded catalog writes says why.
+        for entry in catalog().entries() {
+            for (kind, support) in &entry.targets {
+                if *support == TargetSupport::No {
+                    assert!(entry.refusal(*kind).is_some(), "`{}` {kind}", entry.id);
+                }
+            }
+        }
+        let kernel = catalog()
+            .get(&"gpu.kernel".parse().unwrap())
+            .unwrap()
+            .clone();
+        assert!(kernel
+            .refusal(TargetKind::Pid)
+            .unwrap()
+            .contains("CUDA_INJECTION64_PATH"));
     }
 
     #[test]

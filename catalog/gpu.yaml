@@ -209,8 +209,13 @@
   # A launch only. CUPTI records the activity of the process it is loaded
   # in, and the CUDA driver loads it at `cuInit` from CUDA_INJECTION64_PATH:
   # a running process initialised CUDA long ago and cannot be given a library
-  # at exec. The first caveat says so where a refused `--pid` sends a reader.
-  targets: {launch: native}
+  # at exec. The `pid` target says so, and a refused `--pid` quotes it.
+  targets:
+    launch: native
+    pid: "no: a launched program only -- CUPTI works inside the process that
+      owns the CUDA context and is loaded there by the driver at `cuInit` through
+      CUDA_INJECTION64_PATH, which a running process passed long ago; refused for
+      that reason, not for want of a backend"
   # The process that launched the work. An activity record names its device,
   # context and stream, never its thread, so `task` is the process's main
   # thread and the device is an attribute: a `gpu` key is a fence, which a
@@ -266,7 +271,11 @@
     - {id: "preload", requires: ["dynamic-linking"], cost: high}
   modes: [trace]
   emits: [hist, topk, raw, summary]
-  targets: {launch: native}
+  targets:
+    launch: native
+    pid: "no: a launched program only -- the shim is preloaded into the program at
+      its exec, and a running process was linked long ago; refused for that reason,
+      not for want of a backend"
   # The thread is what the shim knows. The device a call went to is its
   # context's, and asking the driver inside every call would cost more than
   # the call, so no event carries a `gpu` key and the entry does not claim one.
@@ -303,7 +312,12 @@
   emits: [raw, topk]
   # A launch only, for gpu.kernel's reason: the range profiler runs inside
   # the process that owns the context, loaded by the driver at `cuInit`.
-  targets: {launch: native}
+  targets:
+    launch: native
+    pid: "no: a launched program only -- CUPTI's range profiler works inside the process that
+      owns the CUDA context and is loaded there by the driver at `cuInit` through
+      CUDA_INJECTION64_PATH, which a running process passed long ago; refused for
+      that reason, not for want of a backend"
   keys: [task, proc]
   filter_fields: [kernel, counter, verdict, device, pid]
   # Per counter, measured in the run: the verdict on each event is the
@@ -357,7 +371,12 @@
     - {id: "vendor:cupti", requires: ["cupti"], cost: med}
   modes: [trace]
   emits: [stack, topk, raw]
-  targets: {launch: native}
+  targets:
+    launch: native
+    pid: "no: a launched program only -- CUPTI's PC sampling works inside the process that
+      owns the CUDA context and is loaded there by the driver at `cuInit` through
+      CUDA_INJECTION64_PATH, which a running process passed long ago; refused for
+      that reason, not for want of a backend"
   keys: [task, proc]
   filter_fields: [kernel, source, file, line, stall, pc, device, pid]
   determinism: low
