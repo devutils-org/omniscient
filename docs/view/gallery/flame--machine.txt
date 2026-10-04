@@ -1,27 +1,8 @@
 omn top │ fixture machine │ 20.0s                                 view: snapshot │ collectors ≥1.09% │ target 16.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
-┌ flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ──────────────────────────┐
-│Not drawn yet. What this view needs, and what this run holds of it:                                                   │
-│                                                                                                                      │
-│cpu.profile              not in this run                                                                              │
-│                         the on-cpu icicle                                                                            │
-│sched.offcpu             not in this run                                                                              │
-│                         the off-cpu icicle                                                                           │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
+on cpu: not in this run │ off cpu: not in this run
+┌ on cpu cpu.profile ──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│cpu.profile is not in this run: the session that made it did not ask for it                                           │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -37,4 +18,23 @@ omn top │ fixture machine │ 20.0s                                 view: snap
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help
+┌ off cpu sched.offcpu ────────────────────────────────────────────────────────────────────────────────────────────────┐
+│sched.offcpu is not in this run: the session that made it did not ask for it                                          │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t threads  d shape

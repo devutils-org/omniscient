@@ -1,40 +1,40 @@
 omn top │ fixture sqlite-latency │ 284ms                          view: snapshot │ collectors ≥4.79% │ target 9.78% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
-┌ flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ──────────────────────────┐
-│Not drawn yet. What this view needs, and what this run holds of it:                                                   │
-│                                                                                                                      │
-│cpu.profile              43 events via pmu:sw [stack] 3 late ~low det degraded x3                                     │
-│                         the on-cpu icicle                                                                            │
-│sched.offcpu             69 events via bpf:raw_tp [stack] ~low det degraded                                           │
-│                         the off-cpu icicle                                                                           │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help
+on cpu: 43 · hottest own __btrfs_check_leaf 6.98% │ off cpu: 243ms · hottest own fdatasync 100%
+┌ on cpu cpu.profile 43 3 late ~low det degraded x3 ───────┐┌ off cpu sched.offcpu 243ms ~low det degraded ────────────┐
+│width ∝ samples · heaviest left            35 frames deep ││width ∝ time off cpu · heaviest left       15 frames deep │
+│▏all 43                                                   ││▏all › ⋯11⋯ › sqlite3+0x19a888 243ms                      │
+│▏sqlite3+0x5f75 › ⋯7⋯ › sqlite3+0x9aa57 97.7%             ││▏sqlite3+0x6eabb 72.8%                    ▏fdatasync 27.2%│
+│▏sqlite3+0x99a16 93.0%                                ▏sq ││▏⋯fdatasync 48.3%           ▏⋯fdatasync                   │
+│▏sqlite3+0x8ae0e › sqlite3+0x19a888 88.4%          ▏__ ▏k ││                                                          │
+│▏sqlite3+0x6eabb 53.5%         ▏btrfs_sync…▏sqlit… ▏s     ││heaviest on their own (where it ends, every path summed)  │
+│▏btrfs_sync_file▏btrfs_sync_fi…▏btr…▏ext▏bt▏do_▏vf        ││  100% ████████████ fdatasync                             │
+│▏btrfs_sync_…▏b ▏btrfs…▏btr…▏co▏wri ▏_  ▏a ▏vf ▏l         ││                                                          │
+│▏__btr…▏wri▏n   ▏btrf… ▏bt▏b▏_ ▏bt         ▏_             ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
+│▏bt    ▏b▏c     ▏b  ▏r  ▏b      ▏w                        ││is always the scheduler, and what it was waiting for is   │
+│                                                          ││the task state                                            │
+│                                                          ││‼ names came from -- sqlite3: no names: it carries no     │
+│heaviest on their own (where it ends, every path summed)  ││function symbols; libc.so.6: its dynamic symbols only: its│
+│ 6.98% ████████████ __btrfs_check_leaf                    ││internal functions are unnamed                            │
+│ 6.98% ████████████ _raw_spin_unlock_irqrestore           ││                                                          │
+│ 4.65% ████████     __rcu_read_lock                       ││                                                          │
+│ 4.65% ████████     amdv1_map_range                       ││                                                          │
+│ 4.65% ████████     btrfs_get_32                          ││                                                          │
+│ 4.65% ████████     crc32c_x86_3way                       ││                                                          │
+│ 4.65% ████████     wbt_wait                              ││                                                          │
+│ 2.33% ████         __init_swait_queue_head               ││                                                          │
+│ 2.33% ████         __map_single_page2.constprop.0        ││                                                          │
+│ 2.33% ████         __rcu_read_unlock                     ││                                                          │
+│ 2.33% ████         __tree_search.constprop.0.isra.0      ││                                                          │
+│ 2.33% ████         _raw_spin_lock                        ││                                                          │
+│                                                          ││                                                          │
+│‼ pmu:sw: time-based sampling: blind to phases running at ││                                                          │
+│reduced frequency                                         ││                                                          │
+│‼ 39 of 39 samples landed in a function that sets up no   ││                                                          │
+│frame pointer (39 in libc.so.6), so the frames under the  ││                                                          │
+│leaf are not its callers: most of them are outside the    ││                                                          │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+on cpu ▸ all
+43 samples ≈ 43.1ms · 100% of all · own 0 · 43 events
+⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t threads  d shape

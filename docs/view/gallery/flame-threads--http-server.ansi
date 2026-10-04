@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture http-server │ 2.84s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥16.1%[0m[35m │ target 92.0% cpu[0m [0m
+ 1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
+[0m[1mon cpu: [0m[2m2.85k · [0mhottest own [0m[1mlink_path_walk[0m[2m 6.07%[0m │ [0m[1moff cpu: [0m[2m5.51s · [0mhottest own [0m[1mlibc+0xa08f2[0m[2m 50.1%[0m                      [0m
+[0m[32m┌[0m[1;32m off cpu [0m[2;32msched.offcpu 5.51s [0m[36m~low det[0m[32m [0m[33mdegraded[0m[32m ────────────────────────────────────────────────────────────────────────┐[0m
+[0m[32m│width ∝ time off cpu · heaviest left                                                                  [0m[2m 26 frames deep [0m[32m│[0m
+[0m[32m│[0m[1;2;97;42m▏all 5.51s                                                                                                            [0m[32m│[0m
+[0m[32m│[0m[2;30;46m▏[python3 2758953] › ⋯13⋯ › libc+0xa08f2 50.0%             [0m[2;30;106m▏[python3 2758972] › ⋯10⋯ › libpython3.14+0x1b9172 49.8%   [0m[32m│[0m
+[0m[32m│[0m                                                           [0m[2;30;46m▏libpython3.14+0x65c00 › ⋯12⋯ › __recv 47.6%            [0m[2;30;106m▏__[0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m│[0m[1mheaviest on their own[0m[2m (where it ends, every path summed)[0m                                                              [0m[32m│[0m
+[0m[32m│[0m[2m 50.1% [0m[36m████████████[0m[2m libc+0xa08f2[0m                                                                                      [0m[32m│[0m
+[0m[32m│[0m[2m 49.8% [0m[36m████████████[0m[2m __recv[0m                                                                                            [0m[32m│[0m
+[0m[32m│[0m[2m 0.06% [0m[36m▏           [0m[2m __poll[0m                                                                                            [0m[32m│[0m
+[0m[32m│[0m[2m 0.02% [0m[36m▏           [0m[2m clock_nanosleep[0m                                                                                   [0m[32m│[0m
+[0m[32m│[0m[2m 0.01% [0m[36m▏           [0m[2m __read[0m                                                                                            [0m[32m│[0m
+[0m[32m│[0m[2m 0.00% [0m[36m▏           [0m[2m libc+0x12071d[0m                                                                                     [0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m│[0m[33m‼ [0m[2mbpf:raw_tp: user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the[0m[32m│[0m
+[0m[32m│[0m[2mtask state[0m                                                                                                            [0m[32m│[0m
+[0m[32m│[0m[33m‼ [0m[2mnames came from -- python3.14: its dynamic symbols only: its internal functions are unnamed; libc.so.6: its dynamic[0m [0m[32m│[0m
+[0m[32m│[0m[2msymbols only: its internal functions are unnamed; libpython3.14.so.1.0: its dynamic symbols only: its internal[0m        [0m[32m│[0m
+[0m[32m│[0m[2mfunctions are unnamed; _socket.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are[0m  [0m[32m│[0m
+[0m[32m│[0m[2munnamed; select.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are unnamed[0m         [0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m│[0m                                                                                                                      [0m[32m│[0m
+[0m[32m└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1;32moff cpu ▸ [0m[1mall[0m                                                                                                           [0m
+[0m[2m5.51s · 100% of all · own 0ns · 140 blocks[0m                                                                              [0m
+[0m[2m⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓hl[0m move  [0m[1m⏎⌫[0m zoom  [0m[1m/*[0m find  [0m[1mom[0m pane  [0m[1mt[0m threads  [0m[1md[0m shape         [0m

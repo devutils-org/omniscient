@@ -1,40 +1,40 @@
 omn top │ fixture http-server │ 2.84s                             view: snapshot │ collectors ≥16.1% │ target 92.0% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
-┌ flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ──────────────────────────┐
-│Not drawn yet. What this view needs, and what this run holds of it:                                                   │
-│                                                                                                                      │
-│cpu.profile              2.85k events via pmu:sw [stack] 29 late ~low det degraded x7                                 │
-│                         the on-cpu icicle                                                                            │
-│sched.offcpu             140 events via bpf:raw_tp [stack,raw] ~low det degraded                                      │
-│                         the off-cpu icicle                                                                           │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help
+on cpu: 2.85k · hottest own link_path_walk 6.07% │ off cpu: 5.51s · hottest own libc+0xa08f2 50.1%
+┌ on cpu cpu.profile 2.85k 29 late ~low det degraded x7 ───┐┌ off cpu sched.offcpu 5.51s ~low det degraded ────────────┐
+│width ∝ samples · heaviest left            88 frames deep ││width ∝ time off cpu · heaviest left       25 frames deep │
+│▏all 2.85k                                                ││▏all › ⋯4⋯ › Py_RunMain 5.50s                             │
+│▏libc+0x12072c › ⋯19⋯ › libpython3.14+0x1e478b 95.1%   ▏Py││▏⋯libc+0xa08f2 50.0%         ▏libpython3.14+0x1b9172 49.8%│
+│▏libpython3.14+0x67661 56.8%     ▏lib…▏_▏l                ││                             ▏⋯__recv 47.6%               │
+│▏⋯do_syscall_64 40.7%   ▏li▏l    ▏li▏_                    ││                                                          │
+│▏__do_sys_newfstat…▏k                                     ││heaviest on their own (where it ends, every path summed)  │
+│▏vfs_fstatat 30.3%                                        ││ 50.1% ████████████ libc+0xa08f2                          │
+│▏vfs_statx     ▏_                                         ││ 49.8% ████████████ __recv                                │
+│▏path_look…▏b                                             ││ 0.06% ▏            __poll                                │
+│▏link_…▏_                                                 ││ 0.02% ▏            clock_nanosleep                       │
+│▏_                                                        ││ 0.01% ▏            __read                                │
+│                                                          ││ 0.00% ▏            libc+0x12071d                         │
+│heaviest on their own (where it ends, every path summed)  ││                                                          │
+│ 6.07% ████████████ link_path_walk                        ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
+│ 5.12% ██████████   __d_lookup_rcu                        ││is always the scheduler, and what it was waiting for is   │
+│ 3.58% ███████      __tls_get_addr                        ││the task state                                            │
+│ 2.38% █████        do_syscall_64                         ││‼ names came from -- python3.14: its dynamic symbols only:│
+│ 1.54% ███          btrfs_getattr                         ││its internal functions are unnamed; libc.so.6: its dynamic│
+│ 1.47% ███          bpf_trace_run2                        ││symbols only: its internal functions are unnamed;         │
+│ 1.47% ███          security_inode_permission             ││libpython3.14.so.1.0: its dynamic symbols only: its       │
+│ 1.37% ███          _PyUnicode_JoinArray                  ││internal functions are unnamed;                           │
+│ 1.30% ███          security_inode_getattr                ││_socket.cpython-314-x86_64-linux-gnu.so: its dynamic      │
+│ 1.19% ██           _Py_Dealloc                           ││symbols only: its internal functions are unnamed;         │
+│ 1.02% ██           bpf_trampoline_6442524142             ││select.cpython-314-x86_64-linux-gnu.so: its dynamic       │
+│ 0.95% ██           strncpy_from_user                     ││symbols only: its internal functions are unnamed          │
+│                                                          ││                                                          │
+│‼ pmu:sw: time-based sampling: blind to phases running at ││                                                          │
+│reduced frequency                                         ││                                                          │
+│‼ 1428 of 1621 samples landed in a function that sets up  ││                                                          │
+│no frame pointer (1295 in libc.so.6, 101 in               ││                                                          │
+│ld-linux-x86-64.so.2, 32 in libpython3.14.so.1.0), so the ││                                                          │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+on cpu ▸ all
+2.85k samples ≈ 2.86s · 100% of all · own 0 · 2.85k events
+⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t threads  d shape
