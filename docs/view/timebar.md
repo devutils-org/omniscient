@@ -72,8 +72,8 @@ the view adds nothing to a row and removes nothing. Two things are read beside
 the rows, as `omn latency` reads them:
 
 - the `blocked` row is split by the task state each block recorded --
-  `uninterruptible` drawn as I/O, `sleeping` as a sleep, a sleep `sched.futex`
-  covers half of as a lock, a sleep whose stack waits for a child as a child
+  `uninterruptible` drawn as I/O, `sleeping` as a sleep less what `sched.futex`
+  saw waiting in futex(2), which is drawn as a lock beside it, a sleep whose stack waits for a child as a child
   -- **when the run holds `sched.offcpu`'s events**. A recording that kept its
   stacks only (the `sqlite-latency` fixture) cannot be split, and the bar and
   its note say so: it is drawn `blocked`, named by its heaviest stack.
@@ -90,7 +90,7 @@ run's window:
 |---|---|
 | blocked, by task state | `sched.offcpu`'s events (`total_ns` less `queued_ns`, as the triage) |
 | run queue | `sched.runqlat`'s events, or its per-task summary |
-| lock | `sched.futex`'s per-task waits, when they cover half a sleep |
+| lock | `sched.futex`'s per-task waits, taken out of the sleep (never more than the sleep) |
 | on cpu | `cpu.oncpu_time` |
 
 `cpu.oncpu_time` is served by `fs:proc` on this machine: a **per-process**
