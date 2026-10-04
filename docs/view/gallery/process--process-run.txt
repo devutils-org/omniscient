@@ -8,9 +8,9 @@ omn top │ recording process-run │ 2.39s                           view: snap
  Network ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▆██▂▁▁▁▁▁▁   ↓ 108KiB/s     ↑ 431KiB/s   0 retrans (machine)  7 late ~low det degraded x3
  GPU                                no kernel launched   VRAM 0B
  Energy  ▄▄▄▄▄▇▇▇████████████████   145 W          avg 127 W   the machine's, not apportioned  2 late
- Time    ████████▚▚▚░░░░░░░░░░░░·   sleep 51.5%   on cpu 35.1%   run queue 10.6%   I/O 0.11%  17 late ~low det degraded
+ Time    ████████▚▚▚▞▞░░░░░░░░░░·   sleep 40.9%   on cpu 35.1%   run queue 10.6%   lock 10.5%  17 late ~low det degraded
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-▶ suspect: sleep (blocked: sleeping)  51.5%                                                         Enter/click → detail
+▶ suspect: sleep (blocked: sleeping)  40.9%                                                         Enter/click → detail
 
 CPU in one hue: the machine's cores are not in the recording
 Memory in one hue: the machine's memory is not in the recording

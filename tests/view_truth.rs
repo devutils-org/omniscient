@@ -187,7 +187,7 @@ fn flame_draws_each_functions_known_weight() {
 /// `timebar`: the worker's bar, selected, splits its wall clock as the
 /// manifest's phases do -- 0.60 s computing plus 0.30 s contended on the cpu,
 /// 0.40 s asleep and 0.40 s on a lock (both `sleeping` to the scheduler, the
-/// lock's part in futex(2)), and at least half the contended 0.30 s on the
+/// lock's part in futex(2) and drawn apart from the nap), and at least half the contended 0.30 s on the
 /// run queue.
 #[test]
 fn timebar_splits_the_workers_wall_clock_as_its_phases() {
@@ -210,13 +210,21 @@ fn timebar_splits_the_workers_wall_clock_as_its_phases() {
     let on_cpu = first(&drawn, "█ on-cpu", seconds);
     let truth_on = phase("on_cpu") + phase("runqueue");
     within("worker on cpu", on_cpu, truth_on * 0.97, truth_on * 1.1);
-    let asleep = first(&drawn, "░ blocked: sleeping", seconds);
-    let truth_asleep = phase("sleeping") + phase("futex");
+    // The futex waits come out of the sleep (`sched.futex`): what is left
+    // is the nap, and the waits are a lock of their own.
+    let asleep = first(&drawn, "░ blocked: sleeping ", seconds);
     within(
         "worker asleep",
         asleep,
-        truth_asleep * 0.97,
-        truth_asleep * 1.3,
+        phase("sleeping") * 0.97,
+        phase("sleeping") * 1.3,
+    );
+    let lock = first(&drawn, "blocked: sleeping, on a futex", seconds);
+    within(
+        "worker on a lock",
+        lock,
+        phase("futex") * 0.97,
+        phase("futex") * 1.3,
     );
     let futex = in_line(&drawn, "waiting in futex(2)", seconds);
     within(

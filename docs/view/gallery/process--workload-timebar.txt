@@ -8,9 +8,9 @@ omn top │ fixture workload-timebar │ 3.28s                        view: snap
  Network                            no socket bytes   0 retrans (machine)
  GPU                                no kernel launched   VRAM 0B
  Energy  ▇▇▇▇█████████████████▂     31.2 W         avg 123 W   the machine's, not apportioned
- Time    ▚▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞   lock 95.1%   run queue 2.49%   on cpu 2.13%  ~low det degraded x3 2 late
+ Time    █▚▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞░░░░   lock 77.1%   sleep 18.1%   run queue 2.49%   on cpu 2.13%  ~low det degraded x3 2 la
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-▶ suspect: lock (blocked: sleeping, on a futex)  95.1%                                              Enter/click → detail
+▶ suspect: lock (blocked: sleeping, on a futex)  77.1%                                              Enter/click → detail
 
 CPU in one hue: the machine's cores are not in the recording
 Memory in one hue: the machine's memory is not in the recording

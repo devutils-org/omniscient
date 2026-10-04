@@ -8,9 +8,9 @@ omn top │ fixture many-requests │ 15.8s                           view: snap
  Network ▇███▇▇█▇▇█▇█▇█▇███████▇▆   ↓ 2.04KiB/s    ↑ 2.04KiB/s   0 retrans (machine)  3 late ~low det degraded x3
  GPU                                no kernel launched   VRAM 0B
  Energy  ▄▄▅▅▅▅▄▄▆████▇▇▇▆▇▇▆▆▆▇▄   68.2 W         avg 104 W   the machine's, not apportioned  1 late
- Time    ░░░░░░░░░░░░░░░░░░░░░░░░   sleep 97.4%   I/O 1.23%   on cpu 0.26%   run queue 0.19%  8 late ~low det degraded x
+ Time    ░░░░░░░░░░░░░░░░░░░░░░░▓   sleep 96.4%   I/O 1.23%   lock 1.00%   on cpu 0.26%  8 late ~low det degraded x2
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-▶ suspect: sleep (blocked: sleeping)  97.4%                                                         Enter/click → detail
+▶ suspect: sleep (blocked: sleeping)  96.4%                                                         Enter/click → detail
 
 CPU in one hue: the machine's cores are not in the recording
 Memory in one hue: the machine's memory is not in the recording

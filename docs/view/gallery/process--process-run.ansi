@@ -8,9 +8,9 @@
  [0m[1mNetwork [0m[34m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▆██▂▁▁▁▁▁▁[0m   [0m[1;34m↓ 108KiB/s  [0m   ↑ 431KiB/s   0 retrans (machine)  [0m[33m7 late[0m [0m[36m~low det[0m [0m[33mdegraded x3[0m        [0m
  [0m[1;2mGPU     [0m                           [0m[2mno kernel launched   VRAM 0B[0m                                                        [0m
  [0m[1mEnergy  [0m[34m▄▄▄▄▄▇▇▇████████████████[0m   [0m[1;34m145 W       [0m   avg 127 W   the machine's, not apportioned  [0m[33m2 late[0m                   [0m
- [0m[1mTime    [0m[32m████████[0m[35m▚▚▚[0m[37m░░░░░░░░░░░░[0m[2m·[0m   [0m[37msleep 51.5%[0m   [0m[32mon cpu 35.1%[0m   [0m[35mrun queue 10.6%[0m   [0m[34mI/O 0.11%[0m  [0m[33m17 late[0m [0m[36m~low det[0m [0m[33mdegraded [0m
+ [0m[1mTime    [0m[32m████████[0m[35m▚▚▚[0m[31m▞▞[0m[37m░░░░░░░░░░[0m[2m·[0m   [0m[37msleep 40.9%[0m   [0m[32mon cpu 35.1%[0m   [0m[35mrun queue 10.6%[0m   [0m[31mlock 10.5%[0m  [0m[33m17 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m
 [0m[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
-[0m[1m▶ suspect: [0m[1;37msleep (blocked: sleeping)  51.5%[0m                                                         [0m[2mEnter/click → detail[0m
+[0m[1m▶ suspect: [0m[1;37msleep (blocked: sleeping)  40.9%[0m                                                         [0m[2mEnter/click → detail[0m
                                                                                                                         [0m
 [0m[2mCPU in one hue: the machine's cores are not in the recording[0m                                                            [0m
 [0m[2mMemory in one hue: the machine's memory is not in the recording[0m                                                         [0m
