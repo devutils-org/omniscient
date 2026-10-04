@@ -1,7 +1,7 @@
 # Reference pairs for the `heap` family of tools: each entry runs omn and an
 # established tool on the same workload and holds them to a declared
 # tolerance. Read by tests/reference.rs, never by omn itself. Schema:
-# BRIEF.md, "Decided before this wave".
+# catalog/references/README.md.
 #
 # One workload for every pair: blocks.py mallocs 64 blocks of 1 MiB through
 # libc, holds them 0.3 s (so a poller sees the peak), frees all but 4. The
@@ -13,15 +13,18 @@
 # heaptrack's are both LD_PRELOAD interposers on the same symbols. So every
 # pair alternates runs of a workload deterministic to the block, and says so.
 #
-# `omn:` paths are `<emit>.<field>` of the first series of that emit: the
-# allocation pairs read `topk:1` (keyed by task, its `total` the bytes and its
-# `events` the calls), because omn's `summary` has no sum.
+# omn writes its JSON to `-o {out}` (read from `{out}/results.json`), and the
+# paths read the one series of one emit: the allocation pairs read `topk:1`
+# (keyed by task, its `total` the bytes and its `events` the calls), because
+# omn's `summary` has no sum; the live pairs read `summary`'s `max` and `last`.
+# Every pair is `run: separate` (alternate runs, the default).
 
-- source: mem.heap.alloc
+- id: dhat-total-bytes
+  source: mem.heap.alloc
   tool: valgrind --tool=dhat
   use: "valgrind --tool=dhat prog  # Total: N bytes in M blocks"
   workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
-  omn: [trace, mem.heap.alloc, --filter, 'op == "alloc"', -e, "topk:1", --format, json]
+  omn: [trace, mem.heap.alloc, --filter, 'op == "alloc"', -e, "topk:1", --format, json, -o, "{out}"]
   reference:
     command: [valgrind, --tool=dhat, --run-libc-freeres=no, --dhat-out-file=/dev/null]
     parse: dhat_summary
@@ -29,15 +32,16 @@
     privileged: false
   compare:
     key: total_bytes
-    omn: topk.total
+    omn: results.0.outputs[emit=topk].series.0.total
     tolerance: {rel: 0.001}
     why: "both intercept malloc, calloc, realloc and memalign in the program and sum the bytes asked for; alternate runs, the workload's bytes identical to the byte and the interpreter's within ~200 bytes of 73.6 MB (valgrind's own startup adds a few small blocks)"
 
-- source: mem.heap.alloc
+- id: dhat-total-blocks
+  source: mem.heap.alloc
   tool: valgrind --tool=dhat
   use: "valgrind --tool=dhat prog  # Total: N bytes in M blocks"
   workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
-  omn: [trace, mem.heap.alloc, --filter, 'op == "alloc"', -e, "topk:1", --format, json]
+  omn: [trace, mem.heap.alloc, --filter, 'op == "alloc"', -e, "topk:1", --format, json, -o, "{out}"]
   reference:
     command: [valgrind, --tool=dhat, --run-libc-freeres=no, --dhat-out-file=/dev/null]
     parse: dhat_summary
@@ -45,15 +49,16 @@
     privileged: false
   compare:
     key: total_blocks
-    omn: topk.events
+    omn: results.0.outputs[emit=topk].series.0.events
     tolerance: {rel: 0.01}
     why: "one event per allocation call against dhat's block count; alternate runs, the interpreter's startup varying by a few blocks out of ~3180"
 
-- source: mem.heap.live
+- id: dhat-gmax
+  source: mem.heap.live
   tool: valgrind --tool=dhat
   use: "valgrind --tool=dhat prog  # At t-gmax: the peak live heap"
   workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
-  omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json]
+  omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json, -o, "{out}"]
   reference:
     command: [valgrind, --tool=dhat, --run-libc-freeres=no, --dhat-out-file=/dev/null]
     parse: dhat_summary
@@ -61,15 +66,16 @@
     privileged: false
   compare:
     key: gmax_bytes
-    omn: summary.max
+    omn: results.0.outputs[emit=summary].series.0.max
     tolerance: {rel: 0.01}
     why: "dhat tracks the exact high-water mark; omn polls the shim's live total, so the workload holds its peak 0.3 s for six polls to land on it. Alternate runs. Without the hold omn misses the peak (gap 2)"
 
-- source: mem.heap.live
+- id: dhat-end
+  source: mem.heap.live
   tool: valgrind --tool=dhat
   use: "valgrind --tool=dhat prog  # At t-end: what was never freed"
   workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
-  omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json]
+  omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json, -o, "{out}"]
   reference:
     command: [valgrind, --tool=dhat, --run-libc-freeres=no, --dhat-out-file=/dev/null]
     parse: dhat_summary
@@ -77,15 +83,16 @@
     privileged: false
   compare:
     key: end_bytes
-    omn: summary.last
+    omn: results.0.outputs[emit=summary].series.0.last
     tolerance: {rel: 0.005}
     why: "the live heap at exit, both after the program's own frees; --run-libc-freeres=no because valgrind otherwise frees glibc's buffers at exit, which a native run never does (12 KB here). Alternate runs"
 
-- source: mem.heap.live
+- id: massif-peak
+  source: mem.heap.live
   tool: valgrind --tool=massif
   use: "valgrind --tool=massif prog; ms_print massif.out  # the peak snapshot"
   workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
-  omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json]
+  omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json, -o, "{out}"]
   reference:
     command: [valgrind, --tool=massif, --peak-inaccuracy=0, --depth=1, --detailed-freq=1000, --threshold=10, --run-libc-freeres=no, --massif-out-file=/dev/stdout]
     parse: massif_peak
@@ -93,15 +100,16 @@
     privileged: false
   compare:
     key: peak
-    omn: summary.max
+    omn: results.0.outputs[emit=summary].series.0.max
     tolerance: {rel: 0.01}
     why: "massif's peak snapshot (--peak-inaccuracy=0, so it is the exact high-water mark of useful heap bytes, the allocator's padding apart) against omn's polled maximum over the 0.3 s hold. Alternate runs"
 
-- source: mem.heap.alloc
+- id: heaptrack-calls
+  source: mem.heap.alloc
   tool: heaptrack
   use: "heaptrack prog; heaptrack_print file  # calls to allocation functions"
   workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
-  omn: [trace, mem.heap.alloc, --filter, 'op == "alloc"', -e, "topk:1", --format, json]
+  omn: [trace, mem.heap.alloc, --filter, 'op == "alloc"', -e, "topk:1", --format, json, -o, "{out}"]
   reference:
     command: [sh, -c, 'd=$(mktemp -d) && heaptrack --record-only -o "$d/ht" "$@" >/dev/null 2>&1 && heaptrack_print "$d"/ht.* ; rm -rf "$d"', heaptrack]
     parse: heaptrack_summary
@@ -109,15 +117,16 @@
     privileged: false
   compare:
     key: calls
-    omn: topk.events
+    omn: results.0.outputs[emit=topk].series.0.events
     tolerance: {rel: 0.01}
     why: "both are LD_PRELOAD interposers counting each allocation call; alternate runs, the interpreter's startup varying by a few calls"
 
-- source: mem.heap.live
+- id: heaptrack-peak
+  source: mem.heap.live
   tool: heaptrack
   use: "heaptrack prog; heaptrack_print file  # peak heap memory consumption"
   workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
-  omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json]
+  omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json, -o, "{out}"]
   reference:
     command: [sh, -c, 'd=$(mktemp -d) && heaptrack --record-only -o "$d/ht" "$@" >/dev/null 2>&1 && heaptrack_print "$d"/ht.* ; rm -rf "$d"', heaptrack]
     parse: heaptrack_summary
@@ -125,15 +134,16 @@
     privileged: false
   compare:
     key: peak_bytes
-    omn: summary.max
+    omn: results.0.outputs[emit=summary].series.0.max
     tolerance: {rel: 0.01}
     why: "heaptrack's exact high-water mark, printed to two decimals of MB, against omn's polled maximum over the 0.3 s hold. Alternate runs"
 
-- source: mem.heap.live
+- id: heaptrack-leaked
+  source: mem.heap.live
   tool: heaptrack
   use: "heaptrack prog; heaptrack_print file  # total memory leaked"
   workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
-  omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json]
+  omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json, -o, "{out}"]
   reference:
     command: [sh, -c, 'd=$(mktemp -d) && heaptrack --record-only -o "$d/ht" "$@" >/dev/null 2>&1 && heaptrack_print "$d"/ht.* ; rm -rf "$d"', heaptrack]
     parse: heaptrack_summary
@@ -141,15 +151,16 @@
     privileged: false
   compare:
     key: leaked_bytes
-    omn: summary.last
+    omn: results.0.outputs[emit=summary].series.0.last
     tolerance: {rel: 0.01}
     why: "what was never freed, at exit, printed to two decimals of MB, against omn's last live total. Alternate runs"
 
-- source: mem.heap.live
+- id: memleak-outstanding
+  source: mem.heap.live
   tool: memleak
   use: "memleak -c 'prog'  # outstanding allocations by stack (bcc or libbpf-tools)"
   workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
-  omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json]
+  omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json, -o, "{out}"]
   reference:
     command: [sh, -c, 'exec memleak -T 100000 -o 0 -c "$*" 2 1', memleak]
     parse: memleak_outstanding
@@ -157,6 +168,6 @@
     privileged: true
   compare:
     key: bytes
-    omn: summary.last
+    omn: results.0.outputs[emit=summary].series.0.last
     tolerance: {rel: 0.01}
     why: "memleak's uprobes on malloc and free summed over every stack of its one report, taken after the program exited, against omn's last live total; -o 0 so no young allocation is pruned. Alternate runs"
