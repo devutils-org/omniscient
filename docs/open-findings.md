@@ -12152,3 +12152,63 @@ request of 32, reconciled to the byte). Charge it to the bio's submitter
 
 `the_lines_find_what_the_workload_did` allows four 128 KiB requests short of
 the file; tighten it back to the file's bytes once the request above lands.
+
+## The twenty-second wave, coordinator, after the merge
+
+### To every reference family and to stream reference (`tests/reference/runner.rs`): the pairs were written before the runner, and 87 of them do not run through it
+
+`cargo test --test reference` at `bc9f9a5`: 116 passed, 11 failed. The runner's
+own tests, `families_are_whole`, the parsers' tests, `pairs_bpftrace` and
+`pairs_net` pass. Every other `pairs_<family>` fails, and so do the two data
+checks. The family streams wrote their pairs while the runner was not on
+`main` (`docs/fixes/w22-io.md`, "Needs from another stream"), each to a schema
+of its own, and none of their pairs had run through a runner before the merge.
+The failures fall into five kinds:
+
+- **A path the runner's syntax does not parse** (`every_pair_is_well_formed`,
+  22 pairs): `summary[*].mean` and `rate[dir:read].total` (io, gpu, top), where
+  the runner knows `.*.` and `[field=value]` only; perfrecord's `compare.omn`
+  holds prose (`results[0].stacks, leaves summed over ...`), not a path.
+- **`{pid}` without `run: attach`** (12 pairs, top and perfstat).
+- **A path that parses but is not where `omn`'s JSON keeps the value** (heap,
+  perfsched, perfstat, sysstat, power, gpu): `summary.total`, `topk.events`,
+  `raw.stall_ratio` written from the top of the document, where the value sits
+  under `results[source=...].outputs[emit=...].series...`.
+- **An `omn` command line `omn` refuses** (power, sysstat): `--system` or
+  `--cpu` together with a launched program (exit 2, the CLI refusing the
+  combination). These pairs want `run: attach` with no `{pid}` and an
+  `omn --duration`, as the README's system-wide case says.
+- **Fields the runner does not know** (io's `same_run`, `start_after`,
+  `duration`): ignored, so fio's pairs run as two separate runs where they
+  were written for one.
+
+`every_row_names_a_pair_or_why_none` fails on 22 rows (gpu 7, perfstat 5,
+perfsched 3, heap 2, top 2, bpftrace 1, perfrecord 1, sysstat 1): rows naming a
+pair by an `id` the YAML does not carry, or by a tool not in the first cell.
+
+Not a merge fix: each pair has to be rewritten against `omn`'s real output and
+run on this machine, ~90 pairs across nine families. Wanted: one stream per
+family (or one stream for all) that rewrites the pairs to the README's schema,
+runs `cargo test --test reference pairs_<family> -- --nocapture` until it
+holds, and asks stream reference for what the schema lacks (`[*]` as an
+alternative spelling of `.*`, io's one-run `same_run`, a `{log2: 1}`
+tolerance). The full output of the run is not kept; rerun the command above.
+
+### At the merge: stream reference's review fix, lost to a stash swap
+
+`c2194ab` holds the bpftrace round's work under stream reference's message;
+the reference fix stayed in the dangling stash `c72ff98` and as uncommitted
+changes in `omniscient-w22-bpftrace`. Landed on `main` unchanged in
+`bc9f9a5`. The worktree `omniscient-w22-bpftrace` still carries those three
+files uncommitted; they are now on `main`, so they can be dropped there.
+
+### Rerun alone once, and passed
+
+- `cases::every_case_names_its_known_cause_both_ways`
+  (`sqlite3-durability/commits-that-wait-for-nothing`: the person's way named
+  `blocked` at `fdatasync`, the agent's `on-cpu`): the load-sensitive case of
+  the eighteenth wave (`docs/fixes/w18-launcher.md`). Red in the `make check`
+  and in the `--no-fail-fast` run, green alone (6 passed). No source under
+  `src/` changed in this wave.
+- `cross_machine::a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_its_rung`:
+  red in the `--no-fail-fast` run, green alone.
