@@ -915,7 +915,7 @@ impl Method {
         }
     }
 
-    fn args(&self) -> Vec<String> {
+    pub fn args(&self) -> Vec<String> {
         let mut args = vec![
             "trace".into(),
             self.source.clone(),
@@ -1227,10 +1227,37 @@ pub fn workload_for(source: &str) -> Workload {
     }
 }
 
+/// Whether a source is measured on the GPU workloads rather than on the
+/// reference ones: a `gpu` source that follows only a launched program. Those
+/// act inside the program's own GPU calls -- an injection library loaded at
+/// `cuInit`, a shim around the driver's entry points -- and the reference
+/// workloads make no GPU call, so a row of the backends table would measure
+/// a tracer with nothing to trace and call it cheap. A `gpu` source that also
+/// watches anything else (the NVML polls) costs what its poll costs
+/// whatever the program does, and stays in the backends table.
+pub fn on_gpu_workloads(entry: &omn::catalog::Entry) -> bool {
+    use omn::catalog::TargetSupport;
+    use omn::request::TargetKind;
+    let others = [
+        TargetKind::Pid,
+        TargetKind::Tid,
+        TargetKind::Cgroup,
+        TargetKind::Cpu,
+        TargetKind::Iface,
+        TargetKind::Container,
+        TargetKind::System,
+    ];
+    entry.family == "gpu"
+        && entry.target_support(TargetKind::Launch) != TargetSupport::No
+        && others
+            .iter()
+            .all(|kind| entry.target_support(*kind) == TargetSupport::No)
+}
+
 /// The mode strings tried, in order. A poll is measured at 100 ms and a sample
 /// at 997 Hz: both set what the backend costs, and the table states them.
-const MODES: [&str; 5] = ["count", "trace", "poll@100ms", "sample@997hz", "snapshot"];
-const EMITS: [&str; 5] = ["summary", "rate", "hist", "raw", "topk"];
+pub const MODES: [&str; 5] = ["count", "trace", "poll@100ms", "sample@997hz", "snapshot"];
+pub const EMITS: [&str; 5] = ["summary", "rate", "hist", "raw", "topk"];
 
 /// Every (source, backend) this build can serve on this machine, each with a
 /// mode and emit the tool accepts for it, and every one it cannot, with why.
@@ -1261,6 +1288,18 @@ pub fn plan(omn: &Omn, only: Option<&str>) -> (Vec<Planned>, Vec<Unplanned>) {
         .into_iter()
         .flatten()
         .collect();
+        if on_gpu_workloads(entry) {
+            for backend in &entry.backends {
+                unplanned.push(Unplanned {
+                    source: source.clone(),
+                    backend: backend.id.clone(),
+                    why: "acts inside a launched program's GPU calls, so it is measured on the \
+                          GPU workloads (tests/bench_gpu.rs), where there are calls to act in"
+                        .into(),
+                });
+            }
+            continue;
+        }
         if targets.is_empty() {
             for backend in &entry.backends {
                 unplanned.push(Unplanned {
@@ -1369,7 +1408,7 @@ pub fn plan(omn: &Omn, only: Option<&str>) -> (Vec<Planned>, Vec<Unplanned>) {
     (planned, unplanned)
 }
 
-fn combinations<'a>(
+pub fn combinations<'a>(
     modes: &'a [String],
     emits: &'a [String],
 ) -> impl Iterator<Item = (String, String)> + 'a {
@@ -1387,7 +1426,7 @@ fn combinations<'a>(
         })
 }
 
-fn first_line(text: &str) -> String {
+pub fn first_line(text: &str) -> String {
     text.lines()
         .find(|line| line.trim_start().starts_with("error"))
         .or_else(|| text.lines().next())

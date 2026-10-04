@@ -856,3 +856,24 @@ neither counts the other's as unknown (`a_profile_and_kernel_times_share_one_lau
   (the two workloads' disagreement, the known hot line) were used instead.
 - **Multi-device.** Everything was measured on one 2080 Ti (TU102, CUPTI
   13.4); the code keys every context by its device, unexercised past one.
+
+# What a GPU tracer costs (nineteenth wave, stream bench)
+
+Measured in `docs/bench.md`, "The GPU tracers, nineteenth wave", on three
+regimes (`examples/bench/gpu.c`) and against a negative control -- the
+injection library loaded by the driver and disarmed:
+
+| backend | launch-bound (a kernel every 2 us) | compute- or memory-bound (a kernel every ms) | band |
+|---|---|---|---|
+| `gpu.kernel` through `vendor:cupti` | +67 % of the time, +83 % of the cpu, against the control | under 1 % | `extreme` (was `med`) |
+| `gpu.api` through `preload` | +11.3 % | 3 % or less | `high` (was `low`) |
+| the NVML polls | what the poll reads | the same | unchanged |
+| the library loaded, disarmed | inside the floor | inside the floor | - |
+
+CUPTI's price is paid inside each launch, by the launching thread, about
+1.3 us a launch: with the workload's other threads kept off its cpu, that
+thread's own cpu grew by 66 %, and every other thread spent 17 ms more on
+other cpus. `nsys`, CUPTI underneath too, costs the launching thread about as
+much (+74 %). A band per backend holds the worst regime, and
+each source's caveat names it. `gpu.counters` and `gpu.profile` are pending in
+the record until their collectors land.
