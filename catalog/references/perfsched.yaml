@@ -10,8 +10,6 @@
 #   Absent, the first series is read.
 # - `compare.scale: N` -- the tool's value is multiplied by N before the
 #   comparison, where it prints another unit than omn (microseconds).
-# - `compare.missing: zero` -- omn printed no series at all (a count that
-#   saw nothing has no row), which is read as 0 rather than as a failure.
 #
 # The workloads make system calls nothing else in the interpreter makes
 # (`getppid`, `clock_nanosleep`), so a count is exact on both sides and a
@@ -143,33 +141,19 @@
       sched-in events under the name it ends with, so the few before the
       rename fall under `python3`"
 
-- source: sched.runqlat
-  tool: perf sched latency
-  use: "perf sched latency  (average scheduling delay per task)"
-  workload: [python3, tests/reference/workloads/perfsched/sleeper.py, "100", "2"]
-  omn: [trace, sched.runqlat, -e, summary, --format, json]
-  reference:
-    command: [sh, -c, 'd=$(mktemp) && perf sched record -q -o "$d" -- "$@" >/dev/null 2>&1 && perf sched latency -i "$d"; r=$?; rm -f "$d"; exit $r', sh]
-    parse: perf_sched_latency
-    requires: [perf, sh]
-    privileged: true
-  compare:
-    key: omnref-sleep.avg_delay_ns
-    omn: summary.mean
-    tolerance: {abs: 200000}
-    why: "alternate runs, so two draws of a distribution the rest of the
-      machine sets: omn's mean wait for this workload was 256 to 565 us over
-      three runs under the wave's load. The tolerance says the two agree on
-      the order of magnitude, not to the microsecond; perf measures wakeup
-      to sched-in, which omn reports as `wake_to_run_ns` beside the
-      kernel's own `run_delay` account it averages"
+# No pair for `perf sched latency`'s average delay against `sched.runqlat`:
+# omn's `summary.mean` is the kernel's `run_delay`, perf's average is wakeup
+# to sched-in (omn's `wake_to_run_ns`, which no emit summarises), and the two
+# alternate runs it would take put the mean anywhere from 2 to 178 us on this
+# machine (three runs, 2026-10-04). docs/replaces/perfsched.md says what a
+# pair would need.
 
 # --- perf sched timehist ------------------------------------------------------
 
 - source: sched.migrations
   tool: perf sched timehist
   use: "perf sched timehist -s  (per-task migrations)"
-  workload: [python3, tests/reference/workloads/perfsched/sleeper.py, "100", "2"]
+  workload: [python3, tests/reference/workloads/perfsched/migrate.py, "200"]
   omn: [trace, sched.migrations, -m, count, -e, topk, --format, json]
   reference:
     command: [sh, -c, 'd=$(mktemp) && perf sched record -q -o "$d" -- "$@" >/dev/null 2>&1 && perf sched timehist -s -i "$d"; r=$?; rm -f "$d"; exit $r', sh]
@@ -177,14 +161,18 @@
     requires: [perf, sh]
     privileged: true
   compare:
-    key: omnref-sleep.migrations
+    key: omnref-migrate.migrations
     omn: topk.total
     across: sum
-    missing: zero
-    tolerance: {abs: 5}
-    why: "alternate runs; 0 to 2 migrations over three omn runs here, set by
-      where the scheduler wakes the sleeper. An absolute band, since the
-      count is near zero"
+    tolerance: {rel: 0.1}
+    why: "alternate runs of a workload that sets its own count: 200
+      sched_setaffinity calls alternating two cpus, each one a migration the
+      kernel makes before the call returns, whatever the load. omn counted
+      203, 205 and 209 over three runs here (2026-10-04), 1005 for 1000;
+      the few beyond the moves are the scheduler's at start and exit, and
+      perf files those before the rename under `python3`. An omn that
+      counts nothing, or is not attached, prints no series and fails the
+      pair: no series is not read as zero"
 
 - source: sched.switches
   tool: perf sched timehist

@@ -317,7 +317,13 @@ fn perf_lock_contention(stdout: &str, stderr: &str) -> Result<Values, String> {
     let mut in_table = false;
     for line in text.lines() {
         let t = line.trim();
-        if t.starts_with("contended") {
+        // perf appends `=== output for debug ===` (`(BPF)` with `-b`) when
+        // it lost or could not pair events; its histogram has a
+        // `contended: N` line of its own, so the table ends there.
+        if t.starts_with("===") {
+            break;
+        }
+        if t.starts_with("contended") && t.contains("caller") {
             in_table = true;
             continue;
         }
@@ -458,6 +464,19 @@ mod tests {
         assert_eq!(value(&v, "total.contended"), 2202.0);
         assert!(close(value(&v, "total.max_wait_ns"), 1_080_000.0));
         assert!(close(value(&v, "spinlock.wait_ns"), 211_400.0 + 812.0));
+    }
+
+    #[test]
+    fn perf_lock_contention_stops_at_the_debug_block() {
+        // What perf prints after the table when some events were bad:
+        // tools/perf/builtin-lock.c, print_bad_events() and its BPF twin.
+        let text = capture("perf-lock-contention.txt")
+            + "\n=== output for debug ===\n\nbad: 3, total: 2205\nbad rate: 0.14 %\n\
+               histogram of events caused bad sequence\n    acquire: 0\n   acquired: 0\n\
+               \x20 contended: 3\n    release: 0\n\n=== output for debug (BPF) ===\n\
+               total: 2205, bad: 3, bad rate: 0.14 %\n  task: 0\n  stack: 3\n";
+        let v = perf_lock_contention(&text, "").unwrap();
+        assert_eq!(value(&v, "total.contended"), 2202.0);
     }
 
     #[test]
