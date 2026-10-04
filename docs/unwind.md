@@ -262,10 +262,20 @@ serde as those strings) and `stack::unwind::Debuginfod`:
 build id in its `NT_GNU_BUILD_ID` note, and places the debug file's symbols
 through the *mapped* file's load segments. Each module's `NameOrigin` --
 `SymbolTable`, `DynamicSymbols`, `Debuginfod { build_id, server }` (`server:
-None` when the cache answered) or `None(reason)` -- is kept, and the profile's
-facts say *"names came from -- calltree-strip: debuginfod, http://..., build id
-...; libc.so.6: its dynamic symbols only"*. A frame still unnamed stays
-`lib+0xoffset`.
+None` when the cache answered), `PerfMap { lines }` or `None(reason)` -- is
+kept, and the profile's facts say *"names came from -- calltree-strip:
+debuginfod, http://..., build id ...; libc.so.6: its dynamic symbols only"*. A
+frame still unnamed stays `lib+0xoffset`.
+
+**The perf map, under `--symbols local` too.** An address in an anonymous
+executable mapping no file names -- a JIT's code, CPython's trampolines -- is
+looked up in the `/tmp/perf-<pid>.map` the target itself wrote, re-read as it
+grows. It is not a debuginfod rung: the map is a file on this machine, read by
+the default `local` and so by `debuginfod` as well. Its module is keyed by the
+map's own path, its origin is `PerfMap { lines }` (the facts line says
+*"perf-<pid>.map: perf-map, the <n> lines the program wrote for code no file
+holds"*), and each frame it named carries `NamedBy::PerfMap`, `perf-map` in a
+result, beside `elf`, `kallsyms` and `debuginfod`.
 
 **Why `curl`**: the public servers are HTTPS, and linking a TLS stack into the
 tool for one optional request was the alternative; every machine this tool
