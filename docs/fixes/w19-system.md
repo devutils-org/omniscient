@@ -13,8 +13,10 @@ were blessed after being looked at).
   and spanning the same run, so a column is one moment from top to bottom.
   The axis says what a cell is worth ("a cell is 54.8ms, drawn at its
   peak"). A cell holds the largest value that fell in it and carries the
-  earlier read until the next one. A measured zero is a dot on the baseline;
-  a cell where nothing was measured is blank.
+  earlier read until the next one, for a read and a half at most (review
+  round: a gap of missing reads is blank). A measured zero is a dot on the
+  baseline; a cell where nothing was measured is blank. A finished run's
+  timelines are placed on the run's axis by inference (see "Review").
 - **Colour is the trust style and nothing else.** Charts are drawn in the
   terminal's colour; a section's badges sit on its rule and dim its charts and
   figures. `gpu.engine_busy`'s `ts_err_ns` (1 s) is drawn as a cyan ruler at
@@ -25,14 +27,17 @@ were blessed after being looked at).
   events carry it, otherwise "held the whole run, unmoved" rather than a
   full bar); memory stall (`never stalled`, `<0.01%`) and the target's RSS;
   watts per RAPL domain from joules over each read's interval, plus the
-  joules spent; bytes per device and per interface, busiest first, on one
+  joules spent (per domain from live events only: see "Review"); bytes per
+  device and per interface, busiest first, on one
   scale, with the idle ones folded into one line (`i` lists them).
 - **Live runs are drawn from their events**, through the same series code
   (one table of each collector's value attribute). The events also give the
   cpu by state (a stacked bar), read apart from written, in apart from out,
   the GPU's memory size and a process's `comm`. Where a recording kept no
   events, the section's rule says what is missing.
-- **The process list**: one row per task any per-task source saw
+- **The process list**: one row per process and per thread any per-task
+  source saw (a process's main thread its own row, `t<tid>`, since the
+  review round)
   (`cpu.oncpu_time`, `mem.rss`, `mem.faults`, `sched.runqlat`, `io.syscall`,
   `sched.futex`, `gpu.mem` on the target). The columns are as many as fit:
   cpu share of one cpu with its chart, cpu time, RSS, faults, run queue,
@@ -150,6 +155,18 @@ omn top --gallery tests/view_fixtures/sqlite-commits   # space steps the views
 
 ## 6. Needs from another stream
 
+- **core** (`src/emit.rs`, `view/src/model.rs`), raised by the review round:
+  a timeline's offsets are measured from its result's first event
+  (`first_ts_ns` in `aggregate`), and `results.json` does not say when that
+  was. The system view now infers it for the machine's pollers (see
+  "Review"), but the inference rests on the runner's polling discipline, and
+  every view that lines up two timelines on one axis has the same problem.
+  Either measure `offset_ns` from `window.run_opened_ns`, or write the
+  result's `first_ts_ns` beside its timeline; `Results` in the view's model
+  would read it and `timeline_origin` in `system.rs` would use it when
+  present. The second keeps every existing `results.json` meaning what it
+  meant.
+
 - **core** (`docs/view/README.md`, `tests/view_fixtures/record.sh`): to keep
   the cpu by state, read/written and the GPU's memory size after a run ends,
   `system.rs`'s needs would add `raw` to `cpu.util`, `io.bytes` and `gpu.mem`.
@@ -160,10 +177,85 @@ omn top --gallery tests/view_fixtures/sqlite-commits   # space steps the views
   table stays true. The coordinator decides whether the size is worth it.
 - **catalog owners of `net.bytes`, `power.energy`, `gpu.engine_busy`,
   `cpu.oncpu_time`**: these refuse `raw`. In a live run they carry rx/tx,
-  the RAPL domain and the process's `comm`, and the end of the run then
-  drops them. Accepting `raw` (`emits:` in `catalog/{net,power,gpu,cpu}.yaml`)
+  the RAPL domains by name (since the review round the view splits them, for
+  both backends) and the process's `comm`, and the end of the run then
+  drops them: a finished run's one `power.energy` timeline holds every
+  domain together. Accepting `raw` (`emits:` in `catalog/{net,power,gpu,cpu}.yaml`)
   would let a finished run keep them.
 - **core** (`view/src/app.rs`, `draw_header`): when the origin is cut, the
   run's length runs into the cost corner with no cell between them
   (`… s.yml) │ 1.64sview: snapshot`, seen replaying a recording with a long
   path). One cell of margin before the corner would fix it.
+
+## Review
+
+One round, five findings. Each is fixed below, with the one part of a
+finding I disagree with said where it applies.
+
+1. **"One time axis" did not hold on replay** (defect). Confirmed: on every
+   fixture that measured the machine, `mem.pressure`, `io.bytes`, `net.bytes` and `power.energy` end
+   about 252 ms before the run's close and `cpu.util`, `gpu.engine_busy` and
+   `gpu.mem` 2-9 ms before it, all with the same `closed_ns`. Their
+   collectors keep their first read as a baseline (`mem/pressure.rs`,
+   `power/energy*.rs`), and a timeline's offsets start at its own first
+   event. `results.json` does not say when that was, so the view now infers
+   it: a poller's first round is at the window's opening and its last lands
+   at the close (`the_runner_closes_the_window`, `src/collect/mod.rs`), so
+   the first event is at the opening or one read later, and the view takes
+   the one that puts the last read at the close (a quarter of a read of
+   slack; the two answers are a whole read apart). After it, every machine
+   row's last read is within 10 ms of the cpu's on the five fixtures that
+   measured the machine
+   (`every_timeline_of_the_machine_ends_where_the_run_does`). The target's
+   timelines are left at the opening, and there I think the finding is
+   wrong about the process sparkline: `cpu.oncpu_time`'s `fs:proc` reader
+   takes its baseline in `start()` (`oncpu.rs:233`) and reports its first
+   poll, and its last offset, 2.743 s on `http-server`, plus one read would
+   be 2.993 s, after the target exited (2.839 s). So it is already in place.
+   Live runs were already exact (event timestamps). The request to core for
+   a recorded origin is in section 6.
+2. **"Watts per RAPL domain" was not done** (defect). Half right. The perf
+   unit's backend (`energy_pmu.rs`, the one the resolver prefers and the
+   fixtures used) does emit a `domain` attribute, one event per domain, so
+   live runs on it were split. The sysfs backend emits one event with
+   `domains` and `domain.<name>`, which the view summed. And on replay the
+   label `package` was a guess. Now: sysfs events are split per domain by
+   their `domains` list; perf-unit events are keyed by domain and, past the
+   first, package (two packages' `package` were one series); a finished
+   run's one timeline is `all` when it has one point per read, one lane per
+   domain by order (`#1`, `#2`, named "in the events only") when it has
+   several per instant, and not drawn, with the reason, when the count
+   differs between instants. Tests: `power_is_split_by_domain_from_the_events`,
+   `a_timeline_of_several_domains_is_split_by_their_order_or_not_drawn`. The
+   request to the catalog owners stands, now founded: by name, per domain is
+   only in the events, and `power.energy` refuses `raw`.
+3. **The box was cut silently on a short terminal** (gap). Fixed: when the
+   box does not fit, whole sections are left out from the last, and one
+   line in the loss colour counts and names them; the head, the axis line
+   and the bottom border stay. `frame--narrow` (60x20) now shows
+   `+5 left out, the terminal is too short: gpu mem…`. Test:
+   `a_short_terminal_says_which_sections_it_left_out`.
+4. **`served()` could draw a target's result as the machine's** (nit).
+   Fixed in `system.rs`, not in `model.rs` (core's): without a
+   `<source>@system` label, a section takes only results whose series name
+   no task, and its rule says "scope not recorded: taken as the machine's"
+   (a cgroup's `cpu.util` would look the same, and nothing in the result
+   says). The target's RSS row reads the target's results directly. Test:
+   `a_task_s_result_is_not_drawn_as_the_machine_s`.
+5. **Smaller issues** (nits), all fixed: a finished run says `last`, a live
+   one `now`; several engine or device tracks are labelled by their key; a
+   process's row and its main thread's are two rows (`t<tid>` for the
+   thread) instead of a process's cpu next to one thread's faults; a value
+   is held across a read and a half, so lost reads are blank; `s` skips the
+   sorts whose column the width hid. Tests:
+   `the_target_is_in_the_list_with_its_cpu`,
+   `cells_do_not_hold_a_value_across_missing_reads`,
+   `sorting_skips_a_column_the_width_hid`,
+   `a_finished_run_says_last_and_a_live_one_now`.
+
+Snapshots re-blessed after being read: the seven `system--*`, plus
+`frame--help` and `frame--narrow` (first tab). The visible changes: delta
+rows start one read later on the short fixtures, `last`, `all`, the
+`t<tid>` rows, one column more for the id, and the narrow frame's
+left-out line.
+

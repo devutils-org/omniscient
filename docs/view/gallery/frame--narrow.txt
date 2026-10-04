@@ -2,19 +2,19 @@ omn top │ fixture http-server │ 2.84s        view: snapshot
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatma
 ┌ system -- the overview: cpu, memory, disk, network, GPU…─┐
 ├ cpu busy, as a share of the whole machine ───── ~low det ┤
-│   20.0% ┤                             now  4.69%         │
+│   20.0% ┤                             last 4.69%         │
 │         │                             mean 5.99%         │
 │         │██                         ▁ peak 12.0%         │
 │         │████▂▂▂▂▂▂▂▂▁▁▂▂▂▃▃▂▂▂▁▁▂▂▂█ 1.29 cpus busy, on…│
 │       0 ┤████████████████████████████ by state: in the e…│
-├ gpu the device, as its dri…─ ±1.00s ~low det degraded x2 ┤
-│busy                            ██████ 1.31% mean  2.00% …│
-│ ≤2.00%   ████████████████████████████                    │
-│when      ├───────────────────┤        ±1.00s: the driver…│
-│memory    held the whole run, unmoved… 692MiB held        │
+│          +5 left out, the terminal is too short: gpu mem…│
+│          └0s─────────1.42s─────2.84s┘ a cell is 102ms, d…│
+└──────────────────────────────────────────────────────────┘
 ┌ processes the target's, by cpu ──────┐┌ cost, share of on┐
-│      ID    CPU cpu over the run      ││gpu. ███████  0.39│
-│ 2758953  95.0% ·███████████████      ││+7 more      ≥0.13│
-│+3 more  CPU ~low det degraded        ││all of them  ≥0.52│
+│       ID    CPU cpu over the run     ││gpu. ███████  0.39│
+│  2758953  95.0% ·███████████████     ││cpu. █        0.04│
+│ t2758953      ·                      ││io.b █        0.03│
+│  2758972      ·                      ││+5 more      ≥0.06│
+│+2 more  CPU ~low det degraded        ││all of them  ≥0.52│
 └──────────────────────────────────────┘└──────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ p

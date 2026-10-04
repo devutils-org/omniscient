@@ -162,10 +162,13 @@ impl Sort {
 }
 
 pub struct System {
-    /// The selected row of the process list, by thread id, so a re-sort or
-    /// a live update keeps the same process selected.
-    selected: Option<i32>,
+    /// The selected row of the process list, by its id and whether it is a
+    /// process's row, so a re-sort or a live update keeps the same row.
+    selected: Option<(i32, bool)>,
     sort: usize,
+    /// The columns the list was last drawn with: `s` steps only through
+    /// the sorts whose column is on screen.
+    shown: Vec<Col>,
     /// Whether devices and interfaces that moved nothing are listed one by
     /// one, rather than folded into one line.
     idle: bool,
@@ -200,7 +203,8 @@ impl View for System {
             if spare > 0 {
                 machine = lines(CPU_ROWS + spare.min(4));
             }
-            let height = (machine.len() as u16).min(area.height.saturating_sub(5));
+            let machine = machine.fit(usize::from(area.height.saturating_sub(5)));
+            let height = machine.len() as u16;
             frame.render_widget(Paragraph::new(machine), Rect { height, ..area });
             height
         } else {
@@ -233,17 +237,17 @@ impl View for System {
         let procs = processes(ctx.data, SORTS[self.sort]);
         let index = self
             .selected
-            .and_then(|tid| procs.rows.iter().position(|row| row.tid == tid));
+            .and_then(|key| procs.rows.iter().position(|row| row.key() == key));
         let last = procs.rows.len().saturating_sub(1);
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
                 let next = index.map_or(0, |index| (index + 1).min(last));
-                self.selected = procs.rows.get(next).map(|row| row.tid);
+                self.selected = procs.rows.get(next).map(Proc::key);
                 Action::None
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 let next = index.map_or(0, |index| index.saturating_sub(1));
-                self.selected = procs.rows.get(next).map(|row| row.tid);
+                self.selected = procs.rows.get(next).map(Proc::key);
                 Action::None
             }
             KeyCode::Enter => match procs.rows.get(index.unwrap_or(0)) {
@@ -254,7 +258,17 @@ impl View for System {
                 None => Action::None,
             },
             KeyCode::Char('s') => {
-                self.sort = (self.sort + 1) % SORTS.len();
+                // The next sort whose column is on screen: a list sorted by
+                // a column the width hid would be in an order nothing shows.
+                let shown = |sort: Sort| {
+                    self.shown.is_empty()
+                        || self.shown.contains(&sort.column())
+                        || (sort == Sort::Cpu && self.shown.contains(&Col::Cpu))
+                };
+                self.sort = (1..=SORTS.len())
+                    .map(|step| (self.sort + step) % SORTS.len())
+                    .find(|&index| shown(SORTS[index]))
+                    .unwrap_or(self.sort);
                 Action::None
             }
             KeyCode::Char('i') => {
@@ -274,6 +288,7 @@ pub fn view() -> Box<dyn View> {
     Box::new(System {
         selected: None,
         sort: 0,
+        shown: Vec::new(),
         idle: false,
     })
 }
@@ -314,6 +329,11 @@ struct Reading {
     parts: &'static [(&'static str, &'static [&'static str])],
     /// An attribute that says the ceiling of a level (the device's memory).
     ceiling: Option<&'static str>,
+    /// For a source that reads several parts and reports them in one event
+    /// (RAPL's domains through sysfs): the attribute listing the parts'
+    /// names, and the prefix of each part's own value attribute
+    /// (`domains: "package-0,dram"`, `domain.package_0`).
+    fanout: Option<(&'static str, &'static str)>,
 }
 
 fn reading(source: &str) -> Reading {
@@ -322,6 +342,7 @@ fn reading(source: &str) -> Reading {
         per,
         parts: &[],
         ceiling: None,
+        fanout: None,
     };
     match source {
         "cpu.util" => Reading {
@@ -334,6 +355,7 @@ fn reading(source: &str) -> Reading {
                 ("steal", &["steal"]),
             ],
             ceiling: None,
+            fanout: None,
         },
         "mem.pressure" => plain("stall_ratio", Per::Share),
         "io.bytes" => Reading {
@@ -341,12 +363,14 @@ fn reading(source: &str) -> Reading {
             per: Per::Tick,
             parts: &[("read", &["read_bytes"]), ("written", &["write_bytes"])],
             ceiling: None,
+            fanout: None,
         },
         "net.bytes" => Reading {
             attr: "bytes",
             per: Per::Tick,
             parts: &[("in", &["rx"]), ("out", &["tx"])],
             ceiling: None,
+            fanout: None,
         },
         "gpu.engine_busy" => plain("ratio", Per::Share),
         "gpu.mem" => Reading {
@@ -354,8 +378,12 @@ fn reading(source: &str) -> Reading {
             per: Per::Level,
             parts: &[],
             ceiling: Some("device_total_bytes"),
+            fanout: None,
         },
-        "power.energy" => plain("joules", Per::Tick),
+        "power.energy" => Reading {
+            fanout: Some(("domains", "domain")),
+            ..plain("joules", Per::Tick)
+        },
         "cpu.oncpu_time" => plain("ns", Per::Tick),
         "mem.rss" => plain("bytes", Per::Level),
         "mem.faults" => plain("count", Per::Tick),
@@ -386,6 +414,12 @@ struct Track {
     name: Option<String>,
     /// The ceiling a level is held under, when the events say it.
     ceiling: Option<f64>,
+    /// One of several parts a timeline carried in one series, told apart by
+    /// their order at each instant: `key` is its place (`#1`), not its name.
+    lane: bool,
+    /// Several parts shared the series and could not be told apart: at
+    /// most this many at one instant. Nothing is drawn from it.
+    tangled: Option<usize>,
 }
 
 impl Track {
@@ -440,75 +474,151 @@ fn tracks(data: &Data, results: &Results) -> Vec<Track> {
     if !raw.is_empty() || timeline.is_none() {
         return from_events(data, raw, &reading);
     }
-    timeline
-        .into_iter()
-        .flatten()
-        .map(|series| {
-            let mut points: Vec<Point> = series
-                .points
-                .iter()
-                .map(|point| Point {
-                    at_ns: point.offset_ns,
-                    read: point.value,
-                    shown: point.value,
-                })
-                .collect();
-            per_second(&mut points, reading.per, &[]);
-            Track {
-                key: series.key.clone(),
-                points,
-                ..Track::default()
+    let timeline = timeline.map(Vec::as_slice).unwrap_or_default();
+    let offsets: Vec<u64> = timeline
+        .iter()
+        .flat_map(|series| series.points.iter().map(|point| point.offset_ns))
+        .collect();
+    let origin = timeline_origin(data, results, &offsets);
+    let mut tracks = Vec::new();
+    for series in timeline {
+        let points: Vec<Point> = series
+            .points
+            .iter()
+            .map(|point| Point {
+                at_ns: origin + point.offset_ns,
+                read: point.value,
+                shown: point.value,
+            })
+            .collect();
+        match lanes(points) {
+            Lanes::One(mut points) => {
+                per_second(&mut points, reading.per, &[]);
+                tracks.push(Track {
+                    key: series.key.clone(),
+                    points,
+                    ..Track::default()
+                });
             }
-        })
-        .collect()
+            Lanes::Several(lanes) => {
+                for (index, mut points) in lanes.into_iter().enumerate() {
+                    per_second(&mut points, reading.per, &[]);
+                    tracks.push(Track {
+                        key: format!("#{}", index + 1),
+                        points,
+                        lane: true,
+                        ..Track::default()
+                    });
+                }
+            }
+            Lanes::Tangled(most) => tracks.push(Track {
+                key: series.key.clone(),
+                tangled: Some(most),
+                ..Track::default()
+            }),
+        }
+    }
+    tracks
+}
+
+/// Where a finished run's timeline starts, on the run's axis.
+///
+/// A timeline's offsets are measured from its own result's first event, not
+/// from the run's opening (`src/emit.rs`, `first_ts_ns`), and the result does
+/// not record when that event was. For a poller, the window's opening and
+/// its close bound it: its first round of reads is at the opening, and its
+/// last lands at the close (`the_runner_closes_the_window`). A collector that
+/// reports its first read emits there; one that keeps it as a baseline -- a
+/// ratio or a difference needs two reads -- emits one read later. So the
+/// first event is at the opening or one read after it, and only the second
+/// puts the last read at the close: that is the one taken when it fits.
+///
+/// Only a source of the machine is placed this way. A target's last read is
+/// its last before it exits, not the run's close, so nothing ties its end
+/// down; its timelines start at the opening, which is right for every
+/// per-task source this view reads (none keeps its first read back).
+fn timeline_origin(data: &Data, results: &Results, offsets: &[u64]) -> u64 {
+    let opened = results.window.opened_ns.saturating_sub(data.opened_ns());
+    if names_a_task(results) || results.window.closed_ns == 0 {
+        return opened;
+    }
+    let mut distinct = offsets.to_vec();
+    distinct.sort_unstable();
+    distinct.dedup();
+    let mut gaps: Vec<u64> = distinct.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    gaps.sort_unstable();
+    let (Some(&read), Some(&last)) = (gaps.get(gaps.len() / 2), distinct.last()) else {
+        return opened;
+    };
+    let closed = results.window.closed_ns.saturating_sub(data.opened_ns());
+    // A read lands a few milliseconds either side of its tick; a quarter of
+    // one is far from both answers, which are a whole read apart.
+    if opened + read + last <= closed + read / 4 {
+        opened + read
+    } else {
+        opened
+    }
+}
+
+/// How a timeline's points sit: one per instant, or several -- a source
+/// keyed on nothing that reports several parts on each read (RAPL's
+/// domains through the perf unit, a GPU's engines) shares one series
+/// between them, every part of one read at the same instant.
+enum Lanes {
+    One(Vec<Point>),
+    /// The same number at every instant, in the same order each time (a
+    /// collector reads its parts in a fixed order): one lane per part.
+    Several(Vec<Vec<Point>>),
+    /// A different number at some instants (a part that failed a read): the
+    /// parts cannot be told apart. The most there were at one instant.
+    Tangled(usize),
+}
+
+fn lanes(points: Vec<Point>) -> Lanes {
+    let mut instants: Vec<Vec<Point>> = Vec::new();
+    for point in points {
+        match instants.last_mut() {
+            Some(instant) if instant[0].at_ns == point.at_ns => instant.push(point),
+            _ => instants.push(vec![point]),
+        }
+    }
+    let most = instants.iter().map(Vec::len).max().unwrap_or(0);
+    if most <= 1 {
+        return Lanes::One(instants.into_iter().flatten().collect());
+    }
+    if instants.iter().any(|instant| instant.len() != most) {
+        return Lanes::Tangled(most);
+    }
+    let mut lanes = vec![Vec::new(); most];
+    for instant in instants {
+        for (lane, point) in lanes.iter_mut().zip(instant) {
+            lane.push(point);
+        }
+    }
+    Lanes::Several(lanes)
+}
+
+/// Whether a result is a task's: its series are keyed by one.
+fn names_a_task(results: &Results) -> bool {
+    let keyed = |key: &str| key.split(',').any(|part| part.starts_with("task:"));
+    results.outputs.iter().any(|output| match output {
+        Output::Timeline { series } => series.iter().any(|series| keyed(&series.key)),
+        Output::Summary { series } => series.iter().any(|series| keyed(&series.key)),
+        Output::Raw { events } => events.iter().any(|event| event.tid().is_some()),
+        _ => false,
+    })
 }
 
 /// The series of a run's events, grouped as `omn` groups a timeline: by the
 /// event's keys, or -- for a source keyed on nothing that names a domain --
-/// by that name.
+/// by that name. An event that carries several parts' values (RAPL's
+/// domains through sysfs) is one point of each part's series.
 fn from_events(data: &Data, events: &[Event], reading: &Reading) -> Vec<Track> {
     let opened = data.opened_ns();
     let mut grouped: BTreeMap<String, (Vec<Option<f64>>, Track)> = BTreeMap::new();
     for event in events {
-        let Some(value) = event.number(reading.attr) else {
-            continue;
-        };
-        let key = series_key(event);
-        let (intervals, track) = grouped.entry(key.clone()).or_insert_with(|| {
-            (
-                Vec::new(),
-                Track {
-                    key,
-                    parts: reading
-                        .parts
-                        .iter()
-                        .map(|(name, _)| (*name, Vec::new()))
-                        .collect(),
-                    ..Track::default()
-                },
-            )
-        });
-        intervals.push(event.number("interval_ns"));
-        track.points.push(Point {
-            at_ns: event.ts_ns.saturating_sub(opened),
-            read: value,
-            shown: value,
-        });
-        for ((_, attrs), (_, values)) in reading.parts.iter().zip(track.parts.iter_mut()) {
-            let carried: Vec<f64> = attrs.iter().filter_map(|attr| event.number(attr)).collect();
-            if carried.is_empty() {
-                // Kept apart from a zero, to be dropped below if no event
-                // carries the part at all.
-                values.push(f64::NAN);
-            } else {
-                values.push(carried.iter().sum());
-            }
-        }
-        if let Some(name) = event.attr("comm").and_then(|value| value.as_str()) {
-            track.name = Some(name.to_owned());
-        }
-        if let Some(ceiling) = reading.ceiling.and_then(|attr| event.number(attr)) {
-            track.ceiling = Some(ceiling);
+        for (key, value) in values_of(event, reading) {
+            add_point(&mut grouped, event, key, value, opened, reading);
         }
     }
     grouped
@@ -529,13 +639,106 @@ fn from_events(data: &Data, events: &[Event], reading: &Reading) -> Vec<Track> {
         .collect()
 }
 
-/// The key a timeline would file this event under.
+/// What one event says, by the series it belongs to: its value under its
+/// key, or, for an event carrying several parts, each part's under its name.
+fn values_of(event: &Event, reading: &Reading) -> Vec<(String, f64)> {
+    let listed = reading.fanout.and_then(|(list, prefix)| {
+        let names = event.attr(list).and_then(|value| value.as_str())?;
+        let values: Vec<(String, f64)> = names
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .filter_map(|name| {
+                event
+                    .number(&format!("{prefix}.{}", attribute_part(name)))
+                    .map(|value| (name.to_owned(), value))
+            })
+            .collect();
+        (!values.is_empty()).then_some(values)
+    });
+    match listed {
+        Some(values) => values,
+        None => event
+            .number(reading.attr)
+            .map(|value| vec![(series_key(event), value)])
+            .unwrap_or_default(),
+    }
+}
+
+/// A part's name as its attribute spells it: lowercase, everything but
+/// letters and digits an underscore (`src/collect/power/sysfs.rs`,
+/// `attribute_name`).
+fn attribute_part(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// One point of one event, filed under `key`.
+fn add_point(
+    grouped: &mut BTreeMap<String, (Vec<Option<f64>>, Track)>,
+    event: &Event,
+    key: String,
+    value: f64,
+    opened: u64,
+    reading: &Reading,
+) {
+    let (intervals, track) = grouped.entry(key.clone()).or_insert_with(|| {
+        (
+            Vec::new(),
+            Track {
+                key,
+                parts: reading
+                    .parts
+                    .iter()
+                    .map(|(name, _)| (*name, Vec::new()))
+                    .collect(),
+                ..Track::default()
+            },
+        )
+    });
+    intervals.push(event.number("interval_ns"));
+    track.points.push(Point {
+        at_ns: event.ts_ns.saturating_sub(opened),
+        read: value,
+        shown: value,
+    });
+    for ((_, attrs), (_, values)) in reading.parts.iter().zip(track.parts.iter_mut()) {
+        let carried: Vec<f64> = attrs.iter().filter_map(|attr| event.number(attr)).collect();
+        if carried.is_empty() {
+            // Kept apart from a zero, to be dropped below if no event
+            // carries the part at all.
+            values.push(f64::NAN);
+        } else {
+            values.push(carried.iter().sum());
+        }
+    }
+    if let Some(name) = event.attr("comm").and_then(|value| value.as_str()) {
+        track.name = Some(name.to_owned());
+    }
+    if let Some(ceiling) = reading.ceiling.and_then(|attr| event.number(attr)) {
+        track.ceiling = Some(ceiling);
+    }
+}
+
+/// The key a timeline would file this event under -- or, for a source keyed
+/// on nothing that names a domain on each event (RAPL through the perf unit:
+/// `domain: package`, `package: 1`), that domain, and its package past the
+/// first, so two domains read at one instant are two series.
 fn series_key(event: &Event) -> String {
     if event.keys.is_empty() {
-        return event
-            .attr("domain")
-            .and_then(|value| value.as_str())
-            .map_or_else(|| "system".to_owned(), str::to_owned);
+        let Some(domain) = event.attr("domain").and_then(|value| value.as_str()) else {
+            return "system".to_owned();
+        };
+        return match event.number("package").filter(|package| *package > 0.0) {
+            Some(package) => format!("{domain} {package}"),
+            None => domain.to_owned(),
+        };
     }
     event
         .keys
@@ -582,12 +785,58 @@ fn per_second(points: &mut [Point], per: Per, intervals: &[Option<f64>]) {
 /// What the run holds for one of the view's needs: its results and their
 /// trust, or its refusal.
 enum Held<'a> {
-    Served(Vec<&'a Results>, Trust),
+    /// The results, their trust, and whether their scope is assumed: no
+    /// result carries the machine's label (`omn top` gives every machine
+    /// source one), so these are the source's results whose series name no
+    /// task -- the machine's, most likely, but a cgroup's would look the
+    /// same, and the run does not say.
+    Served(Vec<&'a Results>, Trust, bool),
     Refused(&'a Refusal),
 }
 
+/// What the run holds of a machine section's source: the results labelled
+/// as the machine's, or, in a run that labels none, the source's results
+/// that are not a task's. A task's result (`gpu.mem` on the target) is
+/// never drawn as the machine's.
 fn served<'a>(data: &'a Data, label: &str, source: &str) -> Option<Held<'a>> {
-    let held: Vec<&Results> = data.for_need(label, source);
+    let labelled: Vec<&Results> = data
+        .run
+        .results
+        .iter()
+        .filter(|results| results.label == label)
+        .collect();
+    let assumed = labelled.is_empty();
+    let held: Vec<&Results> = if assumed {
+        data.run
+            .results
+            .iter()
+            .filter(|results| results.source == source && !names_a_task(results))
+            .collect()
+    } else {
+        labelled
+    };
+    held_or_refused(data, held, label, source, assumed)
+}
+
+/// What the run holds of a source on the target: its results not labelled
+/// as the machine's.
+fn on_target<'a>(data: &'a Data, source: &str) -> Option<Held<'a>> {
+    let held: Vec<&Results> = data
+        .run
+        .results
+        .iter()
+        .filter(|results| results.source == source && !results.label.ends_with("@system"))
+        .collect();
+    held_or_refused(data, held, source, source, false)
+}
+
+fn held_or_refused<'a>(
+    data: &'a Data,
+    held: Vec<&'a Results>,
+    label: &str,
+    source: &str,
+    assumed: bool,
+) -> Option<Held<'a>> {
     if held.is_empty() {
         // A source refused in one scope may be served in another (`gpu.mem`
         // on the target and on the machine): only a source with no result
@@ -599,7 +848,16 @@ fn served<'a>(data: &'a Data, label: &str, source: &str) -> Option<Held<'a>> {
             .map(Held::Refused);
     }
     let trust = Trust::joined(data, held.iter().copied());
-    Some(Held::Served(held, trust))
+    Some(Held::Served(held, trust, assumed))
+}
+
+/// A section's note, saying so when its scope is assumed.
+fn unlabelled(note: &str, assumed: bool) -> String {
+    if assumed {
+        format!("{note} (scope not recorded: taken as the machine's)")
+    } else {
+        note.to_owned()
+    }
 }
 
 /// The run's time axis: how long it is.
@@ -618,28 +876,49 @@ impl Axis {
     /// One value per cell: the largest drawn value whose point falls in the
     /// cell's slice of the run -- a spike is never averaged away -- or, for
     /// a cell no point falls in, the value of the point before it, held
-    /// until the next. Nothing after the last point: a live run stops where
-    /// it is.
+    /// until the next. A value is held across the reads' usual spacing and
+    /// a half, no further: a longer gap is reads that did not happen (lost,
+    /// or a source that paused), and it stays blank. Nothing after the last
+    /// point: a live run stops where it is.
     fn cells(&self, points: &[Point], width: usize) -> Vec<Option<f64>> {
         let mut cells = vec![None; width];
+        let points: Vec<&Point> = points
+            .iter()
+            .filter(|point| point.shown.is_finite())
+            .collect();
         if width == 0 || points.is_empty() {
             return cells;
         }
-        let cell_of = |at_ns: u64| {
-            ((at_ns as f64 / self.span_ns as f64) * width as f64).clamp(0.0, width as f64 - 1.0)
-                as usize
-        };
-        for point in points.iter().filter(|point| point.shown.is_finite()) {
+        let cell_ns = self.span_ns as f64 / width as f64;
+        let cell_of = |at_ns: u64| (at_ns as f64 / cell_ns).clamp(0.0, width as f64 - 1.0) as usize;
+        // The latest point of each cell, which a value is held from.
+        let mut latest: Vec<Option<u64>> = vec![None; width];
+        for point in &points {
             let cell = cell_of(point.at_ns);
             cells[cell] = Some(cells[cell].map_or(point.shown, |held: f64| held.max(point.shown)));
+            latest[cell] = Some(latest[cell].map_or(point.at_ns, |at: u64| at.max(point.at_ns)));
         }
+        let mut gaps: Vec<u64> = points
+            .windows(2)
+            .map(|pair| pair[1].at_ns.saturating_sub(pair[0].at_ns))
+            .filter(|gap| *gap > 0)
+            .collect();
+        gaps.sort_unstable();
+        let reach = gaps
+            .get(gaps.len() / 2)
+            .map_or(f64::INFINITY, |gap| *gap as f64 * 1.5);
         let first = cell_of(points[0].at_ns);
         let last = cell_of(points[points.len() - 1].at_ns);
-        let mut held = None;
-        for cell in cells.iter_mut().take(last + 1).skip(first) {
-            match cell {
-                Some(value) => held = Some(*value),
-                None => *cell = held,
+        let mut held: Option<(f64, u64)> = None;
+        for index in first..=last {
+            match (cells[index], latest[index]) {
+                (Some(value), Some(at)) => held = Some((value, at)),
+                _ => {
+                    let start = index as f64 * cell_ns;
+                    cells[index] = held
+                        .filter(|(_, at)| start - *at as f64 <= reach)
+                        .map(|(value, _)| value);
+                }
             }
         }
         cells
@@ -847,6 +1126,8 @@ struct Strips<'a> {
     cpu_rows: usize,
     idle: bool,
     lines: Vec<Line<'static>>,
+    /// Where each section starts in `lines`, by name.
+    sections: Vec<(String, usize)>,
 }
 
 impl<'a> Strips<'a> {
@@ -862,11 +1143,12 @@ impl<'a> Strips<'a> {
             cpu_rows,
             idle,
             lines: Vec::new(),
+            sections: Vec::new(),
         }
     }
 
     /// Everything, in order.
-    fn build(mut self) -> Vec<Line<'static>> {
+    fn build(mut self) -> Machine {
         // The view's own name and title on the box, as every view frames
         // itself (`┌ system -- ...`).
         self.section("system --", TITLE, None);
@@ -888,7 +1170,11 @@ impl<'a> Strips<'a> {
         self.lines.push(boxed(axis, self.inner));
         self.lines
             .push(Line::from(format!("└{}┘", "─".repeat(self.inner))));
-        self.lines
+        Machine {
+            lines: self.lines,
+            sections: self.sections,
+            inner: self.inner,
+        }
     }
 
     /// A rule across the box naming a section, its trust on the right:
@@ -897,6 +1183,7 @@ impl<'a> Strips<'a> {
         let (open, close) = if self.lines.is_empty() {
             ("┌", "┐")
         } else {
+            self.sections.push((name.to_owned(), self.lines.len()));
             ("├", "┤")
         };
         let mut right = Vec::new();
@@ -962,7 +1249,7 @@ impl<'a> Strips<'a> {
 
     fn cpu(&mut self) {
         let held = served(self.data, "cpu.util@system", "cpu.util");
-        let Some(Held::Served(results, trust)) = held else {
+        let Some(Held::Served(results, trust, assumed)) = held else {
             return self.missing("cpu", held);
         };
         let all = self.tracks_of(&results);
@@ -972,14 +1259,24 @@ impl<'a> Strips<'a> {
             .or(all.first())
             .cloned()
             .unwrap_or_default();
-        self.section("cpu", "busy, as a share of the whole machine", Some(&trust));
+        self.section(
+            "cpu",
+            &unlabelled("busy, as a share of the whole machine", assumed),
+            Some(&trust),
+        );
         let style = trust.style();
         let top = ceiling(track.peak());
         let cells = self.axis.cells(&track.points, self.chart);
         let name = |word: &str| Span::styled(format!("{word:<5}"), dim());
+        // The last read is "now" only while the run is still going.
+        let last = if self.data.live.is_some() {
+            "now"
+        } else {
+            "last"
+        };
         let mut figures = vec![
             vec![
-                name("now"),
+                name(last),
                 Span::styled(
                     track.last().map_or("-".to_owned(), share),
                     style.add_modifier(Modifier::BOLD),
@@ -1060,22 +1357,52 @@ impl<'a> Strips<'a> {
             return self.missing("gpu", busy.or(memory));
         }
         let mut joined = Trust::clean();
+        let mut assumed = false;
         for held in [&busy, &memory] {
-            if let Some(Held::Served(_, trust)) = held {
+            if let Some(Held::Served(_, trust, scope)) = held {
                 joined.merge(trust.clone());
+                assumed |= scope;
             }
         }
-        self.section("gpu", "the device, as its driver says", Some(&joined));
+        self.section(
+            "gpu",
+            &unlabelled("the device, as its driver says", assumed),
+            Some(&joined),
+        );
         match busy {
-            Some(Held::Served(results, trust)) => {
+            Some(Held::Served(results, trust, _)) => {
                 let style = trust.style();
-                for track in self.tracks_of(&results) {
+                let all = self.tracks_of(&results);
+                let several = all.len() > 1;
+                for track in all {
+                    if let Some(most) = track.tangled {
+                        self.lines.push(boxed(
+                            vec![
+                                label("busy"),
+                                Span::styled(
+                                    format!(
+                                        "up to {most} engines in one series, a read missing at \
+                                         some instants: not told apart, so not drawn"
+                                    ),
+                                    dim(),
+                                ),
+                            ],
+                            self.inner,
+                        ));
+                        continue;
+                    }
                     let cells = self.axis.cells(&track.points, self.chart);
                     let top = ceiling(track.peak());
                     let lines = chart(&cells, top, 2, style);
                     let mut lines = lines.into_iter();
+                    // Several engines or devices: each row says which.
+                    let name = if several {
+                        key_name(&track.key)
+                    } else {
+                        "busy".to_owned()
+                    };
                     self.row(
-                        label("busy"),
+                        label(&name),
                         lines.next().map(|line| line.spans).unwrap_or_default(),
                         vec![
                             Span::styled(share(track.mean()), style.add_modifier(Modifier::BOLD)),
@@ -1118,7 +1445,7 @@ impl<'a> Strips<'a> {
             held => self.missing_row("busy", held),
         }
         match memory {
-            Some(Held::Served(results, trust)) => {
+            Some(Held::Served(results, trust, _)) => {
                 let style = trust.style();
                 for track in self.tracks_of(&results) {
                     let now = track.last().unwrap_or(0.0);
@@ -1183,12 +1510,12 @@ impl<'a> Strips<'a> {
 
     fn memory(&mut self) {
         let held = served(self.data, "mem.pressure@system", "mem.pressure");
-        let Some(Held::Served(results, trust)) = held else {
+        let Some(Held::Served(results, trust, assumed)) = held else {
             return self.missing("memory", held);
         };
         self.section(
             "memory",
-            "time the machine stalled waiting for it",
+            &unlabelled("time the machine stalled waiting for it", assumed),
             Some(&trust),
         );
         let style = trust.style();
@@ -1213,7 +1540,7 @@ impl<'a> Strips<'a> {
         }
         // What the target holds, when the run measured it: the one memory
         // figure that is the target's rather than the machine's.
-        if let Some(Held::Served(rss, rss_trust)) = served(self.data, "mem.rss", "mem.rss") {
+        if let Some(Held::Served(rss, rss_trust, _)) = on_target(self.data, "mem.rss") {
             let rss_style = rss_trust.style();
             let rss_tracks = self.tracks_of(&rss);
             let several = rss_tracks.len() > 1;
@@ -1247,17 +1574,45 @@ impl<'a> Strips<'a> {
 
     fn power(&mut self) {
         let held = served(self.data, "power.energy@system", "power.energy");
-        let Some(Held::Served(results, trust)) = held else {
+        let Some(Held::Served(results, trust, scope)) = held else {
             return self.missing("power", held);
         };
-        self.section("power", "watts, from the RAPL counters", Some(&trust));
-        let style = trust.style();
         let all = self.tracks_of(&results);
+        // A finished run keeps one timeline for every domain together: the
+        // sum of the domains sysfs read, or the perf unit's domains one
+        // after another at each instant, told apart by their order only.
+        // The names are in the events.
+        let named = all
+            .iter()
+            .all(|track| track.key != "system" && !track.lane && track.tangled.is_none());
+        let note = if named {
+            "watts per RAPL domain"
+        } else {
+            "watts, from the RAPL counters; per domain by name: in the events only"
+        };
+        self.section("power", &unlabelled(note, scope), Some(&trust));
+        let style = trust.style();
         let top = all.iter().map(Track::peak).fold(0.0, f64::max);
         for track in &all {
+            if let Some(most) = track.tangled {
+                self.lines.push(boxed(
+                    vec![
+                        label("domains"),
+                        Span::styled(
+                            format!(
+                                "up to {most} domains in one series, a read missing at some \
+                                 instants: not told apart, so not drawn"
+                            ),
+                            dim(),
+                        ),
+                    ],
+                    self.inner,
+                ));
+                continue;
+            }
             let cells = self.axis.cells(&track.points, self.chart);
             let name = if track.key == "system" {
-                "package"
+                "all"
             } else {
                 track.key.as_str()
             };
@@ -1280,7 +1635,7 @@ impl<'a> Strips<'a> {
 
     fn devices(&mut self, what: &Devices) {
         let held = served(self.data, what.label, what.source);
-        let Some(Held::Served(results, trust)) = held else {
+        let Some(Held::Served(results, trust, assumed)) = held else {
             return self.missing(what.name, held);
         };
         let mut all = self.tracks_of(&results);
@@ -1299,7 +1654,7 @@ impl<'a> Strips<'a> {
                 what.note, what.parts.0, what.parts.1
             )
         };
-        self.section(what.name, &note, Some(&trust));
+        self.section(what.name, &unlabelled(&note, assumed), Some(&trust));
         let style = trust.style();
         // One scale for every row, so two devices compare by height.
         let top = all.iter().map(Track::peak).fold(0.0, f64::max);
@@ -1355,6 +1710,73 @@ impl<'a> Strips<'a> {
     }
 }
 
+/// The machine's box, line by line, and where each section starts.
+struct Machine {
+    lines: Vec<Line<'static>>,
+    sections: Vec<(String, usize)>,
+    inner: usize,
+}
+
+impl Machine {
+    fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// The box in at most `room` lines. When it does not fit, whole sections
+    /// are left out from the last, and one line says which -- the head, the
+    /// time axis and the bottom border stay, so what is drawn still reads on
+    /// its axis and what is not is counted.
+    fn fit(self, room: usize) -> Vec<Line<'static>> {
+        let Machine {
+            lines,
+            sections,
+            inner,
+        } = self;
+        if lines.len() <= room {
+            return lines;
+        }
+        // The axis and the border close the box.
+        let tail = lines.len().saturating_sub(2);
+        // A section ends where the next starts, the last where the axis is.
+        let ends = sections
+            .iter()
+            .skip(1)
+            .map(|(_, at)| *at)
+            .chain(std::iter::once(tail));
+        // Sections are kept, in order, while they fit with the line saying
+        // what was left out, the axis and the border.
+        let kept = ends.take_while(|end| end + 3 <= room).count();
+        let left: Vec<&str> = sections[kept..]
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let cut = boxed(
+            vec![
+                label(""),
+                Span::styled(
+                    format!(
+                        "+{} left out, the terminal is too short: {}",
+                        left.len(),
+                        left.join(" ")
+                    ),
+                    Style::new().fg(palette::LOSS),
+                ),
+            ],
+            inner,
+        );
+        let body_end = sections.get(kept).map_or(tail, |(_, at)| *at);
+        let mut out: Vec<Line<'static>> = lines[..body_end].to_vec();
+        out.push(cut);
+        out.extend(lines[tail..].iter().cloned());
+        if out.len() > room {
+            // Not even the head and the axis: the line saying so, alone.
+            out = vec![out.swap_remove(body_end)];
+            out.truncate(room);
+        }
+        out
+    }
+}
+
 /// A line of the box: its content between two borders.
 fn boxed(spans: Vec<Span<'static>>, inner: usize) -> Line<'static> {
     let mut line = vec![Span::raw("│")];
@@ -1388,6 +1810,15 @@ const NETWORK: Devices = Devices {
     source: "net.bytes",
     parts: ("in", "out"),
 };
+
+/// A series key as a row's label: its values without their kinds
+/// (`gpu:0,engine:gr` is `0/gr`), and a timeline's lane as it is (`#2`).
+fn key_name(key: &str) -> String {
+    key.split(',')
+        .map(|part| part.split_once(':').map_or(part, |(_, value)| value))
+        .collect::<Vec<_>>()
+        .join("/")
+}
 
 /// A device's name as a person knows it: `wlan0` for `iface:wlan0`,
 /// `259:0` for `dev:259+0`.
@@ -1480,6 +1911,10 @@ struct Proc {
 }
 
 impl Proc {
+    fn key(&self) -> (i32, bool) {
+        (self.tid, self.process)
+    }
+
     fn focus(&self) -> Focus {
         Focus {
             pid: self.process.then_some(self.tid),
@@ -1529,10 +1964,35 @@ fn per_task(results: &Results) -> BTreeMap<i32, (f64, f64)> {
     totals
 }
 
+/// Whether a result's task keys name processes rather than threads: a
+/// reader of `/proc/<pid>` (cpu time, RSS) and the GPU driver's account
+/// are a whole process's, while a probe or a per-thread counter (faults, run
+/// queue, I/O calls, locks) is the thread's that it fired in. A process's id
+/// is its main thread's, so the two are kept apart rather than merged into
+/// one row that would add a process's cpu to one thread's faults.
+fn per_process(results: &Results) -> bool {
+    match results.source.as_str() {
+        "mem.rss" | "gpu.mem" => true,
+        // A live run may not say its backend: `omn top`'s is `fs:proc`.
+        "cpu.oncpu_time" => results.backend.is_empty() || results.backend.starts_with("fs:"),
+        _ => false,
+    }
+}
+
+/// The row of a task, as a process or as a thread.
+fn row_of(rows: &mut BTreeMap<(i32, bool), Proc>, tid: i32, process: bool) -> &mut Proc {
+    rows.entry((tid, process)).or_insert_with(|| Proc {
+        tid,
+        process,
+        ..Proc::default()
+    })
+}
+
 /// Every task the run measured, with what each source says of it. Sources
-/// on the machine (`@system`) are not a process's and are left out.
+/// on the machine (`@system`) are not a process's and are left out. A
+/// process and its main thread, which share an id, are two rows.
 fn processes(data: &Data, sort: Sort) -> Procs {
-    let mut rows: BTreeMap<i32, Proc> = BTreeMap::new();
+    let mut rows: BTreeMap<(i32, bool), Proc> = BTreeMap::new();
     let mut columns: Vec<(Col, Trust)> = Vec::new();
     for &(col, _, _, source) in COLUMNS {
         let held: Vec<&Results> = data
@@ -1543,6 +2003,7 @@ fn processes(data: &Data, sort: Sort) -> Procs {
             continue;
         }
         for results in &held {
+            let process = per_process(results);
             match col {
                 Col::Spark | Col::CpuTime => {}
                 Col::Cpu => {
@@ -1550,11 +2011,7 @@ fn processes(data: &Data, sort: Sort) -> Procs {
                         let Some(tid) = task_of(&track.key) else {
                             continue;
                         };
-                        let row = rows.entry(tid).or_insert_with(|| Proc {
-                            tid,
-                            ..Proc::default()
-                        });
-                        row.process = true;
+                        let row = row_of(&mut rows, tid, process);
                         if track.name.is_some() {
                             row.name = track.name.clone();
                         }
@@ -1567,11 +2024,7 @@ fn processes(data: &Data, sort: Sort) -> Procs {
                         let Some(tid) = task_of(&track.key) else {
                             continue;
                         };
-                        rows.entry(tid)
-                            .or_insert_with(|| Proc {
-                                tid,
-                                ..Proc::default()
-                            })
+                        row_of(&mut rows, tid, process)
                             .cells
                             .insert(col, track.last().unwrap_or(0.0));
                     }
@@ -1579,13 +2032,7 @@ fn processes(data: &Data, sort: Sort) -> Procs {
                 Col::Faults | Col::InIo | Col::RunQueue | Col::Lock | Col::IoCalls => {
                     for (tid, (total, count)) in per_task(results) {
                         let value = if col == Col::IoCalls { count } else { total };
-                        rows.entry(tid)
-                            .or_insert_with(|| Proc {
-                                tid,
-                                ..Proc::default()
-                            })
-                            .cells
-                            .insert(col, value);
+                        row_of(&mut rows, tid, process).cells.insert(col, value);
                     }
                 }
             }
@@ -1605,6 +2052,7 @@ fn processes(data: &Data, sort: Sort) -> Procs {
         value(other)
             .total_cmp(&value(one))
             .then_with(|| one.tid.cmp(&other.tid))
+            .then_with(|| other.process.cmp(&one.process))
     });
     let refused = data
         .refused
@@ -1631,7 +2079,7 @@ fn cell_text(col: Col, value: f64) -> String {
 
 impl System {
     fn draw_processes(
-        &self,
+        &mut self,
         frame: &mut Frame<'_>,
         area: Rect,
         ctx: &Ctx<'_>,
@@ -1645,6 +2093,7 @@ impl System {
             None,
         );
         let inner = block.inner(area);
+        self.shown.clear();
         if procs.rows.is_empty() {
             match &procs.refused {
                 Some(refusal) => trust::render_refusal(frame, area, refusal),
@@ -1662,7 +2111,7 @@ impl System {
         frame.render_widget(block, area);
 
         let named = procs.rows.iter().any(|row| row.name.is_some());
-        let fixed = 9 + if named { 13 } else { 0 };
+        let fixed = 10 + if named { 13 } else { 0 };
         let mut room = usize::from(inner.width).saturating_sub(fixed);
         let mut columns: Vec<(Col, &str, usize, Trust)> = Vec::new();
         for &(col, head, width, _) in COLUMNS {
@@ -1675,10 +2124,11 @@ impl System {
             room -= width + 1;
             columns.push((col, head, width, trust.clone()));
         }
+        self.shown = columns.iter().map(|(col, ..)| *col).collect();
 
         let bold = Style::new().add_modifier(Modifier::BOLD);
         let mut lines = Vec::new();
-        let mut head = vec![Span::styled(format!("{:>8} ", "ID"), bold)];
+        let mut head = vec![Span::styled(format!("{:>9} ", "ID"), bold)];
         if named {
             head.push(Span::styled(format!("{:<12} ", "NAME"), bold));
         }
@@ -1700,11 +2150,15 @@ impl System {
         let rows_room = usize::from(inner.height).saturating_sub(2).max(1);
         let selected = self
             .selected
-            .and_then(|tid| procs.rows.iter().position(|row| row.tid == tid));
+            .and_then(|key| procs.rows.iter().position(|row| row.key() == key));
         let skip = selected.map_or(0, |index| (index + 1).saturating_sub(rows_room));
         for (index, row) in procs.rows.iter().enumerate().skip(skip).take(rows_room) {
             let chosen = selected == Some(index);
-            let focused = ctx.focus.pid == Some(row.tid) || ctx.focus.tid == Some(row.tid);
+            let focused = if row.process {
+                ctx.focus.pid == Some(row.tid)
+            } else {
+                ctx.focus.tid == Some(row.tid)
+            };
             let marker = if chosen {
                 Span::styled("▶", Style::new().fg(palette::ACCENT))
             } else if focused {
@@ -1717,9 +2171,21 @@ impl System {
             } else {
                 Style::new()
             };
+            // A process's main thread has the process's id: its own row
+            // is marked as the thread's.
+            let id = if !row.process
+                && procs
+                    .rows
+                    .iter()
+                    .any(|other| other.key() == (row.tid, true))
+            {
+                format!("t{}", row.tid)
+            } else {
+                row.tid.to_string()
+            };
             let mut spans = vec![
                 marker,
-                Span::styled(format!("{:>7}", row.tid), id_style),
+                Span::styled(format!("{id:>8}"), id_style),
                 Span::raw(" "),
             ];
             if named {
@@ -1958,12 +2424,291 @@ mod tests {
     fn the_target_is_in_the_list_with_its_cpu() {
         let data = fixture("cpython-hot");
         let procs = processes(&data, Sort::Cpu);
-        assert_eq!(procs.rows.len(), 1);
-        let cpu = procs.rows[0].cells[&Col::Cpu];
+        let process: Vec<&Proc> = procs.rows.iter().filter(|row| row.process).collect();
+        assert_eq!(process.len(), 1);
+        let cpu = process[0].cells[&Col::Cpu];
         // The interpreter spins on one cpu for the whole run.
         assert!(cpu > 0.8 && cpu < 1.1, "{cpu}");
+        // Its main thread, which the per-thread sources saw under the same
+        // id, is a row of its own: a process's cpu is not one thread's.
+        let thread = procs
+            .rows
+            .iter()
+            .find(|row| !row.process && row.tid == process[0].tid)
+            .expect("the main thread's row");
+        assert!(!thread.cells.contains_key(&Col::Cpu));
+        assert!(!process[0].cells.contains_key(&Col::Faults));
         let screen = screen(data);
-        assert!(screen.contains("2779350"), "{screen}");
+        assert!(screen.contains(" 2779350"), "{screen}");
+        assert!(screen.contains("t2779350"), "{screen}");
+    }
+
+    /// A finished run's timelines start at their result's first event. A
+    /// poller that keeps its first read as a baseline emits one read late,
+    /// so it is placed one read later: every source of the machine ends at
+    /// the run's close, as its last read did.
+    #[test]
+    fn every_timeline_of_the_machine_ends_where_the_run_does() {
+        let data = fixture("http-server");
+        let end_of = |source: &str| {
+            let results = data
+                .run
+                .results
+                .iter()
+                .find(|results| results.label == format!("{source}@system"))
+                .unwrap();
+            let tracks = tracks(&data, results);
+            let first = tracks[0].points[0].at_ns;
+            let last = tracks
+                .iter()
+                .flat_map(|track| &track.points)
+                .map(|point| point.at_ns)
+                .max();
+            (first, last.unwrap())
+        };
+        let (_, cpu_end) = end_of("cpu.util");
+        for source in [
+            "mem.pressure",
+            "io.bytes",
+            "net.bytes",
+            "power.energy",
+            "gpu.mem",
+        ] {
+            let (_, end) = end_of(source);
+            assert!(
+                end.abs_diff(cpu_end) < 20_000_000,
+                "{source}: {end} against {cpu_end}"
+            );
+        }
+        // The pollers that keep their first read back start one read late.
+        let (first, _) = end_of("mem.pressure");
+        assert!(first > 200_000_000, "{first}");
+        let (first, _) = end_of("cpu.util");
+        assert!(first < 50_000_000, "{first}");
+        // The target's own timelines are not moved.
+        let oncpu = data.first("cpu.oncpu_time").unwrap();
+        assert_eq!(tracks(&data, oncpu)[0].points[0].at_ns, 0);
+    }
+
+    fn power_result(outputs: Vec<Output>, backend: &str) -> Results {
+        Results {
+            label: "power.energy@system".into(),
+            source: "power.energy".into(),
+            backend: backend.into(),
+            outputs,
+            ..Results::default()
+        }
+    }
+
+    fn data_of(results: Vec<Results>, span_ns: u64) -> Data {
+        Data {
+            run: Run {
+                results,
+                ..Run::default()
+            },
+            live: Some(Live {
+                opened_ns: 0,
+                now_ns: span_ns,
+            }),
+            ..Data::default()
+        }
+    }
+
+    /// Watts per RAPL domain, whichever way the domains came: one event per
+    /// domain (the perf unit), or one event naming every domain (sysfs).
+    #[test]
+    fn power_is_split_by_domain_from_the_events() {
+        let tick = 250_000_000u64;
+        let pmu: Vec<Event> = (1..=4u64)
+            .flat_map(|n| {
+                [("package", 5.0), ("dram", 1.0)].map(|(domain, joules)| {
+                    event(
+                        n * tick,
+                        vec![],
+                        &[
+                            ("joules", AttrValue::Float(joules)),
+                            ("domain", AttrValue::Text(domain.into())),
+                            ("package", AttrValue::Uint(0)),
+                            ("interval_ns", AttrValue::Uint(tick)),
+                        ],
+                    )
+                })
+            })
+            .collect();
+        let drawn = screen(data_of(
+            vec![power_result(vec![Output::Raw { events: pmu }], "pmu")],
+            5 * tick,
+        ));
+        assert!(drawn.contains("watts per RAPL domain"), "{drawn}");
+        assert!(drawn.contains("package   "), "{drawn}");
+        assert!(drawn.contains("dram      "), "{drawn}");
+        assert!(drawn.contains("20.0W peak"), "{drawn}");
+
+        let sysfs: Vec<Event> = (1..=4u64)
+            .map(|n| {
+                event(
+                    n * tick,
+                    vec![],
+                    &[
+                        ("joules", AttrValue::Float(6.0)),
+                        ("domains", AttrValue::Text("package-0,psys".into())),
+                        ("domain.package_0", AttrValue::Float(5.0)),
+                        ("domain.psys", AttrValue::Float(1.0)),
+                        ("interval_ns", AttrValue::Uint(tick)),
+                    ],
+                )
+            })
+            .collect();
+        let drawn = screen(data_of(
+            vec![power_result(vec![Output::Raw { events: sysfs }], "fs:sys")],
+            5 * tick,
+        ));
+        assert!(drawn.contains("package-0 "), "{drawn}");
+        assert!(drawn.contains("psys      "), "{drawn}");
+        assert!(drawn.contains("4.00W peak"), "{drawn}");
+    }
+
+    /// A timeline cannot name the domains: it is one series. Several points
+    /// at each instant are drawn as that many lanes, said to be unnamed; a
+    /// series whose instants do not agree is not drawn at all.
+    #[test]
+    fn a_timeline_of_several_domains_is_split_by_their_order_or_not_drawn() {
+        let tick = 250_000_000u64;
+        let timeline = |counts: &[usize]| {
+            let mut points = Vec::new();
+            for (n, count) in counts.iter().enumerate() {
+                for lane in 0..*count {
+                    points.push(crate::model::Point {
+                        offset_ns: n as u64 * tick,
+                        value: 1.0 + lane as f64,
+                    });
+                }
+            }
+            Output::Timeline {
+                series: vec![crate::model::Series {
+                    key: "system".into(),
+                    points,
+                }],
+            }
+        };
+        let drawn = screen(data_of(
+            vec![power_result(vec![timeline(&[2, 2, 2, 2])], "pmu")],
+            4 * tick,
+        ));
+        assert!(
+            drawn.contains("per domain by name: in the events only"),
+            "{drawn}"
+        );
+        assert!(drawn.contains("#1  "), "{drawn}");
+        assert!(drawn.contains("#2  "), "{drawn}");
+        let drawn = screen(data_of(
+            vec![power_result(vec![timeline(&[2, 1, 2, 2])], "pmu")],
+            4 * tick,
+        ));
+        assert!(drawn.contains("not told apart, so not drawn"), "{drawn}");
+        let drawn = screen(data_of(
+            vec![power_result(vec![timeline(&[1, 1, 1, 1])], "pmu")],
+            4 * tick,
+        ));
+        assert!(drawn.contains("all       "), "{drawn}");
+        assert!(!drawn.contains("package"), "{drawn}");
+    }
+
+    /// On a terminal too short for the machine's box, whole sections are
+    /// left out from the last and counted; the axis and the border stay.
+    #[test]
+    fn a_short_terminal_says_which_sections_it_left_out() {
+        let screen = text(&draw(fixture("http-server"), "system", 120, 22));
+        assert!(
+            screen.contains("left out, the terminal is too short"),
+            "{screen}"
+        );
+        assert!(screen.contains("network"), "{screen}");
+        assert!(screen.contains("a cell is"), "{screen}");
+        assert!(screen.contains("└──"), "{screen}");
+        // Tall enough, nothing is left out.
+        let screen = screen_of_height(60);
+        assert!(!screen.contains("left out"), "{screen}");
+    }
+
+    fn screen_of_height(height: u16) -> String {
+        text(&draw(fixture("http-server"), "system", 120, height))
+    }
+
+    /// A machine section's results are the machine's: a run that labels
+    /// none takes the source's results that name no task, and says that it
+    /// took them; a task's result is never drawn as the machine's.
+    #[test]
+    fn a_task_s_result_is_not_drawn_as_the_machine_s() {
+        let tick = 250_000_000u64;
+        let gpu_mem: Vec<Event> = (1..=4u64)
+            .map(|n| {
+                event(
+                    n * tick,
+                    vec![Key::Task { tid: 9 }],
+                    &[("bytes", AttrValue::Uint(1 << 20))],
+                )
+            })
+            .collect();
+        let cpu: Vec<Event> = (1..=4u64)
+            .map(|n| event(n * tick, vec![], &[("busy", AttrValue::Float(0.5))]))
+            .collect();
+        let result = |source: &str, events| Results {
+            label: source.into(),
+            source: source.into(),
+            outputs: vec![Output::Raw { events }],
+            ..Results::default()
+        };
+        let data = data_of(
+            vec![result("gpu.mem", gpu_mem), result("cpu.util", cpu)],
+            5 * tick,
+        );
+        let screen = screen(data);
+        assert!(screen.contains("scope not recorded"), "{screen}");
+        assert!(!screen.contains("1.00MiB held"), "{screen}");
+    }
+
+    /// `s` steps only through sorts whose column is on screen.
+    #[test]
+    fn sorting_skips_a_column_the_width_hid() {
+        let data = fixture("http-server");
+        let mut view = System {
+            selected: None,
+            sort: 0,
+            shown: Vec::new(),
+            idle: false,
+        };
+        let focus = Focus::default();
+        let ctx = Ctx {
+            data: &data,
+            against: None,
+            focus: &focus,
+        };
+        // Drawn narrow, the list keeps its first columns only.
+        let backend = ratatui::backend::TestBackend::new(70, 40);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| view.draw(frame, frame.area(), &ctx))
+            .unwrap();
+        assert!(!view.shown.contains(&Col::RunQueue), "{:?}", view.shown);
+        let press = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        for _ in 0..SORTS.len() {
+            view.key(press, &ctx);
+            let column = SORTS[view.sort].column();
+            assert!(
+                view.shown.contains(&column)
+                    || (SORTS[view.sort] == Sort::Cpu && view.shown.contains(&Col::Cpu)),
+                "sorted by {column:?}, not shown in {:?}",
+                view.shown
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_run_says_last_and_a_live_one_now() {
+        let screen = screen(fixture("http-server"));
+        assert!(screen.contains("last "), "{screen}");
+        assert!(!screen.contains("now "), "{screen}");
     }
 
     #[test]
@@ -1992,6 +2737,7 @@ mod tests {
         let mut view = System {
             selected: None,
             sort: 0,
+            shown: Vec::new(),
             idle: false,
         };
         let focus = Focus::default();
@@ -2147,6 +2893,25 @@ mod tests {
         expected.push(Some(5.0));
         expected.extend([None; 5]);
         assert_eq!(cells, expected);
+    }
+
+    /// A value is held across the reads' usual spacing, not across reads
+    /// that did not happen: a gap of lost reads is blank.
+    #[test]
+    fn cells_do_not_hold_a_value_across_missing_reads() {
+        let axis = Axis { span_ns: 1000 };
+        let point = |at_ns| Point {
+            at_ns,
+            read: 1.0,
+            shown: 1.0,
+        };
+        let points: Vec<Point> = [0, 100, 200, 300, 800, 900].map(point).to_vec();
+        let cells = axis.cells(&points, 10);
+        // Held for a read and a half past the last one, then blank.
+        assert_eq!(cells[4], Some(1.0));
+        assert_eq!(cells[5], None, "{cells:?}");
+        assert_eq!(cells[7], None, "{cells:?}");
+        assert_eq!(cells[8], Some(1.0));
     }
 
     #[test]

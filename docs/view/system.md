@@ -27,9 +27,30 @@ vertically, which side-by-side panels each scaled to their own width cannot
 do. The axis under the box says the run's length and what one cell is worth
 ("a cell is 54.8ms, drawn at its peak"): a cell holds the largest value that
 fell in it, so a spike is never averaged away, and a cell between two reads
-holds the earlier read until the next one. A measured zero is a dot on the
-baseline; a cell where nothing was measured (before the first read, after
-the last) is blank.
+holds the earlier read until the next one -- for a read and a half of the
+reads' usual spacing, no further, so a gap of reads that did not happen
+(lost, late) stays blank rather than drawn as the last value. A measured
+zero is a dot on the baseline; a cell where nothing was measured (before
+the first read, after the last, in such a gap) is blank.
+
+**Where a finished run's points sit.** Live, every point is at its event's
+own timestamp. A finished run's `timeline` measures its offsets from that
+result's *first event*, not from the run's opening (`src/emit.rs`,
+`first_ts_ns`), and `results.json` does not record when that event was. The
+pollers that keep their first read as a baseline (`mem.pressure`,
+`io.bytes`, `net.bytes`, `power.energy`: a ratio or a difference needs two
+reads) emit one read later than those that report it (`cpu.util`, the GPU's),
+so drawn from the opening they would sit 250 ms to the left of the cpu and
+GPU rows. The view places each machine timeline by what the run does fix: a
+poller's first round of reads is at the window's opening, and its last lands
+at the window's close (`the_runner_closes_the_window` in
+`src/collect/mod.rs`). The first event is therefore at the opening or one
+read after it, and only one of the two puts the last read at the close; the
+view takes that one. On every fixture that measured the machine this lines up every machine row's last
+read within 10 ms of the cpu's. A target's timelines are not moved: its last
+read is its last before it exits, which ties nothing down, and no per-task
+source this view reads keeps its first read back. Core is asked (in the
+handoff) to record a timeline's origin, which would make this exact.
 
 **Colour is trust, and only trust.** The charts are drawn in the
 terminal's own colour. Every coloured cell on the screen is the trust style
@@ -53,13 +74,13 @@ The sections:
 
 | Section | Source | What it shows |
 |---|---|---|
-| cpu | `cpu.util@system` | busy as a share of the whole machine, on a chart up to a round ceiling (`10.0%`, `20.0%`, `100%`); now, mean, peak; `N cpus busy, on average` from the kernel's account over the collection's window (`observed_cpu_ns / wall_ns` of the cpu result: its edges are not exactly the polls', and a short run shows it); live, the busy time **by state** as one bar (user, sys, iowait, steal) |
-| gpu | `gpu.engine_busy@system`, `gpu.mem@system` | occupancy (mean, peak), the ruler, and the memory held: against the device's size when the events carry it (`668MiB held of 11.0GiB`), otherwise `held the whole run, unmoved` rather than a full bar that would read as a full device |
+| cpu | `cpu.util@system` | busy as a share of the whole machine, on a chart up to a round ceiling (`10.0%`, `20.0%`, `100%`); now, mean, peak; `N cpus busy, on average` from the kernel's account over the collection's window (`observed_cpu_ns / wall_ns` of the cpu result: its edges are not exactly the polls', and a short run shows it); the last read (`now` while live, `last` once the run is over), mean, peak; live, the busy time **by state** as one bar (user, sys, iowait, steal) |
+| gpu | `gpu.engine_busy@system`, `gpu.mem@system` | occupancy (mean, peak), a row per engine or device when there are several, each labelled by its key, the ruler, and the memory held: against the device's size when the events carry it (`668MiB held of 11.0GiB`), otherwise `held the whole run, unmoved` rather than a full bar that would read as a full device |
 | memory | `mem.pressure@system`, and `mem.rss` when the run has it | the time the machine stalled waiting for memory (`never stalled`, or `<0.01%` rather than `0.00%`), and the target's resident memory beside it |
-| power | `power.energy@system` | watts per RAPL domain, from joules per read over the read's interval; mean, peak, and the joules spent |
+| power | `power.energy@system` | watts from joules per read over the read's interval; mean, peak, and the joules spent. **Per domain from the events**: the perf unit reports one event per domain (`domain: package`, keyed on nothing, so the view files it under its domain, and its package past the first), sysfs one event naming every domain (`domains: package-0,psys`, each domain's joules in `domain.<name>`). **A finished run** keeps one timeline for the source: sysfs's sum of its top-level domains, drawn as `all`, or the perf unit's domains one after another at each instant, drawn as one lane each by their order (`#1`, `#2`: the names are in the events only), and not drawn at all, with the reason, when a read was missing at some instant and the order no longer says which is which |
 | disk | `io.bytes@system` | bytes per device, busiest first, one scale for every row; live, bytes **read apart from written** |
 | network | `net.bytes@system` | bytes per interface, the same way; live, bytes **in apart from out** |
-| processes | `cpu.oncpu_time`, and every per-task source the run holds | one row per task any source saw, with the columns that fit: cpu as a share of one cpu, its chart over the run, cpu time, RSS, faults, time waiting to run, I/O calls, time in I/O, time on locks, GPU memory. A cell no source measured for that task is `·`, never `0`. Under the columns, each column's badges, once |
+| processes | `cpu.oncpu_time`, and every per-task source the run holds | one row per process and one per thread any source saw, with the columns that fit: cpu as a share of one cpu, its chart over the run, cpu time, RSS, faults, time waiting to run, I/O calls, time in I/O, time on locks, GPU memory. A cell no source measured for that row is `·`, never `0`. A process's main thread has the process's id; when both have a row, the thread's id is drawn `t<tid>`. Under the columns, each column's badges, once. `s` steps only through the sorts whose column is on screen |
 | cost | every result the view's needs are served by | what each collector cost as a share of one cpu over its window, a bar each, the total; `≥` and dimmed where a collector's in-target cost is unknown |
 
 A source that was refused is drawn as its reason in its section's place: on
@@ -70,6 +91,19 @@ run that measured nothing of the machine (`sqlite-latency`,
 case's) gets one paragraph naming what the session did ask for, not seven
 empty frames.
 
+**Whose results.** A machine section draws the results `omn top` labels as
+the machine's (`cpu.util@system`). A session made elsewhere may label none;
+the section then takes the source's results whose series name no task, and
+its rule says so ("scope not recorded: taken as the machine's"), because a
+cgroup's `cpu.util` would look the same. A task's result (`gpu.mem` on the
+target) is never drawn as the device's.
+
+**A short terminal.** The box needs about 28 lines at 120 columns. When it
+does not fit, whole sections are left out from the last, and one line in the
+loss colour counts and names them ("+5 left out, the terminal is too short:
+gpu memory power disk network"); the head, the time axis and the border
+stay, so what is drawn still reads on its axis.
+
 ## Live and finished
 
 A finished run is drawn from each result's `timeline`. A live run holds
@@ -78,7 +112,7 @@ the same series code, with one place that knows each collector's value
 attribute (`busy`, `stall_ratio`, `bytes`, `ratio`, `joules`, `ns`...). The
 events say more than a timeline, and the view draws what they say: the cpu
 by state, read apart from written, in apart from out, the device's memory
-size, a process's name (`comm`). When a run kept no events for these
+size, a process's name (`comm`), the RAPL domains by name. When a run kept no events for these
 sources, the section's rule says what is missing ("in apart from out: in the
 events only"), so its absence is read as a property of the recording.
 
@@ -99,7 +133,9 @@ To see them on a real run, `omn top --dump-session -- work.sh` had `raw`
 added to `cpu.util`, `io.bytes` and `gpu.mem` and was recorded with
 `omn top -f s.yml --headless -o DIR` (unprivileged, while the other streams
 of this wave were building on the machine and using the GPU). The replay's
-machine box:
+machine box, drawn before this stream's review round (`now` there is
+`last` today, and the power row's `package` was a guess the timeline cannot
+support: it is `all` today):
 
 ```
 ┌ system -- the overview: cpu, memory, disk, network, GPU and power, and the processes ────────────────────────────────┐
@@ -152,7 +188,7 @@ at 120x40 by `cargo test --test view_snapshots system`:
 
 `frame--help` and `frame--narrow` are drawn on the first tab, which is this
 view, so they changed with it: the help over the overview, and the overview
-at 60x20, cut rather than broken.
+at 60x20, with the sections that did not fit counted on one line.
 
 ## What it does not show
 
@@ -161,11 +197,15 @@ at 60x20, cut rather than broken.
 - **Every process on the machine.** The process list is the target's tasks
   only, as the per-task sources saw them. With no target there is no list:
   the machine-wide per-task source is refused on this build.
-- **Which thread belongs to which process.** `cpu.oncpu_time` reads a
-  process (`/proc/<pid>`, its threads summed); the sched and memory sources
-  report threads. Both appear as rows, and the process's cpu already holds
-  its threads'. `enter` focuses a pid on a process row and a tid on a thread
+- **Which thread belongs to which process.** `cpu.oncpu_time` on `fs:proc`,
+  `mem.rss` and `gpu.mem` read a process (`/proc/<pid>`, its threads
+  summed); faults, the sched sources and `io.syscall` report threads. Both
+  appear as rows, the process's cpu already holds its threads', and the
+  main thread is a row of its own (`t<tid>`) rather than merged into the
+  process's. `enter` focuses a pid on a process row and a tid on a thread
   row.
+- **The RAPL domains by name, once a run has ended**: one timeline holds
+  them all, as above.
 - **In apart from out, names, by state, once a run has ended**, for the
   reason above.
 - **GPU engines.** NVML gives one whole-device figure (`degraded`, said on

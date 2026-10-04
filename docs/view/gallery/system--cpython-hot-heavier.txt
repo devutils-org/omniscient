@@ -2,7 +2,7 @@ omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snap
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
 ┌ system -- the overview: cpu, memory, disk, network, GPU and power, and the processes ────────────────────────────────┐
 ├ cpu busy, as a share of the whole machine ───────────────────────────────────────────────────────────────── ~low det ┤
-│   10.0% ┤                                                   ▃▃                ▂  now  3.98%                          │
+│   10.0% ┤                                                   ▃▃                ▂  last 3.98%                          │
 │         │                                                   ██                █  mean 5.12%                          │
 │         │                                        ▁▁▁▁       ██                █  peak 9.27%                          │
 │         │                                        ████       ██  ███      ▇▇▇  █  1.23 cpus busy, on average          │
@@ -17,23 +17,23 @@ omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snap
 │when      ├─────────────────┤                                                     ±1.00s: the driver's sampling window│
 │memory    held the whole run, unmoved (the device's size: in its events)          692MiB held                         │
 ├ memory time the machine stalled waiting for it ──────────────────────────────────────────────────────────── ~low det ┤
-│stalled   ·····································································   never stalled                       │
+│stalled     ····································································· never stalled                       │
 │target    ▆▆▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇██████████████████████████  17.5MiB held, peak 17.5MiB          │
-├ power watts, from the RAPL counters ─────────────────────────────────────────────────────────────────────────────────┤
-│package   ▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▇██▇▇▇▇▇▇▇▆▆▆▆▇▇▆▆▆█▆   55.6W mean  70.3W peak  441J        │
+├ power watts, from the RAPL counters; per domain by name: in the events only ─────────────────────────────────────────┤
+│all         ▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▇██▇▇▇▇▇▇▇▆▆▆▆▇▇▇▆▆█▆ 55.6W mean  70.3W peak  441J        │
 ├ disk bytes moved, per device; read apart from written: in the events only ──────────────────────── ~low det degraded ┤
-│259:0     ································································███··   4.86MiB  peak 19.4MiB/s             │
+│259:0       ·································································██·· 4.86MiB  peak 19.4MiB/s             │
 │          +2 moved nothing: 253:0 7:0                                                                                 │
 ├ network bytes moved, per interface; in apart from out: in the events only ──────────────────────── ~low det degraded ┤
-│wlan0     ▁▁▁▁··▁▁···▁▁▁▁▁▁···▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁···▁▁▁▁▁▁·····▆▆▁▁▆▆▂▂▂▁▁▂▂▆▆···█·   47.1KiB  peak 46.1KiB/s             │
-│tailscale ·················································▁▁··▁▁·······▁▁···▁·   1.25KiB  peak 1.25KiB/s             │
+│wlan0       ▁▁▁▁··▁▁▁··▁▁▁▁▁▁▁··▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁··▁▁▁▁▁▁·····▆▆▁▁▆▆▆▂▂▁▁▂▂▆▆▆··█· 47.1KiB  peak 46.1KiB/s             │
+│tailscale   ·················································▁▁··▁▁▁······▁▁▁··▁· 1.25KiB  peak 1.25KiB/s             │
 │          +5 moved nothing: br-bf6c2e1afced br-cb843b6eb1dd docker0 enp38s0 lo                                        │
 │          └0s──────────────────────────────3.97s───────────────────────────7.93s┘ a cell is 112ms, drawn at its peak  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ processes the target's, by cpu ────────────────────────────────────────────────────┐┌ cost, share of one cpu ────────┐
-│      ID    CPU cpu over the run  ON CPU      RSS FAULTS RUN QUEUE I/O CALLS        ││gpu.engine_busy  ███████  0.13% │
-│ 2779622  96.8% ████████████████   7.68s  17.5MiB  3.06k    9.01ms        82        ││cpu.util         █        0.01% │
-│                                                                                    ││io.bytes         █        0.01% │
+│       ID    CPU cpu over the run  ON CPU      RSS FAULTS RUN QUEUE I/O CALLS       ││gpu.engine_busy  ███████  0.13% │
+│  2779622  96.8% ████████████████   7.68s  17.5MiB      ·         ·         ·       ││cpu.util         █        0.01% │
+│ t2779622      ·                        ·        ·  3.06k    9.01ms        82       ││io.bytes         █        0.01% │
 │                                                                                    ││+5 more                  ≥0.03% │
 │CPU ~low det degraded  FAULTS 80 late  I/O CALLS ~low det degraded x2               ││all of them              ≥0.18% │
 └────────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────┘

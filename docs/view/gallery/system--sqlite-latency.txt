@@ -6,8 +6,8 @@ omn top │ fixture sqlite-latency │ 284ms                          view: snap
 │on-cpu (cpu.profile), runnable (sched.runqlat), blocked (sched.offcpu), futex (sched.futex)                           │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ processes the target's, by cpu ────────────────────────────────────────────────────┐┌ cost, share of one cpu ────────┐
-│      ID RUN QUEUE ON LOCKS                                                         ││none of this view's collectors  │
-│ 2759527    1.72ms        ·                                                         ││is in this run                  │
+│       ID RUN QUEUE ON LOCKS                                                        ││none of this view's collectors  │
+│  2759527    1.72ms        ·                                                        ││is in this run                  │
 │                                                                                    ││                                │
 │                                                                                    ││                                │
 │                                                                                    ││                                │
