@@ -1,0 +1,10 @@
+Attaching 6 probes...
+Tracing open syscalls... Hit Ctrl-C to end.
+PID    COMM               FD  ERR PATH
+4242   omnref              3    0 /etc/ld.so.cache
+4242   omnref              3    0 /usr/lib/libc.so.6
+4242   omnref              3    0 /usr/lib/python3.14/encodings/__init__.py
+4242   omnref              3    0 /var/tmp/tmpk2b8x1qa
+4242   omnref              3    0 /var/tmp/tmpk2b8x1qa
+4242   omnref             -1    2 /usr/lib/python3.14/site-packages/missing.pth
+388    systemd-journal    41    0 /proc/4242/comm

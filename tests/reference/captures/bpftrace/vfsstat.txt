@@ -1,0 +1,12 @@
+Attaching 10 probes...
+Tracing key VFS calls... Hit Ctrl-C to end.
+19:42:01
+@[vfs_open]: 120
+@[vfs_write]: 431
+@[vfs_read]: 2958
+
+19:42:02
+@[vfs_open]: 98
+@[vfs_write]: 377
+@[vfs_read]: 3112
+
