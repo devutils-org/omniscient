@@ -20,7 +20,7 @@
   "lead_s": 0.3,
   "tail_s": 0.6,
   "trust": {
-    "cpu": "exact to a few microseconds per process on its own cpu clock: 2.0 s of cpu over about 1.0 s of wall clock, which raises the machine's busy share by two cores' worth on top of whatever else runs. The program's own on-cpu time is its half, `burn_s`, plus the interpreter's start and the copies: a launched program's on-cpu time does not hold its children's",
+    "cpu": "exact to a few microseconds per process on its own cpu clock: 2.0 s of cpu over about 1.0 s of wall clock, which raises the machine's busy share by two cores' worth on top of whatever else runs. The program's own on-cpu time is its half, `burn_s`, plus the interpreter's start and the copies: a launched program's on-cpu time through `fs:proc` does not hold its children's, and through `bpf:raw_tp`, which follows descendants, holds the child's `burn_s` as well",
     "disk": "the file is fsynced, so its bytes reach the device under `target/` before the program goes on; the device's count is at least `written`, more with the filesystem's metadata and anything else writing to it",
     "loopback": "`bytes` sent one way; an interface's counters see them on `lo`, and count each byte once received and once sent, so the interface carries at least `bytes`",
     "machine": "every panel but the program's on-cpu time is the machine's: the program's cost is a lower bound on what it shows",

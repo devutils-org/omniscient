@@ -553,41 +553,56 @@ fn a_workload_that_is_half_blocked_measures_as_half_blocked() {
     // lengthens that wait and the responder's spin with it, and the two halves
     // are equal in cpu time, not in wall time (flaky tally #2's leftover).
     //
-    // The driver's: `sched.offcpu` follows the processes the shell starts since
-    // the eighteenth wave, and the responder blocks once a round trip too,
-    // while `cpu.oncpu_time` reads the launched process alone -- whose task is
-    // its series.
-    let driver: u64 = outputs(labelled(&results, "on-cpu"), "summary")
-        .flat_map(|output| output["series"].as_array().expect("series").clone())
-        .find_map(|series| series["key"].as_str()?.strip_prefix("task:")?.parse().ok())
-        .expect("the on-cpu half names the launched task");
-    let of_driver = |attribute: &str| -> u64 {
-        raw_events(labelled(&results, "blocked"))
-            .iter()
-            .filter(|event| event["tid"].as_u64() == Some(driver))
-            .filter_map(|event| event[attribute].as_u64())
-            .sum()
-    };
-    let blocked_ns = of_driver("blocked_ns");
-    let blocks = of_driver("blocks");
-    assert!(
-        close_to(blocks, HALF_BLOCKED_ROUND_TRIPS),
-        "{HALF_BLOCKED_ROUND_TRIPS} round trips are {HALF_BLOCKED_ROUND_TRIPS} blocks, \
-         saw {blocks}"
-    );
-
-    // `cpu.oncpu_time` reports a delta per poll, so the total is the count of
-    // polls times their mean.
-    let on_cpu = labelled(&results, "on-cpu");
-    let on_cpu_ns: f64 = outputs(on_cpu, "summary")
+    // One task's two halves. `sched.offcpu` follows the processes the shell
+    // starts since the eighteenth wave, and `cpu.oncpu_time` does too through
+    // `bpf:raw_tp` (one series per thread), while through `fs:proc` it reads
+    // the launched process alone. The driver and the responder are each half
+    // on the cpu and half blocked on the other, so either holds the claim:
+    // the task taken is the busiest on-cpu series that also blocked once a
+    // round trip, and only its own rows are read on both sides.
+    //
+    // `cpu.oncpu_time` reports a delta per poll, so a series' total is the
+    // count of its polls times their mean.
+    let on_cpu_of: Vec<(u64, f64)> = outputs(labelled(&results, "on-cpu"), "summary")
         .flat_map(|output| {
             output["series"]
                 .as_array()
                 .expect("a summary carries series")
                 .clone()
         })
-        .filter_map(|series| Some(series["count"].as_f64()? * series["mean"].as_f64()?))
-        .sum();
+        .filter_map(|series| {
+            let tid = series["key"]
+                .as_str()?
+                .strip_prefix("task:")?
+                .parse()
+                .ok()?;
+            Some((tid, series["count"].as_f64()? * series["mean"].as_f64()?))
+        })
+        .collect();
+    assert!(
+        !on_cpu_of.is_empty(),
+        "the on-cpu half names no task:\n{text}"
+    );
+    let of_task = |tid: u64, attribute: &str| -> u64 {
+        raw_events(labelled(&results, "blocked"))
+            .iter()
+            .filter(|event| event["tid"].as_u64() == Some(tid))
+            .filter_map(|event| event[attribute].as_u64())
+            .sum()
+    };
+    let (driver, on_cpu_ns) = on_cpu_of
+        .iter()
+        .copied()
+        .filter(|(tid, _)| close_to(of_task(*tid, "blocks"), HALF_BLOCKED_ROUND_TRIPS))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap_or_else(|| {
+            panic!(
+                "{HALF_BLOCKED_ROUND_TRIPS} round trips are {HALF_BLOCKED_ROUND_TRIPS} blocks of \
+                 one of the on-cpu tasks {on_cpu_of:?}"
+            )
+        });
+    let blocked_ns = of_task(driver, "blocked_ns");
+
     assert!(
         on_cpu_ns > 0.0,
         "the on-cpu half of the workload was not measured at all:\n{text}"

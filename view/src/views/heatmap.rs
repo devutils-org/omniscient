@@ -1987,11 +1987,13 @@ mod tests {
         }
         let after = Samples::of(&ctx(&data, &Focus::default()), need("net.socket"));
         let events = events_of(&data, "net.socket");
-        let (run_start, _) = run_span(&data);
+        let (run_start, run_end) = run_span(&data);
         assert_eq!(after.points.len(), events.len());
         let mut moved = 0;
         for ((then, now), event) in before.points.iter().zip(&after.points).zip(&events) {
-            let ts = (event.ts_ns as f64).max(run_start as f64);
+            // The stop's drain stamps its rows after the run's end, and a
+            // row is never drawn past either end of the run.
+            let ts = (event.ts_ns as f64).clamp(run_start as f64, run_end as f64);
             assert!((now.start - ts).abs() < 0.5, "drawn from its stamp");
             if (then.start - now.start).abs() > 0.5 {
                 moved += 1;

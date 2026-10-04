@@ -2,10 +2,9 @@
 """The system view's workload: a known cost on every panel of the machine.
 
 The program and a child process, `system-burn`, burn `burn_s` of cpu each at
-once -- two cores' worth -- and the program's own share is the one its on-cpu
-time holds, since a launched program's on-cpu time is its own process's and
-not its children's. Then the program
-writes a file to a disk and fsyncs it, then sends bytes to itself over
+once -- two cores' worth. A launched program's on-cpu time holds its own
+share through `fs:proc`, and the child's as well through `bpf:raw_tp`, which
+follows descendants. Then the program writes a file to a disk and fsyncs it, then sends bytes to itself over
 loopback. Every figure is in `manifest.json`.
 """
 

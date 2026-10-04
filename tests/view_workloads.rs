@@ -890,12 +890,18 @@ fn system_panels_carry_at_least_the_manifests_cost() {
         return;
     };
 
-    let on_cpu = timeline_sum(labelled(&results, "on-cpu"), None) / S;
-    let burnt = f(&truth["burn_s"]);
+    // `fs:proc` reads the launched process alone; `bpf:raw_tp` follows its
+    // descendants, so the child's burn is in its rows too.
+    let result = labelled(&results, "on-cpu");
+    let on_cpu = timeline_sum(result, None) / S;
+    let followed = result["backend"] == "bpf:raw_tp";
+    let burnt = f(&truth["burn_s"]) * if followed { 2.0 } else { 1.0 };
     assert!(
         on_cpu >= burnt * 0.95 && on_cpu <= burnt + 0.6,
-        "the program burns {burnt} s itself (its child as much again, not its own); on the cpu \
-         {on_cpu:.3} s"
+        "the program and its child burn {} s each; through {} the on-cpu time holds {burnt} s \
+         of it; on the cpu {on_cpu:.3} s",
+        f(&truth["burn_s"]),
+        result["backend"]
     );
 
     let cores = std::thread::available_parallelism().map_or(1.0, |cores| cores.get() as f64);
