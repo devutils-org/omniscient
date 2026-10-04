@@ -46,6 +46,19 @@
        own `local_bh_enable` (loopback delivery in the sender's `sendmsg`) is
        recorded as a softirq, though the sender caused it. A waker of 0 with
        `waker_context: task` is the idle task."
+    - "Each end has its own name: `comm` and `pid` are the wakee's, because the
+       event is keyed on it, and `wakee_comm` says so by name; `waker_comm` is
+       the waker's, on a task's wakeup only. A launched program is named `omn`
+       until it executes, because it is `omn`'s fork until then."
+    - "An interrupt's wakeup carries `served_in_tid` and `served_in_comm`, the
+       task the interrupt was served on -- where it landed, or the task whose
+       `local_bh_enable` served the softirq, which is then the one that caused
+       it -- and `irq`, the hard interrupt's number as `/proc/interrupts`
+       numbers it, or `softirq`, the vector's name. A hard interrupt with no
+       registered handler (the local timer, which ends most sleeps, and
+       inter-processor interrupts) has no `irq`, and neither has a threaded
+       handler's wakeup of its own thread, which the kernel issues after the
+       handler's exit."
 
 - id: sched.runqlat
   family: sched
@@ -127,12 +140,12 @@
        the context switch changes the lock's convoy. A lock measurement describes
        the run it perturbed, and is read beside that run rather than against an
        untraced one."
-    - "An event is one bucket of one window, and it is stamped at the moment the
-       window's first wait began rather than at the drain that read it. A join
-       that *opens* on this source would otherwise open at the window's close,
-       and everything that happened in the same window as the first wait would
-       fall outside the state. `window_ns` beside the value says how wide the
-       window was."
+    - "An event is one row of one window, and it is stamped at the drain that
+       closed the window, not at any block in it: the blocks it adds up ended in
+       `(ts_ns - window_ns, ts_ns]`. A join that *opens* on this source opens
+       at the window's close, so what happened earlier in the same window falls
+       outside the state; `window_ns` beside the value says how far back the
+       window reaches."
     - "Expensive on switch-heavy workloads, which is why the totals are kept in
        the kernel keyed by (task, state, stack-id, log2 bucket) rather than
        streamed as one event per switch. The stack is walked once per distinct
@@ -249,13 +262,13 @@
   summary: "Kernel lock contention"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:contention_begin(void *, unsigned int)", "raw_tracepoint:contention_end(void *, int)", "kernel>=6.1"], cost: med, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:contention_begin(void *, unsigned int)", "raw_tracepoint:contention_end(void *, int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"], cost: med, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:lock:contention_begin", "tracepoint:lock:contention_end", "bpf", "kernel>=6.1"], cost: med, equivalent: true}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: high,
        degraded: "older kernels: futex and uprobe fallback, partial coverage"}
   modes: [trace]
   emits: [hist, topk, stack, raw, summary]
-  targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only}
+  targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
   keys: [task]
   filter_fields: [comm, pid]
   determinism: low
@@ -271,13 +284,16 @@
        and everything that happened in the same window as the first would fall
        outside the state. `window_ns` beside the value says how wide the window
        was."
+    - "A process target is followed into every process it starts, as
+       `sched.offcpu` follows it: a program on `sched_process_fork` adds a child
+       to the set before it has run."
 
 - id: sched.futex
   family: sched
   summary: "Userspace futex wait"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "kernel>=5.8"], cost: high, drained: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=5.8"], cost: high, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: high, equivalent: true}
   modes: [trace]
   emits: [hist, topk, stack, raw, summary]
@@ -292,6 +308,9 @@
        and everything that happened in the same window as the first would fall
        outside the state. `window_ns` beside the value says how wide the window
        was."
+    - "A process target is followed into every process it starts, as
+       `sched.offcpu` follows it: a program on `sched_process_fork` adds a child
+       to the set before it has run."
 
 - id: sched.mutex
   family: sched

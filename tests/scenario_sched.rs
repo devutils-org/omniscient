@@ -707,6 +707,108 @@ fn each_child_that_exits_is_named_as_the_one_that_released_the_shell() {
          {wakers:?}\n{text}",
         wakers.len()
     );
+
+    // Each end of a wakeup has its own name: the shell is woken (`comm` and
+    // `wakee_comm` are the wakee's, the event's key) by `sleep` exiting
+    // (`waker_comm`), and a wakeup from an interrupt names the task it was
+    // served on instead, under a name that does not say waker.
+    let mut released_by_sleep = 0;
+    for line in text
+        .lines()
+        .filter(|line| line.contains("sched.wakeup  task:"))
+    {
+        let field = |name: &str| {
+            line.split_whitespace()
+                .find_map(|word| word.strip_prefix(name))
+        };
+        assert_eq!(
+            field("comm="),
+            field("wakee_comm="),
+            "`comm` is the wakee's name: {line}"
+        );
+        if field("waker_context=") == Some("task") {
+            assert!(field("waker_comm=").is_some(), "{line}");
+            assert!(field("served_in_tid=").is_none(), "{line}");
+        } else {
+            assert!(field("served_in_tid=").is_some(), "{line}");
+            assert!(field("waker_comm=").is_none(), "{line}");
+        }
+        if field("comm=") == Some("sh") && field("waker_comm=") == Some("sleep") {
+            released_by_sleep += 1;
+        }
+    }
+    assert!(
+        released_by_sleep >= CHILDREN,
+        "{CHILDREN} children exiting are {CHILDREN} wakeups of `sh` by `sleep`, saw \
+         {released_by_sleep}:\n{text}"
+    );
+}
+
+/// An interrupt's wakeup names the interrupt the kernel numbers it by.
+///
+/// The truth is the kernel's own table: every `irq` a wakeup carries is a
+/// line of `/proc/interrupts` with a registered handler, and every `softirq`
+/// one of the ten vectors `kernel/softirq.c` names. Whether a second of this
+/// machine has a device interrupt that wakes a task is the machine's, so the
+/// values are held to the table whatever their number and the count is
+/// reported; a timer softirq waking something in a second is asserted.
+#[test]
+fn an_interrupts_wakeup_names_an_interrupt_the_kernel_numbers() {
+    let output = omn(&[
+        "trace",
+        "sched.wakeup",
+        "--mode",
+        "trace",
+        "--emit",
+        "raw",
+        "--system",
+        "--duration",
+        "1s",
+    ]);
+    let text = spoken(&output);
+    if unprivileged(&text) {
+        eprintln!("skipped: sched.wakeup needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let interrupts = std::fs::read_to_string("/proc/interrupts").unwrap_or_default();
+    let numbered: std::collections::BTreeSet<u32> = interrupts
+        .lines()
+        .filter_map(|line| line.trim_start().split(':').next()?.parse().ok())
+        .collect();
+    const VECTORS: [&str; 10] = [
+        "HI", "TIMER", "NET_TX", "NET_RX", "BLOCK", "IRQ_POLL", "TASKLET", "SCHED", "HRTIMER",
+        "RCU",
+    ];
+    let (mut hard, mut soft) = (0, 0);
+    for line in text
+        .lines()
+        .filter(|line| line.contains("sched.wakeup  task:"))
+    {
+        let field = |name: &str| {
+            line.split_whitespace()
+                .find_map(|word| word.strip_prefix(name))
+        };
+        if let Some(irq) = field("irq=") {
+            assert_eq!(field("waker_context="), Some("hardirq"), "{line}");
+            let irq: u32 = irq.parse().expect("a number");
+            assert!(
+                numbered.contains(&irq),
+                "interrupt {irq} is no line of /proc/interrupts: {line}"
+            );
+            hard += 1;
+        }
+        if let Some(vector) = field("softirq=") {
+            assert_eq!(field("waker_context="), Some("softirq"), "{line}");
+            assert!(VECTORS.contains(&vector), "{line}");
+            soft += 1;
+        }
+    }
+    eprintln!("{hard} wakeups named a hard interrupt and {soft} a softirq vector");
+    assert!(
+        soft > 0,
+        "a second of a whole machine with no timer softirq waking anything:\n{text}"
+    );
 }
 
 /// Where a program blocked, not how long -- whoever started the program.
@@ -2311,7 +2413,127 @@ fn a_run_that_could_not_time_a_wait_says_which_wait_and_why() {
     );
 }
 
+/// A launched program's lock waits are its children's too.
+///
+/// A shell that starts twelve subshells appending to one file: every append
+/// takes the file's inode lock, and the root shell takes none of it itself.
+/// So waits from two or more processes are waits from processes the target
+/// started, which `sched.lock` did not follow before the twentieth wave and
+/// could not be launched for at all.
+#[test]
+fn a_launched_programs_lock_waits_are_its_childrens() {
+    let _workload = one_lock_workload_at_a_time();
+    let directory = scratch("sched-lock-launched");
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let file = directory.join("shared");
+    let script = format!(
+        "for i in $(seq {LOCK_WRITERS}); do (for j in $(seq 4000); do echo xxxxxxxxxxxxxxxx; \
+         done >> {}) & done; wait",
+        file.display()
+    );
+    let output = omn(&[
+        "trace",
+        "sched.lock",
+        "--mode",
+        "trace",
+        "--emit",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "/bin/sh",
+        "-c",
+        &script,
+    ]);
+    let text = spoken(&output);
+    let _ = std::fs::remove_dir_all(&directory);
+    if unprivileged(&text) {
+        eprintln!("skipped: `sched.lock` needs CAP_BPF and CAP_PERFMON");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let results = results(&output);
+    let processes: std::collections::BTreeSet<u64> = results
+        .iter()
+        .flat_map(raw_events)
+        .filter_map(|event| event["pid"].as_u64())
+        .collect();
+    assert!(
+        processes.len() >= 2,
+        "{LOCK_WRITERS} subshells fighting over one file are waits in more than one process; \
+         the run reports {processes:?}\n{text}"
+    );
+}
+
 // ------------------------------------------------- sched.futex: ground truth
+
+/// A launched program's futex waits are its children's too.
+///
+/// The same lock held for a known time, one process down: the launched shell
+/// runs the Python program as a child and then a builtin, so it cannot exec
+/// into it, and the wait is in a process the target started rather than in
+/// the target. Before the twentieth wave `sched.futex` compared the thread
+/// group with the root alone and this run reported nothing.
+#[test]
+fn a_childs_futex_wait_is_the_launched_programs() {
+    if !have("python3") {
+        eprintln!("skipped: the workload's lock is python3's, which this machine does not have");
+        return;
+    }
+    let directory = scratch("sched-futex-child");
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let session = directory.join("session.yml");
+    let program = format!(
+        "import threading, time\n\
+         lock = threading.Lock()\n\
+         lock.acquire()\n\
+         def waiter():\n    lock.acquire()\n    lock.release()\n\
+         thread = threading.Thread(target=waiter)\n\
+         thread.start()\n\
+         time.sleep({})\n\
+         lock.release()\n\
+         thread.join()\n",
+        FUTEX_HOLD_MS as f64 / 1000.0
+    );
+    let yaml = serde_json::json!({
+        "name": "a lock held for a known time, one process down",
+        "requests": [{
+            "label": "waits",
+            "source": "sched.futex",
+            "target": {"launch": ["/bin/sh", "-c", "python3 -c \"$0\"; true", program]},
+            "mode": "trace",
+            "emit": ["raw", "summary"],
+            "keys": ["task"],
+        }],
+    });
+    std::fs::write(&session, yaml.to_string()).expect("the session is written");
+    let output = omn(&["-f", session.to_str().expect("a path"), "--format", "json"]);
+    let text = spoken(&output);
+    let _ = std::fs::remove_dir_all(&directory);
+    if unprivileged(&text) {
+        eprintln!("skipped: `sched.futex` needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    }
+    assert_eq!(exit_code(&output), 0, "{text}");
+    let results = results(&output);
+    let result = labelled(&results, "waits");
+    let long: Vec<u64> = raw_events(result)
+        .iter()
+        .filter(|event| event["total_ns"].as_u64().unwrap_or(0) >= LONG_WAIT_NS)
+        .map(|event| event["total_ns"].as_u64().expect("a total"))
+        .collect();
+    assert_eq!(
+        long.len(),
+        1,
+        "the child holds one lock {FUTEX_HOLD_MS} ms against one waiter; the run reports \
+         {long:?}\n{text}"
+    );
+    assert!(
+        close_to(long[0], FUTEX_HOLD_MS * 1_000_000),
+        "a lock held {FUTEX_HOLD_MS} ms, a wait of {} ns",
+        long[0]
+    );
+}
 
 /// A lock held for a known time is the wait the other thread reports.
 ///

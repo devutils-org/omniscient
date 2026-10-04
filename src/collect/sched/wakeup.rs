@@ -58,6 +58,46 @@ impl Prepared for Prepare {
     }
 }
 
+/// What one wakeup says, as attributes.
+fn attributes(wakeup: &Wakeup) -> Vec<Attr> {
+    let context = wakeup.context();
+    let mut attrs = vec![
+        Attr::uint("count", 1),
+        Attr::uint("wakee_tid", wakeup.wakee_tid as u64),
+        Attr::uint("wakee_pid", wakeup.wakee_pid as u64),
+        // 0 for a wakeup issued from an interrupt, with the interrupt named
+        // beside it: the task that was running there is not the one that woke
+        // anybody.
+        Attr::uint("waker_tid", wakeup.waker_tid as u64),
+        Attr::uint("waker_pid", wakeup.waker_pid as u64),
+        Attr::text("waker_context", context.as_str()),
+        Attr::uint("cpu", wakeup.cpu as u64),
+        // The catalog declares the filter field as `pid`, and the event is
+        // keyed on the wakee, so `pid` and `comm` are the wakee's. Each end has
+        // its own name beside them, because a reader naming threads from
+        // either end must not have to know which end the bare one is.
+        Attr::uint("pid", wakeup.wakee_pid as u64),
+        Attr::text("comm", wakeup.wakee_comm()),
+        Attr::text("wakee_comm", wakeup.wakee_comm()),
+    ];
+    if context.is_interrupt() {
+        // Not the waker: the task the interrupt was served on, which for a
+        // softirq served in its own `local_bh_enable` is the one that caused
+        // it, and otherwise only where the interrupt landed.
+        attrs.push(Attr::uint("served_in_tid", wakeup.served_in_tid as u64));
+        attrs.push(Attr::text("served_in_comm", wakeup.current_comm()));
+        if let Some(irq) = wakeup.irq() {
+            attrs.push(Attr::uint("irq", irq as u64));
+        }
+        if let Some(vector) = wakeup.softirq() {
+            attrs.push(Attr::text("softirq", vector));
+        }
+    } else {
+        attrs.push(Attr::text("waker_comm", wakeup.current_comm()));
+    }
+    attrs
+}
+
 pub struct WakeupCollector {
     id: CollectorId,
     /// Whose wakeups are kept, at either end.
@@ -77,6 +117,9 @@ pub struct WakeupCollector {
     /// Set once the program is loaded on a kernel whose preempt count it could
     /// not find, where an interrupt's wakeup is still the interrupted task's.
     interrupts_blind: bool,
+    /// Why an interrupt's wakeup carries no `irq` or `softirq`, when the
+    /// programs that read them could not be loaded.
+    interrupts_unnamed: Option<String>,
 }
 
 impl WakeupCollector {
@@ -93,6 +136,7 @@ impl WakeupCollector {
             filtered_out: 0,
             from_interrupts: 0,
             interrupts_blind: false,
+            interrupts_unnamed: None,
         }
     }
 
@@ -107,8 +151,7 @@ impl WakeupCollector {
         let (mut kept, mut removed, mut from_interrupts) = (0u64, 0u64, 0u64);
         program.drain(
             |wakeup: Wakeup| {
-                let context = wakeup.context();
-                if context.is_interrupt() {
+                if wakeup.context().is_interrupt() {
                     from_interrupts += 1;
                 }
                 let event = Event {
@@ -119,25 +162,7 @@ impl WakeupCollector {
                     // that stopped being blocked. The waker is an attribute of
                     // that event, which is what the join reads.
                     keys: vec![KeyValue::task(wakeup.wakee_tid as i32)],
-                    attrs: vec![
-                        Attr::uint("count", 1),
-                        Attr::uint("wakee_tid", wakeup.wakee_tid as u64),
-                        Attr::uint("wakee_pid", wakeup.wakee_pid as u64),
-                        // 0 for a wakeup issued from an interrupt, with the
-                        // interrupt named beside it: the task that was running
-                        // there is not the one that woke anybody.
-                        Attr::uint("waker_tid", wakeup.waker_tid as u64),
-                        Attr::uint("waker_pid", wakeup.waker_pid as u64),
-                        Attr::text("waker_context", context.as_str()),
-                        Attr::uint("cpu", wakeup.cpu as u64),
-                        // The catalog declares the filter field as `pid`, and
-                        // the event is keyed on the wakee, so `pid` is the
-                        // wakee's process. `waker_pid` is beside it for the
-                        // other half, which is a different question and gets a
-                        // different name.
-                        Attr::uint("pid", wakeup.wakee_pid as u64),
-                        Attr::text("comm", wakeup.wakee_comm()),
-                    ],
+                    attrs: attributes(&wakeup),
                     collector_id: id.clone(),
                     seq: index,
                 };
@@ -215,6 +240,7 @@ impl Collector for WakeupCollector {
     fn start(&mut self) -> Result<(), String> {
         let program = WakeupProgram::load(self.filter, RING_BYTES)?;
         self.interrupts_blind = !program.interrupts_told_apart();
+        self.interrupts_unnamed = program.interrupts_unnamed().map(str::to_owned);
         self.program = Some(program);
         Ok(())
     }
@@ -266,6 +292,12 @@ impl Collector for WakeupCollector {
                 } else {
                     "s were"
                 },
+            ));
+        }
+        if let (false, Some(reason)) = (self.interrupts_blind, &self.interrupts_unnamed) {
+            notes.push(format!(
+                "an interrupt's wakeup carries no `irq` or `softirq`: the programs that say which \
+                 interrupt a cpu is in were not loaded ({reason})"
             ));
         }
         if self.filtered_in > 0 || self.filtered_out > 0 {
