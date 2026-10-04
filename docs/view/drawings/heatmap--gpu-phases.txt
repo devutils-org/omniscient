@@ -1,0 +1,41 @@
+omn top │ …4; python3 tests/gpu_workload.py launches 3000) │ 1.49sview: snapshot │ collectors ≥29.7% │ target 75.2% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
+┌ heatmap -- gpu.kernel latency over time ─────────────────────────────────────────────────────────────────────────────┐
+│ io.latency 0   sched.runqlat 614 in 195 rows   net.socket 9 in 6 rows   gpu.kernel 6.24k                             │
+│6.24k GPU operations, 831ns to 6.20ms, p50 896ns, p99 1.82ms 18 late ±318ns                                           │
+│3 regimes  ~896ns 96% (6.00k) in two bursts, all through  │  ~252µs 0.6% (37) 1.05s to 1.08s  │  ~1.80ms 3.3% (204) in│
+│two bursts, 400ms to 1.07s                                                                                            │
+│  count          ▃█              ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁                  ▁▁▁                 ▃▆▃       the whole run  │
+│       │                                                                 ░ ░                           ▏             2│
+│       │                                                                   │                                          │
+│       │                                                                   │                                          │
+│       │                         ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒                   ▒░                           ▏           203│
+│       │                         ░                                         │                           ▏             1│
+│    1ms┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  │·   ·   ·   ·   ·   ·   ·                 │
+│       │                                                                   │                                          │
+│       │                                                                   │                                          │
+│       │                                                                  ▒▒                           ▏            36│
+│       │                                                                   │                                          │
+│  100µs┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·░ │·   ·   ·   ·   ·   ·   ·  ▏             1│
+│       │                                                                   │                                          │
+│       │                                                                   │                                          │
+│       │                                                                   │                                          │
+│       │                                                                   │                                          │
+│   10µs┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  │·   ·   ·   ·   ·   ·   ·                 │
+│       │                                                                   │                                          │
+│       │                                                                   │                                          │
+│       │                                                                   │                                          │
+│       │         ░                                                         │                           ▏             1│
+│       │                                                                   │                 ░         ▏             1│
+│    1µs┤·   ·   ·██ ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  │·   ·   ·   ·   ·███·   ·  █████████ 6.00k│
+│       │                                                                   │                                          │
+│       └┬───────────┬────────────┬───────────┬────────────┬───────────┬────▲───────┬───────────┬─────                 │
+│        0         200ms        400ms       600ms        800ms       1.00s        1.20s       1.40s                    │
+│   lost nothing lost; 18 rounds of reads came late: nothing is missing, the drains were further apart than asked      │
+│                                                                                                                      │
+│▲ 1.07s to 1.09s   14 GPU operations   p50 252µs   p99 6.20ms   max 6.20ms                                            │
+│  its slowest 6.20ms: tid 3131595 [memcpy DtoH] 64.0MiB                                                               │
+│per cell ░1 ▒3 ▒13 ▓47 ▓171 █630   rows 1.6/octave, columns 16.0ms each                                               │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it
+
