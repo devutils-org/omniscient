@@ -110,6 +110,9 @@ pub const NEEDS: &[Need] = &[
     },
 ];
 
+/// What the view shows, in one line.
+const TITLE: &str = "the overview: cpu, memory, disk, network, GPU and power, and the processes";
+
 /// The view's keys, for the help line.
 const KEYS: &[(&str, &str)] = &[
     ("↑/↓", "process"),
@@ -174,7 +177,7 @@ impl View for System {
     }
 
     fn title(&self) -> &'static str {
-        "the overview: cpu, memory, disk, network, GPU and power, and the processes"
+        TITLE
     }
 
     fn needs(&self) -> &'static [Need] {
@@ -864,6 +867,9 @@ impl<'a> Strips<'a> {
 
     /// Everything, in order.
     fn build(mut self) -> Vec<Line<'static>> {
+        // The view's own name and title on the box, as every view frames
+        // itself (`┌ system -- ...`).
+        self.section("system --", TITLE, None);
         self.cpu();
         self.gpu();
         self.memory();
@@ -1421,7 +1427,7 @@ fn draw_no_machine(frame: &mut Frame<'_>, area: Rect, data: &Data) {
     ];
     frame.render_widget(
         Paragraph::new(text)
-            .block(panel("the machine", "", None))
+            .block(panel("system --", TITLE, None))
             .wrap(Wrap { trim: true }),
         area,
     );

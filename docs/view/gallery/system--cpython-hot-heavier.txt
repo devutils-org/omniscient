@@ -1,6 +1,7 @@
 omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snapshot │ collectors ≥5.29% │ target 96.5% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
-┌ cpu busy, as a share of the whole machine ───────────────────────────────────────────────────────────────── ~low det ┐
+┌ system -- the overview: cpu, memory, disk, network, GPU and power, and the processes ────────────────────────────────┐
+├ cpu busy, as a share of the whole machine ───────────────────────────────────────────────────────────────── ~low det ┤
 │   10.0% ┤                                                   ▃▃                ▂  now  3.98%                          │
 │         │                                                   ██                █  mean 5.12%                          │
 │         │                                        ▁▁▁▁       ██                █  peak 9.27%                          │
@@ -33,8 +34,7 @@ omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snap
 │      ID    CPU cpu over the run  ON CPU      RSS FAULTS RUN QUEUE I/O CALLS        ││gpu.engine_busy  ███████  0.13% │
 │ 2779622  96.8% ████████████████   7.68s  17.5MiB  3.06k    9.01ms        82        ││cpu.util         █        0.01% │
 │                                                                                    ││io.bytes         █        0.01% │
-│                                                                                    ││net.bytes        █        0.01% │
-│                                                                                    ││+4 more                  ≥0.01% │
+│                                                                                    ││+5 more                  ≥0.03% │
 │CPU ~low det degraded  FAULTS 80 late  I/O CALLS ~low det degraded x2               ││all of them              ≥0.18% │
 └────────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ process  enter its ledger  s sort  i idle devices

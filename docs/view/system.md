@@ -53,7 +53,7 @@ The sections:
 
 | Section | Source | What it shows |
 |---|---|---|
-| cpu | `cpu.util@system` | busy as a share of the whole machine, on a chart up to a round ceiling (`10.0%`, `20.0%`, `100%`); now, mean, peak; `N cpus busy, on average` from the kernel's account of the same window (`observed_cpu_ns / wall_ns` of the cpu result); live, the busy time **by state** as one bar (user, sys, iowait, steal) |
+| cpu | `cpu.util@system` | busy as a share of the whole machine, on a chart up to a round ceiling (`10.0%`, `20.0%`, `100%`); now, mean, peak; `N cpus busy, on average` from the kernel's account over the collection's window (`observed_cpu_ns / wall_ns` of the cpu result: its edges are not exactly the polls', and a short run shows it); live, the busy time **by state** as one bar (user, sys, iowait, steal) |
 | gpu | `gpu.engine_busy@system`, `gpu.mem@system` | occupancy (mean, peak), the ruler, and the memory held: against the device's size when the events carry it (`668MiB held of 11.0GiB`), otherwise `held the whole run, unmoved` rather than a full bar that would read as a full device |
 | memory | `mem.pressure@system`, and `mem.rss` when the run has it | the time the machine stalled waiting for memory (`never stalled`, or `<0.01%` rather than `0.00%`), and the target's resident memory beside it |
 | power | `power.energy@system` | watts per RAPL domain, from joules per read over the read's interval; mean, peak, and the joules spent |
@@ -102,7 +102,8 @@ of this wave were building on the machine and using the GPU). The replay's
 machine box:
 
 ```
-┌ cpu busy, as a share of the whole machine ───────────────────────────────────────────────────────────────── ~low det ┐
+┌ system -- the overview: cpu, memory, disk, network, GPU and power, and the processes ────────────────────────────────┐
+├ cpu busy, as a share of the whole machine ───────────────────────────────────────────────────────────────── ~low det ┤
 │    100% ┤                                                                        now  46.9%                          │
 │         │                                                                        mean 46.8%                          │
 │         │▅▅▅▅▅▅▅▅▅▅▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▄▄▄▄▄▄▄▄▄▄▄▆▆▆▆▆▆▆▆▆▆▆▂▂▂▂▂▂▂▂▂▂▂     ▃ peak 54.1%                          │

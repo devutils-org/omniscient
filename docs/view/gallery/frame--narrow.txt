@@ -1,6 +1,7 @@
 omn top │ fixture http-server │ 2.84s        view: snapshot
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatma
-┌ cpu busy, as a share of the whole machine ───── ~low det ┐
+┌ system -- the overview: cpu, memory, disk, network, GPU…─┐
+├ cpu busy, as a share of the whole machine ───── ~low det ┤
 │   20.0% ┤                             now  4.69%         │
 │         │                             mean 5.99%         │
 │         │██                         ▁ peak 12.0%         │
@@ -11,7 +12,6 @@ omn top │ fixture http-server │ 2.84s        view: snapshot
 │ ≤2.00%   ████████████████████████████                    │
 │when      ├───────────────────┤        ±1.00s: the driver…│
 │memory    held the whole run, unmoved… 692MiB held        │
-├ memory time the machine stalled waiting for i…─ ~low det ┤
 ┌ processes the target's, by cpu ──────┐┌ cost, share of on┐
 │      ID    CPU cpu over the run      ││gpu. ███████  0.39│
 │ 2758953  95.0% ·███████████████      ││+7 more      ≥0.13│

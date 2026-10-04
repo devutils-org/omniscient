@@ -1,6 +1,7 @@
 [0m[1momn top[0m │ fixture sqlite-commits │ 4.97s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥5.82%[0m[35m │ target 87.8% cpu[0m [0m
 [0m[1;7m 1 system [0m 2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
-┌ [0m[1mcpu[0m [0m[2mbusy, as a share of the whole machine [0m───────────────────────────────────────────────────────────────── [0m[36m~low det[0m ┐[0m
+┌ [0m[1msystem --[0m [0m[2mthe overview: cpu, memory, disk, network, GPU and power, and the processes [0m────────────────────────────────┐[0m
+├ [0m[1mcpu[0m [0m[2mbusy, as a share of the whole machine [0m───────────────────────────────────────────────────────────────── [0m[36m~low det[0m ┤[0m
 │[0m[2m   20.0% ┤                                                                       [0m [0m[2mnow  [0m[1;2m11.3%[0m                          │[0m
 │[0m[2m         │                                                                       [0m [0m[2mmean 10.1%[0m                          │[0m
 │[0m[2m         │                            ▁▁▁▁       ▂▂▂▁▁▁▁                         [0m [0m[2mpeak 14.0%[0m                          │[0m
@@ -33,8 +34,7 @@
 │ 2759238 [0m[2m 86.8% ▇▇▇█▇▇▇█▇▇▇▇▇▇▇▇[0m [0m[2m  4.31s [0m 4.75MiB    219 [0m[2m   6.69ms       537 [0m       │[0m[35m│[0mcpu.util         [0m[35m█        0.01%[0m [0m[35m│[0m
 │                                                                                    │[0m[35m│[0mio.bytes         [0m[35m█        0.01%[0m [0m[35m│[0m
 │                                                                                    │[0m[35m│[0mnet.bytes        [0m[35m█        0.01%[0m [0m[35m│[0m
-│                                                                                    │[0m[35m│[0mgpu.mem          [0m[35m▏        0.01%[0m [0m[35m│[0m
-│                                                                                    │[0m[35m│[0m[2m+3 more                 [0m[2;35m ≥0.00%[0m [0m[35m│[0m
+│                                                                                    │[0m[35m│[0m[2m+4 more                 [0m[2;35m ≥0.01%[0m [0m[35m│[0m
 │[0m[2mCPU [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2mFAULTS [0m[33m51 late[0m  [0m[2mI/O CALLS [0m[36m~low det[0m [0m[33mdegraded x2[0m               │[0m[35m│[0m[1mall of them             [0m[1;35m ≥0.12%[0m [0m[35m│[0m
 └────────────────────────────────────────────────────────────────────────────────────┘[0m[35m└────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m process  [0m[1menter[0m its ledger  [0m[1ms[0m sort  [0m[1mi[0m idle devices            [0m
