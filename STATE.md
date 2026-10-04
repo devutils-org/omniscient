@@ -1347,8 +1347,9 @@ shown by the family's own harness -- an ignored test, a `run_pairs.py`, a
 - **top** (`w22-top.md`): 11 pairs, 5 parsers, 21 rows. **Shown** by
   `run_pairs.py`, 33 runs: RES, `%CPU`, `%Cpu(s)`, `pmap -x`/`-XX` RSS, PSS
   and USS, smem's three (Debian's script run in place), ten of them one run
-  through `onpid.py`; TIME+ on alternate runs within 30 ms. **Reasoned**:
-  smem's PSS deficit being its own python3.
+  through `onpid.py` (deleted in the twenty-third wave: `run: attach`);
+  TIME+ on alternate runs within 30 ms. **Reasoned**: smem's PSS deficit
+  being its own python3.
 - **heap** (`w22-heap.md`): 9 pairs, 4 parsers, 17 rows. **Shown** by a
   scratch emulation of the runner: dhat's total, blocks, `t-gmax` and
   `t-end` and massif's peak equal to the byte; heaptrack within 0.2 %.
@@ -1395,27 +1396,168 @@ the sixteen binaries before it green. `omn list`: 95 usable here, 99 sources
 with a collector, 112 of 206 backends -- unchanged. The decisions are in
 `DECISIONS.md`, "Settled in the twenty-second wave".
 
-**After the twenty-second wave, in order:**
+**The twenty-third wave is merged**, all thirteen streams, and
+`docs/briefs/wave-23-runner.md` keeps its brief: **every verdict through the
+runner** -- the twenty-second wave's pairs, rewritten to one schema and run
+by `tests/reference.rs`, and nothing else. Two phases: the runner (with
+stream cross beside it) merged first, then the eleven families at once, each
+merged `--no-ff` as soon as it was done and reviewed while merged, its
+review's fixes a second merge: `a14cf09` runner (`926adc7`), `f42b3e8` cross
+(`4eaeb86`), `e95cd96` heap, `c0abafa` power (`bef19fd`), `4dceb47`
+perfsched, `8c06adf` bpftrace, `a87c68f` sysstat, `c090225` net (`a531e7a`),
+`d25f5e1` perfstat, `7bf20e5` gpu (`f4d7321`), `a6480bf` io (`48233eb`),
+`bf5b2bf` top, `d632384` perfrecord (`1edb677`); then the full suite's
+filing, `f987c8d`. **Nothing under `src/`, `view/` or `catalog/*.yaml`
+changed**: every gap the runs found was filed. Each stream's handoff is
+`docs/fixes/w23-<stream>.md`.
+
+**The one thing to know first**: every pair now runs through the shared
+runner, and **113 pairs in eleven files give the runner's own verdict**. The
+families' harnesses are gone (`run_pairs.py` in perfstat and top, top's
+`onpid.py`, net's `mod runner`, the ignored tests of gpu, perfrecord and
+sysstat); `every_pair_is_well_formed` and `every_row_names_a_pair_or_why_none`
+pass; no pair declares a `gap:`. The tally the runner printed in the
+coordinator's quiet run (`cargo test --test reference -- --nocapture`, at
+`1edb677`):
+
+| Family | Held | Skipped | Gaps | Known defects | Failed |
+|---|---|---|---|---|---|
+| bpftrace | 0 | 10 | 0 | 0 | 0 |
+| perfsched | 3 | 6 | 0 | 0 | 0 |
+| power | 5 | 2 | 0 | 0 | 0 |
+| heap | 8 | 1 | 0 | 0 | 0 |
+| perfstat | 13 | 0 | 0 | 0 | 0 |
+| net | 7 | 1 | 0 | 0 | 0 |
+| io | 7 | 0 | 0 | 0 | 0 |
+| top | 10 | 0 | 0 | 0 | 1 |
+| sysstat | 12 | 0 | 0 | 1 | 0 |
+| perfrecord | 5 | 0 | 0 | 0 | 0 |
+| gpu | 21 | 0 | 0 | 0 | 0 |
+| **all** | **91** | **20** | **0** | **1** | **1** |
+
+Every skip is the same one: `sudo -n` does not grant root here (item 2).
+The known defect is `pidstat -w` against `sched.switches`' counted rate. The
+failure is `top-cpus`, which held alone at the edge of its band (below).
+
+- **runner** (`w23-runner.md`): the schema as code. `compare.omn_parse`
+  (a family's parser applied to `omn`'s output), three one-run shapes
+  beside `separate` and `attach` -- `alongside` (a name for `attach` with no
+  `{pid}`), `tool_wraps_omn`, `omn_launches_tool` (the tool's own status
+  read through a pidfd, Linux 6.15) -- `setup:`, `requires_setting:`,
+  one-sided and `log2_buckets` tolerances, `known_defect:`, a tally line per
+  family and `reference_tally`; a field the runner does not read refused per
+  pair. **Shown**: 21 unit tests on stub tools; heap's pairs through it.
+  **Found**: a perf tool wrapping the capable `omn` counts 0 (inherited
+  perf events end at the exec of a non-dumpable binary).
+- **cross** (`w23-cross.md`): the memory-limit session's two filings
+  closed, neither for the cause filed: the volume under `/var/tmp` is btrfs
+  on two partitions and the test read one; the window is now launched by the
+  session and ended by the program at its drained writeback; the stray
+  reclaimed pages were the program's own after its last read; swap-ins on
+  `zram0` netted out of `/proc/self/io`. **Shown**: 5 of 5 alone, 6 of 6
+  under load, 3 of 3 beside a release build; not red in the end-of-wave suite.
+- **heap** (`w23-heap.md`): 9 pairs, dotted paths, no parser of `omn`'s
+  output. **Shown**: dhat's total bytes, blocks, `t-gmax`, `t-end` and
+  massif's peak to the byte; heaptrack's calls, peak and leaked within
+  0.2 %. memleak skips (root).
+- **power** (`w23-power.md`): 7 pairs, all `alongside` (`omn` refuses a
+  system-scoped source beside a launch, so `tool_wraps_omn` had no
+  workload). **Shown**: energy within 0.4 % of `perf stat -a` and
+  `turbostat`, busy frequency (omn's `last`) within 1.5 %, idle residency with
+  cpu 1 ticked every millisecond (residency is credited only on wake),
+  `sensors` equal. RAPL files and Mperf skip (root).
+- **perfsched** (`w23-perfsched.md`): 9 pairs, paths summing over `*`.
+  **Shown**: `strace -c` exact, the 10 ms sleep within 2 % of `strace -c -w`
+  and `strace -T`, medians of five. The six `perf` pairs skip: tracefs is 755
+  now but each event's `id` and `enable` are root's, and `perf trace -s` and
+  `perf lock -b` load BPF.
+- **bpftrace** (`w23-bpftrace.md`): 10 pairs, a parser for the two medians
+  with `log2_buckets: 1`, bitesize on the `[4K, 8K)` bucket. **Shown**:
+  `omn`'s side on ten real outputs, through the runner's own path code. Every
+  tool side skips (root).
+- **sysstat** (`w23-sysstat.md`): 13 pairs, three parsers of `omn`'s raw
+  polls, five tool captures replaced by real output. **Shown**: 12 held,
+  `pidstat -w` a known defect (77 135/s against 931/s).
+- **net** (`w23-net.md`): 8 pairs, `alongside`, four parsers of `omn`'s
+  output. **Shown**: `ip -s link` bytes and packets exact, errors at zero,
+  `nstat`'s overflows, drops and retransmits exact, `ss -ti`'s rtt within
+  15 %. **Found**: `net.capture` on `lo` keeps each frame twice (outgoing
+  and host); by hand, `omn` 3608 against tcpdump's 1804, equal once the
+  outgoing copy is dropped by the parser. The pair skips: the runner wants
+  `sudo -n` to grant everything, sudo grants `tcpdump` alone.
+- **perfstat** (`w23-perfstat.md`): 13 pairs, paths only. **Shown**: 13
+  held three times under load; cycles and task-clock one run with `omn`
+  launching `perf stat` (one-sided), `-a` pairs with perf wrapping `omn`, a
+  cgroup made by `setup`, `-p` compared raw.
+- **gpu** (`w23-gpu.md`): 21 pairs, two parsers of `omn`'s output, the
+  harness deleted. The stream saw no driver (the kernel had no `nvidia.ko`)
+  and every pair skipped; **in the coordinator's run the driver was loaded and
+  all 21 held**: launches, copies, driver calls and ncu's counters exact, kernel
+  time within 0.3 % and copy time 3.2 %, power, clocks, utilisation, temperature
+  and VRAM within their bands. Its four `omn_*.json` parser captures are
+  still composed by hand (item 1).
+- **io** (`w23-io.md`): 7 pairs, two `omn_launches_tool`, five `alongside`,
+  two parsers (refusing a run that lost records). **Shown**: fio's reads
+  exact, bytes and operations within their one-sided bands, `iostat -dx`'s
+  `r/s`, `rkB/s` and `r_await` over a window holding the whole job; `io.latency`'s
+  mean 28 % below fio's clat, inside the one-sided 50 %.
+- **top** (`w23-top.md`): 11 pairs, `run: attach`, the tool released at the
+  workload's phase by `at.sh` (written to its `comm`). **Shown**: RES,
+  TIME+, `%CPU`, `pmap` and `smem`'s RSS, PSS (omn's `last`) and USS, three
+  runs each; smem's PSS one-sided (its own python maps the interpreter).
+- **perfrecord** (`w23-perfrecord.md`): 5 pairs, every `omn` side a parser.
+  **Shown**: self shares within 0.05 on one attached run, `perf top -p`,
+  `perf c2c`'s line, `perf mem`'s mean (277.6 against 275.4 cycles in the
+  quiet run; 10-12 % below under load). Fixed in the pairs: a 2 s settle
+  (`omn` takes more than 500 ms to attach), `hot.c` phase-locked with a
+  997 Hz sampler. **Found**: `mem.latency`'s IBS delivers about 58 % of the
+  rate asked and calls 18 % of loads `peer` where `perf mem` calls 6 % a
+  cache hit.
+
+**At the merge** (`docs/open-findings.md`, "The twenty-third wave,
+coordinator, after the merge"): `make`, then `make check`, red at
+`cross_memory` (on the flaky tally, passed alone); then `--no-fail-fast`:
+**2848 passed, 6 failed, 14 ignored, 65 test binaries**, each of the six
+passing alone once (`budget`, `scenario_power`'s two roads to RAPL, two
+`triage`, `unwind`'s DWARF tree, `pairs_perfstat`'s `cpu.branch_misses` at
++5.2 % where 4 % is allowed); clippy and fmt clean. No merge fix. The
+reference run above: 159 passed, 1 failed, `top-cpus` (`omn` 0.140 busy
+against `top`'s 0.204; alone, 0.076 against 0.120, both times `omn` below):
+filed to stream top as a possible one-sided bias. The decisions are in
+`DECISIONS.md`, "Settled in the twenty-third wave".
+
+**After the twenty-third wave, in order:**
 
 1. **The gaps the comparison found**, by the file each lands in. The number
    after a family is its handoff's gap (`docs/fixes/w22-<family>.md`); a
    **defect** breaks a standing invariant or a number, the rest are
    features.
-   - **`tests/reference/runner.rs` and the nine families' YAML first**: no
-     verdict in `docs/replaces/` is the runner's until the pairs go through
-     it. Each family's pairs rewritten to the README's schema against
-     `omn`'s real output and run (`cargo test --test reference
-     pairs_<family> -- --nocapture`) until they hold; the 22 table rows
-     backed; the families' own harnesses (`run_pairs.py`, `mod runner`, the
-     ignored tests) deleted once the runner reads what they read. What the
-     schema lacks, asked of the runner by the families: a value `omn`
-     computes rather than holds (`compare.omn_jq`, `compare.omn_parse`, or
-     a path that sums and divides -- open in `DECISIONS.md`); one run where
-     the tool wraps `omn` (`same_run: tool_wraps_omn`, power and perfstat),
-     `omn` launches the tool (io, gpu), or both run alongside (io, net,
-     bpftrace); `setup:` workloads (perfstat); `requires_setting` on
-     `perf_event_paranoid` (power); a one-sided tolerance (io) and one on
-     log2 bucket indices (bpftrace); `known_defect` (sysstat).
+   - **`tests/reference/` and the families' YAML: what the twenty-third
+     wave left.** The runner and the eleven families' pairs are done (every
+     pair runs through it, the 22 rows are backed, the harnesses are gone);
+     what is left of the bullet:
+     - **`top-cpus`** (top): failed in the quiet full run (`omn` 0.140
+       against 0.204) and held alone at 0.044 of its 0.05, `omn` below both
+       times. Three quiet runs recording which side is higher; if `top` is,
+       the pair names the bias in its `why` or `omn`'s window starts at
+       `top`'s first sample (`docs/open-findings.md`).
+     - **`load-latency`** (perfrecord): held in the quiet run, 10-12 % below
+       under load; if it goes red on a quiet machine it becomes a
+       `known_defect` naming the `mem.latency` population finding, not a
+       wider band.
+     - **gpu's four `omn_*.json` parser captures** are composed by hand; the
+       driver is loaded now, so `w23-gpu.md`'s four `omn trace` commands
+       recapture them, unprivileged, and the parser tests' numbers move.
+     - **The runner** (`tests/reference/runner.rs`): a root check by command
+       (`sudo -n` grants `/usr/bin/tcpdump` here, not everything, so net's
+       tcpdump pair skips; net); a `teardown:` argv (perfstat's cgroup stays
+       behind); under `omn_launches_tool`, `workload_fails_alone` running
+       `command` + `workload` (io); "does not exist here" for a device path
+       in `requires` (gpu).
+     - **Pairs worth one more shape once root is granted**: bpftrace's two
+       medians and perfsched's six `perf` pairs `alongside` (one run, not
+       two); io's percentile pair (`omn_parse` with `log2_buckets`); a write
+       pair beside io's three `iostat -dx` read pairs.
    - **`src/cli.rs` and `src/main.rs`, the run's shape**: **a machine-wide
      target bounded by a launched program** -- `--system`, `--cpu`,
      `--cgroup`, `--iface` and `--pid` beside `-- prog`, the way `perf stat
@@ -1423,7 +1565,12 @@ with a collector, 112 of 206 backends -- unchanged. The decisions are in
      (perfstat 3, power 1, io 3, top 6, net); several sources on one launch
      (perfstat 2, top 5); `-r N`, one request repeated with mean and spread
      (perfstat 5); exit 1 saying whether the machine refused or a run failed
-     before writing (reference).
+     before writing (reference); `--pid` ending when its
+     process exits, as `perf stat -p` does (perfstat, top: `-m count --pid`
+     refuses without `-d`, and `-d` runs on after the pid is gone); `omn
+     trace --pid` attached in under 500 ms, or saying when it is
+     (perfrecord); the launched program's exit status in `results.json`, so
+     the runner need not read it through a pidfd (runner).
    - **`src/collect/launch.rs` and the launched tree**: the launcher's `PATH`
      search counted as the program's `execve`s (perfsched 2); `io.latency`
      (io 1, **defect**: 0 requests for a forked fio) and `gpu.mem` (gpu 1:
@@ -1439,16 +1586,21 @@ with a collector, 112 of 206 backends -- unchanged. The decisions are in
      `cpu.pressure` (sysstat 2, held by its test); `mem.heap.alloc` listing
      `stack` and refusing it only after the run (heap 1); a filter on a field
      the resolved backend never fills refused before the run, not counted
-     after it (`cpu.profile` on `pmu:sw`, perfrecord 1).
+     after it (`cpu.profile` on `pmu:sw`, perfrecord 1); `mem.latency`'s IBS sampler delivering about 58 % of the
+     rate asked without saying so, and calling 18 % of its timed loads `peer`
+     where `perf mem` calls 6 % a cache hit (perfrecord, twenty-third wave);
+     `power.freq`'s first poll taken at window open, before anything launched
+     beside it (power, twenty-third wave).
    - **`src/emit.rs` and the keys** (`src/request.rs`): a total in `summary`
-     (heap 4, top 1); `summary` and `hist` per key (`@kernel`, gpu 2); a
+     (heap 4, top 1; net: a counter's total is mean x count today); `summary` and `hist` per key (`@kernel`, gpu 2); a
      summary over `sched.runqlat`'s `wake_to_run_ns` (perfsched 8);
      `topk` with a zero series rather than none, and no `-0.0` (perfsched
      5); keys asked: `syscall` on `proc.syscall` (perfsched 1, one run for
      `strace -c`), `comm` (bpftrace 4), function and object on `cpu.profile`
      (perfrecord 3-4), `level` on `mem.latency` (perfrecord 5), lock kind
      and caller on `sched.lock` (perfsched 6), mapping and user on the
-     memory sources (top 4, 8), `dir` on `net.packets` (net); `summary` over
+     memory sources (top 4, 8), `dir` on `net.packets` (net) and on
+     `io.latency` (io, so a read/write split needs no filter); `summary` over
      `fs:proc` keyed `dir` alone folding devices into one series (io 5).
    - **New sources and attributes** (`catalog/*.yaml`, then a collector):
      `cpu.branches` (perfstat 1); task-clock as a source (perfstat 4);
@@ -1457,7 +1609,8 @@ with a collector, 112 of 206 backends -- unchanged. The decisions are in
      `net.tcp.accept`, `mem.oom`, per-process swap-in, VFS calls by operation
      (bpftrace 5, 7); `%util` (io 4); VIRT and SHR, every thread of a pid on
      `fs:proc`, the per-state cpu split (top 3, 7, 9); `net.snmp`, a socket
-     inventory, pcap output, `tcp_info`'s other fields, `missed` and `mcast`
+     inventory, pcap output, `tcp_info`'s other fields, `missed` and `mcast`, `direction` as a field `net.capture`'s `--filter` can
+     name (`lo` hands every frame twice, outgoing and host)
      (net); syscall errors and per-call records (perfsched 3-4), a per-switch
      stream (perfsched 9); `power.freq`'s busy share and average, an idle
      share, the core energy domain, per-process wakeups (power 3-6), and
@@ -1473,10 +1626,11 @@ with a collector, 112 of 206 backends -- unchanged. The decisions are in
      siblings' (sysstat 3); `sar`'s unattended history (sysstat 10).
    - **`view/` and `omn top`**: no per-process table of the machine, which is
      `top`'s, `htop`'s and `btop`'s first use (top 2) -- see item 3.
-   - **`tests/cross_machine.rs`**: the memory-limit session's window bounded
-     by the cgroup's own writeback, not the program's exit (filed at this
-     merge); and its reclaimed pages outside the intervals (the
-     twenty-first wave's).
+   - **`catalog/io.yaml`, two caveats** (cross, twenty-third wave): a swap on
+     a bio-based device (`zram`) is read I/O that `/proc/<pid>/io` charges and
+     neither `io.latency` nor `io.bytes` sees; on a multi-device filesystem
+     one file's I/O lands on several partitions, so a filter on the mount's
+     source undercounts it.
    - **Still open from the twenty-first wave**, nothing under `src/` having
      moved (`docs/open-findings.md`): `Unwinder::symbolizer` and
      `perf_maps`; a block request a `kworker` dispatched; `net.bytes`'
@@ -1489,32 +1643,32 @@ with a collector, 112 of 206 backends -- unchanged. The decisions are in
      on the MCP way, `sqlite3-durability`'s commits); the smaller ones (the
      unwind share tests' aliasing, the uprobe's tid, `DEVICE_STACKS` as data,
      a sweep from an installed tree).
-2. **What the user installs and grants, so the skipped pairs run** (each
-   family's "Privileged runs wanted"; `/etc/sudoers.d/omniscient-privileged`
-   grants none of these). Installed since the brief was written: sysstat,
-   heaptrack, libbpf-tools' bcc tools (`memleak`, `offcputime`,
-   `wakeuptime`, `cachestat`, `ext4slower`, `hardirqs`, `softirqs`,
-   `runqlen`, `oomkill`), tcpdump, powertop, htop; `iostat` is there now, so
-   io's three `iostat -dx` pairs need nothing more.
+2. **What the user grants, so the 20 skipped pairs run.** Everything else is
+   installed and granted now: smem, ethtool, sysstat, heaptrack, the bcc
+   tools, tcpdump, powertop, fio, perf, nvidia-smi, nsys and ncu run here;
+   `make CAPTURE=1` puts `CAP_NET_RAW` on `omn`; the NVIDIA driver is loaded.
+   What still skips, every one on `sudo -n` not granting root:
+   - bpftrace's ten pairs (bpftrace needs root);
+   - perfsched's six `perf` pairs: tracefs is mode 755 now, but each event's
+     `id` and `enable` are `-rw-r----- root`, and `perf trace -s` and
+     `perf lock contention -b` load BPF skeletons (EPERM);
+   - power's `energy-rapl-files` (`energy_uj` is root's) and
+     `freq-cpupower-mperf` (`/dev/cpu/*/msr`, and the `msr` module);
+   - heap's `memleak-outstanding` (root);
+   - net's `tcpdump-captured`: sudo grants `/usr/bin/tcpdump` alone, and the
+     runner asks whether `sudo -n` grants everything (item 1, the runner).
 
    ```console
-   paru -S smem                     # AUR; top's three smem pairs
-   sudo pacman -S ethtool           # net: ip -s -s link's detailed errors
-   cd /home/moha/repos/omniscient && make CAPTURE=1    # CAP_NET_RAW for net.capture
-   sudo mount -o remount,mode=755 /sys/kernel/tracing  # perfsched's perf pairs (resets at boot)
-   sudo chmod o+r /sys/class/powercap/intel-rapl:0/energy_uj   # power's RAPL-files pair (resets at boot)
-   sudo modprobe msr && sudo setcap cap_sys_rawio+ep /usr/bin/cpupower   # cpupower -m Mperf
-   # the witnesses that need root (bpftrace's ten, memleak, tcpdump), either
-   # `sudo -v` in the terminal that runs the test, or one sudoers line:
-   #   <user> ALL=(root) NOPASSWD: /usr/bin/bpftrace, /usr/bin/memleak, /usr/bin/tcpdump, /usr/bin/perf
+   cd /home/moha/repos/omniscient && make && make CAPTURE=1
+   sudo modprobe msr                                   # cpupower -m Mperf
+   sudo -v                                             # in the terminal that runs the test
    cargo test --test reference -- --nocapture
    ```
 
-   Then the captures written from documentation replaced by the tools' real
-   output (the commands are in each handoff): perfsched's four `perf`
-   captures, bpftrace's thirteen (`<tool>.txt` beside the `.format.txt`),
-   `memleak.txt`, `tcpdump_count.stderr.txt`, `iostat-dx.json`, sysstat's
-   `mpstat`, `sar -u`, `iostat -c` and `pidstat` captures, power's
+   Then the captures still written from documentation replaced by the tools'
+   real output (the commands are in each `docs/fixes/w23-<family>.md`,
+   "Privileged runs wanted"): perfsched's four `perf` captures, bpftrace's
+   `<tool>.txt` beside each `.format.txt`, `memleak.txt`, power's
    `cpupower_mperf.txt` and `rapl_window*.txt`; each parser test's numbers
    moved to its capture. And the runs "Needs privilege" carries.
 3. **The views' open points**, after the user's look at a terminal: the
@@ -1667,14 +1821,13 @@ commands below (`sysctl kernel.perf_event_paranoid` 2 and -1,
 machine-wide, so **the coordinator runs them alone**, never while streams
 build or test.
 
-### Still to run, after the twenty-second wave
+### Still to run, after the twenty-third wave
 
 Item 1, the matrix, ran after the twentieth wave's merge (2026-10-04, "What
-the earlier runs found" below). In the twenty-first and twenty-second waves
+the earlier runs found" below). In the twenty-first to twenty-third waves
 the streams ran only what `make`'s capabilities allow, and nothing
-machine-wide; the twenty-second wave's reference tools that need root or a
-grant are item 10, new. **Carried, none of it run in the twenty-second
-wave**: the backends bench (since the nineteenth wave), the GPU bench and
+machine-wide; the reference tools that need root are item 10. **Carried,
+none of it run in the twenty-second or twenty-third wave**: the backends bench (since the nineteenth wave), the GPU bench and
 the GPU tests (`gpu.profile` measurable since its double free was fixed;
 the failure channel's exit 1, and the bench's new schedule), the budget's
 two runs, and the net stream's namespace run. Items 6, 7 and 10 need a
@@ -1870,33 +2023,14 @@ poller makes the energy counter under-count for every reader of the board.
    target/debug/omn top --view ledger -- python3 view/workloads/timebar/workload.py   # the blocked line, Enter -> timebar
    ```
 
-10. **The reference pairs that need root or a grant** (the twenty-second
-    wave; each family's handoff, "Privileged runs wanted"; typed by the user,
-    nothing here is in the sudoers file). Once `tests/reference.rs` runs the
-    families' pairs ("What remains", item 1), or now through each family's
-    own harness:
-
-    ```console
-    cd /home/moha/repos/omniscient && make && make CAPTURE=1
-    sudo -v
-    sudo mount -o remount,mode=755 /sys/kernel/tracing
-    sudo chmod o+r /sys/class/powercap/intel-rapl:0/energy_uj
-    sudo modprobe msr && sudo setcap cap_sys_rawio+ep /usr/bin/cpupower
-    sudo -E cargo test --test reference -- --nocapture bpftrace
-    cargo test --test reference -- --nocapture
-    cargo test --test reference net::tests::net_pairs_against_the_tools -- --nocapture
-    sudo memleak -T 100000 -o 0 -c "python3 tests/reference/workloads/heap/blocks.py 64 1048576 4 0.3" 2 1 \
-        > tests/reference/captures/heap/memleak.txt
-    ```
-
-    Read: bpftrace's ten pairs against the tools for the first time;
-    perfsched's six `perf` pairs (`perf trace -s`, `perf sched latency` and
-    `timehist`, `perf lock contention`), whose tolerances were set from
-    `omn`'s spread alone; memleak's outstanding bytes; tcpdump's count;
-    the RAPL files and cpupower's Mperf. Then each handoff's capture
-    commands, so every parser is tested on the tool's own output. Put
-    both back when done (`sudo mount -o remount,mode=700
-    /sys/kernel/tracing`, `sudo chmod o-r` on `energy_uj`, or a reboot).
+10. **The reference pairs that need root** (the twenty-second wave's, run
+    through the shared runner since the twenty-third; typed by the user,
+    nothing here is in the sudoers file): the 20 pairs that skip on
+    `sudo -n`, and the captures still written from documentation. The
+    commands are "What remains", item 2: bpftrace's ten pairs against the
+    tools for the first time; perfsched's six `perf` pairs, whose tolerances
+    were set from `omn`'s spread alone; memleak's outstanding bytes;
+    tcpdump's count through the runner; the RAPL files and cpupower's Mperf.
 
 ### What the earlier runs found
 

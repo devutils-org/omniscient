@@ -11484,6 +11484,8 @@ wave's. The end-of-wave matrix sweep refreshes them; until it runs,
 
 ### `cross_machine::a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_its_rung`: reclaimed pages outside the program's intervals
 
+**Answered in the twenty-third wave** (stream cross, `docs/fixes/w23-cross.md`, item 3): the pages sit on the late edge and are the program's own cgroup's, reclaimed after its last read while it read `/proc/self/io` and `memory.stat`, waited for its writeback and unlinked the file. The brackets now end at the program's `done`, and the assertion allows outside them only what the tool saw reclaimed under another cgroup. Not red in the twenty-third wave's full suite.
+
 Failed in the coordinator's third `make check` (*"64 of the 42100 credited
 lie in intervals the program did not overlap"*); passed alone on its one
 rerun, and in the `--no-fail-fast` run before it. The view stream saw it
@@ -12157,6 +12159,8 @@ the file; tighten it back to the file's bytes once the request above lands.
 
 ### To every reference family and to stream reference (`tests/reference/runner.rs`): the pairs were written before the runner, and 87 of them do not run through it
 
+**Answered in the twenty-third wave** (stream runner and the eleven family streams): every pair rewritten to the README's schema and run through the runner, the 22 rows backed, the families' harnesses deleted; `every_pair_is_well_formed` and `every_row_names_a_pair_or_why_none` pass. The tally is in "The twenty-third wave, coordinator, after the merge", below.
+
 `cargo test --test reference` at `bc9f9a5`: 116 passed, 11 failed. The runner's
 own tests, `families_are_whole`, the parsers' tests, `pairs_bpftrace` and
 `pairs_net` pass. Every other `pairs_<family>` fails, and so do the two data
@@ -12213,6 +12217,8 @@ files uncommitted; they are now on `main`, so they can be dropped there.
 
 ### `cross_machine::a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_its_rung`: the writeback lands after the program's window
 
+**Answered in the twenty-third wave** (stream cross, `docs/fixes/w23-cross.md`, items 1 and 2), for another cause than the one filed: `/var/tmp` is a btrfs volume on two partitions, and the test counted the writes on the mount's source only; the cgroup held 0 bytes dirty and 0 under writeback at the program's last read in every capped run measured. The test now reads every member of the filesystem, and the window is launched by the session and ended by the program once its cgroup's writeback has drained. Not red in the twenty-third wave's full suite, so not added to the flaky tally.
+
 Red twice in this pass, both times inside a full run and on the same
 assertion (`tests/cross_machine.rs:1608`): *"to stay within 32 MiB the cgroup
 had to write back at least 64 MiB of the 96 it dirtied before it could drop
@@ -12244,8 +12250,9 @@ Stream reference's handoff is `docs/fixes/w22-reference.md`, "Needs from
 another stream". **Landed at the merge**: the runner's unit tests run first
 and pass (8, the coordinator's run); the cross-family summary of
 `docs/replaces.md`, filled from the eleven tables in the merge's
-documentation commit. **Still open**: every family's tables backed and
-pairs run through the runner (above, the first finding of the merge).
+documentation commit. **Answered in the twenty-third wave**: every family's
+tables backed and pairs run through the runner. **Still open**: which half
+of exit 1 (below).
 
 ### To `src/main.rs`: which half of exit 1
 
@@ -12257,6 +12264,8 @@ is giving (an exit code of its own, or a line the runner can match).
 ## Needs from another stream — the twenty-second wave, stream perfstat
 
 ### To `tests/reference/runner.rs`: one run with the tool wrapping `omn`, and a computed value
+
+**Answered in the twenty-third wave** (stream runner): `run: tool_wraps_omn`, `setup:` as an argv, `compare.omn_parse` (`DECISIONS.md`); `setup: spin_pid` is `run: attach`, and `setup: cgroup_spin` is not offered -- perfstat makes its cgroup in `setup` instead and asks for a `teardown:` (below, the twenty-third wave).
 
 `same_run: tool_wraps_omn` (run `reference.command` with `omn`'s argv
 appended and no workload; the same field as power's, one implementation for
@@ -12278,6 +12287,8 @@ Gaps 1, 4 and 6 of the handoff: `cpu.branches`; task-clock as a source;
 working directory (`catalog/references/README.md`).
 
 ### To `tests/reference/runner.rs`: `compare.omn_parse`
+
+**Answered in the twenty-third wave** (stream runner); `pairs_hold_on_this_machine` is deleted (stream perfrecord).
 
 When present, call that parser (from the family's `parsers()`) on `omn`'s
 stdout and stderr and compare its value under `compare.key`, instead of
@@ -12301,6 +12312,8 @@ and skipped with its refusal; the `sh -c '...' sh` commands get the
 workload as `"$@"`.
 
 ### To `tests/reference/runner.rs`: the family's fields
+
+**Answered in the twenty-third wave** (stream runner): the path's own sum over `*`, `omn_scale`/`reference_scale`, `[emit=...]` filters.
 
 `compare.across: sum` and `compare.scale` (or their renaming to
 `reference_scale`), and `omn: <emit>.<field>` resolved against the output
@@ -12327,6 +12340,8 @@ repository's root. The stash swap: `bc9f9a5` (above).
 
 ### To `tests/reference/runner.rs`: paths, `alongside`, a log2 tolerance
 
+**Answered in the twenty-third wave** (stream runner): `run: alongside`, `tolerance: {log2_buckets: N}`; the paths are the runner's grammar or an `omn_parse` parser (stream bpftrace).
+
 `summary.count`, `summary.last`, `hist.count`, `hist.p50` (bucket counts
 summed; the median bucket's lower bound over merged series);
 `alongside: true` (`omn` with its own `--system -d`, the workload started
@@ -12344,6 +12359,8 @@ degraded silently". Commands in the handoff, gaps 1 and 2.
 ## Needs from another stream — the twenty-second wave, stream sysstat
 
 ### To `tests/reference/runner.rs`: the family's fields
+
+**Answered in the twenty-third wave** (stream runner): `run: alongside`, `[key=...]` filters, `known_defect`; the raw means are `omn_parse` parsers and the `pairs` module is deleted (stream sysstat).
 
 `target: system`, `compare.omn_key`, `compare.scale`, the `raw.<attr>` path
 (the mean over raw events, the leading event left out) and `known_defect`;
@@ -12376,6 +12393,8 @@ point at sysstat's `free` and `uptime` rows.
 
 ### To `tests/reference/runner.rs`: `onpid_attach`, an empty workload, `{pid}` passed through
 
+**Answered in the twenty-third wave** (stream top): the pairs rewritten to `run: attach`, which the runner substitutes `{pid}` for; `onpid.py` and `run_pairs.py` are deleted.
+
 `same_run: onpid_attach` (`omn`'s argv in `ONPID_OMN`, a file in
 `ONPID_OMN_OUT`, `omn`'s JSON read from it), `compare.omn_jq`, an empty
 `workload: []` passing no `--`, and `{pid}` left verbatim for `onpid.py`
@@ -12399,6 +12418,8 @@ tables**: memleak's per-process row is heap's, its kernel mode bpftrace's.
 
 ### To `tests/reference/runner.rs`: `<emit>.<field>`
 
+**Answered in the twenty-third wave** (stream heap): the pairs read dotted paths of the runner's grammar (`results.0.outputs[emit=topk].series.0.total`).
+
 `omn:` read as `<emit>.<field>` of the first series of the output with that
 emit (`topk.total`, `summary.max`). `heap.rs`' own `number` and `capture`
 helpers can then switch to `common.rs`'.
@@ -12419,6 +12440,8 @@ printed by its own test.
 
 ### To `tests/reference/runner.rs`: `alongside: {lead_ms}` and series totals
 
+**Answered in the twenty-third wave** (streams runner and net): `run: alongside` with `settle_ms`; `lead_ms` not offered and not needed (both windows the same seconds); the totals are `omn_parse` parsers; `mod runner` and the `gap:` lines are gone.
+
 `omn` started without `--`, the reference command `lead_ms` later, both
 waited for; and `series[<key>].sum|mean`, `events.count`,
 `events.<attr>.sum`. Then the nine `gap:` lines and `mod runner` in
@@ -12433,6 +12456,8 @@ for `net.capture`; a counter source bounded by a launched program.
 ## Needs from another stream — the twenty-second wave, stream power
 
 ### To `tests/reference/runner.rs`: wrapping, background, a setting
+
+**Answered in the twenty-third wave** (streams runner and power): `run: tool_wraps_omn`, `run: separate`, `requires_setting`; `background: true` and `compare.omn_series` not offered (`[key=...]` filters instead). The power pairs run `alongside`.
 
 `same_run: tool_wraps_omn` (perfstat's too), `same_run: back_to_back`,
 `background: true`, `compare.omn_series`; and
@@ -12455,6 +12480,8 @@ energy domain; per-process wakeups and energy.
 
 ### To `tests/reference/runner.rs`: `omn_launches_tool`, selectors, one at a time
 
+**Answered in the twenty-third wave** (streams runner and gpu): `run: omn_launches_tool`, `rate.*`, `[key=...]` filters; the two-attribute and bracketed selectors are `omn_parse` parsers. All 21 pairs held in the coordinator's run.
+
 `same_run` read (`omn_launches_tool` as io defines it, `alternate` the
 default), the `--program-stderr` file handed to the parser as stderr; the
 selectors `topk[kernel=copy].events`, an escaped glob, an event selected by
@@ -12473,6 +12500,8 @@ under a wrapper holding 412 MiB); gaps 2 to 9 in the handoff.
 `iostat_json` (`-dx`) read different reports; both stay.
 
 ### To `tests/reference/runner.rs`: one run, and a one-sided tolerance
+
+**Answered in the twenty-third wave** (streams runner and io): `run: omn_launches_tool`, `run: alongside`, `side: above`/`below`; the weighted mean is an `omn_parse` parser.
 
 `same_run: omn_launches_tool` (`omn <omn> --program-stderr <file> --
 <command> <workload>`, the file parsed as the tool's stderr) and
@@ -12528,3 +12557,190 @@ is one-sided twice suggests a second one: `top`'s own start-up and its first
 three runs on a quiet machine, recording which side is higher; if `top` is
 higher every time, the pair names the bias in its `why`, or `omn` starts its
 window at `top`'s first sample.
+
+### `load-latency` held in the quiet run
+
+`perf mem`'s mean load latency against `mem.latency`'s: 277.6 against 275.4
+cycles in the reference run, inside its 10 %. Under the wave's load it read
+10-12 % below in 3 of 3 runs (`docs/fixes/w23-perfrecord.md`). The pair stays
+as written; if a quiet run goes red, it becomes a `known_defect` naming the
+next finding, not a wider band.
+
+### To `src/collect/mem/latency*` (the IBS backend): `mem.latency` and `perf mem` time different populations
+
+Filed for stream perfrecord (`docs/fixes/w23-perfrecord.md`, "A finding"). On
+`chase 2`, `omn`'s IBS sampler tagged 5742 ops in 2.48 s at `sample@4000hz`,
+about 2300 a second, 58 % of the rate asked, and nothing in its output says
+so; `perf mem record` tagged 10 750 in about 2.6 s. Of the timed loads, `omn`
+calls 18 % `peer` (mean about 38 cycles) and 81 % `ram`; `perf mem` calls 6 %
+a cache hit and 94 % RAM. So the two means are over different mixes, and the
+mix moves with the load. Wanted: the delivered rate said beside the requested
+one (a loss is counted and surfaced, always), and `peer` checked against
+`perf mem`'s data source on the same op.
+
+### To `catalog/references/README.md` readers, and to `src/` (later): a perf tool wrapping the capable `omn` counts nothing
+
+Filed for stream runner (`docs/fixes/w23-runner.md`, "A finding"). `perf stat
+-x, -e instructions:u -- target/debug/omn trace cpu.instructions ... --
+python3 ...` reads **0** instructions while `omn` carries
+`cap_perfmon,cap_bpf=ep`, and 963 480 494 over a copy of the binary without
+capabilities: the kernel ends a task's inherited perf events at the exec of a
+binary that is not dumpable, which a binary with file capabilities is. The
+README says so under `tool_wraps_omn`; no pair wraps `omn` in `perf stat --`.
+The same holds for any user who runs `perf stat -- omn ...`: it reads 0, not
+a refusal.
+
+## Needs from another stream — the twenty-third wave, stream runner
+
+**Landed at the merge**: the families rewrote their pairs to the schema; the
+capability finding is filed above.
+
+### To `src/main.rs`: which half of exit 1, and the launched program's status
+
+Carried from the twenty-second wave (above): `omn` telling "the machine
+refused" from "a run failed before writing". And the launched program's exit
+status in `results.json`, which would let `omn_launches_tool` see the tool's
+status on kernels before 6.15 (the runner reads it through a pidfd today and
+skips where it cannot).
+
+## Needs from another stream — the twenty-third wave, stream cross
+
+**Landed here**: both memory-limit filings closed (above).
+
+### To `catalog/io.yaml` (owner of `io.latency` and `io.bytes`): two caveats
+
+Candidate text, not defects: a swap on a bio-based device (`zram`) is read I/O
+that `/proc/<pid>/io` charges and neither source sees; on a multi-device
+filesystem one file's I/O lands on several partitions, so a filter on the
+mount's source undercounts it.
+
+## Needs from another stream — the twenty-third wave, stream bpftrace
+
+**Landed in the tables**: the `memleak` row says `no pair:` (heap's).
+
+### To the coordinator: the privileged run
+
+The ten pairs have never compared a tool's number; `STATE.md`, "What
+remains", item 2. If a median misses by one bucket, the pair goes `alongside`
+(one run), not wider.
+
+### To `src/collect/proc/syscall*` and `src/collect/sched/irq*`
+
+The twenty-second wave's two defects stand unchanged (above).
+
+## Needs from another stream — the twenty-third wave, stream gpu
+
+**Landed at the merge**: every gpu pair held in the coordinator's run, the
+driver loaded by then.
+
+### To the coordinator: recapture `omn`'s four parser captures
+
+`tests/reference/captures/gpu/omn_*.json` are composed by hand in today's
+shape; `docs/fixes/w23-gpu.md`, "Privileged runs wanted" step 2, recaptures
+them (no root needed now that the driver is loaded), then the parser tests'
+numbers move.
+
+### To `tests/reference/runner.rs`: a skip's wording for a path
+
+A device node in `requires` (`/dev/nvidiactl`) skips with "is not installed
+here"; "does not exist here" would read right for a path. Nothing blocks on
+it.
+
+## Needs from another stream — the twenty-third wave, stream io
+
+**Landed in the tables**: sysstat's `iostat -d`/`-x` row says `no pair:` and
+points at io's table.
+
+### To `tests/reference/runner.rs`: the workload-alone check under `omn_launches_tool`
+
+`workload_fails_alone` runs `workload` as a program, but the program the tool
+launches there is `command` + `workload`; a job file as the workload would
+fail the check on the way to a legitimate skip. The io pairs put the job file
+in `command` with `workload: []`. Run `command` + `workload`, or document that
+the workload must be a program on its own.
+
+### To `src/collect/io/**`
+
+The twenty-second wave's four gaps (above), and a `dir` key on `io.latency`,
+so a read/write split needs no `rwbs` filter.
+
+## Needs from another stream — the twenty-third wave, stream net
+
+### To `tests/reference/runner.rs`: a root check by command
+
+`tcpdump-captured` skips because the runner asks whether `sudo -n` grants
+root for everything, and the sudoers here grant `/usr/bin/tcpdump` alone. Run
+by hand with `sudo -n tcpdump`, it agrees exactly (1804 against 1804, once
+`lo`'s outgoing copies are left out). A check on the pair's own command would
+run it.
+
+### To `src/collect/net/**` and `catalog/net.yaml`
+
+`direction` as a field `net.capture`'s `--filter` can name (`lo` hands a
+packet socket every frame twice, `outgoing` and `host`, and libpcap keeps
+one); a counter's total in `summary`, which today is a parser's mean x count.
+
+## Needs from another stream — the twenty-third wave, stream perfrecord
+
+**Landed above**: the population finding, and `load-latency` read from the
+quiet run.
+
+### To `src/collect/**` and `src/main.rs`: `--pid` attaching
+
+`omn trace --pid` takes more than 500 ms to attach (the debug build); the
+attach pairs settle 2 s. Attaching faster, or saying when it is attached.
+
+## Needs from another stream — the twenty-third wave, stream perfsched
+
+### To the coordinator: the six `perf` pairs
+
+Verified only once root is granted (`STATE.md`, "What remains", item 2); then
+`perf-lock-contention` is worth moving to `alongside`, where `rel: 0.3` (a
+band for two separate churns) would become a same-run band.
+
+## Needs from another stream — the twenty-third wave, stream perfstat
+
+### To `tests/reference/runner.rs`: a `teardown:` argv
+
+Run after the pair whatever happened, so `cpu.instructions.cgroup` removes the
+cgroup its `setup` made (today it stays, empty, until the next run's `setup`).
+
+### To `src/main.rs`: `--pid` ending with its process
+
+`perf stat -p` ends when the pid exits; `omn --pid ... -m count` refuses
+without `-d` ("a poll needs to know when to stop"), and with `-d` runs to its
+end after the pid is gone (stream top saw the same: 2.5 s spent per TIME+
+pair).
+
+## Needs from another stream — the twenty-third wave, stream power
+
+### To `src/collect/power/**` and `src/cli.rs`
+
+`power.freq`'s poll at window open, before anything launched beside it (the
+pair reads `last`); a system-scoped window bounded by a launched program
+(the twenty-second wave's gap 1), which would let these pairs be
+`tool_wraps_omn` over the program itself.
+
+## Needs from another stream — the twenty-third wave, stream sysstat
+
+### To `src/emit.rs`, `src/collect/sched/**` and `src/collect/mod.rs`
+
+The twenty-second wave's defects 1 to 3 stand (above). Once the poll's
+leading event is fixed, drop the skip in `raw_means` and
+`poll_leading_event_is_held_as_a_known_defect` together, and add a
+`summary.mean` pair for `cpu.util` against `mpstat`.
+
+## Needs from another stream — the twenty-third wave, stream top
+
+**Landed in this pass**: the `onpid.py` request closed (above), `DECISIONS.md`
+and `STATE.md` say what replaced it.
+
+### To stream top: `top-cpus`
+
+Above, "The twenty-third wave, coordinator, after the merge".
+
+### To `src/main.rs` and `src/emit.rs`
+
+`omn trace --pid P -d D` stopping once every target has gone; a total in
+`cpu.oncpu_time`'s summary (the twenty-second wave's gap 1), which is why a
+parser divides.

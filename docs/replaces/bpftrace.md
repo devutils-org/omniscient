@@ -8,7 +8,7 @@ tools that have no `.bt`. Pairs: `catalog/references/bpftrace.yaml`; parsers:
 **Every pair skips on this machine, through the shared runner**: bpftrace
 needs root and `sudo -n` is not granted (`cargo test --test reference
 pairs_bpftrace`: 0 held, 10 skipped, 0 gaps, 0 known defects, 0 failed).
-bcc is not installed. So no row says "same numbers" yet. What is shown is
+The bcc tools are installed and need root too. So no row says "same numbers" yet. What is shown is
 omn's side: each pair's `omn` argv was run here, its output is captured
 under `tests/reference/captures/bpftrace/omn/<id>.json`, and every compare's
 path or parser is evaluated on it by
@@ -19,7 +19,7 @@ wanted").
 
 | Tool and use | omn equivalent | Covered | Same numbers | Missing |
 |---|---|---|---|---|
-| `syscount.bt`: syscalls per process | `omn trace proc.syscall -m count -e summary --filter 'comm == "X"'` | per process and per syscall name; one process at a time per request | skipped (root); omn shown: 21216 calls for 20000 `getppid` and python3's startup; pair `syscount` holds it within 5%, tool pending | a system-wide top-N by process in one request (`-k comm`); a comm filter that follows a rename (see Missing below) |
+| `syscount.bt`: syscalls per process | `omn trace proc.syscall -m count -e summary --filter 'comm == "X"'` | per process and per syscall name; one process at a time per request | skipped (root); omn shown: 21216 calls for 20000 `getppid` and python3's startup; pair `syscount` compares it within 5%, tool pending | a system-wide top-N by process in one request (`-k comm`); a comm filter that follows a rename (see Missing below) |
 | `opensnoop.bt`: who opens what | `omn trace proc.syscall --filter 'syscall == "openat"'` | the count and latency of opens; not the path, nor the fd returned | skipped (root); omn shown: 623 openat for 500 opens plus startup; pair `opensnoop`, within 5%, tool pending | the opened path and the returned fd as attributes; `open`/`openat2` folded into one "open" selector |
 | `killsnoop.bt`: who signals whom | `omn trace proc.signals -m count --filter 'sig == 12'` | the count of signals per receiving task, by number | skipped (root); omn shown: exactly 50 SIGUSR2; pair `killsnoop`, exact, tool pending | the sender's comm and pid, the kill(2) return value |
 | `execsnoop.bt`: programs executed | `omn trace proc.exec --system --filter 'comm == "true"'` | every exec, system-wide or per cgroup | skipped (root); omn shown: exactly 20 `/bin/true`, one run beside the tool; pair `execsnoop`, exact, tool pending | `proc.exec` per launch (the programs a launched command executes); argv as an attribute |

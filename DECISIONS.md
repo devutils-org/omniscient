@@ -1243,7 +1243,7 @@ reads a value `omn` computes, which the families each answered their own way.
 | Decision | Choice | Reason |
 |---|---|---|
 | A machine-wide tool | **Observes the same seconds as `omn`**: the tool wraps `omn` (perfstat's `--system`, `--cgroup`, `--pid`; power), or both run alongside the workload (io, net, sysstat, bpftrace's `execsnoop` and `tcplife`), the asymmetry of the two windows said in `why`. | `omn` refuses `--system` beside a launched program (a gap, filed), and separate system-wide runs differed by 2.5x on cycles under the wave's load. |
-| A tool that takes a pid | **One run**: a launcher starts the workload and hands its pid to the tool and to `omn` (top's `onpid.py`); a pid-attached count compared per on-cpu nanosecond, not raw (perfstat). | Two windows that differ by `omn`'s start and exit are not one count. |
+| A tool that takes a pid | **One run**: a launcher starts the workload and hands its pid to the tool and to `omn` (top's `onpid.py`); a pid-attached count compared per on-cpu nanosecond, not raw (perfstat). *Superseded in the twenty-third wave: `run: attach` starts the workload stopped before its exec, `onpid.py` is gone and the count is compared raw (below).* | Two windows that differ by `omn`'s start and exit are not one count. |
 | A tool that launches its own child | **Two runs, quantities the workload fixes compared exactly**, latencies by median within one log2 bucket (bpftrace); heap's interposers and valgrind on alternate runs of a workload deterministic to the block. | bpftrace's `-c` child, valgrind's malloc and two `LD_PRELOAD` interposers cannot share a process. |
 | A total-printing tool | **Read before and after the workload** (`around.py`), never two runs subtracted (net). | A counter's increase over one run is the measurement. |
 | Units | **The parser converts to `omn`'s units and names** (ns, bytes, ratios, `[memcpy HtoD]`); a pair never converts beyond a declared scale. | One place for each conversion. |
@@ -1271,6 +1271,42 @@ reads a value `omn` computes, which the families each answered their own way.
   both sides of a comparison reviewable in one file and tested on real
   output; jq would add a dependency to the test and a second language to
   read, and per-family grammars are what left 105 pairs unrunnable.
+
+## Settled in the twenty-third wave
+
+From the decision lines of the thirteen handoffs (`docs/fixes/w23-*.md`). No
+open line is settled and none is opened: the five below, under "Open", stand
+as they were.
+
+**The runner** (`docs/fixes/w23-runner.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A field the runner does not read | **Refused per pair**, named by `every_pair_is_well_formed`; the family's file still loads, its other pairs run, its rows resolve. Prose goes in `why`, `use`, `gap` or a comment. | A field that is ignored is a pair that runs as something it does not say. |
+| `alongside` | **A name for `attach` with no `{pid}`**: the same start-up, settle and wait; `{pid}` refused, the workload optional. | One mechanism, two names for what a reader means. |
+| `tool_wraps_omn` | **Requires `-o {out}`**; a tool counting through inherited perf events does not wrap the capable `omn` (its events end at the exec of a non-dumpable binary, and it reads 0). | Two outputs on one stdout; and a count of 0 that is not a skip. |
+| `omn_launches_tool` | **`exec`s the tool**, so `omn` watches the tool's own pid; the tool's exit status read through a pidfd (`PIDFD_INFO_EXIT`, Linux 6.15), a non-zero status failing the pair unless its stderr refuses, a kernel that cannot tell skipping it. | `omn` exits 0 whatever its program did; an unknown status never counts as success. |
+| One-sided and log2 tolerances | `side: above`/`below` **allows nothing on the other side**, its `why` saying why `omn` can only be on one; `log2_buckets` stands alone, and a value not above 0 is in no bucket. | A lost median (0) must never hold against a real one. |
+| `known_defect` | **Excuses only numbers outside the tolerance**; a path or key error still fails, and agreeing numbers fail ("remove `known_defect`"). | The marker cannot outlive the defect. |
+| The tally of a filtered run (`OMN_REFERENCE_PAIR`) | **Printed, not left for `reference_tally`.** | It is not the family's. |
+
+**How the families compare** (`docs/fixes/w23-{bpftrace,gpu,heap,io,net,perfrecord,perfsched,perfstat,power,sysstat,top}.md`, and `w23-cross.md` for the last row):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Where `omn`'s value is read | **A dotted path where `omn` holds it at one place** (series `.0` where one series is expected, so a second fails rather than adds; `.*` where the sum is meant); **an `omn_parse` parser** for a mean weighted by count, a mean times a count, a key holding `]`, an event picked by two attributes, a share over a stack table. Every separate pair's `omn` writes `-o {out}`. | The settled rule (above); and a workload that prints must never land inside the JSON. |
+| A value that follows the clock or the load (cycles, cpu time) | **One run, `omn` launching the tool, a one-sided band** (perfstat); counts the tool's own process would swamp (branch and cache misses) on separate runs, medians of five. | `perf`'s own share only adds to `omn`'s count; it is 18 % of the branch misses and about 40 % of the cache misses. |
+| A pid-taking tool | **`run: attach`**, the workload stopped before its exec, the raw count compared (perfstat, top; supersedes `onpid.py` above); the tool released at the workload's phase by `at.sh` polling the `comm` the workload writes (top). | An attach that starts before the exec misses nothing; the runner sends the workload's output nowhere, and its `comm` is visible from outside. |
+| A system-scoped source against a tool | **`alongside`, the tool over the same seconds as `omn`'s `-d`** (power, net, sysstat, io's iostat), the load launched by the runner after `settle_ms`; not `tool_wraps_omn` while `omn` refuses a system scope beside a launch. A window holds the whole job when a rate is compared (io). | One load both windows see, two windows of equal length; a rate inside a moving job moves with it. |
+| A tolerance under load | **More runs, not a wider band** (perfsched's sleeps, five); a pair that misses on an open finding becomes `known_defect` once the finding is filed, not wider (perfrecord's `load-latency`). | A band widened to go green says nothing. |
+| PSS | **`omn`'s last poll**, not its maximum; smem's PSS one-sided, `omn` above (top). | PSS moves with every process mapping the same pages, and smem itself is one. |
+| A cpuidle residency pair | **The measured cpu woken every millisecond across both windows** (power). | Residency is credited only on wake; a read in a long idle period is stale by an unbounded amount. |
+| A cpu-frequency pair under a held load | **`omn`'s `last`** (power). | The reading at window open precedes the load. |
+| A sampled workload | **Never periodic near the sampler's period**; a C workload built in `setup`, never inside the observed pid (perfrecord). | `hot.c`'s 1 ms rounds phase-locked with a 997 Hz sampler. |
+| bpftrace's medians and bitesize | **`log2_buckets: 1`**, the exact offset of the two grids; bitesize compares the `[4K, 8K)` bucket, not the histogram's count. | `rel: 1.1` bounded nothing below; python3's own reads move the count between runs. |
+| tcpdump on `lo` | **`omn`'s raw events counted without the `outgoing` copy** (net). | `lo` hands a packet socket each frame twice; libpcap keeps one. |
+| A GPU pair without a loaded driver | **Skips through `requires: [/dev/nvidiactl]`** (gpu). | A CUDA workload without a driver exits 2, which would fail every pair for the machine's reason. |
+| A cross-machine session whose window must contain a program | **The session launches the program, and the program says when it is done**; a `/proc/<pid>/io` reference is net of the cgroup's `pswpin` delta over the run; a filesystem's devices are its members (`/sys/fs/btrfs/*/devices`), not its mount's source (cross). | Neither a duration nor a head start holds under load; zram swap-ins are reads no block source sees; btrfs spreads a file's chunks over its members. |
 
 ## Open
 

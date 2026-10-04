@@ -1074,7 +1074,7 @@ it has no "obviously wrong" output.
 | Cost regression | the phase 8 harness, in CI (built, and run by hand on a quiet machine; not in CI, since its variance gate exists to refuse a loaded one) |
 | Portability | a VM kernel matrix: floor, LTS, recent, no BTF (built in the eleventh wave: `scripts/matrix.sh`, `docs/portability.md`) |
 | Join robustness | injection of disorder, losses, recycled pointers |
-| Reference tools | `omn` against each tool it replaces, on the same workload within a declared tolerance: pairs as data (`catalog/references/`), the tools as witnesses only, one runner (`tests/reference.rs`), a verdict table per family (`docs/replaces.md`). Built in the twenty-second wave: 117 pairs, most of their numbers shown by the families' own harnesses; none yet through the runner, which the pairs predate (`STATE.md`, "What remains", item 1) |
+| Reference tools | `omn` against each tool it replaces, on the same workload within a declared tolerance: pairs as data (`catalog/references/`), the tools as witnesses only, one runner (`tests/reference.rs`), a verdict table per family (`docs/replaces.md`). Built in the twenty-second wave; every pair through the runner since the twenty-third: 113 pairs, 91 held, 20 skipped on root, 1 known defect, 1 failed (`top-cpus`, held alone) in the quiet run at its merge (`STATE.md`, "What remains", items 1 and 2) |
 | Degradation | run without privileges, without BTF, without tracefs — check that it degrades **while saying so** (built with the matrix, one configuration each; the CI is the unprivileged cell) |
 
 ---
