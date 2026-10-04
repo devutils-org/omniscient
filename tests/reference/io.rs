@@ -11,6 +11,16 @@
 //!   column such as `r_await` is weighted by the operations behind it), with
 //!   the kB/s columns also in bytes (`rB/s`, `wB/s`) and the await columns
 //!   in nanoseconds (`r_await_ns`, `w_await_ns`).
+//! - `omn_summary_as_fio`, `omn_summary_as_iostat`: `omn`'s own output (a
+//!   pair's `compare.omn_parse`), the `summary` emit of its results, read in
+//!   the tool's vocabulary so the two sides' keys agree. The pairs that use
+//!   them restrict `omn` to reads (a launched process's `io.latency` sees the
+//!   reads it submits; a system-wide one is filtered on `rwbs =~ 'R'`), so
+//!   the summary's requests summed over its series are the tool's read count
+//!   and their mean weighted by each series' count is the tool's read mean:
+//!   `read.total_ios` and `read.clat_mean_ns` for fio, `all.r_await_ns` for
+//!   iostat. A mean per series is a mean per device, which the path grammar
+//!   can sum but not weight.
 
 use serde_json::Value;
 
@@ -26,11 +36,19 @@ pub fn parsers() -> Vec<Parser> {
             name: "iostat_json",
             parse: iostat_json,
         },
+        Parser {
+            name: "omn_summary_as_fio",
+            parse: omn_summary_as_fio,
+        },
+        Parser {
+            name: "omn_summary_as_iostat",
+            parse: omn_summary_as_iostat,
+        },
     ]
 }
 
-/// The JSON document in a tool's output: fio may print a warning before it
-/// when told `--output=/dev/stderr`, so the document starts at the first `{`.
+/// The JSON document in a tool's output, stdout first: fio may print a
+/// warning line before its report, so the document starts at the first `{`.
 fn json_document(stdout: &str, stderr: &str) -> Result<Value, String> {
     let text = if stdout.contains('{') { stdout } else { stderr };
     let start = text
@@ -155,12 +173,66 @@ fn iostat_json(stdout: &str, stderr: &str) -> Result<Values, String> {
     Ok(out)
 }
 
+/// The requests and their mean over every series of every `summary` emit
+/// in `omn`'s results: `(count, mean weighted by count)`.
+fn omn_summary(stdout: &str, stderr: &str) -> Result<(f64, f64), String> {
+    let doc = json_document(stdout, stderr)?;
+    let results = doc
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "omn's output has no results".to_string())?;
+    let mut series_seen = 0;
+    let (mut count, mut weighted) = (0.0, 0.0);
+    for output in results
+        .iter()
+        .filter_map(|r| r.get("outputs").and_then(Value::as_array))
+        .flatten()
+        .filter(|o| o.get("emit").and_then(Value::as_str) == Some("summary"))
+    {
+        for s in output
+            .get("series")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let n = number(s.get("count").unwrap_or(&Value::Null), "series.count")?;
+            let mean = number(s.get("mean").unwrap_or(&Value::Null), "series.mean")?;
+            series_seen += 1;
+            count += n;
+            weighted += n * mean;
+        }
+    }
+    if series_seen == 0 {
+        return Err("omn's results have no summary series".to_string());
+    }
+    let mean = if count > 0.0 { weighted / count } else { 0.0 };
+    Ok((count, mean))
+}
+
+fn omn_summary_as_fio(stdout: &str, stderr: &str) -> Result<Values, String> {
+    let (count, mean) = omn_summary(stdout, stderr)?;
+    Ok(vec![
+        ("read.total_ios".to_string(), count),
+        ("read.clat_mean_ns".to_string(), mean),
+    ])
+}
+
+fn omn_summary_as_iostat(stdout: &str, stderr: &str) -> Result<Values, String> {
+    let (count, mean) = omn_summary(stdout, stderr)?;
+    Ok(vec![
+        ("all.r_ios".to_string(), count),
+        ("all.r_await_ns".to_string(), mean),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const FIO: &str = include_str!("captures/io/fio-randread.json");
     const IOSTAT: &str = include_str!("captures/io/iostat-dx.json");
+    const OMN_LAUNCH: &str = include_str!("captures/io/omn-io-latency-launch.json");
+    const OMN_SYSTEM: &str = include_str!("captures/io/omn-io-latency-system.json");
 
     fn get(values: &Values, key: &str) -> f64 {
         values
@@ -172,10 +244,10 @@ mod tests {
 
     #[test]
     fn fio_json_reads_the_captured_randread() {
-        let v = fio_json("", FIO).unwrap();
-        assert_eq!(get(&v, "read.total_ios"), 29118.0);
-        assert_eq!(get(&v, "read.io_bytes"), 29118.0 * 4096.0);
-        assert!((get(&v, "read.clat_mean_ns") - 68329.6848).abs() < 1e-3);
+        let v = fio_json(FIO, "").unwrap();
+        assert_eq!(get(&v, "read.total_ios"), 27297.0);
+        assert_eq!(get(&v, "read.io_bytes"), 27297.0 * 4096.0);
+        assert!((get(&v, "read.clat_mean_ns") - 72849.643954).abs() < 1e-3);
         assert!(get(&v, "read.lat_mean_ns") >= get(&v, "read.clat_mean_ns"));
         assert!(get(&v, "read.clat_p50_ns") > 0.0);
         assert_eq!(get(&v, "write.total_ios"), 0.0);
@@ -185,7 +257,7 @@ mod tests {
     fn fio_json_finds_the_document_after_a_warning() {
         let noisy = format!("fio: some warning\n{FIO}");
         let v = fio_json("", &noisy).unwrap();
-        assert_eq!(get(&v, "read.total_ios"), 29118.0);
+        assert_eq!(get(&v, "read.total_ios"), 27297.0);
     }
 
     #[test]
@@ -197,12 +269,52 @@ mod tests {
     #[test]
     fn iostat_json_sums_disks_and_converts_units() {
         let v = iostat_json(IOSTAT, "").unwrap();
-        assert_eq!(get(&v, "nvme0n1.r/s"), 14612.0);
-        assert_eq!(get(&v, "all.r/s"), 14612.0);
-        assert_eq!(get(&v, "all.rB/s"), 58448.0 * 1024.0);
+        // `iostat -d -x -y -o JSON 4 1` over a 2 s fio job started a second
+        // in; zram0 read nothing and weighs nothing.
+        assert_eq!(get(&v, "nvme0n1.r/s"), 5843.75);
+        assert_eq!(get(&v, "all.r/s"), 5843.75);
+        assert_eq!(get(&v, "all.rB/s"), 23375.0 * 1024.0);
         assert!((get(&v, "all.r_await_ns") - 60_000.0).abs() < 1e-6);
         assert!((get(&v, "nvme0n1.r_await_ns") - 60_000.0).abs() < 1e-6);
-        assert_eq!(get(&v, "sda.util"), 0.0);
+        assert_eq!(get(&v, "nvme0n1.util"), 34.77);
+        assert_eq!(get(&v, "zram0.util"), 0.0);
+    }
+
+    #[test]
+    fn omn_summary_reads_the_captured_launch_as_fio() {
+        // omn launching fio, the run fio-randread.json is the report of.
+        let v = omn_summary_as_fio(OMN_LAUNCH, "").unwrap();
+        assert_eq!(get(&v, "read.total_ios"), 27297.0);
+        assert!((get(&v, "read.clat_mean_ns") - 55908.40792028428).abs() < 1e-6);
+    }
+
+    #[test]
+    fn omn_summary_reads_the_captured_system_run_as_iostat() {
+        // The same four seconds as iostat-dx.json: 23375 reads, which is
+        // iostat's 5843.75 r/s over its 4 s.
+        let v = omn_summary_as_iostat(OMN_SYSTEM, "").unwrap();
+        assert_eq!(get(&v, "all.r_ios"), 23375.0);
+        assert!((get(&v, "all.r_await_ns") - 56733.52337967914).abs() < 1e-6);
+    }
+
+    #[test]
+    fn omn_summary_weights_each_device_by_its_requests() {
+        let two = r#"{"results": [{"outputs": [
+            {"emit": "summary", "series": [
+                {"key": "dev:259+6", "count": 1, "mean": 1000.0},
+                {"key": "dev:259+9", "count": 3, "mean": 2000.0}]},
+            {"emit": "rate", "series": [{"key": "x", "count": 100, "mean": 9.0}]}]}]}"#;
+        let v = omn_summary_as_fio(two, "").unwrap();
+        assert_eq!(get(&v, "read.total_ios"), 4.0);
+        assert_eq!(get(&v, "read.clat_mean_ns"), 1750.0);
+    }
+
+    #[test]
+    fn omn_summary_refuses_results_without_a_summary() {
+        assert!(omn_summary_as_fio(r#"{"results": []}"#, "").is_err());
+        let rate_only = r#"{"results": [{"outputs": [{"emit": "rate", "series": []}]}]}"#;
+        assert!(omn_summary_as_iostat(rate_only, "").is_err());
+        assert!(omn_summary_as_fio("", "omn: cannot run").is_err());
     }
 
     #[test]

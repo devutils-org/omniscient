@@ -1,0 +1,67 @@
+{
+  "results": [
+    {
+      "label": "io.latency",
+      "source": "io.latency",
+      "unit": "ns",
+      "backend": "bpf:raw_tp",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "dev:259+9",
+              "count": 27297,
+              "min": 9280.0,
+              "max": 4659934.0,
+              "mean": 55908.40792028428,
+              "last": 56560.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 27297,
+      "observed_ns": 2397573973,
+      "window": {
+        "run_opened_ns": 2233660874989,
+        "opened_ns": 2233660874989,
+        "closed_ns": 2236058448962,
+        "attached": true
+      },
+      "stopped_because": "the launched program exited with exit status 0",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "lifetime": {
+        "released_ns": 2233660834389,
+        "exited_ns": 2236058441192,
+        "exited_err_ns": 7356701,
+        "cpu_ns": 411499000
+      },
+      "degradations": [
+        "a process target sees the requests submitted in its own context, which is reads; a write leaves through writeback in a kworker minutes later and carries no submitter at all, so it is absent here rather than counted as zero"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 134815000,
+        "attributed_cpu_ns": 134815000,
+        "observed_cpu_ns": 411448490,
+        "observed_from": "the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 205664 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)",
+        "wall_ns": 2397806275,
+        "measurement_ns": 31210,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel is not timing eBPF programs on this run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable",
+        "before_window_cpu_ns": 167713000,
+        "after_window_cpu_ns": 342000
+      },
+      "served_by": [
+        "bpf:raw_tp"
+      ],
+      "value_attr": "latency_ns"
+    }
+  ]
+}
