@@ -19,7 +19,8 @@ counts against the net sources.
   `nstat_delta`, `ss_ti_rtt`, `tcpdump_count`), unit-tested on
   `tests/reference/captures/net/` (the first three captured on this machine
   through the wrappers; `tcpdump_count.stderr.txt` written by hand in
-  tcpdump 4.99's tally format, since tcpdump is not installed); and
+  tcpdump 4.99's tally format, since tcpdump was not installed then -- it
+  now is, 4.99.7, but a real capture still needs root); and
   `net_pairs_against_the_tools`, which runs every net pair the family's way
   until the shared runner knows `alongside`.
 - `docs/replaces/net.md`: fourteen rows.
@@ -55,8 +56,10 @@ zero does not show a non-zero error count would agree.
 
 ## Not done, and why
 
-- The tcpdump pair has not run: tcpdump is not installed, it needs root,
-  and omn's `net.capture` needs `CAP_NET_RAW`.
+- The tcpdump pair has not run: tcpdump 4.99.7 is installed now, but it
+  needs root through `sudo -n` (which prompts here), and omn's
+  `net.capture` needs `CAP_NET_RAW` (`make CAPTURE=1`). The same two block
+  replacing the hand-written `tcpdump_count.stderr.txt` with a real one.
 - No pair for `ip -s -s link`'s detailed errors through `netlink:ethtool`
   (`ethtool` is not installed, and lo has none to show).
 - Rows without a pair, because omn has no source to compare (the gaps
@@ -89,10 +92,14 @@ zero does not show a non-zero error count would agree.
 ## Privileged runs wanted
 
 ```console
-sudo pacman -S tcpdump ethtool
+sudo pacman -S ethtool   # tcpdump 4.99.7 is installed already
 make CAPTURE=1      # CAP_NET_RAW on target/debug/omn for net.capture
 # then, with a sudo that does not prompt (sudo -v first, in a terminal):
 cargo test --test reference net::tests::net_pairs_against_the_tools -- --nocapture
+# and a real tally for the parser's capture, to replace the hand-written one:
+python3 tests/reference/workloads/net/bracket.py sudo -n tcpdump -i lo -w /dev/null \
+  'tcp dst port 47312' -- python3 tests/reference/workloads/net/pingpong.py 47312 2 \
+  2> tests/reference/captures/net/tcpdump_count.stderr.txt
 ```
 
 Note `cargo test` relinks `omn` only when `src/` changed; if it does, run
@@ -126,3 +133,31 @@ the `net.tcp.retransmit` pair needs `CAP_BPF`/`CAP_PERFMON` too.
 - **reference**, `.github/expected-skips*.txt`: the skip is printed by
   `net_pairs_against_the_tools` as `net pair SKIP  net.capture / tcpdump
   [captured]: ...`, not as an ignored test, so it may need no entry.
+
+## Review
+
+Fixed, after merging main (which now has the shared runner):
+
+- **The six net paths `parse_path` rejects, and every net pair failing
+  under `pairs_net`.** Both come from the shared runner not knowing
+  `alongside` (it appends `-- <workload>`, which omn refuses beside
+  `--iface`/`--system`) nor the family's path forms (a series total is a
+  mean times a count, which the dot-path syntax cannot say). Every pair in
+  `catalog/references/net.yaml` now declares a `gap:` saying so, and the
+  header says the family's `net_pairs_against_the_tools` reads the file
+  directly, ignores `gap:`, and runs every pair. `pairs_net` reports nine
+  `gap:` lines and passes; `every_pair_is_well_formed` lists no net pair
+  (its remaining lines are perfstat, perfrecord, top, gpu and io).
+  `net_pairs_against_the_tools` after the change: eight pairs pass exactly
+  (rx 67197748, tx 67194004, packets 7436, errors 0, overflows 62, drops
+  62, retransmits 124, rtt 1072750 ns), tcpdump skips on `sudo -n`. The
+  request to stream reference below stands: once the runner honours
+  `alongside` and a series total, the `gap:` lines and `mod runner` go.
+- **Row 2 of `docs/replaces/net.md`** now names `omn net.bytes` and the pair
+  `net.bytes / ip -s link [tx_bytes]`; `every_row_names_a_pair_or_why_none`
+  lists no net row.
+- **tcpdump is installed.** The skip reason in the replaces row and this
+  handoff now says tcpdump 4.99.7 is there and only `sudo -n` and
+  `CAP_NET_RAW` block it. The hand-written `tcpdump_count.stderr.txt`
+  stays: a real capture needs the same root this session cannot get without
+  a password; the command to replace it is under "Privileged runs wanted".
