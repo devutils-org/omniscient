@@ -173,14 +173,12 @@ fn refusal(kind: Inside, report: u32) -> Option<String> {
     }
 }
 
-/// What a request asks of the injection library, when it is one of its
-/// readers and nothing pins it to another backend.
-fn library_bit(request: &Request) -> Option<u32> {
-    if request
-        .backend
-        .as_ref()
-        .is_some_and(|backend| !backend.as_str().contains("vendor:cupti"))
-    {
+/// What a request asks of the injection library, when it resolved onto it.
+/// The backend is the one the resolver chose, not the one the request named:
+/// an unpinned request served by another vendor's library asks nothing of
+/// CUPTI, and is no reason to refuse its neighbours.
+fn library_bit(request: &Request, backend: &str) -> Option<u32> {
+    if backend != "vendor:cupti" {
         return None;
     }
     match request.source.as_str() {
@@ -192,27 +190,29 @@ fn library_bit(request: &Request) -> Option<u32> {
 }
 
 /// The session's requests that cannot share their launch with the others,
-/// by index, each with the reason: refused before anything is launched, as
-/// the request's error, rather than at attach as the machine's. Requests
-/// share a launch when they launch the same command line.
-pub fn launch_refusals(requests: &[Request]) -> Vec<(usize, String)> {
+/// by index, each with the reason: refused once resolved and before anything
+/// is launched, as the request's error, rather than at attach as the
+/// machine's. Each request comes with the backend it resolved onto, and only
+/// those served by CUPTI count. Requests share a launch when they launch the
+/// same command line.
+pub fn launch_refusals(resolved: &[(&Request, &str)]) -> Vec<(usize, String)> {
     let mut refused = Vec::new();
-    for (index, request) in requests.iter().enumerate() {
+    for (index, &(request, backend)) in resolved.iter().enumerate() {
         let kind = match request.source.as_str() {
             "gpu.counters" => Inside::Counters,
             "gpu.profile" => Inside::Profile,
             _ => continue,
         };
-        if library_bit(request).is_none() {
+        if library_bit(request, backend).is_none() {
             continue;
         }
         let Target::Launch(argv) = &request.target else {
             continue;
         };
-        let report = requests
+        let report = resolved
             .iter()
-            .filter(|other| matches!(&other.target, Target::Launch(theirs) if theirs == argv))
-            .filter_map(library_bit)
+            .filter(|(other, _)| matches!(&other.target, Target::Launch(theirs) if theirs == argv))
+            .filter_map(|&(other, backend)| library_bit(other, backend))
             .fold(0, |report, bit| report | bit);
         if let Some(reason) = refusal(kind, report) {
             refused.push((index, reason));
@@ -1273,7 +1273,7 @@ pub(super) mod tests {
 
     /// The same rule, before the launch: a request that shares its launch
     /// with one it cannot is refused by index, and requests on different
-    /// command lines, or pinned to another backend, are left alone.
+    /// command lines, or resolved onto another backend, are left alone.
     #[test]
     fn a_session_s_requests_are_refused_before_their_shared_launch() {
         let session = |requests: &str| -> crate::request::Session {
@@ -1284,23 +1284,36 @@ pub(super) mod tests {
         let request = |source: &str, argv: &str| {
             format!("  - {{source: {source}, target: {{launch: [{argv}]}}, mode: trace, emit: [raw]}}\n")
         };
+        let on = |session: &crate::request::Session, backends: &[&'static str]| {
+            let pairs: Vec<(&Request, &str)> = session
+                .requests
+                .iter()
+                .zip(backends.iter().copied())
+                .collect();
+            launch_refusals(&pairs)
+        };
+        let cupti = "vendor:cupti";
         let both = session(&(request("gpu.counters", "a") + &request("gpu.kernel", "a")));
-        let refused = launch_refusals(&both.requests);
+        let refused = on(&both, &[cupti, cupti]);
         assert_eq!(refused.len(), 1);
         assert_eq!(refused[0].0, 0);
         assert!(refused[0].1.contains("with gpu.kernel"), "{}", refused[0].1);
+        // The same pair served by another library, or with one of the two
+        // served by another: nothing of CUPTI's replay is in the launch.
+        assert!(on(&both, &["vendor:rocprof", "vendor:rocprof"]).is_empty());
+        assert!(on(&both, &[cupti, "vendor:rocprof"]).is_empty());
 
         let inside = session(&(request("gpu.profile", "a") + &request("gpu.counters", "a")));
-        let indexes: Vec<usize> = launch_refusals(&inside.requests)
+        let indexes: Vec<usize> = on(&inside, &[cupti, cupti])
             .iter()
             .map(|(index, _)| *index)
             .collect();
         assert_eq!(indexes, [0, 1]);
 
         let apart = session(&(request("gpu.counters", "a") + &request("gpu.kernel", "b")));
-        assert!(launch_refusals(&apart.requests).is_empty());
+        assert!(on(&apart, &[cupti, cupti]).is_empty());
         let profile = session(&(request("gpu.profile", "a") + &request("gpu.kernel", "a")));
-        assert!(launch_refusals(&profile.requests).is_empty());
+        assert!(on(&profile, &[cupti, cupti]).is_empty());
     }
 
     /// Counters replay kernels: refused beside gpu.kernel, and beside PC
