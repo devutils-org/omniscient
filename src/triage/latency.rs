@@ -991,7 +991,20 @@ fn latency(run: &Reading, runs: usize) -> Verdict {
     let share = read_one.wall().map(|whole| amount / whole * 100.0);
     let share_text = share.map_or(String::new(), |share| format!(" ({share:.1} % {of_what})"));
     let what = top.limit.map_or("", |limit| limit.describe());
-    if amount > second && amount > room {
+    // A lower row read off a lossy source is a lower bound: at its source's
+    // loss rate it could be larger, and when that is enough to overtake the
+    // largest, the largest is not decisive -- a lossy profile under load
+    // otherwise names the run queue for a spin.
+    let overtaking = known.iter().skip(1).find_map(|state| {
+        let short = state.short.as_ref()?;
+        let read = state.amount?;
+        let could_be = short
+            .fraction
+            .filter(|fraction| *fraction < 1.0)
+            .map_or(f64::INFINITY, |fraction| read / (1.0 - fraction));
+        (could_be >= amount).then_some((*state, short, could_be))
+    });
+    if amount > second && amount > room && overtaking.is_none() {
         Verdict {
             objective,
             task: Some(read_one.task.clone()),
@@ -1015,6 +1028,24 @@ fn latency(run: &Reading, runs: usize) -> Verdict {
                 top.state,
                 span(amount),
                 span(second)
+            )
+        } else if let Some((state, short, could_be)) = overtaking {
+            let could = if could_be.is_finite() {
+                format!(
+                    "at its source's loss rate ({:.1} % of records dropped, run-wide) it could \
+                     be {}",
+                    short.fraction.unwrap_or(0.0) * 100.0,
+                    span(could_be)
+                )
+            } else {
+                "its source's loss is not a count (throttled), so it could be any larger".to_owned()
+            };
+            format!(
+                "`{}` is {}, and `{}` is a lower bound at {}: {could}, enough to overtake it",
+                top.state,
+                span(amount),
+                state.state,
+                span(state.amount.unwrap_or(0.0))
             )
         } else if unread.is_empty() {
             format!(
@@ -2409,6 +2440,41 @@ mod tests {
         let verdict = latency(&run, 1);
         assert_eq!(verdict.limit, None, "{}", verdict.sentence);
         assert!(verdict.undecided.is_some());
+    }
+
+    /// The lossy profile under load: a spin whose on-cpu row lost a third of
+    /// its samples reads less than its run queue, which is exact. The run
+    /// queue is not named; the on-cpu row could overtake it.
+    #[test]
+    fn a_lossy_row_that_could_overtake_the_largest_undecides_it() {
+        let lossy = |dropped: u64, records: u64| Shortfall {
+            dropped,
+            throttled: 0,
+            records,
+            fraction: (dropped > 0).then(|| dropped as f64 / (dropped + records) as f64),
+            per_record: false,
+            evicted: 0,
+            note: String::new(),
+        };
+        let run = |short: Shortfall| {
+            let mut on_cpu = state("on-cpu", Limit::Cpu, Some(120e6));
+            on_cpu.short = Some(short);
+            reading(
+                300e6,
+                vec![on_cpu, state("runnable", Limit::CpuQueue, Some(150e6))],
+                0.0,
+            )
+        };
+        let verdict = latency(&run(lossy(400, 600)), 1);
+        assert_eq!(verdict.limit, None, "{}", verdict.sentence);
+        assert!(
+            verdict.sentence.contains("lower bound") && verdict.sentence.contains("overtake"),
+            "{}",
+            verdict.sentence
+        );
+        // A loss too small to make up the difference decides as before.
+        let verdict = latency(&run(lossy(1, 999)), 1);
+        assert_eq!(verdict.limit, Some(Limit::CpuQueue), "{}", verdict.sentence);
     }
 
     #[test]
