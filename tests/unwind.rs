@@ -1676,6 +1676,21 @@ fn build_id_of(path: &Path) -> String {
         .expect("the build carries a build id")
 }
 
+/// The sampling period of [`named_stacks`]: shorter than the shortest branch.
+///
+/// A batch of the call tree takes about a millisecond of cpu (973 us here),
+/// and this was 1 ms: one sample a batch, at a phase that drifts by the
+/// difference between the two. When they are close the samples stay in one or
+/// two neighbouring branches for the whole run -- the stripped build's "second
+/// shape", whose unstripped reference held only `hash_block` and
+/// `parse_record`. Matched to the batch on purpose (972 us), one run in seven
+/// put 229 of its 299 samples in `hash_block`, built to take 40 %. Below the
+/// shortest branch (`checksum`, a tenth of a batch, about 97 us) every
+/// branch holds a sample point in every batch whatever the phase; 61 us is
+/// that with room for a machine half again as fast, and is no divisor of
+/// anything the program does.
+const NAMED_PERIOD_NS: u64 = 61_001;
+
 /// Stacks root first, and where each module's names came from.
 type NamedStacks = (Vec<Vec<String>>, BTreeMap<String, NameOrigin>);
 
@@ -1691,7 +1706,7 @@ fn named_stacks(binary: &Path, debuginfod: Option<Arc<Debuginfod>>) -> Option<Na
         .spawn()
         .unwrap();
     let pid = child.id() as i32;
-    let spec = omn::perf::SampleSpec::software(CPU_CLOCK, 1_000_000, callchain);
+    let spec = omn::perf::SampleSpec::software(CPU_CLOCK, NAMED_PERIOD_NS, callchain);
     let mut event = match SampledEvent::open(&spec, Scope::Process(pid), 512) {
         Ok(event) => event,
         Err(error) => {
@@ -1793,8 +1808,8 @@ fn a_stripped_build_is_named_from_debuginfod_only_when_asked_and_as_the_unstripp
     }
     let (reference, _) = named_stacks(unstripped, None).unwrap();
     // Every stack of both runs with its samples, for a failure to be read
-    // from: a whole branch missing from one run was seen once, at load 12,
-    // and not reproduced since.
+    // from: a whole branch missing from one run was seen twice under load,
+    // with one sample a batch (`NAMED_PERIOD_NS` says why that was the cause).
     let counted = |stacks: &[Vec<String>]| -> String {
         let mut counts: BTreeMap<&[String], usize> = BTreeMap::new();
         for frames in stacks {
