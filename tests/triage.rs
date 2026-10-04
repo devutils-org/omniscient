@@ -284,6 +284,20 @@ fn answer(args: &[&str], would_have_checked: &str) -> Option<Answered> {
             args.join(" ")
         )
     });
+    // Whatever was asked, the tool's own eBPF programs -- run on the
+    // target's cpu by the tracepoints it attached -- are never the named
+    // suspect (`sqlite3-durability`'s `bpf_trace_run2`).
+    for frame in [
+        "bpf_trace_run",
+        "bpf_prog_",
+        "__bpf_trace_",
+        "trace_call_bpf",
+    ] {
+        assert!(
+            !text.contains(&format!("hottest function `{frame}")),
+            "the tool's own eBPF frame `{frame}` named as the hottest function:\n{text}"
+        );
+    }
     let stderr = String::from_utf8_lossy(&output.stderr);
     let truths = stderr
         .lines()
