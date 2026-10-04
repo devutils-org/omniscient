@@ -9,6 +9,7 @@
 #   scripts/bench.sh resolution   the 0.5-50 us resolution sweep
 #   scripts/bench.sh observer     the observer effect
 #   scripts/bench.sh backends     the cost table and the resolver's verdicts
+#   scripts/bench.sh gpu          the GPU tracers against a negative control
 #   scripts/bench.sh --smoke ...  three repetitions: the mechanics, never a table
 #
 # Run it alone. The gate refuses a machine where anything else is building,
@@ -28,14 +29,14 @@ steps=()
 for arg in "$@"; do
     case "$arg" in
         --smoke) smoke=1 ;;
-        gate|loaded|counts|resolution|observer|backends) steps+=("$arg") ;;
-        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+        gate|loaded|counts|resolution|observer|backends|gpu) steps+=("$arg") ;;
+        -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
         *) echo "bench: unknown step \`$arg\`" >&2; exit 2 ;;
     esac
 done
 # `loaded` is not in the default sequence: it proves the gate refuses, and a
 # real run needs the gate to pass. It is its own step, run on purpose.
-[ ${#steps[@]} -eq 0 ] && steps=(gate counts resolution observer backends)
+[ ${#steps[@]} -eq 0 ] && steps=(gate counts resolution observer backends gpu)
 
 make release
 export OMN_BENCH_BIN="$PWD/target/release/omn"
@@ -81,6 +82,7 @@ for step in "${steps[@]}"; do
             run bench_observer the_observer_metric_flags_a_sequence_serialized_on_purpose
             run bench_observer the_collectors_on_an_asynchronous_sequence ;;
         backends)   run bench_backends every_served_backend_is_costed_and_the_resolver_is_judged_by_it ;;
+        gpu)        run bench_gpu every_gpu_tracer_is_costed_against_a_negative_control ;;
     esac
 done
 echo "bench: done; the documents are under target/bench/"

@@ -172,8 +172,12 @@ impl App {
         // collectors' is in every result, and the frame must stay legible.
         let right = self.cost_line(area.width >= 100);
         let title = "omn top │ ";
-        let fixed =
-            title.chars().count() + after.iter().map(Span::width).sum::<usize>() + right.width();
+        // One cell is kept between the left side and the corner, so a cut
+        // origin never runs the run's length into the cost.
+        let fixed = title.chars().count()
+            + after.iter().map(Span::width).sum::<usize>()
+            + 1
+            + right.width();
         // The origin gives way first, from its start: the end of a path is
         // the part that tells two recordings apart.
         let room = usize::from(area.width).saturating_sub(fixed);
@@ -185,8 +189,12 @@ impl App {
         ];
         left.extend(after);
         let width = right.width() as u16;
-        let [left_area, right_area] =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(width)]).areas(area);
+        let [left_area, _, right_area] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(width),
+        ])
+        .areas(area);
         frame.render_widget(Paragraph::new(Line::from(left)), left_area);
         frame.render_widget(Paragraph::new(right), right_area);
     }

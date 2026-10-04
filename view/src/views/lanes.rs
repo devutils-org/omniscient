@@ -69,11 +69,19 @@ pub const NEEDS: &[Need] = &[
         scope: Scope::Target,
         why: "a lane per GPU stream",
     },
+    Need {
+        source: WAKEUP,
+        mode: "trace",
+        emit: &["raw"],
+        keys: &[],
+        stack: None,
+        scope: Scope::Target,
+        why: "where each block ended, and who ended it",
+    },
 ];
 
-/// Where a block's end is read from when the run holds it: the wake view
-/// asks for it, so `omn top` live always has it. Not in [`NEEDS`] until
-/// `docs/view/README.md`'s table lists it (the handoff asks for the row).
+/// Where a block's end is read from: the same request as the wake view's,
+/// so one collector serves both.
 const WAKEUP: &str = "sched.wakeup";
 
 /// The colours of the states, sixteen-colour names as the palette's.

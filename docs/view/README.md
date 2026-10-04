@@ -218,9 +218,10 @@ holds this table to the code.
 | heatmap | `sched.runqlat` | trace | raw,summary (keys task) | target | run queue latency |
 | heatmap | `net.socket` | trace | raw,hist | target | socket read and write latency |
 | heatmap | `gpu.kernel` | trace | raw,summary | target | kernel durations |
-| lanes | `sched.switches` | trace | raw | target | each thread's on and off cpu |
-| lanes | `sched.offcpu` | trace | raw,stack (stack fp) | target | why a thread was off cpu, each block on its own |
+| lanes | `sched.switches` | trace | raw | target | each thread's switch-outs, the instant each block or preemption began |
+| lanes | `sched.offcpu` | trace | raw,stack (stack fp) | target | the state and stack of each block, from its drain window's rows |
 | lanes | `gpu.kernel` | trace | raw,summary | target | a lane per GPU stream |
+| lanes | `sched.wakeup` | trace | raw | target | where each block ended, and who ended it |
 | wake | `sched.wakeup` | trace | raw | target | the wake chain |
 | flows | `net.socket` | trace | raw,hist | target | bytes per socket |
 | flows | `net.bytes` | poll@250ms | timeline,summary | system | bytes per interface |
