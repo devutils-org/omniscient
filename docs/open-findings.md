@@ -12892,3 +12892,20 @@ machine (load about 1 on 24 cpus), the GPU free:
 - **The views' size** (item 9, the user's one remark): the views other than
   `system` draw in a fraction of the terminal and leave the rest empty; they
   should fill the screen the way `system` does.
+
+### The GPU bench rerun alone: `gpu.freq`'s two losses reproduce
+
+`scripts/bench.sh gpu` again (`target/bench/gpu-1791157792`, 1220 s, the
+same as the first run's 1218: the "about fifteen minutes" was reasoned and
+is twenty). `bench_gpu` red the same way: `gpu.freq` through `vendor:nvml`
+on `launch` lost 2 of 191 records (2 of 190 the first time), and on
+`compute` and `memory` none. Deterministic, then, and only on the launch
+regime -- the one whose program is shortest per run; whether the two are a
+tick that ran late or a closing read after the program was reaped is what to
+read first, since the test calls them "drops under the load" and the second
+is not. `gpu.profile` over its `med` in every regime by cpu dilation (+165 %
+launch, +56 % compute, +39 % memory), `extreme` would hold it; elapsed
+dilation stays under 1 % outside launch (+54 %). The NVML pollers are within
+their bands here (0.65 to 10.9 % of the target's cpu), against 25 to 36 % in
+the backends bench, whose `compute` workload gives the target less cpu to be
+a share of.
