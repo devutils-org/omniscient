@@ -447,13 +447,25 @@ mod tests {
                     continue;
                 }
             };
-            let find = |v: &Values| {
-                v.iter()
-                    .find(|(k, _)| k == key)
-                    .map(|(_, x)| *x)
-                    .unwrap_or(0.0)
+            // A side without the key fails the pair with its reason: read as
+            // zero, two sides that both lost it would agree vacuously.
+            let find = |v: &Values| v.iter().find(|(k, _)| k == key).map(|(_, x)| *x);
+            let (t, o) = match (find(&theirs), find(&ours)) {
+                (Some(t), Some(o)) => (t, o),
+                (t, o) => {
+                    let keys = |v: &Values| v.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
+                    let reason = format!(
+                        "{label}: key missing (tool {}, omn {}); tool has {:?}, omn has {:?}",
+                        if t.is_some() { "has it" } else { "lacks it" },
+                        if o.is_some() { "has it" } else { "lacks it" },
+                        keys(&theirs),
+                        keys(&ours),
+                    );
+                    eprintln!("FAIL {reason}");
+                    failed.push(reason);
+                    continue;
+                }
             };
-            let (t, o) = (find(&theirs), find(&ours));
             let tolerance = &pair["compare"]["tolerance"];
             let ok = match (tolerance["abs"].as_f64(), tolerance["rel"].as_f64()) {
                 (Some(abs), _) => (t - o).abs() <= abs,

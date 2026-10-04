@@ -122,4 +122,21 @@
     omn: "results[0].outputs[topk].series[0].events / all events"
     omn_parse: omn_topk_share
     tolerance: {abs: 0.02}
-    why: "two threads write two counters in one static line, at a fixed address (built without PIE): both rank that line first and give it nearly every HITM; alternate runs. `top` is the first line whatever its address; the parsers also key each line by its address (0x4040c0 with this toolchain), which the captures show is the same on both sides"
+    why: "two threads write two counters in one static line, at a fixed address (built without PIE): both rank that line first and give it nearly every HITM; alternate runs. `top` is whichever line each side ranks first, so this pair checks the share, not the line; the pair keyed by the address below checks that both name the same line"
+
+- source: mem.sharing
+  tool: perf c2c
+  use: "perf c2c record -- prog; perf c2c report (the cache lines with the most HITMs)"
+  workload: [sh, tests/reference/workloads/perfrecord/build.sh, share, "2"]
+  omn: [trace, mem.sharing, -m, sample@4000hz, -e, topk, --format, json]
+  reference:
+    command: [sh, -c, 'T=$(mktemp) && trap "rm -f $T" EXIT && perf c2c record -q -o "$T" -- "$@" >/dev/null 2>&1 && perf c2c report -i "$T" --stdio 2>/dev/null', sh]
+    parse: perf_c2c_hitm_share
+    requires: [perf, cc]
+    privileged: false
+  compare:
+    key: "0x4040c0"
+    omn: "the events of the series keyed mem:[0x4040c0,...) / all events"
+    omn_parse: omn_topk_share
+    tolerance: {abs: 0.02}
+    why: "the same run as the `top` pair, keyed by the false-shared line's start address: fixed because the workload is built without PIE, 0x4040c0 with this toolchain (gcc 16, x86_64). A side that does not name that line has no value for the key and the pair fails with that reason rather than comparing zeros; another toolchain may place the counters elsewhere, which is the expected way for this pair to fail"
