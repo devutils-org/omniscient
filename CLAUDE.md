@@ -64,9 +64,25 @@ catch what the change could break:
 - **A commit that touches only documents, indexes or sessions**: run
   `cargo test --test cli` (the index and session-validation tests), nothing
   else.
-- **Keep the full suite for** merges of a stream and changes to a shared layer
-  (`src/bpf/insn.rs`, `btf.rs`, `map.rs`, `emit.rs`, `join.rs`, the catalog
-  loader). Those are where a full run has actually caught defects.
+- **Keep the full suite for** changes to a shared layer (`src/bpf/insn.rs`,
+  `btf.rs`, `map.rs`, `emit.rs`, `join.rs`, the catalog loader). Those are
+  where a full run has actually caught defects.
+
+### In a wave of parallel streams
+
+Ten streams each running the full suite cost a wave about a hundred full runs,
+each two to three times slower under the others' load, and the load itself
+turns timing tests red. So in a wave everything is scoped:
+
+- **A stream, its fix round and its reviewer test only what the stream
+  produced**: the tests of its own files, plus `cargo clippy --workspace` and
+  `cargo fmt --check`. No `make check`, no `cargo test --workspace` -- unless
+  the stream changed a shared layer listed above.
+- **A merge agent merges** and runs the tests of what a conflict touched; it
+  does not run the full suite per phase.
+- **The coordinator runs the full suite once**, at the end of the wave, when
+  every stream is merged and the machine is quiet. A red test goes back as a
+  fix; one in the flaky tally is rerun alone once.
 
 `make` still has to run before any eBPF test, because a relink drops the
 capabilities — but once per build, not once per test.
