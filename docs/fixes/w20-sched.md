@@ -58,7 +58,8 @@ Shown (on this machine, with the capabilities, `target/debug/omn` after
 - `an_interrupts_wakeup_names_an_interrupt_the_kernel_numbers`: in a 1 s
   machine-wide run, every `irq` is a numbered line of `/proc/interrupts` and
   every `softirq` is one of the ten vectors. A manual run named 66 (`nvidia`)
-  and 71-73 (`nvme0q3-5`); one test run counted 154 hard and 177 soft.
+  and 71-73 (`nvme0q3-5`); one test run counted 154 hard and 177 soft. Since
+  the review round both sides are asserted present: see "Review".
 - `a_childs_futex_wait_is_the_launched_programs`: a 500 ms lock hold inside
   `python3`, run as a child of a launched `sh -c '...; true'`. The main
   checkout's binary reports **0 events**, and this branch reports the one
@@ -150,3 +151,22 @@ scripts/bench.sh backends   # the cost table; sched.wakeup's `cost: med` re-chec
 - **The coordinator** (`STATE.md` item 8/11, `docs/scenarios/sched.md`): the
   timebar finding that `comm` is the waker's is withdrawn (section 2), and the
   scenarios file's offcpu stamping line should match the catalog.
+
+## Review
+
+- **The hard-interrupt side of
+  `an_interrupts_wakeup_names_an_interrupt_the_kernel_numbers` held
+  vacuously.** Fixed. The test now drives its own device interrupts: a
+  python reader opens a 4 MiB scratch file under `target/tmp` with `O_DIRECT`
+  and reads it for the whole window, so every read is a completion of the
+  disk under `target/`. It asserts `hard > 0` (and that the reader read)
+  alongside `soft > 0`. On this btrfs machine the reader itself is woken by
+  a kworker, because btrfs queues data-read completions to its end-io
+  workqueue; the kworker is what the nvme handler wakes, with `irq=69`
+  (`nvme0q1`) and the like. On ext4 the reader would be woken directly. A
+  filesystem that refuses `O_DIRECT`, or no `python3`, falls back to holding
+  the values to the table and says so.
+  Shown: 40400 hard and 10731 soft over 79959 reads; and with the collector
+  mutated to never push `irq`, the test fails (`0 wakeups named a hard
+  interrupt`, "79959 direct reads from the disk, and no wakeup named a hard
+  interrupt"), then passes again with the collector restored.
