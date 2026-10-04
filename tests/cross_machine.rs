@@ -1609,9 +1609,16 @@ fn print_ladder(title: &str, run: &ReclaimRun, ladder: &Ladder, scratch: &Scratc
 ///   events, is what the cgroup's `memory.stat` counted.
 /// - **TEMPORAL**: to stay within 32 MiB the cgroup had to write back at least
 ///   64 of the 96 dirty mebibytes before it could drop them, so at least that
-///   much reached the file's device while the program ran -- and the block
-///   layer does not say it was the program's.
+///   much reached the devices of the file's filesystem between the program's
+///   first write and its cgroup's writeback drained -- and the block layer
+///   does not say it was the program's.
 ///
+/// The session launches the program, so the run's gate holds it until every
+/// collector is attached and its exit ends the run; it exits once its
+/// cgroup's `file_dirty` and `file_writeback` are back to zero. A fixed
+/// three-second window with a 700 ms head start was outrun under load, and
+/// the writeback a btrfs volume put on its second device read as writeback
+/// that never happened (`docs/fixes/w23-cross.md`).
 /// Uncapped, the same program reclaims nothing and reads nothing from the
 /// device, and the crossing ties none of the device's bytes to it: whatever
 /// else the disk did in that window is somebody else's, and says so.
@@ -1829,10 +1836,11 @@ fn a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_it
         assert!(
             under.writes_meanwhile >= evicted_at_least - evicted_at_least / 10,
             "to stay within {LIMIT_MIB} MiB the cgroup had to write back at least {} MiB of the \
-             {WRITTEN_MIB} it dirtied before it could drop them, and {:.1} MiB reached the \
-             file's device while the program ran",
+             {WRITTEN_MIB} it dirtied before it could drop them, and {:.1} MiB reached {} \
+             between its first write and its writeback drained",
             WRITTEN_MIB - LIMIT_MIB,
-            mib(under.writes_meanwhile as f64)
+            mib(under.writes_meanwhile as f64),
+            scratch.partitions.join(", ")
         );
     }
 
