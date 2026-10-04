@@ -22,8 +22,11 @@ verdict are `docs/view/heatmap.md`; its snapshots are
     or operation, `rwbs`, size, device, request), the legend.
   - **Reading**: `raw` events only, so live and finished draw alike. A
     kernel-bucketed row is placed at `total_ns / weight` (inside its bucket,
-    exact for one wait) and its weight spread over its drain window; a
-    `total_of` row is left out and counted; a result without `raw` is said with
+    exact for one wait) and its weight spread over its drain window, found
+    from how its collector stamps it (`net.socket` at the close,
+    `sched.runqlat` at its first wait) and cut to the run; a whole-run
+    kernel histogram row (`weight`, no `window_ns`) and a `total_of` row are
+    left out and said; a result without `raw` is said with
     its summary or histogram, never drawn on a time it does not have; a
     refused source is drawn as its refusal; an absent one says how to ask.
   - **Trust**: every cell, bar and figure in `Trust::of`'s style. Losses
@@ -34,18 +37,23 @@ verdict are `docs/view/heatmap.md`; its snapshots are
     zoom x2 up to x64 around the cursor, `t` narrows every view to the slowest
     measurement under the cursor (pid, tid, request), `⏎` opens its request's
     waterfall when it carries one and its thread's lane otherwise.
-  - Ten unit tests: the default source, the sqlite regimes apart, a kernel
-    row counted as its waits, focus narrowing, `t` and `⏎`, `⏎` onto a
-    request, the scale's bounds, every fixture and source at four sizes
-    without drawing off screen, a live run half way, and the extra snapshots.
+  - Sixteen unit tests: the default source, the sqlite regimes apart, a
+    kernel row counted as its waits, a close-stamped row over the window
+    before its stamp, a first-wait-stamped row ending at its drain, a
+    whole-run histogram said and not drawn, a lone spike kept among five
+    regimes, regime shares within a zoomed window, the loss strip's words at
+    no margin, focus narrowing, `t` and `⏎`, `⏎` onto a request, the scale's
+    bounds, every fixture and source at four sizes drawing only inside its
+    area, a live run half way, and the extra snapshots.
 - Snapshots: the nine `heatmap--<fixture>` of `tests/view_snapshots.rs`,
   and four of the view's own tests: `heatmap--http-server--sched.runqlat`,
   `heatmap--http-server--gpu.kernel` (the refusal),
   `heatmap--sqlite-commits--zoom-x8`, `heatmap--sqlite-commits--live-half-way`.
   `frame--gallery` and `frame--live` are core's snapshots but draw this
   view, so they were re-blessed with it.
-- `docs/view/gallery/heatmap--gpu-phases.txt`: a drawing, not held by a
-  test, of a run recorded in the scratch directory (14 MB, not committed):
+- `docs/view/drawings/heatmap--gpu-phases.txt`: a hand-kept drawing, not
+  held by a test (moved out of the gallery in the review round, so it is not
+  taken for a snapshot), of a run recorded in the scratch directory (14 MB, not committed):
   four programs of `tests/gpu_workload.py` in a row.
 - `docs/view/heatmap.md`: the guide, what each snapshot shows, the limits,
   the verdict.
@@ -80,12 +88,19 @@ Shown, on this machine:
   was using (`nvidia-smi --query-compute-apps` showed the bench stream's
   process); nothing in it is a timing claim.
 - No draw at any size from 30x8 to 200x60, on every fixture, every source,
-  zoomed and moved, writes outside the screen
-  (`every_size_draws_without_panicking`).
+  zoomed and moved, writes a cell outside the area it is given: the view is
+  drawn into a frame larger on every side, pre-filled with a mark, and every
+  cell outside the area must still hold it (`every_size_draws_inside_its_area`).
+- A drained row is drawn over the window it was counted in: every
+  `net.socket` row of http-server within `[ts - window_ns, ts]`, the 807 µs
+  call over 163.5-218.5 ms (`a_row_stamped_at_its_close_is_drawn_over_the_window_before`);
+  every `sched.runqlat` row of three fixtures from its stamp to at most a
+  window later and never past the run
+  (`a_row_stamped_at_its_first_wait_ends_at_its_drain`).
 
 Reasoned, not shown:
 
-- That the http-server's two slow socket calls in its first 0.4 s are the
+- That the http-server's two slow socket calls between 164 and 320 ms are the
   first listings of a cold directory: the map shows when they were, nothing
   says why.
 - Losses placed in time: no fixture has a loss (every one is clean but for
@@ -137,8 +152,11 @@ third of the size.
   and from events while live would change shape when the run ended.
 - **A kernel-bucketed row is drawn at its bucket's mean and over its drain
   window** (wave 19): `total_ns / weight`, which is inside the bucket and
-  exact for one wait, spread over the columns its `window_ns` covers in
-  proportion. Reason: the low bound would draw every wait up to half an
+  exact for one wait, spread over the columns its drain window covers in
+  proportion -- `[ts - window_ns, ts]` for a row stamped at its drain's close
+  (`net.socket`), from its stamp to the drain's close for one stamped at its
+  first wait (`sched.runqlat`), cut to the run. A whole-run kernel row is
+  not drawn. Reason: the low bound would draw every wait up to half an
   octave too low, and a point at the row's stamp would claim a moment the
   kernel never measured.
 - **Latency rows are log2 and every screen row is used; density is
@@ -152,6 +170,44 @@ third of the size.
   whole window marked "when unknown". Reason: placing a drop where it was not
   would draw a gap the run never had.
 
+## Review
+
+One round, seven findings; all taken.
+
+- **Kernel rows drawn a window late** (defect, taken). The view read every
+  drained row's `ts_ns` as its window's start; `collect::io::histogram`
+  (`net.socket`) stamps at the window's close, and `sched::runqlat` at the
+  row's first wait. `Stamp` now names each convention: a close-stamped row
+  covers `[ts - window_ns, ts]`; a first-wait row covers from its stamp to
+  its drain's close, bounded by the earliest first-wait end plus the window
+  among the rows of the same drain (same result, same `window_ns` to the
+  nanosecond) -- a bound that holds every wait it counted. Every spread is cut
+  to the run, so the time axis no longer runs past its end.
+  `heatmap--http-server` now puts the 807 µs call at 164-218 ms and the
+  ~435 µs regime at 164-320 ms; the cpython-hot and runqlat snapshots shift
+  by up to a window. A row whose `first_ns` was zero is stamped at the close
+  by the collector and is then drawn from the close forward, at most to the
+  same bound: no fixture has one. If the collectors ever stamp alike, the
+  table goes; better, `results.json` could say how a source stamps (a
+  request below).
+- **Whole-run `io.latency` rows drawn as a burst at 0** (gap, taken): a row
+  with `weight` and no `window_ns` is counted aside and said, "a histogram of
+  the whole run, built in the kernel", with the measurements it stands for
+  (`a_whole_run_histogram_is_said_not_drawn_at_the_start`).
+- **The size test proved only no panic** (nit, taken): it now draws into a
+  larger frame filled with a mark and checks every cell outside the view's
+  area is untouched.
+- **The loss strip's words clipped** (nit, taken): the shading gives way to
+  the words, so they show whole at any width; tested at no margin.
+- **"3 regimes" for five** (nit, taken): the header says "5 regimes, 3
+  shown", and the cut keeps the slowest plus the two heaviest of the rest.
+- **Shares over 100 % when zoomed** (nit, taken): a regime's weight is its
+  rows' share inside the window, as the map counts them.
+- **frame--gallery / frame--live re-blessed** (nit): again in this round,
+  since both draw the heatmap; the request to core below stands.
+- **The GPU drawing in the gallery** (nit, taken): moved to
+  `docs/view/drawings/`, said to be hand-kept and unheld.
+
 ## Needs from another stream
 
 - **Coordinator, the runner (`src/collect/*` drain loops, `src/main.rs`)**:
@@ -163,6 +219,11 @@ third of the size.
   attribute (the collection's `value_attr`), so a view reads a source's value
   by name from the run rather than from a table of its own. The heatmap's
   `value_attr()` is that table today.
+- **Coordinator, the collectors and `results.json`**: say how a drained
+  source stamps its rows (at the drain's close, or at the row's first event)
+  in the result, or stamp them all alike. The heatmap keeps a per-source
+  table (`Stamp::of`) that a new drained source would silently miss: it
+  defaults to the close, which is `collect::io::histogram`'s.
 - **core, `view/src/app.rs`, the header**: a long launched command squeezes
   the run's length into the cost corner with no space between them --
   `… launches 3000) │ 1.49sview: snapshot` on the phased GPU run at 120

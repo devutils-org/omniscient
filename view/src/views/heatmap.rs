@@ -17,7 +17,11 @@
 //! `net.socket`) hands up one row per bucket per window: the row is placed at
 //! its bucket's mean (`total_ns` / `weight`, exact when the row stands for one
 //! wait) and spread over the window it was counted in, since the kernel does
-//! not say when inside the window each wait happened.
+//! not say when inside the window each wait happened. Where that window lies
+//! depends on how the collector stamps the row ([`Stamp`]): `net.socket` at
+//! the drain that closed it, `sched.runqlat` where its first wait began. A
+//! row kept for the whole run (`io.latency` bucketed in the kernel: a
+//! `weight` and no `window_ns`) has no time to place and is said, not drawn.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
@@ -351,11 +355,13 @@ impl Heatmap {
 
         // The regimes: the modes a histogram would show, and when each one
         // happened, which it would not.
-        let regimes = regimes(samples, &scale, &grid, run_start);
+        let (regimes, found) = regimes(samples, &scale, &grid, run_start);
         let in_window: f64 = grid.per_row.iter().sum();
         let mut spans = vec![Span::styled(
-            if regimes.len() > 1 {
-                format!("{} regimes  ", regimes.len())
+            if found > regimes.len() {
+                format!("{found} regimes, {} shown  ", regimes.len())
+            } else if found > 1 {
+                format!("{found} regimes  ")
             } else {
                 "one regime  ".to_owned()
             },
@@ -502,7 +508,12 @@ impl Heatmap {
             dim,
         );
         let losses = Losses::of(results, samples);
-        buf.set_line(map_x, y, &losses.strip(&grid, cols), cols + margin);
+        buf.set_line(
+            map_x,
+            y,
+            &losses.strip(&grid, cols, cols + margin),
+            cols + margin,
+        );
         y += 2;
 
         // The cursor's column.
@@ -706,6 +717,16 @@ fn draw_empty(
             ),
             bold,
         )));
+    } else if samples.whole_run > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Its {} events are a histogram of the whole run, built in the kernel: the {} \
+                 they count hold no time, so there is nothing to place along it.",
+                units::count(samples.whole_run as f64),
+                counted(samples.whole_run_weight, noun(need.source)),
+            ),
+            bold,
+        )));
     } else if results
         .iter()
         .any(|results| results.output("raw").is_some())
@@ -864,23 +885,51 @@ struct Point {
 }
 
 /// Every measurement of one need that the focus lets through.
+#[derive(Default)]
 struct Samples {
     points: Vec<Point>,
     /// Events whose value is a sum of measurements, left out.
     summed: u64,
+    /// Kernel rows of the whole run, which hold no time, left out; and how
+    /// many measurements they stand for.
+    whole_run: u64,
+    whole_run_weight: f64,
     /// Whether any point is a kernel row spread over its window.
     drained: bool,
+}
+
+/// Where a collector stamps a row it drains from the kernel, which is where
+/// the row's window is found from its `ts_ns` and `window_ns`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stamp {
+    /// At the drain that closed the window (`collect::io::histogram`, which
+    /// serves `net.socket`): the window is `[ts - window, ts]`.
+    Close,
+    /// Where the row's first wait began (`collect::sched::runqlat`, finding
+    /// 44): the window is from there to the drain's close, found from the
+    /// drain's other rows ([`Samples::close_first_waits`]).
+    FirstWait,
+}
+
+impl Stamp {
+    fn of(source: &str) -> Stamp {
+        match source {
+            "sched.runqlat" => Stamp::FirstWait,
+            _ => Stamp::Close,
+        }
+    }
 }
 
 impl Samples {
     fn of(ctx: &Ctx<'_>, need: usize) -> Samples {
         let attr = value_attr(NEEDS[need].source);
-        let mut samples = Samples {
-            points: Vec::new(),
-            summed: 0,
-            drained: false,
-        };
-        for results in held(ctx.data, need) {
+        let stamp = Stamp::of(NEEDS[need].source);
+        let mut samples = Samples::default();
+        // The rows stamped at their first wait, as (result, window, point):
+        // a drain's rows share their result and their window to the
+        // nanosecond, which is how their common close is found.
+        let mut firsts: Vec<(usize, u64, usize)> = Vec::new();
+        for (index, results) in held(ctx.data, need).into_iter().enumerate() {
             for event in results.events() {
                 if !focused(ctx.focus, event) {
                     continue;
@@ -896,6 +945,7 @@ impl Samples {
                     continue;
                 };
                 let weight = event.number("weight").filter(|weight| *weight > 0.0);
+                let mut start = event.ts_ns as f64;
                 let mut span_ns = 0.0;
                 if let Some(weight) = weight {
                     // A kernel row: its value is its bucket's low bound, and
@@ -907,13 +957,27 @@ impl Samples {
                             value = mean;
                         }
                     }
-                    if let Some(window) = event.number("window_ns") {
-                        span_ns = window.max(0.0);
-                        samples.drained |= span_ns > 0.0;
+                    match event.number("window_ns") {
+                        Some(window) if window > 0.0 => {
+                            span_ns = window;
+                            if stamp == Stamp::Close {
+                                start -= window;
+                            } else {
+                                firsts.push((index, window.to_bits(), samples.points.len()));
+                            }
+                        }
+                        Some(_) => {}
+                        None => {
+                            // A row of the whole run, stamped at its open:
+                            // nothing says when any of it happened.
+                            samples.whole_run += 1;
+                            samples.whole_run_weight += weight;
+                            continue;
+                        }
                     }
                 }
                 samples.points.push(Point {
-                    start: event.ts_ns as f64,
+                    start,
                     span_ns,
                     value: value.max(0.0),
                     weight: weight.unwrap_or(1.0),
@@ -924,7 +988,57 @@ impl Samples {
                 });
             }
         }
+        samples.close_first_waits(&firsts);
+        // A row is counted inside the run: a window reaching past either end
+        // of it is cut there.
+        let (run_start, run_end) = run_span(ctx.data);
+        let (run_start, run_end) = (run_start as f64, run_end as f64);
+        for point in &mut samples.points {
+            if point.span_ns <= 0.0 {
+                continue;
+            }
+            let start = point.start.max(run_start);
+            let end = (point.start + point.span_ns).min(run_end);
+            if end > start {
+                point.start = start;
+                point.span_ns = end - start;
+            } else {
+                point.start = start.min(run_end);
+                point.span_ns = 0.0;
+            }
+        }
+        samples.drained = samples.points.iter().any(|point| point.span_ns > 0.0);
         samples
+    }
+
+    /// Ends each row stamped at its first wait at its drain's close. The
+    /// waits of a drain ended inside `[close - window, close]`, and the first
+    /// wait of each row began at its stamp and ended `value` later, so the
+    /// close is at most the earliest such end plus the window: the row is
+    /// spread from its stamp to there, which holds every wait it counted, and
+    /// never past the drain that read it.
+    fn close_first_waits(&mut self, firsts: &[(usize, u64, usize)]) {
+        let mut closes: Vec<((usize, u64), f64)> = Vec::new();
+        for &(results, window, point) in firsts {
+            let point = &self.points[point];
+            let end = point.start + point.value + f64::from_bits(window);
+            match closes.iter_mut().find(|(key, _)| *key == (results, window)) {
+                Some((_, close)) => *close = close.min(end),
+                None => closes.push(((results, window), end)),
+            }
+        }
+        for &(results, window, index) in firsts {
+            let close = closes
+                .iter()
+                .find(|(key, _)| *key == (results, window))
+                .map_or(0.0, |(_, close)| *close);
+            let point = &mut self.points[index];
+            // Two drains a nanosecond-equal window apart would share a close
+            // too early for the later one's rows: never before the row's own
+            // first wait ended.
+            let close = close.max(point.start + point.value);
+            point.span_ns = (close - point.start).max(0.0);
+        }
     }
 
     /// How many measurements a need's events stand for, unfocused.
@@ -1385,9 +1499,10 @@ struct Regime {
 }
 
 /// The distribution's modes: groups of rows apart by at least an empty
-/// octave; the heaviest three, lowest latency first, each with when it was
-/// seen.
-fn regimes(samples: &Samples, scale: &Scale, grid: &Grid, run_start: f64) -> Vec<Regime> {
+/// octave, lowest latency first, each with when it was seen; and how many
+/// there were. More than three are cut to the slowest and the two heaviest of
+/// the rest, so a lone spike far above the others is never the one left out.
+fn regimes(samples: &Samples, scale: &Scale, grid: &Grid, run_start: f64) -> (Vec<Regime>, usize) {
     let gap = scale.per_octave().ceil().max(1.0) as u16;
     let mut groups: Vec<(u16, u16)> = Vec::new();
     let mut empty = 0u16;
@@ -1409,11 +1524,13 @@ fn regimes(samples: &Samples, scale: &Scale, grid: &Grid, run_start: f64) -> Vec
                 .points
                 .iter()
                 .filter(|point| (first..=last).contains(&scale.row(point.value)))
-                .filter(|point| overlap(point, grid.window.0, grid.window.1 + 1.0) > 0.0)
+                .filter(|point| in_window(point, grid.window) > 0.0)
                 .collect();
+            // Weighed by their share inside the window, as the map counts
+            // them, so the shares add up to the map's whole.
             let mut values: Vec<(f64, f64)> = inside
                 .iter()
-                .map(|point| (point.value, point.weight))
+                .map(|point| (point.value, point.weight * in_window(point, grid.window)))
                 .collect();
             values.sort_by(|one, two| one.0.total_cmp(&two.0));
             let held = quantiles(&values);
@@ -1427,12 +1544,31 @@ fn regimes(samples: &Samples, scale: &Scale, grid: &Grid, run_start: f64) -> Vec
             )
         })
         .collect();
-    if regimes.len() > 3 {
+    let found = regimes.len();
+    if found > 3 {
+        let slowest = regimes.pop().expect("more than three");
         regimes.sort_by(|one, two| two.1.weight.total_cmp(&one.1.weight));
-        regimes.truncate(3);
+        regimes.truncate(2);
+        regimes.push(slowest);
         regimes.sort_by_key(|(first, _)| *first);
     }
-    regimes.into_iter().map(|(_, regime)| regime).collect()
+    (
+        regimes.into_iter().map(|(_, regime)| regime).collect(),
+        found,
+    )
+}
+
+/// The share of a point inside the drawn window, `[start, end]` as the grid
+/// places moments: 1 or 0 for a moment, the share of its span for a row.
+fn in_window(point: &Point, window: (f64, f64)) -> f64 {
+    if point.span_ns <= 0.0 {
+        return if point.start >= window.0 && point.start <= window.1 {
+            1.0
+        } else {
+            0.0
+        };
+    }
+    overlap(point, window.0, window.1)
 }
 
 /// When a regime was seen, in a few words: once, all through or between
@@ -1544,9 +1680,11 @@ impl Losses {
         losses
     }
 
-    /// The strip under the time axis: shaded where records were lost, and
-    /// said in words.
-    fn strip(&self, grid: &Grid, cols: u16) -> Line<'static> {
+    /// The strip under the time axis, `width` cells from the map's left
+    /// edge (the map's `cols` and the margin beside it): shaded where records
+    /// were lost, and said in words, which the shading makes room for when
+    /// the margin is too narrow to hold them.
+    fn strip(&self, grid: &Grid, cols: u16, width: u16) -> Line<'static> {
         let shade = Style::new().fg(palette::LOSS);
         let late = (self.late > 0).then(|| {
             format!(
@@ -1562,33 +1700,33 @@ impl Losses {
             }
             return Line::from(Span::styled(text, Style::new().add_modifier(Modifier::DIM)));
         }
+        let mut words = String::new();
+        if self.evicted > 0 {
+            words.push_str(&format!(" -{} let go", units::count(self.evicted as f64)));
+        }
+        if self.unplaced > 0 {
+            words.push_str(&format!(
+                " -{} lost, when unknown",
+                units::count(self.unplaced as f64)
+            ));
+        }
+        // The words are the strip's sentence: the shading gives way to them.
+        let room = width.saturating_sub(words.chars().count() as u16).min(cols);
         let mut spans = Vec::new();
         if self.evicted > 0 {
             // A live run lets its oldest events go: they were before the
             // first one it kept.
             let until = grid
                 .column_of(self.evicted_until.clamp(grid.window.0, grid.window.1))
-                .unwrap_or(0);
+                .unwrap_or(0)
+                .min(room);
             spans.push(Span::styled("▒".repeat(usize::from(until)), shade));
-            spans.push(Span::raw(" ".repeat(usize::from(cols - until))));
-            spans.push(Span::styled(
-                format!(" -{} let go", units::count(self.evicted as f64)),
-                shade,
-            ));
-        }
-        if self.unplaced > 0 {
+            spans.push(Span::raw(" ".repeat(usize::from(room - until))));
+        } else {
             // Nothing says when: shaded lightly across the whole window.
-            if spans.is_empty() {
-                spans.push(Span::styled("░".repeat(usize::from(cols)), shade));
-            }
-            spans.push(Span::styled(
-                format!(
-                    " -{} lost, when unknown",
-                    units::count(self.unplaced as f64)
-                ),
-                shade,
-            ));
+            spans.push(Span::styled("░".repeat(usize::from(room)), shade));
         }
+        spans.push(Span::styled(words, shade));
         Line::from(spans)
     }
 }
@@ -1660,7 +1798,7 @@ mod tests {
         let scale = Scale::of(&samples, 26);
         let window = (data.opened_ns() as f64, data.closed_ns() as f64);
         let grid = Grid::build(&samples, &scale, window, 93);
-        let found = regimes(&samples, &scale, &grid, window.0);
+        let (found, _) = regimes(&samples, &scale, &grid, window.0);
         assert!(found.len() >= 2, "one regime only");
         let (fast, slow) = (&found[0], &found[found.len() - 1]);
         assert!(
@@ -1700,6 +1838,216 @@ mod tests {
                 "{} drawn in [{low}, {high})",
                 point.value
             );
+        }
+    }
+
+    /// The events of one need, in the order `Samples::of` reads them.
+    fn events_of(data: &Data, source: &str) -> Vec<Event> {
+        held(data, need(source))
+            .iter()
+            .flat_map(|results| results.events().iter().cloned())
+            .collect()
+    }
+
+    /// `net.socket` stamps each row at the drain that closed its window: the
+    /// row is drawn over `[ts - window, ts]`, the window it was counted in,
+    /// and never past the run's end. On http-server the 807µs call is in the
+    /// window that closed at 218.5ms, not the one after.
+    #[test]
+    fn a_row_stamped_at_its_close_is_drawn_over_the_window_before() {
+        let data = fixture("http-server");
+        let samples = Samples::of(&ctx(&data, &Focus::default()), need("net.socket"));
+        let events = events_of(&data, "net.socket");
+        assert_eq!(samples.points.len(), events.len());
+        let (run_start, run_end) = run_span(&data);
+        for (point, event) in samples.points.iter().zip(&events) {
+            let ts = event.ts_ns as f64;
+            let window = event.number("window_ns").expect("a drained row");
+            assert!(
+                point.start >= (ts - window).max(run_start as f64) - 0.5
+                    && point.start + point.span_ns <= ts + 0.5,
+                "row stamped {ts} over {window} drawn from {} for {}",
+                point.start,
+                point.span_ns
+            );
+            assert!(point.start + point.span_ns <= run_end as f64);
+        }
+        let slowest = samples
+            .slowest_in(f64::NEG_INFINITY, f64::INFINITY)
+            .expect("a slowest call");
+        let from = slowest.start - run_start as f64;
+        let to = from + slowest.span_ns;
+        assert!(
+            (163.0e6..164.0e6).contains(&from) && (218.0e6..219.0e6).contains(&to),
+            "the slowest call drawn {from} to {to}"
+        );
+    }
+
+    /// `sched.runqlat` stamps each row where its first wait began: the row
+    /// is drawn from there to its drain's close, found from the drain's
+    /// other rows -- never more than a window, never past the run's end.
+    #[test]
+    fn a_row_stamped_at_its_first_wait_ends_at_its_drain() {
+        for name in ["http-server", "sqlite-commits", "cpython-hot"] {
+            let data = fixture(name);
+            let samples = Samples::of(&ctx(&data, &Focus::default()), need("sched.runqlat"));
+            let events = events_of(&data, "sched.runqlat");
+            assert_eq!(samples.points.len(), events.len(), "{name}");
+            let (run_start, run_end) = run_span(&data);
+            let mut shorter = 0;
+            for (point, event) in samples.points.iter().zip(&events) {
+                let ts = (event.ts_ns as f64).max(run_start as f64);
+                let window = event.number("window_ns").expect("a drained row");
+                let end = point.start + point.span_ns;
+                assert!(
+                    (point.start - ts).abs() < 0.5,
+                    "{name}: moved from its stamp"
+                );
+                assert!(
+                    end <= ts + window + point.value + 0.5,
+                    "{name}: past a window"
+                );
+                assert!(end <= run_end as f64, "{name}: past the run");
+                if point.span_ns + 0.5 < window {
+                    shorter += 1;
+                }
+            }
+            // A row whose first wait began late in its window ends before a
+            // whole window has gone by.
+            assert!(shorter > 0, "{name}: every row spread over a whole window");
+        }
+    }
+
+    /// `io.latency` bucketed in the kernel keeps one row per bucket for the
+    /// whole run, stamped at its open: no time to place, so said rather than
+    /// drawn as a burst at the start.
+    #[test]
+    fn a_whole_run_histogram_is_said_not_drawn_at_the_start() {
+        let mut data = fixture("sqlite-commits");
+        let opened = data.opened_ns();
+        let attr = |name: &str, value: u64| crate::model::Attr {
+            name: name.to_owned(),
+            value: crate::model::AttrValue::Uint(value),
+        };
+        for results in &mut data.run.results {
+            if results.source != "io.latency" {
+                continue;
+            }
+            for output in &mut results.outputs {
+                if let Output::Raw { events } = output {
+                    *events = [(13u64, 4096u64, 900u64), (23, 4_194_304, 40)]
+                        .into_iter()
+                        .map(|(bucket, low, count)| Event {
+                            ts_ns: opened,
+                            ts_err_ns: 0,
+                            kind: "io.latency".to_owned(),
+                            keys: Vec::new(),
+                            attrs: vec![
+                                attr("latency_ns", low),
+                                attr("count", count),
+                                attr("weight", count),
+                                attr("total_ns", low * count * 3 / 2),
+                                attr("bucket", bucket),
+                            ],
+                            collector_id: String::new(),
+                            seq: bucket,
+                        })
+                        .collect();
+                }
+            }
+        }
+        let samples = Samples::of(&ctx(&data, &Focus::default()), need("io.latency"));
+        assert!(samples.points.is_empty());
+        assert_eq!(samples.whole_run, 2);
+        let drawn = snapshot::text(&snapshot::draw_app(&mut app(data), WIDTH, HEIGHT));
+        assert!(
+            drawn.contains("histogram of the whole") && drawn.contains("940 block"),
+            "{drawn}"
+        );
+    }
+
+    /// More than three regimes are cut to three, the slowest kept, and the
+    /// header says how many there were.
+    #[test]
+    fn a_lone_spike_is_kept_among_many_regimes() {
+        let point = |start: f64, value: f64, weight: f64| Point {
+            start,
+            span_ns: 0.0,
+            value,
+            weight,
+            tid: None,
+            pid: None,
+            request: None,
+            what: None,
+        };
+        let mut points = Vec::new();
+        for (index, value) in [10.0, 1e3, 1e5, 1e7].into_iter().enumerate() {
+            for at in 0..20 {
+                points.push(point(f64::from(at) * 10.0, value, 10.0 + index as f64));
+            }
+        }
+        points.push(point(55.0, 1e10, 1.0));
+        let samples = Samples {
+            points,
+            ..Samples::default()
+        };
+        let scale = Scale::of(&samples, 40);
+        let grid = Grid::build(&samples, &scale, (0.0, 200.0), 50);
+        let (shown, found) = regimes(&samples, &scale, &grid, 0.0);
+        assert_eq!(found, 5);
+        assert_eq!(shown.len(), 3);
+        assert!(shown[2].median >= 1e10, "the spike was left out");
+        let total: f64 = shown.iter().map(|regime| regime.weight).sum();
+        assert!(total <= grid.per_row.iter().sum::<f64>() + 1e-6);
+    }
+
+    /// Zoomed on a drained source, a regime's share counts only what of its
+    /// rows is inside the window: the shares add up to the map, not more.
+    #[test]
+    fn regime_shares_add_up_to_the_window_when_zoomed() {
+        let data = fixture("http-server");
+        let samples = Samples::of(&ctx(&data, &Focus::default()), need("sched.runqlat"));
+        let scale = Scale::of(&samples, 26);
+        let (start, end) = run_span(&data);
+        let mid = (start + end) as f64 / 2.0;
+        let width = (end - start) as f64 / 16.0;
+        let grid = Grid::build(&samples, &scale, (mid - width / 2.0, mid + width / 2.0), 93);
+        let (shown, found) = regimes(&samples, &scale, &grid, start as f64);
+        assert_eq!(shown.len(), found.min(3));
+        let total: f64 = shown.iter().map(|regime| regime.weight).sum();
+        let in_window: f64 = grid.per_row.iter().sum();
+        assert!(total <= in_window + 1e-6, "{total} of {in_window}");
+    }
+
+    /// The loss strip's words survive a narrow screen: the shading gives way.
+    #[test]
+    fn the_loss_strip_keeps_its_words_without_a_margin() {
+        let losses = Losses {
+            unplaced: 1234,
+            evicted: 56,
+            evicted_until: 50.0,
+            late: 0,
+        };
+        let grid = Grid {
+            cols: 40,
+            window: (0.0, 100.0),
+            cells: Vec::new(),
+            per_col: Vec::new(),
+            per_row: Vec::new(),
+        };
+        for width in [40u16, 57] {
+            let line = losses.strip(&grid, 40, width);
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert!(text.chars().count() <= usize::from(width), "{text:?}");
+            assert!(
+                text.ends_with(" -56 let go -1.23k lost, when unknown"),
+                "{text:?}"
+            );
+            assert!(text.starts_with('▒'), "{text:?}");
         }
     }
 
@@ -1786,8 +2134,7 @@ mod tests {
         ] {
             let samples = Samples {
                 points: values.iter().copied().map(point).collect(),
-                summed: 0,
-                drained: false,
+                ..Samples::default()
             };
             let scale = Scale::of(&samples, rows);
             assert!(scale.rows <= rows, "{} rows of {rows}", scale.rows);
@@ -1799,18 +2146,55 @@ mod tests {
     }
 
     /// Every fixture, every source, at sizes from a phone's terminal to a
-    /// wide one, zoomed in and out: nothing is drawn outside the screen.
+    /// wide one, zoomed in and out: the view draws inside the area it is
+    /// given and nowhere else. It is drawn into a frame larger than its area
+    /// on every side, filled beforehand with a mark, so a cell drawn outside
+    /// the area is caught even where the frame would have clipped it.
     #[test]
-    fn every_size_draws_without_panicking() {
+    fn every_size_draws_inside_its_area() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        const MARK: &str = "#";
+        let keys = |code: char| KeyEvent::new(KeyCode::Char(code), KeyModifiers::NONE);
         for name in snapshot::fixture_names() {
             let data = fixture(&name);
-            for (width, height) in [(30, 8), (50, 16), (80, 24), (200, 60)] {
-                let mut drawn = app(data.clone());
+            let unfocused = Focus::default();
+            let ctx = ctx(&data, &unfocused);
+            for (width, height) in [(30u16, 8u16), (50, 16), (80, 24), (200, 60)] {
+                let area = Rect::new(3, 2, width, height);
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width + 6, height + 4)).expect("a terminal");
+                let mut view = Heatmap::default();
                 for _ in 0..NEEDS.len() {
-                    press(&mut drawn, KeyCode::Char('s'));
+                    view.key(keys('s'), &ctx);
                     for code in ['+', '+', 'l', 'L', 'h', '-'] {
-                        press(&mut drawn, KeyCode::Char(code));
-                        snapshot::draw_app(&mut drawn, width, height);
+                        view.key(keys(code), &ctx);
+                        let frame = terminal
+                            .draw(|frame| {
+                                let whole = frame.area();
+                                let buf = frame.buffer_mut();
+                                for y in whole.top()..whole.bottom() {
+                                    for x in whole.left()..whole.right() {
+                                        buf[(x, y)].set_symbol(MARK);
+                                    }
+                                }
+                                view.draw(frame, area, &ctx);
+                            })
+                            .expect("a draw");
+                        let buf = frame.buffer;
+                        for y in buf.area.top()..buf.area.bottom() {
+                            for x in buf.area.left()..buf.area.right() {
+                                let inside = x >= area.left()
+                                    && x < area.right()
+                                    && y >= area.top()
+                                    && y < area.bottom();
+                                assert!(
+                                    inside || buf[(x, y)].symbol() == MARK,
+                                    "{name} at {width}x{height}: ({x}, {y}) drawn outside \
+                                     {area:?}"
+                                );
+                            }
+                        }
                     }
                 }
             }

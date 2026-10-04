@@ -54,9 +54,21 @@ latencies before the scheduler's, which every run has.
   weight` -- exact when the row stands for one wait, inside the bucket always
   -- and spreads its weight over the columns its window covers, in
   proportion, since the kernel does not say when inside the window each wait
-  happened. The legend says it, with the typical window (~100 ms), and the
-  cursor line says "alone in a 55.0ms kernel window" or "one of 6". A cell
-  can therefore hold a fraction of a count, which the lowest glyph says (`░<1`).
+  happened. Where the window lies follows how the collector stamps the row:
+  `net.socket` (`collect::io::histogram`) stamps it at the drain that closed
+  the window, so the row covers `[ts - window_ns, ts]`; `sched.runqlat`
+  stamps it where its first wait began (finding 44), so the row covers from
+  there to its drain's close, which the view finds from the drain's other
+  rows (same result, same `window_ns` to the nanosecond): at most the
+  earliest first wait's end plus the window, a bound that holds every wait
+  the row counted. Nothing is spread outside the run. The legend says it,
+  with the typical span, and the cursor line says "alone in a 55.0ms kernel
+  window" or "one of 6". A cell can therefore hold a fraction of a count,
+  which the lowest glyph says (`░<1`).
+- **A row of the whole run** -- `io.latency` bucketed in the kernel, a
+  `weight` with no `window_ns`, stamped at the run's open -- holds no time:
+  it is said ("a histogram of the whole run, built in the kernel"), never
+  drawn as a burst at the start.
 - **A row that is a sum** (`total_of`) has no single latency and is left out,
   with the count said.
 - **Rows**: whole octaves from the smallest to the largest value, every row
@@ -67,8 +79,11 @@ latencies before the scheduler's, which every run has.
   (`░ ▒ ▒ ▓ ▓ █`, blue to red), so one measurement shows beside a thousand.
   The glyph carries it in the plain-text snapshot, the colour in a terminal.
   The legend lists only the steps a whole count reaches.
-- **Regimes**: groups of rows apart by at least one empty octave; the
-  heaviest three, each with its median, its share and when it was seen --
+- **Regimes**: groups of rows apart by at least one empty octave, each with
+  its median, its share of what the window holds (a row half inside a zoomed
+  window counts half) and when it was seen. Beyond three, the slowest and the
+  two heaviest of the rest are shown and the header says how many there were
+  ("5 regimes, 3 shown"): the lone spike is never the one cut. When --
   once, all through, between two moments, in bursts at a steady pace ("in
   bursts every ~121ms") or in a counted number of irregular bursts.
 - **Trust**: the cells, bars and figures take `Trust::of` like every other
@@ -88,15 +103,17 @@ latencies before the scheduler's, which every run has.
 | `heatmap--sqlite-commits` | the forty commits of a full-sync sqlite run as three bands, each pulsing every ~120 ms, one pulse per commit: synchronous writes around 22 µs (76 %, mostly metadata, `WSM`), cache flushes around 480 µs (21 %, `WFSM`, 164 on each of two partitions), and 44 synchronous writes around 4.6 ms (2.8 %, `WS`); the cursor names the slowest: `sqlite3 ... WS 12.0KiB on nvme0n1p6` (the bands' operations read off the events, not drawn: the map shows the latencies and the cursor one measurement) |
 | `heatmap--sqlite-commits--zoom-x8` | five commits, each a pair of 6.7 ms columns holding all three regimes: a commit's writes, its journal and its flush fall within ~13 ms of each other |
 | `heatmap--sqlite-commits--live-half-way` | the same run at 2.48 s, from its events so far, badged `live` |
-| `heatmap--http-server` | socket calls of a directory-listing server: one regime at ~47 µs all through, and two calls at ~435 µs and 807 µs in the first 0.4 s only (the first listings; that they waited on a cold directory is a guess the map cannot check) |
+| `heatmap--http-server` | socket calls of a directory-listing server: one regime at ~47 µs all through, and two calls at ~435 µs and 807 µs in the drain windows from 164 ms to 320 ms only (the 807 µs one in the window that closed at 218 ms) (the first listings; that they waited on a cold directory is a guess the map cannot check) |
 | `heatmap--http-server--sched.runqlat` | run queue waits, mostly 0, with the zero row of their own |
 | `heatmap--vertical-requests` | the vertical case's block I/O: the reads its requests made (a002's 64 pages, a003's 32) are the ~56 µs band; the ~4.5 ms band is 32 synchronous writes no request owns, and one readahead of a002 that waited 4.70 ms -- the slowest, on which `⏎` opens request a002 |
 | `heatmap--cpython-hot`, `-heavier` | a cpu-bound program has only run queue waits to show: ~7 µs, and one 175 µs wait |
 | `heatmap--sqlite-latency` | a session that kept `sched.runqlat` as a summary only: said, not drawn |
 | `heatmap--machine` | a run that asked none of the four: said, with how to ask |
 
-`heatmap--gpu-phases.txt` is a drawing of a run recorded on this machine and
-not committed (14 MB), so no test holds it: `omn top --headless -o` on four
+`docs/view/drawings/heatmap--gpu-phases.txt` -- kept out of the gallery,
+whose files are all held by tests -- is a hand-kept drawing of a run recorded
+on this machine and not committed (14 MB), so no test holds it and it goes
+stale with the view: `omn top --headless -o` on four
 programs of `tests/gpu_workload.py` in a row (3000 launches of `tiny`, 200 of
 `spin`, 40 of `copy` over 64 MiB, 3000 launches again). `gpu.kernel` served
 6 243 operations, every one the workload issued; the map shows the four
