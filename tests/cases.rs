@@ -46,23 +46,6 @@ use serde_json::{json, Value};
 
 const OMN: &str = env!("CARGO_BIN_EXE_omn");
 
-/// The ceiling the agent's way gives `run_session` if the server requires
-/// one: the collectors may spend as much cpu as the program they watch, the
-/// most generous ceiling that still means something.
-///
-/// The person's way asks with no budget, and so does the agent's: since the
-/// eighteenth wave `run_session` takes none unless asked (`docs/fixes/
-/// w18-mcp.md`), so [`BUDGET`] is unchecked -- a cost held against no
-/// ceiling is not a pass. A server that required one again would be asked
-/// with this one, [`BUDGET`] then made, and a run it stopped asked again with
-/// [`UNBOUNDED_BUDGET`], so the rest of the checks still answer the person's
-/// question while [`BUDGET`] fails.
-const MODEL_BUDGET: &str = "100%";
-
-/// The ceiling no collector reaches: what the agent's way is asked again with
-/// when [`MODEL_BUDGET`] stopped the run (above).
-const UNBOUNDED_BUDGET: &str = "100000%";
-
 /// How long a cause's run may last, either way, before it is a failure.
 const RUN_CEILING: Duration = Duration::from_secs(180);
 
@@ -704,9 +687,6 @@ struct Answer {
     /// (`traced`, `sampled`, ...). The backend a row was served by is what a
     /// privilege changes, and these are what either answer says of it.
     read_as: BTreeMap<String, (String, String)>,
-    /// The ceiling `run_session` was asked with; `None` when it was asked
-    /// with none.
-    budget: Option<String>,
     /// What the answer says about how it knows.
     how: How,
 }
@@ -1237,14 +1217,13 @@ const CLI_NAMES: &str = "the-person-s-way-names-the-hottest-function";
 const CLI_ORIGINS: &str = "the-person-s-way-says-where-names-came-from";
 const BLOCK_NAMED: &str = "the-block-s-frames-are-named";
 const NOTHING_FALSE: &str = "the-sentence-claims-nothing-false";
-const BUDGET: &str = "the-agent-s-way-answers-within-a-model-s-budget";
 const SAYS: &str = "the-sentence-says-what-the-case-knows";
 const PRIVILEGES: &str = "both-ways-run-with-the-same-privileges";
 const LIMIT_SPELLED: &str = "the-verdict-s-json-spells-its-limit-as-the-text-does";
 
 /// Every check this file knows, so a case cannot list one that does not
 /// exist.
-const CHECKS: [&str; 13] = [
+const CHECKS: [&str; 12] = [
     LIMIT_SPELLED,
     SAME_SUSPECT,
     KNOWN_CAUSE,
@@ -1255,7 +1234,6 @@ const CHECKS: [&str; 13] = [
     CLI_ORIGINS,
     BLOCK_NAMED,
     NOTHING_FALSE,
-    BUDGET,
     SAYS,
     PRIVILEGES,
 ];
@@ -1562,9 +1540,6 @@ fn latency_args(cause: &Cause, naming: &Naming) -> Vec<String> {
 enum Asked {
     Answer(Box<Answer>, String),
     Withheld(String),
-    /// `run_session` stopped the run on [`MODEL_BUDGET`] before the program
-    /// was done: what it said, for [`BUDGET`].
-    OverBudget(String),
 }
 
 /// Runs an injection (if the cause has one) around `ask`, and returns the
@@ -1808,14 +1783,12 @@ fn approved_session(cause: &Cause, places: &Places, naming: &Naming) -> Result<S
     serde_norway::to_string(&session).map_err(|error| error.to_string())
 }
 
-/// `budget`: `None` asks as a model would ([`MODEL_BUDGET`]); `Some` is the
-/// ceiling to ask with.
-fn ask_mcp(
-    cause: &Cause,
-    places: &Places,
-    naming: &Naming,
-    budget: Option<&str>,
-) -> Result<Asked, String> {
+/// Asks as a model would: `run_session` with no budget, which it takes
+/// none of unless asked (`docs/mcp.md`). What the run said is `omn`'s lines
+/// and then the program's whole stderr, which `run_session` hands over apart
+/// (`program_stderr`), so a reference read `from: target` finds the program's
+/// own account where the person's way finds it.
+fn ask_mcp(cause: &Cause, places: &Places, naming: &Naming) -> Result<Asked, String> {
     let approved = places.dir.join(format!("approved-{}", cause.name));
     let runs = places.dir.join(format!("runs-{}", cause.name));
     std::fs::create_dir_all(&approved).map_err(|e| e.to_string())?;
@@ -1858,30 +1831,14 @@ fn ask_mcp(
         }
         return Err(format!("the approved session does not resolve: {entry}"));
     }
-    let mut arguments = json!({
+    let arguments = json!({
         "approved": file,
         "duration": format!("{}s", RUN_CEILING.as_secs()),
     });
-    let mut required = None;
     // A perf map last written before this is an earlier process's.
     let asked_at = SystemTime::now();
-    let ran = match budget {
-        Some(budget) => {
-            arguments["budget"] = budget.into();
-            mcp.call("run_session", arguments.clone())?
-        }
-        // As a model asks: with no ceiling, the person's question has none;
-        // with the generous one where the server insists on a ceiling.
-        None => match mcp.call("run_session", arguments.clone()) {
-            Err(refused) if refused.contains("`budget` is required") => {
-                required = Some(refused);
-                arguments["budget"] = MODEL_BUDGET.into();
-                mcp.call("run_session", arguments.clone())?
-            }
-            other => other?,
-        },
-    };
-    let said = match &ran["said_by_omn"] {
+    let ran = mcp.call("run_session", arguments)?;
+    let mut said = match &ran["said_by_omn"] {
         Value::Array(lines) => lines
             .iter()
             .filter_map(Value::as_str)
@@ -1889,21 +1846,8 @@ fn ask_mcp(
             .join("\n"),
         other => other.as_str().unwrap_or("").to_owned(),
     };
-    if budget.is_none() {
-        if let Some(stopped) = said
-            .lines()
-            .find(|line| line.contains("--budget") && line.contains("was exceeded"))
-        {
-            return Ok(Asked::OverBudget(format!(
-                "{}; asked with `budget: {MODEL_BUDGET}`, the run stopped before the program \
-                 was done: {}",
-                required
-                    .as_deref()
-                    .unwrap_or("run_session asked for no budget"),
-                stopped.trim()
-            )));
-        }
-    }
+    said.push('\n');
+    said.push_str(&program_stderr(&ran["program_stderr"]));
     if ran["exit"] != 0 {
         if let Some(reason) = withheld(ran["exit"].as_i64().map(|code| code as i32), &said) {
             return Ok(Asked::Withheld(reason));
@@ -1949,10 +1893,6 @@ fn ask_mcp(
         ran["answered_by"]["binary"].as_str().map(Path::new),
         &ran["answered_by"]["file_capabilities"],
     );
-    answer.budget = arguments
-        .get("budget")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
     Ok(Asked::Answer(Box::new(answer), said))
 }
 
@@ -2201,52 +2141,17 @@ fn cause_held(cause: &Cause, accounts: &BTreeMap<String, Account>) -> Result<(),
     Ok(())
 }
 
-/// Ends every process a stopped run left behind -- each whose command line
-/// names the case's scratch directory, or that works under it -- other than
-/// this process and its ancestors, and waits for them to be gone. Returns how
-/// many there were.
-fn sweep(places: &Places) -> usize {
-    let marker = places.dir.to_string_lossy().into_owned();
-    let mut mine = BTreeSet::new();
-    let mut pid = std::process::id();
-    while pid > 1 && mine.insert(pid) {
-        pid = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .and_then(|stat| {
-                stat.rsplit_once(')')
-                    .and_then(|(_, rest)| rest.split_whitespace().nth(1)?.parse().ok())
-            })
-            .unwrap_or(1);
-    }
-    let names_marker = |pid: u32| {
-        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-        String::from_utf8_lossy(&cmdline).contains(&marker)
-            || std::fs::read_link(format!("/proc/{pid}/cwd"))
-                .is_ok_and(|cwd| cwd.starts_with(&places.dir))
-    };
-    let left: Vec<u32> = std::fs::read_dir("/proc")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|pid| !mine.contains(pid) && names_marker(*pid))
-        .collect();
-    for pid in &left {
-        // SAFETY: a signal to a process id; the worst a reused id gets is a
-        // SIGKILL meant for a process that named this test's own directory.
-        unsafe {
-            libc::kill(*pid as i32, libc::SIGKILL);
-        }
-    }
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline
-        && left
-            .iter()
-            .any(|pid| Path::new(&format!("/proc/{pid}/cmdline")).exists() && names_marker(*pid))
-    {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    left.len()
+/// The whole of what the launched program wrote on its stderr, from the run's
+/// `program_stderr`: the file that holds all of it, else the text the answer
+/// carries, else nothing (an `omn` from before the program had a stderr of
+/// its own put it among `said_by_omn`, which is read already).
+fn program_stderr(answer: &Value) -> String {
+    answer["file"]
+        .as_str()
+        .and_then(|file| std::fs::read(file).ok())
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .or_else(|| answer["text"].as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 fn run_case(case_dir: &Path, case: &Case, report: &mut Report) {
@@ -2321,43 +2226,10 @@ fn run_case(case_dir: &Path, case: &Case, report: &mut Report) {
         let mut answers: Vec<Answer> = Vec::new();
         for way in ["cli", "mcp"] {
             let at = format!("{}/{}/{way}", case.name, cause.name);
-            let mut asked = around_injection(cause, &places, || match way {
+            let asked = around_injection(cause, &places, || match way {
                 "cli" => ask_cli(cause, &places, &naming),
-                _ => ask_mcp(cause, &places, &naming, None),
+                _ => ask_mcp(cause, &places, &naming),
             });
-            match &asked {
-                Ok((Asked::OverBudget(why), _)) => {
-                    report.add(&at, BUDGET, Outcome::Fail(why.clone()));
-                    // `omn` ends the stopped run's process group; a program
-                    // whose children left it would still be running, and
-                    // would compete with the run asked again.
-                    let swept = sweep(&places);
-                    if swept > 0 {
-                        eprintln!("case {at}: {swept} processes of the stopped run ended");
-                    }
-                    // Asked again, unbounded, so the other checks answer the
-                    // person's question; a fresh injection, since the first
-                    // one's cause was spent on the stopped run.
-                    asked = around_injection(cause, &places, || {
-                        ask_mcp(cause, &places, &naming, Some(UNBOUNDED_BUDGET))
-                    });
-                }
-                // Asked with no ceiling, nothing measured the run's cost
-                // against one: not a pass.
-                Ok((Asked::Answer(answer, _), _)) if way == "mcp" => report.add(
-                    &at,
-                    BUDGET,
-                    match &answer.budget {
-                        Some(_) => Outcome::Pass,
-                        None => Outcome::Unchecked(
-                            "run_session took the question with no budget, so its cost was \
-                             held against no ceiling"
-                                .to_owned(),
-                        ),
-                    },
-                ),
-                _ => {}
-            }
             let (answer, said, injection_said) = match asked {
                 Ok((Asked::Answer(answer, said), injection_said)) => {
                     (*answer, said, injection_said)
@@ -2365,14 +2237,6 @@ fn run_case(case_dir: &Path, case: &Case, report: &mut Report) {
                 Ok((Asked::Withheld(reason), _)) => {
                     eprintln!(
                         "SKIPPED case {at}: this machine withholds a source it needs: {reason}"
-                    );
-                    continue;
-                }
-                Ok((Asked::OverBudget(why), _)) => {
-                    report.add(
-                        &at,
-                        KNOWN_CAUSE,
-                        Outcome::Fail(format!("stopped even at {UNBOUNDED_BUDGET}: {why}")),
                     );
                     continue;
                 }

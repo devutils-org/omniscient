@@ -7,8 +7,9 @@ It does a fixed amount of work in three phases -- compute, wait, compute --
 so that what dominates its time is known before anything measures it: about
 two thirds of its life on a cpu, one third blocked in a sleep. Then it says
 what it did, on its own clock and from the kernel's own account of it, in one
-line on stderr prefixed `omn-truth`, which `run_session` hands over with what
-`omn` said (`said_by_omn`). The tests of `omn-mcp` hold the tool to that line.
+line on stderr prefixed `omn-truth`, which `run_session` hands over apart from
+what `omn` said, as the program's own stderr (`program_stderr`). The tests of
+`omn-mcp` hold the tool to that line.
 """
 
 import sys
