@@ -14,13 +14,16 @@ merged). `BRIEF.md`, "profiler -- inside a kernel (phase B)".
   exit, each range evaluated and paired with its launch by order. Each
   counter of each launch is one `OP_COUNTER`. Ranges dropped, ranges and
   launches that did not pair, launches never decoded: each counted
-  (`OP_INSIDE_LOST`, with its kind). Metrics the chip does not have are named
+  (`OP_INSIDE_LOST`, with its kind); since the review, a batch is paired
+  only when nothing can have shifted it (see "Review"). Metrics the chip
+  does not have are named
   and the others measured. Every CUPTI call's result is checked and named in
   the error. Clocks are never locked (`cuptiClockControlLock` is not called).
 - **The witness.** The library always adds `sm__ctas_launched.sum` and
   compares it, per launch, with the grid read from the launch call's own
   parameters: a launch whose window held more blocks than its grid is
-  marked disturbed. See "Found".
+  marked disturbed; fewer is a range that is not the launch's, and its
+  batch is counted unpaired. See "Found".
 - **`cupti/src/pcsampling.rs`** (new): `gpu.profile` in the library. PC
   sampling enabled and configured at context creation, **continuous** mode
   (kernels not serialised), every `2^12` SM cycles (`OMN_CUPTI_PC_PERIOD`),
@@ -84,6 +87,65 @@ merged). `BRIEF.md`, "profiler -- inside a kernel (phase B)".
   listing check.
 - **`docs/families/gpu.md`**: the section "Inside a kernel".
 
+## Review
+
+The adversarial review's ten points, all taken; none was wrong.
+
+- **Pairing by position (defect)**: fixed. `pairing()` in
+  `cupti/src/profiler.rs` pairs a batch by order only when
+  `ranges == launches` and nothing was dropped; any other batch is not
+  reported and `max(ranges, launches - dropped)` is counted `LOST_UNPAIRED`.
+  The witness is a second check: every range is evaluated first, and one
+  with **fewer** blocks than its launch's grid marks the batch mispaired
+  (`witnesses()`), so it is not reported either. Two unit tests, including
+  the reviewer's `[A1, G, A2]` against `[A1, A2]`. No workload here launches
+  a graph, so the mismatch is shown by unit test, not end to end; the
+  end-to-end runs reported no unpaired batch before or after.
+- **Vacuous pass (gap)**: the verdict test now prints a `skipped:` line with
+  the device's tenants (`nvidia-smi`'s list) and each attempt's evidence, so
+  the skip gate sees it. It asserted on this run.
+- **`gpu.profile` held to the self-instrumenting kernel (gap)**: new test
+  `the_samples_are_the_kernel_s_own_cycles_over_the_period`: `selftimed 10
+  100000` under `gpu.profile` at `2^12` and `2^14`; samples on `selftimed`
+  against `sum(max_block_cycles x sms) / 2^n x 11/10` (the workload's
+  warm-up launch is the eleventh). Measured 1.0006 and 1.0014; held within
+  10 %. This also shows the period is per SM, not per sub-partition.
+- **Counter timestamps (gap)**: the library records `CLOCK_MONOTONIC` at the
+  entry of each launch call (a thread-local set at `API_ENTER`), carried in
+  `wire::Counter::launched_ns` (the frame grew 8 bytes). Each event is
+  stamped at its kernel's first launch entry, `ts_err_ns` reaching to the
+  arrival of its last counters. `memory 6 64` now reads `ts_err_ns` = 100 ms,
+  not 1. Limit: `ts_err_ns` is a `u32` and saturates at 4.29 s, which a
+  kernel launched across a longer run reaches; said in the caveat.
+- **Sample shortfall (gap)**: `ProfileCollector::account_for_samples` holds
+  `cupti - non_user` to `reported`; a shortfall past what CUPTI said it
+  dropped is added to `dropped` with the reason (unit test). Whether CUPTI's
+  total includes its dropped samples is not documented, so the dropped are
+  subtracted: never counted twice, at worst a shortfall smaller than the
+  dropped count is hidden behind a loss already counted. The "kernels with no
+  sample" claim was wrong as written: one kernel with no sample among others
+  is expected (a kernel shorter than the period takes none) and is not a
+  loss; the module doc, the catalog caveat and the family document now say
+  "a run whose kernels took no sample at all". `channel.rs` counts
+  `OP_COUNTER_SETUP`, `OP_STALL`, `OP_PC_CONFIG` and `OP_PC_DRAIN` in an
+  unsent batch too (unit test extended). These overlap with the shortfall
+  when a drain's account is sent and its program counters are not: two
+  counts of one loss in different units, said here rather than reconciled.
+- **Witness direction (nit)**: fewer blocks is no longer `disturbed`; it is a
+  mispaired batch (above).
+- **Double count on a late decode failure (nit)**: `decode_into` reports how
+  many launches it accounted for; `decode` counts only the rest as
+  undecoded, so a failure in `initialize_image` after the sends counts none.
+- **Period ignored silently (nit)**: `period_from` returns the reason, sent
+  as a `gpu.profile:` error, so the notes say the setting was ignored and the
+  default used (unit test). `LOST_HW_BUFFER_FULL` is now added to
+  `throttled` (occurrences whose cost is not knowable), not to `dropped`.
+- **Test nits**: the offset test now checks `source` is exactly `+0x<pc>`
+  and that the bare kernel's hottest offset is the lined one's, on line 20;
+  the pid-refusal test accepts "no viable backend" only where CUPTI does not
+  resolve.
+- **`CATALOG.md` (nit)**: flagged under "Needs from another stream".
+
 ## Shown versus reasoned
 
 - **Shown** (`tests/gpu_counters.rs`, green here on the shared device):
@@ -134,8 +196,14 @@ merged). `BRIEF.md`, "profiler -- inside a kernel (phase B)".
   nobody else's work reached. The test holds it there; when three attempts
   in a row leave fewer than four undisturbed launches of a kernel (it
   happened while the bench stream looped GPU programs: every compute launch
-  of three runs disturbed), it prints the evidence and does not assert a
-  verdict the device made impossible.
+  of three runs disturbed), it skips through the skip gate, naming the
+  device's tenants.
+- **Since the review, shown**: samples against the self-timing kernel's own
+  cycles (1.0006 at `2^12`, 1.0014 at `2^14`); counter events stamped at the
+  launches (`ts_err_ns` 100 ms on `memory 6 64`); the bare kernel's hottest
+  offset equal to the lined one's. **By unit test only**: a batch with a
+  range no launch accounts for is not reported (no workload launches a
+  graph); the sample shortfall counted; a period setting ignored and said.
 
 ## Found
 
@@ -201,7 +269,7 @@ cd /home/moha/repos/omniscient && make && nvidia-smi --query-compute-apps=pid,pr
   that repeats bit for bit into one that does not.
 - **Every launch's window is witnessed by `sm__ctas_launched.sum` against
   its grid, and a launch with more blocks is disturbed, counted and left
-  out** (wave 19). Reason: measured, another process's kernels added the
+  out; a range with fewer blocks is not its launch's** (wave 19). Reason: measured, another process's kernels added the
   same 283 million instructions to every launch of a run, so the wrong
   count repeated and no spread could tell; the blocks launched are fixed by
   the launch call, so a difference is other work, by construction.
@@ -216,7 +284,13 @@ cd /home/moha/repos/omniscient && make && nvidia-smi --query-compute-apps=pid,pr
   produces, so an event per PC and reason per drain loses nothing.
 - **A PC sampling configuration is checked by what CUPTI applied and by its
   effect, not by the status code** (wave 19): attribute statuses, the period
-  and mode read back, and launches with no sample a lost read.
+  and mode read back, a run with no sample at all a lost read, and CUPTI's
+  sample count held to the samples reported.
+- **Ranges pair with launches by order only when a batch's counts agree and
+  no range has fewer blocks than its launch; any other batch is not
+  reported and counted unpaired** (wave 19). Reason: a range carries no
+  launch's identity, and one range with no recorded launch (a graph's
+  kernel) shifts every later launch onto its neighbour's counters.
 - **`_not_issued` stall reasons are left out** (wave 19). Reason: a subset of
   their reason; counted beside it, a sample counts twice.
 - **Inside readers share `gpu.kernel`'s socket; ops 13 to 31 are theirs and
@@ -224,6 +298,11 @@ cd /home/moha/repos/omniscient && make && nvidia-smi --query-compute-apps=pid,pr
   counted apart (`OP_INSIDE_UNSENT`).
 
 ## Needs from another stream
+
+- **Coordinator (`CATALOG.md`)**: section 8 was edited by this stream (the
+  `gpu.counters` and `gpu.profile` rows and caveats, and since the review
+  the pairing and shortfall sentences), although `BRIEF.md`'s ownership
+  table does not list `CATALOG.md` for profiler: expect it at the merge.
 
 - **Coordinator / cupti's files**: expect the edits listed above in
   `cupti/src/{lib,api,channel,wire}.rs` and `src/collect/gpu/kernel.rs`
@@ -274,3 +353,21 @@ also truncated the log before the GPU binaries:
 Rerun after: `gpu_counters` 7 passed, `gpu_kernel` 11, `scenario_gpu` 32,
 `family_gpu` 10; `omn-cupti` 8 unit tests, `collect::gpu` 60. Clippy
 (`--workspace --all-targets -D warnings`) and fmt clean.
+
+### The suite, after the review round
+
+`make check` went red only on `cases::every_case_names_its_known_cause_both_ways`
+(`cpython-perf-map/a-blocking-read` frames, `gcc-shell/the-passes-o2-adds`
+on-cpu figure: the cpu sources under load, not touched here). `cargo test
+--workspace --no-fail-fast` then ran 2554 passed, 3 failed, 11 ignored --
+`cases` passed that time -- with:
+
+- `runner::a_profile_s_losses_land_on_the_series_...`: the known gap filed
+  for the profile stream.
+- `triage::a_detailed_layer_over_its_budget_is_let_go_...` and
+  `unwind::a_stripped_build_is_named_from_debuginfod_...`: each passed rerun
+  alone once.
+
+Before it: `gpu_counters` 8 passed (no skip; the verdicts asserted),
+`gpu_kernel` 11, `scenario_gpu` 32, `family_gpu` 10, `omn-cupti` 10 unit
+tests, `collect::gpu` 61, `catalog` 59, `cli` 26. Clippy and fmt clean.
