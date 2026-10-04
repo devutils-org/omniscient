@@ -2602,6 +2602,7 @@ mod tests {
             served_by: Vec::new(),
             period_ns: None,
             by_ring: Vec::new(),
+            value_attr: String::new(),
         }
     }
 

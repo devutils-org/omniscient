@@ -561,6 +561,7 @@ fn a_profile_larger_than_one_gzip_block_comes_back_whole() {
         served_by: Vec::new(),
         period_ns: None,
         by_ring: Vec::new(),
+        value_attr: String::new(),
     };
     let mut stacks = Vec::new();
     // Frame names long enough that the string table alone passes 64 KiB.
@@ -639,6 +640,7 @@ fn a_unit_pprof_does_not_know_is_written_under_its_own_name_and_said_so() {
         served_by: Vec::new(),
         period_ns: None,
         by_ring: Vec::new(),
+        value_attr: String::new(),
     };
     results.stacks.insert(1, vec!["main".into(), "spin".into()]);
     let run = RunOutput {
@@ -1159,6 +1161,7 @@ fn distribution(losses: Losses) -> Results {
         served_by: Vec::new(),
         period_ns: None,
         by_ring: Vec::new(),
+        value_attr: String::new(),
     }
 }
 
