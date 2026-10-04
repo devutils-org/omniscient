@@ -1269,89 +1269,273 @@ binaries**, clippy and fmt clean. `omn list`: 95 usable here, 99 sources with
 a collector, 112 of 206 backends. The decisions are in `DECISIONS.md`,
 "Settled in the twenty-first wave".
 
-**After the twenty-first wave, in order:**
+**The twenty-second wave is merged**, all twelve streams, and
+`docs/briefs/wave-22-replaces.md` keeps its brief: **`omn` against every
+tool it can replace**, tool by tool -- for each common use, what `omn`
+serves, whether it gives the same numbers on the same workload within a
+declared tolerance, and what is missing. One stream for the shared runner,
+eleven for the families of tools, all at once; each merged `--no-ff` as soon
+as it was done and reviewed while merged, its review's fixes a second merge:
+`ff055c8` reference (`6cb1225`), `9d367ef` perfstat (`62c8e84`), `ad36ec7`
+perfrecord (`61bc1c0`), `ccf79d1` perfsched (`aaa2102`), `9de3c76` bpftrace
+(`5ef23a9`), `5370f11` sysstat (`e5a1205`), `928e949` top (`92fc0ae`),
+`51e3822` heap (`438afca`), `2c1bddc` net (`ea97e9a`), `7fe0d53` power
+(`b7425c5`), `45d886a` gpu (no review round), `c6935e0` io (`f578ad5`). Then
+the merge's fix, `bc9f9a5`. **Nothing under `src/` changed**: a gap in `omn`
+was filed, not fixed. Each stream's handoff is `docs/fixes/w22-<stream>.md`,
+each family's verdict `docs/replaces/<family>.md`, and `docs/replaces.md`
+says across families what is replaced fully, in part and not at all.
 
-1. **The runs this wave and the last ones left, alone** (each command in
-   "Needs privilege" below): the GPU tests, now with the failure channel's
-   exit 1; the GPU bench on the new schedule, which shows whether the step
-   fits in about fifteen minutes, measures `gpu.profile` and decides
-   `gpu.temp`'s band; the backends bench (deferred since the nineteenth
-   wave); the budget's meters before the stops and its first check at
-   paranoid 2; then one `make check`.
-2. **The user at a terminal**: the new `process` view live and replayed, its
-   lines and their pages, the usage gradient on a dark and a light terminal
-   and in 256-colour tmux, the mouse in Ghostty and through tmux.
-3. **The CI read back**: `gh run watch` on the pushed `main`, and
-   `.github/scripts/skip-gate.sh` over a red cell's `target/test.log`; the
-   nineteenth wave's list for it stands.
-4. **What the streams filed for one another**, by the file each lands in
-   (`docs/open-findings.md`, "Needs from another stream -- the twenty-first
-   wave", and what the twentieth wave's sections still mark open):
-   - `src/collect/mod.rs` and `launch.rs`: the closing round while a
-     launched program is a zombie, before the reap, so `cpu.oncpu_time` on
-     `fs:proc` reads its last interval.
-   - `view/src/feed.rs`: an update describing a result
-     (`Update::Described`), so a live view gets drains and a late source's
-     fields after its first events.
-   - `src/stack.rs`: `Unwinder::symbolizer`, so `cpu.profile` fills
-     `perf_maps` and follows an `execve`; `src/collect/sched/offcpu.rs`: the
-     same provenance.
-   - `src/collect/io/**`: a block request a `kworker` dispatched charged to
-     the bio's submitter, or counted as a loss of attribution; then
-     `process`'s Disk bound tightened back.
-   - `src/collect/net/dev.rs`: `net.bytes`' polled baseline at the start.
-   - The machine's capacity in a recording (cpus and quota, `MemTotal` and
-     `memory.max`, VRAM, link speeds), so a replayed `process` takes the
-     gradient; a link's speed as a field for the network rows.
-   - `view/src/model.rs`: `Key::Dir`; `views/process.rs`: `trust::usage` and
-     `Trust::hued` in place of its own palette (the brief's "one palette"),
-     `ledger::reading` and `flame::hottest`; `views/request.rs`: the new
-     request bytes; `system` split by `dir`; flows' socket to interface edge
-     and a drawn file to device ribbon.
-   - `CATALOG.md` and `docs/contributing.md`: the `targets: {pid: "no:
-     <reason>"}` form, `dir` among the keys, `net.request`'s new fields.
-   - `src/triage/**`: the failure channel in the engine; `--program-stderr`
-     with `--runs`; `named_by` and `perf_maps` read from the results; the job
-     restricted to the followed child's parent.
-   - Still open from the twentieth wave: `cpu.profile`'s `pid` per sample
-     and its late discovery of a child; `ppid` on the sched sources;
-     `docs/triage.md` and `docs/mcp.md` (`waiting`, `job`, the lossy
-     undecided, the eBPF samples); `docs/families/join.md` and
-     `docs/scenarios/sched.md` on `sched.offcpu`'s stamp;
-     `docs/scenarios/cpu.md`'s `sched_switch` blind spot; `--against` and
-     focus snapshots in the standard set.
-5. **The views, after the user's look**: the `process` suspect on a lock the
-   timebar now splits; the `raw` the system view's other panels could keep
-   (`cpu.util`, `gpu.mem`) and the ledger's `cpu.oncpu_time`;
-   `sqlite-latency`'s `blocked` with its events; a recording holding a drop,
-   so a placed drop is seen on screen.
-6. **The triage and the cases**: `make-sqlite`'s critical path (over now, on
-   `ppid`), `http-server-stdlib`'s slow client on the MCP way,
-   `sqlite3-durability`'s commits; a C server's connection wait (the open
-   line on `sched.wakeup`); the tail's verdict under the lossy-row rule; the
-   loss bound read from the followed task's own ring.
-7. **The smaller ones**: the unwind share tests' aliasing; the uprobe hit
-   carrying another thread's tid (`scenario_runtime`); the `cross_machine`
-   memory-limit pages outside the intervals; `DEVICE_STACKS` as catalog
-   data; a helper's orphan weighed as the program's; `docs/bench.md`'s
-   printed "Not measured here" table at the next backends bench; a sweep
-   from an installed tree; one program for both `io.latency` histograms and
-   the build's registered extractors (both optional).
-8. **The next wave: `omn` against every tool it can replace.** The project
-   exists to unify them into one, so each is measured as a replacement:
-   `perf` (`stat`, `record`, `sched`, `lock`, `mem`, `trace`), `bpftrace` and
-   the bcc tools, `iostat`, `vmstat`, `mpstat`, `pidstat`, `sar`,
-   `top`/`htop`/`btop`, `smem`/`pmap`, `heaptrack`, `strace -c`,
-   `ss`/`nstat`, `tcpdump`, `turbostat`/`powertop`, `nvidia-smi`, `nsys` and
-   `ncu`. Per tool: the share of its common uses `omn` serves; the same
-   numbers on the same workload within a declared tolerance, the pair written
-   as catalog data (a `reference:` field) and one test reading every entry --
-   the tools are witnesses in tests, never what `omn` runs on; and the gaps
-   to close, each filed where it lands.
+**The one thing to know first**: the families wrote their pairs while the
+runner was not on `main`, each to a schema of its own, and **no pair has yet
+compared a number through `tests/reference.rs`**. 117 pairs in eleven
+files; `pairs_bpftrace` passes because its ten pairs skip on `sudo -n`,
+`pairs_net` because its nine declare a `gap:` pointing at the family's own
+harness; the other nine families fail the runner (paths it does not parse,
+`{pid}` outside `attach`, values looked for outside `results[...]`, `omn`
+command lines `omn` refuses, fields it ignores). Every "shown" below was
+shown by the family's own harness -- an ignored test, a `run_pairs.py`, a
+`mod runner` -- or by hand, on the YAML's exact commands.
 
-   **Then, once `omn` is polished: a portability wave across distributions**
-   -- Debian, Fedora, Ubuntu, Gentoo, NixOS; x86_64 and aarch64; containers
-   -- measured on each rather than read from documentation.
+- **reference** (`w22-reference.md`): **the runner**
+  (`tests/reference/runner.rs`): every `catalog/references/*.yaml` loaded,
+  `omn` and the tool run `separate` (alternating, medians over `runs`) or
+  `attach` (one stopped workload both observe by `{pid}`), `{tmp}`, `{out}`,
+  `{pid}`, a `report:` command, a dotted path with `*` and `[field=value]`
+  filters summed, `{rel, abs}` with the larger allowed, `omn_scale` and
+  `reference_scale`, `key: "*"`; outcomes pass, skip (the machine's reason
+  only), gap and fail. `omn`'s exit 1 a skip only when nothing was written
+  and the workload succeeds alone; a tool's refusal a skip only when its
+  stderr says so and the workload succeeds alone. `families_are_whole`,
+  `every_pair_is_well_formed`, `every_row_names_a_pair_or_why_none`;
+  `catalog/references/README.md`; `docs/replaces.md`; three skip lines in
+  `.github/expected-skips.txt`. **Shown**: the runner's unit tests (8) at the
+  merge. **Reasoned**: every family's pairs through it.
+- **perfstat** (`w22-perfstat.md`): 13 pairs, 2 parsers, 19 rows.
+  **Shown** by `run_pairs.py`, 39 runs, 0 failing: instructions within
+  0.01 %, cycles, branch and cache misses, context switches, migrations,
+  page faults (omn 3 to 7 more, every run), task-clock, IPC per process;
+  cycles and context switches `--system`, instructions per cgroup, the same
+  run with perf wrapping `omn`; instructions per on-cpu ns by `--pid`, omn
+  0.5 to 1 % above every run. **Reasoned**: that the runner reads
+  `same_run`, `setup` and `omn_jq` as `run_pairs.py` does.
+- **perfrecord** (`w22-perfrecord.md`): 7 pairs, 7 parsers, 8 rows.
+  **Shown** by its ignored test: self shares of three C functions and of a
+  stripped library within 0.05 against `perf record`/`report` and `perf top
+  -p`, `perf mem`'s mean load latency within 10 %, the false-shared line
+  `0x4040c0` first in both `perf c2c` and `mem.sharing`. Two untouched pairs
+  fell outside once each under load in the review round. **Reasoned**:
+  inclusive shares, `omn top --view flame` against `perf top`.
+- **perfsched** (`w22-perfsched.md`): 9 pairs, 6 parsers, 14 rows.
+  **Shown** by hand: `strace -c` 5000 `getppid` exact; a 10 ms sleep within
+  0.2 % of `strace -c -w` and `strace -T`. **Reasoned**: the six `perf`
+  pairs (tracefs is root's here), on four captures written from perf's
+  documented layouts; the `perf sched latency` delay pair removed in review,
+  the two quantities differing.
+- **bpftrace** (`w22-bpftrace.md`): 10 pairs, 9 parsers, 25 rows. **Shown**:
+  `omn`'s side of each pair exact or within its startup against what the
+  workload fixes. **Reasoned**: every tool-side number; the 13 captures are
+  format fixtures with synthetic numbers. Its review round was committed in
+  stream reference's tree by a `git stash` swap (`c2194ab`), the lesson in
+  the handoff.
+- **sysstat** (`w22-sysstat.md`): 13 pairs, 8 parsers, 26 rows; the
+  sysstat tools were installed by the time the pairs ran. **Shown** by its
+  own test: `numastat -p`, `pidstat -r`, vmstat's busy share, PSI, `mpstat`,
+  `iostat -c`, `sar -u` within their bands; `pidstat -w` 66 685/s against
+  944/s, held as a `known_defect`; the poll's leading event held by its own
+  test both ways. **Reasoned**: swap and memory pressure agreeing beyond zero.
+- **top** (`w22-top.md`): 11 pairs, 5 parsers, 21 rows. **Shown** by
+  `run_pairs.py`, 33 runs: RES, `%CPU`, `%Cpu(s)`, `pmap -x`/`-XX` RSS, PSS
+  and USS, smem's three (Debian's script run in place), ten of them one run
+  through `onpid.py`; TIME+ on alternate runs within 30 ms. **Reasoned**:
+  smem's PSS deficit being its own python3.
+- **heap** (`w22-heap.md`): 9 pairs, 4 parsers, 17 rows. **Shown** by a
+  scratch emulation of the runner: dhat's total, blocks, `t-gmax` and
+  `t-end` and massif's peak equal to the byte; heaptrack within 0.2 %.
+  **Reasoned**: memleak (root; a format fixture only).
+- **net** (`w22-net.md`): 9 pairs, 4 parsers, 14 rows. **Shown** by
+  `net_pairs_against_the_tools`: `ip -s link` bytes, packets and errors,
+  `nstat`'s listen overflows, drops and retransmits, `ss -ti`'s rtt, eight
+  exact. **Reasoned**: tcpdump's count (root and `CAP_NET_RAW`).
+- **power** (`w22-power.md`): 7 pairs, 5 parsers, 11 rows. **Shown** by
+  hand, the tool wrapping `omn`: package energy within 1.9 to 3.1 % of
+  `perf stat -a` and `turbostat --no-msr`, busy frequency within 0.1 %, idle
+  residency within 0.02 s per cpu, `sensors` equal. **Reasoned**: the RAPL
+  files and cpupower's Mperf (root).
+- **gpu** (`w22-gpu.md`): 21 pairs, 6 parsers, 20 rows. **Shown** by its
+  ignored test, two full runs (19/21, then 20/21, each miss passing on its
+  own reruns): launches, copies, driver calls, instructions, blocks, L1
+  bytes and per-process VRAM exact against nsys, ncu and nvidia-smi; kernel
+  time within 0.3 % launch-bound, DRAM bytes within 0.4 %, power, clocks,
+  utilisation and temperature the same run within their bands.
+  **Reasoned**: nsys and ncu beside `omn`'s CUPTI library in one process.
+- **io** (`w22-io.md`): 7 pairs, 2 parsers, 12 rows. **Shown** by hand:
+  `io.latency`'s count equal to fio's three times on one run, its mean 18 %
+  below fio's `clat` (the layers above the block device), `io.bytes` and
+  `io.iops` machine-wide equal to fio's. **Reasoned**: the three `iostat -dx`
+  pairs (iostat absent when the stream ran; installed now), on a capture
+  written in sysstat's JSON layout.
+
+**At the merge** (`docs/open-findings.md`, "The twenty-second wave,
+coordinator, after the merge"): `make`, then `make check`, red at
+`tests/cases.rs`; then `--no-fail-fast`: **2805 passed, 15 failed, 15
+ignored, 65 test binaries**. Two were a regression where streams met, fixed
+in `bc9f9a5`: stream reference's review fix (`scenario_cpu` and
+`scenario_proc` copying `catalog/references/` as a file, "Is a directory")
+had stayed in a dangling stash when two streams' `git stash pop`s crossed.
+Eleven are `tests/reference.rs` (nine `pairs_<family>` and the two data
+checks), filed above, not a merge fix. `cases`'
+`sqlite3-durability` is the eighteenth wave's load-sensitive case and passed
+alone. `cross_machine`'s memory-limit session **failed twice inside full
+runs** (18.3, then 32.7 MiB of the 64 MiB the cgroup had to write back
+reached the device in the program's window) and passed alone between them:
+filed, for its cause to be read before it goes on the tally. **The second
+`make check`: red** at `tests/cross_machine.rs`, 1750 passed and 1 failed,
+the sixteen binaries before it green. `omn list`: 95 usable here, 99 sources
+with a collector, 112 of 206 backends -- unchanged. The decisions are in
+`DECISIONS.md`, "Settled in the twenty-second wave".
+
+**After the twenty-second wave, in order:**
+
+1. **The gaps the comparison found**, by the file each lands in. The number
+   after a family is its handoff's gap (`docs/fixes/w22-<family>.md`); a
+   **defect** breaks a standing invariant or a number, the rest are
+   features.
+   - **`tests/reference/runner.rs` and the nine families' YAML first**: no
+     verdict in `docs/replaces/` is the runner's until the pairs go through
+     it. Each family's pairs rewritten to the README's schema against
+     `omn`'s real output and run (`cargo test --test reference
+     pairs_<family> -- --nocapture`) until they hold; the 22 table rows
+     backed; the families' own harnesses (`run_pairs.py`, `mod runner`, the
+     ignored tests) deleted once the runner reads what they read. What the
+     schema lacks, asked of the runner by the families: a value `omn`
+     computes rather than holds (`compare.omn_jq`, `compare.omn_parse`, or
+     a path that sums and divides -- open in `DECISIONS.md`); one run where
+     the tool wraps `omn` (`same_run: tool_wraps_omn`, power and perfstat),
+     `omn` launches the tool (io, gpu), or both run alongside (io, net,
+     bpftrace); `setup:` workloads (perfstat); `requires_setting` on
+     `perf_event_paranoid` (power); a one-sided tolerance (io) and one on
+     log2 bucket indices (bpftrace); `known_defect` (sysstat).
+   - **`src/cli.rs` and `src/main.rs`, the run's shape**: **a machine-wide
+     target bounded by a launched program** -- `--system`, `--cpu`,
+     `--cgroup`, `--iface` and `--pid` beside `-- prog`, the way `perf stat
+     -a -- prog` and `turbostat prog` measure -- asked by five families
+     (perfstat 3, power 1, io 3, top 6, net); several sources on one launch
+     (perfstat 2, top 5); `-r N`, one request repeated with mean and spread
+     (perfstat 5); exit 1 saying whether the machine refused or a run failed
+     before writing (reference).
+   - **`src/collect/launch.rs` and the launched tree**: the launcher's `PATH`
+     search counted as the program's `execve`s (perfsched 2); `io.latency`
+     (io 1, **defect**: 0 requests for a forked fio) and `gpu.mem` (gpu 1:
+     0 under a wrapper) following the launched program's descendants;
+     `proc.exec` and `net.tcp.lifetime` per launch (bpftrace 3); the closing
+     round before the reap, so `cpu.oncpu_time` on `fs:proc` keeps its last
+     interval (sysstat 9, and the twenty-first wave's request).
+   - **Defects in the collectors**: `proc.syscall`'s `comm` filter reading
+     the comm an aggregate first saw (bpftrace 1); `sched.irq --filter 'kind
+     == "hard"'` returning no series (bpftrace 2); `sched.switches`' counted
+     rate divided by a 12 to 22 ms window (sysstat 1, held by `pidstat -w`'s
+     `known_defect`); a poll's leading event of a few ms in `cpu.util` and
+     `cpu.pressure` (sysstat 2, held by its test); `mem.heap.alloc` listing
+     `stack` and refusing it only after the run (heap 1); a filter on a field
+     the resolved backend never fills refused before the run, not counted
+     after it (`cpu.profile` on `pmu:sw`, perfrecord 1).
+   - **`src/emit.rs` and the keys** (`src/request.rs`): a total in `summary`
+     (heap 4, top 1); `summary` and `hist` per key (`@kernel`, gpu 2); a
+     summary over `sched.runqlat`'s `wake_to_run_ns` (perfsched 8);
+     `topk` with a zero series rather than none, and no `-0.0` (perfsched
+     5); keys asked: `syscall` on `proc.syscall` (perfsched 1, one run for
+     `strace -c`), `comm` (bpftrace 4), function and object on `cpu.profile`
+     (perfrecord 3-4), `level` on `mem.latency` (perfrecord 5), lock kind
+     and caller on `sched.lock` (perfsched 6), mapping and user on the
+     memory sources (top 4, 8), `dir` on `net.packets` (net); `summary` over
+     `fs:proc` keyed `dir` alone folding devices into one series (io 5).
+   - **New sources and attributes** (`catalog/*.yaml`, then a collector):
+     `cpu.branches` (perfstat 1); task-clock as a source (perfstat 4);
+     `mem.system` from `/proc/meminfo`, load and run queue, slab, the
+     machine's NUMA counters, interrupt counts (sysstat 4-8), `sched.runqlen`,
+     `net.tcp.accept`, `mem.oom`, per-process swap-in, VFS calls by operation
+     (bpftrace 5, 7); `%util` (io 4); VIRT and SHR, every thread of a pid on
+     `fs:proc`, the per-state cpu split (top 3, 7, 9); `net.snmp`, a socket
+     inventory, pcap output, `tcp_info`'s other fields, `missed` and `mcast`
+     (net); syscall errors and per-call records (perfsched 3-4), a per-switch
+     stream (perfsched 9); `power.freq`'s busy share and average, an idle
+     share, the core energy domain, per-process wakeups (power 3-6), and
+     `power.freq` on an idle cpu saying what it reads (power 2); the GPU's
+     NVTX, launch facts, memory clock as a value, per-process engine busy,
+     PCIe, throttle and ECC, more driver calls and a CUPTI callback backend
+     (gpu 3-9); a cycles `cpu.profile`, sampling any PMU event, instruction
+     attribution, `c2c`'s per-line detail (perfrecord 2, 6-8); the heap's
+     eBPF attach, high-water mark, live blocks and lifetimes (heap 2-3,
+     5-6); attributes on `proc.syscall`'s `openat`, `proc.signals`,
+     `io.writeback`, `net.drops` (bpftrace 6); a caveat on `mem.faults`'
+     earlier open (perfstat 6); `cpu.pressure`'s attributes named as its
+     siblings' (sysstat 3); `sar`'s unattended history (sysstat 10).
+   - **`view/` and `omn top`**: no per-process table of the machine, which is
+     `top`'s, `htop`'s and `btop`'s first use (top 2) -- see item 3.
+   - **`tests/cross_machine.rs`**: the memory-limit session's window bounded
+     by the cgroup's own writeback, not the program's exit (filed at this
+     merge); and its reclaimed pages outside the intervals (the
+     twenty-first wave's).
+   - **Still open from the twenty-first wave**, nothing under `src/` having
+     moved (`docs/open-findings.md`): `Unwinder::symbolizer` and
+     `perf_maps`; a block request a `kworker` dispatched; `net.bytes`'
+     polled baseline; the machine's capacity in a recording; `CATALOG.md`'s
+     `targets: {pid: "no: ..."}` form, `dir` and `net.request`'s fields; the
+     triage's failure channel, `--program-stderr` with `--runs`, the
+     provenance and the job restricted to the followed child's parent;
+     `cpu.profile`'s `pid` per sample and `ppid` on the sched sources; the
+     cases (`make-sqlite`'s critical path, `http-server-stdlib`'s slow client
+     on the MCP way, `sqlite3-durability`'s commits); the smaller ones (the
+     unwind share tests' aliasing, the uprobe's tid, `DEVICE_STACKS` as data,
+     a sweep from an installed tree).
+2. **What the user installs and grants, so the skipped pairs run** (each
+   family's "Privileged runs wanted"; `/etc/sudoers.d/omniscient-privileged`
+   grants none of these). Installed since the brief was written: sysstat,
+   heaptrack, libbpf-tools' bcc tools (`memleak`, `offcputime`,
+   `wakeuptime`, `cachestat`, `ext4slower`, `hardirqs`, `softirqs`,
+   `runqlen`, `oomkill`), tcpdump, powertop, htop; `iostat` is there now, so
+   io's three `iostat -dx` pairs need nothing more.
+
+   ```console
+   paru -S smem                     # AUR; top's three smem pairs
+   sudo pacman -S ethtool           # net: ip -s -s link's detailed errors
+   cd /home/moha/repos/omniscient && make CAPTURE=1    # CAP_NET_RAW for net.capture
+   sudo mount -o remount,mode=755 /sys/kernel/tracing  # perfsched's perf pairs (resets at boot)
+   sudo chmod o+r /sys/class/powercap/intel-rapl:0/energy_uj   # power's RAPL-files pair (resets at boot)
+   sudo modprobe msr && sudo setcap cap_sys_rawio+ep /usr/bin/cpupower   # cpupower -m Mperf
+   # the witnesses that need root (bpftrace's ten, memleak, tcpdump), either
+   # `sudo -v` in the terminal that runs the test, or one sudoers line:
+   #   <user> ALL=(root) NOPASSWD: /usr/bin/bpftrace, /usr/bin/memleak, /usr/bin/tcpdump, /usr/bin/perf
+   cargo test --test reference -- --nocapture
+   ```
+
+   Then the captures written from documentation replaced by the tools' real
+   output (the commands are in each handoff): perfsched's four `perf`
+   captures, bpftrace's thirteen (`<tool>.txt` beside the `.format.txt`),
+   `memleak.txt`, `tcpdump_count.stderr.txt`, `iostat-dx.json`, sysstat's
+   `mpstat`, `sar -u`, `iostat -c` and `pidstat` captures, power's
+   `cpupower_mperf.txt` and `rapl_window*.txt`; each parser test's numbers
+   moved to its capture. And the runs "Needs privilege" carries.
+3. **The views' open points**, after the user's look at a terminal: the
+   `process` view live and replayed, its lines and pages, the usage gradient
+   on a dark and a light terminal and in 256-colour tmux, the mouse in
+   Ghostty and through tmux (item 9 of "Needs privilege"); `omn top`'s
+   `system` view listing the machine's processes, the one use of `top`,
+   `htop` and `btop` no pair could hold, and a batch output a pair could
+   parse; the `process` suspect on a lock the timebar now splits; the `raw`
+   `system`'s other panels could keep (`cpu.util`, `gpu.mem`) and the
+   ledger's `cpu.oncpu_time`; `sqlite-latency`'s `blocked` with its events;
+   a recording holding a drop; `Update::Described` in `view/src/feed.rs`;
+   `Key::Dir` in the mirror, `system` split by `dir`; `process` on
+   `trust::usage`, `ledger::reading` and `flame::hottest`; the request view's
+   bytes; flows' socket-to-interface edge and file-to-device ribbon;
+   `--against` and focus snapshots in the standard set.
+4. **Then, once `omn` is polished: a portability wave across
+   distributions** -- Debian, Fedora, Ubuntu, Gentoo, NixOS; x86_64 and
+   aarch64; containers -- each measured, never read from documentation: what
+   `omn list` serves there, which backends attach, what each refusal says,
+   and the reference pairs run on each where its tools install.
 
 Below the milestones, and not scheduled:
 
@@ -1359,15 +1543,16 @@ Below the milestones, and not scheduled:
   A consumer of one more format, not a source: `DECISIONS.md` boundary 6 says
   why LTTng is a peer rather than a backend. Low priority; nothing depends on
   it and no measurement here is worse without it.
-- **Five decisions are open** (`DECISIONS.md`): the phase 6 criterion for
+- **Six decisions are open** (`DECISIONS.md`): the phase 6 criterion for
   the in-kernel histogram, pending what `tp_btf` leaves; what the budget's
   first check may stop a run on (its one-time half landed in the twentieth
   wave, the 10 ms slack proposed with numbers); a cost per regime in the
   catalog's schema (proposed with numbers); whether a range in the GPU's
-  performance levels can be read as free clocks, pending the `-lgc` run; and
-  since the twentieth wave, whether the latency session asks `sched.wakeup`.
-  How a byte counter's direction becomes a series was settled in the
-  twenty-first wave: a key, `dir`.
+  performance levels can be read as free clocks, pending the `-lgc` run;
+  since the twentieth wave, whether the latency session asks `sched.wakeup`;
+  and since the twenty-second, how a reference pair reads a value `omn`
+  computes rather than holds. How a byte counter's direction becomes a
+  series was settled in the twenty-first wave: a key, `dir`.
 - **An `lbr` collector** waits on a cpu with a branch call stack (Intel from
   Haswell) to be tested against, and **`sframe`** on a kernel that reads
   `.sframe` (none through 7.2).
@@ -1482,17 +1667,19 @@ commands below (`sysctl kernel.perf_event_paranoid` 2 and -1,
 machine-wide, so **the coordinator runs them alone**, never while streams
 build or test.
 
-### Still to run, after the twenty-first wave
+### Still to run, after the twenty-second wave
 
 Item 1, the matrix, ran after the twentieth wave's merge (2026-10-04, "What
-the earlier runs found" below). In the twenty-first wave the streams ran only
-what `make`'s capabilities allow -- the re-recording, `net.request`'s bytes,
-the view workloads and the cases (item 5) -- and nothing machine-wide.
-**Carried**: the backends bench (since the nineteenth wave), the GPU bench
-and the GPU tests (`gpu.profile` measurable since its double free was fixed;
-now also the failure channel's exit 1, and the bench's new schedule), the
-budget's two runs, and the net stream's namespace run. Items 6 and 7 need a
-password (`sudo -n` refuses them); item 9 is the user's.
+the earlier runs found" below). In the twenty-first and twenty-second waves
+the streams ran only what `make`'s capabilities allow, and nothing
+machine-wide; the twenty-second wave's reference tools that need root or a
+grant are item 10, new. **Carried, none of it run in the twenty-second
+wave**: the backends bench (since the nineteenth wave), the GPU bench and
+the GPU tests (`gpu.profile` measurable since its double free was fixed;
+the failure channel's exit 1, and the bench's new schedule), the budget's
+two runs, and the net stream's namespace run. Items 6, 7 and 10 need a
+password (`sudo -n` refuses them); item 9 is the user's. The GPU's
+reference pairs (about 70 s, the device to themselves) belong with item 2.
 
 In the order that changes the machine least between them. The GPU is one
 device: every GPU run below wants it to itself, so check first that nothing
@@ -1682,6 +1869,34 @@ poller makes the energy counter under-count for every reader of the board.
    target/debug/omn top --view system                                     # the gradient, disk and network split
    target/debug/omn top --view ledger -- python3 view/workloads/timebar/workload.py   # the blocked line, Enter -> timebar
    ```
+
+10. **The reference pairs that need root or a grant** (the twenty-second
+    wave; each family's handoff, "Privileged runs wanted"; typed by the user,
+    nothing here is in the sudoers file). Once `tests/reference.rs` runs the
+    families' pairs ("What remains", item 1), or now through each family's
+    own harness:
+
+    ```console
+    cd /home/moha/repos/omniscient && make && make CAPTURE=1
+    sudo -v
+    sudo mount -o remount,mode=755 /sys/kernel/tracing
+    sudo chmod o+r /sys/class/powercap/intel-rapl:0/energy_uj
+    sudo modprobe msr && sudo setcap cap_sys_rawio+ep /usr/bin/cpupower
+    sudo -E cargo test --test reference -- --nocapture bpftrace
+    cargo test --test reference -- --nocapture
+    cargo test --test reference net::tests::net_pairs_against_the_tools -- --nocapture
+    sudo memleak -T 100000 -o 0 -c "python3 tests/reference/workloads/heap/blocks.py 64 1048576 4 0.3" 2 1 \
+        > tests/reference/captures/heap/memleak.txt
+    ```
+
+    Read: bpftrace's ten pairs against the tools for the first time;
+    perfsched's six `perf` pairs (`perf trace -s`, `perf sched latency` and
+    `timehist`, `perf lock contention`), whose tolerances were set from
+    `omn`'s spread alone; memleak's outstanding bytes; tcpdump's count;
+    the RAPL files and cpupower's Mperf. Then each handoff's capture
+    commands, so every parser is tested on the tool's own output. Put
+    both back when done (`sudo mount -o remount,mode=700
+    /sys/kernel/tracing`, `sudo chmod o-r` on `energy_uj`, or a reboot).
 
 ### What the earlier runs found
 

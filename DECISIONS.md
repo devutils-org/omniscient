@@ -1049,7 +1049,7 @@ regime -- are still open, below, with the numbers the streams measured.
 | The view is clickable | **A view reports the regions it drew; a click selects, a click on the selection goes in, the wheel scrolls or zooms, a right click comes back; mouse capture on by default, `M` turns it off; keys stay complete.** Landed by view, every view's regions, and record (a snapshot per view after a click). *Reasoned, not seen: a real terminal and tmux.* | The links make the mouse cheap; capture takes the terminal's own selection, so it must be one key away. |
 | Every view has a workload | **One program per view and one for `process`, each with a truth manifest** (`view/workloads/`); the sources held to it (`tests/view_workloads.rs`, workloads) and each view held to it on screen (`tests/view_truth.rs`, record); the recordings of these programs are fixtures beside the realistic ones. | Ground truth for a view, as for a source, and fixtures a re-recording redraws within their measurement (shown on a second recording). |
 | A field, not a sentence | **What a collector says that a program would read becomes a field of the result.** Landed for `sched.wakeup`'s names and interrupt, `net.socket`'s interface, `io.fs`'s block devices, `row_stamp` and the drains' drops. *`net.request`'s counts since the twenty-first wave (`Results::fields`).* | A sentence a view parses breaks on a rewording. |
-| The comparison with the reference tools | **The next wave**, not this one. | One wave with nothing else pending. |
+| The comparison with the reference tools | **The next wave**, not this one. *Done in the twenty-second wave ("Settled in the twenty-second wave"), its pairs not yet run through the shared runner.* | One wave with nothing else pending. |
 | The open decisions | **Stay open unless a stream's measurement settles one.** Both were proposed with numbers; neither is settled (below). | A decision is taken on a measurement, not on a deadline. |
 
 **The GPU** (`docs/fixes/w20-gpu.md`):
@@ -1209,6 +1209,52 @@ them. The other open lines stay open; no stream measured them.
 
 ---
 
+## Settled in the twenty-second wave
+
+What was decided before the wave (`docs/briefs/wave-22-replaces.md`,
+"Decided before this wave") and what the twelve streams settled, from the
+decision lines of their handoffs (`docs/fixes/w22-*.md`). No open line is
+settled: no stream measured one. One is opened (below, "Open"): how a pair
+reads a value `omn` computes, which the families each answered their own way.
+
+**Decided before the wave**, each landed by the streams named:
+
+| Decision | Choice | Reason |
+|---|---|---|
+| What the tools are | **Witnesses, never what `omn` runs on**: nothing in `src/` calls `perf`, `bpftrace`, `strace` or any other tool; they run only in `tests/reference.rs` and its families. Held: no file under `src/` changed in the wave. | The rule "do not wrap `perf`" (above, the GPU family's "a vendor library is called, not a vendor tool"): a tool's text output is a format nobody promised to keep, and a second tool is a second clock. |
+| A pair | **Data**: one file per family, `catalog/references/<family>.yaml`, read by the test only (the catalog loader does not embed it); the schema in `catalog/references/README.md` (reference). 117 pairs in eleven files. | Adding a comparison is adding an entry, as adding a source is. |
+| The parsers | **Code, one module per family** (`tests/reference/<family>.rs`, `parsers()`), each unit-tested on a captured output under `tests/reference/captures/<family>/`. A file written from a tool's documentation is named a format fixture (`<tool>.format.txt`), never a capture (bpftrace, heap, after review). | A parser checked against numbers dressed as the tool's checks nothing. |
+| Same execution | **Where both can, one run of the workload seen by both**; otherwise alternate runs, said in `why`. Landed as `run: attach` in the runner, and by the families' own forms (below). | Twelve streams load the machine: a tolerance across two runs is partly noise. |
+| The verdict | **A table in the repository**, `docs/replaces/<family>.md`, one row per tool and use, each row backed by a pair or `no pair` and why (`every_row_names_a_pair_or_why_none`); `docs/replaces.md` the index and the summary across families. | A verdict anyone can rerun. |
+| A missing tool or privilege | **Skips, with the machine's reason**; the command that installs or grants it in the handoff, run by the user after the wave. | A skip is not a pass and is never silent. |
+| A gap in `omn` | **Filed, not fixed, this wave** (`STATE.md`, "What remains", item 1). | A comparison that edits what it compares proves nothing. |
+
+**The runner** (`docs/fixes/w22-reference.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| `omn`'s exit 1 | **A skip, quoting `omn`'s reason, only when `omn` wrote nothing and the workload succeeds alone**; a failure when `omn` wrote its results first, when an attached workload failed on its own, or when the workload fails with no observer. Exits 2 and 3 fail; a use `omn` cannot serve is declared with `gap:`. | Exit 1 is the machine's half and the run's half at once; only the first is a skip. |
+| A tool's non-zero exit | **A skip only when its stderr carries a refusal wording and the workload succeeds alone**; any other parse failure fails the pair. | A workload's "Permission denied" is not the tool's refusal. |
+| Several matches of a path | **Summed**, so per-thread series add up to the process. | The process is what the tools report. |
+| The tolerance | **The larger of `rel` and `abs`.** | A count near zero needs an absolute floor, a large one a relative band. |
+
+**How the families compare** (`docs/fixes/w22-{perfstat,perfrecord,perfsched,bpftrace,sysstat,top,heap,net,power,gpu,io}.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A machine-wide tool | **Observes the same seconds as `omn`**: the tool wraps `omn` (perfstat's `--system`, `--cgroup`, `--pid`; power), or both run alongside the workload (io, net, sysstat, bpftrace's `execsnoop` and `tcplife`), the asymmetry of the two windows said in `why`. | `omn` refuses `--system` beside a launched program (a gap, filed), and separate system-wide runs differed by 2.5x on cycles under the wave's load. |
+| A tool that takes a pid | **One run**: a launcher starts the workload and hands its pid to the tool and to `omn` (top's `onpid.py`); a pid-attached count compared per on-cpu nanosecond, not raw (perfstat). | Two windows that differ by `omn`'s start and exit are not one count. |
+| A tool that launches its own child | **Two runs, quantities the workload fixes compared exactly**, latencies by median within one log2 bucket (bpftrace); heap's interposers and valgrind on alternate runs of a workload deterministic to the block. | bpftrace's `-c` child, valgrind's malloc and two `LD_PRELOAD` interposers cannot share a process. |
+| A total-printing tool | **Read before and after the workload** (`around.py`), never two runs subtracted (net). | A counter's increase over one run is the measurement. |
+| Units | **The parser converts to `omn`'s units and names** (ns, bytes, ratios, `[memcpy HtoD]`); a pair never converts beyond a declared scale. | One place for each conversion. |
+| A count the tool could not make | **Absent, never zero** (perfstat's `<not counted>`, every perfsched parser refusing an empty output). | A zero is a measurement. |
+| A pair that misses on a filed defect | **Stays, marked `known_defect`**, reported KNOWN, and failing once it agrees (sysstat's `pidstat -w`); a defect that shows in some runs only is held by its own test instead (the poll's leading event). | A pair that alternates between KNOWN and agreeing is a flaky test, not a hold. |
+| Where a tool is not a reference | **Not compared**: `strace`'s per-call latency on short calls (16 us under ptrace against 0.25), nsys's host time per driver call, `gpu.profile` against ncu's source counters. | The tool's own cost is inside the number. |
+| Tool options fixed for every pair | `strace -c -w`; valgrind `--run-libc-freeres=no`; heaptrack `--record-only`; `turbostat --no-msr` (unprivileged through perf at paranoid at most 0); C workloads built once without PIE into `target/reference/`; workloads named at exec (a symlink), not by `prctl`; files under `target/`, never `/tmp`; fio with `thread` until `io.latency` follows forks. | Each is what made one side measure what the other does (each handoff says why). |
+| `git stash` in a worktree while other streams run | **Never**: the stash list is shared by every worktree; two streams' pops crossed and a review fix reached `main` only at the merge (bpftrace, `bc9f9a5`). Use a commit or another worktree. | Lost work, found only by the full suite. |
+
+---
+
 ## Open
 
 - **The phase 6 criterion for the in-kernel histogram** (io, pending the
@@ -1283,6 +1329,23 @@ them. The other open lines stay open; no stream measured them.
   answers who it waited on with no frame names, at the price of one more
   source in the cheap pass. Leaving it open costs C servers whose libc frames
   are unnamed their slow client.
+
+- **How a reference pair reads a value `omn` computes** (twenty-second
+  wave, every family against the runner). The runner reads one dotted path
+  into `omn`'s JSON, summing what `*` and filters match. Most families' values
+  are not at one path: a series total is a mean times a count, an attach is
+  compared per on-cpu nanosecond, a function's share is its leaves summed
+  over the stack table over the total. The families answered three ways:
+  `compare.omn_jq`, a jq expression (perfstat, top, gpu); `compare.omn_parse`,
+  a parser of `omn`'s JSON in the family's module (perfrecord); and a path
+  grammar of their own (`<emit>[<glob>].<field>`, io; `series[<key>].sum`,
+  net; `<emit>.<field>`, heap, perfsched, bpftrace). **Proposed**: the runner
+  takes a family's parser of `omn`'s output (`compare.omn_parse`), which is
+  code beside the tool's parser and unit-tested on a captured `omn` output
+  the same way, and the dotted path stays for a value `omn` holds; no jq
+  dependency in the test. Leaving it open costs every one of the nine
+  families' pairs its run through the runner, and so every verdict in
+  `docs/replaces/` its claim to be the runner's.
 
 A new open line goes here with what it costs to leave it open, which is the
 habit that kept this section honest.

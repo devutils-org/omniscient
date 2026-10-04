@@ -29,6 +29,23 @@ The two capabilities are what its eBPF sources need; without them `omn` still
 runs and serves fewer sources, and says which ones and why. `docs/install.md`
 has what each distribution needs and what `perf_event_paranoid` changes.
 
+`omn` runs no other tool. The comparison with the tools it replaces
+(`docs/replaces.md`) does, as witnesses in `tests/reference.rs`, and each
+pair whose tool is missing skips with the reason. To run all of them, a
+development machine needs `perf`, `strace`, `bpftrace`, the bcc tools
+(libbpf-tools' `memleak`, `offcputime`, `runqlat` and the rest), sysstat
+(`iostat`, `mpstat`, `pidstat`, `sar`), `numactl`, procps (`vmstat`, `top`,
+`pmap`, `slabtop`), `smem`, valgrind, heaptrack, iproute2 (`ip`, `ss`,
+`nstat`), `tcpdump`, `ethtool`, `turbostat` and `cpupower`, `lm_sensors`,
+`powertop`, `fio`, and for the GPU pairs `nvidia-smi`, `nsys` and `ncu`.
+Some need more than installing: `bpftrace`, `memleak` and `tcpdump` need
+root (`sudo -n`, or the test run as root), `perf trace`, `perf sched` and
+`perf lock` a readable `/sys/kernel/tracing`, `net.capture` `CAP_NET_RAW`
+(`make CAPTURE=1`), the RAPL files and `cpupower monitor -m Mperf` root or a
+grant, and the cpu-wide `perf` and `turbostat --no-msr` pairs
+`perf_event_paranoid` at most 0. `catalog/references/README.md` says how a
+pair runs and skips; `STATE.md`, "What remains", lists the exact commands.
+
 ## Try it
 
 ```console

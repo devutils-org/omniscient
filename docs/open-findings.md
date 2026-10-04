@@ -12227,3 +12227,266 @@ written. For the owner of the cross-machine sessions: bound the window by the
 cgroup's own writeback (`memory.stat` `file_writeback` back to 0, or a
 `syncfs` before the window closes), not by the program's exit. Now failed
 repeatedly, so it belongs on the flaky tally once its cause is read.
+
+### The earlier waves' filings
+
+None answered in the twenty-second wave: nothing under `src/`, `view/`,
+`CATALOG.md` or `docs/contributing.md` changed (`git diff --stat
+f68c656..705a75d`: `catalog/references/`, `tests/reference*`,
+`docs/replaces*`, the handoffs, and three test files' guard on
+`catalog/references/`). Every section of the twenty-first wave above stands
+open as written; `STATE.md`'s "What remains", item 1, lists them under
+"Still open from the twenty-first wave".
+
+## Needs from another stream — the twenty-second wave, stream reference
+
+Stream reference's handoff is `docs/fixes/w22-reference.md`, "Needs from
+another stream". **Landed at the merge**: the runner's unit tests run first
+and pass (8, the coordinator's run); the cross-family summary of
+`docs/replaces.md`, filled from the eleven tables in the merge's
+documentation commit. **Still open**: every family's tables backed and
+pairs run through the runner (above, the first finding of the merge).
+
+### To `src/main.rs`: which half of exit 1
+
+`omn` exiting 1 before writing anything, against a healthy workload, is read
+as the machine's refusal and skipped. A run that failed mid-way before
+writing reads the same. Telling them apart needs `omn` to say which half it
+is giving (an exit code of its own, or a line the runner can match).
+
+## Needs from another stream — the twenty-second wave, stream perfstat
+
+### To `tests/reference/runner.rs`: one run with the tool wrapping `omn`, and a computed value
+
+`same_run: tool_wraps_omn` (run `reference.command` with `omn`'s argv
+appended and no workload; the same field as power's, one implementation for
+both), `setup: cgroup_spin` (a user-owned child cgroup with a spinning
+`spin.py`, `{cgroup}` and `{cgroup_abs}` substituted, removed after) and
+`setup: spin_pid` (`{pid}` of a background `spin.py`); and a value `omn`
+computes -- a summary's series summed, two fields divided -- which every
+pair carries as `compare.omn_jq` (`DECISIONS.md`, "Open"). Until then
+`tests/reference/workloads/perfstat/run_pairs.py` is the reading.
+
+### To `catalog/cpu.yaml`, `catalog/mem.yaml` and their collectors
+
+Gaps 1, 4 and 6 of the handoff: `cpu.branches`; task-clock as a source;
+`mem.faults`' 4 to 7 extra faults said in its caveats.
+
+## Needs from another stream — the twenty-second wave, stream perfrecord
+
+**Landed at the merge**: `omn` runs with the repository's root as its
+working directory (`catalog/references/README.md`).
+
+### To `tests/reference/runner.rs`: `compare.omn_parse`
+
+When present, call that parser (from the family's `parsers()`) on `omn`'s
+stdout and stderr and compare its value under `compare.key`, instead of
+reading `compare.omn` as a path; then `pairs_hold_on_this_machine` goes. The
+seven pairs take about 40 s together. Whether the tolerances (0.05 absolute
+on a share, 10 % on a latency) hold under load is open: each review run
+failed one untouched pair, a different one each time.
+
+### To `src/collect/cpu/profile*` and `src/emit.rs`
+
+Gaps 1 to 9: `comm` on `pmu:sw`'s samples, or a filter on a field the
+resolved backend never fills refused before the run; a cycles collector; a
+per-function table (leaf and inclusive) and a per-object key; `mem.latency`
+by level as a key; `mem.sharing`'s per-line detail; instruction-level
+attribution; sampling any PMU event; `omn diff`'s tables by share.
+
+## Needs from another stream — the twenty-second wave, stream perfsched
+
+**Landed at the merge**: a `privileged: true` command run through `sudo -n`
+and skipped with its refusal; the `sh -c '...' sh` commands get the
+workload as `"$@"`.
+
+### To `tests/reference/runner.rs`: the family's fields
+
+`compare.across: sum` and `compare.scale` (or their renaming to
+`reference_scale`), and `omn: <emit>.<field>` resolved against the output
+whose `emit` matches.
+
+### To `src/collect/proc/**`, `src/collect/sched/**` and `src/emit.rs`
+
+Gaps 1 to 9: `syscall` as a key on `proc.syscall`; the launcher's `PATH`
+search out of the program's window; errors per syscall; per-call records;
+`sched.migrations`' zero series and `-0.0`; `sched.lock` keyed by kind and
+caller; its 1 % of dropped rows; a summary of `wake_to_run_ns`; a
+per-switch stream.
+
+### To stream bpftrace's owner (`catalog/references/bpftrace.yaml`)
+
+`syscalls.py` and `sleeper.py` give exact counts for `syscount.bt` and
+`runqlat.bt`, if that family's pairs want them.
+
+## Needs from another stream — the twenty-second wave, stream bpftrace
+
+**Landed at the merge**: privileged pairs skip before `omn` runs, with the
+`sudo -n` reason; a relative workload `argv[0]` resolves from the
+repository's root. The stash swap: `bc9f9a5` (above).
+
+### To `tests/reference/runner.rs`: paths, `alongside`, a log2 tolerance
+
+`summary.count`, `summary.last`, `hist.count`, `hist.p50` (bucket counts
+summed; the median bucket's lower bound over merged series);
+`alongside: true` (`omn` with its own `--system -d`, the workload started
+beside it); a tolerance on log2 bucket indices (`{log2: 1}`), so a median is
+bounded both ways -- `rel: 1.1` bounds nothing below the reference.
+
+### To `src/collect/proc/syscall*` and `src/collect/sched/irq*`: two defects
+
+`proc.syscall`'s `comm` filter reads the comm an aggregate first saw (a task
+renamed by `prctl` keeps its old name on calls it had made); `sched.irq
+--filter 'kind == "hard"'` returns no series while raw events carry `kind`.
+The second breaks "an invalid combination is refused with the reason, never
+degraded silently". Commands in the handoff, gaps 1 and 2.
+
+## Needs from another stream — the twenty-second wave, stream sysstat
+
+### To `tests/reference/runner.rs`: the family's fields
+
+`target: system`, `compare.omn_key`, `compare.scale`, the `raw.<attr>` path
+(the mean over raw events, the leading event left out) and `known_defect`;
+then the `pairs` module of `tests/reference/sysstat.rs` goes.
+
+### To `src/emit.rs` or `src/collect/sched/**`: `sched.switches`' counted rate
+
+`omn sched.switches -m count -e rate -- python3 switch.py 3000` divides 3005
+switches by a `window_ns` of 12 to 22 ms over a 3.18 s run: 138 734/s for
+about 945/s. Held by the `pidstat -w` pair's `known_defect`.
+
+### To `src/collect/mod.rs` (the poll's runner): a poll's leading event
+
+`cpu.util` and `cpu.pressure` at `poll@1s` emit a first event computed over a
+few milliseconds, which enters `summary`'s `min` and `mean`; `mem.pressure`
+and `io.pressure` do not. Held both ways by
+`poll_leading_event_is_held_as_a_known_defect`. And `cpu.pressure`'s
+attribute names made its siblings' (gap 3).
+
+### To `catalog/` and new collectors
+
+Gaps 4 to 10: `mem.system`, load and run queue, slab, the machine's NUMA
+counters, interrupt counts; `cpu.oncpu_time` on `fs:proc` keeping its tail
+and a `rate` in poll; `sar`'s history.
+
+## Needs from another stream — the twenty-second wave, stream top
+
+**Landed in the tables**: `top`'s memory lines, load average and `smem -w`
+point at sysstat's `free` and `uptime` rows.
+
+### To `tests/reference/runner.rs`: `onpid_attach`, an empty workload, `{pid}` passed through
+
+`same_run: onpid_attach` (`omn`'s argv in `ONPID_OMN`, a file in
+`ONPID_OMN_OUT`, `omn`'s JSON read from it), `compare.omn_jq`, an empty
+`workload: []` passing no `--`, and `{pid}` left verbatim for `onpid.py`
+rather than refused outside `run: attach` -- or the pairs rewritten to
+`run: attach`, which the runner now offers. Until then
+`tests/reference/workloads/top/run_pairs.py` is the reading.
+
+### To `src/collect/mem/**`, `src/collect/cpu/**` and `view/`
+
+Gaps 1 to 9: a total in `cpu.oncpu_time`'s summary; a per-process table of
+the machine (`omn top`'s `system` view, `top`'s first use); VIRT and SHR;
+per-mapping keys and Swap, AnonHugePages, Locked; several sources at once;
+`cpu.util`'s per-state split; a process tree and a user key; every thread
+of a pid on `fs:proc`.
+
+## Needs from another stream — the twenty-second wave, stream heap
+
+**Landed at the merge**: `requires` checked before `privileged`; the
+workload's argv appended after `sh -c SCRIPT NAME`. **Landed in the
+tables**: memleak's per-process row is heap's, its kernel mode bpftrace's.
+
+### To `tests/reference/runner.rs`: `<emit>.<field>`
+
+`omn:` read as `<emit>.<field>` of the first series of the output with that
+emit (`topk.total`, `summary.max`). `heap.rs`' own `number` and `capture`
+helpers can then switch to `common.rs`'.
+
+### To `src/collect/mem/heap*` and the preload shim
+
+Gap 1, a **defect**: `mem.heap.alloc` lists `stack` and its backend captures
+none, refused only after the run; stacks from the shim, or `stack` dropped
+from the backend so the resolver refuses up front. Gaps 2 to 6: an eBPF
+collector (attach to a running program), a high-water mark, a sum in
+`summary`, live blocks, allocation lifetimes.
+
+## Needs from another stream — the twenty-second wave, stream net
+
+**Landed at the merge**: `docs/replaces.md`'s net line, in its summary;
+no `.github/expected-skips*.txt` entry needed, the family's skip being
+printed by its own test.
+
+### To `tests/reference/runner.rs`: `alongside: {lead_ms}` and series totals
+
+`omn` started without `--`, the reference command `lead_ms` later, both
+waited for; and `series[<key>].sum|mean`, `events.count`,
+`events.<attr>.sum`. Then the nine `gap:` lines and `mod runner` in
+`tests/reference/net.rs` go.
+
+### To `src/collect/net/**` and `catalog/net.yaml`
+
+`net.packets` by `dir`; `net.snmp`; a socket inventory; `tcp_info`'s other
+fields on `net.tcp.rtt`; `missed` and `mcast` on `net.iface`; pcap output
+for `net.capture`; a counter source bounded by a launched program.
+
+## Needs from another stream — the twenty-second wave, stream power
+
+### To `tests/reference/runner.rs`: wrapping, background, a setting
+
+`same_run: tool_wraps_omn` (perfstat's too), `same_run: back_to_back`,
+`background: true`, `compare.omn_series`; and
+`requires_setting: [{file, at_most}]`, skipping with the file, its value and
+the bound -- three pairs need `perf_event_paranoid` at most 0. Until then
+these pairs should skip with "same_run not supported", not run `omn` with a
+workload it refuses.
+
+### To `src/collect/power/**`
+
+Gaps 2 to 6: `power.freq` on an idle cpu (1745.645 MHz, the part's lowest
+non-linear frequency, against turbostat's 4041 busy and 68 average) saying
+what it reads; `Busy%` and `Avg_MHz`; `power.cstate`'s idle share; the core
+energy domain; per-process wakeups and energy.
+
+## Needs from another stream — the twenty-second wave, stream gpu
+
+**Landed at the merge**: a missing `nvidia-smi` skips with
+`.github/expected-skips.txt`'s "is not installed here" line.
+
+### To `tests/reference/runner.rs`: `omn_launches_tool`, selectors, one at a time
+
+`same_run` read (`omn_launches_tool` as io defines it, `alternate` the
+default), the `--program-stderr` file handed to the parser as stderr; the
+selectors `topk[kernel=copy].events`, an escaped glob, an event selected by
+two attributes, `rate[*].per_second`, `summary[*].mean` -- or
+`compare.omn_jq`, which every pair carries. The GPU pairs run serially,
+about 70 s, nothing else on the device.
+
+### To `src/collect/gpu/**`
+
+Gap 1, `gpu.mem` on a launched program reading the launched pid only (0
+under a wrapper holding 412 MiB); gaps 2 to 9 in the handoff.
+
+## Needs from another stream — the twenty-second wave, stream io
+
+**Answered at the merge**: sysstat's `iostat_cpu` (`-c`) and io's
+`iostat_json` (`-dx`) read different reports; both stay.
+
+### To `tests/reference/runner.rs`: one run, and a one-sided tolerance
+
+`same_run: omn_launches_tool` (`omn <omn> --program-stderr <file> --
+<command> <workload>`, the file parsed as the tool's stderr) and
+`same_run: alongside` with `duration` and `start_after`; the path
+`<emit>[<key glob>].<field>` with counts and totals summed and a mean
+weighted by count. And a one-sided tolerance (`{rel: N, side: omn_above}`
+and its mirror): pairs 3 and 4 want `omn_above`, pair 2 `omn_below`; until
+then their bands are symmetric and their `why` says which side they would
+wrongly pass.
+
+### To `src/collect/io/**`
+
+Gap 1, a **defect**: `io.latency` on a launched program does not follow its
+forked children (0 requests for fio's forked job, "29678 block_rq_complete
+events had no opening"); gaps 2 to 5 in the handoff (`io.bytes` and
+`io.iops` per process, `%util`, `summary` over `fs:proc` keyed `dir`
+folding devices).
