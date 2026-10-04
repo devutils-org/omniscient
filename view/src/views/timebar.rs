@@ -2561,9 +2561,13 @@ mod tests {
             &draw_app(&mut requests, WIDTH, HEIGHT),
         );
         // A small terminal: the bars keep their place, the table gives way.
-        let mut small = app(fixture("http-server"));
+        let data = fixture("http-server");
+        let sheets = sheets(&data);
+        let first = &sheets.iter().find(|sheet| sheet.reading).unwrap().bars[0];
+        let label = format!("{} {}", first.tid.unwrap(), first.comm.as_deref().unwrap());
+        let mut small = app(data);
         let screen = text(&draw_app(&mut small, 80, 24));
-        assert!(screen.contains("2758972 python3"), "{screen}");
+        assert!(screen.contains(&label), "no {label:?} in\n{screen}");
     }
 
     #[test]
@@ -2642,13 +2646,15 @@ mod tests {
         assert_eq!(folded, vec!["task 3".to_owned()]);
     }
 
-    /// On every fixture the view reads itself, a bar whose on cpu is derived
-    /// from the window gives no residue -- it would be zero by construction
-    /// -- and says why instead.
+    /// A bar whose on cpu is derived from the window gives no residue -- it
+    /// would be zero by construction -- and says why instead. That is the
+    /// per-process backend's case (`fs:proc`); the recordings now carry the
+    /// eBPF one, per thread, so each is also read with its cpu time put back
+    /// in the per-process shape: one total for the process.
     #[test]
     fn a_residue_that_cannot_fail_is_not_printed_as_one() {
         for name in ["http-server", "cpython-hot"] {
-            let data = fixture(name);
+            let data = as_per_process(fixture(name));
             let sheets = sheets(&data);
             let sheet = sheets.iter().find(|sheet| sheet.reading).expect(name);
             let bracketed: Vec<&Bar> = sheet
@@ -2667,6 +2673,68 @@ mod tests {
                 "{name}\n{screen}"
             );
         }
+    }
+
+    /// Read per thread, on cpu is measured, not derived: a bar whose every
+    /// row was read has a residue, which is a measurement and is printed.
+    #[test]
+    fn a_residue_measured_per_thread_is_printed() {
+        for name in ["http-server", "cpython-hot"] {
+            let data = fixture(name);
+            let sheets = sheets(&data);
+            let sheet = sheets.iter().find(|sheet| sheet.reading).expect(name);
+            let complete: Vec<&Bar> = sheet
+                .bars
+                .iter()
+                .filter(|bar| bar.parts.iter().all(|part| part.amount.is_some()))
+                .collect();
+            assert!(!complete.is_empty(), "{name}: no bar read whole");
+            for bar in complete {
+                assert!(bar.residue.is_some(), "{name} {}", bar.key);
+                assert_eq!(bar.residue_says, None, "{name} {}", bar.key);
+            }
+            let screen = text(&draw(data, "timebar", WIDTH, HEIGHT));
+            assert!(!screen.contains("on cpu is derived"), "{name}\n{screen}");
+        }
+    }
+
+    /// A recording whose `cpu.oncpu_time` was read per thread, in the shape
+    /// the per-process backend gives: one series, the process's, holding
+    /// the sum of its threads'.
+    fn as_per_process(mut data: Data) -> Data {
+        let pid = data
+            .first("mem.rss")
+            .and_then(|results| match results.output("timeline") {
+                Some(Output::Timeline { series, .. }) => series.first().map(|s| s.key.clone()),
+                _ => None,
+            })
+            .expect("the process's RSS");
+        for results in &mut data.run.results {
+            if results.source != "cpu.oncpu_time" {
+                continue;
+            }
+            let total: f64 = match results.output("summary") {
+                Some(Output::Summary { series }) => series
+                    .iter()
+                    .map(|series| series.mean * series.count as f64)
+                    .sum(),
+                _ => panic!("a summary"),
+            };
+            results.backend = "fs:proc".to_owned();
+            results.outputs = vec![Output::Summary {
+                series: vec![crate::model::SeriesSummary {
+                    key: pid.clone(),
+                    count: 1,
+                    min: total,
+                    max: total,
+                    mean: total,
+                    last: total,
+                    unmeasured: 0,
+                    short: None,
+                }],
+            }];
+        }
+        data
     }
 
     /// A decomposition the view cannot draw is said, not dropped.

@@ -2511,23 +2511,43 @@ mod tests {
         let absolute = tree(&first, Some(&second), ON, false);
         let shape = tree(&first, Some(&second), ON, true);
         let moved = |tree: &Tree| tree.compare.as_ref().unwrap().difference.len();
-        let up = absolute
-            .compare
-            .as_ref()
-            .unwrap()
-            .difference
+        // Every function with a name spends more. An address with none
+        // (`libpython…+0x…`) is one instruction of the interpreter, whose
+        // library carries no symbols: a few dozen samples apiece, and a few
+        // of those cross the noise downward -- only a few.
+        let difference = &absolute.compare.as_ref().unwrap().difference;
+        let unnamed = |change: &&Change| change.function.contains("+0x");
+        let down: Vec<&Change> = difference
             .iter()
-            .filter(|change| change.delta > 0.0)
-            .count();
-        assert_eq!(
-            up,
-            moved(&absolute),
-            "the heavier run spends more everywhere"
+            .filter(|change| change.delta <= 0.0)
+            .collect();
+        assert!(
+            down.iter().all(unnamed),
+            "the heavier run spends more in every named function: {down:?}"
+        );
+        assert!(down.len() * 5 <= moved(&absolute), "{down:?}");
+        // In shape, the program is the same: few functions with a name move.
+        // The unnamed addresses, small as they are, still cross the noise
+        // either way, so they are held more loosely.
+        let named = |tree: &Tree| {
+            tree.compare
+                .as_ref()
+                .unwrap()
+                .difference
+                .iter()
+                .filter(|change| !unnamed(change))
+                .count()
+        };
+        assert!(
+            named(&absolute) >= 4 * named(&shape).max(1),
+            "absolutely {} named functions moved, in shape {}: the heavier run is the same \
+             program doing more, which only the shape comparison says",
+            named(&absolute),
+            named(&shape)
         );
         assert!(
-            moved(&absolute) >= 4 * moved(&shape).max(1),
-            "absolutely {} functions moved, in shape {}: the heavier run is the same program \
-             doing more, which only the shape comparison says",
+            moved(&absolute) >= 2 * moved(&shape),
+            "absolutely {} functions moved, in shape {}",
             moved(&absolute),
             moved(&shape)
         );
@@ -2598,7 +2618,16 @@ mod tests {
         assert_eq!(threads.len(), 3, "{threads:?}");
         assert!(threads.iter().all(|name| name.starts_with('[')));
         assert_eq!(split.nodes[0].value[0], stack_total(&data, "sched.offcpu"));
-        let tid = 2_758_974;
+        // A thread that blocked, read from the recording rather than written
+        // here: a re-recording gives every thread a new id.
+        let tid = data
+            .first("sched.offcpu")
+            .unwrap()
+            .events()
+            .iter()
+            .filter(|event| event.number("total_ns").is_some_and(|ns| ns > 0.0))
+            .find_map(|event| event.tid())
+            .expect("a thread that blocked");
         let narrowed = read(
             false,
             &Focus {

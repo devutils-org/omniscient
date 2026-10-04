@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::cost::Meter;
-use crate::model::Data;
+use crate::model::{Data, Results};
 use crate::trust::{palette, Mark};
 use crate::units;
 use crate::views::{registry, Action, Ctx, Focus, Region, View};
@@ -550,17 +550,39 @@ pub fn run_costs(data: &Data) -> RunCosts {
             .iter()
             .filter(|results| results.overhead.in_target_cpu_ns.is_none())
             .count(),
-        target_cpu_ns: results
-            .iter()
-            .filter(|results| !results.label.ends_with("@system"))
-            .filter_map(|results| results.overhead.observed_cpu_ns)
-            .max(),
+        target_cpu_ns: target_cpu_ns(results),
         wall_ns: results
             .iter()
             .map(|results| results.overhead.wall_ns)
             .max()
             .unwrap_or(0),
     }
+}
+
+/// The target's own cpu: the most a request on a target observed.
+fn target_cpu_ns(results: &[Results]) -> Option<u64> {
+    let observed = |system: bool| {
+        results
+            .iter()
+            .filter(|results| metered_on_the_machine(results) == system)
+            .filter_map(|results| results.overhead.observed_cpu_ns)
+            .max()
+    };
+    // A recording older than the meter's words: a machine run's task-keyed
+    // requests carry the same figure as its `@system` ones.
+    observed(false).filter(|_| observed(false) != observed(true))
+}
+
+/// Whether a request's own account is the machine's rather than a
+/// target's: a request on the machine (`@system`), or one whose run had no
+/// target and so measured the cpus (an eBPF `cpu.oncpu_time` over every
+/// task, `sched.wakeup` machine-wide), as `omn` says in `observed_from`.
+pub fn metered_on_the_machine(results: &Results) -> bool {
+    results.label.ends_with("@system")
+        || results
+            .overhead
+            .observed_from
+            .starts_with("everything but idle on")
 }
 
 /// `text` in at most `room` cells, its start replaced by `…` when it does
@@ -590,6 +612,18 @@ mod tests {
 
     fn press(app: &mut App, code: KeyCode) {
         app.key(KeyEvent::from(code));
+    }
+
+    /// A run with no target claims no target's cpu, even where a request on
+    /// it is keyed per task: its account is the machine's.
+    #[test]
+    fn a_run_on_the_machine_claims_no_target() {
+        for name in ["machine", "system-wakeup"] {
+            assert_eq!(run_costs(&fixture(name)).target_cpu_ns, None, "{name}");
+        }
+        for name in ["http-server", "cpython-hot"] {
+            assert!(run_costs(&fixture(name)).target_cpu_ns.is_some(), "{name}");
+        }
     }
 
     fn current(app: &App) -> &'static str {

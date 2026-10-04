@@ -1,0 +1,40 @@
+omn top │ fixture workload-flame │ 2.07s                          view: snapshot │ collectors ≥14.9% │ target 62.4% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ process -- one process at a glance: pid 1524065, ran 2.30s ──────────────────────────────────────────────────────────┐
+│first suspect: ▶ lock 97.3% -- the wake tile (wake) has the detail                                                    │
+│one view's essence per tile: enter, or a click on the selected tile, opens it                                         │
+│┌ time → timebar ─────────────────────┐┌ cpu → flame ─────────────────────────┐┌ cost → ledger ──────────────────────┐│
+││▶ lock 97.3%                         ││heavy › burn 53.9%                    ││cpu 1.43s                            ││
+││█▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞             ││on cpu: the hottest own code          ││rss peak 13.2MiB · 1.70k faults      ││
+││flame-main (1524065), 2.07s wall     ││off cpu: main › Thread.join 76.8%     ││cpu: the program's own account       ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││~low det degraded x2                 ││30 late ~low det degraded x5          ││~low det 30 late                     ││
+│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
+│┌ request → request ──────────────────┐┌ latency → heatmap ───────────────────┐┌ threads → lanes ────────────────────┐│
+││no request declared                  ││max 65.5µs                            ││3 threads                            ││
+││refused: cannot start collecting     ││█▂    ▃     ▃▁▁▁▁  ▂▁▁▁▃              ││█▁    ▁     ▅▁▁▁ ▁▁▂▁▁▁▂             ││
+││`net.request`: /usr/bin/python3      ││sched.runqlat: 32 measured, median 0ns││39 context switches                  ││
+││declares no request: `net.request`   ││                                      ││                                     ││
+││follows a request from a             ││                                      ││                                     ││
+││`request__start(id)` probe to a      ││                                      ││                                     ││
+││`request__done(id)` probe the        ││                                      ││                                     ││
+││program fires itself, any provider,  ││                                      ││                                     ││
+││and this one carries no USDT probe…  ││~low det degraded                     ││23 late ~low det degraded            ││
+│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
+│┏ wake → wake ━━━━━━━━━━━━━━━━━━━━━━━━┓┌ flows → flows ───────────────────────┐┌ gpu → lanes ────────────────────────┐│
+│┃hardirq ×11                          ┃│net ↓0B ↑0B                           ││no kernel launched                   ││
+│┃50.0% of 22 wake-ups; 7 wakers       ┃│disk ↓0B ↑0B                          ││device memory peak 0B                ││
+│┃                                     ┃│↓ received or read · ↑ sent or written││                                     ││
+│┃                                     ┃│                                      ││                                     ││
+│┃                                     ┃│                                      ││                                     ││
+│┃                                     ┃│                                      ││                                     ││
+│┃                                     ┃│                                      ││                                     ││
+│┃                                     ┃│                                      ││                                     ││
+│┃23 late ~low det degraded            ┃│~low det degraded x3                  ││19 late degraded                     ││
+│┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└──────────────────────────────────────┘└─────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ hjkl move between tiles  enter open the tile's view

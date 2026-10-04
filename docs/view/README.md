@@ -269,7 +269,7 @@ holds this table to the code.
 | ledger | `cpu.oncpu_time` | poll@250ms | timeline,summary (keys task) | target | cpu time, per thread |
 | ledger | `mem.rss` | poll@250ms | timeline,summary | target | memory held |
 | ledger | `mem.faults` | trace | summary | target | memory faulted in |
-| ledger | `io.syscall` | trace | summary,hist | target | bytes read and written, and their latency as the program saw it |
+| ledger | `io.syscall` | trace | raw,summary,hist | target | bytes read and written, and their latency as the program saw it |
 | ledger | `net.socket` | trace | raw,hist | target | network volume: bytes sent and received through the target's sockets |
 | ledger | `net.tcp.retransmit` | trace | summary | system | retransmissions, the machine's: a retransmission is sent from a timer, so the collector cannot give it to a process |
 | ledger | `gpu.mem` | poll@250ms | timeline,summary | target | GPU memory held |
@@ -292,7 +292,7 @@ holds this table to the code.
 | wake | `sched.wakeup` | trace | raw | target | the wake chain |
 | flows | `net.socket` | trace | raw,hist | target | bytes per socket |
 | flows | `net.bytes` | poll@250ms | timeline,summary | system | bytes per interface |
-| flows | `io.syscall` | trace | summary,hist | target | bytes per file |
+| flows | `io.syscall` | trace | raw,summary,hist | target | bytes per descriptor, from its rows: a file, a pipe or a socket |
 | flows | `io.bytes` | poll@250ms | timeline,summary | system | bytes per device |
 
 Two views read what no default request gives:

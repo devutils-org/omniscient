@@ -1,0 +1,40 @@
+omn top │ fixture vertical-abandoned │ 184ms                      view: snapshot │ collectors ≥0.55% │ target 1.44% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ process -- one process at a glance: ran 184ms ───────────────────────────────────────────────────────────────────────┐
+│first suspect: not in this run                                                                                        │
+│one view's essence per tile: enter, or a click on the selected tile, opens it                                         │
+│┌ time → timebar ─────────────────────┐┌ cpu → flame ─────────────────────────┐┌ cost → ledger ──────────────────────┐│
+││not in this run                      ││not in this run                       ││cpu 2.79ms                           ││
+││needs cpu.profile or sched.offcpu or ││needs cpu.profile or sched.offcpu     ││cpu: the program's own account       ││
+││sched.runqlat or cpu.oncpu_time      ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
+│┌ request → request ──────────────────┐┌ latency → heatmap ───────────────────┐┌ threads → lanes ────────────────────┐│
+││a002 5.09ms ▶ lock 99.1%             ││not in this run                       ││not in this run                      ││
+││the slowest of 2 requests            ││needs gpu.kernel or io.latency or     ││needs sched.switches or              ││
+││                                     ││net.socket or sched.runqlat           ││cpu.oncpu_time                       ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││degraded x5                          ││                                      ││                                     ││
+│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
+│┌ wake → wake ────────────────────────┐┌ flows → flows ───────────────────────┐┌ gpu → lanes ────────────────────────┐│
+││not in this run                      ││not in this run                       ││not in this run                      ││
+││needs sched.wakeup                   ││needs net.socket or io.latency        ││needs gpu.kernel or gpu.mem          ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ hjkl move between tiles  enter open the tile's view

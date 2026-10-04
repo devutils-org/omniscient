@@ -63,11 +63,11 @@ pub const NEEDS: &[Need] = &[
     Need {
         source: "io.syscall",
         mode: "trace",
-        emit: &["summary", "hist"],
+        emit: &["raw", "summary", "hist"],
         keys: &[],
         stack: None,
         scope: Scope::Target,
-        why: "bytes per file",
+        why: "bytes per descriptor, from its rows: a file, a pipe or a socket",
     },
     Need {
         source: "io.bytes",

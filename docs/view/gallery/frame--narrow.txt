@@ -1,20 +1,20 @@
 omn top │ fixture http-server │ 3.24s        view: snapshot
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatma
-┌ process -- one process at a glance: pid 2758953, ran 2.84┐
-│first suspect: ▶ sleep 96.9% -- the cpu tile (flame) has t│
+┌ process -- one process at a glance: pid 1493220, ran 3.23┐
+│first suspect: ▶ sleep 96.7% -- the cpu tile (flame) has t│
 │one view's essence per tile: enter, or a click on the sele│
 │┌ time → timebar ─┐┏ cpu → flame ━━━━━┓┌ cost → ledger ──┐│
-││▶ sleep 96.9%    │┃_PyObject_MakeTpCa┃│cpu 2.79s        ││
-││░░░░░░░░░░░░░░░░░│┃on cpu: the hottes┃│rss peak 25.2MiB ││
+││▶ sleep 96.7%    │┃_PyObject_MakeTpCa┃│cpu 3.17s        ││
+││█░░░░░░░░░░░░░░░…│┃on cpu: the…      ┃│rss peak 27.3MiB…││
 │└─────────────────┘┗━━━━━━━━━━━━━━━━━━┛└─────────────────┘│
 │┌ request → reques┐┌ latency → heatmap┐┌ threads → lanes ┐│
-││no request declar││max 524µs         ││2 threads        ││
-││net.request refus││▁█▅▂▂ ▂▂▁▁▁▁▂▁▂ ▂▁││█▂▂▂▂▃▁▅▁▂ ▁ ▂▂▂▂││
-││                 ││net.socket: 86 mea││98 context switch││
+││no request declar││max 524µs         ││4 threads        ││
+││refused: cannot  ││▁██▂ ▁▁▁▁▂▂▂▂▂▂   ││█▂▃ ▂  ▂  ▁▃   ▂ ││
+││start collecting…││▂▂▂█▅▅ ▂…         ││▁▁▂▂▆▂▃…         ││
 │└─────────────────┘└──────────────────┘└─────────────────┘│
 │┌ wake → wake ────┐┌ flows → flows ───┐┌ gpu → lanes ────┐│
-││thread 2758974 ×1││net ↓1.76KiB ↑28.3││kernels not in th││
-││33.3% of 30 wake-││disk ↓0B ↑0B      ││device memory pea││
+││softirq ×141     ││net ↓1.76KiB ↑28.3││no kernel launche││
+││73.8% of 191…    ││disk ↓0B ↑0B…     ││device memory…   ││
 │└─────────────────┘└──────────────────┘└─────────────────┘│
 └──────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ hj

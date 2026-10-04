@@ -1,21 +1,21 @@
-[0m[1momn top[0m │ fixture workload-flows │ 1.00s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥12.4%[0m[35m │ target 5.69% cpu[0m [0m
+[0m[1momn top[0m │ fixture workload-flows │ 1.00s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥14.4%[0m[35m │ target 5.80% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  9 flows  0 process                      [0m
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐[0m
-│[0m[1msched.switches [0m[2m124[0m [0m[33m11 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m  [0m[1msched.wakeup [0m[2m170[0m [0m[33m11 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.offcpu [0m[2m23[0m [0m[36m~low det[0m │[0m
-│[0m[33mdegraded[0m  [0m[1mgpu.kernel [0m0 [0m[33m13 late[0m [0m[33mdegraded[0m                                                                               │[0m
+│[0m[1msched.switches [0m[2m43[0m [0m[33m10 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m  [0m[1msched.wakeup [0m[2m64[0m [0m[33m10 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.offcpu [0m[2m25[0m [0m[36m~low det[0m   │[0m
+│[0m[33mdegraded x3[0m  [0m[1mgpu.kernel [0m0 [0m[33m7 late[0m [0m[33mdegraded[0m                                                                             │[0m
 │[0m[2m12.1ms a cell[0m          [0m[2m╷0ns[0m            [0m[2m╷200ms[0m           [0m[2m╷400ms[0m          [0m[2m╷600ms[0m           [0m[2m╷800ms[0m            [0m[2mof the span[0m│[0m
-│[0m[1;7mflows-main     1528032[0m[2m│[0m[2;32m██▇[0m[2m                        [0m[2;32m▃▂[0m[2m  [0m[2;32m▂[0m[2m                        [0m[2;7m [0m[2m                          │awake 4.32%[0m│[0m
-│[0m[2m              off cpu │  [0m[2;34m▂████████████████████████▆[0m[2;33m▇[0m[2;34m██▇████████████████████████[0m[2;7;34m█[0m[2;34m████████████████████████▃[0m[2m │ blkd 93.6%[0m│[0m
-│[0m[2m───────────────────────────────────────────────────────────────────────────────[0m[2;32m▲ 683ms[0m[2m────────────────────────────────[0m│[0m
-│[0m[1mflows-main 1528032 (pid 1528032) at 683ms: [0m[2;34mblocked, sleeping[0m[2m 600ms, 383ms → 983ms, left cpu 4[0m                         │[0m
+│[0m[1;7mflows-main     1783958[0m[2m│[0m[2;32m██▄[0m[2m                        [0m[2;32m▃▂[0m[2m [0m[2;32m▁▁[0m[2m                        [0m[2;7m [0m[2m                          │awake 3.76%[0m│[0m
+│[0m[2m              off cpu │  [0m[2;34m▅████████████████████████[0m[2;33m▆[0m[2;34m▇███████████████████████████[0m[2;7;34m█[0m[2;34m████████████████████████▄[0m[2m │ blkd 94.3%[0m│[0m
+│[0m[2m───────────────────────────────────────────────────────────────────────────────[0m[2;32m▲ 681ms[0m[2m────────────────────────────────[0m│[0m
+│[0m[1mflows-main 1783958 (pid 1783958) at 681ms: [0m[2;34mblocked, sleeping[0m[2m 600ms, 381ms → 981ms, left cpu 1[0m                         │[0m
 │  woken by [0m[1man interrupt (hardirq)[0m[2m, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone[0m │[0m
 │[0m[2m  in [0m[2;34mclock_nanosleep ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← libpython3.14.so.1.0 x4 ← Py_RunMain ← …[0m           │[0m
-│[0m[2m  124 switch-outs and 94 wakeups seen; awake 4.32% of the run[0m                                                         │[0m
-│[0m[2m  where it was off a cpu over the run, 941ms in all (sched.offcpu, by state and stack)[0m [0m[36m~low det[0m [0m[33mdegraded[0m[2m:[0m             │[0m
-│  [0m[2m   900ms 95.7%[0m [0m[2;34msleeping  [0m[2m    2 blocks  clock_nanosleep ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m              │[0m
-│  [0m[2m  29.1ms 3.09%[0m [0m[2;34msleeping  [0m[2m    1 blocks  accept4 ← _socket.cpython-314-x86_64-linux-gnu.so x2 ← …[0m                     │[0m
-│  [0m[2m  5.77ms 0.61%[0m [0m[2;33muninterr. [0m[2m   70 blocks  fsync ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m                        │[0m
-│  [0m[2m  4.43ms 0.47%[0m [0m[2;34msleeping  [0m[2m    1 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m                        │[0m
+│[0m[2m  43 switch-outs and 35 wakeups seen; awake 3.76% of the run[0m                                                          │[0m
+│[0m[2m  where it was off a cpu over the run, 944ms in all (sched.offcpu, by state and stack)[0m [0m[36m~low det[0m [0m[33mdegraded x3[0m[2m:[0m          │[0m
+│  [0m[2m   900ms 95.3%[0m [0m[2;34msleeping  [0m[2m    2 blocks  clock_nanosleep ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m              │[0m
+│  [0m[2m  29.0ms 3.07%[0m [0m[2;34msleeping  [0m[2m    1 blocks  accept4 ← _socket.cpython-314-x86_64-linux-gnu.so x2 ← …[0m                     │[0m
+│  [0m[2m  5.77ms 0.61%[0m [0m[2;33muninterr. [0m[2m    9 blocks  fsync ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m                        │[0m
+│  [0m[2m  4.90ms 0.52%[0m [0m[2;34msleeping  [0m[2m    1 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m                        │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

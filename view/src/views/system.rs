@@ -2435,9 +2435,11 @@ mod tests {
         // The busiest interface listed, the idle ones folded into one line.
         assert!(screen.contains("wlan0"), "{screen}");
         assert!(screen.contains("moved nothing"), "{screen}");
-        // The process list's source was refused on this run: its reason is
-        // where the list would be.
-        assert!(screen.contains("cpu.oncpu_time refused"), "{screen}");
+        // The process list's source is served on this run (per thread, the
+        // eBPF backend): the busiest tasks listed by cpu, the rest counted.
+        assert!(!screen.contains("cpu.oncpu_time refused"), "{screen}");
+        assert!(screen.contains("by cpu"), "{screen}");
+        assert!(screen.contains(" more "), "{screen}");
     }
 
     #[test]
@@ -2458,21 +2460,26 @@ mod tests {
         let procs = processes(&data, Sort::Cpu);
         let process: Vec<&Proc> = procs.rows.iter().filter(|row| row.process).collect();
         assert_eq!(process.len(), 1);
-        let cpu = process[0].cells[&Col::Cpu];
-        // The interpreter spins on one cpu for the whole run.
-        assert!(cpu > 0.8 && cpu < 1.1, "{cpu}");
         // Its main thread, which the per-thread sources saw under the same
-        // id, is a row of its own: a process's cpu is not one thread's.
+        // id, is a row of its own. This run's `cpu.oncpu_time` is the eBPF
+        // backend's, per thread: the cpu is the thread's row, and the
+        // process's holds what `/proc/<pid>` says (RSS), never a thread's
+        // cpu or faults.
         let thread = procs
             .rows
             .iter()
             .find(|row| !row.process && row.tid == process[0].tid)
             .expect("the main thread's row");
-        assert!(!thread.cells.contains_key(&Col::Cpu));
+        let cpu = thread.cells[&Col::Cpu];
+        // The interpreter spins on one cpu for the whole run.
+        assert!(cpu > 0.8 && cpu < 1.1, "{cpu}");
+        assert!(process[0].cells.contains_key(&Col::Rss));
+        assert!(!process[0].cells.contains_key(&Col::Cpu));
         assert!(!process[0].cells.contains_key(&Col::Faults));
+        let pid = process[0].tid;
         let screen = screen(data);
-        assert!(screen.contains(" 2779350"), "{screen}");
-        assert!(screen.contains("t2779350"), "{screen}");
+        assert!(screen.contains(&format!(" {pid}")), "{screen}");
+        assert!(screen.contains(&format!("t{pid}")), "{screen}");
     }
 
     /// A finished run's timelines start at their result's first event. A
@@ -2517,9 +2524,22 @@ mod tests {
         assert!(first > 200_000_000, "{first}");
         let (first, _) = end_of("cpu.util");
         assert!(first < 50_000_000, "{first}");
-        // The target's own timelines are not moved.
+        // The target's own timelines are not moved: they start where the run
+        // says their first event was (`first_ts_ns`), which is the target's
+        // first read, a few milliseconds after the window opened -- not one
+        // inferred read later, as a poller of the machine may be.
         let oncpu = data.first("cpu.oncpu_time").unwrap();
-        assert_eq!(tracks(&data, oncpu)[0].points[0].at_ns, 0);
+        let said = oncpu
+            .outputs
+            .iter()
+            .find_map(|output| match output {
+                Output::Timeline { first_ts_ns, .. } => *first_ts_ns,
+                _ => None,
+            })
+            .expect("a recording that says its first event");
+        let first = tracks(&data, oncpu)[0].points[0].at_ns;
+        assert_eq!(first, said - data.opened_ns());
+        assert!(first < 50_000_000, "{first}");
     }
 
     fn power_result(outputs: Vec<Output>, backend: &str) -> Results {
@@ -2747,15 +2767,44 @@ mod tests {
 
     #[test]
     fn every_thread_any_source_saw_is_listed() {
-        let procs = processes(&fixture("http-server"), Sort::Cpu);
+        let data = fixture("http-server");
+        let procs = processes(&data, Sort::Cpu);
         let tids: Vec<i32> = procs.rows.iter().map(|row| row.tid).collect();
-        for tid in [2758953, 2758972, 2758973, 2758974] {
+        // The threads, read from the recording: the ones `cpu.oncpu_time`
+        // timed and the ones `sched.offcpu` saw block.
+        let mut seen: Vec<i32> = data
+            .first("sched.offcpu")
+            .unwrap()
+            .events()
+            .iter()
+            .filter_map(Event::tid)
+            .collect();
+        for output in &data.first("cpu.oncpu_time").unwrap().outputs {
+            if let Output::Timeline { series, .. } = output {
+                seen.extend(
+                    series
+                        .iter()
+                        .filter_map(|series| series.key.strip_prefix("task:")?.parse::<i32>().ok()),
+                );
+            }
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        assert!(seen.len() >= 3, "{seen:?}");
+        for tid in seen {
             assert!(tids.contains(&tid), "{tid} missing from {tids:?}");
         }
-        // A thread `cpu.oncpu_time` does not read has no cpu: not a zero.
-        let thread = procs.rows.iter().find(|row| row.tid == 2758974).unwrap();
-        assert!(!thread.cells.contains_key(&Col::Cpu));
-        assert!(thread.cells.contains_key(&Col::Faults));
+        // A row `cpu.oncpu_time` does not read -- here the process, as
+        // `/proc/<pid>` sees it, since this run's cpu time is per thread --
+        // has no cpu: not a zero.
+        let process = procs.rows.iter().find(|row| row.process).unwrap();
+        assert!(!process.cells.contains_key(&Col::Cpu));
+        assert!(process.cells.contains_key(&Col::Rss));
+        assert!(procs
+            .rows
+            .iter()
+            .filter(|row| !row.process)
+            .all(|row| row.cells.contains_key(&Col::Faults)));
     }
 
     #[test]
@@ -2782,21 +2831,24 @@ mod tests {
             focus: &focus,
         };
         let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
-        assert_eq!(view.key(press(KeyCode::Down), &ctx), Action::None);
-        match view.key(press(KeyCode::Enter), &ctx) {
-            Action::Goto { view, focus } => {
-                assert_eq!(view, "ledger");
-                // The first row is the process `cpu.oncpu_time` reads.
-                assert_eq!(focus.pid, Some(2758953));
+        // Each row in turn opens the ledger on itself: a process on its pid,
+        // a thread on its tid.
+        let rows = processes(&data, SORTS[0]).rows;
+        assert!(rows.iter().any(|row| row.process));
+        assert!(rows.iter().any(|row| !row.process));
+        for row in &rows {
+            assert_eq!(view.key(press(KeyCode::Down), &ctx), Action::None);
+            match view.key(press(KeyCode::Enter), &ctx) {
+                Action::Goto { view, focus } => {
+                    assert_eq!(view, "ledger");
+                    if row.process {
+                        assert_eq!((focus.pid, focus.tid), (Some(row.tid), None));
+                    } else {
+                        assert_eq!((focus.pid, focus.tid), (None, Some(row.tid)));
+                    }
+                }
+                other => panic!("{other:?}"),
             }
-            other => panic!("{other:?}"),
-        }
-        view.key(press(KeyCode::Down), &ctx);
-        match view.key(press(KeyCode::Enter), &ctx) {
-            Action::Goto { focus, .. } => {
-                assert!(focus.tid.is_some() && focus.pid.is_none(), "{focus:?}");
-            }
-            other => panic!("{other:?}"),
         }
     }
 
@@ -2805,9 +2857,25 @@ mod tests {
         let data = fixture("http-server");
         let by_cpu = processes(&data, Sort::Cpu);
         let by_faults = processes(&data, Sort::Faults);
-        assert_eq!(by_cpu.rows[0].tid, 2758953);
-        // The thread that listed the directory faulted most.
-        assert_eq!(by_faults.rows[0].tid, 2758974);
+        // Each list is in its column's order, a row without the column last.
+        let column = |procs: &Procs, col: Col| -> Vec<f64> {
+            procs
+                .rows
+                .iter()
+                .map(|row| row.cells.get(&col).copied().unwrap_or(f64::NEG_INFINITY))
+                .collect()
+        };
+        for (procs, col) in [(&by_cpu, Col::Cpu), (&by_faults, Col::Faults)] {
+            let values = column(procs, col);
+            assert!(
+                values.windows(2).all(|pair| pair[0] >= pair[1]),
+                "{col:?}: {values:?}"
+            );
+        }
+        // And the two orders differ on this run: a thread that ran less
+        // faulted more.
+        let order = |procs: &Procs| procs.rows.iter().map(Proc::key).collect::<Vec<_>>();
+        assert_ne!(order(&by_cpu), order(&by_faults));
     }
 
     fn event(ts_ns: u64, keys: Vec<Key>, attrs: &[(&str, AttrValue)]) -> Event {

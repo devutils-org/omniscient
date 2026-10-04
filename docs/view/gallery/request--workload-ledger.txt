@@ -1,4 +1,4 @@
-omn top │ fixture workload-ledger │ 1.28s                         view: snapshot │ collectors ≥16.4% │ target 42.8% cpu
+omn top │ fixture workload-ledger │ 1.28s                         view: snapshot │ collectors ≥15.6% │ target 40.0% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────┐
 │┌ net.request refused ───────────────────────────────────────────────────────────────────────────────────────────────┐│

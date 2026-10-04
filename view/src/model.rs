@@ -506,6 +506,10 @@ pub struct Overhead {
     pub before_window_cpu_ns: u64,
     #[serde(default)]
     pub after_window_cpu_ns: u64,
+    /// The part of `attributed_cpu_ns` spent once rather than at a rate
+    /// (a symbol table loaded the first time a frame landed in it).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub one_time_cpu_ns: u64,
 }
 
 impl Overhead {
