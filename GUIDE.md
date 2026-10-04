@@ -138,16 +138,19 @@ with why.
 missing — the right sysctl, the right capability, the right flag. A refusal that
 sends a reader to the wrong one costs more than no message.
 
-> Two of those four are wrong, and both are recorded as defects by the
-> scenarios that found them. **"No viable backend" returns 2**, the same code as
-> a request that cannot mean anything, so a caller scripting around these
-> cannot tell *fix your request* from *run this somewhere else*
-> (`docs/scenarios/io.md`, defect 3). And **"cannot start collecting" returns
-> 1**, the code for a run that failed, where the honest answer for a mode the
-> collector does not implement is 3 (`docs/scenarios/io.md`, defect 1).
+> Two of those codes used to be wrong, and both were recorded as defects by
+> the scenarios that found them: "no viable backend" returned 2, the code of a
+> request that cannot mean anything (`docs/scenarios/io.md`, defect 3), and
+> "cannot start collecting" returned 1 for a mode the collector does not
+> implement (defect 1). Both are fixed; the table above is what the binary
+> exits with now.
 >
-> The *messages* are right in every case, which is why the sessions above check
-> those rather than the codes.
+> One session in the list still answers by machine: `proc-not-built.yml` pins
+> `bpf:tp` with `force:`, which skips the resolver's choice but not the pinned
+> backend's own probes, and a missing requirement is refused before a missing
+> collector. It exits **3** where tracefs is readable and the binary holds its
+> capabilities, and **1** where tracefs is root-only, as on this project's own
+> machine.
 
 ---
 
@@ -396,7 +399,7 @@ each mode costs and what it was held to.
 | `proc-exit.yml` | A program that ends is not a program that lost data. |
 | `proc-handles.yml` | Is this program running out of handles? |
 | `proc-loss.yml` | Did the poller keep up, and does it say so when it did not? |
-| `proc-not-built.yml` | The four `proc` sources this build does not implement yet. |
+| `proc-not-built.yml` | The four `proc` backends this build does not implement, pinned: exit 3, or 1 where tracefs is root-only. |
 | `proc-one-reading.yml` | What is this process holding, right now? |
 | `proc-sweep.yml` | Does every axis these two sources declare actually work? |
 | `proc-bpf-sweep.yml` | Does every axis the four event sources declare actually work? |

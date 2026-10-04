@@ -188,7 +188,7 @@ each mode costs and what it was held to.
 | `proc-exit.yml` | A program that ends is not a program that lost data. |
 | `proc-handles.yml` | Is this program running out of handles? |
 | `proc-loss.yml` | Did the poller keep up, and does it say so when it did not? |
-| `proc-not-built.yml` | The four `proc` sources this build does not implement yet. |
+| `proc-not-built.yml` | The four `proc` backends this build does not implement, pinned: exit 3, or 1 where tracefs is root-only. |
 | `proc-one-reading.yml` | What is this process holding, right now? |
 | `proc-sweep.yml` | Does every axis these two sources declare actually work? |
 | `proc-bpf-sweep.yml` | Does every axis the four event sources declare actually work? |
