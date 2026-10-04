@@ -1,40 +1,40 @@
 omn top │ fixture http-server │ 1.42s live                           view: snapshot │ collectors and target: at the end
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
-┌ heatmap -- latency over time: time across, latency up, density in colour ────────────────────────────────────────────┐
-│Not drawn yet. What this view needs, and what this run holds of it:                                                   │
+┌ heatmap -- net.socket latency over time ─────────────────────────────────────────────────────────────────────────────┐
+│ io.latency 0   sched.runqlat 175 in 70 rows   net.socket 78 in 39 rows   gpu.kernel refused                          │
+│78 socket calls, 1.29µs to 807µs, p50 45.4µs, p99 807µs ~low det live degraded x2                                     │
+│3 regimes  ~1.42µs 13% (10) in bursts every ~138ms, all through  │  ~47.0µs 85% (66) in bursts every ~110ms, all      │
+│through  │  ~435µs 2.6% (2) 219ms to 421ms                                                                            │
+│  count      ▁▂▂▂▂▂▂▁ ▆██▇  ▁▅▅▅▅▅▅▄▅▅▅▅▅▅▆▅▅▅▅▅▃     ▁▅▅▅▅▅▅▅▅▅▅▅▅▅▄▅▅▅▅▅▅▄▅▅▅▅▅▆▇▅▅▅▅▆▅▅▅▅▅▄▄▅▅▅▅▅▄  the whole run  │
+│    1ms┤·   ·   ·   · ▒▒▒▒  ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  ▏             1│
+│       │                │                                                                                             │
+│       │                │   ░▒▒▒▒▒▒░                                                                   ▏             1│
+│       │                │                                                                                             │
+│       │                │                                                                                             │
+│       │                │                                                                                             │
+│       │                │                                                                                             │
+│  100µs┤·   ·   ·   ·   │   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
+│       │                │          ░▒▒▒▒▒▒▒▒▒▒▒▒▒     ░▒▒▒▒▒▒▒▓▓▓▓▓▓▒▒▒▒▒▒▒░                           ██           10│
+│       │                │          ▒▓▓▓▓▓▓▒                                                            █             4│
+│       │              ▓▓▓▓  ░▓▓▓▓▓▓▒      ▓▓▓▓▓▓▒     ░▓▓▓▓▓▓▓▒▒▒▒▒▒▒▒▒▒▒▒▒▓▓▓▓▓▓██▓▓▓▓█▓▓▓▓▓▓▓▓▓▓▓▓▓  █████████    40│
+│       │                │   ░▒▒▒▒▒▒░▒▒▒▒▒▒░                                                            ▏             2│
+│       │              ▒▓▓▓                            ░▒▒▒▒▒▒▒▒▒▒▒▒▒░      ░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░░▒▒▒▒▒░  ██            8│
+│       │                │                                                                                             │
+│       │              ▒▒▒▒  ░▒▒▒▒▒▒░                                                                   ▏             2│
+│   10µs┤·   ·   ·   ·   │   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
+│       │                │                                                                                             │
+│       │                │                                                                                             │
+│       │     ░▒▒▒▒▒▒░   │                                                                              ▏             1│
+│       │                │                                                                                             │
+│       │                │                                                                                             │
+│       │                │          ░▒▒▒▒▒▒▒▒▒▒▒▒░     ░▒▒▒▒▒▒▒▒▒▒▒▒▒░      ░▒▒▒▒▒▒░                    █             5│
+│       │                │                                           ░▒▒▒▒▒▒░     ░▒▒▒▒▒▒▒▒▒▒▒░░▒▒▒▒▒░  █             4│
+│       └┬────────────┬──▲─────────┬────────────┬────────────┬────────────┬────────────┬────────────┬─                 │
+│        0          200ms        400ms        600ms        800ms        1.00s        1.20s        1.40s                │
+│   lost nothing lost                                                                                                  │
 │                                                                                                                      │
-│io.latency               0 events via bpf:raw_tp [raw] ~low det live degraded                                         │
-│                         block request latency, of the requests the target issued                                     │
-│sched.runqlat            70 events via bpf:raw_tp [raw] ~low det live degraded                                        │
-│                         run queue latency                                                                            │
-│net.socket               39 events via bpf:fentry [raw] ~low det live degraded x2                                     │
-│                         socket read and write latency                                                                │
-│gpu.kernel               refused: no collector is written for `gpu.kernel` on backend `vendor:cupti` yet              │
-│                         kernel durations                                                                             │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
+│▲ 244ms to 260ms   2 socket calls   p50 48.9µs   p99 807µs   max 807µs                                                │
+│  its slowest 807µs: Thread-1 (proce tid 2758974 recv 72B (alone in a 55.0ms kernel window)                           │
+│per cell ░<1 █1   rows 2.3/octave, columns 15.3ms each, kernel rows spread over their ~100ms window                   │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it
