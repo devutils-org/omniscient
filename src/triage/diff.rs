@@ -165,8 +165,19 @@ impl Profile {
                 ))
             }
         };
+        // Two runs' tasks are different tasks: a row keyed by its series
+        // (`--keys task`) is compared by its frames alone, the series' rows
+        // of one stack summed back into one.
+        let mut whole = chosen.clone();
+        for output in &mut whole.outputs {
+            if let Output::Stack { stacks, .. } = output {
+                for row in stacks {
+                    row.series = None;
+                }
+            }
+        }
         let single = RunOutput {
-            results: vec![chosen.clone()],
+            results: vec![whole],
             joins: Vec::new(),
             decompositions: Vec::new(),
         };

@@ -1175,10 +1175,18 @@ pub enum KeyKind {
     /// told apart by the node they landed on, and a sum across nodes is the
     /// one number that hides the imbalance being asked about.
     Node,
+    /// `dir:read`, `dir:write`, `dir:rx`, `dir:tx`: the direction a counted
+    /// byte or operation went.
+    ///
+    /// A key rather than an attribute so that a counter of both directions
+    /// is one series per direction under every aggregating emit, and a
+    /// `results.json` keeps the split the views draw live
+    /// (`DECISIONS.md`, the twenty-first wave).
+    Dir,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 13] = [
+    pub const ALL: [KeyKind; 14] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -1192,6 +1200,7 @@ impl KeyKind {
         KeyKind::Dev,
         KeyKind::Cpu,
         KeyKind::Node,
+        KeyKind::Dir,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -1209,6 +1218,7 @@ impl KeyKind {
             KeyKind::Dev => "dev",
             KeyKind::Cpu => "cpu",
             KeyKind::Node => "node",
+            KeyKind::Dir => "dir",
         }
     }
 }
@@ -2120,6 +2130,20 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_direction_is_a_key_spelled_dir() {
+        use crate::event::{Direction, KeyValue};
+        assert_eq!("dir".parse::<KeyKind>().unwrap(), KeyKind::Dir);
+        for dir in Direction::ALL {
+            let key = KeyValue::dir(dir);
+            assert_eq!(key.kind(), KeyKind::Dir);
+            assert_eq!(key.to_string(), format!("dir:{}", dir.as_str()));
+            let json = serde_json::to_string(&key).unwrap();
+            assert_eq!(serde_json::from_str::<KeyValue>(&json).unwrap(), key);
+        }
+        assert_eq!(KeyValue::dir(Direction::Rx).to_string(), "dir:rx");
+    }
 
     #[test]
     fn a_memory_node_is_a_key_spelled_node() {

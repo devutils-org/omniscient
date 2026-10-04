@@ -230,6 +230,63 @@ impl fmt::Display for NamedBy {
     }
 }
 
+/// What the labels of a result's stacks cannot say on their own: who named
+/// each frame, which perf maps did, and what each task executed. Built by a
+/// collector that captures stacks while its targets are alive, and carried
+/// into the results beside `stacks`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Provenance {
+    /// Each stack's frames' [`NamedBy`], root first, frame for frame with
+    /// the labels `stacks` holds under the same id; `null` for a frame
+    /// nothing named.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub named_by: BTreeMap<u64, Vec<Option<NamedBy>>>,
+    /// The perf maps that named a frame, so a reader need not read
+    /// `/tmp/perf-<pid>.map` back after the run, and can tell when it would
+    /// be reading another file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub perf_maps: Vec<PerfMapFile>,
+    /// The file each task executed, by the key the result writes for it
+    /// (`task:<tid>`, `proc:<pidns>+<pid>`), read while it was alive.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub executables: BTreeMap<String, String>,
+}
+
+impl Provenance {
+    pub fn is_empty(&self) -> bool {
+        self.named_by.is_empty() && self.perf_maps.is_empty() && self.executables.is_empty()
+    }
+
+    /// Only the stacks a result kept: a collector's table can hold stacks
+    /// no emitted row names.
+    pub fn keep_stacks(&mut self, stacks: &BTreeMap<u64, Vec<String>>) {
+        self.named_by.retain(|id, _| stacks.contains_key(id));
+    }
+}
+
+/// A perf map that named frames, as it was when read.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PerfMapFile {
+    pub path: String,
+    /// The file's device and inode; zero when it was never opened.
+    pub dev: u64,
+    pub ino: u64,
+}
+
+/// The file process `pid` executes, while it is alive (pid zero is this
+/// process). `None` once it has exited, for a kernel thread, and for a
+/// process this user may not inspect.
+pub fn executable_of(pid: i32) -> Option<String> {
+    let path = if pid <= 0 {
+        PathBuf::from("/proc/self/exe")
+    } else {
+        PathBuf::from(format!("/proc/{pid}/exe"))
+    };
+    std::fs::read_link(path)
+        .ok()
+        .map(|target| target.display().to_string())
+}
+
 /// What a recovered frame's label ends with.
 pub const RECOVERED_MARK: &str = " [recovered]";
 
@@ -378,6 +435,22 @@ pub struct Stack {
 impl Stack {
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
+    }
+
+    /// Each frame's label, root first: what [`crate::emit::Results::stacks`]
+    /// stores.
+    pub fn labels_root_first(&self) -> Vec<String> {
+        self.frames.iter().rev().map(Frame::label).collect()
+    }
+
+    /// Each frame's [`NamedBy`], root first, in the order of
+    /// [`Stack::labels_root_first`]: `None` for a frame nothing named.
+    pub fn named_by_root_first(&self) -> Vec<Option<NamedBy>> {
+        self.frames
+            .iter()
+            .rev()
+            .map(|frame| frame.named_by)
+            .collect()
     }
 
     pub fn depth(&self) -> usize {
@@ -564,6 +637,10 @@ pub struct Symbolizer {
     /// Whether a frame in anonymous executable memory went unnamed, and so a
     /// refresh has a reason to read the map again.
     perf_map_wanted: bool,
+    /// The file the process executes, read while it is alive -- at creation
+    /// and at each refresh, since an `execve` changes it -- because
+    /// `/proc/<pid>/exe` is gone once it exits and `comm` is cut at 15 bytes.
+    executable: Option<String>,
 }
 
 /// How often, at most, a frame the perf map does not name sends the
@@ -597,6 +674,7 @@ impl Symbolizer {
             perf_map_grew: false,
             perf_map_named: 0,
             perf_map_wanted: false,
+            executable: executable_of(pid),
         }
     }
 
@@ -641,7 +719,32 @@ impl Symbolizer {
             return false;
         }
         self.regions = fresh;
+        if let Some(executable) = executable_of(self.pid) {
+            self.executable = Some(executable);
+        }
         true
+    }
+
+    /// The file this symbolizer's process executes, as last read while it
+    /// was alive. `None` when it could never be read: a kernel thread, or a
+    /// process this user may not inspect.
+    pub fn executable(&self) -> Option<&str> {
+        self.executable.as_deref()
+    }
+
+    /// The perf map, when it named at least one frame: its path, and the
+    /// device and inode of the file read, so a reader tells this map from
+    /// another written later at the same path.
+    pub fn perf_map_file(&self) -> Option<PerfMapFile> {
+        if self.perf_map_named == 0 {
+            return None;
+        }
+        let (dev, ino) = self.perf_map.identity.unwrap_or((0, 0));
+        Some(PerfMapFile {
+            path: self.perf_map.path.display().to_string(),
+            dev,
+            ino,
+        })
     }
 
     /// Whether this machine let the kernel's symbols be read at all.
@@ -3466,7 +3569,79 @@ mod tests {
         let raw = RawStack::split(&[PERF_CONTEXT_USER, 0x7f00_0000_0800], CpuMode::User);
         let frame = &symbols.symbolize(&raw).frames[0];
         assert_eq!((frame.symbol.as_deref(), frame.named_by), (None, None));
+
+        // The map that named a frame is named, with the file's identity, so
+        // a reader of the results need not read it back after the run.
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            symbols.perf_map_file(),
+            Some(PerfMapFile {
+                path: path.display().to_string(),
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            })
+        );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Each frame's namer travels root first beside its label, and a frame
+    /// nothing named says so; a result keeps only its kept stacks' namers.
+    #[test]
+    fn a_stacks_namers_read_root_first_beside_its_labels() {
+        let stack = Stack {
+            frames: vec![
+                Frame::named(
+                    0x10,
+                    Context::User,
+                    None,
+                    "leaf".to_owned(),
+                    0,
+                    NamedBy::PerfMap,
+                ),
+                Frame::unresolved(0x20, Context::User),
+                Frame::named(
+                    0x30,
+                    Context::User,
+                    None,
+                    "main".to_owned(),
+                    0,
+                    NamedBy::Elf,
+                ),
+            ],
+        };
+        assert_eq!(stack.labels_root_first(), vec!["main", "0x20", "leaf"]);
+        assert_eq!(
+            stack.named_by_root_first(),
+            vec![Some(NamedBy::Elf), None, Some(NamedBy::PerfMap)]
+        );
+        let mut provenance = Provenance {
+            named_by: BTreeMap::from([(1, stack.named_by_root_first()), (2, Vec::new())]),
+            ..Provenance::default()
+        };
+        provenance.keep_stacks(&BTreeMap::from([(1, stack.labels_root_first())]));
+        assert_eq!(provenance.named_by.keys().collect::<Vec<_>>(), vec![&1]);
+        let json = serde_json::to_value(&provenance).unwrap();
+        assert_eq!(
+            json["named_by"]["1"],
+            serde_json::json!(["elf", null, "perf-map"])
+        );
+        assert!(json.get("executables").is_none() && json.get("perf_maps").is_none());
+    }
+
+    /// A process's executable is read while it lives, whole where `comm` is
+    /// cut, and kept once it is gone.
+    #[test]
+    fn a_symbolizer_knows_what_its_process_executes() {
+        let own = std::env::current_exe().unwrap().display().to_string();
+        assert_eq!(executable_of(0).as_deref(), Some(own.as_str()));
+        assert_eq!(
+            executable_of(std::process::id() as i32).as_deref(),
+            Some(own.as_str())
+        );
+        let symbols = Symbolizer::for_process(0);
+        assert_eq!(symbols.executable(), Some(own.as_str()));
+        assert_eq!(executable_of(i32::MAX), None);
     }
 
     /// A stack interned before the runtime wrote the line that names it is

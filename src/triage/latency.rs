@@ -2914,6 +2914,8 @@ mod tests {
             value_attr: String::new(),
             row_stamp: None,
             drains: Vec::new(),
+            fields: Default::default(),
+            provenance: Default::default(),
         }
     }
 

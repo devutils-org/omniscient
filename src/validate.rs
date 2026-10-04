@@ -308,6 +308,27 @@ fn check_joins(
 pub fn check_catalog(catalog: &Catalog) -> Vec<String> {
     let mut complaints = Vec::new();
     for entry in catalog.entries() {
+        // An absent kind is already `no`: a kind written `no` is there to say
+        // why, and one that does not is a refusal with no reason to quote.
+        for (kind, support) in &entry.targets {
+            let reason = entry.refused.get(kind).map(|reason| reason.trim());
+            if *support == TargetSupport::No && reason.is_none_or(str::is_empty) {
+                complaints.push(format!(
+                    "catalog entry `{}` writes `{kind}: no` without a reason: write `{kind}: \"no: \
+                     <why>\"`, the sentence a refused `--{kind}` quotes, or drop the key",
+                    entry.id
+                ));
+            }
+        }
+        for kind in entry.refused.keys() {
+            if entry.targets.get(kind) != Some(&TargetSupport::No) {
+                complaints.push(format!(
+                    "catalog entry `{}` gives a reason for refusing `{kind}` and does not refuse \
+                     it: a reason belongs on a `{kind}: \"no: <why>\"` target",
+                    entry.id
+                ));
+            }
+        }
         for emit in &entry.emits {
             if entry
                 .modes
@@ -414,6 +435,12 @@ fn check_target(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection
 /// Explains *why* a target is refused, using what the entry declares rather
 /// than a generic "unsupported".
 fn target_rejection_reason(entry: &Entry, kind: TargetKind) -> String {
+    // An entry that refuses a target for a reason of its own says so on its
+    // `targets:` line (`pid: "no: <why>"`), and that is the reason: the
+    // catalog is the data, so the reason lives there, not here.
+    if let Some(reason) = entry.refusal(kind) {
+        return reason.to_owned();
+    }
     let uncore = entry.backends.iter().any(|backend| {
         backend
             .requires
@@ -429,15 +456,7 @@ fn target_rejection_reason(entry: &Entry, kind: TargetKind) -> String {
         }
         TargetKind::Iface => format!("`{}` is not a network interface source", entry.id),
         TargetKind::Cpu => "this source is not attributable to a single core".to_owned(),
-        // An entry that refuses a target for a reason of its own says so in
-        // a caveat naming the flag, and that caveat is the reason: the
-        // catalog is the data, so the reason lives there, not here.
-        _ => entry
-            .caveats
-            .iter()
-            .find(|caveat| caveat.contains(&format!("`--{kind}`")) && caveat.contains("refused"))
-            .cloned()
-            .unwrap_or_else(|| format!("the catalog declares no `{kind}` support for this source")),
+        _ => format!("the catalog declares no `{kind}` support for this source"),
     }
 }
 
