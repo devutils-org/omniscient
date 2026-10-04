@@ -2071,10 +2071,12 @@ fn the_raw_events_of_a_run_are_the_readings_its_timeline_is_drawn_from() {
         "json",
     ]);
     if output.status.code() != Some(0) {
-        eprintln!(
-            "skipped: this machine does not serve power.energy: {}",
-            stderr(&output)
+        let message = stderr(&output);
+        assert!(
+            message.contains("no viable backend") || message.contains("cannot start collecting"),
+            "power.energy with `-e raw` was refused rather than unserved: {message}"
         );
+        eprintln!("skipped: this machine does not serve power.energy: {message}");
         return;
     }
     let document: serde_json::Value =

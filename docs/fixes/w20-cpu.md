@@ -150,3 +150,23 @@ on a kernel older than 6.8, where the prototype has three arguments.
   `cpu.profile` and `sched.offcpu`, not `cpu.oncpu_time`. It failed twice, so
   it is filed for the triage stream to read. `triage::a_contended_mutex_is_what_the_workload_queues_for`
   failed once in the file and passed alone.
+
+## Review
+
+Two findings, both gaps, both fixed: a skip now has to be the machine's.
+
+- **`tests/scenario_cpu.rs`, `oncpu_rows`**: a refusal skipped through
+  `machine_s_reason`, which only lays the message out. It now asserts
+  `machine_cannot_serve(&message)` first, as the file's other skips do, so a
+  refusal of the request itself (`-e raw`, `poll@100ms`) fails both
+  `bpf:raw_tp` tests instead of skipping them.
+- **`tests/scenario_power.rs`,
+  `the_raw_events_of_a_run_are_the_readings_its_timeline_is_drawn_from`**:
+  any non-zero exit was called "this machine does not serve power.energy". It
+  now asserts the stderr says `no viable backend` or `cannot start
+  collecting` before skipping.
+
+Shown, not reasoned: each guard was mutated (`-e raw` changed to `-e rawx`)
+and the three tests failed with "refused rather than unserved: ... unknown
+emit `rawx`"; restored, all three pass after `make` with no skip line
+(`--nocapture`). Tests run: those three, plus clippy and fmt, clean.

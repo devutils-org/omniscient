@@ -4751,6 +4751,10 @@ fn oncpu_rows(args: &[&str]) -> Option<(serde_json::Value, Vec<serde_json::Value
     let document = match run(&command) {
         Outcome::Measured { document, .. } => document,
         Outcome::Refused { message, .. } => {
+            assert!(
+                machine_cannot_serve(&message),
+                "cpu.oncpu_time was refused rather than unserved: {message}"
+            );
             eprintln!("skipped: {}", machine_s_reason(&message));
             return None;
         }
