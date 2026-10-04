@@ -1684,7 +1684,22 @@ filed to stream top as a possible one-sided bias. The decisions are in
    `trust::usage`, `ledger::reading` and `flame::hottest`; the request view's
    bytes; flows' socket-to-interface edge and file-to-device ribbon;
    `--against` and focus snapshots in the standard set.
-4. **Then, once `omn` is polished: a portability wave across
+4. **A lazy mode for people who are not experts** (the user, 2026-10-05).
+   `omn` can do everything, and that is what makes it heavy for a beginner:
+   a source, a mode, an emit, a stack mode and a duration before the first
+   number. The lazy path takes only a family and a target -- `cpu`, `mem`,
+   `io`, ... on a program or a pid -- and composes the rest from a default
+   per family, the minimum that answers that family's first question.
+   Optionally the person adds how much they are ready to pay (`low`, `med`,
+   ...), and the default picks within that cost band. The defaults are
+   catalog data, one per family, never code (a family owns its default the
+   way it owns its sources), and the run still says what it chose, what it
+   degraded and what it lost, so nothing silent comes in with the
+   convenience. To settle first in `DECISIONS.md`: the spelling (a family
+   name where a source is expected, or a verb of its own), how a default
+   relates to the sessions in `examples/`, and what a family with no safe
+   default answers.
+5. **Then, once `omn` is polished: a portability wave across
    distributions** -- Debian, Fedora, Ubuntu, Gentoo, NixOS; x86_64 and
    aarch64; containers -- each measured, never read from documentation: what
    `omn list` serves there, which backends attach, what each refusal says,
