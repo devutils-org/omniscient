@@ -35,6 +35,12 @@ pub struct Channel {
     losses_in_batch: u64,
     /// Kernel names first sent in the current batch.
     names_in_batch: Vec<Vec<u8>>,
+    /// The same for what is learnt inside kernels -- counters, sampled
+    /// program counters -- counted apart, because the socket of a launch
+    /// may be read by `gpu.kernel` too, and its losses are not these.
+    inside_in_batch: u64,
+    pub inside_lost: u64,
+    reported_inside_lost: u64,
     /// Activity records produced, and records that could not be sent.
     pub seen: u64,
     pub lost: u64,
@@ -85,6 +91,9 @@ impl Channel {
             pid,
             losses_in_batch: 0,
             names_in_batch: Vec::new(),
+            inside_in_batch: 0,
+            inside_lost: 0,
+            reported_inside_lost: 0,
             seen: 0,
             lost: 0,
             reported_lost: 0,
@@ -120,6 +129,16 @@ impl Channel {
             wire::OP_DROPPED | wire::OP_INCOMPLETE => {
                 self.losses_in_batch += count(payload);
             }
+            // Every record an inside reader reads: the setups, stall names
+            // and drain accounts a batch carries are lost with it as surely
+            // as its counters and program counters.
+            wire::OP_COUNTER_SETUP
+            | wire::OP_COUNTER
+            | wire::OP_STALL
+            | wire::OP_PC_CONFIG
+            | wire::OP_PC
+            | wire::OP_PC_DRAIN => self.inside_in_batch += 1,
+            wire::OP_INSIDE_LOST => self.inside_in_batch += count(payload),
             _ => {}
         }
     }
@@ -153,15 +172,19 @@ impl Channel {
             return;
         }
         let reported_before = self.reported_lost;
+        let inside_reported_before = self.reported_inside_lost;
         if self.lost > self.reported_lost {
             let lost = self.lost.to_ne_bytes();
             if self.writer().fits(lost.len()) {
                 self.reported_lost = self.lost;
-                let mut writer = self.writer();
-                writer.frame(wire::OP_LOST, &lost);
-                let (at, frames) = (writer.at, writer.frames);
-                self.at = at;
-                self.frames = frames;
+                self.raw_frame(wire::OP_LOST, &lost);
+            }
+        }
+        if self.inside_lost > self.reported_inside_lost {
+            let lost = self.inside_lost.to_ne_bytes();
+            if self.writer().fits(lost.len()) {
+                self.reported_inside_lost = self.inside_lost;
+                self.raw_frame(wire::OP_INSIDE_UNSENT, &lost);
             }
         }
         if self.frames == 0 {
@@ -194,6 +217,8 @@ impl Channel {
         if !sent {
             self.lost += self.losses_in_batch;
             self.reported_lost = reported_before;
+            self.inside_lost += self.inside_in_batch;
+            self.reported_inside_lost = inside_reported_before;
             for name in self.names_in_batch.drain(..) {
                 self.names.remove(&name);
             }
@@ -201,10 +226,20 @@ impl Channel {
         self.forget_batch();
     }
 
+    /// Appends a frame that is about the batch rather than in it.
+    fn raw_frame(&mut self, op: u8, payload: &[u8]) {
+        let mut writer = self.writer();
+        writer.frame(op, payload);
+        let (at, frames) = (writer.at, writer.frames);
+        self.at = at;
+        self.frames = frames;
+    }
+
     fn forget_batch(&mut self) {
         self.at = wire::HEADER;
         self.frames = 0;
         self.losses_in_batch = 0;
+        self.inside_in_batch = 0;
         self.names_in_batch.clear();
     }
 }
@@ -247,6 +282,27 @@ mod tests {
         channel.send();
         assert_eq!(channel.lost, 2 + 1_258 + 7);
         assert_eq!(channel.seen, 2);
+        assert_eq!(channel.inside_lost, 0, "activity is not inside a kernel");
+    }
+
+    /// What is learnt inside kernels is lost apart from activity: a launch
+    /// read by `gpu.kernel` and `gpu.profile` at once must not bill one
+    /// reader for the other's records.
+    #[test]
+    fn an_unsent_batch_counts_inside_records_apart() {
+        let mut channel = orphan();
+        channel.frame(wire::OP_KERNEL, &[0; wire::KERNEL_FIELDS]);
+        channel.frame(wire::OP_PC, &[0; wire::PC_SAMPLE_FIELDS]);
+        channel.frame(wire::OP_COUNTER, &[0; wire::COUNTER_FIELDS]);
+        channel.frame(wire::OP_PC_DRAIN, &[0; 56]);
+        channel.frame(wire::OP_COUNTER_SETUP, &[0; wire::COUNTER_SETUP_FIELDS]);
+        channel.frame(
+            wire::OP_INSIDE_LOST,
+            &[&40u64.to_ne_bytes()[..], &[0; 8]].concat(),
+        );
+        channel.send();
+        assert_eq!(channel.lost, 1);
+        assert_eq!(channel.inside_lost, 4 + 40);
     }
 
     #[test]

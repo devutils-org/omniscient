@@ -271,22 +271,95 @@
 
 - id: gpu.counters
   family: gpu
-  summary: "Internal GPU counters (SM occupancy, cache, stalls)"
+  summary: "Counters inside a kernel, per launch: instructions, memory, cache"
   unit: count
   backends:
-    - {id: "vendor:ncu", requires: ["nsight-compute"], cost: extreme}
+    - {id: "vendor:cupti", requires: ["cupti"], cost: extreme}
     - {id: "vendor:rocprof", requires: ["rocprofv3"], cost: extreme, equivalent: true}
-  modes: [snapshot]
-  emits: [summary]
-  targets: {pid: native, launch: native}
-  keys: [gpu]
-  filter_fields: [kernel, device]
-  determinism: high
+  modes: [trace]
+  emits: [raw, topk]
+  # A launch only, for gpu.kernel's reason: the range profiler runs inside
+  # the process that owns the context, loaded by the driver at `cuInit`.
+  targets: {launch: native}
+  keys: [task, proc]
+  filter_fields: [kernel, counter, verdict, device, pid]
+  # Per counter, measured in the run: the verdict on each event is the
+  # determinism, and a fixed level here would claim it for every counter.
+  determinism: medium
   caveats:
-    - "Does NOT measure time: kernel replay destroys the timeline. Its value is
-       counter determinism, and it locks clocks by default."
-    - "Only the counters the workload dominates are reproducible. Instruction
-       counts repeat bit for bit; DRAM traffic on a compute-bound kernel moved
-       16 % run to run on the hardware this was measured on. A fixed list of
-       reproducible GPU counters is a property of the benchmark, not of the
-       device."
+    - "A launched program only: CUPTI's range profiler works inside the
+       process that owns the CUDA context, and is loaded there by the driver at
+       `cuInit` through CUDA_INJECTION64_PATH. A `--pid` target is refused for
+       that reason, not for want of a backend."
+    - "One event per kernel and counter, at the end of the run: `value` is the
+       median over the kernel's launches, beside its `min`, `max`, `spread`
+       (the middle half's range over the median), `outliers` (launches more
+       than 10 % from the median) and a `verdict` -- `reproducible here`
+       within 10 %, `not dominated by this workload` past it, `measured once`
+       for a kernel launched once, `disturbed on every launch` when no launch
+       was the kernel's alone. The verdict is measured per run, never
+       declared: the DRAM bytes of a 64 MiB copy spread under 5 % here, those
+       of a compute-bound kernel over 100 %. The counters are
+       smsp__inst_executed.sum, dram__bytes_read.sum, dram__bytes_write.sum,
+       lts__t_bytes.sum and l1tex__t_bytes.sum; OMN_CUPTI_METRICS names
+       others."
+    - "Does NOT measure time: kernel replay runs every launch as many times as
+       the counters need passes, serialised, with CUPTI's save and restore
+       between them. A run asking for this and for gpu.kernel is refused. The
+       clocks are left as they are -- CUPTI locks them only when asked, and
+       omn never asks -- and their state is in the facts."
+    - "The device counts what its SMs and memory do, whoever's work it is: a
+       copy kernel's instruction count went from 3.2 million to 286 million on
+       every launch of a run here while another process ran its own kernels,
+       the same wrong count each time. So every launch is checked: the blocks
+       the SMs launched in its window (sm__ctas_launched.sum, always
+       collected) against its grid, and a launch with more is `disturbed`,
+       counted and left out of every counter. Work that launched no block in
+       the window escapes that check and shows as `outliers` or a spread. The
+       compute processes NVML lists on the device, once a second, are in the
+       facts."
+    - "Ranges pair with launches by order, and only when a batch's counts
+       agree and no range launched fewer blocks than its launch's grid; a
+       batch that holds a launch the library does not follow (a CUDA graph's
+       kernel nodes) is not reported at all and counted as unpaired, rather
+       than credited to its neighbours. Each event is stamped at its kernel's
+       first launch call, its ts_err_ns reaching to the arrival of the last
+       launch's counters (saturating at 4.29 s, the field's width)."
+
+- id: gpu.profile
+  family: gpu
+  summary: "Where time goes inside a kernel: sampled program counters and stall reasons"
+  unit: count
+  backends:
+    - {id: "vendor:cupti", requires: ["cupti"], cost: med}
+  modes: [trace]
+  emits: [stack, topk, raw]
+  targets: {launch: native}
+  keys: [task, proc]
+  filter_fields: [kernel, source, file, line, stall, pc, device, pid]
+  determinism: low
+  caveats:
+    - "A launched program only: CUPTI's PC sampling works inside the process
+       that owns the CUDA context, and is loaded there by the driver at
+       `cuInit` through CUDA_INJECTION64_PATH. A `--pid` target is refused for
+       that reason, not for want of a backend."
+    - "One event per program counter and stall reason, weighed by `samples`
+       and stacked as kernel;file:line;stall, so `-e stack` is a flame of the
+       device's cycles and `topk:10@source` ranks the lines. A kernel built
+       without line information (`-lineinfo`) is placed by offset, +0x<pc>,
+       and the facts name it."
+    - "A sample is taken every 2^12 cycles of each SM (OMN_CUPTI_PC_PERIOD sets
+       the exponent, 5 to 31), continuously: the program's kernels are not
+       serialised. A share of samples is a share of SM cycles, at whatever
+       clock the device ran; the clocks' state is in the facts."
+    - "CUPTI reports each stall reason twice, once restricted to the samples
+       where no instruction issued (`_not_issued`); that subset is left out,
+       so every sample counts once."
+    - "CUPTI accepts some configurations it does not apply. What it applied is
+       read back and a difference said (a period setting outside 5 to 31 is
+       said and the default used), and a run whose kernels took no sample at
+       all is a lost read, not an empty profile. One kernel without a sample
+       among others is not a loss: shorter than the period, it takes none.
+       CUPTI's own sample count over the program's kernels is held to the
+       samples reported; a shortfall past what it said it dropped is counted
+       as lost."

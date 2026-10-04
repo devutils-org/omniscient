@@ -251,16 +251,19 @@ fn a_device_wide_source_refuses_a_per_process_target() {
 
 #[test]
 fn a_source_whose_collector_is_not_written_says_so_instead_of_measuring() {
-    // `gpu.counters` needs a vendor profiling SDK and has no collector (the
-    // nineteenth wave wrote `gpu.kernel`'s, which this test used to name).
-    // Whether this machine has the SDK or not, the answer must name the gap
-    // rather than produce numbers from somewhere else.
+    // `gpu.counters` through `vendor:rocprof` has no collector (the
+    // nineteenth wave wrote `gpu.kernel`'s and `gpu.counters`' CUPTI ones,
+    // which this test used to name), so the backend is pinned. Whether this
+    // machine has the SDK or not, the answer must name the gap rather than
+    // produce numbers from somewhere else.
     let output = run(&[
         "gpu.counters",
         "--mode",
-        "snapshot",
+        "trace",
         "-e",
-        "summary",
+        "raw",
+        "--backend",
+        "force:vendor:rocprof",
         "--",
         "true",
     ]);
@@ -288,6 +291,7 @@ fn the_listing_marks_what_this_machine_can_serve() {
         "gpu.kernel",
         "gpu.api",
         "gpu.counters",
+        "gpu.profile",
     ] {
         assert!(
             listing.contains(source),

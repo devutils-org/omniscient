@@ -35,6 +35,30 @@ pub const REPORT_VARIABLE: &str = "OMN_CUPTI_REPORT";
 
 /// Kernel, memcpy and memset activity: `gpu.kernel`.
 pub const REPORT_ACTIVITY: u32 = 1;
+/// Counters per kernel launch, by CUPTI's range profiler in kernel replay:
+/// `gpu.counters`.
+pub const REPORT_COUNTERS: u32 = 2;
+/// Program counters sampled inside kernels, with their stall reasons, by
+/// CUPTI's PC sampling: `gpu.profile`.
+pub const REPORT_PC_SAMPLING: u32 = 4;
+
+/// The counters `gpu.counters` asks for, comma-separated, in place of
+/// [`DEFAULT_METRICS`]: CUPTI's metric names (`smsp__inst_executed.sum`...).
+pub const METRICS_VARIABLE: &str = "OMN_CUPTI_METRICS";
+/// Instruction, memory and cache counters: what a kernel executed, what it
+/// moved to and from video memory, and what went through its L2 and L1.
+pub const DEFAULT_METRICS: [&str; 5] = [
+    "smsp__inst_executed.sum",
+    "dram__bytes_read.sum",
+    "dram__bytes_write.sum",
+    "lts__t_bytes.sum",
+    "l1tex__t_bytes.sum",
+];
+
+/// The PC sampling period, as CUPTI takes it: a sample every `2^n` cycles of
+/// each SM, `n` from 5 to 31.
+pub const PC_PERIOD_VARIABLE: &str = "OMN_CUPTI_PC_PERIOD";
+pub const DEFAULT_PC_PERIOD: u32 = 12;
 
 /// Overrides of the activity buffers, for the tests that make CUPTI drop:
 /// the size of one buffer in bytes, and how many may be held at once.
@@ -88,6 +112,49 @@ pub const OP_UNKNOWN: u8 = 11;
 /// times to report: a count.
 pub const OP_INCOMPLETE: u8 = 12;
 
+/// Ops from here to [`OP_INSIDE_LAST`] are what the library learns *inside*
+/// kernels -- counters, sampled program counters -- for the readers of
+/// `gpu.counters` and `gpu.profile`. A reader of activity skips them
+/// without counting them as unknown: they are another reader's frames on the
+/// one socket of a launch, not a newer library's.
+pub const OP_INSIDE_FIRST: u8 = 13;
+/// The range profiler is set up on a context: [`CounterSetup`], then the
+/// metric ids, in the order [`OP_COUNTER`] refers to them.
+pub const OP_COUNTER_SETUP: u8 = 13;
+/// One counter of one kernel launch: [`Counter`].
+pub const OP_COUNTER: u8 = 14;
+/// Something inside a kernel the library could not report, by kind
+/// (`LOST_*`): a count, then the kind.
+pub const OP_INSIDE_LOST: u8 = 15;
+/// One stall reason of a context's table: its index, then its name.
+pub const OP_STALL: u8 = 16;
+/// PC sampling is configured on a context, and what CUPTI says it applied:
+/// [`PcConfig`].
+pub const OP_PC_CONFIG: u8 = 17;
+/// The samples one stall reason took at one program counter: [`PcSample`].
+pub const OP_PC: u8 = 18;
+/// One drain of the PC sampling buffers: [`PcDrain`].
+pub const OP_PC_DRAIN: u8 = 19;
+/// Records inside kernels the library had and could not send, cumulative:
+/// the [`OP_LOST`] of the inside readers.
+pub const OP_INSIDE_UNSENT: u8 = 20;
+pub const OP_INSIDE_LAST: u8 = 31;
+
+/// What an [`OP_INSIDE_LOST`] counts: ranges CUPTI's decode said it dropped.
+pub const LOST_RANGES: u32 = 1;
+/// Ranges and launches that did not pair: the counters of a launch with no
+/// range, or of a range with no launch, are not reported.
+pub const LOST_UNPAIRED: u32 = 2;
+/// Launches whose counters were never decoded: a decode or an evaluation
+/// failed, or the program exited with them still queued.
+pub const LOST_UNDECODED: u32 = 3;
+/// Samples PC sampling dropped, by its own count.
+pub const LOST_SAMPLES: u32 = 4;
+/// Times the PC sampling hardware buffer filled: samples lost, uncounted.
+pub const LOST_HW_BUFFER_FULL: u32 = 5;
+/// Program counters CUPTI still held when PC sampling was torn down, and
+/// that did not fit in the buffer it was handed.
+pub const LOST_PCS: u32 = 6;
 /// CUPTI's own numbers, from `cupti_activity.h`.
 pub mod cupti {
     pub const KIND_MEMCPY: u32 = 1;
@@ -335,13 +402,266 @@ impl Copy {
     }
 }
 
+/// The range profiler, as set up on one context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CounterSetup {
+    pub device: u32,
+    /// The replay passes CUPTI needs for the counters asked: each launch is
+    /// run this many times.
+    pub passes: u32,
+    /// The chip's name, interned.
+    pub chip: u32,
+    /// How many of the counters asked CUPTI accepted.
+    pub metrics: u32,
+}
+
+/// One counter of one kernel launch.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Counter {
+    /// The kernel's name and the counter's, interned.
+    pub kernel: u32,
+    pub metric: u32,
+    /// CUPTI's correlation id of the launch, which `gpu.kernel` carries too.
+    pub correlation: u32,
+    pub device: u32,
+    pub value: f64,
+    /// Whether the launch's own blocks were all the device ran in its
+    /// window, by [`WITNESS_METRIC`]: one of the `WITNESS_*` values.
+    pub witness: u32,
+    pub pad: u32,
+    /// When the launch call was entered, in the program's
+    /// `CLOCK_MONOTONIC`: the launch's work ran after it. Zero when the
+    /// entry was not seen.
+    pub launched_ns: u64,
+}
+
+/// The counter that says whether a launch's window held only the launch:
+/// the blocks the SMs launched, which the launch's grid fixes exactly.
+/// Another process's kernels running in the same window launch blocks of
+/// their own, and the count is then larger (measured: 892 to 1 032 for a
+/// grid of 272). Always collected, whatever else is asked.
+pub const WITNESS_METRIC: &str = "sm__ctas_launched.sum";
+/// The launch's blocks could not be compared: no grid known (a launch entry
+/// point whose parameters the library does not read), or no witness counter
+/// on this chip.
+pub const WITNESS_UNKNOWN: u32 = 0;
+/// The blocks launched in the window are the launch's grid, exactly.
+pub const WITNESS_CLEAN: u32 = 1;
+/// More blocks were launched than the grid has: other work was counted
+/// with the launch's. (Fewer is not a disturbance: the range is then not
+/// the launch's, and the library reports none of its batch.)
+pub const WITNESS_DISTURBED: u32 = 2;
+
+/// What PC sampling was asked on a context, and what CUPTI reports applying
+/// when asked back: a configuration it accepted and did not apply shows as a
+/// difference here, never as a status code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PcConfig {
+    pub device: u32,
+    pub period_asked: u32,
+    pub period_applied: u32,
+    /// `CUpti_PCSamplingCollectionMode`, as read back.
+    pub mode_applied: u32,
+    pub stall_reasons: u32,
+    pub pad: u32,
+}
+
+/// The samples one stall reason took at one program counter, since the last
+/// drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PcSample {
+    /// The module's CRC, as CUPTI computes it, and the offset of the program
+    /// counter in its function.
+    pub cubin_crc: u64,
+    pub pc_offset: u64,
+    /// The function's name, interned.
+    pub function: u32,
+    /// The stall reason's index in its context's table ([`OP_STALL`]).
+    pub stall: u32,
+    pub samples: u32,
+    /// The source line, and its file interned, when the module carries line
+    /// information; zero when it does not.
+    pub line: u32,
+    pub file: u32,
+    pub device: u32,
+}
+
+/// One drain of PC sampling: when, over what window, and what CUPTI counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PcDrain {
+    /// `CLOCK_MONOTONIC` at this drain and at the one before it (or at
+    /// enable): the samples were taken between the two.
+    pub at_ns: u64,
+    pub since_ns: u64,
+    /// CUPTI's counts over the drain: every sample taken, those it dropped,
+    /// and those in kernels that are not the program's.
+    pub total: u64,
+    pub dropped: u64,
+    pub non_user: u64,
+    pub pcs: u32,
+    pub device: u32,
+    /// Kernel launches the library saw on the context so far: kernels ran,
+    /// so a run of them with no sample at all is a configuration that was
+    /// accepted and not applied.
+    pub launches: u64,
+}
+
+pub const COUNTER_SETUP_FIELDS: usize = 4 * 4;
+pub const COUNTER_FIELDS: usize = 4 * 4 + 8 + 4 * 2 + 8;
+pub const PC_CONFIG_FIELDS: usize = 4 * 6;
+pub const PC_SAMPLE_FIELDS: usize = 8 * 2 + 4 * 6;
+pub const PC_DRAIN_FIELDS: usize = 8 * 5 + 4 * 2 + 8;
+
+impl CounterSetup {
+    pub fn encode(&self) -> Fields<COUNTER_SETUP_FIELDS> {
+        let mut fields = Fields::default();
+        fields
+            .u32(self.device)
+            .u32(self.passes)
+            .u32(self.chip)
+            .u32(self.metrics);
+        fields
+    }
+
+    pub fn decode(payload: &[u8]) -> Option<Self> {
+        let mut read = Reader::checked(payload, COUNTER_SETUP_FIELDS)?;
+        Some(Self {
+            device: read.u32(),
+            passes: read.u32(),
+            chip: read.u32(),
+            metrics: read.u32(),
+        })
+    }
+}
+
+impl Counter {
+    pub fn encode(&self) -> Fields<COUNTER_FIELDS> {
+        let mut fields = Fields::default();
+        fields
+            .u32(self.kernel)
+            .u32(self.metric)
+            .u32(self.correlation)
+            .u32(self.device)
+            .u64(self.value.to_bits())
+            .u32(self.witness)
+            .u32(self.pad)
+            .u64(self.launched_ns);
+        fields
+    }
+
+    pub fn decode(payload: &[u8]) -> Option<Self> {
+        let mut read = Reader::checked(payload, COUNTER_FIELDS)?;
+        Some(Self {
+            kernel: read.u32(),
+            metric: read.u32(),
+            correlation: read.u32(),
+            device: read.u32(),
+            value: f64::from_bits(read.u64()),
+            witness: read.u32(),
+            pad: read.u32(),
+            launched_ns: read.u64(),
+        })
+    }
+}
+
+impl PcConfig {
+    pub fn encode(&self) -> Fields<PC_CONFIG_FIELDS> {
+        let mut fields = Fields::default();
+        fields
+            .u32(self.device)
+            .u32(self.period_asked)
+            .u32(self.period_applied)
+            .u32(self.mode_applied)
+            .u32(self.stall_reasons)
+            .u32(self.pad);
+        fields
+    }
+
+    pub fn decode(payload: &[u8]) -> Option<Self> {
+        let mut read = Reader::checked(payload, PC_CONFIG_FIELDS)?;
+        Some(Self {
+            device: read.u32(),
+            period_asked: read.u32(),
+            period_applied: read.u32(),
+            mode_applied: read.u32(),
+            stall_reasons: read.u32(),
+            pad: read.u32(),
+        })
+    }
+}
+
+impl PcSample {
+    pub fn encode(&self) -> Fields<PC_SAMPLE_FIELDS> {
+        let mut fields = Fields::default();
+        fields
+            .u64(self.cubin_crc)
+            .u64(self.pc_offset)
+            .u32(self.function)
+            .u32(self.stall)
+            .u32(self.samples)
+            .u32(self.line)
+            .u32(self.file)
+            .u32(self.device);
+        fields
+    }
+
+    pub fn decode(payload: &[u8]) -> Option<Self> {
+        let mut read = Reader::checked(payload, PC_SAMPLE_FIELDS)?;
+        Some(Self {
+            cubin_crc: read.u64(),
+            pc_offset: read.u64(),
+            function: read.u32(),
+            stall: read.u32(),
+            samples: read.u32(),
+            line: read.u32(),
+            file: read.u32(),
+            device: read.u32(),
+        })
+    }
+}
+
+impl PcDrain {
+    pub fn encode(&self) -> Fields<PC_DRAIN_FIELDS> {
+        let mut fields = Fields::default();
+        fields
+            .u64(self.at_ns)
+            .u64(self.since_ns)
+            .u64(self.total)
+            .u64(self.dropped)
+            .u64(self.non_user)
+            .u32(self.pcs)
+            .u32(self.device)
+            .u64(self.launches);
+        fields
+    }
+
+    pub fn decode(payload: &[u8]) -> Option<Self> {
+        let mut read = Reader::checked(payload, PC_DRAIN_FIELDS)?;
+        Some(Self {
+            at_ns: read.u64(),
+            since_ns: read.u64(),
+            total: read.u64(),
+            dropped: read.u64(),
+            non_user: read.u64(),
+            pcs: read.u32(),
+            device: read.u32(),
+            launches: read.u64(),
+        })
+    }
+}
+
 /// Reads native-endian fields from a payload whose length was checked.
 pub struct Reader<'a> {
     pub payload: &'a [u8],
     pub at: usize,
 }
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
+    /// A reader of a payload at least `length` bytes long.
+    pub fn checked(payload: &'a [u8], length: usize) -> Option<Self> {
+        (payload.len() >= length).then_some(Self { payload, at: 0 })
+    }
+
     pub fn u64(&mut self) -> u64 {
         let value = u64::from_ne_bytes(
             self.payload[self.at..self.at + 8]

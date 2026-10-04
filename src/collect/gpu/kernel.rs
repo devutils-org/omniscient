@@ -43,7 +43,7 @@ use crate::request::Target;
 
 #[allow(dead_code)]
 #[path = "../../../cupti/src/wire.rs"]
-mod wire;
+pub(super) mod wire;
 
 /// Where the injection library is looked for, relative to the directory of
 /// the `omn` binary: beside it (the build tree and the release's flat
@@ -152,7 +152,12 @@ impl Socket {
         self.unread.len() - 1
     }
 
-    fn close_write(&mut self) {
+    /// What the program is asked to report: every reader's bit.
+    pub(super) fn report(&self) -> u32 {
+        self.report
+    }
+
+    pub(super) fn close_write(&mut self) {
         close(&mut self.write_fd);
     }
 
@@ -212,7 +217,7 @@ pub struct KernelPrepared {
 }
 
 impl KernelPrepared {
-    fn new(library: PathBuf, report: u32) -> Result<Self, String> {
+    pub(super) fn new(library: PathBuf, report: u32) -> Result<Self, String> {
         let mut socket = Socket::new(library, report)?;
         let reader = socket.subscribe();
         Ok(Self {
@@ -222,10 +227,14 @@ impl KernelPrepared {
     }
 
     /// The channel this collector reads, for a CUPTI source of the same
-    /// launch that joins it. Unused until a second CUPTI source exists.
-    #[allow(dead_code)]
+    /// launch that joins it (`counters.rs`).
     pub(super) fn socket(&self) -> Rc<RefCell<Socket>> {
         Rc::clone(&self.socket)
+    }
+
+    /// This collector's reader of the channel.
+    pub(super) fn reader(&self) -> usize {
+        self.reader
     }
 }
 
@@ -501,6 +510,9 @@ impl KernelCollector {
                 }
             }
             wire::OP_UNKNOWN => {}
+            // What the library learns inside kernels, for the readers of
+            // `gpu.counters` and `gpu.profile` on the same socket: theirs.
+            wire::OP_INSIDE_FIRST..=wire::OP_INSIDE_LAST => {}
             _ => {
                 self.losses.undecoded += 1;
                 self.losses.note(

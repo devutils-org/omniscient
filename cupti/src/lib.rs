@@ -6,7 +6,12 @@
 //! records what the contexts of its own process do, so `gpu.kernel` serves a
 //! program `omn` launches and refuses a running one with that reason.
 //!
-//! What it does, once armed (`OMN_CUPTI_REPORT`):
+//! What it does, once armed (`OMN_CUPTI_REPORT`, a bit set): it says hello
+//! and takes a calibration bracket whatever it was armed for, then, for
+//! [`wire::REPORT_COUNTERS`], sets up CUPTI's range profiler on every context
+//! (`profiler.rs`, `gpu.counters`), for [`wire::REPORT_PC_SAMPLING`] PC
+//! sampling (`pcsampling.rs`, `gpu.profile`) -- never both, which CUPTI cannot
+//! run in one process -- and for [`wire::REPORT_ACTIVITY`] (`gpu.kernel`):
 //!
 //! - enables CUPTI's concurrent-kernel, memcpy and memset activity, and hands
 //!   CUPTI buffers to fill -- at most [`wire::DEFAULT_BUFFERS`] of
@@ -18,7 +23,9 @@
 //! - turns every record into a frame on the channel to `omn`
 //!   (`channel.rs`), with what CUPTI dropped and what could not be sent;
 //! - at exit, forces a last flush and says so ([`wire::OP_END`]), so a run
-//!   that ended without that frame knows its tail may be missing.
+//!   that ended without that frame knows its tail may be missing. What was
+//!   learnt inside kernels is read back from CUPTI first, while the program's
+//!   contexts are still there.
 //!
 //! **Never fail the program.** Every CUPTI call that fails is reported as an
 //! [`wire::OP_ERROR`] frame and the library disarms; `InitializeInjection`
@@ -43,6 +50,8 @@
 
 mod api;
 mod channel;
+mod pcsampling;
+mod profiler;
 #[allow(dead_code)]
 mod wire;
 
@@ -84,7 +93,7 @@ pub extern "C" fn InitializeInjection() -> c_int {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(wire::REPORT_ACTIVITY);
-    if report & wire::REPORT_ACTIVITY == 0 {
+    if report == 0 {
         return 1;
     }
     if let Err(reason) = arm(report) {
@@ -94,9 +103,12 @@ pub extern "C" fn InitializeInjection() -> c_int {
     1
 }
 
+/// What this process was armed for, once [`arm`] got that far.
+static ARMED: AtomicU32 = AtomicU32::new(0);
+
 /// Whether this is the process that initialised, rather than a child forked
 /// from it, which holds a copy of the parent's state and none of its threads.
-fn owner() -> bool {
+pub(crate) fn owner() -> bool {
     OWNER.load(Ordering::SeqCst) == std::process::id()
 }
 
@@ -106,17 +118,17 @@ fn lock() -> std::sync::MutexGuard<'static, Option<Channel>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn with_channel(f: impl FnOnce(&mut Channel)) {
+pub(crate) fn with_channel(f: impl FnOnce(&mut Channel)) {
     if let Some(channel) = lock().as_mut() {
         f(channel);
     }
 }
 
-fn error(reason: &str) {
+pub(crate) fn error(reason: &str) {
     with_channel(|channel| channel.frame(wire::OP_ERROR, reason.as_bytes()));
 }
 
-fn send_now() {
+pub(crate) fn send_now() {
     with_channel(Channel::send);
 }
 
@@ -131,6 +143,16 @@ fn setting(name: &str, default: usize) -> usize {
 fn arm(report: u32) -> Result<(), String> {
     let cupti = Cupti::open()?;
     let cupti = CUPTI.get_or_init(|| cupti);
+    let inside = report & (wire::REPORT_COUNTERS | wire::REPORT_PC_SAMPLING);
+    if inside == wire::REPORT_COUNTERS | wire::REPORT_PC_SAMPLING {
+        // `omn` refuses the pair before the launch; this is the library
+        // keeping the same rule for whoever sets the variable by hand.
+        return Err(
+            "counters and PC sampling were both asked: CUPTI's range profiler \
+                    and its PC sampling cannot run in one process, so neither was armed"
+                .to_owned(),
+        );
+    }
     BUFFER_BYTES.store(
         setting(wire::BUFFER_BYTES_VARIABLE, wire::DEFAULT_BUFFER_BYTES).max(4096),
         Ordering::Relaxed,
@@ -152,6 +174,21 @@ fn arm(report: u32) -> Result<(), String> {
         .u64(BUFFERS.load(Ordering::Relaxed) as u64);
     with_channel(|channel| channel.frame(wire::OP_HELLO, hello.as_slice()));
     calibrate(cupti, 32);
+    // SAFETY: registering a function with C linkage that takes nothing.
+    unsafe { libc::atexit(at_exit) };
+
+    if report & wire::REPORT_COUNTERS != 0 {
+        profiler::arm(cupti)?;
+        ARMED.fetch_or(wire::REPORT_COUNTERS, Ordering::SeqCst);
+    }
+    if report & wire::REPORT_PC_SAMPLING != 0 {
+        pcsampling::arm(cupti)?;
+        ARMED.fetch_or(wire::REPORT_PC_SAMPLING, Ordering::SeqCst);
+    }
+    if report & wire::REPORT_ACTIVITY == 0 {
+        send_now();
+        return Ok(());
+    }
 
     let check = |what: &str, code: api::Result| {
         if code == c::SUCCESS {
@@ -181,8 +218,7 @@ fn arm(report: u32) -> Result<(), String> {
         .name("omn-cupti-flush".to_owned())
         .spawn(move || flush_loop(flush_ms))
         .map_err(|error| format!("cannot start the flush thread: {error}"))?;
-    // SAFETY: registering a function with C linkage that takes nothing.
-    unsafe { libc::atexit(at_exit) };
+    ARMED.fetch_or(wire::REPORT_ACTIVITY, Ordering::SeqCst);
     Ok(())
 }
 
@@ -207,7 +243,7 @@ fn calibrate(cupti: &Cupti, tries: usize) {
     }
 }
 
-fn monotonic_ns() -> u64 {
+pub(crate) fn monotonic_ns() -> u64 {
     let mut time = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -250,12 +286,23 @@ extern "C" fn at_exit() {
     let Some(cupti) = CUPTI.get() else {
         return;
     };
+    let armed = ARMED.load(Ordering::SeqCst);
+    // What was learnt inside kernels first: tearing it down is CUDA work
+    // that must run while the program's contexts are still there.
+    if armed & wire::REPORT_COUNTERS != 0 {
+        profiler::finish();
+    }
+    if armed & wire::REPORT_PC_SAMPLING != 0 {
+        pcsampling::finish();
+    }
     // The bracket first, so that it reaches `omn` before the records the
     // flush hands back, which all precede it: they are converted between
     // brackets rather than extrapolated past the last one.
     calibrate(cupti, 32);
-    // SAFETY: a forced flush hands back every buffer, complete or not.
-    unsafe { (cupti.flush_all)(c::FLUSH_FORCED) };
+    if armed & wire::REPORT_ACTIVITY != 0 {
+        // SAFETY: a forced flush hands back every buffer, complete or not.
+        unsafe { (cupti.flush_all)(c::FLUSH_FORCED) };
+    }
     with_channel(|channel| {
         let mut end = wire::Fields::<24>::default();
         end.u64(channel.seen)

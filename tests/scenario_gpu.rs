@@ -1781,9 +1781,22 @@ fn a_request_that_cannot_mean_anything_is_rejected_and_names_what_cannot() {
 #[test]
 fn a_source_this_build_does_not_implement_exits_three_and_names_the_backend() {
     // `gpu.kernel` left this list in the nineteenth wave, when its CUPTI
-    // collector was written (`tests/gpu_kernel.rs`).
-    for (source, mode, emit, backend) in [("gpu.counters", "snapshot", "summary", "vendor:ncu")] {
-        let output = omn(&[source, "--mode", mode, "--emit", emit, "--", "true"]);
+    // collector was written (`tests/gpu_kernel.rs`), and `gpu.counters`
+    // through CUPTI with it (`tests/gpu_counters.rs`): what is left is the
+    // chain's AMD backend, pinned.
+    for (source, mode, emit, backend) in [("gpu.counters", "trace", "raw", "vendor:rocprof")] {
+        let pinned = format!("force:{backend}");
+        let output = omn(&[
+            source,
+            "--mode",
+            mode,
+            "--emit",
+            emit,
+            "--backend",
+            &pinned,
+            "--",
+            "true",
+        ]);
         // Every backend of the chain is probed before the build is asked for a
         // collector, so a machine without the vendor's library answers first.
         if stderr(&output).contains("has no viable backend on this machine") {
