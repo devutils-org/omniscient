@@ -83,10 +83,13 @@ causes:
       # interpreter's, presented as the suspect.
       never_says: ['hottest function `']
       # Both ways say a flat interpreter profile as one and name no function
-      # (`docs/mcp.md`, "A flat profile of an interpreter is said as one"), so
-      # `both-ways-name-the-same-suspect` compares no two C leaves of it: the
-      # coin the seventeenth wave's flaky tally counted is gone with python's
-      # finding 2.
+      # (`docs/mcp.md`, "A flat profile of an interpreter is said as one"):
+      # held on each way by `the-dominant-stack-ends-in-the-known-frame`, and
+      # `both-ways-name-the-same-suspect` fails if one way names a function
+      # and the other none. No two C leaves of it are compared: the coin the
+      # seventeenth wave's flaky tally counted is gone with python's finding
+      # 2.
+      names_no_function: true
       agrees:
         - row: on-cpu
           with: account.cpu_ns

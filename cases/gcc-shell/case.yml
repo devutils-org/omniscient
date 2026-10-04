@@ -97,9 +97,10 @@ causes:
     expect:
       limit: cpu
       state: on-cpu
-      # The main thread waits for its child in wait4: not a timer, a pipe or
-      # a socket, which is what the sentence for a sleep says it is.
-      never_says: [a timer, a pipe or a socket]
+      # The main thread waits for its child in wait4, and the time is the
+      # child's: the verdict must not stop at the wait and call the run
+      # asleep, which is what the sentence for a sleep says.
+      never_says: [asleep on something that is not a lock]
       # The verdict follows the driver's wait into the compiler.
       says: ['for a child, in `wait4`']
       agrees:
@@ -143,7 +144,7 @@ causes:
     expect:
       limit: cpu-queue
       state: runnable
-      never_says: [a timer, a pipe or a socket]
+      never_says: [asleep on something that is not a lock]
       # The verdict follows the driver's wait into the compiler.
       says: ['for a child, in `wait4`']
       agrees:
@@ -158,9 +159,16 @@ causes:
 
 open_findings:
   - check: every-cited-number-agrees-with-the-reference
+    cause: a-cpu-shared-with-two-competitors
     filed: >-
       docs/fixes/w18-cases.md, "a job is a chain of processes": the contended
       compile's `runnable` is the one process the wait was followed into
       (cc1, 3.4 s), against the wait for a cpu of the whole chain the driver
       ran one after the other (3.8 s: the driver, cc1 and `as`); the
       decomposition takes the wait's place with one process's rows
+  - check: the-verdict-s-json-spells-its-limit-as-the-text-does
+    cause: a-cpu-shared-with-two-competitors
+    filed: >-
+      docs/fixes/w18-cases.md, "The JSON's `limit` is `cpu_queue`, the text's
+      `cpu-queue`": `Limit` is serialised in snake_case where `Limit::as_str`,
+      the text and the catalog say `cpu-queue`

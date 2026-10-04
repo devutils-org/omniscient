@@ -39,7 +39,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -52,9 +52,9 @@ const OMN: &str = env!("CARGO_BIN_EXE_omn");
 ///
 /// The person's way asks with no budget, and so does the agent's: since the
 /// eighteenth wave `run_session` takes none unless asked (`docs/fixes/
-/// w18-mcp.md`), which is why [`BUDGET`] passes -- not because a budget now
-/// holds for a program that waits. A server that required one again would be
-/// asked with this one, and a run it stopped asked again with
+/// w18-mcp.md`), so [`BUDGET`] is unchecked -- a cost held against no
+/// ceiling is not a pass. A server that required one again would be asked
+/// with this one, [`BUDGET`] then made, and a run it stopped asked again with
 /// [`UNBOUNDED_BUDGET`], so the rest of the checks still answer the person's
 /// question while [`BUDGET`] fails.
 const MODEL_BUDGET: &str = "100%";
@@ -201,6 +201,11 @@ struct Expect {
     /// dominant block began in off it.
     #[serde(default)]
     leaf: Option<String>,
+    /// The answer names no function as the hottest: a flat interpreter
+    /// profile, whose hottest leaf is the interpreter's and not the
+    /// program's. Checked on each way, as `leaf` is.
+    #[serde(default)]
+    names_no_function: bool,
     /// A frame the dominant stack must pass through.
     #[serde(default)]
     through: Option<String>,
@@ -245,6 +250,23 @@ struct OpenFinding {
     /// finding, never as a failure.
     #[serde(default)]
     sometimes: bool,
+    /// The one cause the finding is about. Absent, it is the whole case's: a
+    /// failure of the check on any cause is the finding. A finding filed
+    /// against one cause names it, so the check still fails on the others.
+    #[serde(default)]
+    cause: Option<String>,
+}
+
+impl OpenFinding {
+    /// Whether a report line -- `case/cause` or `case/cause/way` -- of
+    /// `check` is this finding's.
+    fn covers(&self, at: &str, check: &str) -> bool {
+        self.check == check
+            && self
+                .cause
+                .as_deref()
+                .is_none_or(|cause| at.split('/').nth(1) == Some(cause))
+    }
 }
 
 // --------------------------------------------------------------- extractors
@@ -653,8 +675,11 @@ fn withheld(code: Option<i32>, said: &str) -> Option<String> {
 struct Answer {
     /// `cli` or `mcp`.
     way: &'static str,
-    /// The verdict's `limit`; only the person's way names one.
+    /// The verdict's `limit`; only the person's way names one. As the text
+    /// and the catalog spell it, so it compares with the case's.
     limit: Option<String>,
+    /// The verdict's `limit` as its JSON wrote it, for [`LIMIT_SPELLED`].
+    limit_written: Option<String>,
     /// The dominant state, before any qualifier.
     state: String,
     /// The dominant stack's leaf, when there is one.
@@ -675,6 +700,13 @@ struct Answer {
     sentence: String,
     /// The binary that answered and the capabilities it carried.
     privileges: String,
+    /// How each state's row was read, by state: its source and its kind
+    /// (`traced`, `sampled`, ...). The backend a row was served by is what a
+    /// privilege changes, and these are what either answer says of it.
+    read_as: BTreeMap<String, (String, String)>,
+    /// The ceiling `run_session` was asked with; `None` when it was asked
+    /// with none.
+    budget: Option<String>,
     /// What the answer says about how it knows.
     how: How,
 }
@@ -730,10 +762,13 @@ fn read_cli(stdout: &str) -> Result<Answer, String> {
     let mut answer = Answer {
         way: "cli",
         // As the text and the catalog spell it: the JSON's `cpu_queue` is
-        // the text's `cpu-queue`.
+        // the text's `cpu-queue`. The JSON's own spelling is kept, and
+        // checked apart (`LIMIT_SPELLED`), so the known cause is not
+        // decided by it.
         limit: verdict["limit"]
             .as_str()
             .map(|limit| limit.replace('_', "-")),
+        limit_written: verdict["limit"].as_str().map(str::to_owned),
         state: base_state(verdict["state"].as_str().unwrap_or("")),
         sentence: verdict["sentence"].as_str().unwrap_or("").to_owned(),
         whole: (
@@ -750,6 +785,13 @@ fn read_cli(stdout: &str) -> Result<Answer, String> {
     let top_state = verdict["state"].as_str().unwrap_or("");
     for state in run["states"].as_array().into_iter().flatten() {
         let name = state["state"].as_str().unwrap_or("").to_owned();
+        answer.read_as.insert(
+            base_state(&name),
+            (
+                state["source"].as_str().unwrap_or("").to_owned(),
+                state["kind"].as_str().unwrap_or("").to_owned(),
+            ),
+        );
         answer
             .how
             .evidence
@@ -841,10 +883,20 @@ fn is_interpreter(name: &str) -> bool {
 }
 
 /// The symbols of the perf maps a names note cites (`perf-4242.map:
-/// perf-map, ...`), read from `/tmp`, where every runtime writes them: a
-/// frame whose label is one of them is a frame the map named.
-fn perf_map_symbols(notes: &[String]) -> BTreeSet<String> {
+/// perf-map, ...`), read from `/tmp`, where every runtime writes them
+/// whatever `TMPDIR` says, and where the triage reads them
+/// (`PerfMapNames::of` in `src/triage/diff.rs`): a frame whose label is one
+/// of them is a frame the map named.
+///
+/// A map last written before `since`, the time the run was asked for, is an
+/// earlier process's that had the same pid: it is not read, and is returned
+/// in the second half to be said.
+fn perf_map_symbols(
+    notes: &[String],
+    since: Option<SystemTime>,
+) -> (BTreeSet<String>, Vec<String>) {
     let mut symbols = BTreeSet::new();
+    let mut stale = Vec::new();
     for note in notes {
         let Some(at) = note.find("names came from -- ") else {
             continue;
@@ -859,7 +911,20 @@ fn perf_map_symbols(notes: &[String]) -> BTreeSet<String> {
             if !map.starts_with("perf-") || !map.ends_with(".map") || map.contains('/') {
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(Path::new("/tmp").join(map)) else {
+            let path = Path::new("/tmp").join(map);
+            let before = |since: SystemTime| {
+                std::fs::metadata(&path)
+                    .and_then(|meta| meta.modified())
+                    .is_ok_and(|modified| modified < since)
+            };
+            if since.is_some_and(before) {
+                stale.push(format!(
+                    "{}: last written before the run, an earlier process's: not read",
+                    path.display()
+                ));
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
             // `START SIZE SYMBOL`, the symbol to the end of the line.
@@ -870,7 +935,7 @@ fn perf_map_symbols(notes: &[String]) -> BTreeSet<String> {
             }));
         }
     }
-    symbols
+    (symbols, stale)
 }
 
 /// A row's amount, by state before any qualifier.
@@ -917,8 +982,13 @@ fn table_top(table: &Value) -> Option<(f64, String, String, f64)> {
 ///   and an interpreter's flat profile -- charged by leaves, none on half
 ///   the samples -- naming no function.
 ///
-/// `programs` are the names the launched command's words go by.
-fn read_mcp(answer_doc: &Value, programs: &[String]) -> Result<Answer, String> {
+/// `programs` are the names the launched command's words go by; `since` is
+/// when the run was asked for, before which a perf map is not this run's.
+fn read_mcp(
+    answer_doc: &Value,
+    programs: &[String],
+    since: Option<SystemTime>,
+) -> Result<Answer, String> {
     let read_back = &answer_doc["read_back"];
     let tables: Vec<&Value> = read_back["decompositions"]
         .as_array()
@@ -972,6 +1042,13 @@ fn read_mcp(answer_doc: &Value, programs: &[String]) -> Result<Answer, String> {
         .map(|id| format!("decomposition `{id}`"));
     for row in table["rows"].as_array().into_iter().flatten() {
         let state = row["state"].as_str().unwrap_or("").to_owned();
+        answer.read_as.insert(
+            base_state(&state),
+            (
+                row["source"].as_str().unwrap_or("").to_owned(),
+                row["kind"].as_str().unwrap_or("").to_owned(),
+            ),
+        );
         answer.how.evidence.push((
             state.clone(),
             row["evidence_means"]["level"]
@@ -1051,11 +1128,15 @@ fn read_mcp(answer_doc: &Value, programs: &[String]) -> Result<Answer, String> {
         }
         raw_seen = true;
         for event in output["events"].as_array().into_iter().flatten() {
-            let of_task = event["keys"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|key| key["task"]["tid"].as_u64() == tid);
+            // A table keyed by something other than a task has no events of
+            // its own: none is taken as its, rather than every event that
+            // carries no task.
+            let of_task = tid.is_some()
+                && event["keys"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|key| key["task"]["tid"].as_u64() == tid);
             if !of_task {
                 continue;
             }
@@ -1092,7 +1173,8 @@ fn read_mcp(answer_doc: &Value, programs: &[String]) -> Result<Answer, String> {
         ));
     }
     if source == "cpu.profile" {
-        let named = perf_map_symbols(&notes);
+        let (named, stale) = perf_map_symbols(&notes, since);
+        answer.how.unseen.extend(stale);
         let mut charged: BTreeMap<String, (f64, bool)> = BTreeMap::new();
         let (mut total, mut interpreted) = (0.0, 0.0);
         for (stack, weight) in &weighed {
@@ -1158,10 +1240,12 @@ const NOTHING_FALSE: &str = "the-sentence-claims-nothing-false";
 const BUDGET: &str = "the-agent-s-way-answers-within-a-model-s-budget";
 const SAYS: &str = "the-sentence-says-what-the-case-knows";
 const PRIVILEGES: &str = "both-ways-run-with-the-same-privileges";
+const LIMIT_SPELLED: &str = "the-verdict-s-json-spells-its-limit-as-the-text-does";
 
 /// Every check this file knows, so a case cannot list one that does not
 /// exist.
-const CHECKS: [&str; 12] = [
+const CHECKS: [&str; 13] = [
+    LIMIT_SPELLED,
     SAME_SUSPECT,
     KNOWN_CAUSE,
     KNOWN_LEAF,
@@ -1277,6 +1361,15 @@ fn check_answer(
         ),
         _ => {}
     }
+    if expect.names_no_function {
+        report.pass_or(at, KNOWN_LEAF, answer.leaf.is_none(), || {
+            format!(
+                "the answer names `{}` as the hottest function, where the case knows the \
+                 profile is the interpreter's and names none",
+                answer.leaf.as_deref().unwrap_or("")
+            )
+        });
+    }
 
     if let Some(through) = &expect.through {
         let named = answer.frames.iter().filter(|f| is_named(f)).count();
@@ -1326,6 +1419,14 @@ fn check_answer(
         });
     }
     if answer.way == "cli" {
+        if let Some(written) = &answer.limit_written {
+            report.pass_or(at, LIMIT_SPELLED, !written.contains('_'), || {
+                format!(
+                    "the JSON's `limit` is `{written}`, the text's and the catalog's `{}`",
+                    written.replace('_', "-")
+                )
+            });
+        }
         if !expect.says.is_empty() {
             let missing: Vec<&String> = expect
                 .says
@@ -1762,10 +1863,12 @@ fn ask_mcp(
         "duration": format!("{}s", RUN_CEILING.as_secs()),
     });
     let mut required = None;
+    // A perf map last written before this is an earlier process's.
+    let asked_at = SystemTime::now();
     let ran = match budget {
         Some(budget) => {
             arguments["budget"] = budget.into();
-            mcp.call("run_session", arguments)?
+            mcp.call("run_session", arguments.clone())?
         }
         // As a model asks: with no ceiling, the person's question has none;
         // with the generous one where the server insists on a ceiling.
@@ -1773,7 +1876,7 @@ fn ask_mcp(
             Err(refused) if refused.contains("`budget` is required") => {
                 required = Some(refused);
                 arguments["budget"] = MODEL_BUDGET.into();
-                mcp.call("run_session", arguments)?
+                mcp.call("run_session", arguments.clone())?
             }
             other => other?,
         },
@@ -1841,11 +1944,15 @@ fn ask_mcp(
         }
     }
     kept(places, cause, "mcp", &ran.to_string());
-    let mut answer = read_mcp(&ran, &program_names(cause, places))?;
+    let mut answer = read_mcp(&ran, &program_names(cause, places), Some(asked_at))?;
     answer.privileges = privileges_of(
         ran["answered_by"]["binary"].as_str().map(Path::new),
         &ran["answered_by"]["file_capabilities"],
     );
+    answer.budget = arguments
+        .get("budget")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     Ok(Asked::Answer(Box::new(answer), said))
 }
 
@@ -2235,9 +2342,20 @@ fn run_case(case_dir: &Path, case: &Case, report: &mut Report) {
                         ask_mcp(cause, &places, &naming, Some(UNBOUNDED_BUDGET))
                     });
                 }
-                Ok((Asked::Answer(..), _)) if way == "mcp" => {
-                    report.add(&at, BUDGET, Outcome::Pass)
-                }
+                // Asked with no ceiling, nothing measured the run's cost
+                // against one: not a pass.
+                Ok((Asked::Answer(answer, _), _)) if way == "mcp" => report.add(
+                    &at,
+                    BUDGET,
+                    match &answer.budget {
+                        Some(_) => Outcome::Pass,
+                        None => Outcome::Unchecked(
+                            "run_session took the question with no budget, so its cost was \
+                             held against no ceiling"
+                                .to_owned(),
+                        ),
+                    },
+                ),
                 _ => {}
             }
             let (answer, said, injection_said) = match asked {
@@ -2319,15 +2437,40 @@ fn run_case(case_dir: &Path, case: &Case, report: &mut Report) {
             // Two ways run with different privileges answer from two
             // different machines: what differs is the machine's, and is not
             // compared.
-            if cli.privileges != mcp.privileges {
-                report.add(
-                    &at,
-                    PRIVILEGES,
-                    Outcome::Fail(format!(
-                        "the person's way ran {}, the agent's {}",
-                        cli.privileges, mcp.privileges
-                    )),
-                );
+            //
+            // The file's capabilities are one half: one file, read twice. The
+            // other is what the run itself was served by -- a process that
+            // could not use them (`no_new_privs`, a `nosuid` mount) falls
+            // back to another backend, and its rows say so in their source
+            // and kind -- compared for every state both ways read.
+            let read_differently: Vec<String> = cli
+                .read_as
+                .iter()
+                .filter_map(|(state, how)| {
+                    let other = mcp.read_as.get(state)?;
+                    (other != how).then(|| {
+                        format!(
+                            "`{state}` read by {} ({}) the person's way, by {} ({}) the agent's",
+                            how.0, how.1, other.0, other.1
+                        )
+                    })
+                })
+                .collect();
+            let differ = if cli.privileges != mcp.privileges {
+                Some(format!(
+                    "the person's way ran {}, the agent's {}",
+                    cli.privileges, mcp.privileges
+                ))
+            } else if !read_differently.is_empty() {
+                Some(format!(
+                    "one file with the same capabilities, but the runs were served differently: {}",
+                    read_differently.join("; ")
+                ))
+            } else {
+                None
+            };
+            if let Some(differ) = differ {
+                report.add(&at, PRIVILEGES, Outcome::Fail(differ));
                 report.add(
                     &at,
                     SAME_SUSPECT,
@@ -2343,7 +2486,10 @@ fn run_case(case_dir: &Path, case: &Case, report: &mut Report) {
             // state: the hottest leaf of a spread profile -- a kernel
             // function at 5 % of the samples, the next at 3.5 % -- moves
             // between two runs of the same program, and comparing two of
-            // them compares two samples of the noise. A leaf that is an
+            // them compares two samples of the noise. Whether a leaf is named
+            // at all is still compared there: one way naming a function where
+            // the other says the profile names none (a flat interpreter
+            // profile) is two different answers. A leaf that is an
             // address is not compared with anything -- an unnamed binary's
             // hottest leaf is an instruction, and moves from run to run -- so
             // that half is said to be unchecked, not passed.
@@ -2355,7 +2501,10 @@ fn run_case(case_dir: &Path, case: &Case, report: &mut Report) {
             };
             let outcome = match (&cli.leaf, &mcp.leaf) {
                 _ if cli.state != mcp.state => Outcome::Fail(differ()),
-                _ if cause.expect.leaf.is_none() => Outcome::Pass,
+                (Some(_), Some(_)) | (None, None) if cause.expect.leaf.is_none() => Outcome::Pass,
+                (Some(_), None) | (None, Some(_)) if cause.expect.leaf.is_none() => {
+                    Outcome::Fail(differ())
+                }
                 (Some(a), Some(b)) if is_named(a) && is_named(b) => {
                     if a == b {
                         Outcome::Pass
@@ -2398,26 +2547,31 @@ fn every_case_names_its_known_cause_both_ways() {
         }
         let mut report = Report::default();
         run_case(&dir, &case, &mut report);
-        let open: BTreeMap<&str, &str> = case
-            .open_findings
-            .iter()
-            .map(|finding| (finding.check.as_str(), finding.filed.as_str()))
-            .collect();
+        // Which finding a line is, by its index: two findings of one check
+        // may name two causes.
+        let finding_of = |at: &str, check: &str| {
+            case.open_findings
+                .iter()
+                .position(|finding| finding.covers(at, check))
+        };
         let mut failed_open = BTreeSet::new();
         let mut passed_open = BTreeSet::new();
         for (at, check, outcome) in &report.lines {
             match outcome {
                 Outcome::Pass => {
                     eprintln!("  ok        {at}: {check}");
-                    if open.contains_key(check) {
-                        passed_open.insert(*check);
+                    if let Some(index) = finding_of(at, check) {
+                        passed_open.insert(index);
                     }
                 }
                 Outcome::Unchecked(why) => eprintln!("  unchecked {at}: {check}: {why}"),
-                Outcome::Fail(why) => match open.get(check) {
-                    Some(filed) => {
-                        failed_open.insert(*check);
-                        eprintln!("  FINDING   {at}: {check}: {why}\n            filed: {filed}");
+                Outcome::Fail(why) => match finding_of(at, check) {
+                    Some(index) => {
+                        failed_open.insert(index);
+                        eprintln!(
+                            "  FINDING   {at}: {check}: {why}\n            filed: {}",
+                            case.open_findings[index].filed
+                        );
                     }
                     None => {
                         eprintln!("  FAILED    {at}: {check}: {why}");
@@ -2426,22 +2580,26 @@ fn every_case_names_its_known_cause_both_ways() {
                 },
             }
         }
-        for check in passed_open.difference(&failed_open) {
-            if case
-                .open_findings
-                .iter()
-                .any(|finding| finding.check == *check && finding.sometimes)
-            {
+        for index in passed_open.difference(&failed_open) {
+            let finding = &case.open_findings[*index];
+            let (check, on) = (
+                &finding.check,
+                finding
+                    .cause
+                    .as_deref()
+                    .map_or(String::new(), |cause| format!(" on `{cause}`")),
+            );
+            if finding.sometimes {
                 eprintln!(
-                    "  note      {}: `{check}`, listed as failing in some runs, passed in every \
-                     run here: close it by hand once its filing shows it closed",
+                    "  note      {}: `{check}`{on}, listed as failing in some runs, passed in \
+                     every run here: close it by hand once its filing shows it closed",
                     case.name
                 );
                 continue;
             }
             failures.push(format!(
-                "{}: `{check}` is listed under open_findings and now passes everywhere it was \
-                 checked: remove it from cases/{}/case.yml and close the finding",
+                "{}: `{check}`{on} is listed under open_findings and now passes everywhere it \
+                 was checked: remove it from cases/{}/case.yml and close the finding",
                 case.name, case.name
             ));
         }
@@ -2477,6 +2635,27 @@ fn every_case_is_well_formed() {
                 finding.check
             );
             assert!(!finding.filed.trim().is_empty());
+            if let Some(cause) = &finding.cause {
+                assert!(
+                    case.causes.iter().any(|c| c.name == *cause),
+                    "{}: the open finding on `{}` names no cause `{cause}`",
+                    case.name,
+                    finding.check
+                );
+            }
+            assert_eq!(
+                case.open_findings
+                    .iter()
+                    .filter(|other| other.check == finding.check
+                        && (other.cause.is_none()
+                            || finding.cause.is_none()
+                            || other.cause == finding.cause))
+                    .count(),
+                1,
+                "{}: `{}` is listed twice for one cause",
+                case.name,
+                finding.check
+            );
         }
         assert!(
             case.causes.iter().any(|cause| cause.on == On::Cpu)
@@ -2687,8 +2866,22 @@ fn the_agent_s_reading_follows_a_block_into_the_busy_task() {
                 "outputs": [{"emit": "raw", "events": events}]}}]
         }
     });
-    let answer = read_mcp(&answer_doc, &["python3".to_owned()]).unwrap();
+    let answer = read_mcp(&answer_doc, &["python3".to_owned()], None).unwrap();
+    // Asked for after the map was last written, the map is an earlier
+    // process's: not read, and said.
+    let later = SystemTime::now() + Duration::from_secs(3600);
+    let stale = read_mcp(&answer_doc, &["python3".to_owned()], Some(later)).unwrap();
     let _ = std::fs::remove_file(&map);
+    assert_ne!(stale.leaf.as_deref(), Some("py::score:/x/hot.py"));
+    assert!(
+        stale
+            .how
+            .unseen
+            .iter()
+            .any(|said| said.contains("an earlier process's")),
+        "{:?}",
+        stale.how.unseen
+    );
     assert_eq!(answer.task.as_deref(), Some("task:2"));
     assert_eq!(answer.state, "on-cpu");
     assert_eq!(
@@ -2703,7 +2896,7 @@ fn the_agent_s_reading_follows_a_block_into_the_busy_task() {
     // followed: the main thread's block is the answer.
     let mut idle = answer_doc.clone();
     idle["read_back"]["decompositions"][0]["tables"][1]["rows"][0]["amount"] = json!(9e8);
-    let answer = read_mcp(&idle, &[]).unwrap();
+    let answer = read_mcp(&idle, &[], None).unwrap();
     assert_eq!(
         (answer.task.as_deref(), answer.state.as_str()),
         (Some("task:1"), "blocked")

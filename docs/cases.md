@@ -31,14 +31,21 @@ The person's way reads them off `target/debug/omn` before it asks; every
 answer of `run_session` carries `answered_by` (the binary and its
 `file_capabilities`). Two ways that ran with different privileges are not
 compared -- what differs between them is the machine's -- and the cause fails
-`both-ways-run-with-the-same-privileges` with both.
+`both-ways-run-with-the-same-privileges` with both. One file read twice can
+only differ when the file changed between the two asks, so the check also
+reads what the runs themselves were served by: every state both ways read
+must come from the same source and be of the same kind (`traced`,
+`sampled`). A process that could not use the file's capabilities --
+`no_new_privs`, a `nosuid` mount -- falls back to another backend, and its
+rows say so there. A fallback of the same source and kind is not seen: the
+person's JSON names no backend per row.
 
 Each answer is held to named checks:
 
 | Check | What it asserts |
 |---|---|
 | `the-first-suspect-is-the-known-cause` | the dominant state (and, for the person's way, the verdict's `limit`) is the cause the case put there |
-| `the-dominant-stack-ends-in-the-known-frame` | the hottest function on a cpu, or the frame the dominant block began in off it, is the one the case names -- compared only where the frame is named, never a name against an address |
+| `the-dominant-stack-ends-in-the-known-frame` | the hottest function on a cpu, or the frame the dominant block began in off it, is the one the case names -- compared only where the frame is named, never a name against an address. Under `names_no_function`, the answer names no hottest function at all (a flat interpreter profile) |
 | `the-block-s-frames-are-named` | the dominant stack passes through the frame the case names under `through`; unchecked where names beyond the file's own (debuginfod) were asked for and could not be had, and a frame is an address; under `symbols: local` an absent frame fails |
 | `every-cited-number-agrees-with-the-reference` | each row the case lists under `agrees` is within the two resolutions of the reference's figure |
 | `the-verdict-says-how-it-knows` | the method, the evidence level of every row, the unwind mode, and for the agent's way where its names came from. What it could not see (losses, degradations, missing rows) is printed under the run's line, not required: a run that lost nothing is not a worse answer |
@@ -46,9 +53,10 @@ Each answer is held to named checks:
 | `the-person-s-way-says-where-names-came-from` | the verdict's notes say where its names came from |
 | `the-sentence-claims-nothing-false` | the verdict's sentence contains none of the case's `never_says`; for the agent's way, the frames of the stack it names contain none |
 | `the-sentence-says-what-the-case-knows` | the verdict's sentence contains each of the case's `says` |
-| `both-ways-name-the-same-suspect` | the two answers name the same state, and the same leaf where the case names its known frame (`leaf`); unchecked, with both leaves, when the states agree and a leaf is an address. A cause that names no frame is about a state: the hottest leaf of a spread profile -- a kernel function at 5 % of the samples, the next at 3.5 % -- moves between two runs, and is not compared |
-| `both-ways-run-with-the-same-privileges` | the person's `omn` and the binary `run_session` answered through are one file with the same capabilities |
-| `the-agent-s-way-answers-within-a-model-s-budget` | `run_session` answers the question asked with no budget. It passes because `run_session` no longer requires one (`docs/fixes/w18-mcp.md`), not because a budget now holds for a program that waits. Were one required again, the agent would ask at `100%`, and a run that ceiling stopped would be asked again with an unbounded one -- once whatever the stopped run left behind is ended -- so the other checks still answer the person's question |
+| `both-ways-name-the-same-suspect` | the two answers name the same state, and the same leaf where the case names its known frame (`leaf`); unchecked, with both leaves, when the states agree and a leaf is an address. A cause that names no frame is about a state: the hottest leaf of a spread profile -- a kernel function at 5 % of the samples, the next at 3.5 % -- moves between two runs, and is not compared; whether each names one at all still is, so one way naming a function where the other names none fails |
+| `both-ways-run-with-the-same-privileges` | the person's `omn` and the binary `run_session` answered through are one file with the same capabilities, and every state both ways read came from the same source, of the same kind |
+| `the-agent-s-way-answers-within-a-model-s-budget` | `run_session` answers within the ceiling a model would give it. `run_session` no longer requires one (`docs/fixes/w18-mcp.md`), and a question asked with none is **unchecked**: its cost was held against no ceiling, so it is not a pass. Were one required again, the agent would ask at `100%` and the check would be made; a run that ceiling stopped fails it, and is asked again with an unbounded one -- once whatever the stopped run left behind is ended -- so the other checks still answer the person's question |
+| `the-verdict-s-json-spells-its-limit-as-the-text-does` | the person's JSON writes the verdict's `limit` as the text and the catalog spell it (`cpu-queue`, not `cpu_queue`). The other checks read the limit in the text's spelling, so this one alone holds the JSON's |
 
 A check is **ok**, **failed**, or **unchecked** with the reason (names that were
 not asked for, a leaf that is an address). A cause whose reference says the
@@ -71,8 +79,11 @@ rule: listed, its passing runs fail the test; unlisted, its failing ones do.
 It is listed with `sometimes: true` and its filing says why it alternates and
 how often. Its failure prints `FINDING`; its pass prints a `note` and asks
 nothing, and the line is closed by hand, with the runs that show it closed.
-This is the open finding's form of the flaky tally, and as narrow: a check
-listed so on one case is still a failure on every other.
+This is the open finding's form of the flaky tally, and as narrow, given a
+`cause:`: a finding names the cause it was filed against, and the same check
+on the case's other causes is still a failure, as it is on every other case.
+A finding with no `cause:` covers every cause of the case, and is filed so
+only when it was seen on each of them.
 
 ## The format: `cases/<name>/case.yml`
 
@@ -129,6 +140,7 @@ causes:
       limit: cpu                # the person's verdict's `limit`
       state: on-cpu             # the dominant row, before any `:` qualifier
       leaf: sqlite3VdbeExec     # a prefix: `.lto_priv.0` and `.isra.0` suffixes match
+      # names_no_function: true # instead of `leaf`: no hottest function is named
       through: sqliteDefaultBusyCallback
       never_says: [not a lock]
       agrees:
@@ -143,6 +155,7 @@ open_findings:
   - check: every-cited-number-agrees-with-the-reference
     filed: docs/fixes/w18-cases.md, "a job is a chain of processes"
   - check: the-first-suspect-is-the-known-cause
+    cause: the-critical-path-is-one-job   # this cause only; absent, every cause
     sometimes: true             # fails in some runs only: see the rule above
     filed: docs/fixes/w18-cases.md, "a job is a chain of processes"
 held: >-                        # optional: not asked, still checked for form
@@ -278,7 +291,9 @@ way reads it so, and the way `omn latency` reads the same run
   event (`read_run`, `max_events: 0`) for the task it reads: off the cpu, the
   stack with the most blocked nanoseconds (`total_ns` less `queued_ns`); on
   it, each sample charged to the innermost frame a perf map named
-  (`/tmp/perf-<pid>.map`, cited by the profile's names note), or to its leaf.
+  (`/tmp/perf-<pid>.map`, cited by the profile's names note, and last
+  written once the run was asked for: an older map is an earlier process's
+  with the same pid, not read and said), or to its leaf.
 - **A flat interpreter profile names nothing.** When the program is an
   interpreter -- by the name a word of its command goes by, or by the module
   of the unnamed frames of half its samples -- and the hottest function was

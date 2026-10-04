@@ -86,9 +86,10 @@ causes:
     expect:
       limit: cpu
       state: on-cpu
-      # The main thread waits for its child in wait4: not a timer, a pipe or
-      # a socket, which is what the sentence for a sleep says it is.
-      never_says: [a timer, a pipe or a socket]
+      # The main thread waits for its child in wait4, and the time is the
+      # child's: the verdict must not stop at the wait and call the run
+      # asleep, which is what the sentence for a sleep says.
+      never_says: [asleep on something that is not a lock]
       # The verdict follows the wait into the job that ran during it.
       says: ['for a child, in `wait4`']
       agrees:
@@ -133,7 +134,7 @@ causes:
     expect:
       limit: cpu-queue
       state: runnable
-      never_says: [a timer, a pipe or a socket]
+      never_says: [asleep on something that is not a lock]
       says: ['for a child, in `wait4`']
       agrees:
         - row: runnable
@@ -151,6 +152,7 @@ open_findings:
       cpu, the followed compile's `runnable` is 6.7 s against the job's
       7.3 s
   - check: the-first-suspect-is-the-known-cause
+    cause: the-critical-path-is-one-job
     sometimes: true
     filed: >-
       docs/fixes/w18-cases.md, "a job is a chain of processes": the followed
@@ -160,8 +162,15 @@ open_findings:
       undecided ("2.799s of the wall clock is in no row that was read") when
       it is the shorter: one run in three here
   - check: both-ways-name-the-same-suspect
+    cause: the-critical-path-is-one-job
     sometimes: true
     filed: >-
       docs/fixes/w18-cases.md, "a job is a chain of processes": the runs whose
       person's verdict is undecided name no state, against the agent's
       `on-cpu`
+  - check: the-verdict-s-json-spells-its-limit-as-the-text-does
+    cause: a-cpu-shared-with-two-competitors
+    filed: >-
+      docs/fixes/w18-cases.md, "The JSON's `limit` is `cpu_queue`, the text's
+      `cpu-queue`": `Limit` is serialised in snake_case where `Limit::as_str`,
+      the text and the catalog say `cpu-queue`

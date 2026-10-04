@@ -186,8 +186,11 @@ what still gets them wrong is filed (section 3). The baseline run on the
 merged tree, before this branch's reader, named `blocked` at `wait4` on the
 agent's way for both `make-sqlite` causes and `blocked` for the listing.
 
-`both-ways-run-with-the-same-privileges` passed for every cause of every run,
-`the-agent-s-way-answers-within-a-model-s-budget` likewise.
+`both-ways-run-with-the-same-privileges` passed for every cause of every run.
+`the-agent-s-way-answers-within-a-model-s-budget` was reported `ok` in those
+seven runs, but it could not fail: `run_session` was asked with no budget.
+Since the review round (section 9) it is reported `unchecked` for that
+reason.
 
 **Reasoned, not run**: the privilege refusal on a difference (no run here had
 one: both ways are one file now; the unit of it is the comparison of two
@@ -382,13 +385,20 @@ every cause skipping with the machine's reason, both ways the same reason.
 ### To the coordinator
 
 - `docs/open-findings.md`, "The seventeenth wave, the coordinator's", the
-  flaky tally: **remove both `cases` lines**. The budget line: in seven runs,
-  `the-agent-s-way-answers-within-a-model-s-budget` passed on every cause of
-  every case (`run_session` takes no budget, and `sched.mutex` is asked only
-  in a second pass), and `http-server-stdlib` no longer lists the check.
-  The flat-profile line: both ways name no function on
-  `cpython-interpreter/one-function-dominates`, and
-  `both-ways-name-the-same-suspect` passed in every run (python's finding 2).
+  flaky tally: **both `cases` lines can go, for these reasons**. The budget
+  line: the check cannot flake now because it is never made: `run_session`
+  takes no budget unless asked (`w18-mcp.md`), and the check is reported
+  `unchecked` (section 9). It does not go because the cost held under a
+  ceiling: no run measured that. If the server ever requires a budget again,
+  the check is made again and fails on a stopped run, not as a flake. The
+  flat-profile line: since the review round, each way's
+  `the-dominant-stack-ends-in-the-known-frame` asserts it names no function
+  (`names_no_function: true` on `cpython-interpreter/one-function-dominates`),
+  and `both-ways-name-the-same-suspect` fails if one way names a function and
+  the other names none. That is python's finding 2, held on both sides by the
+  live test (one run after the review fixes, section 9). The seven earlier
+  runs showed the same through the run's line (`leaf None` both ways), but
+  nothing then made it a check.
 - Section 3.8 for the tally.
 - `STATE.md` (lines 634 and 691) and `ROADMAP.md` (line 870) still say
   `gcc-shell` is held back under `cases/held/`; it is `cases/gcc-shell/` and
@@ -441,3 +451,84 @@ agents share one scratchpad directory, and a first no-fail-fast run here wrote
 two logs interleaved (two "targets failed" summaries in one file). It was
 rerun into a directory of this stream's own. Whoever writes the next brief
 may want each stream to log under a directory named after it.
+
+---
+
+## 9. Review
+
+The adversarial review's seven points, and what was done with each.
+
+1. **The flat profile's comparison passed on state alone** (gap). It was
+   true: under `expect.leaf: None` the comparison passed whatever the two
+   leaves were, and the agent's "names nothing" was held only by the unit
+   test. Now (a) `Expect::names_no_function` (`names_no_function: true` on
+   `cpython-interpreter/one-function-dominates`) makes
+   `the-dominant-stack-ends-in-the-known-frame` assert, on each way, that no
+   hottest function is named; and (b) `both-ways-name-the-same-suspect`, for a
+   cause with no `leaf`, still compares whether each way names a leaf. One
+   naming a function and the other none fails. Two named leaves are still
+   not compared (section 1.5). The case's comment says what holds it.
+2. **`sometimes` covered the whole case** (gap). `OpenFinding` takes
+   `cause:`. A finding that names a cause covers that cause's lines only, and
+   the same check on the case's other causes is a failure again.
+   `make-sqlite`'s two `sometimes` findings name
+   `the-critical-path-is-one-job`, and `gcc-shell`'s numbers finding names
+   `a-cpu-shared-with-two-competitors`. Findings are tracked by their index,
+   so two findings of one check on two causes are closed separately.
+   `every_case_is_well_formed` asserts that a named cause exists and that no
+   check is listed twice for one cause. `docs/cases.md` gives the rule and
+   the field.
+3. **The budget check could not fail** (nit, taken). A question asked with no
+   budget is now `unchecked`, with the reason: "run_session took the
+   question with no budget, so its cost was held against no ceiling". It
+   passes only when a ceiling was asked for. Section 7's request to the
+   coordinator no longer cites the check's passes as evidence.
+4. **The stale `never_says`** (nit, taken). The sleep sentence now lists the
+   wait for a child. `make-sqlite` and both `gcc-shell` causes now forbid the
+   sleep limit's own words, `asleep on something that is not a lock`, which
+   is the claim the check was meant to catch: the run is not asleep, its
+   child is busy. The sentence the followed verdict writes ("waited ... for a
+   child, in `wait4`, and task:N ... is decomposed in its place") does not
+   contain it.
+5. **`cpu_queue` hidden by the reader** (nit, taken). The reader still
+   compares the limit in the text's spelling, so the known cause is not
+   decided by a spelling. The JSON's own spelling is kept, and a new check,
+   `the-verdict-s-json-spells-its-limit-as-the-text-does`, holds it on the
+   person's way. It is listed as an open finding (section 3.6) on the two
+   `cpu-queue` causes (`make-sqlite` and `gcc-shell`,
+   `a-cpu-shared-with-two-competitors`). The fix will ask for those lines'
+   removal, and a regression elsewhere fails.
+6. **The privilege check compared one file with itself** (nit, taken in
+   part). It still compares the file capabilities. It now also compares what
+   the runs were served by: for every state both ways read, the row's
+   `source` and `kind`. A process that cannot use the file's capabilities
+   (`no_new_privs`, `nosuid`) falls back to another backend and changes
+   those. It does not catch a fallback of the same source and kind: the
+   person's JSON names no backend per row, which `docs/cases.md` says.
+   Reading `capability_shortfall` would not help here, because it is also
+   computed from the file (`mcp/src/binary.rs`).
+7. **The perf map and the unkeyed table** (nit, taken in part).
+   - A map last modified before the run was asked for (`asked_at`, taken
+     before `run_session`) belongs to an earlier process with the same pid.
+     It is not read, and is said under "could not see". The unit test covers
+     it.
+   - `/tmp` stays, and the reviewer is wrong that it should be `temp_dir()`:
+     runtimes write `perf-<pid>.map` to `/tmp` whatever `TMPDIR` says, and
+     the triage reads them from there (`PerfMapNames::of`,
+     `src/triage/diff.rs`). `Places` uses `temp_dir()` for the case's own
+     scratch directory, which is a different thing. The doc comment now says
+     so.
+   - When the table read is not keyed `task:N`, no event is taken as its own.
+     Before, every event that carried no task matched.
+
+Shown after the fixes: `make` (capabilities on), then
+`OMN_CASES_ONLY=cpython-interpreter,gcc-shell,make-sqlite cargo test --test
+cases every_case_names -- --nocapture`, green in 98 s.
+`cpython-interpreter/one-function-dominates`: `known-frame` ok both ways (no
+function named) and `same-suspect` ok. `the-verdict-s-json-...` was a
+FINDING on both `cpu-queue` causes and ok elsewhere. Privileges were ok on
+every cause, so the source and kind of the rows agreed. The budget check was
+`unchecked` on every cause. `make-sqlite`'s two `sometimes` findings printed
+their `note` with the cause named. The other cases ran in the final
+`make check` (section 10).
+
