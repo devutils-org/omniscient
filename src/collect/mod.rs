@@ -2535,6 +2535,10 @@ fn run_core(
             spending.read_before_the_stop();
             child.terminate();
         }
+        // A program that exited on its own may have left processes running
+        // outside its tree -- a daemon's double fork -- which this process
+        // adopted: they end with the run as they would at a stop.
+        child.end_orphans();
     }
 
     let closed_ns = monotonic_ns();

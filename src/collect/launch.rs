@@ -74,10 +74,14 @@ pub struct Lifetime {
     /// nothing.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub left_running: u32,
-    /// How many processes the stop ended that had left the program's tree
-    /// before it -- orphaned, their parent gone first, and adopted by this
-    /// process ([`adopt_orphans`]) -- and that a walk of the program's tree
-    /// no longer finds. Counted, so a run says it reached them.
+    /// How many processes the end of the run ended that had left the
+    /// program's tree before it -- orphaned, their parent gone first, and
+    /// adopted by this process ([`adopt_orphans`]) -- and that a walk of the
+    /// program's tree no longer finds. Counted, so a run says it reached them.
+    ///
+    /// At a stop, and when the program exited on its own too: a double-forked
+    /// daemon outlives a program that ends by itself as surely as one that is
+    /// stopped. One that had already exited is reaped and not counted.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub adopted_ended: u32,
 }
@@ -104,10 +108,19 @@ pub fn adopt_orphans() -> bool {
     adopted
 }
 
+/// Whether `pid` has exited and waits to be reaped: a signal still reaches
+/// it, and succeeds, without ending anything.
+fn is_zombie(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+    })
+}
+
 /// Ends every process this one adopted, and their descendants, once the
 /// program has been reaped: stopped first, as [`freeze`] stops a tree, then
 /// killed and reaped. Returns how many it ended and how many it could not
-/// signal.
+/// signal; one that had exited already is reaped and in neither count.
 fn end_adopted() -> (u32, u32) {
     if !ADOPTING.load(std::sync::atomic::Ordering::Relaxed) {
         return (0, 0);
@@ -131,6 +144,9 @@ fn end_adopted() -> (u32, u32) {
     }
     let (mut ended, mut refused) = (0, 0);
     for adopted in &stopped {
+        if is_zombie(*adopted) {
+            continue;
+        }
         // SAFETY: killing a process the launched program started.
         if unsafe { libc::kill(*adopted, libc::SIGKILL) } == 0 {
             ended += 1;
@@ -185,8 +201,11 @@ pub struct Gated {
     cpu_ns: Option<u64>,
     /// What the stop could not signal ([`Lifetime::left_running`]).
     left_running: u32,
-    /// What the stop ended outside the program's tree ([`Lifetime::adopted_ended`]).
+    /// What the end of the run ended outside the program's tree
+    /// ([`Lifetime::adopted_ended`]).
     adopted_ended: u32,
+    /// Whether [`Gated::end_orphans`] has run: once per program.
+    orphans_ended: bool,
 }
 
 impl Gated {
@@ -258,8 +277,12 @@ impl Gated {
     /// at launch: a process group that is not the terminal's foreground one
     /// is stopped the moment it reads the terminal, and a target that reads
     /// stdin would hang under the tool.
+    ///
+    /// A program that has exited already is not signalled again; what it left
+    /// running outside its tree is still ended ([`Gated::end_orphans`]).
     pub fn terminate(&mut self) {
         if self.status.is_some() {
+            self.end_orphans();
             return;
         }
         let tree = freeze(self.pid);
@@ -287,9 +310,7 @@ impl Gated {
             self.status = Some(status);
             self.cpu_ns = Some(cpu_ns(&usage));
         }
-        let (ended, refused) = end_adopted();
-        self.adopted_ended += ended;
-        self.left_running += refused;
+        self.end_orphans();
         let reaped_ns = monotonic_ns();
         // Its end is somewhere after it was last seen running, which may be
         // before the signal: a program that exited a moment before it was
@@ -297,6 +318,25 @@ impl Gated {
         // two apart. So the interval starts there, not at the kill.
         self.exited = Some((reaped_ns, reaped_ns.saturating_sub(self.alive_ns)));
         self.terminated = true;
+    }
+
+    /// Ends what the program left running outside its tree, once it has been
+    /// reaped -- by a stop ([`Gated::terminate`]) or because it exited on its
+    /// own -- and reaps whatever of it had exited already, so nothing it
+    /// started is left behind as a process or a zombie. Once per program; a
+    /// no-op before the reap, and for a caller that never adopted
+    /// ([`adopt_orphans`]).
+    ///
+    /// Not at the reap itself ([`Gated::finished`]): the run's collectors are
+    /// still attached then, and their last reads belong to the run as it was.
+    pub fn end_orphans(&mut self) {
+        if self.status.is_none() || self.orphans_ended {
+            return;
+        }
+        self.orphans_ended = true;
+        let (ended, refused) = end_adopted();
+        self.adopted_ended += ended;
+        self.left_running += refused;
     }
 
     /// When the program ran, once it has been released and has ended. `None`
@@ -560,6 +600,7 @@ fn gated_with(
         terminated: false,
         left_running: 0,
         adopted_ended: 0,
+        orphans_ended: false,
     })
 }
 

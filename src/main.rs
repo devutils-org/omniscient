@@ -1454,15 +1454,19 @@ fn report_costs(costs: &[MeasuredCost], run: &encode::RunOutput) {
              could not be signalled (a setuid child refuses this process's signals)"
         );
     }
-    let adopted = run
-        .results
-        .iter()
-        .find_map(|results| results.lifetime)
-        .map_or(0, |life| life.adopted_ended);
+    let lifetime = run.results.iter().find_map(|results| results.lifetime);
+    let adopted = lifetime.map_or(0, |life| life.adopted_ended);
     if adopted > 0 {
+        // Stopped, or exited on its own leaving them running: either way the
+        // run ended them, and says which end it was.
+        let end = if lifetime.is_some_and(|life| life.terminated) {
+            "the stop also ended"
+        } else {
+            "the program exited, and the end of the run then ended"
+        };
         eprintln!(
-            "note: the stop also ended {adopted} process(es) the program started that had left \
-             its tree before it (orphaned, their parent gone first, and adopted by omn)"
+            "note: {end} {adopted} process(es) the program started that had left its tree \
+             before it (orphaned, their parent gone first, and adopted by omn)"
         );
     }
     if let Some(comparison) = compare_backends(costs, &run.results) {
