@@ -1,0 +1,9 @@
+Attaching 2 probes...
+Sampling run queue length at 99 Hertz... Hit Ctrl-C to end.
+
+
+@runqlen:
+[0, 1)                  1980 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1, 2)                   205 |@@@@@                                               |
+[2, 3)                    12 |                                                    |
+

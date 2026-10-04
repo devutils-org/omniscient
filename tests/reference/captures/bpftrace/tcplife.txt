@@ -1,0 +1,6 @@
+Attaching 2 probes...
+PID   COMM       LADDR           LPORT RADDR           RPORT TX_KB RX_KB MS
+4242  omnref     127.0.0.1       40301 127.0.0.1       41234     64     0 1
+4242  omnref     127.0.0.1       41234 127.0.0.1       40301      0    64 1
+4242  omnref     127.0.0.1       40302 127.0.0.1       41234     64     0 1
+4242  omnref     127.0.0.1       41234 127.0.0.1       40302      0    64 1

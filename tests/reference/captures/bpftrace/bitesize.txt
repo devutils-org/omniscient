@@ -1,0 +1,16 @@
+Attaching 3 probes...
+Tracing block device I/O... Hit Ctrl-C to end.
+
+I/O size (bytes) histograms by process name:
+
+@[kworker/u33:2]:
+[4K, 8K)                   3 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@[omnref]:
+[4K, 8K)                 501 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8K, 16K)                  0 |                                                    |
+[16K, 32K)                 5 |                                                    |
+[32K, 64K)                 0 |                                                    |
+[64K, 128K)                0 |                                                    |
+[128K, 256K)               2 |                                                    |
+

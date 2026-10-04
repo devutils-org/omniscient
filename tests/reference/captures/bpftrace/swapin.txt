@@ -1,0 +1,8 @@
+Attaching 3 probes...
+19:42:01
+@[kswapd0, 97]: 3
+@[omnref, 4242]: 12
+
+19:42:02
+@[omnref, 4250]: 30
+

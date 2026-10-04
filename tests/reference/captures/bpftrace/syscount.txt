@@ -1,0 +1,15 @@
+Attaching 3 probes...
+Counting syscalls... Hit Ctrl-C to end.
+
+Top 10 syscalls IDs:
+@syscall[202]: 96
+@syscall[1]: 104
+@syscall[3]: 214
+@syscall[0]: 377
+@syscall[257]: 623
+@syscall[110]: 20004
+
+Top 10 processes:
+@process[bpftrace]: 41
+@process[Xorg]: 2311
+@process[omnref]: 21217
