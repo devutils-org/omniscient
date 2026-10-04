@@ -1,0 +1,8 @@
+258526229,,cycles,53589017,83.00,,
+501870504,,instructions,52936534,82.00,,
+85712649,,branches,52355036,81.00,,
+416896,,branch-misses,53244384,83.00,,
+4672787,,cache-references,53926695,84.00,,
+1023938,,cache-misses,53642324,83.00,,
+<not supported>,,ref-cycles,0,100.00,,
+<not supported>,,bus-cycles,0,100.00,,

@@ -1,0 +1,12 @@
+
+ Performance counter stats for 'python3 -S tests/reference/workloads/perfstat/spin.py 1000000':
+
+       798,682,901      cycles                                                                
+     1,779,155,355      instructions                                                          
+
+       0.526701422 seconds time elapsed
+
+       0.188554000 seconds user
+       0.006434000 seconds sys
+
+
