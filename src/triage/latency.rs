@@ -2915,6 +2915,7 @@ mod tests {
             row_stamp: None,
             drains: Vec::new(),
             fields: Default::default(),
+            provenance: Default::default(),
         }
     }
 

@@ -205,6 +205,11 @@ pub struct Results {
     /// nothing, which is most collectors.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fields: Fields,
+    /// What `stacks`' labels cannot say -- each frame's `named_by`, the
+    /// `perf_maps` that named frames, each task's `executables` -- written
+    /// beside them, each only when not empty.
+    #[serde(flatten)]
+    pub provenance: crate::stack::Provenance,
 }
 
 /// What a series is keyed on.
@@ -1039,6 +1044,7 @@ pub fn aggregate(
     // is the cheap path and the one a profiler takes. The scan is the fallback
     // for a collector that writes the frames onto each event instead, and it
     // never overwrites what the collector already said.
+    let mut provenance = collection.provenance;
     let stacks = if request.emit.contains(&Emit::Stack) {
         let mut stacks = collection.stacks;
         for (id, frames) in stack_table(&collection.events) {
@@ -1048,6 +1054,12 @@ pub fn aggregate(
     } else {
         BTreeMap::new()
     };
+    // Who named the frames speaks of the stacks kept, and of nothing when
+    // none were; what each task executed speaks of the keys, stacks or not.
+    provenance.keep_stacks(&stacks);
+    if stacks.is_empty() {
+        provenance.perf_maps.clear();
+    }
 
     Ok(Results {
         label: request
@@ -1082,6 +1094,7 @@ pub fn aggregate(
         row_stamp: collection.row_stamp,
         drains: collection.drains,
         fields: collection.fields,
+        provenance,
     })
 }
 
@@ -2069,6 +2082,7 @@ mod tests {
             row_stamp: None,
             drains: Vec::new(),
             fields: Default::default(),
+            provenance: Default::default(),
         }
     }
 
@@ -2131,6 +2145,44 @@ mod tests {
         .unwrap();
         let json = serde_json::to_value(&silent).unwrap();
         assert!(json.get("fields").is_none(), "{json}");
+    }
+
+    /// A collector's provenance reaches the result beside `stacks`: its
+    /// executables whatever the emit, its namers only for the stacks kept.
+    #[test]
+    fn a_result_carries_what_its_stacks_labels_cannot_say() {
+        use crate::stack::{NamedBy, PerfMapFile, Provenance};
+        let resolved = rss_request(vec![Emit::Summary], Vec::new());
+        let mut said = two_threads(lost(0, 0), Vec::new());
+        said.stacks = BTreeMap::from([(1, vec!["main".to_owned()])]);
+        said.provenance = Provenance {
+            named_by: BTreeMap::from([(1, vec![Some(NamedBy::Elf)])]),
+            perf_maps: vec![PerfMapFile {
+                path: "/tmp/perf-7.map".to_owned(),
+                dev: 1,
+                ino: 2,
+            }],
+            executables: BTreeMap::from([("task:7".to_owned(), "/usr/bin/python3.12".to_owned())]),
+        };
+        let results = aggregate(&resolved, said, Unit::Bytes, "bytes").unwrap();
+        let json = serde_json::to_value(&results).unwrap();
+        assert_eq!(json["executables"]["task:7"], "/usr/bin/python3.12");
+        // No stack emit, so no stacks and nothing about who named them.
+        assert!(
+            json.get("named_by").is_none() && json.get("perf_maps").is_none(),
+            "{json}"
+        );
+        let back: Results = serde_json::from_value(json).unwrap();
+        assert_eq!(back.provenance, results.provenance);
+        let silent = aggregate(
+            &resolved,
+            two_threads(lost(0, 0), Vec::new()),
+            Unit::Bytes,
+            "bytes",
+        )
+        .unwrap();
+        let json = serde_json::to_value(&silent).unwrap();
+        assert!(json.get("executables").is_none(), "{json}");
     }
 
     #[test]
