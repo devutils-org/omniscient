@@ -6,7 +6,7 @@
 
 ## What landed
 
-- `catalog/references/perfrecord.yaml`: six pairs.
+- `catalog/references/perfrecord.yaml`: seven pairs.
   - `cpu.profile` / `perf record` + `perf report --no-children --sort dso,sym`,
     keyed `hot_beta` and `hot_alpha`: a C workload (`hot.c`) whose three leaf
     functions do 20, 50 and 30 % of every round by construction.
@@ -90,13 +90,18 @@ and `cargo fmt --check` clean.
 
 ## Gaps found (each a line of work for `omn`)
 
-1. **`cpu.profile --filter 'comm == "NAME"'` keeps no sample.** `omn trace
-   cpu.profile -m sample@997hz -e stack --filter 'comm == "perfrecord-hot"'
-   --format json -- target/reference/perfrecord-hot 1` ends with
-   `events_seen: 0`, exit 0, no note; without the filter it sees ~1000. A
-   filter that silently drops everything breaks "losses are counted and
-   surfaced". Reproduced launching the program directly and through
-   `sh build.sh` (which `exec`s it).
+1. **`cpu.profile` on `pmu:sw` has no `comm` field to filter on.** `omn
+   trace cpu.profile -m sample@997hz -e stack --filter 'comm ==
+   "perfrecord-hot"' -- target/reference/perfrecord-hot 1` keeps no sample,
+   but says so: the text output prints `filter `comm == 'perfrecord-hot'`
+   kept 0 of 997 events, evaluated after reading`, and the JSON carries
+   `"filtered": {"kept": 0, "dropped": 998, "unseen_fields": ["comm"]}`. The
+   loss is counted and surfaced, and `unseen_fields` names the cause: the
+   `pmu:sw` backend never fills `comm`. Not a defect against an invariant
+   (an earlier draft of this handoff called it a silent loss; the review
+   corrected it). The line of work: fill `comm` on the sampled events, or
+   refuse a filter on a field the resolved backend never fills before the
+   run rather than after it.
 2. **`cpu.profile` has no cycles collector**: `pmu` (cycles) says "no
    collector yet", `pmu:sw` (cpu-clock) serves. `perf record`'s default is
    cycles.
@@ -149,9 +154,41 @@ cd /home/moha/repos/omniscient && make && cargo test --test reference perfrecord
 - Run omn as `target/debug/omn <omn...> -- <workload...>` with the
   repository root as the working directory: the workloads' paths are
   relative to it.
-- The `perfrecord` pairs take some 40 s together (six pairs, two runs of 2 s
+- The `perfrecord` pairs take some 40 s together (seven pairs, two runs of 2 s
   plus perf's post-processing each).
 
 ### To the coordinator (`STATE.md` "What remains")
 
-- Gaps 1 to 9 above; gap 1 is a defect, the rest are features.
+- Gaps 1 to 9 above, all features. Gap 1 is not a defect: the drop is
+  counted and its cause named (see "Review"); file it as a missing field.
+
+## Review
+
+All three findings were right; fixed in the fix round.
+
+1. **Gap 1 was wrong.** Rerun on a fresh build: the text output prints
+   `filter ... kept 0 of 997 events, evaluated after reading` and the JSON's
+   `filtered` holds `kept: 0, dropped: 998, unseen_fields: ["comm"]`. The
+   loss is counted and surfaced; the gap is a field `pmu:sw` never fills.
+   Gap 1 and `docs/replaces/perfrecord.md` are reworded; the coordinator
+   line no longer calls it a defect. Other sources refuse a `comm` filter on
+   a backend without the field before the run (`docs/scenarios/io.md`);
+   doing that here is the line of work.
+2. **`pairs_hold_on_this_machine` read a missing key as 0.** A side without
+   the compared key now fails the pair, naming which side lacks it and the
+   keys each side has.
+3. **The `mem.sharing` / `perf c2c` pair did not show the same line.** A
+   second pair compares key `0x4040c0` (the line's start, fixed by
+   `-no-pie`); with finding 2 fixed, a side that names another line fails
+   it. The `top` pair stays, and its `why` says it checks the share only.
+
+Shown in the fix round, `cargo test --test reference perfrecord -- --ignored
+--nocapture`, twice, load average about 9 with the other streams' fix
+rounds: the new pair keyed `0x4040c0` passed both times (1.000 vs 1.000), the
+`top` pair both times (1.000 / 0.993 vs 1.000). Each run failed one untouched
+pair, a different one each time: `mem.latency` / `perf mem` (370.7 vs 289.5
+cycles, then 268.0 vs 277.6, inside) and `cpu.profile` / `perf record`
+`hot_beta` (0.340 vs 0.460, after 0.500 vs 0.501). That is the run-to-run
+spread of perf's cycles-mode sampling and of miss latency on a loaded
+machine named under "Shown versus reasoned", not something this round
+changed; whether these tolerances are wide enough under load is open.
