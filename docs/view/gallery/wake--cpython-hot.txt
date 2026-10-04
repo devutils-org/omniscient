@@ -1,20 +1,18 @@
 omn top │ fixture cpython-hot │ 3.89s                             view: snapshot │ collectors ≥5.56% │ target 95.3% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐
-│Not drawn yet. What this view needs, and what this run holds of it:                                                   │
+│5 wakeups of 5 threads -- from a task 100%, in 3.89s 39 late ~low det                                                 │
 │                                                                                                                      │
-│sched.wakeup             5 events via bpf:raw_tp [raw] 39 late ~low det                                               │
-│                         the wake chain                                                                               │
+│woken thread      wakes  mostly by      woken thread      wakes  mostly by      woken thread      wakes  mostly by    │
+│python3 2779350       1  omn      100%  tailscaled 1025       1  python3  100%  omn 2779333           1  python3  100%│
+│migration/0 20        1  python3  100%  tailscaled 1062       1  python3  100%                                        │
+│4 dimmed: outside the target, woken by it                                                                             │
 │                                                                                                                      │
+│python3 2779350 was woken 1 time, 0.26/s                                                                              │
+│<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         │
+│└─ omn 2779333  outside the target: stops                 1  100%       --       --       --  █                       │
 │                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
+│-> it woke in turn: migration/0 20 x1, tailscaled 1025 x1, tailscaled 1062 x1, omn 2779333 x1                         │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -33,8 +31,10 @@ omn top │ fixture cpython-hot │ 3.89s                             view: snap
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
+│quiet: the woken thread's time with no sign of life in the run (no wakeup received or issued) before this one -- at   │
+│most how long it was blocked. hold: the waker's time from its own wakeup to the one it issued -- how long the chain   │
+│sat with it. A chain stops at an interrupt, at a thread already on it, or at a waker whose own wakeup the run did not │
+│see. A softirq may be a loopback send served in its sender's context: the sender is not named.                        │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ thread  +/- chain depth  enter focus it  l its lanes
