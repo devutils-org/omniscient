@@ -131,17 +131,23 @@
   run: alongside
   omn: [trace, power.cstate, --system, -m, poll@2s, -e, summary, --format, json, -d, 2s]
   reference:
-    command: [cpupower, monitor, -m, Idle_Stats, sleep, "2"]
+    command: [sh, tests/reference/workloads/power/cpu1_ticks.sh, cpupower, monitor, -m, Idle_Stats, sleep, "2"]
     parse: power_cpupower_monitor
-    requires: [cpupower, /sys/devices/system/cpu/cpu1/cpuidle]
+    requires: [sh, cpupower, python3, /sys/devices/system/cpu/cpu1/cpuidle]
   compare:
     key: "cpu:1"
     omn: results.0.outputs[emit=summary].series[key=cpu:1].mean
     tolerance: {abs: 100000000}
     why: "both read the cpuidle sysfs residency files over 2 s side by side; the parser
           turns cpupower's percentages back into nanoseconds over the command's
-          duration. 0.1 s absolute because residency is credited when a cpu wakes
-          (catalog caveat) and the two windows are offset by omn's start-up"
+          duration. Residency is credited only when a cpu wakes (catalog caveat), so
+          cpu 1 is woken every millisecond from before either side's first read to
+          after both last ones (workloads/power/cpu1_ticks.sh): each read is within
+          about 1 ms of the true residency. What is left is the windows' offset, the
+          same at both ends (omn's opens ~0.06 s in, cpupower's 0.1 s in): the
+          difference is at most the idle time in one end's gap, under 0.1 s while
+          omn's start-up stays under 0.2 s. Without the ticks one uncredited NOHZ
+          idle period could exceed 0.1 s (+0.123 s, shown under the wave's load)"
 
 - id: temp-sensors
   source: power.temp

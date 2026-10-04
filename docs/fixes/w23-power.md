@@ -2,7 +2,8 @@
 
 The power family's seven pairs, rewritten to the runner's schema and run by
 it. Branch `feat/w23-power`: `dadf8fb` (the pairs and the table) and this
-handoff. Files touched: `catalog/references/power.yaml`,
+handoff; the fix round adds `tests/reference/workloads/power/tick.py` and
+`cpu1_ticks.sh` (see Review). Files touched: `catalog/references/power.yaml`,
 `docs/replaces/power.md`. `tests/reference/power.rs` and the captures are
 unchanged: every compare is a path, so no `omn_parse` parser was needed, and
 no tool that runs unprivileged here had a capture written from
@@ -42,7 +43,7 @@ documentation.
 | `energy-rapl-files` | skipped: `sudo -n` does not grant root (`energy_uj` is root-only) | -- |
 | `freq-turbostat` | holds (rel 0.03) | 3924 / 3984 MHz, 3974 / 3977, 3938 / 3975 |
 | `freq-cpupower-mperf` | skipped: `sudo -n` (Mperf reads `/dev/cpu/*/msr`) | -- |
-| `cstate-cpupower-idle-stats` | holds (abs 0.1 s) | cpu 1: 0.976 / 0.986 s, 1.193 / 1.219, 1.350 / 1.342 |
+| `cstate-cpupower-idle-stats` | holds (abs 0.1 s), with cpu 1 ticked (see Review) | cpu 1: 1.256 / 1.253 s, 1.181 / 1.117, 1.297 / 1.318 (eight runs after the fix, all held) |
 | `temp-sensors` | holds (abs 3) | 80.875 / 80.875, 79.25 / 79.25, 79.625 / 79.75 |
 
 Tally, three times: `5 held, 2 skipped, 0 gaps, 0 known defects, 0 failed`.
@@ -91,8 +92,39 @@ cd /home/moha/repos/omniscient && make && cargo test --test reference pairs_powe
 Then replace `captures/power/cpupower_mperf.txt` and `rapl_window*.txt` with
 the real outputs.
 
+## Review
+
+One finding, a gap, fixed.
+
+- **`cstate-cpupower-idle-stats` did not hold reliably under load** (the
+  reviewer's first of five runs: omn 1.143 s against cpupower 1.020 s,
+  +0.123 s where 0.1 s is allowed). Right: cpuidle residency is credited
+  when a cpu wakes, so a read made during a long NOHZ idle period misses
+  it, and the two sides read at different moments (omn's window opens
+  ~0.06 s after cpupower's). One idle period ending between the two reads
+  goes to one side alone, and nothing bounded it. Fixed the way the
+  reviewer's second option says, with a load that keeps cpu 1 mostly idle:
+  the tool's command now runs under `workloads/power/cpu1_ticks.sh`, which
+  starts `workloads/power/tick.py` (pinned to cpu 1, a 1 ms sleep in a
+  loop, 3 s) 0.1 s before `cpupower`, so the ticks cover both windows from
+  the first read to the last. The ticker is in the tool's command, not the
+  pair's `workload`, because under `alongside` the runner launches the
+  workload after both observers have started, and `cpupower` reads at once:
+  its first read would precede the ticks. Each read is now within about
+  1 ms of the true residency, and the difference left is the idle time in
+  the windows' offset at one end against the other, below 0.1 s while
+  omn's start-up stays under 0.2 s. The `why` says so. The spin load of the
+  freq pairs would not do: it holds cpu 1 busy, and a residency of zero on
+  both sides compares nothing.
+- **Shown**: eight runs with `OMN_REFERENCE_PAIR=cstate-cpupower-idle-stats`
+  at a load average of 12 to 15: all held, off by +2.9, +63.9, -21.3,
+  +9.3, +30.3, +0.5, +27.0 and +13.6 ms, residency 1.0 to 1.5 s of 2 s.
+
 ## Decision lines
 
+- A cpuidle-residency pair wakes the measured cpu every millisecond across
+  both windows: residency is credited only on wake, and a read during a
+  long idle period is otherwise stale by an unbounded amount.
 - Power pairs run `alongside`, the tool wrapping `sleep 2` and omn on
   `-d 2s`, with the load launched by the runner after a 100 ms settle: one
   load both windows see, two windows of equal length.
