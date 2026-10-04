@@ -145,7 +145,12 @@
   summary: "CPU time actually consumed"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch", "kernel>=5.8"], cost: low}
+    # The `sched_stat_runtime` program: each thread's increments of the
+    # scheduler's own `sum_exec_runtime` added up in the kernel, drained every
+    # poll.
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stat_runtime(task_struct *, u64)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"],
+       cost: low, modes: [poll], drained: true,
+       targets: {system: native, cgroup: native, pid: native, tid: native, launch: native}}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low, equivalent: true}
     - {id: "fs:cgroup", requires: ["cgroup2:cpu.stat"], cost: free, modes: [poll],
        targets: {cgroup: native, container: native}, filter_fields: [],
@@ -154,11 +159,22 @@
        targets: {pid: native, tid: native, launch: native},
        degraded: "tick granularity, no per-site attribution"}
   modes: [trace, poll]
-  emits: [summary, timeline, hist, rate]
+  emits: [summary, timeline, hist, rate, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, launch: native, container: native}
   keys: [task, cgroup]
   filter_fields: [comm]
   determinism: low
+  caveats:
+    - "Through `bpf:raw_tp` each thread is its own series, keyed `task:<tid>`
+       with its process as `pid`, in the scheduler's own nanoseconds
+       (`se.sum_exec_runtime`, the first field of `/proc/<tid>/schedstat`).
+       Through `fs:proc` one series is the process's total, `task:<pid>`, in
+       ticks of 10 ms. Summing the threads gives the process."
+    - "Through `bpf:raw_tp` a running thread is credited at each scheduler
+       tick and when it leaves the cpu, so each edge of the window is at most
+       one tick off: the first increment after the attach can reach back to
+       the tick before it, and a thread on a cpu at the end is short by the
+       time since its last tick."
 
 - id: cpu.context_switches
   family: cpu

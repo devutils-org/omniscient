@@ -1836,11 +1836,11 @@ fn a_request_that_cannot_mean_anything_names_what_it_cannot_mean() {
         "and say which modes this source does have: {message}"
     );
 
-    let unshaped = run(&["power.energy", "--system", "-m", "count", "-e", "raw"]);
+    let unshaped = run(&["power.energy", "--system", "-m", "count", "-e", "stack"]);
     assert_eq!(unshaped.status.code(), Some(EXIT_REFUSED));
     let message = stderr(&unshaped);
     assert!(
-        message.contains("cannot emit `raw`") && message.contains("summary, rate, timeline"),
+        message.contains("cannot emit `stack`") && message.contains("summary, rate, timeline, raw"),
         "the refusal has to say what this source does emit: {message}"
     );
 
@@ -2046,4 +2046,80 @@ fn without_capabilities() -> Option<PathBuf> {
     std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
     std::fs::set_permissions(&path, mode).ok()?;
     Some(path)
+}
+
+/// `raw` hands over the events the timeline is drawn from, each with its
+/// domain: the same joules, read once, in two shapes.
+///
+/// Ground truth is internal consistency of one run, not a second meter: the
+/// timeline's points of a domain add up to that domain's raw events, to the
+/// rounding of a float, because both are the same readings.
+#[test]
+fn the_raw_events_of_a_run_are_the_readings_its_timeline_is_drawn_from() {
+    let output = run(&[
+        "power.energy",
+        "--system",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "raw",
+        "-e",
+        "timeline",
+        "-d",
+        "600ms",
+        "--format",
+        "json",
+    ]);
+    if output.status.code() != Some(0) {
+        eprintln!(
+            "skipped: this machine does not serve power.energy: {}",
+            stderr(&output)
+        );
+        return;
+    }
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("one json document");
+    let outputs = document["results"][0]["outputs"]
+        .as_array()
+        .expect("two outputs");
+    let raw = outputs
+        .iter()
+        .find(|output| output["emit"] == "raw")
+        .expect("the raw output");
+    let timeline = outputs
+        .iter()
+        .find(|output| output["emit"] == "timeline")
+        .expect("the timeline output");
+    let events = raw["events"].as_array().expect("events");
+    assert!(!events.is_empty(), "a 600 ms poll read nothing: {raw}");
+    let joules = |event: &serde_json::Value| {
+        event["attrs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|attr| attr["name"] == "joules")
+            .and_then(|attr| attr["value"].as_f64())
+    };
+    for event in events {
+        assert!(
+            event["attrs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|attr| attr["name"] == "domain"),
+            "a raw event names its domain: {event}"
+        );
+    }
+    let raw_total: f64 = events.iter().filter_map(joules).sum();
+    let timeline_total: f64 = timeline["series"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|series| series["points"].as_array().into_iter().flatten())
+        .filter_map(|point| point["value"].as_f64())
+        .sum();
+    assert!(
+        (raw_total - timeline_total).abs() <= 1e-9 * raw_total.max(1.0),
+        "the raw events hold {raw_total} J and the timeline drawn from them {timeline_total} J"
+    );
 }

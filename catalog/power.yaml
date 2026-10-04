@@ -17,7 +17,7 @@
     - {id: "fs:sys", requires: ["/sys/class/powercap/intel-rapl:0/energy_uj"], cost: free,
        degraded: "polled: a spike between two reads is averaged into the interval that contains it"}
   modes: [count, poll]
-  emits: [summary, rate, timeline]
+  emits: [summary, rate, timeline, raw]
   targets: {system: native}
   keys: []
   filter_fields: [domain]

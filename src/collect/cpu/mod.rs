@@ -12,6 +12,7 @@ pub(in crate::collect) mod cgroup;
 /// mode is one software counter read through this group rather than a copy of it.
 pub(in crate::collect) mod counters;
 mod oncpu;
+mod oncpu_bpf;
 mod percpu;
 mod pressure;
 mod profile;
@@ -57,6 +58,12 @@ pub fn factories() -> Vec<Factory> {
             }),
             Factory::new("cpu.oncpu_time", "fs:proc", |resolved| {
                 Ok(Box::new(oncpu::Prepare::new(resolved.request.mode)?))
+            }),
+            Factory::new("cpu.oncpu_time", "bpf:raw_tp", |resolved| {
+                Ok(Box::new(oncpu_bpf::Prepare::new(
+                    resolved.request.mode,
+                    resolved.request.filter.clone(),
+                )?))
             }),
             Factory::new("cpu.pressure", "fs:proc", |resolved| {
                 Ok(Box::new(pressure::Prepare(resolved.request.mode)))
