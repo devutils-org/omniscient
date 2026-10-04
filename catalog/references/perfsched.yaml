@@ -1,15 +1,12 @@
 # Reference pairs for the `perfsched` family of tools: each entry runs omn and an
 # established tool on the same workload and holds them to a declared
 # tolerance. Read by tests/reference.rs, never by omn itself. Schema:
-# BRIEF.md, "Decided before this wave".
+# catalog/references/README.md.
 #
-# Two fields beyond the brief's schema:
-# - `compare.across: sum` -- omn's value is the field summed over every
-#   series of the output (one series a task, or a task and cpu), where a
-#   process with several threads, or a count kept per cpu, splits it.
-#   Absent, the first series is read.
-# - `compare.scale: N` -- the tool's value is multiplied by N before the
-#   comparison, where it prints another unit than omn (microseconds).
+# omn's side is read from `{out}/results.json` by a path: the source's
+# result, its emit, then `series.*.<field>`, which sums the field over every
+# series (one series a task: a process with several threads splits a count,
+# and a single-threaded workload has one series, so a mean is that task's).
 #
 # The workloads make system calls nothing else in the interpreter makes
 # (`getppid`, `clock_nanosleep`), so a count is exact on both sides and a
@@ -17,11 +14,12 @@
 
 # --- strace -c ----------------------------------------------------------------
 
-- source: proc.syscall
+- id: strace-c-count
+  source: proc.syscall
   tool: strace -c
   use: "strace -c -f -- prog  (how many calls of each syscall)"
   workload: [python3, tests/reference/workloads/perfsched/syscalls.py, "5000", "20", "10"]
-  omn: [trace, proc.syscall, -m, count, -e, summary, --filter, "syscall == getppid", --format, json]
+  omn: [trace, proc.syscall, -m, count, -e, summary, --filter, "syscall == getppid", --format, json, -o, "{out}"]
   reference:
     command: [strace, -c, -f, --]
     parse: strace_c
@@ -29,19 +27,20 @@
     privileged: false
   compare:
     key: getppid.calls
-    omn: summary.count
-    across: sum
+    omn: results[source=proc.syscall].outputs[emit=summary].series.*.count
     tolerance: {abs: 0}
     why: "alternate runs of a deterministic workload: ptrace and the omn
       launcher cannot both own the child. 5000 getppid calls are 5000 on both
       sides, every run; the in-kernel count is exact, so any difference is a
       defect"
 
-- source: proc.syscall
+- id: strace-c-latency
+  source: proc.syscall
   tool: strace -c
   use: "strace -c -w -f -- prog  (wall time spent in each syscall)"
   workload: [python3, tests/reference/workloads/perfsched/syscalls.py, "200", "20", "10"]
-  omn: [trace, proc.syscall, -m, count, -e, summary, --filter, "syscall == clock_nanosleep", --format, json]
+  omn: [trace, proc.syscall, -m, count, -e, summary, --filter, "syscall == clock_nanosleep", --format, json, -o, "{out}"]
+  runs: 5
   reference:
     command: [strace, -c, -w, -f, --]
     parse: strace_c
@@ -49,11 +48,15 @@
     privileged: false
   compare:
     key: clock_nanosleep.usecs_per_call
-    scale: 1000                 # strace prints microseconds, omn nanoseconds
-    omn: summary.mean
+    reference_scale: 1000       # strace prints microseconds, omn nanoseconds
+    omn: results[source=proc.syscall].outputs[emit=summary].series.*.mean
     tolerance: {rel: 0.02}
-    why: "alternate runs; a 10 ms sleep is 10.05-10.07 ms on both sides
-      (three runs each, 2026-10-04: omn 10.054-10.067 ms, strace 10.056 ms).
+    why: "alternate runs, five of each side, medians compared: a 10 ms
+      sleep is 10.05-10.07 ms on both sides on a quiet machine (three runs
+      each, 2026-10-04: omn 10.054-10.067 ms, strace 10.056 ms), but a loaded
+      one wakes the sleeper late by up to a millisecond on either side, and
+      five runs keep one late run out of the median. This pair wants a quiet
+      machine.
       `-w` is required: without it strace reports the system cpu time of the
       call, 18 us for a 10 ms sleep. Short calls are not compared: strace's
       own stop doubles as the call's latency (getppid 16 us under strace,
@@ -61,11 +64,13 @@
 
 # --- strace -T ----------------------------------------------------------------
 
-- source: proc.syscall
+- id: strace-t-latency
+  source: proc.syscall
   tool: strace -T
   use: "strace -f -T -e trace=clock_nanosleep -- prog  (each call's duration)"
   workload: [python3, tests/reference/workloads/perfsched/syscalls.py, "0", "20", "10"]
-  omn: [trace, proc.syscall, -m, count, -e, summary, --filter, "syscall == clock_nanosleep", --format, json]
+  omn: [trace, proc.syscall, -m, count, -e, summary, --filter, "syscall == clock_nanosleep", --format, json, -o, "{out}"]
+  runs: 5
   reference:
     command: [strace, -f, -T, -e, trace=clock_nanosleep, --]
     parse: strace_t
@@ -73,21 +78,26 @@
     privileged: false
   compare:
     key: clock_nanosleep.mean_ns
-    omn: summary.mean
+    omn: results[source=proc.syscall].outputs[emit=summary].series.*.mean
     tolerance: {rel: 0.02}
-    why: "alternate runs; strace -T's per-call times averaged against omn's
-      exact sum over its count (10.05 ms both, 2026-10-04). omn keeps the
+    why: "alternate runs, five of each side, medians compared (a loaded
+      machine wakes the sleeper late by up to a millisecond, on one run or
+      the other: with three runs at a load average of 16-22 omn's median was
+      10.49 ms against strace's 10.05; alone it holds, 10.06-10.07 against
+      10.09-10.11 ms, 2026-10-04). strace -T's per-call times averaged
+      against omn's exact sum over its count. omn keeps the
       distribution as log2 buckets and the sum, not each call: `-e raw`
       gives one row a bucket, so strace -T's per-call line has no omn
       equivalent"
 
 # --- perf trace -s ------------------------------------------------------------
 
-- source: proc.syscall
+- id: perf-trace-count
+  source: proc.syscall
   tool: perf trace -s
   use: "perf trace -s -- prog  (per-syscall counts)"
   workload: [python3, tests/reference/workloads/perfsched/syscalls.py, "5000", "20", "10"]
-  omn: [trace, proc.syscall, -m, count, -e, summary, --filter, "syscall == getppid", --format, json]
+  omn: [trace, proc.syscall, -m, count, -e, summary, --filter, "syscall == getppid", --format, json, -o, "{out}"]
   reference:
     command: [perf, trace, -s, --]
     parse: perf_trace_summary
@@ -95,17 +105,17 @@
     privileged: true
   compare:
     key: getppid.calls
-    omn: summary.count
-    across: sum
+    omn: results[source=proc.syscall].outputs[emit=summary].series.*.count
     tolerance: {abs: 0}
     why: "perf trace and omn both read raw_syscalls in the kernel and could
       observe one run; alternate runs suffice for a deterministic count"
 
-- source: proc.syscall
+- id: perf-trace-latency
+  source: proc.syscall
   tool: perf trace -s
   use: "perf trace -s -- prog  (per-syscall latency)"
   workload: [python3, tests/reference/workloads/perfsched/syscalls.py, "200", "20", "10"]
-  omn: [trace, proc.syscall, -m, count, -e, summary, --filter, "syscall == clock_nanosleep", --format, json]
+  omn: [trace, proc.syscall, -m, count, -e, summary, --filter, "syscall == clock_nanosleep", --format, json, -o, "{out}"]
   reference:
     command: [perf, trace, -s, --]
     parse: perf_trace_summary
@@ -113,18 +123,19 @@
     privileged: true
   compare:
     key: clock_nanosleep.mean_ns
-    omn: summary.mean
+    omn: results[source=proc.syscall].outputs[emit=summary].series.*.mean
     tolerance: {rel: 0.02}
     why: "alternate runs; the sleep's latency is the kernel's, and both
       timestamp sys_enter and sys_exit in the kernel"
 
 # --- perf sched latency -------------------------------------------------------
 
-- source: sched.switches
+- id: perf-sched-latency-switches
+  source: sched.switches
   tool: perf sched latency
   use: "perf sched record -- prog; perf sched latency  (switches per task)"
   workload: [python3, tests/reference/workloads/perfsched/sleeper.py, "100", "2"]
-  omn: [trace, sched.switches, -m, count, -e, topk, --format, json]
+  omn: [trace, sched.switches, -m, count, -e, topk, --format, json, -o, "{out}"]
   reference:
     command: [sh, -c, 'd=$(mktemp) && perf sched record -q -o "$d" -- "$@" >/dev/null 2>&1 && perf sched latency -i "$d"; r=$?; rm -f "$d"; exit $r', sh]
     parse: perf_sched_latency
@@ -132,8 +143,7 @@
     privileged: true
   compare:
     key: omnref-sleep.switches
-    omn: topk.total
-    across: sum
+    omn: results[source=sched.switches].outputs[emit=topk].series.*.total
     tolerance: {rel: 0.15}
     why: "alternate runs: perf sched records the whole machine and is read
       by the workload's own command name. 100 sleeps gave omn 105 to 117
@@ -150,11 +160,12 @@
 
 # --- perf sched timehist ------------------------------------------------------
 
-- source: sched.migrations
+- id: perf-sched-timehist-migrations
+  source: sched.migrations
   tool: perf sched timehist
   use: "perf sched timehist -s  (per-task migrations)"
   workload: [python3, tests/reference/workloads/perfsched/migrate.py, "200"]
-  omn: [trace, sched.migrations, -m, count, -e, topk, --format, json]
+  omn: [trace, sched.migrations, -m, count, -e, topk, --format, json, -o, "{out}"]
   reference:
     command: [sh, -c, 'd=$(mktemp) && perf sched record -q -o "$d" -- "$@" >/dev/null 2>&1 && perf sched timehist -s -i "$d"; r=$?; rm -f "$d"; exit $r', sh]
     parse: perf_sched_timehist_summary
@@ -162,8 +173,7 @@
     privileged: true
   compare:
     key: omnref-migrate.migrations
-    omn: topk.total
-    across: sum
+    omn: results[source=sched.migrations].outputs[emit=topk].series.*.total
     tolerance: {rel: 0.1}
     why: "alternate runs of a workload that sets its own count: 200
       sched_setaffinity calls alternating two cpus, each one a migration the
@@ -174,11 +184,12 @@
       counts nothing, or is not attached, prints no series and fails the
       pair: no series is not read as zero"
 
-- source: sched.switches
+- id: perf-sched-timehist-sched-in
+  source: sched.switches
   tool: perf sched timehist
   use: "perf sched timehist -s  (per-task sched-in count)"
   workload: [python3, tests/reference/workloads/perfsched/sleeper.py, "100", "2"]
-  omn: [trace, sched.switches, -m, count, -e, topk, --format, json]
+  omn: [trace, sched.switches, -m, count, -e, topk, --format, json, -o, "{out}"]
   reference:
     command: [sh, -c, 'd=$(mktemp) && perf sched record -q -o "$d" -- "$@" >/dev/null 2>&1 && perf sched timehist -s -i "$d"; r=$?; rm -f "$d"; exit $r', sh]
     parse: perf_sched_timehist_summary
@@ -186,19 +197,19 @@
     privileged: true
   compare:
     key: omnref-sleep.sched_in
-    omn: topk.total
-    across: sum
+    omn: results[source=sched.switches].outputs[emit=topk].series.*.total
     tolerance: {rel: 0.15}
     why: "as perf sched latency's switches: a task sched in once for every
       time it was switched out, the last excepted"
 
 # --- perf lock contention -----------------------------------------------------
 
-- source: sched.lock
+- id: perf-lock-contention
+  source: sched.lock
   tool: perf lock contention
   use: "perf lock contention -b -- prog  (kernel lock contentions)"
   workload: [python3, tests/reference/workloads/perfsched/contend.py, "8", "2"]
-  omn: [trace, sched.lock, -e, summary, --format, json]
+  omn: [trace, sched.lock, -e, summary, --format, json, -o, "{out}"]
   reference:
     command: [perf, lock, contention, -b, --]
     parse: perf_lock_contention
@@ -206,8 +217,7 @@
     privileged: true
   compare:
     key: total.contended
-    omn: summary.count
-    across: sum
+    omn: results[source=sched.lock].outputs[emit=summary].series.*.count
     tolerance: {rel: 0.3}
     why: "alternate runs of a timed churn on one process's mmap_lock: both
       count contention_begin, but how many contentions a 2 s run makes
