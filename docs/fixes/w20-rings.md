@@ -96,71 +96,13 @@ None beyond what `make` grants (`cap_bpf,cap_perfmon` were on
 
 ## Needs from another stream
 
-- **shared, or whoever owns `tests/cross_compute.rs`** (in no row; filed, not
-  made). **`bdef096` turns one test red, and this is the fix to merge with
-  it.** `cross_compute::a_lossy_profile_marks_its_row_and_leaves_the_traced_rows_alone`
-  asserted that the decomposed task's histogram carries the *run's* drops
-  (18174 in the failing run) -- true only because placement used to be
-  refused whenever the kernel throttled. With the throttles on the rings the
-  run is placed, and the series carries its own ring's (12054). The test
-  should hold the series to its own ring's account, and to the run's only
-  when there is no per-ring account. Tried here and reverted: 3 of 3 green,
-  none a skip. The patch:
-
-```diff
-diff --git a/tests/cross_compute.rs b/tests/cross_compute.rs
-index a9912f6..05069dc 100644
---- a/tests/cross_compute.rs
-+++ b/tests/cross_compute.rs
-@@ -1025,14 +1025,39 @@ fn a_lossy_profile_marks_its_row_and_leaves_the_traced_rows_alone() {
-     let short = series_of(profile, "hist", lossy.task())
-         .map(|series| series["short"].clone())
-         .unwrap_or(Value::Null);
--    assert!(
--        !short.is_null(),
--        "the run dropped {dropped} samples and was throttled {throttled} times, and its \
--         histogram does not say so:\n{}",
--        lossy.text
--    );
--    assert_eq!(short["dropped"].as_u64(), Some(dropped), "{short}");
--    assert_eq!(short["throttled"].as_u64(), Some(throttled), "{short}");
-+    // The profile keeps one ring per task, and a series is short by its own
-+    // ring's losses when the rings account for the run's (`emit.rs`,
-+    // `Shortfalls`); the run's whole loss is on it only when they do not.
-+    let rings = profile["by_ring"].as_array().cloned().unwrap_or_default();
-+    let (own_dropped, own_throttled) = if rings.is_empty() {
-+        (dropped, throttled)
-+    } else {
-+        rings
-+            .iter()
-+            .find(|ring| ring["key"]["task"]["tid"].as_u64() == Some(lossy.task()))
-+            .map(|ring| {
-+                (
-+                    ring["losses"]["dropped"].as_u64().unwrap_or(0),
-+                    ring["losses"]["throttled"].as_u64().unwrap_or(0),
-+                )
-+            })
-+            .unwrap_or((0, 0))
-+    };
-+    if own_dropped == 0 && own_throttled == 0 {
-+        assert!(
-+            short.is_null(),
-+            "the decomposed task's ring lost nothing and its histogram is marked: {short}"
-+        );
-+    } else {
-+        assert!(
-+            !short.is_null(),
-+            "the decomposed task's ring dropped {own_dropped} samples and was throttled \
-+             {own_throttled} times, and its histogram does not say so:\n{}",
-+            lossy.text
-+        );
-+        assert_eq!(short["dropped"].as_u64(), Some(own_dropped), "{short}");
-+        assert_eq!(short["throttled"].as_u64(), Some(own_throttled), "{short}");
-+    }
- 
-     // The samples the mark says were dropped are time some sampled task spent
-     // holding its cpu. Counted back in, they must still fit in the room the
-```
+- **coordinator** (`tests/cross_compute.rs`, in no row): the fix that
+  `bdef096` needed for
+  `cross_compute::a_lossy_profile_marks_its_row_and_leaves_the_traced_rows_alone`
+  is now on this branch (review round, below), not a patch to apply by hand.
+  The test holds the decomposed task's histogram to its own ring's losses,
+  and to the run's only when there is no per-ring account. Merging the branch
+  brings it with it.
 
 - **docs** (`docs/unwind.md`, "The stripped build's second shape"): replace
   "reads as the workload or the window" with the aliasing explanation and
@@ -187,8 +129,8 @@ earlier concurrent run 15/17, above), `tests/stack_capture.rs` 13/13,
 passed (1621 passed). Then `cargo test --workspace --no-fail-fast` (load 10
 to 14): **2547 passed, 2 failed, 12 ignored**; `cases` passed there.
 
-- `cross_compute::a_lossy_profile_marks_...`: **caused by `bdef096`**, the
-  fix filed above with its patch.
+- `cross_compute::a_lossy_profile_marks_...`: **caused by `bdef096`**; the
+  fix is now committed on this branch (see "Review").
 - `recorder::two_bursts_write_exactly_two_documents_each_holding_its_burst`
   (the value that fired 256 against 303): not mine; passed alone on its
   rerun.
@@ -200,3 +142,57 @@ every stream of the wave, and another stream (shared) wrote `check.log` and
 `ws.log` there while this one did; a first suite run here read its numbers
 by mistake and was discarded. Logs with a stream prefix, or a directory per
 stream, avoid it.
+
+## Review
+
+Both findings were right, and both are fixed on the branch.
+
+- **`runner::a_profile_s_losses_land_...` skipped on an empty `by_ring`
+  without checking the run's losses first.** That is the regression the
+  test exists to catch: a collector that stopped reporting
+  `losses_by_ring` would have skipped and blamed the machine. Now the test
+  skips only when the run's `dropped` and `throttled` are both 0. When the
+  run lost something and `by_ring` is empty, it fails and prints the
+  document. 28/28 in `tests/runner.rs`. With `--nocapture` this test passed
+  and did not skip.
+- **`cross_compute::a_lossy_profile_marks_...` was red with `bdef096`, and
+  the fix was only a patch in this handoff.** I applied the patch to
+  `tests/cross_compute.rs` on this branch, exactly as filed, so it merges
+  together with `bdef096` and the merged tree is not red in between. The
+  file has no owner in this wave's rows. Its one test changes only how it
+  reads the series' shortfall: its own ring first, the run's as a fallback.
+  Results: `tests/cross_compute.rs` 8/8 in three of four runs, under load
+  10 to 12. The first run had one failure, and I did not capture its name.
+  The three runs after it were 8/8, and that test passed alone too, with no
+  skip.
+
+
+### The suite, review round
+
+I ran `make check` once on `a4c4707` (main `777d6dd` merged in, plus this
+round's two test files; no source changed). It stopped at `cases`. Then I
+ran `cargo test --workspace --no-fail-fast` (load 8 to 12): **2628 passed,
+5 failed, 13 ignored**. None of the failures is in `tests/runner.rs` or
+`tests/cross_compute.rs`. Since this round touches no source, all five come
+from the merged main.
+
+- `scenario_net::every_datagram_sent_to_a_closed_port_...` and
+  `unwind::dwarf_recovers_the_whole_tree_...`: on the flaky tally, and each
+  passed alone on its one rerun.
+- `scenario_sched::a_workload_that_is_half_blocked_...`: on the tally, but
+  it failed alone too (28 % blocked: 174.6 ms against 444.9 ms on cpu).
+  Worth watching.
+- **`view_workloads::system_panels_carry_at_least_the_manifests_cost`, not
+  on any tally, red alone too**: "the program burns 1 s itself (its child
+  as much again, not its own); on the cpu 2.070 s". The panel seems to count
+  the child's cpu. It looks like the view stream's test meeting another
+  stream's merge. For the coordinator.
+- **`cases::every_case_names_its_known_cause_both_ways`**: seven
+  sub-failures. Four `cpython-*/mcp` sub-cases fail "the reference
+  `account`: no `key=value` number in 'note: --duration 3m applied to
+  every request ...'". Two `sqlite3-stripped/*/mcp` sub-cases fail with
+  "no `Run Time:` line". The seventh is `http-server-stdlib/a-cold-file/cli`,
+  where the first suspect is on-cpu. The mcp ones are all the same shape.
+  It looks like a reference parser reading the new session note. Not the
+  `gcc-shell` timing the tally knows. For the coordinator. I did not rerun
+  it: the binary takes minutes, and none of it is mine.

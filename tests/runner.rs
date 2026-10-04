@@ -1924,15 +1924,25 @@ fn a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed() {
         serde_json::from_slice(&output.stdout).expect("a JSON document");
     let result = &document["results"][0];
     let dropped = result["losses"]["dropped"].as_u64().unwrap_or(0);
-    let rings = result["by_ring"].as_array().cloned().unwrap_or_default();
-    if rings.is_empty() {
+    let throttled = result["losses"]["throttled"].as_u64().unwrap_or(0);
+    if dropped == 0 && throttled == 0 {
         eprintln!(
-            "SKIP: no ring of this profile lost anything at 50 kHz on this machine (the run's \
-             losses: {}), so there is no loss to place",
+            "SKIP: nothing was dropped or throttled at 50 kHz on this machine, so there is no \
+             loss to place: {}",
             result["losses"]
         );
         return;
     }
+    // The run lost something, so its rings must say whose loss it was: an
+    // empty `by_ring` here is the collector no longer reporting its losses
+    // per ring, not the machine.
+    let rings = result["by_ring"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !rings.is_empty(),
+        "the run dropped {dropped} samples and was throttled {throttled} times, and no ring \
+         accounts for any of it:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     // Each ring's account, by the series key its task's events carry.
     let lost_by_task: std::collections::BTreeMap<String, (u64, u64)> = rings
         .iter()
@@ -1950,14 +1960,6 @@ fn a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed() {
             ))
         })
         .collect();
-    let throttled = result["losses"]["throttled"].as_u64().unwrap_or(0);
-    if dropped == 0 && throttled == 0 {
-        eprintln!(
-            "SKIP: no ring overflowed and nothing was throttled at 50 kHz on this machine, so \
-             there is no loss to place: {lost_by_task:?}"
-        );
-        return;
-    }
     // A run is placed per ring only when the rings account for every loss it
     // counted (`emit.rs`, `placed`): its drops and its throttles both. On a
     // loaded machine the kernel throttles a 50 kHz sampler, so a profile whose
