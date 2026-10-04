@@ -42,8 +42,8 @@ pub fn parsers() -> Vec<Parser> {
             parse: omn_rtt,
         },
         Parser {
-            name: "omn_events",
-            parse: omn_events,
+            name: "omn_captured",
+            parse: omn_captured,
         },
     ]
 }
@@ -313,16 +313,34 @@ fn omn_rtt(stdout: &str, _stderr: &str) -> Result<Values, String> {
     Ok(vec![("rtt_ns_mean".into(), sum / n)])
 }
 
-/// The number of events of omn's `raw` output, as `captured` (what
-/// `tcpdump` names the packets it kept) and `""`.
-fn omn_events(stdout: &str, _stderr: &str) -> Result<Values, String> {
+/// An event's string attribute, if it has one by that name.
+fn attr<'a>(event: &'a Json, name: &str) -> Option<&'a str> {
+    event["attrs"]
+        .as_array()?
+        .iter()
+        .find(|a| a["name"] == name)?["value"]
+        .as_str()
+}
+
+/// The events of omn's `raw` output that `tcpdump` would have kept, as
+/// `captured` (what `tcpdump` names them) and `""`. On loopback every frame
+/// reaches a packet socket twice, once `outgoing` and once `host`
+/// (`docs/open-findings.md`, "Loopback carries every frame twice"); omn's
+/// `net.capture` keeps both, and libpcap drops the `outgoing` copy on a
+/// loopback device (`pcap-linux.c`), so a frame on `lo` counts once here,
+/// as tcpdump counts it. An event with no `direction` (another source's
+/// raw output) counts as itself.
+fn omn_captured(stdout: &str, _stderr: &str) -> Result<Values, String> {
     let result = omn_result(stdout)?;
     let events = result["outputs"]
         .as_array()
         .and_then(|o| o.iter().find(|o| o["emit"] == "raw"))
         .and_then(|o| o["events"].as_array())
         .ok_or("omn's result has no `raw` output")?;
-    let n = events.len() as f64;
+    let n = events
+        .iter()
+        .filter(|e| !(attr(e, "iface") == Some("lo") && attr(e, "direction") == Some("outgoing")))
+        .count() as f64;
     Ok(vec![("".into(), n), ("captured".into(), n)])
 }
 
@@ -393,8 +411,8 @@ mod tests {
     #[test]
     fn tcpdump_count_reads_the_tally_on_stderr() {
         let v = tcpdump_count("", include_str!("captures/net/tcpdump_count.stderr.txt")).unwrap();
-        assert_eq!(get(&v, "captured"), 3621.0);
-        assert_eq!(get(&v, "received"), 7242.0);
+        assert_eq!(get(&v, "captured"), 1804.0);
+        assert_eq!(get(&v, "received"), 3608.0);
         assert_eq!(get(&v, "dropped"), 0.0);
         assert!(tcpdump_count("", "tcpdump: lo: You don't have permission").is_err());
     }
@@ -434,10 +452,27 @@ mod tests {
     }
 
     #[test]
-    fn omn_events_counts_the_raw_events() {
-        let v = omn_events(include_str!("captures/net/omn_net_backlog.json"), "").unwrap();
+    fn omn_captured_counts_raw_events_with_no_direction_as_themselves() {
+        let v = omn_captured(include_str!("captures/net/omn_net_backlog.json"), "").unwrap();
         assert_eq!(get(&v, "captured"), 5.0);
         let summary = include_str!("captures/net/omn_net_tcp_rtt.json");
-        assert!(omn_events(summary, "").is_err());
+        assert!(omn_captured(summary, "").is_err());
+    }
+
+    /// The pair's own source: `net.capture`'s raw output, captured with
+    /// CAP_NET_RAW (`make CAPTURE=1`) over a 2 ms pingpong on `lo`. Every
+    /// packet the filter kept is one event, nothing capped or split (the
+    /// result's `events_seen` and its filter's `kept` are the 14 events),
+    /// and the 14 are 7 frames seen twice, `outgoing` and `host`: tcpdump
+    /// counts 7.
+    #[test]
+    fn omn_captured_counts_each_loopback_frame_once_as_tcpdump_does() {
+        let stdout = include_str!("captures/net/omn_net_capture.json");
+        let result = omn_result(stdout).unwrap();
+        assert_eq!(result["events_seen"].as_f64(), Some(14.0));
+        assert_eq!(result["filtered"]["kept"].as_f64(), Some(14.0));
+        let v = omn_captured(stdout, "").unwrap();
+        assert_eq!(get(&v, "captured"), 7.0);
+        assert_eq!(get(&v, ""), 7.0);
     }
 }
