@@ -263,6 +263,39 @@ The whole machine.
 Launch the program and measure it. The program is held at a gate until every
 collector is attached, so the measurement starts before its first instruction,
 and the run ends when it does.
+.IP
+When the run stops first \(em its duration elapsed, a budget ended it, the
+view was quit \(em the program and every process it started are stopped
+together, then killed and reaped, and the results say so
+.RI ( lifetime.terminated ).
+A process the program started that left its tree before the stop \(em
+orphaned, its parent gone first, or in a session of its own \(em is not lost:
+.B omn
+is the subreaper of everything the program starts, so such a process is
+adopted by
+.B omn
+rather than by init, and is ended at the end of the run, whether the program
+was stopped or exited on its own leaving it behind. Their count is
+.I lifetime.adopted_ended
+and is said on standard error. One the stop could not signal (a setuid child
+refusing this process's signals) is still running when
+.B omn
+exits; its count is
+.I lifetime.left_running
+and is said as a warning.
+.TP
+.BI \-\-program\-stderr " FILE"
+Write the launched program's standard error to
+.IR FILE ,
+created or truncated, instead of the standard error it would share with
+.BR omn ,
+so the program's lines and
+.BR omn 's
+are told apart at the source. What
+.B OMN_PROGRAM_STDERR
+sets, and it wins over the variable. Refused, with exit 2, beside a command
+that launches nothing; a file that cannot be opened stops the launch with the
+reason.
 .SS Measurement
 .TP
 .BI \-m ", " \-\-mode " MODE"
@@ -827,8 +860,8 @@ and a source this machine cannot serve is drawn as its reason where its panel
 would be. Every figure is drawn in one trust style: dimmed where it is not to
 be read at face value, with a badge saying why.
 .PP
-The first screen is \fBprocess\fR for a launched program, and
-\fBsystem\fR for the machine;
+The first screen is \fBprocess\fR for a launched program or
+\fB\-\-pid\fR, and \fBsystem\fR for the machine;
 .BI \-\-view " name"
 opens another.
 .B \-\-replay
@@ -874,7 +907,12 @@ The measurement ran, or the question was answered.
 .B 1
 This run cannot happen here: this machine cannot serve the request, or
 something failed while running. The request itself is valid and will run on a
-machine that has what it needs.
+machine that has what it needs. Also a run that went to its end but whose
+collector broke the program it measured \(em the GPU's injection library
+killing its target as it exited \(em said in an
+.B error:
+line on standard error once the results are written: the program's own exit
+status was then the tool's doing.
 .TP
 .B 2
 The request was refused: it cannot mean what it asks for. A flag that does not
@@ -911,7 +949,9 @@ Path to the heap shim, when it is not beside the binary.
 A file, created or truncated, that the launched program's standard error is
 written to instead of the one it would share with
 .BR omn ,
-so the two are told apart at the source. The variable is
+so the two are told apart at the source; what
+.B \-\-program\-stderr
+sets, which wins over it. The variable is
 .BR omn 's
 own and is not passed on to the program; a file that cannot be opened stops
 the launch with the reason.

@@ -144,6 +144,16 @@ fn normalize(args: impl Iterator<Item = OsString>) -> Vec<OsString> {
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+    if let Some(refusal) = cli.program_stderr_refusal() {
+        eprintln!("error: {refusal}");
+        return Ok(ExitCode::from(EXIT_REJECTED));
+    }
+    if let Some(path) = &cli.program_stderr {
+        // What the variable sets, and read where the variable is: the launch
+        // takes it from this process's environment and does not pass it on.
+        // Set before any thread is started.
+        std::env::set_var(omn::collect::PROGRAM_STDERR_VARIABLE, path);
+    }
     match cli.command {
         Command::Trace(args) => trace(*args),
         Command::List(args) => list(args),

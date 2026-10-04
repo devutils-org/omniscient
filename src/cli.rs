@@ -48,6 +48,42 @@ use crate::style::ColorChoice;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
+
+    /// Write the launched program's standard error to this file, created or
+    /// truncated, instead of omn's own: what OMN_PROGRAM_STDERR sets, which
+    /// this flag overrides. Only beside a program to launch, or a session
+    /// file that may launch one.
+    #[arg(long, value_name = "FILE", global = true)]
+    pub program_stderr: Option<PathBuf>,
+}
+
+impl Cli {
+    /// Why `--program-stderr` cannot mean anything beside this command, when
+    /// it cannot: a command that launches nothing has no program whose
+    /// standard error to write, and the flag is refused rather than dropped.
+    pub fn program_stderr_refusal(&self) -> Option<String> {
+        self.program_stderr.as_ref()?;
+        let launches = match &self.command {
+            Command::Trace(args) => args.file.is_some() || !args.program.is_empty(),
+            Command::Top(args) => {
+                args.replay.is_none()
+                    && args.gallery.is_none()
+                    && (args.file.is_some() || !args.program.is_empty())
+            }
+            Command::Latency(args) => !args.program.is_empty(),
+            Command::Saturate(args) => !args.program.is_empty(),
+            Command::List(_)
+            | Command::Formats(_)
+            | Command::Validate(_)
+            | Command::Diff(_)
+            | Command::Join(_) => false,
+        };
+        (!launches).then(|| {
+            "--program-stderr names where a launched program's standard error goes, and this \
+             command launches no program: give one after `--`, or a session file that does"
+                .to_owned()
+        })
+    }
 }
 
 #[derive(Debug, Subcommand)]
