@@ -1,0 +1,130 @@
+{
+  "results": [
+    {
+      "label": "mem.swap",
+      "source": "mem.swap",
+      "unit": "bytes",
+      "backend": "fs:proc",
+      "outputs": [
+        {
+          "emit": "raw",
+          "events": [
+            {
+              "ts_ns": 2063965628024,
+              "kind": "mem.swap",
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 0
+                },
+                {
+                  "name": "in_bytes",
+                  "value": 0
+                },
+                {
+                  "name": "out_bytes",
+                  "value": 0
+                },
+                {
+                  "name": "interval_ns",
+                  "value": 1000100114
+                },
+                {
+                  "name": "read_from",
+                  "value": "/proc/vmstat"
+                },
+                {
+                  "name": "basis",
+                  "value": "the swap counters' increase over this tick"
+                },
+                {
+                  "name": "in_zero_bytes",
+                  "value": 0
+                },
+                {
+                  "name": "out_zero_bytes",
+                  "value": 0
+                }
+              ],
+              "collector_id": "mem.swap/fs:proc",
+              "seq": 0
+            },
+            {
+              "ts_ns": 2064965535480,
+              "kind": "mem.swap",
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 0
+                },
+                {
+                  "name": "in_bytes",
+                  "value": 0
+                },
+                {
+                  "name": "out_bytes",
+                  "value": 0
+                },
+                {
+                  "name": "interval_ns",
+                  "value": 999907456
+                },
+                {
+                  "name": "read_from",
+                  "value": "/proc/vmstat"
+                },
+                {
+                  "name": "basis",
+                  "value": "the swap counters' increase over this tick"
+                },
+                {
+                  "name": "in_zero_bytes",
+                  "value": 0
+                },
+                {
+                  "name": "out_zero_bytes",
+                  "value": 0
+                }
+              ],
+              "collector_id": "mem.swap/fs:proc",
+              "seq": 1
+            }
+          ]
+        }
+      ],
+      "events_seen": 2,
+      "observed_ns": 2000276471,
+      "window": {
+        "run_opened_ns": 2062965281859,
+        "opened_ns": 2062965281859,
+        "closed_ns": 2064965558330,
+        "attached": true
+      },
+      "stopped_because": "the requested duration elapsed",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "overhead": {
+        "collector_cpu_ns": 746000,
+        "attributed_cpu_ns": 746000,
+        "observed_cpu_ns": 3120000000,
+        "observed_from": "everything but idle on every cpu (/proc/stat)",
+        "wall_ns": 2000377451,
+        "measurement_ns": 93020,
+        "measurements": 2,
+        "in_target_cpu_ns": 0,
+        "in_target_from": "nothing of this collector runs in the target's context: it reads the kernel's account, or a file, from its own",
+        "before_window_cpu_ns": 40184000,
+        "after_window_cpu_ns": 111000
+      },
+      "served_by": [
+        "fs:proc"
+      ],
+      "value_attr": "bytes"
+    }
+  ]
+}

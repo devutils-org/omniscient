@@ -43,6 +43,18 @@ pub fn parsers() -> Vec<Parser> {
             name: "psi_window",
             parse: psi_window,
         },
+        Parser {
+            name: "omn_cpu_util",
+            parse: omn_cpu_util,
+        },
+        Parser {
+            name: "omn_mem_swap",
+            parse: omn_mem_swap,
+        },
+        Parser {
+            name: "omn_psi",
+            parse: omn_psi,
+        },
     ]
 }
 
@@ -367,14 +379,120 @@ fn psi_window(stdout: &str, _stderr: &str) -> Result<Values, String> {
     Ok(out)
 }
 
+// --- omn's side ---------------------------------------------------------
+
+/// The window's opening and every raw event's stamp, of `omn -e raw`'s JSON.
+fn window_and_stamps(json: &serde_json::Value) -> Result<(f64, Vec<f64>), String> {
+    let result = &json["results"][0];
+    let opened = result["window"]["opened_ns"]
+        .as_f64()
+        .ok_or("omn: no window.opened_ns")?;
+    let stamps = raw_events(json)?
+        .iter()
+        .map(|e| e["ts_ns"].as_f64().ok_or("omn: a raw event has no ts_ns"))
+        .collect::<Result<_, _>>()?;
+    Ok((opened, stamps))
+}
+
+fn raw_events(json: &serde_json::Value) -> Result<&Vec<serde_json::Value>, String> {
+    json["results"][0]["outputs"]
+        .as_array()
+        .and_then(|o| o.iter().find(|o| o["emit"] == "raw"))
+        .and_then(|o| o["events"].as_array())
+        .ok_or_else(|| "omn: no `raw` output".to_string())
+}
+
+/// `omn <source> --system -m poll@1s -e raw --format json`: each numeric
+/// attribute's mean over the raw events, keyed by its name. A leading event
+/// stamped less than half a period after the window opened covers a few ms,
+/// not a period (defect 2 of `docs/fixes/w22-sysstat.md`, held by
+/// `poll_leading_event_is_held_as_a_known_defect`), and is left out: with
+/// equal windows, the mean of the shares is the share of the whole, which is
+/// what the tools print.
+fn raw_means(stdout: &str) -> Result<Values, String> {
+    let json: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| format!("omn's JSON: {e}"))?;
+    let (opened, stamps) = window_and_stamps(&json)?;
+    let skip = match stamps[..] {
+        [t0, t1, ..] if t0 - opened < (t1 - t0) / 2.0 => 1,
+        _ => 0,
+    };
+    let events = &raw_events(&json)?[skip..];
+    let mut sums: Vec<(String, f64, usize)> = Vec::new();
+    for event in events {
+        for attr in event["attrs"].as_array().into_iter().flatten() {
+            let (Some(name), Some(v)) = (attr["name"].as_str(), attr["value"].as_f64()) else {
+                continue;
+            };
+            match sums.iter_mut().find(|(n, _, _)| n == name) {
+                Some((_, s, c)) => {
+                    *s += v;
+                    *c += 1;
+                }
+                None => sums.push((name.to_string(), v, 1)),
+            }
+        }
+    }
+    if sums.is_empty() {
+        return Err("omn: no numeric attribute in a full-period raw event".into());
+    }
+    Ok(sums
+        .into_iter()
+        .map(|(n, s, c)| (n, s / c as f64))
+        .collect())
+}
+
+fn renamed(means: &Values, names: &[(&str, &str)]) -> Values {
+    names
+        .iter()
+        .filter_map(|(from, to)| {
+            means
+                .iter()
+                .find(|(k, _)| k == from)
+                .map(|(_, v)| (to.to_string(), *v))
+        })
+        .collect()
+}
+
+/// `cpu.util --system`'s busy share, as `busy` (vmstat's key) and `all`
+/// (mpstat's, sar's and iostat's).
+fn omn_cpu_util(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let means = raw_means(stdout)?;
+    Ok(renamed(&means, &[("busy", "busy"), ("busy", "all")]))
+}
+
+/// `mem.swap --system`'s flows per tick, under vmstat's keys: at poll@1s a
+/// tick is a second, so `in_bytes` is `si_bytes` per second.
+fn omn_mem_swap(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let means = raw_means(stdout)?;
+    Ok(renamed(
+        &means,
+        &[("in_bytes", "si_bytes"), ("out_bytes", "so_bytes")],
+    ))
+}
+
+/// A pressure source's window shares under the PSI file's line names:
+/// `cpu.pressure` calls its share `some` (defect 3: unlike its siblings) and
+/// has no `full` share; `mem.pressure` and `io.pressure` call them
+/// `stall_ratio` and `full_stall_ratio`.
+fn omn_psi(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let means = raw_means(stdout)?;
+    Ok(renamed(
+        &means,
+        &[
+            ("some", "some"),
+            ("stall_ratio", "some"),
+            ("full_stall_ratio", "full"),
+        ],
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    //! Each parser on a committed capture. The captures of `vmstat`,
-    //! `numastat -p` and the PSI window were produced on this machine; the
-    //! sysstat tools are not installed here, so `mpstat`, `sar -u`,
-    //! `iostat -c` and `pidstat -r`/`-w` are written in sysstat 12's
-    //! documented `LC_ALL=C` layout, with numbers chosen to check the
-    //! arithmetic.
+    //! Each parser on a committed capture, every one produced on this machine
+    //! (sysstat 12.8.0, `LC_ALL=C`; `omn` on 2026-10-04): the tools' under
+    //! the commands of `catalog/references/sysstat.yaml`, `omn`'s under the
+    //! pairs' `omn` arguments with `-d 2s`.
 
     use super::*;
 
@@ -432,35 +550,34 @@ mod tests {
     #[test]
     fn mpstat_reads_the_average_rows() {
         let v = mpstat(&capture("mpstat.txt"), "").unwrap();
-        assert!(close(get(&v, "all"), (100.0 - 48.75 - 0.25) / 100.0));
-        assert!(close(get(&v, "0"), 1.0));
-        assert!(close(get(&v, "1.%sys"), 1.5));
+        assert!(close(get(&v, "all"), (100.0 - 66.02 - 7.02) / 100.0));
+        assert!(close(get(&v, "all.%sys"), 5.16));
     }
 
     #[test]
     fn sar_u_reads_the_average_row() {
         let v = sar_u(&capture("sar-u.txt"), "").unwrap();
-        assert!(close(get(&v, "all"), (100.0 - 49.0 - 0.25) / 100.0));
+        assert!(close(get(&v, "all"), (100.0 - 66.01 - 7.02) / 100.0));
     }
 
     #[test]
     fn iostat_cpu_leaves_out_the_since_boot_block() {
         let v = iostat_cpu(&capture("iostat-c.txt"), "").unwrap();
-        let want = ((100.0 - 49.0 - 0.25) + (100.0 - 49.0 - 0.25)) / 200.0;
+        let want = ((100.0 - 69.00 - 7.30) + (100.0 - 63.24 - 6.71)) / 200.0;
         assert!(close(get(&v, "all"), want));
     }
 
     #[test]
     fn pidstat_r_takes_the_largest_interval_rss() {
         let v = pidstat_r(&capture("pidstat-r.txt"), "").unwrap();
-        assert!(close(get(&v, "python3"), 140944.0 * 1024.0));
+        assert!(close(get(&v, "python3"), 139840.0 * 1024.0));
     }
 
     #[test]
     fn pidstat_w_sums_both_kinds() {
         let v = pidstat_w(&capture("pidstat-w.txt"), "").unwrap();
-        assert!(close(get(&v, "python3"), 943.0));
-        assert!(close(get(&v, "python3.nvcswch/s"), 2.0));
+        assert!(close(get(&v, "python3"), 913.0));
+        assert!(close(get(&v, "python3.nvcswch/s"), 13.0));
     }
 
     #[test]
@@ -478,271 +595,61 @@ mod tests {
     fn psi_window_refuses_one_read() {
         assert!(psi_window("123\nsome avg10=0 total=5\n", "").is_err());
     }
-}
 
-/// This family's pairs, run until the shared runner (stream reference) knows
-/// `target: system` and the `raw.<attr>` path: every pair in
-/// `catalog/references/sysstat.yaml`, run, parsed, compared, or skipped with
-/// the machine's reason. A failure lists every pair that missed, at once.
-#[cfg(test)]
-mod pairs {
-    use super::parsers;
-    use serde::Deserialize;
-    use serde_json::Value;
-    use std::path::Path;
-    use std::process::{Command, Stdio};
-    use std::time::Duration;
-
-    #[derive(Deserialize)]
-    struct Pair {
-        source: String,
-        #[serde(rename = "use")]
-        use_: String,
-        #[serde(default)]
-        workload: Vec<String>,
-        omn: Vec<String>,
-        #[serde(default)]
-        target: Option<String>,
-        reference: Reference,
-        compare: Compare,
-        #[serde(default)]
-        known_defect: Option<String>,
-    }
-
-    #[derive(Deserialize)]
-    struct Reference {
-        command: Vec<String>,
-        parse: String,
-        #[serde(default)]
-        requires: Vec<String>,
-        #[serde(default)]
-        privileged: bool,
-    }
-
-    #[derive(Deserialize)]
-    struct Compare {
-        key: String,
-        omn: String,
-        #[serde(default)]
-        omn_key: Option<String>,
-        #[serde(default)]
-        scale: Option<f64>,
-        tolerance: Tolerance,
-    }
-
-    #[derive(Deserialize)]
-    struct Tolerance {
-        #[serde(default)]
-        rel: Option<f64>,
-        #[serde(default)]
-        abs: Option<f64>,
-    }
-
-    fn on_path(bin: &str) -> bool {
-        std::env::var_os("PATH")
-            .map(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
-            .unwrap_or(false)
-    }
-
-    fn omn_value(json: &Value, path: &str, key: Option<&str>) -> Result<f64, String> {
-        let result = &json["results"][0];
-        let (emit, field) = path.split_once('.').ok_or(format!("`{path}`: no emit"))?;
-        let output = result["outputs"]
-            .as_array()
-            .and_then(|o| o.iter().find(|o| o["emit"] == emit))
-            .ok_or(format!("no `{emit}` output in omn's results"))?;
-        if emit == "raw" {
-            let events = output["events"].as_array().ok_or("raw: no events")?;
-            // A leading event stamped less than half a period after the
-            // window opened covers a few ms, not a period: cpu.util and
-            // cpu.pressure emit one (docs/fixes/w22-sysstat.md), mem.pressure
-            // and io.pressure do not. It is left out wherever it appears.
-            let opened = result["window"]["opened_ns"].as_f64().unwrap_or(0.0);
-            let ts = |i: usize| events.get(i).and_then(|e| e["ts_ns"].as_f64());
-            let skip = match (ts(0), ts(1)) {
-                (Some(t0), Some(t1)) if t0 - opened < (t1 - t0) / 2.0 => 1,
-                _ => 0,
-            };
-            let values: Vec<f64> = events
-                .iter()
-                .skip(skip)
-                .filter_map(|e| {
-                    e["attrs"].as_array()?.iter().find(|a| a["name"] == field)?["value"].as_f64()
-                })
-                .collect();
-            if values.is_empty() {
-                return Err(format!("raw: no `{field}` after the first event"));
-            }
-            return Ok(values.iter().sum::<f64>() / values.len() as f64);
-        }
-        let series = output["series"].as_array().ok_or("no series")?;
-        let one = match key {
-            Some(k) => series.iter().find(|s| s["key"] == k),
-            None => series.first(),
-        }
-        .ok_or(format!("no series {key:?} in `{emit}`"))?;
-        one[field]
-            .as_f64()
-            .ok_or(format!("`{emit}` series has no `{field}`"))
-    }
-
-    fn run(pair: &Pair, root: &Path) -> Result<String, String> {
-        for bin in &pair.reference.requires {
-            if !on_path(bin) {
-                return Err(format!("SKIP: `{bin}` is not installed"));
-            }
-        }
-        if !pair.workload.is_empty() && !on_path(&pair.workload[0]) {
-            return Err(format!("SKIP: `{}` is not installed", pair.workload[0]));
-        }
-        let mut reference = pair.reference.command.clone();
-        if pair.reference.privileged {
-            let granted = Command::new("sudo")
-                .args(["-n", "true"])
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !granted {
-                return Err("SKIP: privileged, and `sudo -n` is not granted".into());
-            }
-            reference.splice(0..0, ["sudo".to_string(), "-n".to_string()]);
-        }
-        let omn_bin = env!("CARGO_BIN_EXE_omn");
-        let system = pair.target.as_deref() == Some("system");
-        let mut omn_args = pair.omn.clone();
-        let (omn_out, ref_out) = if system {
-            let mut background = if pair.workload.is_empty() {
-                None
-            } else {
-                let child = Command::new(&pair.workload[0])
-                    .args(&pair.workload[1..])
-                    .current_dir(root)
-                    .stdout(Stdio::null())
-                    .spawn()
-                    .map_err(|e| format!("workload: {e}"))?;
-                std::thread::sleep(Duration::from_millis(300));
-                Some(child)
-            };
-            let omn = Command::new(omn_bin)
-                .args(&omn_args)
-                .current_dir(root)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("omn: {e}"))?;
-            let tool = Command::new(&reference[0])
-                .args(&reference[1..])
-                .current_dir(root)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("{}: {e}", reference[0]))?;
-            let o = omn.wait_with_output().map_err(|e| e.to_string())?;
-            let t = tool.wait_with_output().map_err(|e| e.to_string())?;
-            if let Some(child) = background.as_mut() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            (o, t)
-        } else {
-            omn_args.push("--".into());
-            omn_args.extend(pair.workload.iter().cloned());
-            reference.extend(pair.workload.iter().cloned());
-            let o = Command::new(omn_bin)
-                .args(&omn_args)
-                .current_dir(root)
-                .stdin(Stdio::null())
-                .output()
-                .map_err(|e| format!("omn: {e}"))?;
-            let t = Command::new(&reference[0])
-                .args(&reference[1..])
-                .current_dir(root)
-                .stdin(Stdio::null())
-                .output()
-                .map_err(|e| format!("{}: {e}", reference[0]))?;
-            (o, t)
-        };
-        let omn_stderr = String::from_utf8_lossy(&omn_out.stderr);
-        if !omn_out.status.success() {
-            return Err(format!("omn failed: {}", omn_stderr.trim()));
-        }
-        let json: Value =
-            serde_json::from_slice(&omn_out.stdout).map_err(|e| format!("omn's JSON: {e}"))?;
-        let parser = parsers()
-            .into_iter()
-            .find(|p| p.name == pair.reference.parse)
-            .ok_or(format!("no parser `{}`", pair.reference.parse))?;
-        let values = (parser.parse)(
-            &String::from_utf8_lossy(&ref_out.stdout),
-            &String::from_utf8_lossy(&ref_out.stderr),
-        )?;
-        let theirs = values
-            .iter()
-            .find(|(k, _)| *k == pair.compare.key)
-            .map(|(_, v)| *v)
-            .ok_or(format!("the tool gave no `{}`", pair.compare.key))?;
-        let ours = omn_value(&json, &pair.compare.omn, pair.compare.omn_key.as_deref())?
-            * pair.compare.scale.unwrap_or(1.0);
-        let diff = (ours - theirs).abs();
-        let tol = &pair.compare.tolerance;
-        let within = tol.abs.is_some_and(|a| diff <= a)
-            || tol
-                .rel
-                .is_some_and(|r| diff <= r * ours.abs().max(theirs.abs()));
-        let line = format!("omn {ours:.6} vs tool {theirs:.6} (|diff| {diff:.6})");
-        if within {
-            Ok(line)
-        } else {
-            Err(format!("outside the tolerance: {line}"))
-        }
+    #[test]
+    fn omn_cpu_util_leaves_out_the_few_ms_leading_event() {
+        // The capture's first event is stamped 225 us after the window opened,
+        // with busy 0.0; the two after it cover a second each.
+        let v = omn_cpu_util(&capture("omn-cpu-util-raw.json"), "").unwrap();
+        let want = (0.11041926110419262 + 0.04447215295095595) / 2.0;
+        assert!(close(get(&v, "busy"), want));
+        assert!(close(get(&v, "all"), want));
     }
 
     #[test]
-    fn sysstat_pairs_agree_or_skip_with_the_reason() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let text = std::fs::read_to_string(root.join("catalog/references/sysstat.yaml"))
-            .expect("catalog/references/sysstat.yaml");
-        let pairs: Vec<Pair> = serde_norway::from_str(&text).expect("sysstat.yaml parses");
-        let mut failed = Vec::new();
-        for pair in &pairs {
-            let outcome = run(pair, root);
-            if let Some(defect) = &pair.known_defect {
-                match outcome {
-                    Err(reason) if reason.starts_with("outside the tolerance") => {
-                        eprintln!("KNOWN {} / {}: {reason} ({defect})", pair.source, pair.use_)
-                    }
-                    Err(reason) if reason.starts_with("SKIP") => {
-                        eprintln!("{reason}: {} / {}", pair.source, pair.use_)
-                    }
-                    Ok(line) => failed.push(format!(
-                        "{} / {}: agrees now ({line}); drop its known_defect",
-                        pair.source, pair.use_
-                    )),
-                    Err(reason) => {
-                        failed.push(format!("{} / {}: {reason}", pair.source, pair.use_))
-                    }
-                }
-                continue;
-            }
-            match outcome {
-                Ok(line) => eprintln!("PASS {} / {}: {line}", pair.source, pair.use_),
-                Err(reason) if reason.starts_with("SKIP") => {
-                    eprintln!("{reason}: {} / {}", pair.source, pair.use_)
-                }
-                Err(reason) => {
-                    eprintln!("FAIL {} / {}: {reason}", pair.source, pair.use_);
-                    failed.push(format!("{} / {}: {reason}", pair.source, pair.use_));
-                }
-            }
-        }
-        assert!(failed.is_empty(), "{failed:#?}");
+    fn omn_mem_swap_keeps_a_first_event_a_period_in() {
+        let v = omn_mem_swap(&capture("omn-mem-swap-raw.json"), "").unwrap();
+        assert!(close(get(&v, "si_bytes"), 0.0));
+        assert!(close(get(&v, "so_bytes"), 0.0));
     }
 
+    #[test]
+    fn omn_psi_reads_both_namings() {
+        let cpu = omn_psi(&capture("omn-cpu-pressure-raw.json"), "").unwrap();
+        let want = (0.014840426914747037 + 0.006944784760677956) / 2.0;
+        assert!(close(get(&cpu, "some"), want));
+        assert!(!cpu.iter().any(|(k, _)| k == "full"), "{cpu:?}");
+        let io = omn_psi(&capture("omn-io-pressure-raw.json"), "").unwrap();
+        assert!(close(
+            get(&io, "some"),
+            (0.2353519582147253 + 0.08836666667427447) / 2.0
+        ));
+        assert!(close(get(&io, "full"), 0.18252916028034885 / 2.0));
+    }
+
+    #[test]
+    fn omn_parsers_refuse_what_is_not_omns_json() {
+        assert!(omn_cpu_util("vmstat\n", "").is_err());
+        assert!(omn_psi("{\"results\": []}", "").is_err());
+    }
+}
+
+/// Holds defect 2 of `docs/fixes/w22-sysstat.md` (a poll's leading raw event
+/// covers a few ms), which `raw_means` leaves out and which no pair can hold:
+/// the event appears in one run out of six to four out of five, with a share
+/// of 0, 0.5, 0.67 or 1, so a `summary.mean` pair under `known_defect` would
+/// miss or agree by chance. This runs `omn` alone, no tool: `cpu.util` and
+/// `cpu.pressure` must still show the leading event within forty runs, or the
+/// defect is fixed and `raw_means`' skip and this test go; `mem.pressure` and
+/// `io.pressure` must not show it in five runs, or it has spread to them.
+#[cfg(test)]
+mod defect_hold {
+    use serde_json::Value;
+    use std::process::{Command, Stdio};
+
     /// Whether one short run of `source` emits a leading raw event stamped
-    /// within half a period of the window's opening: defect 2 of
-    /// docs/fixes/w22-sysstat.md, which `omn_value`'s `raw.<attr>` path
-    /// leaves out. `None` when the run gave fewer than two events.
+    /// within half a period of the window's opening. `None` when the run gave
+    /// fewer than two events.
     fn leading_event(source: &str) -> Result<Option<bool>, String> {
         let out = Command::new(env!("CARGO_BIN_EXE_omn"))
             .args([source, "--system", "-m", "poll@50ms", "-e", "raw"])
@@ -758,30 +665,13 @@ mod pairs {
         }
         let json: Value =
             serde_json::from_slice(&out.stdout).map_err(|e| format!("omn's JSON: {e}"))?;
-        let result = &json["results"][0];
-        let opened = result["window"]["opened_ns"]
-            .as_f64()
-            .ok_or("no window.opened_ns")?;
-        let events = result["outputs"]
-            .as_array()
-            .and_then(|o| o.iter().find(|o| o["emit"] == "raw"))
-            .and_then(|o| o["events"].as_array())
-            .ok_or("no raw events")?;
-        let ts = |i: usize| events.get(i).and_then(|e| e["ts_ns"].as_f64());
-        Ok(match (ts(0), ts(1)) {
-            (Some(t0), Some(t1)) => Some(t0 - opened < (t1 - t0) / 2.0),
+        let (opened, stamps) = super::window_and_stamps(&json)?;
+        Ok(match stamps[..] {
+            [t0, t1, ..] => Some(t0 - opened < (t1 - t0) / 2.0),
             _ => None,
         })
     }
 
-    /// Holds defect 2 the way `known_defect` holds a pair, which no pair can
-    /// do for it: the leading event appears in one run out of six to four out
-    /// of five (measured), and its share is 0, 0.5, 0.67 or 1, so a
-    /// `summary.mean` pair would miss or agree by chance. Instead: `cpu.util`
-    /// and `cpu.pressure` must still show the leading event within forty runs,
-    /// or the defect is fixed and `omn_value`'s skip and this test go;
-    /// `mem.pressure` and `io.pressure` must not show it in five runs, or the
-    /// defect has spread to them.
     #[test]
     fn poll_leading_event_is_held_as_a_known_defect() {
         let mut failed = Vec::new();
@@ -801,11 +691,11 @@ mod pairs {
                 }
             }
             if seen {
-                eprintln!("KNOWN {source}: a leading event within half a period (defect 2)");
+                eprintln!("known defect: {source}: a leading event within half a period (defect 2)");
             } else if failed.is_empty() {
                 failed.push(format!(
                     "{source}: no leading event in forty runs; defect 2 looks fixed, \
-                     drop omn_value's skip and this test"
+                     drop raw_means' skip and this test"
                 ));
             }
         }
