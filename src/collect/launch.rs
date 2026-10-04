@@ -301,11 +301,62 @@ fn describe(status: i32) -> String {
     }
 }
 
+/// The variable naming a file the launched program's stderr is written to,
+/// rather than the stderr it would share with `omn`.
+///
+/// A caller reading `omn`'s stderr -- the MCP server's `run_session` -- gets
+/// the program's lines mixed into `omn`'s, with nothing to tell them apart. A
+/// file of its own separates them at the source, without a guess at whose a
+/// line is. The variable is `omn`'s and is not passed on to the program.
+pub const PROGRAM_STDERR_VARIABLE: &str = "OMN_PROGRAM_STDERR";
+
+/// Opens the file [`PROGRAM_STDERR_VARIABLE`] names, created or truncated,
+/// close-on-exec in this process; `None` when the variable is not set.
+fn program_stderr(path: Option<&std::ffi::OsStr>) -> io::Result<Option<RawFd>> {
+    let Some(path) = path.filter(|path| !path.is_empty()) else {
+        return Ok(None);
+    };
+    let c_path = CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL"))?;
+    // SAFETY: a NUL-terminated path this frame owns.
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        return Err(io::Error::new(
+            error.kind(),
+            format!(
+                "{PROGRAM_STDERR_VARIABLE}={}: {error}",
+                std::path::Path::new(&path).display()
+            ),
+        ));
+    }
+    Ok(Some(fd))
+}
+
 /// Forks a child that waits at a gate, then execs `argv` when released.
 ///
 /// `environment` is added to the child's environment, which is how a preloaded
 /// shim is told where to send what it sees.
 pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Gated> {
+    gated_with(
+        argv,
+        environment,
+        std::env::var_os(PROGRAM_STDERR_VARIABLE).as_deref(),
+    )
+}
+
+/// [`gated`], with the program's stderr written to `stderr` when one is given.
+fn gated_with(
+    argv: &[String],
+    environment: &[(String, String)],
+    stderr: Option<&std::ffi::OsStr>,
+) -> io::Result<Gated> {
     let (program, _) = argv
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no program to launch"))?;
@@ -328,6 +379,7 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
     let mut variables: Vec<CString> = std::env::vars()
         .filter(|(name, _)| !environment.iter().any(|(added, _)| added == name))
         .chain(environment.iter().cloned())
+        .filter(|(name, _)| name != PROGRAM_STDERR_VARIABLE)
         .map(|(name, value)| {
             CString::new(format!("{name}={value}")).unwrap_or_else(|_| CString::new("").unwrap())
         })
@@ -337,9 +389,18 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
         variables.iter().map(|variable| variable.as_ptr()).collect();
     environment_pointers.push(std::ptr::null());
 
+    let stderr_fd = program_stderr(stderr)?;
+    let close_stderr = || {
+        if let Some(fd) = stderr_fd {
+            // SAFETY: a descriptor `program_stderr` opened, closed once.
+            unsafe { libc::close(fd) };
+        }
+    };
+
     let mut pipe_fds = [0i32; 2];
     // SAFETY: `pipe` fills two file descriptors into an array we own.
     if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
+        close_stderr();
         return Err(io::Error::last_os_error());
     }
     let (read_fd, write_fd) = (pipe_fds[0], pipe_fds[1]);
@@ -353,6 +414,7 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
             libc::close(read_fd);
             libc::close(write_fd);
         }
+        close_stderr();
         return Err(error);
     }
 
@@ -375,6 +437,11 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
             // writing means it gave up.
             libc::read(read_fd, go.as_mut_ptr() as *mut libc::c_void, 1);
             libc::close(read_fd);
+            // The program's own stderr, when one was asked for: `dup2`
+            // clears close-on-exec on the copy, so the program keeps it.
+            if let Some(fd) = stderr_fd {
+                libc::dup2(fd, 2);
+            }
             libc::execvpe(
                 c_program.as_ptr(),
                 argv_pointers.as_ptr(),
@@ -388,6 +455,7 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
 
     // SAFETY: closing the end of the pipe this process does not use.
     unsafe { libc::close(read_fd) };
+    close_stderr();
     // SAFETY: `pidfd_open` on a child of this process that cannot have been
     // reaped yet, so the pid still names it. Refused only on a kernel older
     // than 5.3, below this project's floor, and then the run falls back to its
@@ -607,6 +675,33 @@ mod tests {
             "{fds} is not readable by the user who launched it: {:?}",
             listed.err()
         );
+    }
+
+    /// The program's stderr goes to the file the variable names, and the
+    /// variable is not passed on to it.
+    #[test]
+    fn a_program_given_a_stderr_of_its_own_writes_there_and_is_not_told_about_it() {
+        let file = std::env::temp_dir().join(format!("omn-launch-stderr-{}", std::process::id()));
+        let launched = gated_with(
+            &[
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                format!(
+                    "echo the program said this >&2; echo \"[${PROGRAM_STDERR_VARIABLE}]\" >&2"
+                ),
+            ],
+            &[(PROGRAM_STDERR_VARIABLE.to_owned(), "set".to_owned())],
+            Some(file.as_os_str()),
+        );
+        let mut child = launched.expect("fork");
+        child.release();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while child.finished().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let written = std::fs::read_to_string(&file).expect("the file was created");
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(written, "the program said this\n[]\n");
     }
 
     #[test]

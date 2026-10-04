@@ -500,7 +500,25 @@ pub fn run(
     // The duration is the run's own bound; this is the bound on the process,
     // for a run that does not end when it should.
     let bound = StdDuration::from_nanos(duration.as_nanos()) * 2 + StdDuration::from_secs(30);
-    let output = binary.invoke_in(&args, stdin.as_deref(), bound, source.working_directory())?;
+    // A launched program's stderr is written to a file of its own, so that
+    // `said_by_omn` is omn's alone.
+    let program_stderr_file = out.join(PROGRAM_STDERR_FILE);
+    let mut env = Vec::new();
+    if launches {
+        std::fs::create_dir_all(out)
+            .map_err(|error| format!("cannot create {}: {error}", out.display()))?;
+        env.push((
+            omn::collect::PROGRAM_STDERR_VARIABLE,
+            program_stderr_file.as_os_str(),
+        ));
+    }
+    let output = binary.invoke_with(
+        &args,
+        stdin.as_deref(),
+        bound,
+        source.working_directory(),
+        &env,
+    )?;
     let mut answer = json!({
         "exit": output.status,
         "said_by_omn": output.stderr.lines().filter(|line| !line.trim().is_empty()).collect::<Vec<_>>(),
@@ -523,9 +541,11 @@ pub fn run(
             "longest_this_server_allows": limit.longest.to_string(),
         },
         "budget_against": budget_against(out, budget.is_some()),
+        "stopped_by_budget": stopped_by_budget(out),
     });
     if launches {
         answer["program_stdout"] = program_stdout(&output.stdout_bytes, out);
+        answer["program_stderr"] = program_stderr(&program_stderr_file);
     }
     if let Some(after) = output.killed_after {
         answer["killed"] = json!(format!(
@@ -547,6 +567,67 @@ const PROGRAM_STDOUT_IN_ANSWER: usize = 64 * 1024;
 
 /// The file of the run's directory that holds what the program printed.
 const PROGRAM_STDOUT_FILE: &str = "program.stdout";
+
+/// The file of the run's directory the program's stderr is written to.
+const PROGRAM_STDERR_FILE: &str = "program.stderr";
+
+/// What a launched program wrote on its stderr, which `omn` sent to a file
+/// of its own ([`omn::collect::PROGRAM_STDERR_VARIABLE`]) rather than
+/// mixing it into its own: the last [`PROGRAM_STDOUT_IN_ANSWER`] bytes, and
+/// the file holding all of it.
+pub fn program_stderr(file: &Path) -> Value {
+    match std::fs::read(file) {
+        Ok(bytes) => {
+            let cut = bytes.len().saturating_sub(PROGRAM_STDOUT_IN_ANSWER);
+            json!({
+                "bytes": bytes.len(),
+                "text": String::from_utf8_lossy(&bytes[cut..]),
+                "left_out_before_text": cut,
+                "file": file.display().to_string(),
+            })
+        }
+        Err(error) => json!({
+            "unread": format!(
+                "{}: {error}; the program was not launched, or this omn predates a stderr of \
+                 the program's own, in which case its lines are among `said_by_omn`",
+                file.display()
+            ),
+        }),
+    }
+}
+
+/// Every request whose budget ended the run, read from the run's
+/// `cost.json`: `null` when none did. A stopped run's numbers are those of a
+/// window shorter than the one asked for, and the answer says so as the CLI
+/// does on its own line, so that a caller cannot take it for a complete one.
+pub fn stopped_by_budget(out: &Path) -> Value {
+    let Ok(Value::Array(costs)) = std::fs::read(out.join("cost.json"))
+        .map_err(|_| ())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|_| ()))
+    else {
+        return Value::Null;
+    };
+    let stops: Vec<Value> = costs
+        .iter()
+        .filter(|cost| cost["stopped_by_budget"].as_bool().unwrap_or(false))
+        .map(|cost| {
+            json!({
+                "label": cost["label"],
+                "source": cost["source"],
+                "budget_percent": cost["budget_percent"],
+                "because": cost["stopped_because"],
+                "reads": "the budget was exceeded and the run was stopped there, before its own \
+                          end: every figure of this run covers a shorter window than the one \
+                          asked for",
+            })
+        })
+        .collect();
+    if stops.is_empty() {
+        Value::Null
+    } else {
+        json!(stops)
+    }
+}
 
 /// What a launched program printed on stdout, told apart from `omn`'s own
 /// document.
@@ -611,8 +692,8 @@ pub fn program_stdout(stdout: &[u8], out: &Path) -> Value {
         "left_out_before_text": cut,
         "file": written,
         "told_apart": told_apart,
-        "stderr": "not told apart: the program shares omn's stderr, and its lines are among \
-                   `said_by_omn`",
+        "stderr": "apart: the program's stderr is written to a file of its own, in \
+                   `program_stderr`, and is not among `said_by_omn`",
     })
 }
 
@@ -803,6 +884,28 @@ mod tests {
         let answer = program_stdout(b"before\n{\"r\":1}\n", &out);
         assert_eq!(answer["text"], "before\n{\"r\":1}\n");
         assert!(answer["told_apart"].as_str().unwrap().starts_with("no"));
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    /// A run a budget stopped says so in the answer, by request, as the CLI
+    /// says it on a line of its own; a run nothing stopped says null.
+    #[test]
+    fn a_run_the_budget_stopped_says_so_in_the_answer() {
+        let out = std::env::temp_dir().join(format!("omn-mcp-stopped-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(
+            out.join("cost.json"),
+            r#"[{"label":"profile","source":"cpu.profile","budget_percent":5.0,
+                 "stopped_by_budget":true,"stopped_because":"`cpu.profile` spent 9.1 % ..."},
+                {"label":"rss","source":"mem.rss","stopped_because":"the same"}]"#,
+        )
+        .unwrap();
+        let stops = stopped_by_budget(&out);
+        assert_eq!(stops.as_array().map(Vec::len), Some(1), "{stops}");
+        assert_eq!(stops[0]["source"], "cpu.profile");
+        assert!(stops[0]["because"].as_str().unwrap().contains("9.1 %"));
+        std::fs::write(out.join("cost.json"), r#"[{"label":"rss"}]"#).unwrap();
+        assert!(stopped_by_budget(&out).is_null());
         std::fs::remove_dir_all(&out).unwrap();
     }
 }

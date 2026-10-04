@@ -22,6 +22,7 @@ mod cpu;
 pub mod gpu;
 pub(crate) mod io;
 mod launch;
+pub use launch::PROGRAM_STDERR_VARIABLE;
 pub mod mem;
 /// Public for its probes: `net::probe` answers the PTP-clock and ethtool
 /// requirements, which the capability layer asks.

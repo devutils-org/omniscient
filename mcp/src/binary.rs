@@ -107,7 +107,20 @@ impl Binary {
         bound: Duration,
         cwd: Option<&Path>,
     ) -> Result<Output, String> {
+        self.invoke_with(args, stdin, bound, cwd, &[])
+    }
+
+    /// [`Binary::invoke_in`], with `env` added to `omn`'s environment.
+    pub fn invoke_with(
+        &self,
+        args: &[String],
+        stdin: Option<&str>,
+        bound: Duration,
+        cwd: Option<&Path>,
+        env: &[(&str, &std::ffi::OsStr)],
+    ) -> Result<Output, String> {
         let mut command = Command::new(&self.path);
+        command.envs(env.iter().copied());
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }

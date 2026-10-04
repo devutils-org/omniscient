@@ -12,7 +12,7 @@
 //!   additions taken out first.
 //! - **the program's own account.** `examples/mcp/approved/program.py` computes, sleeps
 //!   and computes again, and says on stderr -- which reaches the agent in
-//!   `said_by_omn` -- when it ran on its own clock, how long it slept, and
+//!   `program_stderr`, apart from `said_by_omn` -- when it ran on its own clock, how long it slept, and
 //!   the kernel's `schedstat` for it. The life the tool hands over holds the
 //!   program's own span, the blocked row holds its sleep, and the row that
 //!   dominates is the one the program's own figures say dominates.
@@ -85,18 +85,18 @@ fn has_python() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-/// What the program said of itself, read out of what `omn` said.
+/// What the program said of itself, on its own stderr, which the answer
+/// carries apart from what `omn` said.
 fn truth(answer: &Value) -> BTreeMap<String, f64> {
-    let line = answer["said_by_omn"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
+    let line = answer["program_stderr"]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .lines()
         .find_map(|line| line.strip_prefix("omn-truth "))
         .unwrap_or_else(|| {
             panic!(
                 "the program did not say what it did: {}",
-                answer["said_by_omn"]
+                answer["program_stderr"]
             )
         });
     line.split_whitespace()
