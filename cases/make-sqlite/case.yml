@@ -168,9 +168,3 @@ open_findings:
       docs/fixes/w18-cases.md, "a job is a chain of processes": the runs whose
       person's verdict is undecided name no state, against the agent's
       `on-cpu`
-  - check: the-verdict-s-json-spells-its-limit-as-the-text-does
-    cause: a-cpu-shared-with-two-competitors
-    filed: >-
-      docs/fixes/w18-cases.md, "The JSON's `limit` is `cpu_queue`, the text's
-      `cpu-queue`": `Limit` is serialised in snake_case where `Limit::as_str`,
-      the text and the catalog say `cpu-queue`

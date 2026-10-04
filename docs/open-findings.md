@@ -10747,7 +10747,10 @@ serving the request, named beside it as a busy one is.
 
 The JSON writes `cpu_queue` and `other_block`, the text `cpu-queue` and
 `other-block`. Held by `the-verdict-s-json-spells-its-limit-as-the-text-does`
-(an open finding on the two `cpu-queue` causes).
+(an open finding on the two `cpu-queue` causes). **Closed in the twentieth
+wave**: `Limit` serializes as kebab-case (stream triage, `ede15d8`); the check
+passed everywhere on the coordinator's first `make check` after the merge, so
+the open finding is gone from `gcc-shell` and `make-sqlite`.
 
 ### To the owners of `cpu.profile` and the sched programs: the tool's own programs as the hottest function
 

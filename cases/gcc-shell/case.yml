@@ -166,9 +166,3 @@ open_findings:
       (cc1, 3.4 s), against the wait for a cpu of the whole chain the driver
       ran one after the other (3.8 s: the driver, cc1 and `as`); the
       decomposition takes the wait's place with one process's rows
-  - check: the-verdict-s-json-spells-its-limit-as-the-text-does
-    cause: a-cpu-shared-with-two-competitors
-    filed: >-
-      docs/fixes/w18-cases.md, "The JSON's `limit` is `cpu_queue`, the text's
-      `cpu-queue`": `Limit` is serialised in snake_case where `Limit::as_str`,
-      the text and the catalog say `cpu-queue`
