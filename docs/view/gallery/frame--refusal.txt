@@ -1,0 +1,6 @@
+┌ gpu.kernel refused ──────────────────────────────────────┐
+│gpu.kernel was not served:                                │
+│no collector is written for `gpu.kernel` on backend       │
+│`vendor:cupti` yet                                        │
+│                                                          │
+└──────────────────────────────────────────────────────────┘

@@ -1,0 +1,54 @@
+{
+  "origin": "live: /work/machine.yml",
+  "facts": {
+    "cpu.oncpu_time": {
+      "determinism": "low",
+      "summary": "CPU time actually consumed"
+    },
+    "cpu.util": {
+      "determinism": "low",
+      "summary": "CPU utilization by state (user/sys/iowait/idle/steal)"
+    },
+    "gpu.engine_busy": {
+      "determinism": "low",
+      "summary": "Per-engine occupancy"
+    },
+    "gpu.mem": {
+      "determinism": "medium",
+      "summary": "VRAM held, by device or by process"
+    },
+    "io.bytes": {
+      "determinism": "low",
+      "summary": "I/O volume"
+    },
+    "mem.pressure": {
+      "determinism": "low",
+      "summary": "PSI: memory stall time"
+    },
+    "net.bytes": {
+      "determinism": "low",
+      "summary": "Network volume"
+    },
+    "power.energy": {
+      "determinism": "medium",
+      "summary": "Energy consumed per RAPL domain (pkg / cores / dram / gpu)"
+    }
+  },
+  "refused": [
+    {
+      "label": "cpu.oncpu_time",
+      "source": "cpu.oncpu_time",
+      "reason": "no collector is written for `cpu.oncpu_time` on backend `bpf:raw_tp` yet"
+    }
+  ],
+  "ts_err_ns": {
+    "cpu.util@system": 0,
+    "gpu.engine_busy@system": 1000000000,
+    "gpu.mem": 0,
+    "gpu.mem@system": 0,
+    "io.bytes@system": 0,
+    "mem.pressure@system": 0,
+    "net.bytes@system": 0,
+    "power.energy@system": 0
+  }
+}

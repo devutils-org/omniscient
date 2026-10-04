@@ -1,0 +1,20 @@
+[0m[1momn top[0m │ fixture http-server │ 2.84s        [0m[35mview: snapshot[0m [0m
+[0m[1;7m 1 system [0m 2 flame  3 ledger  4 request  5 timebar  6 heatma[0m
+┌ system -- the overview: cpu, memory, disk, network, GPU a┐[0m
+│[0m[3mNot drawn yet. What this view needs, and what this run hol[0m│[0m
+│                                                          │[0m
+│[0m[1mcpu.util@system          [0m[2m13 events via fs:proc[0m            │[0m
+│[0m[2m[timeline,summary][0m [0m[36m~low det[0m                               │[0m
+│[0m[2m                         the cpu panel: utilization by[0m    │[0m
+│[0m[2mstate, and its sparkline[0m                                  │[0m
+│[0m[1mmem.pressure@system      [0m[2m12 events via fs:proc[0m            │[0m
+│[0m[2m[timeline,summary][0m [0m[36m~low det[0m                               │[0m
+│[0m[2m                         the memory panel: stall time[0m     │[0m
+│[0m[2munder memory pressure[0m                                     │[0m
+│[0m[1mio.bytes@system          [0m[2m36 events via fs:proc[0m            │[0m
+│[0m[2m[timeline,summary][0m [0m[36m~low det[0m [0m[33mdegraded[0m                      │[0m
+│[0m[2m                         the disk panel: bytes read and[0m   │[0m
+│[0m[2mwritten per device[0m                                        │[0m
+│[0m[1mnet.bytes@system         [0m[2m84 events via fs:proc[0m            │[0m
+└──────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help       [0m
