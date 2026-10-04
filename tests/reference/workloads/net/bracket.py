@@ -1,9 +1,8 @@
-"""Start a tool that runs until interrupted, run the workload, interrupt it.
+"""Start a tool that runs until interrupted, and interrupt it after SECONDS.
 
-argv: TOOL... -- WORKLOAD...  For a tool that counts while it runs and
-prints its tally on SIGINT (`tcpdump`'s "N packets captured"). The tool is
-given a second to open its socket first; its stdout and stderr pass
-through, the workload's output goes to stderr.
+argv: SECONDS TOOL...  For a tool that counts while it runs and prints its
+tally on SIGINT (`tcpdump`'s "N packets captured"). Run `alongside` omn
+over omn's `--duration`; the tool's stdout and stderr pass through.
 """
 
 import signal
@@ -11,11 +10,8 @@ import subprocess
 import sys
 import time
 
-sep = sys.argv.index("--")
-tool, workload = sys.argv[1:sep], sys.argv[sep + 1 :]
+seconds, tool = float(sys.argv[1]), sys.argv[2:]
 watcher = subprocess.Popen(tool)
-time.sleep(1.0)
-subprocess.run(workload, check=True, stdout=sys.stderr)
-time.sleep(0.3)
+time.sleep(seconds)
 watcher.send_signal(signal.SIGINT)
-watcher.wait(timeout=10)
+sys.exit(watcher.wait(timeout=10))

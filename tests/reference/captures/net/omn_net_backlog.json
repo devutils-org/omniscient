@@ -1,0 +1,170 @@
+{
+  "results": [
+    {
+      "label": "net.backlog",
+      "source": "net.backlog",
+      "unit": "count",
+      "backend": "fs:proc",
+      "outputs": [
+        {
+          "emit": "raw",
+          "events": [
+            {
+              "ts_ns": 2073142721013,
+              "kind": "net.backlog",
+              "attrs": [
+                {
+                  "name": "drops",
+                  "value": 62
+                },
+                {
+                  "name": "overflows",
+                  "value": 62
+                },
+                {
+                  "name": "syncookies_sent",
+                  "value": 0
+                },
+                {
+                  "name": "syncookies_failed",
+                  "value": 0
+                }
+              ],
+              "collector_id": "net.backlog/fs:proc",
+              "seq": 0
+            },
+            {
+              "ts_ns": 2074142720971,
+              "kind": "net.backlog",
+              "attrs": [
+                {
+                  "name": "drops",
+                  "value": 62
+                },
+                {
+                  "name": "overflows",
+                  "value": 62
+                },
+                {
+                  "name": "syncookies_sent",
+                  "value": 0
+                },
+                {
+                  "name": "syncookies_failed",
+                  "value": 0
+                }
+              ],
+              "collector_id": "net.backlog/fs:proc",
+              "seq": 1
+            },
+            {
+              "ts_ns": 2075141977739,
+              "kind": "net.backlog",
+              "attrs": [
+                {
+                  "name": "drops",
+                  "value": 62
+                },
+                {
+                  "name": "overflows",
+                  "value": 62
+                },
+                {
+                  "name": "syncookies_sent",
+                  "value": 0
+                },
+                {
+                  "name": "syncookies_failed",
+                  "value": 0
+                }
+              ],
+              "collector_id": "net.backlog/fs:proc",
+              "seq": 2
+            },
+            {
+              "ts_ns": 2076141866800,
+              "kind": "net.backlog",
+              "attrs": [
+                {
+                  "name": "drops",
+                  "value": 0
+                },
+                {
+                  "name": "overflows",
+                  "value": 0
+                },
+                {
+                  "name": "syncookies_sent",
+                  "value": 0
+                },
+                {
+                  "name": "syncookies_failed",
+                  "value": 0
+                }
+              ],
+              "collector_id": "net.backlog/fs:proc",
+              "seq": 3
+            },
+            {
+              "ts_ns": 2076142376983,
+              "kind": "net.backlog",
+              "attrs": [
+                {
+                  "name": "drops",
+                  "value": 0
+                },
+                {
+                  "name": "overflows",
+                  "value": 0
+                },
+                {
+                  "name": "syncookies_sent",
+                  "value": 0
+                },
+                {
+                  "name": "syncookies_failed",
+                  "value": 0
+                }
+              ],
+              "collector_id": "net.backlog/fs:proc",
+              "seq": 9223372036854775807
+            }
+          ]
+        }
+      ],
+      "events_seen": 5,
+      "observed_ns": 4000657852,
+      "window": {
+        "run_opened_ns": 2072141245898,
+        "opened_ns": 2072141245898,
+        "closed_ns": 2076141903750,
+        "attached": true
+      },
+      "stopped_because": "the requested duration elapsed",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "overhead": {
+        "collector_cpu_ns": 3929000,
+        "attributed_cpu_ns": 3929000,
+        "observed_cpu_ns": 49450000000,
+        "observed_from": "everything but idle on every cpu (/proc/stat)",
+        "wall_ns": 4001239775,
+        "measurement_ns": 87910,
+        "measurements": 2,
+        "in_target_cpu_ns": 0,
+        "in_target_from": "nothing of this collector runs in the target's context: it reads the kernel's account, or a file, from its own",
+        "before_window_cpu_ns": 66948000,
+        "after_window_cpu_ns": 98000
+      },
+      "served_by": [
+        "fs:proc"
+      ],
+      "value_attr": "drops"
+    }
+  ]
+}
