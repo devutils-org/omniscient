@@ -153,3 +153,71 @@ sudo pacman -S bcc-tools python-bcc
   this family's), after merging `main`.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.
 - `cargo fmt --check`: clean.
+
+## Review
+
+Both findings were right, and both are fixed. **Where the fix landed is the
+odd part**: see "Fix round: where the commits are" below.
+
+1. **The median tolerance was too tight, and asymmetric.** The two grids
+   differ: bpftrace's buckets are powers of two in microseconds (the
+   reference p50 is r = 1000 * 2^k ns), omn's powers of two in nanoseconds.
+   The same latency puts omn's p50 at 2^(k+9) = 0.512 r or
+   2^(k+10) = 1.024 r. One bucket above that is 2^(k+11) = 2.048 r, off by
+   1.048 r, which `rel: 1.0` refused (biolatency 8192 against 4000, runqlat
+   4,194,304 against 2,048,000). Both pairs are now `rel: 1.1`, which admits
+   2.048 r and refuses 2^(k+12) = 4.096 r. The pair file's header has the
+   arithmetic. Not fixed: below r a relative tolerance of 1 or more bounds
+   nothing, so a median of 0 would pass. A tolerance on log2 bucket indices
+   would be symmetric. That is a request to the runner (below), not something
+   this family can add alone.
+2. **The captures were omn's numbers in tool-named files.** All 13 are now
+   `<tool>.format.txt`, and the numbers omn measured are replaced by
+   synthetic ones that agree with no tool and no omn run: syscount 7313/7001,
+   bitesize 308/301, biolatency 333 with p50 8000 ns, runqlat 10747 with p50
+   1,024,000 ns, execsnoop 6 `/bin/true`, killsnoop 12 SIGUSR2, tcpconnect 3.
+   The test helper is now `fixture()`, and its doc comment says these files
+   check the parsers, never a pair. The real output from the privileged run
+   goes beside them as `<tool>.txt`, and the loop under "Privileged runs"
+   should write there. "Shown versus reasoned" above already said the tool
+   side was reasoned. That still holds, and the files now say it too.
+
+### Fix round: where the commits are
+
+While this round ran its baseline test, it used `git stash` and
+`git stash pop` on the tree. The stash list is shared by every worktree of
+the repository, and stream reference stashed and popped at the same time. The
+two stashes swapped places:
+
+- **This round's fix** (the yaml, `tests/reference/bpftrace.rs`, the 13
+  renamed fixtures) was popped into `omniscient-w22-reference`. It is
+  committed there in **c2194ab** on `feat/w22-reference`, labelled as a
+  reference fix. Merging that branch brings it into `main`. It is also in
+  the dangling stash commit `0a9b1a1`.
+- **Stream reference's runner fix** (`tests/reference/runner.rs`,
+  `tests/scenario_cpu.rs`, `tests/scenario_proc.rs`, the work c2194ab's
+  message describes) was popped into this worktree. It is left there
+  uncommitted and untouched, also saved as the dangling stash commit
+  `c72ff98`. Restoring this tree from `0a9b1a1` and dropping those three
+  files was refused by the session's permissions, so the coordinator has
+  to sort it out.
+- Lesson: never run `git stash` in a worktree while other streams run. Use
+  `git worktree add` or a commit instead.
+
+### Requests from this round
+
+- **reference** (the runner): a tolerance on log2 bucket indices
+  (`{log2: 1}`: |log2(omn) - log2(reference)| <= 1), so a median is bounded
+  both ways.
+
+## Tests run, fix round
+
+- `cargo test --test reference`, with the fix in place (before the swap):
+  97 passed, 9 failed, 1 ignored. All 16 bpftrace parser tests and
+  `pairs_bpftrace` passed. The 9 failures are other families' pairs against
+  the runner just merged from `main` (perfrecord, io, top, power, heap,
+  sysstat, perfstat, `every_pair_is_well_formed`,
+  `every_row_names_a_pair_or_why_none`). `main` without the fix gives the
+  same 97/9/1.
+- `cargo fmt --all -- --check` and
+  `cargo clippy --workspace --all-targets -- -D warnings`: clean.
