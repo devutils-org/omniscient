@@ -29,6 +29,7 @@ exactly these nine files under one top directory, and nothing else
 bin/omn                    the tool
 bin/omn-mcp                an MCP server over what omn writes (docs/mcp.md)
 bin/libomn_preload.so      the preload shim the mem.heap.*, sched.mutex and gpu.api sources load
+bin/libomn_cupti.so        the CUDA injection library gpu.kernel loads
 share/man/man1/omn.1       the manual page
 share/doc/omn/README.md
 share/doc/omn/install.md   this file
@@ -44,7 +45,7 @@ omn-0.1.0-x86_64-linux-gnu.tar.gz: OK
 $ tar -xzf omn-0.1.0-x86_64-linux-gnu.tar.gz -C ~/.local --strip-components=1
 ```
 
-`/usr/local` works the same way, with `sudo`. Keep the three files of `bin/`
+`/usr/local` works the same way, with `sudo`. Keep the four files of `bin/`
 together: `omn` looks for the shim **beside its own executable**, and `omn-mcp`
 looks for `omn` beside its own. A symbolic link to `omn` from elsewhere on the
 `PATH` is fine, since the kernel resolves it and `omn` finds the directory it

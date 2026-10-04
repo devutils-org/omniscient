@@ -130,7 +130,7 @@ test: build
 	cargo test --workspace $(CARGOFLAGS)
 
 check: test
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
 	cargo fmt --check
 
 # Eight questions, answered against this machine. A block that cannot run here
@@ -239,7 +239,7 @@ fmt:
 	cargo fmt
 
 clippy:
-	cargo clippy --all-targets
+	cargo clippy --workspace --all-targets
 
 clean:
 	cargo clean

@@ -469,7 +469,7 @@ impl Nvml {
                     &mut default,
                 ))?;
             }
-            *slot = (target as u32, default as u32);
+            *slot = (target, default);
         }
         Ok(answer)
     }

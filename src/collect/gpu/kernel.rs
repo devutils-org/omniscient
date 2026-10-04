@@ -728,6 +728,9 @@ impl Collector for KernelCollector {
                 self.widest_err_ns
             ));
         }
+        // A timing on unlocked clocks depends on what ran before it: say
+        // which clocks these were taken on.
+        facts.extend(super::timing_clock_facts());
         facts
     }
 

@@ -348,17 +348,19 @@ impl Refresh {
             .readings
             .saturating_sub(self.repeats)
             .saturating_sub(devices as u64);
-        let moved = if moves == 0 {
-            format!("it did not move once in {} ms", span_ns / 1_000_000)
-        } else {
-            // Per device: the moves are summed over every device read.
-            let every_ns = span_ns.saturating_mul(devices.max(1) as u64) / moves;
+        // Per device: the moves are summed over every device read.
+        let moved = if let Some(every_ns) = span_ns
+            .saturating_mul(devices.max(1) as u64)
+            .checked_div(moves)
+        {
             format!(
                 "it moved {moves} {} in {} ms, about every {} ms",
                 if moves == 1 { "time" } else { "times" },
                 span_ns / 1_000_000,
                 every_ns / 1_000_000
             )
+        } else {
+            format!("it did not move once in {} ms", span_ns / 1_000_000)
         };
         let polled = match poll_ns {
             Some(ns) => format!("this run read it every {} ms", ns as f64 / 1e6),
