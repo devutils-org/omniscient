@@ -1,11 +1,12 @@
 //! omn against the tools it replaces: every pair in `catalog/references/`
 //! run on the same workload and held to its declared tolerance. The runner
-//! is stream reference's (BRIEF.md); each family fills its own module.
+//! is shared (`reference/runner.rs`); each family fills its own module.
 //!
 //! One test per family, `pairs_<family>`, so a family runs alone with
 //! `cargo test --test reference pairs_perfstat -- --nocapture`; one pair
-//! alone with `OMN_REFERENCE_PAIR=<label>` as well. The schema of a pair is
-//! `catalog/references/README.md`.
+//! alone with `OMN_REFERENCE_PAIR=<label>` as well. Each ends on its tally
+//! line, and `reference_tally` reads them across families afterwards. The
+//! schema of a pair is `catalog/references/README.md`.
 
 #[path = "reference/common.rs"]
 mod common;
@@ -154,6 +155,61 @@ fn every_pair_is_well_formed() {
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The tally of every family whose `pairs_<family>` ran unfiltered since the
+/// last build, read back after the fact: one line per family, a total, and a
+/// failure when any family failed a pair. Ignored by default, because it
+/// reads what the other tests leave and cargo runs tests in any order:
+///
+/// ```console
+/// cargo test --test reference pairs_ -- --nocapture
+/// cargo test --test reference reference_tally -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "reads the tallies the pairs_<family> tests leave; run it after them"]
+fn reference_tally() {
+    let mut total = runner::Tally::default();
+    let mut failed = Vec::new();
+    let mut missing = Vec::new();
+    for (family, _) in families() {
+        let Ok(line) = std::fs::read_to_string(runner::tally_file(family)) else {
+            missing.push(family);
+            continue;
+        };
+        let line = line.trim();
+        eprintln!("{line}");
+        let count = |what: &str| -> usize {
+            line.split(", ")
+                .find_map(|part| {
+                    let part = part.rsplit(": ").next().unwrap_or(part);
+                    part.strip_suffix(what)?.trim().parse().ok()
+                })
+                .unwrap_or(0)
+        };
+        total.held += count("held");
+        total.skipped += count("skipped");
+        total.gaps += count("gaps");
+        total.known_defects += count("known defects");
+        let f = count("failed");
+        total.failed += f;
+        if f > 0 {
+            failed.push(family);
+        }
+    }
+    if !missing.is_empty() {
+        eprintln!("not run: {}", missing.join(", "));
+    }
+    eprintln!("{}", total.line("all"));
+    assert!(
+        missing.len() < families().len(),
+        "no family left a tally: run `cargo test --test reference pairs_` first"
+    );
+    assert!(
+        failed.is_empty(),
+        "families with a pair that did not hold: {}",
+        failed.join(", ")
+    );
 }
 
 /// One table row: its cells, trimmed.
