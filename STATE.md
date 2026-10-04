@@ -828,6 +828,14 @@ settled (the fourth, phase 6's criterion, waits on its run), with the streams'
 lines and "one order for unbuilt and missing", now in the code
 (`DECISIONS.md`, "Settled in the eighteenth wave"); one new line open.
 
+**The nineteenth wave** (`BRIEF.md`, decided with the user on 2026-10-04) is
+not this list: it is the GPU's inside -- `gpu.kernel` and `gpu.counters`
+served through CUPTI, a new `gpu.profile`, the device's clock state -- and,
+beside it, `omn top`, a terminal view whose nine views are experiments the
+user judges on screen. The AMD and Intel GPU paths wait for a card in the
+machine. The list below stays the order for the waves after it, and ends with
+the comparison against the reference tools.
+
 **After the eighteenth wave, in order:**
 
 1. **The privileged runs the handoffs asked for, alone** -- **ran on
@@ -908,6 +916,14 @@ lines and "one order for unbuilt and missing", now in the code
 9. **The matrix**, swept alone at the end of the next wave: the sched
    fallbacks on kernels before 6.16, and the `member_offset` audit on the
    other kernels.
+10. **Last: the same numbers as the reference tools.** Each source that has
+    an established counterpart run beside it on the same workload -- `perf
+    stat`, `perf record`, `perf sched`/`runqlat.bt`, `biolatency.bt` and
+    `fio`'s own completion latency, `perf trace -s`/`strace -c`, `ss`/`nstat`,
+    `nvidia-smi`, and `nsys`/`ncu` once wave 19 is merged -- with a declared
+    tolerance per pair, the pair written as catalog data (a `reference:` field)
+    and one test reading every entry. A harness, not a wrapper: the tools are
+    witnesses in tests, never what `omn` runs on.
 
 Below the milestones, and not scheduled:
 
