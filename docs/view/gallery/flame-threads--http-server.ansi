@@ -17,11 +17,11 @@
 [0m[32m│[0m[2m 0.00% [0m[36m▏           [0m[2m libc+0x12071d[0m                                                                                     [0m[32m│[0m
 [0m[32m│[0m                                                                                                                      [0m[32m│[0m
 [0m[32m│[0m[33m‼ [0m[2mbpf:raw_tp: user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the[0m[32m│[0m
-[0m[32m│[0m[2mtask state[0m                                                                                                            [0m[32m│[0m
+[0m[32m│[0m[33m  [0m[2mtask state[0m                                                                                                          [0m[32m│[0m
 [0m[32m│[0m[33m‼ [0m[2mnames came from -- python3.14: its dynamic symbols only: its internal functions are unnamed; libc.so.6: its dynamic[0m [0m[32m│[0m
-[0m[32m│[0m[2msymbols only: its internal functions are unnamed; libpython3.14.so.1.0: its dynamic symbols only: its internal[0m        [0m[32m│[0m
-[0m[32m│[0m[2mfunctions are unnamed; _socket.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are[0m  [0m[32m│[0m
-[0m[32m│[0m[2munnamed; select.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are unnamed[0m         [0m[32m│[0m
+[0m[32m│[0m[33m  [0m[2msymbols only: its internal functions are unnamed; libpython3.14.so.1.0: its dynamic symbols only: its internal[0m      [0m[32m│[0m
+[0m[32m│[0m[33m  [0m[2mfunctions are unnamed; _socket.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are[0m[32m│[0m
+[0m[32m│[0m[33m  [0m[2munnamed; select.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are unnamed[0m       [0m[32m│[0m
 [0m[32m│[0m                                                                                                                      [0m[32m│[0m
 [0m[32m│[0m                                                                                                                      [0m[32m│[0m
 [0m[32m│[0m                                                                                                                      [0m[32m│[0m
@@ -37,4 +37,4 @@
 [0m[1;32moff cpu ▸ [0m[1mall[0m                                                                                                           [0m
 [0m[2m5.51s · 100% of all · own 0ns · 140 blocks[0m                                                                              [0m
 [0m[2m⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits[0m
-[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓hl[0m move  [0m[1m⏎⌫[0m zoom  [0m[1m/*[0m find  [0m[1mom[0m pane  [0m[1mt[0m threads  [0m[1md[0m shape         [0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓hl[0m move  [0m[1m⏎⌫[0m zoom  [0m[1m/*[0m find  [0m[1mom[0m pane  [0m[1mt[0m split  [0m[1md[0m shape  [0m[1m![0m caveats[0m

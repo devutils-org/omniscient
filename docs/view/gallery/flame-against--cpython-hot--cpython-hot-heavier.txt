@@ -13,22 +13,22 @@ on cpu: 3.87k → 7.88k (x2.03) · absolute: the difference is `__tls_get_addr` 
 │     +408  x2.17  12.3σ __tls_get_addr                                                                                │
 │     +291  x2.19  10.4σ _Py_Dealloc                                                                                   │
 │     +206  x2.26   8.9σ PyLong_FromLong                                                                               │
-│     +148  x2.04   7.1σ PyNumber_Remainder                                                                            │
-│     +141  x2.11   7.1σ libpython3.14+0x19cf26                                                                        │
-│     +128  x1.93   6.4σ libpython3.14+0x1f999e                                                                        │
-│     +105  x1.98   5.9σ libpython3.14+0x1f9997                                                                        │
-│     +105  x2.67   6.9σ libpython3.14+0x1f99b9                                                                        │
-│      +89  x2.29   5.9σ libpython3.14+0x19cf17                                                                        │
-│      +88  x2.91   6.6σ libpython3.14+0x64ed8                                                                         │
-│      +78  x1.62   4.3σ libpython3.14+0x19cf1e                                                                        │
-│      +69  x2.38   5.3σ libpython3.14+0x692a9                                                                         │
 │                                                                                                                      │
 │‼ pmu:sw: time-based sampling: blind to phases running at reduced frequency                                           │
 │‼ 516 of 969 samples landed in a function that sets up no frame pointer (348 in ld-linux-x86-64.so.2, 164 in          │
-│libpython3.14.so.1.0, 4 in libc.so.6), so the frames under the leaf are not its callers: most of them are outside the │
-│target's own code, which is where the callers are lost; `--stack fp+leaf` recovers the leaf's caller and `--stack     │
-│dwarf` the whole chain                                                                                                │
+│  libpython3.14.so.1.0, 4 in libc.so.6), so the frames under the leaf are not its callers: most of them are outside   │
+│  the target's own code, which is where the callers are lost; `--stack fp+leaf` recovers the leaf's caller and        │
+│  `--stack dwarf` the whole chain                                                                                     │
 │‼ 1 frames fell in no mapping of the target and are reported by address                                               │
+│‼ stacks unwound by `fp`: the caller of a function that sets up no frame pointer is lost -- every frameless leaf, and │
+│  whole stacks of a target built without them                                                                         │
+│‼ names came from -- python3.14: its dynamic symbols only: its internal functions are unnamed; ld-linux-x86-64.so.2:  │
+│  its dynamic symbols only: its internal functions are unnamed; libc.so.6: its dynamic symbols only: its internal     │
+│  functions are unnamed; libpython3.14.so.1.0: its dynamic symbols only: its internal functions are unnamed           │
+│‼ the other run: 1129 of 2088 samples landed in a function that sets up no frame pointer (757 in ld-linux-x86-64.so.2,│
+│  369 in libpython3.14.so.1.0, 3 in libc.so.6), so the frames under the leaf are not its callers: most of them are    │
+│  outside the target's own code, which is where the callers are lost; `--stack fp+leaf` recovers the leaf's caller and│
+│  `--stack dwarf` the whole chain                                                                                     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ off cpu sched.offcpu ────────────────────────────────────────────────────────────────────────────────────────────────┐
 │no block was recorded: the target never waited, or never long enough for `sched.offcpu` to see it (0 events) ~low det │
@@ -37,4 +37,4 @@ on cpu: 3.87k → 7.88k (x2.03) · absolute: the difference is `__tls_get_addr` 
 on cpu ▸ libpython3.14.so.1.0+0x1b9172  the last of 12 frames called in one chain from all
 this run 3.86k → the other 7.87k samples (+4005, x2.04, 37.0σ)
 ⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t threads  d shape
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

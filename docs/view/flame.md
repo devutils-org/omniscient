@@ -29,8 +29,12 @@ omn top -- ./prog                         # live, then press 2
   samples end, every path that reaches them summed, which an icicle spreads
   over many boxes -- with a bar each; for a lossy run the bar's shaded tail
   is what the function could be had nothing been lost (`trust::error_bar`).
-  Then the source's own caveats, in full: a frameless leaf whose caller is
-  lost, names a module does not carry.
+  Then the source's own caveats -- a frameless leaf whose caller is lost,
+  names a module does not carry -- each one **whole or not at all**: the
+  ranking keeps its first three, the caveats take the room after it, and
+  when some do not fit a last `‼ N more` line says how many. The bottom line
+  then carries the first of those, and `!` lists every caveat of both panes
+  (of both runs, in a comparison) whole, over the panes.
 - **The line above** names each pane's heaviest own function; the **lines
   below** say the selected box whole: its name, samples and the time they
   stand for, its share of everything and of the zoom, its own weight.
@@ -56,6 +60,7 @@ omn top -- ./prog                         # live, then press 2
 | `m` | the active pane alone, full width |
 | `t` | off cpu, one subtree per thread (from the blocks themselves) |
 | `d` | in a comparison: absolute, or shapes |
+| `!` | every caveat of both panes, whole; `!` or `esc` closes |
 | `esc` | clear the search and the zoom |
 
 A search paints every matching box magenta and says, per pane, how many
@@ -87,16 +92,34 @@ function doubled is the only difference; a run against itself has none):
   at two rates in time;
 - **beyond 3σ of a sample count's Poisson noise**, the variance of a count
   times a scale being the count times the scale squared;
-- **the losses of both runs said**, under the panes.
+- **the losses of both runs said**, under the panes, summed over every
+  result that served the need on each side.
+
+Both runs' caveats are said: the second run's after the first's, each
+prefixed `the other run:` unless the two runs said the same words.
+
+The restatement is held to the triage's own cases, their inputs verbatim
+(`the_triage_s_own_cases_give_the_triage_s_answers`): one function doubled,
+shares that would have named everything, noise that is not a difference,
+and two rates compared in time. That is a test of the view against the
+triage's expected answers, not of the two codes on one input.
 
 `d` switches to **shapes**: the second run scaled to the first's total, the
-same noise rule applied to what is left. The two modes answer different
+same noise rule applied to what is left. The line above still gives each
+run's own total and how much more the second did (`x2.03, scaled to one`). The two modes answer different
 questions, and the fixtures show why both are needed (below).
 
 **Off cpu has no noise model**: a block's duration is not a count. A box is
 coloured when trust's own difference rule says so (outside ±5 %) and the
-movement is more than a speck (0.25 % of the larger run); the sentence says
-there is no noise model rather than give a σ.
+movement is more than a speck (0.25 % of the larger run). That rule is the
+view's own, not the triage's, and the sentence says so rather than give a σ.
+
+**Blocks with no stack** are weighed by their time under `[no stack]`, from
+the blocks themselves -- the stack emit counts them but does not time them --
+so the off-cpu total is the same read through the stacks or through the
+blocks (`t`, a focus). A run that kept no blocks cannot weigh them, and the
+pane says how many are in no box; a block that carries no `total_ns` is
+counted and said the same way, never summed as a count in a tree of time.
 
 ## Live
 
@@ -118,7 +141,7 @@ one, as a comb), dimmed `live`. The icicle replaces it when the run ends.
 | `flame--cpython-hot` | a flat interpreter: the time is spread over `libpython` offsets, and half the samples landed in a frameless leaf -- the caveat under it says so |
 | `flame-against--cpython-hot--cpython-hot-heavier` | absolute: the heavier run is x2.03, and 38 of 378 functions moved beyond the noise, **every one of them up** -- led by `__tls_get_addr`, +408 own, 12.3σ |
 | `flame-against-shape--…` | `d`, shapes: **no function moved** beyond 3σ. The second run is the same program doing twice the work, which neither mode says alone |
-| `flame-live--sqlite-commits` | half way through a live run |
+| `flame-live--sqlite-commits` | a recording replayed as live, half way. The fixtures keep `cpu.profile` as `stack` only, so its replay has no samples to count; the test says so as a degradation the pane draws, rather than show a run that sampled nothing. A real live run hands its samples over as they come; no test shows that pane |
 | `flame-narrow--http-server` | 80x24 |
 | `flame--machine`, `flame--vertical-requests` | runs that did not ask for either source: each pane says so |
 

@@ -17,18 +17,18 @@ on cpu: 3.87k · hottest own __tls_get_addr 8.99% │ off cpu: nothing recorded
 │ 3.54% █████        libpython3.14+0x1f999e                                                                            │
 │ 3.28% ████         libpython3.14+0x19cf26                                                                            │
 │ 3.25% ████         libpython3.14+0x19cf1e                                                                            │
-│ 2.76% ████         libpython3.14+0x1f9997                                                                            │
-│ 1.78% ██           libpython3.14+0x19cf17                                                                            │
-│ 1.78% ██           libpython3.14+0x64ec6                                                                             │
-│ 1.68% ██           libpython3.14+0x5ef6d                                                                             │
-│ 1.65% ██           PyObject_Size                                                                                     │
 │                                                                                                                      │
 │‼ pmu:sw: time-based sampling: blind to phases running at reduced frequency                                           │
 │‼ 516 of 969 samples landed in a function that sets up no frame pointer (348 in ld-linux-x86-64.so.2, 164 in          │
-│libpython3.14.so.1.0, 4 in libc.so.6), so the frames under the leaf are not its callers: most of them are outside the │
-│target's own code, which is where the callers are lost; `--stack fp+leaf` recovers the leaf's caller and `--stack     │
-│dwarf` the whole chain                                                                                                │
+│  libpython3.14.so.1.0, 4 in libc.so.6), so the frames under the leaf are not its callers: most of them are outside   │
+│  the target's own code, which is where the callers are lost; `--stack fp+leaf` recovers the leaf's caller and        │
+│  `--stack dwarf` the whole chain                                                                                     │
 │‼ 1 frames fell in no mapping of the target and are reported by address                                               │
+│‼ stacks unwound by `fp`: the caller of a function that sets up no frame pointer is lost -- every frameless leaf, and │
+│  whole stacks of a target built without them                                                                         │
+│‼ names came from -- python3.14: its dynamic symbols only: its internal functions are unnamed; ld-linux-x86-64.so.2:  │
+│  its dynamic symbols only: its internal functions are unnamed; libc.so.6: its dynamic symbols only: its internal     │
+│  functions are unnamed; libpython3.14.so.1.0: its dynamic symbols only: its internal functions are unnamed           │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ off cpu sched.offcpu ────────────────────────────────────────────────────────────────────────────────────────────────┐
 │no block was recorded: the target never waited, or never long enough for `sched.offcpu` to see it (0 events) ~low det │
@@ -37,4 +37,4 @@ on cpu: 3.87k · hottest own __tls_get_addr 8.99% │ off cpu: nothing recorded
 on cpu ▸ libpython3.14.so.1.0+0x1b9172  the last of 12 frames called in one chain from all
 3.86k samples ≈ 3.87s · 99.7% of all · own 0 · 3.86k events
 ⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t threads  d shape
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

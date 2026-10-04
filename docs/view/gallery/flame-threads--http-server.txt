@@ -17,11 +17,11 @@ on cpu: 2.85k · hottest own link_path_walk 6.07% │ off cpu: 5.51s · hottest 
 │ 0.00% ▏            libc+0x12071d                                                                                     │
 │                                                                                                                      │
 │‼ bpf:raw_tp: user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the│
-│task state                                                                                                            │
+│  task state                                                                                                          │
 │‼ names came from -- python3.14: its dynamic symbols only: its internal functions are unnamed; libc.so.6: its dynamic │
-│symbols only: its internal functions are unnamed; libpython3.14.so.1.0: its dynamic symbols only: its internal        │
-│functions are unnamed; _socket.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are  │
-│unnamed; select.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are unnamed         │
+│  symbols only: its internal functions are unnamed; libpython3.14.so.1.0: its dynamic symbols only: its internal      │
+│  functions are unnamed; _socket.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are│
+│  unnamed; select.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its internal functions are unnamed       │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -37,4 +37,4 @@ on cpu: 2.85k · hottest own link_path_walk 6.07% │ off cpu: 5.51s · hottest 
 off cpu ▸ all
 5.51s · 100% of all · own 0ns · 140 blocks
 ⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t threads  d shape
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

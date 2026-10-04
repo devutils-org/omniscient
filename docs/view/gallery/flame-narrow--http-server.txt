@@ -11,14 +11,14 @@ on cpu: 2.85k · hottest own link_path_walk 6.07% │ off cpu: 5.51s · hottest 
 │▏__do_sys_ne…                         ││ 50.1% ████████████ libc+0xa08f2      │
 │▏vfs_fstat…                           ││ 49.8% ████████████ __recv            │
 │▏vfs_statx                            ││ 0.06% ▏            __poll            │
-│▏path_…▏f                             ││ 0.02% ▏            clock_nanosleep   │
-│▏lin…                                 ││ 0.01% ▏            __read            │
-│                                      ││ 0.00% ▏            libc+0x12071d     │
-│                                      ││                                      │
-│                                      ││‼ bpf:raw_tp: user stacks only: the   │
-│                                      ││kernel side of a block is always the  │
+│▏path_…▏f                             ││                                      │
+│▏lin…                                 ││‼ bpf:raw_tp: user stacks only: the   │
+│                                      ││  kernel side of a block is always the│
+│                                      ││  scheduler, and what it was waiting  │
+│                                      ││  for is the task state               │
+│                                      ││‼ 1 more; ! lists every caveat whole  │
 └──────────────────────────────────────┘└──────────────────────────────────────┘
 on cpu ▸ all
 2.85k samples ≈ 2.86s · 100% of all · own 0 · 2.85k events
-cpu.profile (+8 more): pmu:sw: time-based sampling: blind to phases running at r
+cpu.profile (+8 more, ! lists them): pmu:sw: time-based sampling: blind to phas…
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* fi

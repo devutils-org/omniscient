@@ -12,29 +12,29 @@ on cpu: 43 · hottest own __btrfs_check_leaf 6.98% │ off cpu: 243ms · hottest
 │▏btrfs_sync_file▏btrfs_sync_fi…▏btr…▏ext▏bt▏do_▏vf        ││  100% ████████████ fdatasync                             │
 │▏btrfs_sync_…▏b ▏btrfs…▏btr…▏co▏wri ▏_  ▏a ▏vf ▏l         ││                                                          │
 │▏__btr…▏wri▏n   ▏btrf… ▏bt▏b▏_ ▏bt         ▏_             ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
-│▏bt    ▏b▏c     ▏b  ▏r  ▏b      ▏w                        ││is always the scheduler, and what it was waiting for is   │
-│                                                          ││the task state                                            │
+│▏bt    ▏b▏c     ▏b  ▏r  ▏b      ▏w                        ││  is always the scheduler, and what it was waiting for is │
+│                                                          ││  the task state                                          │
 │                                                          ││‼ names came from -- sqlite3: no names: it carries no     │
-│heaviest on their own (where it ends, every path summed)  ││function symbols; libc.so.6: its dynamic symbols only: its│
-│ 6.98% ████████████ __btrfs_check_leaf                    ││internal functions are unnamed                            │
+│heaviest on their own (where it ends, every path summed)  ││  function symbols; libc.so.6: its dynamic symbols only:  │
+│ 6.98% ████████████ __btrfs_check_leaf                    ││  its internal functions are unnamed                      │
 │ 6.98% ████████████ _raw_spin_unlock_irqrestore           ││                                                          │
 │ 4.65% ████████     __rcu_read_lock                       ││                                                          │
 │ 4.65% ████████     amdv1_map_range                       ││                                                          │
-│ 4.65% ████████     btrfs_get_32                          ││                                                          │
-│ 4.65% ████████     crc32c_x86_3way                       ││                                                          │
-│ 4.65% ████████     wbt_wait                              ││                                                          │
-│ 2.33% ████         __init_swait_queue_head               ││                                                          │
-│ 2.33% ████         __map_single_page2.constprop.0        ││                                                          │
-│ 2.33% ████         __rcu_read_unlock                     ││                                                          │
-│ 2.33% ████         __tree_search.constprop.0.isra.0      ││                                                          │
-│ 2.33% ████         _raw_spin_lock                        ││                                                          │
 │                                                          ││                                                          │
 │‼ pmu:sw: time-based sampling: blind to phases running at ││                                                          │
-│reduced frequency                                         ││                                                          │
+│  reduced frequency                                       ││                                                          │
 │‼ 39 of 39 samples landed in a function that sets up no   ││                                                          │
-│frame pointer (39 in libc.so.6), so the frames under the  ││                                                          │
+│  frame pointer (39 in libc.so.6), so the frames under the││                                                          │
+│  leaf are not its callers: most of them are outside the  ││                                                          │
+│  target's own code, which is where the callers are lost; ││                                                          │
+│  `--stack fp+leaf` recovers the leaf's caller and        ││                                                          │
+│  `--stack dwarf` the whole chain                         ││                                                          │
+│‼ stacks unwound by `fp`: the caller of a function that   ││                                                          │
+│  sets up no frame pointer is lost -- every frameless     ││                                                          │
+│  leaf, and whole stacks of a target built without them   ││                                                          │
+│‼ 1 more on the last line; ! lists every caveat whole     ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
 on cpu ▸ all
 43 samples ≈ 43.1ms · 100% of all · own 0 · 43 events
-⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t threads  d shape
+cpu.profile: names came from -- sqlite3: no names: it carries no function symbols; ld-linux-x86-64.so.2: its dynamic sy…
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

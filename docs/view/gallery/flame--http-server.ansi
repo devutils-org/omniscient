@@ -17,24 +17,24 @@
 [0m[32m│[0m                                                          [0m[32m│[0m[2m│ 0.00% [0m[36m▏           [0m[2m libc+0x12071d[0m                         [0m[2m│[0m
 [0m[32m│[0m[1mheaviest on their own[0m[2m (where it ends, every path summed)[0m  [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m│[0m[2m 6.07% [0m[33m████████████[0m[2m link_path_walk[0m                        [0m[32m│[0m[2m│[0m[33m‼ [0m[2mbpf:raw_tp: user stacks only: the kernel side of a block│[0m
-[0m[32m│[0m[2m 5.12% [0m[33m██████████  [0m[2m __d_lookup_rcu[0m                        [0m[32m│[0m[2m│is always the scheduler, and what it was waiting for is[0m   [0m[2m│[0m
-[0m[32m│[0m[2m 3.58% [0m[33m███████     [0m[2m __tls_get_addr[0m                        [0m[32m│[0m[2m│the task state[0m                                            [0m[2m│[0m
+[0m[32m│[0m[2m 5.12% [0m[33m██████████  [0m[2m __d_lookup_rcu[0m                        [0m[32m│[0m[2m│[0m[33m  [0m[2mis always the scheduler, and what it was waiting for is[0m [0m[2m│[0m
+[0m[32m│[0m[2m 3.58% [0m[33m███████     [0m[2m __tls_get_addr[0m                        [0m[32m│[0m[2m│[0m[33m  [0m[2mthe task state[0m                                          [0m[2m│[0m
 [0m[32m│[0m[2m 2.38% [0m[33m█████       [0m[2m do_syscall_64[0m                         [0m[32m│[0m[2m│[0m[33m‼ [0m[2mnames came from -- python3.14: its dynamic symbols only:│[0m
-[0m[32m│[0m[2m 1.54% [0m[33m███         [0m[2m btrfs_getattr[0m                         [0m[32m│[0m[2m│its internal functions are unnamed; libc.so.6: its dynamic│[0m
-[0m[32m│[0m[2m 1.47% [0m[33m███         [0m[2m bpf_trace_run2[0m                        [0m[32m│[0m[2m│symbols only: its internal functions are unnamed;[0m         [0m[2m│[0m
-[0m[32m│[0m[2m 1.47% [0m[33m███         [0m[2m security_inode_permission[0m             [0m[32m│[0m[2m│libpython3.14.so.1.0: its dynamic symbols only: its[0m       [0m[2m│[0m
-[0m[32m│[0m[2m 1.37% [0m[33m███         [0m[2m _PyUnicode_JoinArray[0m                  [0m[32m│[0m[2m│internal functions are unnamed;[0m                           [0m[2m│[0m
-[0m[32m│[0m[2m 1.30% [0m[33m███         [0m[2m security_inode_getattr[0m                [0m[32m│[0m[2m│_socket.cpython-314-x86_64-linux-gnu.so: its dynamic[0m      [0m[2m│[0m
-[0m[32m│[0m[2m 1.19% [0m[33m██          [0m[2m _Py_Dealloc[0m                           [0m[32m│[0m[2m│symbols only: its internal functions are unnamed;[0m         [0m[2m│[0m
-[0m[32m│[0m[2m 1.02% [0m[33m██          [0m[2m bpf_trampoline_6442524142[0m             [0m[32m│[0m[2m│select.cpython-314-x86_64-linux-gnu.so: its dynamic[0m       [0m[2m│[0m
-[0m[32m│[0m[2m 0.95% [0m[33m██          [0m[2m strncpy_from_user[0m                     [0m[32m│[0m[2m│symbols only: its internal functions are unnamed[0m          [0m[2m│[0m
-[0m[32m│[0m                                                          [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
-[0m[32m│[0m[33m‼ [0m[2mpmu:sw: time-based sampling: blind to phases running at[0m [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
-[0m[32m│[0m[2mreduced frequency[0m                                         [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
-[0m[32m│[0m[33m‼ [0m[2m1428 of 1621 samples landed in a function that sets up[0m  [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
-[0m[32m│[0m[2mno frame pointer (1295 in libc.so.6, 101 in[0m               [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m                                                          [0m[32m│[0m[2m│[0m[33m  [0m[2mits internal functions are unnamed; libc.so.6: its[0m      [0m[2m│[0m
+[0m[32m│[0m[33m‼ [0m[2mpmu:sw: time-based sampling: blind to phases running at[0m [0m[32m│[0m[2m│[0m[33m  [0m[2mdynamic symbols only: its internal functions are[0m        [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2mreduced frequency[0m                                       [0m[32m│[0m[2m│[0m[33m  [0m[2munnamed; libpython3.14.so.1.0: its dynamic symbols only:│[0m
+[0m[32m│[0m[33m‼ [0m[2m1428 of 1621 samples landed in a function that sets up[0m  [0m[32m│[0m[2m│[0m[33m  [0m[2mits internal functions are unnamed;[0m                     [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2mno frame pointer (1295 in libc.so.6, 101 in[0m             [0m[32m│[0m[2m│[0m[33m  [0m[2m_socket.cpython-314-x86_64-linux-gnu.so: its dynamic[0m    [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2mld-linux-x86-64.so.2, 32 in libpython3.14.so.1.0), so[0m   [0m[32m│[0m[2m│[0m[33m  [0m[2msymbols only: its internal functions are unnamed;[0m       [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2mthe frames under the leaf are not its callers: most of[0m  [0m[32m│[0m[2m│[0m[33m  [0m[2mselect.cpython-314-x86_64-linux-gnu.so: its dynamic[0m     [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2mthem are outside the target's own code, which is where[0m  [0m[32m│[0m[2m│[0m[33m  [0m[2msymbols only: its internal functions are unnamed[0m        [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2mthe callers are lost; `--stack fp+leaf` recovers the[0m    [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2mleaf's caller and `--stack dwarf` the whole chain[0m       [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m‼ [0m[2m22 frames fell in no mapping of the target and are[0m      [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m  [0m[2mreported by address[0m                                     [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
+[0m[32m│[0m[33m‼ 6 more on the last line; ! lists every caveat whole[0m     [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m└──────────────────────────────────────────────────────────┘[0m[2m└──────────────────────────────────────────────────────────┘[0m
 [0m[1;32mon cpu ▸ [0m[1mall[0m                                                                                                            [0m
 [0m[2m2.85k samples ≈ 2.86s · 100% of all · own 0 · 2.85k events[0m                                                              [0m
-[0m[2m⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits[0m
-[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓hl[0m move  [0m[1m⏎⌫[0m zoom  [0m[1m/*[0m find  [0m[1mom[0m pane  [0m[1mt[0m threads  [0m[1md[0m shape         [0m
+[0m[33mcpu.profile (+5 more, ! lists them): [0m[2m21 of 28 samples landed in a function that sets up no frame pointer (17 in libc.so…[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓hl[0m move  [0m[1m⏎⌫[0m zoom  [0m[1m/*[0m find  [0m[1mom[0m pane  [0m[1mt[0m split  [0m[1md[0m shape  [0m[1m![0m caveats[0m

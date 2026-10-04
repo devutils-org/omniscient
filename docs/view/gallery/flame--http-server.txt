@@ -17,24 +17,24 @@ on cpu: 2.85k · hottest own link_path_walk 6.07% │ off cpu: 5.51s · hottest 
 │                                                          ││ 0.00% ▏            libc+0x12071d                         │
 │heaviest on their own (where it ends, every path summed)  ││                                                          │
 │ 6.07% ████████████ link_path_walk                        ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
-│ 5.12% ██████████   __d_lookup_rcu                        ││is always the scheduler, and what it was waiting for is   │
-│ 3.58% ███████      __tls_get_addr                        ││the task state                                            │
+│ 5.12% ██████████   __d_lookup_rcu                        ││  is always the scheduler, and what it was waiting for is │
+│ 3.58% ███████      __tls_get_addr                        ││  the task state                                          │
 │ 2.38% █████        do_syscall_64                         ││‼ names came from -- python3.14: its dynamic symbols only:│
-│ 1.54% ███          btrfs_getattr                         ││its internal functions are unnamed; libc.so.6: its dynamic│
-│ 1.47% ███          bpf_trace_run2                        ││symbols only: its internal functions are unnamed;         │
-│ 1.47% ███          security_inode_permission             ││libpython3.14.so.1.0: its dynamic symbols only: its       │
-│ 1.37% ███          _PyUnicode_JoinArray                  ││internal functions are unnamed;                           │
-│ 1.30% ███          security_inode_getattr                ││_socket.cpython-314-x86_64-linux-gnu.so: its dynamic      │
-│ 1.19% ██           _Py_Dealloc                           ││symbols only: its internal functions are unnamed;         │
-│ 1.02% ██           bpf_trampoline_6442524142             ││select.cpython-314-x86_64-linux-gnu.so: its dynamic       │
-│ 0.95% ██           strncpy_from_user                     ││symbols only: its internal functions are unnamed          │
-│                                                          ││                                                          │
-│‼ pmu:sw: time-based sampling: blind to phases running at ││                                                          │
-│reduced frequency                                         ││                                                          │
-│‼ 1428 of 1621 samples landed in a function that sets up  ││                                                          │
-│no frame pointer (1295 in libc.so.6, 101 in               ││                                                          │
+│                                                          ││  its internal functions are unnamed; libc.so.6: its      │
+│‼ pmu:sw: time-based sampling: blind to phases running at ││  dynamic symbols only: its internal functions are        │
+│  reduced frequency                                       ││  unnamed; libpython3.14.so.1.0: its dynamic symbols only:│
+│‼ 1428 of 1621 samples landed in a function that sets up  ││  its internal functions are unnamed;                     │
+│  no frame pointer (1295 in libc.so.6, 101 in             ││  _socket.cpython-314-x86_64-linux-gnu.so: its dynamic    │
+│  ld-linux-x86-64.so.2, 32 in libpython3.14.so.1.0), so   ││  symbols only: its internal functions are unnamed;       │
+│  the frames under the leaf are not its callers: most of  ││  select.cpython-314-x86_64-linux-gnu.so: its dynamic     │
+│  them are outside the target's own code, which is where  ││  symbols only: its internal functions are unnamed        │
+│  the callers are lost; `--stack fp+leaf` recovers the    ││                                                          │
+│  leaf's caller and `--stack dwarf` the whole chain       ││                                                          │
+│‼ 22 frames fell in no mapping of the target and are      ││                                                          │
+│  reported by address                                     ││                                                          │
+│‼ 6 more on the last line; ! lists every caveat whole     ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
 on cpu ▸ all
 2.85k samples ≈ 2.86s · 100% of all · own 0 · 2.85k events
-⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t threads  d shape
+cpu.profile (+5 more, ! lists them): 21 of 28 samples landed in a function that sets up no frame pointer (17 in libc.so…
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

@@ -23,14 +23,16 @@ nothing else.
     cell shares a box with it, so each column is as deep as it branches. An
     88-frame kernel path under CPython fits 40 rows.
   - Under each icicle, the heaviest functions on their own (with
-    `trust::error_bar` for a lossy run) and then the source's caveats in
-    full; above, each pane's heaviest own function; below, the selected box
-    whole.
+    `trust::error_bar` for a lossy run) and then the source's caveats, each
+    whole or not at all, with a `‼ N more` line when some do not fit; the
+    bottom line carries the first left over, and `!` lists every caveat of
+    both panes and both runs whole. Above, each pane's heaviest own
+    function; below, the selected box whole.
   - Keys: `↑↓`/`jk` caller and callee, `hl`/`[]` along a row, `⏎` zoom,
     `⌫`/`u` out to the nearest caller that shows more, `/` and `*` search
     (share of the profile matched, a match under a match counted once), `o`
     switch pane, `m` one pane alone, `t` off cpu by thread, `d` absolute or
-    shape comparison, `esc` reset.
+    shape comparison, `!` every caveat whole, `esc` reset.
   - The frame's focus narrows off cpu from the raw blocks (`tid`, `pid`);
     on cpu says it cannot ("these stacks carry no thread").
   - Live: no stack names until the end, so a pane says what arrived on how
@@ -41,8 +43,9 @@ nothing else.
     count x scale², both runs' losses said). `d` scales the second run to
     the first's total. Off cpu, which has no noise model, uses
     `trust::difference_colour` and ignores specks under 0.25 %.
-  - 16 unit tests, among them the triage's own "one function doubled is the
-    only difference" and "a run against itself has none", every sample in
+  - 21 unit tests, among them the triage's four cases with their inputs
+    verbatim (one function doubled, shares, noise, two rates in time) and
+    "a run against itself has none", every sample in
     the tree once on four fixtures, the thread split and the narrowing
     against the raw events, the live pane against `as_live_until`, and
     the key path (zoom, out, search).
@@ -68,23 +71,34 @@ Shown, by a test or a snapshot drawn from the committed recordings:
   least four times the shape's count), not a threshold.
 - http-server off cpu splits into three threads and narrows to one exactly
   (the sum of its raw blocks' `total_ns`).
-- `omn top --replay … --against … --headless --view flame` draws the
-  comparison through the real subcommand.
+- Every caveat under an icicle is said whole or counted, at every height
+  from 2 to 40 rows (`caveats_are_said_whole_or_counted`); `!` lists every
+  one whole; a comparison says the second run's caveats too.
+- Off-cpu blocks with no stack weigh the same through the stacks and
+  through the blocks, and a run that kept no blocks says how many are in no
+  box (a synthetic run: every fixture has `unattributed` 0).
+
+Run by hand, not by a test: `omn top --replay … --against … --headless
+--view flame` draws the comparison through the real subcommand
+(`tests/view_live.rs` only checks that `--against` without `--replay` is
+refused).
 
 Reasoned, not shown:
 
 - **Live on cpu.** The fixtures keep `cpu.profile` as `stack` only, so
-  `as_live_until` gives its pane no events, and `flame-live--sqlite-commits`
-  shows an on-cpu pane with zero samples. A real live run hands over the
-  raw samples (they carry `stack_id`), so the pane should count them; no
-  test runs a live `omn top` with this view on a terminal, and this agent
-  shell has none.
+  `as_live_until` gives its pane no events. `flame-live--sqlite-commits`
+  now says so on screen (a degradation the snapshot's test adds to the
+  replay, first under the count) instead of passing zero samples off as a
+  run. A real live run hands over the raw samples (they carry `stack_id`),
+  so the pane should count them; no test runs a live `omn top` with this
+  view on a terminal, and this agent shell has none.
 - **On a terminal.** The snapshots' `.ansi` carry the colours; nobody has
   looked at the view in a real terminal yet, and the keys were driven
   through `App::key` only.
 - The restated diff agrees with `src/triage/diff.rs` by construction and on
-  the triage's own test case, not by a test that runs both on one input
-  (the view links nothing of `omn`; see the requests).
+  the triage's four cases' inputs and expected answers, not by a test that
+  runs both codes on one input (the view links nothing of `omn`; see the
+  requests).
 
 ## What I could not do, and why
 
@@ -156,5 +170,45 @@ None. Nothing here touches a collector or the machine.
   the interpreter's perf map (`PYTHONPERFSUPPORT=1`) and `--stack fp+leaf`,
   and the perf map's names in the mirror, so the flame view can charge to
   Python functions as the triage does.
+- **core (`view/src/feed.rs`)**: `as_live_until` could add the degradation
+  the flame test adds by hand -- a source the recording kept without `raw`
+  arrives empty when replayed as live -- so every view's live snapshot says
+  it, not only this one's.
 - **core (`view/src/app.rs`)**: at 100 columns the header runs the span into
   the cost corner (`3.89sview: snapshot`), seen with `--size 100x30`.
+
+## Review
+
+The adversarial review's six findings, one fix round:
+
+1. **Caveats cut off unsaid (defect) -- fixed.** `ranking()` now wraps each
+   caveat itself (`wrap_words`, nothing dropped) and says it whole or not at
+   all, after the ranking's first three entries, then `‼ N more` when some
+   do not fit; it returns how many it said, and `bottom()` carries the rest
+   (`(+N more, ! lists them)`). `!` lists every caveat of both panes, whole.
+   Nothing under the icicle wraps in ratatui any more, so nothing is clipped
+   at the bottom. `flame--cpython-hot` now shows the `stacks unwound by fp`
+   and `names came from` caveats under the icicle; `flame--http-server`'s
+   on-cpu pane says three whole and "6 more", and the bottom line the next.
+2. **Off-cpu blocks with no stack dropped (defect) -- fixed.** Through the
+   stack emit, their time is read from the blocks the run kept (`raw`) and
+   drawn under `[no stack]`, so the total matches the block path; without
+   the blocks the pane's aside says how many are in no box. On the block
+   path a block with no `total_ns` is counted and said, not summed as 1 ns
+   (the reviewer's last nit).
+3. **Only the first run's caveats (gap) -- fixed.** The second run's are
+   said after the first's, prefixed `the other run:`; its asides likewise.
+   `compare()` takes every result of each side and sums their losses.
+4. **The live snapshot's zero (gap) -- fixed on screen.** No fixture keeps
+   `cpu.profile` raw, and recording one is core's (`record.sh`) and needs a
+   privileged run, so the snapshot's test says it: a degradation on the
+   replayed result, drawn first under the count. A live pane now draws its
+   source's caveats under the count. Request filed for `as_live_until`.
+5. **Handoff over-claims (nit) -- fixed.** The `--against` subcommand run is
+   listed as a manual run; the triage's four cases (two rates included) are
+   now restated with their inputs verbatim.
+6. **Units and the view's own rule (nit) -- fixed.** See 2 for the weight
+   fallback; the off-cpu sentence says the ±5 % and 0.25 % rule is the
+   view's, not the triage's; in shape mode the line above prints the raw
+   totals beside their raw ratio (`x2.03, scaled to one`), not the scaled
+   ratio of 1.00.

@@ -30,7 +30,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Sparkline, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Sparkline, Wrap};
 use ratatui::Frame;
 
 use super::{Action, Ctx, Focus, Need, Scope, View};
@@ -66,8 +66,9 @@ const KEYS: &[(&str, &str)] = &[
     ("⏎⌫", "zoom"),
     ("/*", "find"),
     ("om", "pane"),
-    ("t", "threads"),
+    ("t", "split"),
     ("d", "shape"),
+    ("!", "caveats"),
 ];
 
 /// How many standard deviations of a sample count's noise a difference has
@@ -100,8 +101,11 @@ pub struct Flame {
     by_thread: bool,
     /// The width the view was last drawn at, for moving from a key.
     last_width: u16,
-    /// Whether each pane said its caveats in its own room, on the last draw.
-    caveats_said: [bool; 2],
+    /// How many of each pane's caveats it said, whole, in its own room on
+    /// the last draw; the rest go to the last line.
+    caveats_said: [usize; 2],
+    /// Every caveat of both panes and both runs, whole, over the panes.
+    listing: bool,
     cache: Option<(Fingerprint, [Pane; 2])>,
 }
 
@@ -238,6 +242,9 @@ struct Compare {
     /// What the comparable values are in.
     unit: &'static str,
     totals: [f64; 2],
+    /// The second run's total over the first's, comparable but before any
+    /// scaling of shapes: how much more the second run did.
+    growth: f64,
     /// The functions whose own cost moved beyond the noise, largest first.
     difference: Vec<Change>,
     /// How many functions there are, in either run.
@@ -301,7 +308,9 @@ impl Compare {
         let noise = if self.poisson {
             format!("beyond {SIGMAS}σ of a sample count's noise")
         } else {
-            "by over 5 % (time off cpu has no noise model)".to_owned()
+            "by over 5 % and 0.25 % of the total (time off cpu has no noise model: the view's \
+             rule, not the triage's)"
+                .to_owned()
         };
         match self.difference.first() {
             None => format!("{mode}: no function's own cost moved {noise}"),
@@ -540,6 +549,8 @@ fn fill(tree: &mut Tree, results: &[&Results], run: usize, reading: &Reading<'_>
             frames.to_vec()
         }
     };
+    let mut untimed = 0u64;
+    let mut unplaced = 0u64;
     for one in results {
         let events = one.events();
         let from_events = wants_events
@@ -561,10 +572,19 @@ fn fill(tree: &mut Tree, results: &[&Results], run: usize, reading: &Reading<'_>
                 if reading.focus.pid.is_some() && pid != reading.focus.pid {
                     continue;
                 }
-                let weight = event
-                    .number("total_ns")
-                    .or_else(|| event.number("weight"))
-                    .unwrap_or(1.0);
+                // Off cpu a block weighs its time, and one without it is
+                // counted and said, never summed as a count in time.
+                let weight = if tree.unit == Unit::Nanos {
+                    match event.number("total_ns") {
+                        Some(ns) => ns,
+                        None => {
+                            untimed += 1;
+                            continue;
+                        }
+                    }
+                } else {
+                    event.number("weight").unwrap_or(1.0)
+                };
                 let mut path = Vec::new();
                 if reading.by_thread {
                     let comm = event
@@ -608,11 +628,47 @@ fn fill(tree: &mut Tree, results: &[&Results], run: usize, reading: &Reading<'_>
                         run,
                     );
                 }
-                if unattributed > 0 && tree.unit != Unit::Nanos {
-                    tree.add(["[no stack]"], unattributed as f64, unattributed, run);
+                if unattributed == 0 {
+                    continue;
                 }
+                if tree.unit != Unit::Nanos {
+                    tree.add(["[no stack]"], unattributed as f64, unattributed, run);
+                    continue;
+                }
+                // Off cpu the emit counts the blocks that carried no stack,
+                // not their time: the time is in the blocks, when the run
+                // kept them, and what cannot be weighed is said.
+                let (mut time, mut found) = (0.0, 0u64);
+                for event in events
+                    .iter()
+                    .filter(|event| event.number("stack_id").is_none())
+                {
+                    match event.number("total_ns") {
+                        Some(ns) => {
+                            time += ns;
+                            found += 1;
+                        }
+                        None => untimed += 1,
+                    }
+                }
+                if found > 0 {
+                    tree.add(["[no stack]"], time, found, run);
+                }
+                unplaced += unattributed.saturating_sub(found + untimed);
             }
         }
+    }
+    if untimed > 0 {
+        asides.push(format!(
+            "{} blocks carried no time: in no box",
+            units::count(untimed as f64)
+        ));
+    }
+    if unplaced > 0 {
+        asides.push(format!(
+            "{} blocks carried no stack, and the run kept no blocks to weigh them: in no box",
+            units::count(unplaced as f64)
+        ));
     }
     asides.sort();
     asides.dedup();
@@ -643,17 +699,7 @@ fn build(
         }
         return pane;
     }
-    for one in &held {
-        pane.caveats.extend(one.degradations.iter().cloned());
-    }
-    for one in &held {
-        pane.caveats.extend(
-            one.notes
-                .iter()
-                .filter(|note| !note.starts_with("stacks unwound by"))
-                .cloned(),
-        );
-    }
+    pane.caveats = caveats_of(&held);
     if data.live.is_some() {
         pane.body = live_body(data, &held);
         return pane;
@@ -671,10 +717,21 @@ fn build(
     if let (Some(against), Some(other)) = (against, &other) {
         // The other run is read the same way; what it could not do is the
         // same as this one's.
-        let _ = fill(&mut tree, other, 1, reading);
+        for aside in fill(&mut tree, other, 1, reading) {
+            if !asides.contains(&aside) {
+                asides.push(format!("the other run: {aside}"));
+            }
+        }
         pane.trust
             .merge(Trust::joined(against, other.iter().copied()));
-        tree.compare = Some(compare(&tree, held[0], other[0], shape));
+        // The other run's caveats are said too, after this one's: the badge
+        // counts both, so both are said.
+        for caveat in caveats_of(other) {
+            if !pane.caveats.contains(&caveat) {
+                pane.caveats.push(format!("the other run: {caveat}"));
+            }
+        }
+        tree.compare = Some(compare(&tree, &held, other, shape));
     }
     pane.aside = (!asides.is_empty()).then(|| asides.join("; "));
     if tree.nodes[0].value == [0.0; 2] {
@@ -694,11 +751,30 @@ fn build(
     pane
 }
 
-/// The comparison of a tree's two runs: the triage's arithmetic.
-fn compare(tree: &Tree, first: &Results, second: &Results, shape: bool) -> Compare {
+/// A source's own caveats: its degradations, then its notes.
+fn caveats_of(results: &[&Results]) -> Vec<String> {
+    let mut caveats: Vec<String> = Vec::new();
+    for one in results {
+        caveats.extend(one.degradations.iter().cloned());
+    }
+    for one in results {
+        caveats.extend(
+            one.notes
+                .iter()
+                .filter(|note| !note.starts_with("stacks unwound by"))
+                .cloned(),
+        );
+    }
+    caveats
+}
+
+/// The comparison of a tree's two runs: the triage's arithmetic. Each side
+/// is every result that served the need, and each side's losses are all of
+/// theirs.
+fn compare(tree: &Tree, first: &[&Results], second: &[&Results], shape: bool) -> Compare {
     let mut notes = Vec::new();
     let poisson = tree.unit != Unit::Nanos;
-    let (unit, mut scale) = match (tree.unit, Unit::of(second)) {
+    let (unit, mut scale) = match (tree.unit, Unit::of(second[0])) {
         (Unit::Nanos, _) => ("ns", [1.0, 1.0]),
         (Unit::Samples(Some(a)), Unit::Samples(Some(b))) if a == b => ("samples", [1.0, 1.0]),
         (Unit::Samples(Some(a)), Unit::Samples(Some(b))) => {
@@ -718,11 +794,12 @@ fn compare(tree: &Tree, first: &Results, second: &Results, shape: bool) -> Compa
         }
     };
     let raw = tree.nodes[0].value;
+    let growth = raw[1] * scale[1] / (raw[0] * scale[0]).max(f64::MIN_POSITIVE);
     if shape && raw[1] > 0.0 {
         scale[1] *= raw[0] * scale[0] / (raw[1] * scale[1]);
     }
     for (which, results) in [("this run", first), ("the other", second)] {
-        let missing = results.losses.missing();
+        let missing: u64 = results.iter().map(|one| one.losses.missing()).sum();
         if missing > 0 {
             notes.push(format!(
                 "{which} lost {}: part of the difference is in what each lost",
@@ -735,6 +812,7 @@ fn compare(tree: &Tree, first: &Results, second: &Results, shape: bool) -> Compa
         poisson,
         unit,
         totals: [raw[0] * scale[0], raw[1] * scale[1]],
+        growth,
         difference: Vec::new(),
         functions: 0,
         notes,
@@ -1001,6 +1079,57 @@ fn fit_start(text: &str, width: usize) -> String {
     cut
 }
 
+/// A text cut into lines of at most `width` cells, at spaces where it can
+/// be and inside a word where it cannot. Nothing is dropped: the lines hold
+/// every word, so a caveat drawn from them is said whole or not at all.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut count = 0;
+    for word in text.split(' ').filter(|word| !word.is_empty()) {
+        let mut word: Vec<char> = word.chars().collect();
+        if count > 0 && count + 1 + word.len() <= width {
+            line.push(' ');
+            line.extend(word.iter());
+            count += 1 + word.len();
+            continue;
+        }
+        if count > 0 {
+            lines.push(std::mem::take(&mut line));
+        }
+        while word.len() > width {
+            let rest = word.split_off(width);
+            lines.push(word.into_iter().collect());
+            word = rest;
+        }
+        count = word.len();
+        line = word.into_iter().collect();
+    }
+    if count > 0 || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// One caveat as the lines it takes at `width`: `‼` and then the text,
+/// wrapped under itself.
+fn caveat_lines(caveat: &str, width: usize) -> Vec<Line<'static>> {
+    wrap_words(caveat, width.saturating_sub(2))
+        .into_iter()
+        .enumerate()
+        .map(|(at, text)| {
+            Line::from(vec![
+                Span::styled(
+                    if at == 0 { "‼ " } else { "  " },
+                    Style::new().fg(palette::LOSS),
+                ),
+                Span::styled(text, Style::new().add_modifier(Modifier::DIM)),
+            ])
+        })
+        .collect()
+}
+
 /// The colour of a frame: warm on cpu, cool off it, by a hash of the name so
 /// a function has one colour wherever it is -- and never the colour of the
 /// frame just left of it, so two frames stay two.
@@ -1197,10 +1326,18 @@ impl View for Flame {
             }
             return Action::None;
         }
+        // The list of caveats closes on `!` or esc, and on any other key,
+        // which then does what it does.
+        if std::mem::take(&mut self.listing)
+            && matches!(key.code, KeyCode::Esc | KeyCode::Char('!'))
+        {
+            return Action::None;
+        }
         let panes = self.panes(ctx);
         let active = self.active_pane(&panes);
         self.active = active;
         match key.code {
+            KeyCode::Char('!') => self.listing = true,
             KeyCode::Char('/') => self.typing = Some(String::new()),
             KeyCode::Char('*') => {
                 if let Body::Tree(tree) = &panes[active].body {
@@ -1247,7 +1384,7 @@ impl View for Flame {
             inner
         };
         self.last_width = area.width;
-        self.caveats_said = [false; 2];
+        self.caveats_said = [0; 2];
         let panes = self.panes(ctx);
         let active = self.active_pane(&panes);
         self.active = active;
@@ -1293,7 +1430,17 @@ impl View for Flame {
             self.draw_pane(frame, two, &panes[OFF], OFF, false);
         }
         frame.render_widget(Paragraph::new(self.detail(&panes[active], active)), detail);
-        frame.render_widget(Paragraph::new(self.bottom(&panes[active], active)), bottom);
+        frame.render_widget(
+            Paragraph::new(self.bottom(&panes[active], active, bottom.width)),
+            bottom,
+        );
+        if self.listing {
+            let over = Rect {
+                height: middle.height + detail.height,
+                ..middle
+            };
+            self.draw_listing(frame, over, &panes);
+        }
     }
 }
 
@@ -1332,12 +1479,15 @@ impl Flame {
         let active = self.active_pane(panes);
         if let Body::Tree(tree) = &panes[active].body {
             if let Some(compare) = &tree.compare {
-                let ratio = compare.totals[1] / compare.totals[0].max(f64::MIN_POSITIVE);
+                // The runs' own totals and how much more the second did;
+                // in shape, that the second was scaled to the first.
                 spans.push(Span::styled(format!("{}: ", panes[active].title), bold));
                 spans.push(Span::raw(format!(
-                    "{} → {} (x{ratio:.2}) · ",
+                    "{} → {} (x{:.2}{}) · ",
                     tree.unit.short(tree.nodes[0].value[0]),
                     tree.unit.short(tree.nodes[0].value[1]),
+                    compare.growth,
+                    if self.shape { ", scaled to one" } else { "" },
                 )));
                 spans.push(Span::raw(compare.sentence(self.shape)));
                 return Line::from(spans);
@@ -1512,9 +1662,11 @@ impl Flame {
         }
     }
 
-    /// The last line: the search being typed, or the comparison's notes and
-    /// the active pane's caveats, the first of them in full.
-    fn bottom(&self, pane: &Pane, index: usize) -> Line<'static> {
+    /// The last line: the search being typed, or what the pane could not
+    /// say in its own room -- the comparison's notes and the caveats left
+    /// over -- the first of them as far as the line goes, and how many more
+    /// `!` lists whole.
+    fn bottom(&self, pane: &Pane, index: usize, width: u16) -> Line<'static> {
         if let Some(typed) = &self.typing {
             return Line::from(vec![
                 Span::styled(
@@ -1527,36 +1679,97 @@ impl Flame {
                 ),
             ]);
         }
-        let mut said: Vec<String> = Vec::new();
+        if self.listing {
+            return Line::from(Span::styled(
+                "every caveat of both panes, whole · ! or esc closes",
+                Style::new().add_modifier(Modifier::DIM),
+            ));
+        }
+        let mut left: Vec<String> = Vec::new();
         if let Body::Tree(tree) = &pane.body {
             if let Some(compare) = &tree.compare {
-                said.extend(compare.notes.iter().cloned());
+                left.extend(compare.notes.iter().cloned());
             }
         }
-        if !self.caveats_said[index] {
-            said.extend(pane.caveats.iter().cloned());
-        }
-        match said.split_first() {
+        let said = self.caveats_said[index].min(pane.caveats.len());
+        left.extend(pane.caveats[said..].iter().cloned());
+        match left.split_first() {
             None => Line::from(Span::styled(
                 "⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o \
-                 switches pane, m shows it alone · t splits off cpu by thread",
+                 switches pane, m shows it alone · t splits off cpu by thread · ! lists caveats",
                 Style::new().add_modifier(Modifier::DIM),
             )),
             Some((first, rest)) => {
-                let more = if rest.is_empty() {
-                    String::new()
+                let head = if rest.is_empty() {
+                    format!("{}: ", pane.source)
                 } else {
-                    format!(" (+{} more)", rest.len())
+                    format!("{} (+{} more, ! lists them): ", pane.source, rest.len())
                 };
+                let room = usize::from(width).saturating_sub(head.chars().count());
                 Line::from(vec![
-                    Span::styled(
-                        format!("{}{more}: ", pane.source),
-                        Style::new().fg(palette::LOSS),
-                    ),
-                    Span::styled(first.clone(), Style::new().add_modifier(Modifier::DIM)),
+                    Span::styled(head, Style::new().fg(palette::LOSS)),
+                    Span::styled(fit(first, room), Style::new().add_modifier(Modifier::DIM)),
                 ])
             }
         }
+    }
+
+    /// `!`: every caveat of both panes -- both runs' in a comparison -- and
+    /// the comparison's notes, whole, over the panes.
+    fn draw_listing(&self, frame: &mut Frame<'_>, area: Rect, panes: &[Pane; 2]) {
+        let block = Block::new()
+            .borders(Borders::ALL)
+            .border_style(Style::new().fg(palette::LOSS))
+            .title(Span::styled(
+                " caveats, whole ",
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+        let width = usize::from(inner.width);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for pane in panes {
+            if !lines.is_empty() {
+                lines.push(Line::default());
+            }
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} ", pane.title),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(pane.source, Style::new().add_modifier(Modifier::DIM)),
+            ]));
+            let mut said: Vec<String> = Vec::new();
+            if let Body::Tree(tree) = &pane.body {
+                if let Some(compare) = &tree.compare {
+                    said.extend(compare.notes.iter().cloned());
+                }
+            }
+            said.extend(pane.caveats.iter().cloned());
+            if let Some(aside) = &pane.aside {
+                said.push(aside.clone());
+            }
+            if said.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "no caveat: the source said none",
+                    Style::new().add_modifier(Modifier::DIM),
+                )));
+            }
+            for caveat in &said {
+                lines.extend(caveat_lines(caveat, width));
+            }
+        }
+        let height = usize::from(inner.height);
+        if lines.len() > height && height > 0 {
+            let more = lines.len() - (height - 1);
+            lines.truncate(height - 1);
+            lines.push(Line::from(Span::styled(
+                format!("↓ {more} more lines: a taller terminal shows them"),
+                Style::new().add_modifier(Modifier::REVERSED),
+            )));
+        }
+        frame.render_widget(Paragraph::new(lines), inner);
     }
 
     fn draw_pane(
@@ -1636,8 +1849,25 @@ impl Flame {
                 for at in arrivals {
                     spark[((*at * bins as f32) as usize).min(bins - 1)] += 1;
                 }
-                let [words, chart] =
-                    Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(inner);
+                // What the source says of itself comes under the count, whole,
+                // as long as the chart keeps a few rows.
+                let mut caveats: Vec<Line<'static>> = Vec::new();
+                let room = usize::from(inner.height).saturating_sub(3 + 3);
+                for caveat in &pane.caveats {
+                    let lines = caveat_lines(caveat, usize::from(inner.width));
+                    if caveats.len() + lines.len() > room {
+                        break;
+                    }
+                    caveats.extend(lines);
+                    self.caveats_said[index] += 1;
+                }
+                let [words, notes, chart] = Layout::vertical([
+                    Constraint::Length(3),
+                    Constraint::Length(caveats.len() as u16),
+                    Constraint::Min(0),
+                ])
+                .areas(inner);
+                frame.render_widget(Paragraph::new(caveats), notes);
                 frame.render_widget(
                     said(vec![
                         trust::figure(
@@ -1823,23 +2053,27 @@ impl Flame {
                 height: under,
                 ..body
             };
-            let (lines, said) = self.ranking(pane, tree, zoom, rest);
+            let (lines, said) = self.ranking(pane, tree, zoom, rest, active);
             self.caveats_said[index] = said;
-            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rest);
+            // Every line is cut to the width already: nothing wraps, so
+            // nothing is clipped at the bottom unsaid.
+            frame.render_widget(Paragraph::new(lines), rest);
         }
     }
 
     /// The functions heaviest on their own under the zoom -- where the
     /// samples end, which an icicle spreads over every path that reaches
     /// them -- with a bar each; in a comparison, the largest movements. Then
-    /// the source's caveats, as room allows.
+    /// the source's caveats, each whole or not at all, and how many did not
+    /// fit; returns how many were said.
     fn ranking(
         &self,
         pane: &Pane,
         tree: &Tree,
         zoom: usize,
         area: Rect,
-    ) -> (Vec<Line<'static>>, bool) {
+        active: bool,
+    ) -> (Vec<Line<'static>>, usize) {
         let mut own: BTreeMap<&str, [f64; 2]> = BTreeMap::new();
         let mut stack = vec![zoom];
         while let Some(node) = stack.pop() {
@@ -1856,8 +2090,55 @@ impl Flame {
         let bold = Style::new().add_modifier(Modifier::BOLD);
         let style = pane.trust.style();
         let mut lines = Vec::new();
-        let room = usize::from(area.height).saturating_sub(1);
-        let entries = room.min(12);
+        // The ranking keeps its title and its first three; the caveats come
+        // next, whole, as many as fit, and say how many did not; the ranking
+        // takes what is left, up to twelve.
+        let height = usize::from(area.height);
+        let floor = 1 + own.len().min(3);
+        let blocks: Vec<Vec<Line<'static>>> = pane
+            .caveats
+            .iter()
+            .map(|caveat| caveat_lines(caveat, width))
+            .collect();
+        let room = height.saturating_sub(floor + 1);
+        let mut said = 0;
+        let mut said_lines: Vec<Line<'static>> = Vec::new();
+        if !blocks.is_empty() {
+            let all: usize = blocks.iter().map(Vec::len).sum();
+            let budget = if all <= room {
+                room
+            } else {
+                room.saturating_sub(1)
+            };
+            for block in &blocks {
+                if said_lines.len() + block.len() > budget {
+                    break;
+                }
+                said_lines.extend(block.iter().cloned());
+                said += 1;
+            }
+            if said < blocks.len() && room > 0 {
+                let more = blocks.len() - said;
+                let more = if active {
+                    format!("{more} more on the last line; ! lists every caveat whole")
+                } else {
+                    format!("{more} more; ! lists every caveat whole")
+                };
+                said_lines.push(Line::from(vec![
+                    Span::styled("‼ ", Style::new().fg(palette::LOSS)),
+                    Span::styled(
+                        fit(&more, width.saturating_sub(2)),
+                        Style::new().fg(palette::LOSS),
+                    ),
+                ]));
+            }
+        }
+        let caveat_rows = if said_lines.is_empty() {
+            0
+        } else {
+            said_lines.len() + 1
+        };
+        let entries = height.saturating_sub(1 + caveat_rows).min(12);
         match &tree.compare {
             None => {
                 lines.push(Line::from(vec![
@@ -1958,15 +2239,9 @@ impl Flame {
                 }
             }
         }
-        let said = !pane.caveats.is_empty() && lines.len() + 2 <= usize::from(area.height);
-        if said {
+        if !said_lines.is_empty() {
             lines.push(Line::default());
-            for caveat in &pane.caveats {
-                lines.push(Line::from(vec![
-                    Span::styled("‼ ", Style::new().fg(palette::LOSS)),
-                    Span::styled(caveat.clone(), Style::new().add_modifier(Modifier::DIM)),
-                ]));
-            }
+            lines.extend(said_lines);
         }
         (lines, said)
     }
@@ -2371,6 +2646,284 @@ mod tests {
         assert!(!text(&draw(&mut app)).contains("/fstat/"));
     }
 
+    /// A profile of named stacks at `period_ns`, from the triage's folded
+    /// lines (`a;b 3`).
+    fn folded(lines: &str, period_ns: u64) -> Data {
+        let stacks: Vec<(Vec<&str>, u64)> = lines
+            .lines()
+            .map(|line| {
+                let (stack, count) = line.rsplit_once(' ').unwrap();
+                (stack.split(';').collect(), count.parse().unwrap())
+            })
+            .collect();
+        let borrowed: Vec<(&[&str], u64)> = stacks
+            .iter()
+            .map(|(frames, count)| (frames.as_slice(), *count))
+            .collect();
+        let mut data = profile(&borrowed);
+        data.run.results[0].period_ns = Some(period_ns);
+        data
+    }
+
+    /// `src/triage/diff.rs`'s own cases, its inputs verbatim, held to the
+    /// view's re-statement: the same functions named, in the same unit.
+    #[test]
+    fn the_triage_s_own_cases_give_the_triage_s_answers() {
+        /// Before, after, their two periods, the unit compared in, and the
+        /// functions named.
+        type Case<'a> = (&'a str, &'a str, u64, u64, &'a str, &'a [&'a str]);
+        let cases: [Case; 4] = [
+            // one_function_doubled_is_the_only_difference
+            (
+                "main;alpha 1000\nmain;beta 1000\nmain;gamma 1000\n",
+                "main;alpha 1010\nmain;beta 2000\nmain;gamma 985\n",
+                1_000_000,
+                1_000_000,
+                "samples",
+                &["beta"],
+            ),
+            // shares_would_have_named_everything
+            (
+                "a 100\nb 100\nc 100\n",
+                "a 100\nb 200\nc 100\n",
+                1_000_000,
+                1_000_000,
+                "samples",
+                &["b"],
+            ),
+            // noise_is_not_a_difference
+            (
+                "a 400\nb 400\n",
+                "a 420\nb 385\n",
+                1_000_000,
+                1_000_000,
+                "samples",
+                &[],
+            ),
+            // two_rates_are_compared_in_time
+            (
+                "a 100\nb 100\n",
+                "a 200\nb 400\n",
+                1_000_000,
+                500_000,
+                "ns",
+                &["b"],
+            ),
+        ];
+        for (before, after, first, second, unit, named) in cases {
+            let on = tree(
+                &folded(before, first),
+                Some(&folded(after, second)),
+                ON,
+                false,
+            );
+            let compare = on.compare.as_ref().unwrap();
+            let got: Vec<&str> = compare
+                .difference
+                .iter()
+                .map(|change| change.function.as_str())
+                .collect();
+            assert_eq!(
+                got,
+                named,
+                "{before} → {after}: {}",
+                compare.sentence(false)
+            );
+            assert_eq!(compare.unit, unit, "{before} → {after}");
+        }
+    }
+
+    /// Every caveat under an icicle is said whole or not at all, in the room
+    /// there is, and the ones that did not fit are counted on screen.
+    #[test]
+    fn caveats_are_said_whole_or_counted() {
+        let flame = Flame::default();
+        for name in ["http-server", "cpython-hot"] {
+            let data = fixture(name);
+            for (index, need) in NEEDS.iter().enumerate() {
+                let focus = Focus::default();
+                let pane = build(
+                    &data,
+                    None,
+                    need,
+                    "",
+                    false,
+                    &Reading {
+                        by_thread: false,
+                        focus: &focus,
+                    },
+                );
+                let Body::Tree(tree) = &pane.body else {
+                    continue;
+                };
+                for height in 2..40u16 {
+                    let area = Rect::new(0, 0, 56, height);
+                    let (lines, said) = flame.ranking(&pane, tree, 0, area, index == ON);
+                    assert!(lines.len() <= usize::from(height), "{name}: {height} rows");
+                    let words: Vec<String> = lines
+                        .iter()
+                        .map(|line| line.to_string())
+                        .skip_while(|line| !line.is_empty())
+                        .skip(1)
+                        .collect();
+                    let mut expected: Vec<String> = pane.caveats[..said]
+                        .iter()
+                        .flat_map(|caveat| caveat_lines(caveat, 56))
+                        .map(|line| line.to_string())
+                        .collect();
+                    if said < pane.caveats.len() && !words.is_empty() {
+                        let last = words.last().unwrap();
+                        assert!(
+                            last.contains(&format!("{} more", pane.caveats.len() - said)),
+                            "{name} at {height} rows: {last}"
+                        );
+                        expected.push(last.clone());
+                    }
+                    assert_eq!(words, expected, "{name} at {height} rows");
+                }
+                // At full height, every caveat of this fixture fits.
+                let (_, said) =
+                    flame.ranking(&pane, tree, 0, Rect::new(0, 0, 56, 200), index == ON);
+                assert_eq!(said, pane.caveats.len(), "{name}");
+            }
+        }
+    }
+
+    /// What does not fit under the icicle is on the last line, and `!` lists
+    /// every caveat whole.
+    #[test]
+    fn the_last_line_and_the_listing_say_the_rest() {
+        let mut app = app("cpython-hot");
+        let screen = text(&draw(&mut app));
+        assert!(
+            screen.contains("more on the last line") || !screen.contains(" more;"),
+            "{screen}"
+        );
+        press(&mut app, KeyCode::Char('!'));
+        let listed = text(&draw(&mut app));
+        let data = fixture("cpython-hot");
+        let held = data.for_need(&NEEDS[ON].label(), NEEDS[ON].source);
+        let caveats = caveats_of(&held);
+        assert!(caveats
+            .iter()
+            .any(|caveat| caveat.starts_with("names came from")));
+        let width = usize::from(WIDTH) - 2;
+        for caveat in &caveats {
+            for line in wrap_words(caveat, width - 2) {
+                assert!(listed.contains(&line), "{line}\n{listed}");
+            }
+        }
+        press(&mut app, KeyCode::Char('!'));
+        assert!(!text(&draw(&mut app)).contains("caveats, whole"));
+    }
+
+    #[test]
+    fn a_comparison_says_both_runs_caveats() {
+        let first = fixture("cpython-hot");
+        let second = fixture("cpython-hot-heavier");
+        let focus = Focus::default();
+        let pane = build(
+            &first,
+            Some(&second),
+            &NEEDS[ON],
+            "",
+            false,
+            &Reading {
+                by_thread: false,
+                focus: &focus,
+            },
+        );
+        let other = caveats_of(&second.for_need(&NEEDS[ON].label(), NEEDS[ON].source));
+        assert!(!other.is_empty());
+        for caveat in &other {
+            assert!(
+                pane.caveats
+                    .iter()
+                    .any(|said| said == caveat || *said == format!("the other run: {caveat}")),
+                "{caveat}"
+            );
+        }
+        assert!(pane
+            .caveats
+            .iter()
+            .any(|said| said.starts_with("the other run: ")));
+    }
+
+    /// Off-cpu blocks that arrived with no stack are weighed by their time
+    /// under `[no stack]`, the same through the stacks as through the
+    /// blocks; without the blocks, how many is said.
+    #[test]
+    fn off_cpu_blocks_without_a_stack_are_weighed_or_said() {
+        let block = |stack: Option<u64>, ns: u64| -> crate::model::Event {
+            let mut attrs = vec![serde_json::json!({"name": "total_ns", "value": ns})];
+            if let Some(stack) = stack {
+                attrs.push(serde_json::json!({"name": "stack_id", "value": stack}));
+            }
+            serde_json::from_value(serde_json::json!({
+                "ts_ns": 1, "kind": "sched.offcpu",
+                "keys": [{"task": {"tid": 7}}], "attrs": attrs,
+            }))
+            .unwrap()
+        };
+        let mut results = Results {
+            label: "sched.offcpu".into(),
+            source: "sched.offcpu".into(),
+            unit: "ns".into(),
+            ..Results::default()
+        };
+        results.stacks.insert(1, vec!["main".into(), "read".into()]);
+        results.outputs = vec![
+            Output::Stack {
+                stacks: vec![StackCount {
+                    stack: 1,
+                    events: 1,
+                    total: 1000.0,
+                }],
+                unattributed: 2,
+                short: None,
+            },
+            Output::Raw {
+                events: vec![block(Some(1), 1000), block(None, 300), block(None, 200)],
+            },
+        ];
+        let data = Data {
+            run: Run {
+                results: vec![results],
+                ..Run::default()
+            },
+            ..Data::default()
+        };
+        let read = |data: &Data, by_thread: bool| {
+            let focus = Focus::default();
+            build(
+                data,
+                None,
+                &NEEDS[OFF],
+                "",
+                false,
+                &Reading {
+                    by_thread,
+                    focus: &focus,
+                },
+            )
+        };
+        let total = |pane: &Pane| match &pane.body {
+            Body::Tree(tree) => tree.nodes[0].value[0],
+            _ => panic!("a tree"),
+        };
+        let stacks = read(&data, false);
+        assert_eq!(total(&stacks), 1500.0);
+        assert_eq!(total(&read(&data, true)), 1500.0, "the same by thread");
+        // Without the blocks, the time is unknown and the count is said.
+        let mut kept = data.clone();
+        kept.run.results[0]
+            .outputs
+            .retain(|output| matches!(output, Output::Stack { .. }));
+        let alone = read(&kept, false);
+        assert_eq!(total(&alone), 1000.0);
+        assert!(alone.aside.unwrap().contains("2 blocks carried no stack"));
+    }
+
     // The gallery's other screens: what a key or a second run shows, for
     // the person judging the view.
 
@@ -2421,13 +2974,40 @@ mod tests {
         assert_snapshot("flame-threads--http-server", &draw(&mut app));
     }
 
+    /// A recording replayed as live, half way. `as_live_until` keeps a
+    /// source's raw events only, so a source the recording kept as `stack`
+    /// alone arrives empty -- which a live run, handing over its samples as
+    /// they come, would not. That is said on the screen, as a degradation of
+    /// the replay, rather than drawn as a run that sampled nothing.
+    fn live_half_way(name: &str) -> Data {
+        let data = fixture(name);
+        let half = data.opened_ns() + (data.closed_ns() - data.opened_ns()) / 2;
+        let mut live = crate::feed::as_live_until(&data, half);
+        for (was, now) in data.run.results.iter().zip(live.run.results.iter_mut()) {
+            if was.events().is_empty() && was.output("stack").is_some() {
+                now.degradations.insert(
+                    0,
+                    format!(
+                        "this recording kept `{}` as `stack` only: replayed as live it has no \
+                     samples to count, where a live run hands them over as they arrive",
+                        was.source
+                    ),
+                );
+            }
+        }
+        live
+    }
+
     #[test]
     fn snapshot_a_live_run_half_way() {
-        let data = fixture("sqlite-commits");
-        let half = data.opened_ns() + (data.closed_ns() - data.opened_ns()) / 2;
-        let mut app = App::new(crate::feed::as_live_until(&data, half));
+        let mut app = App::new(live_half_way("sqlite-commits"));
         app.cost = Cost::Snapshot;
         app.open("flame").unwrap();
+        let screen = text(&draw(&mut app));
+        assert!(
+            screen.contains("this recording kept `cpu.profile` as `stack` only"),
+            "{screen}"
+        );
         assert_snapshot("flame-live--sqlite-commits", &draw(&mut app));
     }
 
