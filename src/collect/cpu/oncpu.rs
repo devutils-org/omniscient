@@ -175,6 +175,31 @@ impl OnCpuTime {
         })
     }
 
+    /// Counts the reading the task's end took away.
+    ///
+    /// A launched program is reaped before the run's closing round, so the
+    /// read that would have closed the last interval finds no `/proc/<pid>`:
+    /// whatever the task ran since the reading before it, up to one interval,
+    /// is in no event. That is a loss of this run's, counted where the run's
+    /// losses are, not only a sentence in the catalog. Counted once: the
+    /// baseline is dropped with it, so a later read finds nothing to close.
+    fn gone(&mut self) {
+        if self.previous.take().is_none() {
+            return;
+        }
+        self.losses.failed_reads += 1;
+        *self
+            .losses
+            .reasons
+            .entry(
+                "the task ended before the closing read: its cpu time since the last reading, \
+                 up to one interval, is in no event (a launched program's exit carries the \
+                 whole as `cpu_ns`)"
+                    .to_owned(),
+            )
+            .or_default() += 1;
+    }
+
     /// Turns a reading into an event, against whatever was read before it.
     ///
     /// Separate from `sample` so the arithmetic can be checked against readings
@@ -252,7 +277,14 @@ impl Collector for OnCpuTime {
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        let now = self.read()?;
+        let now = match self.read() {
+            Ok(now) => now,
+            Err(SampleError::TargetGone(reason)) => {
+                self.gone();
+                return Err(SampleError::TargetGone(reason));
+            }
+            Err(error) => return Err(error),
+        };
         Ok(self.event_from(now, monotonic_ns(), seq))
     }
 
@@ -345,6 +377,42 @@ mod tests {
             kernel.map(|last| last.saturating_sub(before)),
             wall,
         )
+    }
+
+    /// A task reaped before the closing read leaves its last interval in no
+    /// event, and the run says so in its losses rather than only in the
+    /// catalog's caveat: one failed read, with the reason, and only once
+    /// however often the run asks again.
+    #[test]
+    fn a_task_reaped_before_the_closing_read_is_a_counted_loss() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep runs");
+        let pid = child.id() as i32;
+        let mut collector =
+            OnCpuTime::new(pid, PathBuf::from(format!("/proc/{pid}/stat")), poll(100));
+        collector.start().expect("the task exists");
+        collector.sample(0).expect("the task is still there");
+        assert_eq!(collector.losses().failed_reads, 0);
+
+        child.kill().expect("kill");
+        child.wait().expect("reap");
+        for seq in 1..3 {
+            assert!(matches!(
+                collector.sample(seq),
+                Err(SampleError::TargetGone(_))
+            ));
+        }
+        let losses = collector.losses();
+        assert_eq!(losses.failed_reads, 1, "{losses:?}");
+        assert!(
+            losses
+                .reasons
+                .keys()
+                .any(|reason| reason.contains("closing read") && reason.contains("cpu_ns")),
+            "{losses:?}"
+        );
     }
 
     #[test]
