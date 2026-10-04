@@ -220,3 +220,21 @@ The fix round, over `a4bdf0e`:
   five-name coverage is held on the build branch only, and why, pointing at
   the launcher item above. No test can hold it on the machine branch until
   the launcher names every refused request.
+
+The suite at the review round's commit (other streams' suites running on the
+machine at the same time):
+
+- `make check`: red on `runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`
+  alone, the same failure as above (78225 dropped against its ring's count,
+  throttled 4116 times, "filed for stream profile" in its own message). It
+  failed again when rerun alone; it is phase A's, for profile and launcher.
+  `make check` stops at the test step, so clippy (`--workspace --all-targets
+  -D warnings`) and `cargo fmt --check` were run after it: both clean.
+- `cargo test --workspace --no-fail-fast`: the log was shared by mistake with
+  another stream's run of the same command (one scratchpad file), so its
+  totals are not this branch's alone. The failures it shows were each rerun
+  alone once on this branch: `scenario_runtime::a_probe_follows_every_thread_of_the_process`,
+  `unwind::dwarf_recovers_the_whole_tree_of_a_build_without_frame_pointers`
+  and `scenario_mem::a_walk_that_fits_in_l1_is_never_timed_and_one_that_does_not_waits_on_memory`
+  passed; `runner::a_profile_s_losses_...` failed, as above. `cargo test
+  --lib` passed whole (1482).
