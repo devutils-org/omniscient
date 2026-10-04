@@ -1,5 +1,6 @@
 [0m[1momn top[0m │ fixture sqlite-commits │ 4.97s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥5.82%[0m[35m │ target 87.8% cpu[0m [0m
  1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
+[0m[1;2m flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference [0m[2m────────────────────────────[0m
 [0m[1mon cpu: [0m[2m4.54k · [0mhottest own [0m[1msqlite3+0x90183[0m[2m 5.60%[0m │ [0m[1moff cpu: [0m[2m410ms · [0mhottest own [0m[1mfdatasync[0m[2m 100%[0m                         [0m
 [0m[32m┌[0m[1;32m on cpu [0m[2;32mcpu.profile 4.54k [0m[33m50 late[0m[32m [0m[36m~low det[0m[32m [0m[33mdegraded x4[0m[32m ───┐[0m[2m┌[0m[1;2m off cpu [0m[2msched.offcpu 410ms [0m[2;36m~low det[0m[2m [0m[2;33mdegraded[0m[2m ────────────┐[0m
 [0m[32m│width ∝ samples · heaviest left           [0m[2m 36 frames deep [0m[32m│[0m[2m│[0m[32mwidth ∝ time off cpu · heaviest left      [0m[2m 15 frames deep │[0m
@@ -32,7 +33,6 @@
 [0m[32m│[0m[2mdwarf` the whole chain[0m                                    [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m│[0m[33m‼ [0m[2m1 frames fell in no mapping of the target and are[0m       [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m│[0m[2mreported by address[0m                                       [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
-[0m[32m│[0m[33m‼ [0m[2mstacks unwound by `fp`: the caller of a function that[0m   [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m└──────────────────────────────────────────────────────────┘[0m[2m└──────────────────────────────────────────────────────────┘[0m
 [0m[1;32mon cpu ▸ [0m[1msqlite3+0x9aa57[0m[2m  the last of 10 frames called in one chain from all[0m                                            [0m
 [0m[2m4.53k samples ≈ 4.54s · 99.8% of all · own 0 · 4.53k events[0m                                                             [0m

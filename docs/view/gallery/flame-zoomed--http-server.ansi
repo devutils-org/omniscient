@@ -1,5 +1,6 @@
 [0m[1momn top[0m │ fixture http-server │ 2.84s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥16.1%[0m[35m │ target 92.0% cpu[0m [0m
  1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
+[0m[1;2m flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference [0m[2m────────────────────────────[0m
 [0m[1mon cpu: [0m[2m2.85k · [0mhottest own [0m[1mlink_path_walk[0m[2m 6.07%[0m │ [0m[1moff cpu: [0m[2m5.51s · [0mhottest own [0m[1mlibc+0xa08f2[0m[2m 50.1%[0m                      [0m
 [0m[32m┌[0m[1;32m on cpu [0m[2;32mcpu.profile 2.85k [0m[33m29 late[0m[32m [0m[36m~low det[0m[32m [0m[33mdegraded x7[0m[32m ───┐[0m[2m┌[0m[1;2m off cpu [0m[2msched.offcpu 5.51s [0m[2;36m~low det[0m[2m [0m[2;33mdegraded[0m[2m ────────────┐[0m
 [0m[32m│zoom: …14+0x1e478b › libpython3.14+0x67661[0m[2m 34 frames deep [0m[32m│[0m[2m│[0m[32mwidth ∝ time off cpu · heaviest left      [0m[2m 25 frames deep │[0m
@@ -32,7 +33,6 @@
 [0m[32m│[0m[33m‼ [0m[2m1428 of 1621 samples landed in a function that sets up[0m  [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m│[0m[2mno frame pointer (1295 in libc.so.6, 101 in[0m               [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m│[0m[2mld-linux-x86-64.so.2, 32 in libpython3.14.so.1.0), so the[0m [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
-[0m[32m│[0m[2mframes under the leaf are not its callers: most of them[0m   [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m└──────────────────────────────────────────────────────────┘[0m[2m└──────────────────────────────────────────────────────────┘[0m
 [0m[1;32mon cpu ▸ [0m[1mdo_syscall_64[0m[2m  the last of 2 frames called in one chain from entry_SYSCALL_64_after_hwframe[0m                    [0m
 [0m[2m1.16k samples ≈ 1.17s · 40.7% of all, 71.8% of the zoom · own 66 · 1.16k events[0m                                         [0m

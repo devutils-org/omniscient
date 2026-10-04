@@ -1,5 +1,6 @@
 [0m[1momn top[0m │ fixture cpython-hot │ 3.89s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥5.56%[0m[35m │ target 95.3% cpu[0m [0m
  1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
+[0m[1;2m flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference [0m[2m────────────────────────────[0m
 [0m[1mon cpu: [0m3.87k → 7.88k (x2.03) · absolute: the difference is `__tls_get_addr` +408 own (x2.17, 12.3σ); 37 more of 378 mov[0m
 [0m[32m┌[0m[1;32m on cpu [0m[2;32mcpu.profile 3.87k vs 7.88k [0m[33m120 late[0m[32m [0m[36m~low det[0m[32m [0m[33mdegraded x8[0m[32m ─────────────────────────────────────────────────────┐[0m
 [0m[32m│width ∝ the mean of the two runs · heaviest left                                                      [0m[2m 16 frames deep [0m[32m│[0m
@@ -28,7 +29,6 @@
 [0m[32m│[0m[2mtarget's own code, which is where the callers are lost; `--stack fp+leaf` recovers the leaf's caller and `--stack[0m     [0m[32m│[0m
 [0m[32m│[0m[2mdwarf` the whole chain[0m                                                                                                [0m[32m│[0m
 [0m[32m│[0m[33m‼ [0m[2m1 frames fell in no mapping of the target and are reported by address[0m                                               [0m[32m│[0m
-[0m[32m│[0m[33m‼ [0m[2mstacks unwound by `fp`: the caller of a function that sets up no frame pointer is lost -- every frameless leaf, and[0m [0m[32m│[0m
 [0m[32m└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[2m┌[0m[1;2m off cpu [0m[2msched.offcpu ────────────────────────────────────────────────────────────────────────────────────────────────┐[0m
 [0m[2m│no block was recorded: the target never waited, or never long enough for `sched.offcpu` to see it (0 events)[0m [0m[36m~low det[0m [0m[2m│[0m

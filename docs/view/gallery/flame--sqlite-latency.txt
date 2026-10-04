@@ -1,5 +1,6 @@
 omn top │ fixture sqlite-latency │ 284ms                          view: snapshot │ collectors ≥4.79% │ target 9.78% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
+ flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
 on cpu: 43 · hottest own __btrfs_check_leaf 6.98% │ off cpu: 243ms · hottest own fdatasync 100%
 ┌ on cpu cpu.profile 43 3 late ~low det degraded x3 ───────┐┌ off cpu sched.offcpu 243ms ~low det degraded ────────────┐
 │width ∝ samples · heaviest left            35 frames deep ││width ∝ time off cpu · heaviest left       15 frames deep │
@@ -32,7 +33,6 @@ on cpu: 43 · hottest own __btrfs_check_leaf 6.98% │ off cpu: 243ms · hottest
 │reduced frequency                                         ││                                                          │
 │‼ 39 of 39 samples landed in a function that sets up no   ││                                                          │
 │frame pointer (39 in libc.so.6), so the frames under the  ││                                                          │
-│leaf are not its callers: most of them are outside the    ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
 on cpu ▸ all
 43 samples ≈ 43.1ms · 100% of all · own 0 · 43 events

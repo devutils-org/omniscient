@@ -1,11 +1,11 @@
 [0m[1momn top[0m │ fixture sqlite-commits │ 2.48s [0m[3;34mlive[0m                        [0m[35mview: snapshot[0m │ [0m[35mcollectors and target: at the end[0m [0m
  1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
+[0m[1;2m flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference [0m[2m────────────────────────────[0m
 [0m[1mon cpu: [0m[2m0 so far[0m │ [0m[1moff cpu: [0m[2m253 so far[0m                                                                                  [0m
 [0m[2m┌[0m[1;2m on cpu [0m[2mcpu.profile ──────────────────────────────────────────────────────────────────────────────────────────────────┐[0m
 [0m[2m│0 samples on 0 stacks so far[0m [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegraded x4[0m                                                                [0m[2m│[0m
 [0m[2m│[0m[2;3mthe icicle is drawn when the run ends: the runner names the stacks then. Below, what arrived over time.[0m               [0m[2m│[0m
 [0m[2m│[0m                                                                                                                      [0m[2m│[0m
-[0m[2m│[0m[2;34m                                                                                                                      [0m[2m│[0m
 [0m[2m│[0m[2;34m                                                                                                                      [0m[2m│[0m
 [0m[2m│[0m[2;34m                                                                                                                      [0m[2m│[0m
 [0m[2m│[0m[2;34m                                                                                                                      [0m[2m│[0m

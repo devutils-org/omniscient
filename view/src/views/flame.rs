@@ -1233,6 +1233,19 @@ impl View for Flame {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>) {
+        // The view's name and title on a rule, as every view says what it is.
+        let rule = Block::new()
+            .borders(Borders::TOP)
+            .border_style(Style::new().add_modifier(Modifier::DIM))
+            .title(Span::styled(
+                format!(" {} -- {} ", self.name(), self.title()),
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
+        let area = {
+            let inner = rule.inner(area);
+            frame.render_widget(rule, area);
+            inner
+        };
         self.last_width = area.width;
         self.caveats_said = [false; 2];
         let panes = self.panes(ctx);

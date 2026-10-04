@@ -1,5 +1,6 @@
 [0m[1momn top[0m │ fixture sqlite-latency │ 284ms                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥4.79%[0m[35m │ target 9.78% cpu[0m [0m
  1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
+[0m[1;2m flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference [0m[2m────────────────────────────[0m
 [0m[1mon cpu: [0m[2m43 · [0mhottest own [0m[1m__btrfs_check_leaf[0m[2m 6.98%[0m │ [0m[1moff cpu: [0m[2m243ms · [0mhottest own [0m[1mfdatasync[0m[2m 100%[0m                         [0m
 [0m[32m┌[0m[1;32m on cpu [0m[2;32mcpu.profile 43 [0m[33m3 late[0m[32m [0m[36m~low det[0m[32m [0m[33mdegraded x3[0m[32m ───────┐[0m[2m┌[0m[1;2m off cpu [0m[2msched.offcpu 243ms [0m[2;36m~low det[0m[2m [0m[2;33mdegraded[0m[2m ────────────┐[0m
 [0m[32m│width ∝ samples · heaviest left           [0m[2m 35 frames deep [0m[32m│[0m[2m│[0m[32mwidth ∝ time off cpu · heaviest left      [0m[2m 15 frames deep │[0m
@@ -32,7 +33,6 @@
 [0m[32m│[0m[2mreduced frequency[0m                                         [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m│[0m[33m‼ [0m[2m39 of 39 samples landed in a function that sets up no[0m   [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m│[0m[2mframe pointer (39 in libc.so.6), so the frames under the[0m  [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
-[0m[32m│[0m[2mleaf are not its callers: most of them are outside the[0m    [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m└──────────────────────────────────────────────────────────┘[0m[2m└──────────────────────────────────────────────────────────┘[0m
 [0m[1;32mon cpu ▸ [0m[1mall[0m                                                                                                            [0m
 [0m[2m43 samples ≈ 43.1ms · 100% of all · own 0 · 43 events[0m                                                                   [0m

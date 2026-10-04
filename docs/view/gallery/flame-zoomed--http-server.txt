@@ -1,5 +1,6 @@
 omn top │ fixture http-server │ 2.84s                             view: snapshot │ collectors ≥16.1% │ target 92.0% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
+ flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
 on cpu: 2.85k · hottest own link_path_walk 6.07% │ off cpu: 5.51s · hottest own libc+0xa08f2 50.1%
 ┌ on cpu cpu.profile 2.85k 29 late ~low det degraded x7 ───┐┌ off cpu sched.offcpu 5.51s ~low det degraded ────────────┐
 │zoom: …14+0x1e478b › libpython3.14+0x67661 34 frames deep ││width ∝ time off cpu · heaviest left       25 frames deep │
@@ -32,7 +33,6 @@ on cpu: 2.85k · hottest own link_path_walk 6.07% │ off cpu: 5.51s · hottest 
 │‼ 1428 of 1621 samples landed in a function that sets up  ││                                                          │
 │no frame pointer (1295 in libc.so.6, 101 in               ││                                                          │
 │ld-linux-x86-64.so.2, 32 in libpython3.14.so.1.0), so the ││                                                          │
-│frames under the leaf are not its callers: most of them   ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
 on cpu ▸ do_syscall_64  the last of 2 frames called in one chain from entry_SYSCALL_64_after_hwframe
 1.16k samples ≈ 1.17s · 40.7% of all, 71.8% of the zoom · own 66 · 1.16k events

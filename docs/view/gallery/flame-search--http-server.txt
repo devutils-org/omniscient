@@ -1,5 +1,6 @@
 omn top │ fixture http-server │ 2.84s                             view: snapshot │ collectors ≥16.1% │ target 92.0% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
+ flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
 /lookup/ on cpu: 16 frames, 20.0% of it │ off cpu: 0 frames, 0.00% of it
 ┌ on cpu cpu.profile 2.85k 29 late ~low det degraded x7 ───┐┌ off cpu sched.offcpu 5.51s ~low det degraded ────────────┐
 │width ∝ samples · heaviest left            88 frames deep ││width ∝ time off cpu · heaviest left       25 frames deep │
@@ -32,7 +33,6 @@ omn top │ fixture http-server │ 2.84s                             view: snap
 │reduced frequency                                         ││                                                          │
 │‼ 1428 of 1621 samples landed in a function that sets up  ││                                                          │
 │no frame pointer (1295 in libc.so.6, 101 in               ││                                                          │
-│ld-linux-x86-64.so.2, 32 in libpython3.14.so.1.0), so the ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
 on cpu ▸ all
 2.85k samples ≈ 2.86s · 100% of all · own 0 · 2.85k events
