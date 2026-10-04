@@ -532,3 +532,17 @@ every cause, so the source and kind of the rows agreed. The budget check was
 their `note` with the cause named. The other cases ran in the final
 `make check` (section 10).
 
+
+## 10. The review round's suite
+
+While iterating: `cargo test --test cases -- --skip every_case_names` (the
+five machine-independent tests), `cargo clippy --tests --test cases -D
+warnings`, and the three changed cases live (section 9).
+
+One `make check` at `4a9a774`, with the capabilities on: red only at
+`tests/runner.rs`,
+`a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`.
+That is the same failure as in section 8, which is red on `main` and not in
+this stream's files. `cases` passed in it: 6 tests in 185 s, every case. That
+run captures no output, so the check-by-check lines of the other cases were
+not read.
