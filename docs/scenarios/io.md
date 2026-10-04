@@ -1478,3 +1478,51 @@ should count the timer's slack (filed in `docs/open-findings.md`).
   own on `null_blk`.
 - **One program for both `io.latency` histograms**: not started; it was
   optional, and the two items above came first.
+
+## The twentieth wave
+
+### 23. A file's device and the device `io.bytes` counts did not meet — **fixed**
+
+`io.fs` keyed a file by its superblock's device, which on btrfs is an
+anonymous `0:28` that names nothing in `/proc/diskstats`, and `io.bytes`
+counts the devices nothing is stacked on (`dev:259+0`). The flows view could
+not draw a file -> device edge for that reason (`docs/view/flows.md`, "What it
+does not do"). `io.fs`, `io.fsync` and `io.pagecache` now carry `blk_devs`:
+the mount source followed through `/sys` -- a partition to its disk, a dm or
+md device to its members, a btrfs to every device in
+`/sys/fs/btrfs/<fsid>/devices` -- each spelled as `io.bytes` keys its series,
+comma-separated (`src/collect/io/underneath.rs`). On this machine the root
+btrfs spans `nvme0n1p6` and `nvme0n1p9`, the mount names only the first, and
+both land on `dev:259+0`, the key `io.bytes -e summary --system` reports.
+Held by `a_file_event_names_the_block_devices_its_filesystem_is_on`, whose
+reference is the test's own walk from the mount source (`backing_device`),
+and by the unit tests over fabricated `/sys` trees (partition, multi-device
+btrfs, dm on md, a whole disk, an unknown name).
+
+It is the set the filesystem can write to, not the device a given byte
+reached: on a btrfs over two disks or a striped volume, which disk took a
+write is not in the mount table.
+
+### 24. Batched direct reads are coalesced without being counted as merges — **measured, not held**
+
+The known number of merges was attempted again. Sixteen adjacent 4 KiB
+`O_DIRECT` reads in one `io_uring` submission (`fio --ioengine=io_uring
+--iodepth=16 --iodepth_batch_submit=16`, on a NOCOW file so btrfs does not
+checksum it) became **two requests and one merge** on `nvme0n1`, three times
+out of three; the same reads made one at a time (`psync`) were sixteen
+requests and no merge. So the block layer coalesced fifteen bios and the
+merge column counted one: `io.merges` is not "bios combined", and a workload
+cannot predict it from the number of adjacent bios it submits. The same
+sixteen reads through `io_submit` (libaio) on btrfs moved the whole 256 KiB
+file in four requests -- btrfs answered the asynchronous direct reads through
+the page cache -- so libaio is not a merge driver on this filesystem either.
+No test holds a merge count; the scenario above (`merges` bracketed by the
+kernel's own column over an enclosing window) is still what does.
+
+### Not done this wave
+
+- **`io.bytes` split by direction in the aggregating emits.** The split is on
+  every event (`read_bytes`, `write_bytes`) and `raw` shows it; a timeline or
+  summary per direction needs a key the series can be grouped on, and
+  `KeyKind` (`src/request.rs`) has none. Filed in `docs/fixes/w20-io.md`.
+- **One program for both `io.latency` histograms**: optional, not started.
