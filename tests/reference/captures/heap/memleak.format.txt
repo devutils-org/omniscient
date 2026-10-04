@@ -1,0 +1,15 @@
+using default object: libc.so.6
+using page size: 4096
+tracing kernel: false
+Tracing outstanding memory allocs...  Hit Ctrl-C to end
+[00:00:01] Top 100000 stacks with outstanding allocations:
+1000 bytes in 10 allocations from stack
+	0 [<0000000000001000>] synthetic_a+0x10
+[00:00:02] Top 100000 stacks with outstanding allocations:
+300 bytes in 3 allocations from stack
+	0 [<0000000000002000>] synthetic_b+0x20
+	1 [<0000000000003000>] synthetic_c+0x30
+20 bytes in 2 allocations from stack
+	0 [<0000000000004000>] synthetic_d+0x40
+1 bytes in 1 allocations from stack
+	0 [<0000000000005000>] synthetic_e+0x50
