@@ -16,12 +16,11 @@
 //! what the gate says the workload resolves cannot be told from zero, and
 //! reads as zero (`docs/bench.md`).
 //!
-//! One rule holds the bands the table did not measure: a backend declared
-//! `equivalent` declares no cheaper band than a backend above it in the chain
-//! that serves a target it serves. `--budget` degrades onto what is below and
-//! declares less; an equivalent one is the same measurement, often through the
-//! same mechanism (`bpf:tp` beside `bpf:raw_tp`), and a cheaper band on it
-//! would promise a saving the move cannot deliver.
+//! The bands the table did not measure are held by the catalog loader: a
+//! backend declared `equivalent` declares no cheaper band than a backend above
+//! it in the chain that serves a target it serves (`src/catalog.rs`), so a
+//! catalog that breaks the rule does not load, and this file no longer keeps
+//! a second copy of it.
 //!
 //! Each judgement is a function returning what it found wrong, run on the
 //! real record by one test and on synthetic rows, one per way of being wrong,
@@ -29,8 +28,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use omn::catalog::{Backend, Catalog, Cost, Entry, TargetSupport};
-use omn::request::TargetKind;
+use omn::catalog::{Catalog, Cost};
 
 const BENCH_MD: &str = include_str!("../docs/bench.md");
 
@@ -304,46 +302,6 @@ fn band_faults(record: &Record) -> Vec<String> {
     wrong
 }
 
-/// The targets `backend` serves in `entry`'s chain.
-fn served(entry: &Entry, backend: &Backend) -> BTreeSet<TargetKind> {
-    backend
-        .targets
-        .as_ref()
-        .unwrap_or(&entry.targets)
-        .iter()
-        .filter(|(_, support)| **support != TargetSupport::No)
-        .map(|(kind, _)| *kind)
-        .collect()
-}
-
-/// Every backend declared `equivalent` that declares a cheaper band than a
-/// backend above it in the chain serving a target it serves.
-fn cheaper_equivalents(entries: &[Entry]) -> Vec<String> {
-    let mut wrong = Vec::new();
-    for entry in entries {
-        for (at, fallback) in entry.backends.iter().enumerate() {
-            if !fallback.equivalent {
-                continue;
-            }
-            let theirs = served(entry, fallback);
-            for above in &entry.backends[..at] {
-                if fallback.cost < above.cost && !served(entry, above).is_disjoint(&theirs) {
-                    wrong.push(format!(
-                        "`{}` through `{}` is declared equivalent and declares `{}`, under \
-                         `{}`'s `{}`: a budget would degrade onto it and keep paying the same",
-                        entry.id.as_str(),
-                        fallback.id,
-                        fallback.cost,
-                        above.id,
-                        above.cost
-                    ));
-                }
-            }
-        }
-    }
-    wrong
-}
-
 fn record() -> Record {
     let record = parse(BENCH_MD);
     assert!(
@@ -409,12 +367,6 @@ fn every_measured_pair_declares_the_band_its_row_records() {
 #[test]
 fn every_band_holds_what_the_table_measured_or_says_why_it_stands() {
     let faults = band_faults(&record());
-    assert!(faults.is_empty(), "{}", faults.join("\n"));
-}
-
-#[test]
-fn no_equivalent_backend_declares_less_than_what_it_stands_in_for() {
-    let faults = cheaper_equivalents(catalog().entries());
     assert!(faults.is_empty(), "{}", faults.join("\n"));
 }
 
@@ -536,51 +488,4 @@ fn a_record_missing_a_row_or_misreading_one_is_named() {
         "| a | x | count | launch | memory | 0.05 % | - | free | free | within |",
         "whose resolution",
     );
-}
-
-#[test]
-fn an_equivalent_backend_cheaper_than_what_it_stands_in_for_is_named() {
-    let catalog = catalog();
-    let io_size = catalog
-        .entries()
-        .iter()
-        .find(|entry| entry.id.as_str() == "io.size")
-        .expect("the catalog has `io.size`");
-    assert_eq!(io_size.backends[0].id, "bpf:raw_tp");
-    assert!(io_size.backends[1].equivalent);
-    let chain = |fallback: Cost, equivalent: bool, disjoint: bool| {
-        let mut entry = io_size.clone();
-        entry.backends[0].cost = Cost::High;
-        entry.backends[1].cost = fallback;
-        entry.backends[1].equivalent = equivalent;
-        if disjoint {
-            entry.backends[0].targets = Some(BTreeMap::from([(
-                TargetKind::System,
-                TargetSupport::Native,
-            )]));
-            entry.backends[1].targets = Some(BTreeMap::from([(
-                TargetKind::Cgroup,
-                TargetSupport::BpfOnly,
-            )]));
-        }
-        cheaper_equivalents(&[entry])
-    };
-
-    let faults = chain(Cost::Low, true, false);
-    assert_eq!(faults.len(), 1, "{faults:?}");
-    assert!(
-        faults[0].contains("`io.size` through `bpf:tp`")
-            && faults[0].contains("`bpf:raw_tp`'s `high`"),
-        "{}",
-        faults[0]
-    );
-    // As dear, or dearer: nothing to say.
-    assert_eq!(chain(Cost::High, true, false), Vec::<String>::new());
-    assert_eq!(chain(Cost::Extreme, true, false), Vec::<String>::new());
-    // Cheaper and degraded rather than equivalent: what a budget's ladder is
-    // for.
-    assert_eq!(chain(Cost::Low, false, false), Vec::<String>::new());
-    // Cheaper, and serving no target the one above serves: not a step a
-    // budget can take for the same request.
-    assert_eq!(chain(Cost::Low, true, true), Vec::<String>::new());
 }

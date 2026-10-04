@@ -33,7 +33,7 @@ test runs one of those files, so anything below can be reproduced by hand.
 | What is it holding right now? | `proc-one-reading.yml` | `snapshot`: one read, and the only emits `snapshot` can carry |
 | Did the poller keep up, and does it say so? | `proc-loss.yml` | the program opens exactly 30000 descriptors and reports `OPEN 30003`; a 30000-entry directory cannot be walked in the 1 ms tick the session asks for |
 | Is a program that ends a program that lost data? | `proc-exit.yml` | it holds still for 150 ms and exits 0, against a session asking for 2 s |
-| Are the three refusals the right three? | `proc-not-built.yml`, and the session below | exit 2 for a request that cannot mean anything, exit 3 for one this build has not written |
+| Are the three refusals the right three? | `proc-not-built.yml`, and the session below | exit 2 for a request that cannot mean anything, exit 3 for one this build has not written (1 where tracefs is root-only: see below) |
 
 ### A — the capability sweep
 
@@ -158,7 +158,7 @@ cannot decide whether to fix the request or wait for a release.
 | It says | It means | Exit | Reachable here |
 |---|---|---|---|
 | a rejection | the request cannot mean anything | 2 | the session below |
-| no collector | this build does not implement it | 3 | `proc-not-built.yml` |
+| no collector | this build does not implement it | 3 | `proc-not-built.yml`, where tracefs is readable |
 | no viable backend | this machine cannot serve it | 1 | through `--catalog`, in the test |
 
 **This row has now been all three things, and the sequence is the point.**
@@ -180,9 +180,15 @@ It is exit 3 again, and deterministically, since the sixth wave. All four
 sources collect through `bpf:raw_tp` — a name and the kernel's own BTF, no
 tracefs — and what is left unimplemented is the *second* backend of each chain.
 `proc-not-built.yml` pins it with `backend: "force:bpf:tp"`, and `force:`
-bypasses the resolver entirely, so the answer no longer depends on what this
-machine can read. It is 3 everywhere, which is what an exit code meaning "this
-build does not have it" should be.
+bypasses the resolver's choice.
+
+It is not 3 everywhere, and it was wrongly written down as such until the
+twentieth wave. `force:` skips the choice, not the pinned backend's own
+probes, and a missing requirement is refused before a missing collector: the
+session exits **3** where tracefs is readable and the binary holds its
+capabilities, and **1** where tracefs is root-only, as on this project's own
+machine (`GUIDE.md` says the same). The demonstration of exit 3 is therefore
+still a demonstration that depends on the machine, for the reason below.
 
 There is a lesson in that for the other families, and it is not about `proc`:
 **a refusal scenario that depends on a probe is a scenario that will change

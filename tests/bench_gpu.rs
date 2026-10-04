@@ -78,23 +78,32 @@ fn every_gpu_tracer_is_costed_against_a_negative_control() {
 
     let workloads = gpu_workloads();
     let mut series: BTreeMap<(usize, &str), Series> = BTreeMap::new();
+    // The bare run and the control at a workload's `replayed` size, which
+    // the replaying arms are measured against.
+    let mut scaled_series: BTreeMap<(usize, &str), Series> = BTreeMap::new();
     let mut failures: BTreeMap<String, String> = BTreeMap::new();
+    let replaying = arms.iter().any(Arm::replays);
     for workload in &workloads {
-        for arm in &arms {
-            for _ in 0..WARMUP {
-                if let Err(error) = run_gpu(&omn, arm, workload) {
-                    failures.insert(format!("{} on {}", arm.label(), workload.name), error);
-                }
-            }
+        let scaled = workload.scaled().filter(|_| replaying);
+        let full: Vec<usize> = (0..arms.len())
+            .filter(|&index| scaled.is_none() || !arms[index].replays())
+            .collect();
+        for (index, measured) in measure(&omn, &arms, &full, workload, repetitions, &mut failures) {
+            series.insert((index, workload.name), measured);
         }
-        for index in round_robin(arms.len(), repetitions) {
-            match run_gpu(&omn, &arms[index], workload) {
-                Ok(run) => series.entry((index, workload.name)).or_default().push(&run),
-                Err(error) => {
-                    failures.insert(
-                        format!("{} on {}", arms[index].label(), workload.name),
-                        error,
-                    );
+        if let Some(scaled) = &scaled {
+            let subset: Vec<usize> = (0..arms.len())
+                .filter(|&index| {
+                    arms[index].replays() || matches!(arms[index], Arm::Bare | Arm::Control(_))
+                })
+                .collect();
+            for (index, measured) in
+                measure(&omn, &arms, &subset, scaled, repetitions, &mut failures)
+            {
+                if arms[index].replays() {
+                    series.insert((index, workload.name), measured);
+                } else {
+                    scaled_series.insert((index, workload.name), measured);
                 }
             }
         }
@@ -132,7 +141,28 @@ fn every_gpu_tracer_is_costed_against_a_negative_control() {
             let Some(measured) = series.get(&(index, workload.name)) else {
                 continue;
             };
-            let row = row(pair, workload.name, measured, bare, control, resolution);
+            // A replaying arm ran the workload's smaller size, and is held to
+            // the bare run and the control of that size.
+            let scaled_bare = arms[index]
+                .replays()
+                .then(|| scaled_series.get(&(0, workload.name)))
+                .flatten();
+            let row = match scaled_bare {
+                Some(scaled_bare) => {
+                    let scaled_control =
+                        control_index.and_then(|index| scaled_series.get(&(index, workload.name)));
+                    let resolution = workload_resolution(scaled_bare, scaled_control);
+                    row(
+                        pair,
+                        workload.name,
+                        measured,
+                        scaled_bare,
+                        scaled_control,
+                        resolution,
+                    )
+                }
+                None => row(pair, workload.name, measured, bare, control, resolution),
+            };
             note_row(&row);
             rows.push(row);
         }
@@ -174,6 +204,7 @@ fn every_gpu_tracer_is_costed_against_a_negative_control() {
         "rows": rows.iter().map(row_json).collect::<Vec<_>>(),
         "references": references,
         "series": raw_series(&arms, &series),
+        "scaled_series": raw_series(&arms, &scaled_series),
         "failures": failures,
         "unplanned": unplanned,
     });
@@ -187,7 +218,7 @@ fn every_gpu_tracer_is_costed_against_a_negative_control() {
     say(format!("wrote {} after {}", dir.display(), since(started)));
 
     let mut wrong = gpu_table_failures(&planned, &unplanned, &rows, workloads.len());
-    for ((index, workload), measured) in &series {
+    for ((index, workload), measured) in series.iter().chain(&scaled_series) {
         wrong.extend(series_failures(&arms[*index], workload, measured));
     }
     wrong.extend(
@@ -218,6 +249,46 @@ fn which(program: &str) -> Option<std::path::PathBuf> {
 
 /// Every repetition of every arm, so a table can be judged again by
 /// another rule without measuring again.
+/// Warms up and measures `subset` of the arms on `workload`, round robin:
+/// each arm's series, by its index in `arms`. A failed run is kept in
+/// `failures` under the arm and the workload.
+fn measure(
+    omn: &Omn,
+    arms: &[Arm],
+    subset: &[usize],
+    workload: &GpuWorkload,
+    repetitions: usize,
+    failures: &mut BTreeMap<String, String>,
+) -> BTreeMap<usize, Series> {
+    let mut series: BTreeMap<usize, Series> = BTreeMap::new();
+    let mut failed = |index: usize, error: String| {
+        failures.insert(
+            format!(
+                "{} on {} ({})",
+                arms[index].label(),
+                workload.name,
+                workload.args.join(" ")
+            ),
+            error,
+        );
+    };
+    for &index in subset {
+        for _ in 0..WARMUP {
+            if let Err(error) = run_gpu(omn, &arms[index], workload) {
+                failed(index, error);
+            }
+        }
+    }
+    for slot in round_robin(subset.len(), repetitions) {
+        let index = subset[slot];
+        match run_gpu(omn, &arms[index], workload) {
+            Ok(run) => series.entry(index).or_default().push(&run),
+            Err(error) => failed(index, error),
+        }
+    }
+    series
+}
+
 fn raw_series(arms: &[Arm], series: &BTreeMap<(usize, &str), Series>) -> Value {
     series
         .iter()
@@ -1211,4 +1282,45 @@ fn a_gpu_table_that_lost_records_or_left_a_pair_out_or_misplaced_a_run_fails() {
         &series_failures(&Arm::Bare, "launch", &shared),
         "launching thread's cpu",
     );
+}
+
+/// A replaying arm runs the launch regime at its smaller size, and only it:
+/// the other regimes and every other arm keep their arguments.
+#[test]
+fn only_a_replaying_arm_runs_the_launch_regime_smaller() {
+    let method = |source: &str| harness::Method {
+        source: source.into(),
+        backend: Some("vendor:cupti".into()),
+        mode: "trace".into(),
+        emit: "summary".into(),
+        filter: None,
+        system: false,
+    };
+    assert!(Arm::Served(method("gpu.counters")).replays());
+    assert!(!Arm::Served(method("gpu.kernel")).replays());
+    assert!(!Arm::Bare.replays());
+
+    let workloads = gpu_workloads();
+    let launch = workloads
+        .iter()
+        .find(|w| w.name == "launch")
+        .expect("a launch regime");
+    let scaled = launch
+        .scaled()
+        .expect("the launch regime has a replayed size");
+    assert_eq!(scaled.name, launch.name);
+    assert_eq!(scaled.regime, launch.regime);
+    assert_eq!(scaled.args, ["launches", &REPLAYED_LAUNCHES.to_string()]);
+    let full: u32 = launch.args[1].parse().unwrap();
+    assert!(
+        REPLAYED_LAUNCHES * 10 <= full,
+        "{REPLAYED_LAUNCHES} against {full}"
+    );
+    for other in workloads.iter().filter(|w| w.name != "launch") {
+        assert!(
+            other.scaled().is_none(),
+            "{} has no replayed size",
+            other.name
+        );
+    }
 }

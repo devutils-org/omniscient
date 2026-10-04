@@ -83,7 +83,10 @@ proc.signals  trace, count    low    medium  yes   1 of 2     Signals delivered
 
 `1 of 2` rather than `all` is honest and deliberate: each of the four declares a
 `bpf:tp` fallback that nothing collects, and `examples/proc-not-built.yml` pins
-it so that the family keeps a demonstration of exit 3.
+it so that the family keeps a demonstration of exit 3. That exit is 3 where
+tracefs is readable, and 1 where tracefs is root-only: `force:` skips the
+resolver's choice, not the pinned backend's probes, and a missing requirement
+is refused before a missing collector.
 
 ## Status
 

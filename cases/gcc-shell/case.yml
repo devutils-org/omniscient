@@ -156,13 +156,3 @@ causes:
           # A task's last millisecond may be in no read.
           plus: watch.poll_ns
           relative: 0.02
-
-open_findings:
-  - check: every-cited-number-agrees-with-the-reference
-    cause: a-cpu-shared-with-two-competitors
-    filed: >-
-      docs/fixes/w18-cases.md, "a job is a chain of processes": the contended
-      compile's `runnable` is the one process the wait was followed into
-      (cc1, 3.4 s), against the wait for a cpu of the whole chain the driver
-      ran one after the other (3.8 s: the driver, cc1 and `as`); the
-      decomposition takes the wait's place with one process's rows

@@ -150,7 +150,9 @@ open_findings:
       (2.8 s on a cpu), while the job that is the build ran two compiles one
       after the other in one driver (5.2 s, every process under it); off the
       cpu, the followed compile's `runnable` is 6.7 s against the job's
-      7.3 s
+      7.3 s. Since docs/fixes/w21-docs.md the row adds the rest of the job
+      (`followed.job`), which is every busy task off the way, not only the
+      critical job's: 7.0 s against 5.2 s, over by the build's other work
   - check: the-first-suspect-is-the-known-cause
     cause: the-critical-path-is-one-job
     sometimes: true

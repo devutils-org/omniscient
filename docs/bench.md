@@ -617,7 +617,6 @@ Measured with /home/moha/repos/omniscient/target/release/omn (release build, car
 | gpu.kernel | vendor:cupti | no collector is written for it |
 | gpu.kernel | vendor:rocprof | no collector is written for it |
 | gpu.kernel | vendor:l0 | no collector is written for it |
-| gpu.counters | vendor:ncu | no collector is written for it |
 | gpu.counters | vendor:rocprof | no collector is written for it |
 | proc.syscall | bpf:tp | no collector is written for it |
 | proc.exec | bpf:tp | no collector is written for it |
@@ -631,6 +630,10 @@ Measured with /home/moha/repos/omniscient/target/release/omn (release build, car
 | mem.heap.alloc | every backend | the gate excluded its workload: `malloc` its workload has no baseline |
 | mem.heap.live | every backend | the gate excluded its workload: `malloc` its workload has no baseline |
 | mem.heap.retained | every backend | the gate excluded its workload: `malloc` its workload has no baseline |
+
+One row of the table as printed is left out: `gpu.counters` through
+`vendor:ncu`. That backend has since left the catalog -- `gpu.counters` is
+`vendor:cupti`, then `vendor:rocprof` -- so the next bench does not list it.
 
 
 What the smoke runs established about the mechanics, without quoting a
@@ -1076,6 +1079,14 @@ mode per regime:
 | `launch` | launch-bound | 50 000 launches of `tiny`, one block of 32, synchronised every 1024 | 98 ms |
 | `compute` | compute-bound | 50 launches of `spin`, 200 000 dependent additions per thread, 68 blocks | 80 ms |
 | `memory` | memory-bound | a memset and a copy of 64 MiB in, 200 grid-stride copies of it, a copy out | 62 ms |
+
+**A replaying arm runs `launch` smaller.** `gpu.counters` replays every
+launch (kernel replay), so at 50 000 launches its arm took 108 of the GPU
+step's 117 minutes. It runs `launch` with 2 000 launches
+(`gpu::REPLAYED_LAUNCHES`), against a bare run and a control of that size
+measured beside it, and its row is judged on those; every other arm, and the
+other two regimes, are unchanged. The step should fit in about fifteen
+minutes again -- reasoned from the 108 minutes, not yet measured.
 
 Each measures itself on `CLOCK_MONOTONIC`: `init_ns` (`cuInit` to the module
 loaded: where the driver loads an injection library and where it arms
