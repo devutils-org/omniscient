@@ -103,6 +103,40 @@ that has requests.
   that is 16.9 ms, so the five requests together are a small part of it.
 - **The device-time share** is against every block request the run saw,
   carried or not -- the server's own start-up writes included.
+- **A network side `net.request` could not close is unknown, not zero.**
+  When a response had not left the stack, or the first byte was not seen,
+  the collector publishes no `net_tx` (`net_rx`) rather than a short one, and
+  the view does not fill it in: the side's state holds only the part inside
+  the service (the wait in `send` or `recv`), drawn as a lower bound `≥`; the
+  span is `≥` and runs to `request__done` (from `request__start`), said in the
+  heading; the waterfall marks the edge with `?` and says "unknown after
+  done"; no state gets a share of a span that is only a lower bound, so the
+  `%` column and `mostly` give times instead. The line under the summary
+  counts such requests. This is the third request of
+  `examples/vertical-abandoned.yml`, whose client never reads its 16 KiB
+  answer (`an_undrained_response_is_unknown_not_gone_when_done`).
+- **Requests `net.request` counted and could put in no event** are counted on
+  the line under the summary, read off the collector's notes: requests born
+  and never ended (with the ids it named, and how many a later
+  `request__start` on the same thread replaced), `request__done` with no
+  birth, and requests the filter removed. A request with no end has no total,
+  so the list cannot draw it, and the view says how many it does not draw
+  (`requests_in_no_event_are_counted_on_screen`). `vertical-abandoned` is the
+  run that has them; no recording of it is in `tests/view_fixtures/` yet, so
+  the tests rewrite the vertical recording into its shape.
+- **"No block request" is a zero only from an `io.latency` that watched the
+  whole request and lost nothing** -- the join engine's rule. Otherwise the
+  view says "no block request seen" and why (`io.latency lost N, so some may
+  be missing`, or it was not watching for all of the request), with
+  `io.latency`'s loss badge beside it
+  (`no_block_request_under_losses_is_none_seen_with_the_loss`).
+- `io.latency` held under two labels (a target's and the system's) is one set
+  of block requests: an event both saw is counted once, in the request's
+  block requests and in the run's device time.
+- A focus on a request the list does not hold -- not in any event of the run,
+  or hidden by a pid or tid focus -- is said on the line under the summary,
+  with the request drawn instead. "What sets it apart" compares against the
+  requests the list shows, under the same focus.
 - Trust: request figures take `net.request`'s marks (medium determinism, two
   degradations it states, so a badge and no dimming); disk figures take
   `io.latency`'s (low determinism: dimmed, with `~low det`).

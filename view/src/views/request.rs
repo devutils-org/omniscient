@@ -123,16 +123,23 @@ struct Request {
     tid: i32,
     comm: String,
     sock: Option<u64>,
-    /// Its first byte reaching the server's socket.
-    first_byte: u64,
+    /// Its first byte reaching the server's socket; `None` when `net.request`
+    /// could not place it and so published no `net_rx`.
+    first_byte: Option<u64>,
     /// `request__start`.
     born: u64,
     /// `request__done`.
     done: u64,
-    /// Its last byte leaving the server's socket.
-    drained: u64,
-    /// The six states, in the order of [`STATES`].
+    /// Its last byte leaving the server's socket; `None` when the response
+    /// had not left the stack, and `net.request` published no `net_tx` rather
+    /// than a short one.
+    drained: Option<u64>,
+    /// The six states, in the order of [`STATES`]. Where a network side is
+    /// unknown its state holds only the part inside the service (the wait in
+    /// `recv` or `send`), a lower bound: see [`Request::known`].
     states: [f64; 6],
+    /// First byte in to last byte out, as `net.request` added it up.
+    span_ns: Option<f64>,
     rx_queued: f64,
     rx_wait: f64,
     tx_wait: f64,
@@ -159,14 +166,17 @@ impl Request {
         let total = number("total_ns");
         let born = instant("born_ns").unwrap_or(event.ts_ns.saturating_sub(total as u64));
         let done = event.ts_ns.max(born);
-        let rx_queued = number("rx_queued_ns");
         let rx_wait = number("rx_wait_ns");
         let tx_wait = number("tx_wait_ns");
-        let tx_drain = number("tx_drain_ns");
-        let net_rx = event.number("net_rx_ns").unwrap_or(rx_queued + rx_wait);
-        let net_tx = event.number("net_tx_ns").unwrap_or(tx_wait + tx_drain);
-        let first_byte = instant("first_byte_ns").unwrap_or(born).min(born);
-        let drained = instant("drained_ns").unwrap_or(done).max(done);
+        // A side is known only when `net.request` closed it: it leaves out
+        // `net_rx` (`net_tx`) rather than publish a short one, and the view
+        // does not fill it in.
+        let net_rx = event.number("net_rx_ns").map(|ns| ns.max(0.0));
+        let net_tx = event.number("net_tx_ns").map(|ns| ns.max(0.0));
+        let first_byte = net_rx
+            .and(instant("first_byte_ns"))
+            .map(|first| first.min(born));
+        let drained = net_tx.and(instant("drained_ns")).map(|last| last.max(done));
         Some(Request {
             id,
             pid: event
@@ -191,17 +201,18 @@ impl Request {
             done,
             drained,
             states: [
-                net_rx,
+                net_rx.filter(|_| first_byte.is_some()).unwrap_or(rx_wait),
                 number("oncpu_ns"),
                 number("runq_ns"),
                 number("sleep_ns"),
                 number("disk_ns"),
-                net_tx,
+                net_tx.filter(|_| drained.is_some()).unwrap_or(tx_wait),
             ],
-            rx_queued,
+            span_ns: event.number("span_ns").filter(|ns| *ns > 0.0),
+            rx_queued: number("rx_queued_ns"),
             rx_wait,
             tx_wait,
-            tx_drain,
+            tx_drain: number("tx_drain_ns"),
             blocks: number("blocks") as u64,
             preempted: number("preempted") as u64,
             holder_tid: event
@@ -212,10 +223,42 @@ impl Request {
         })
     }
 
+    /// Whether a state's time is known whole. Only the network's two sides
+    /// can be unknown: their part outside the service is, when `net.request`
+    /// could not close it.
+    fn known(&self, state: usize) -> bool {
+        match state {
+            NET_IN => self.first_byte.is_some(),
+            NET_OUT => self.drained.is_some(),
+            _ => true,
+        }
+    }
+
+    /// Whether its span runs from its first byte in to its last byte out;
+    /// otherwise it is a lower bound, from wherever the known ends are.
+    fn whole(&self) -> bool {
+        self.known(NET_IN) && self.known(NET_OUT)
+    }
+
+    /// Where the known part of its life starts and ends.
+    fn start(&self) -> u64 {
+        self.first_byte.unwrap_or(self.born)
+    }
+
+    fn end(&self) -> u64 {
+        self.drained.unwrap_or(self.done)
+    }
+
     /// From its first byte in to its last byte out: what the six states tile.
+    /// A lower bound when a network side is unknown.
     fn span(&self) -> f64 {
         let parts: f64 = self.states.iter().sum();
-        parts.max((self.drained - self.first_byte) as f64)
+        parts.max((self.end() - self.start()) as f64)
+    }
+
+    /// The span in words, `≥` before it when it is a lower bound.
+    fn span_text(&self) -> String {
+        at_least(self.span(), self.whole())
     }
 
     /// The states that made most of it, largest first: each one above a
@@ -247,6 +290,7 @@ struct BlockIo {
 
 /// Everything the view reads from a run, gathered once per draw.
 struct Gathered<'a> {
+    data: &'a Data,
     results: Vec<&'a Results>,
     requests: Vec<Request>,
     /// Block requests by the request id they carry.
@@ -254,6 +298,88 @@ struct Gathered<'a> {
     /// The device time of every block request the run saw, carried or not.
     device_total: f64,
     block_results: Vec<&'a Results>,
+    /// What `net.request` counted and could put in no event.
+    undrawn: Undrawn,
+}
+
+/// The requests `net.request` counted and could put in no event, as its notes
+/// say: a request with no end has no total, so it is in no event, and the
+/// view says how many rather than let the list read as all of them.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Undrawn {
+    /// Born and never ended, and the first few named (`req:<id> in task
+    /// <tid>`).
+    never_ended: u64,
+    named: String,
+    /// Of those, the ones a later `request__start` on their thread replaced.
+    replaced: u64,
+    /// `request__done` on a thread carrying no request.
+    unborn: u64,
+    /// Ended, and removed by the request's filter.
+    filtered: u64,
+}
+
+impl Undrawn {
+    /// Read off the collector's notes, which the run carries as its
+    /// result's notes or degradations.
+    fn of<'a>(results: impl IntoIterator<Item = &'a Results>) -> Undrawn {
+        let mut undrawn = Undrawn::default();
+        let leading = |text: &str| -> Option<u64> { text.split_whitespace().next()?.parse().ok() };
+        for text in results
+            .into_iter()
+            .flat_map(|results| results.notes.iter().chain(&results.degradations))
+        {
+            if text.contains(" never ended in the run (") {
+                undrawn.never_ended += leading(text).unwrap_or(0);
+                if let Some(named) = text
+                    .split_once(" never ended in the run (")
+                    .and_then(|(_, rest)| rest.split_once("); "))
+                {
+                    if !undrawn.named.is_empty() {
+                        undrawn.named.push_str(", ");
+                    }
+                    undrawn.named.push_str(named.0);
+                }
+            } else if text.contains("` hit") && text.contains("a task carrying no request") {
+                undrawn.unborn += leading(text).unwrap_or(0);
+            } else if text.contains("` hit") && text.contains("still carrying a request") {
+                undrawn.replaced += leading(text).unwrap_or(0);
+            } else if let Some(rest) = text.strip_prefix("the filter removed ") {
+                undrawn.filtered += leading(rest).unwrap_or(0);
+            }
+        }
+        undrawn
+    }
+
+    fn is_empty(&self) -> bool {
+        self.never_ended + self.unborn + self.filtered == 0
+    }
+
+    /// In words, for the line under the summary.
+    fn text(&self) -> String {
+        let mut parts = Vec::new();
+        if self.never_ended > 0 {
+            let mut part = format!("{} never ended", self.never_ended);
+            let mut named = vec![];
+            if !self.named.is_empty() {
+                named.push(self.named.clone());
+            }
+            if self.replaced > 0 {
+                named.push(format!("{} replaced by a later start", self.replaced));
+            }
+            if !named.is_empty() {
+                part.push_str(&format!(" ({})", named.join(", ")));
+            }
+            parts.push(part);
+        }
+        if self.unborn > 0 {
+            parts.push(format!("{} ended with no birth", self.unborn));
+        }
+        if self.filtered > 0 {
+            parts.push(format!("{} removed by the filter", self.filtered));
+        }
+        format!("  in no event, not drawn: {}", parts.join(" · "))
+    }
 }
 
 impl<'a> Gathered<'a> {
@@ -270,16 +396,15 @@ impl<'a> Gathered<'a> {
         requests.dedup_by(|a, b| a.id == b.id && a.born == b.born);
         // `io.latency` is read when the run holds it -- the session that
         // asked for requests asked for it, or another view did: a block
-        // request submitted while a request was served carries its id.
+        // request submitted while a request was served carries its id. A run
+        // may hold it under two labels (a target's and the system's): an
+        // event both saw is one block request.
         let block_results: Vec<&Results> = data.of_source("io.latency").collect();
         let mut blocks: BTreeMap<String, Vec<BlockIo>> = BTreeMap::new();
         let mut device_total = 0.0;
+        let mut seen = std::collections::BTreeSet::new();
         for event in block_results.iter().flat_map(|results| results.events()) {
             let latency = event.number("latency_ns").unwrap_or(0.0);
-            device_total += latency;
-            let Some(id) = req_id(event) else {
-                continue;
-            };
             let open = event
                 .number("open_ts")
                 .map(|t| t as u64)
@@ -290,24 +415,56 @@ impl<'a> Gathered<'a> {
                     })
                 })
                 .unwrap_or(event.ts_ns.saturating_sub(latency as u64));
+            let dev = event
+                .attr("dev")
+                .map(|dev| dev.to_string())
+                .unwrap_or_default();
+            if !seen.insert((event.ts_ns, open, dev.clone(), latency.to_bits())) {
+                continue;
+            }
+            device_total += latency;
+            let Some(id) = req_id(event) else {
+                continue;
+            };
             blocks.entry(id).or_default().push(BlockIo {
                 start: open.min(event.ts_ns),
                 end: event.ts_ns,
                 latency,
                 bytes: event.number("bytes").unwrap_or(0.0),
-                dev: event
-                    .attr("dev")
-                    .map(|dev| dev.to_string())
-                    .unwrap_or_default(),
+                dev,
             });
         }
+        let undrawn = Undrawn::of(results.iter().copied());
         Gathered {
+            data,
             results,
             requests,
             blocks,
             device_total,
             block_results,
+            undrawn,
         }
+    }
+
+    /// Why a request with no block request carrying its id may still have
+    /// issued some: `io.latency` lost events, or was not watching for the
+    /// whole of it. `None` when its absence is a zero -- from a source that
+    /// watched the whole request and lost nothing, the join engine's rule.
+    fn blocks_unsure(&self, request: &Request) -> Option<Unsure> {
+        let lost: u64 = self
+            .block_results
+            .iter()
+            .map(|results| results.losses.missing())
+            .sum();
+        if lost > 0 {
+            return Some(Unsure::Lost(lost));
+        }
+        let watched = self.block_results.iter().any(|results| {
+            let window = results.window;
+            let from = window.attach_ns.unwrap_or(window.opened_ns);
+            from <= request.born && (window.closed_ns == 0 || window.closed_ns >= request.done)
+        });
+        (!watched).then_some(Unsure::Unwatched)
     }
 
     /// The cpu the requests' process took over the whole run, as the runner
@@ -321,6 +478,35 @@ impl<'a> Gathered<'a> {
                 .as_f64()
                 .filter(|cpu| *cpu > 0.0)
         })
+    }
+}
+
+/// Why no block request carrying a request's id is not a zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unsure {
+    /// `io.latency` lost this many records.
+    Lost(u64),
+    /// `io.latency` was not watching for the whole of the request.
+    Unwatched,
+}
+
+impl Unsure {
+    /// In a few words, for the waterfall's note.
+    fn short(self) -> String {
+        match self {
+            Unsure::Lost(lost) => format!("io.latency lost {lost}"),
+            Unsure::Unwatched => "io.latency not watching".to_owned(),
+        }
+    }
+
+    /// In a sentence, for the share column.
+    fn sentence(self) -> String {
+        match self {
+            Unsure::Lost(lost) => format!("io.latency lost {lost}, so some may be missing"),
+            Unsure::Unwatched => {
+                "io.latency was not watching for all of it, so some may be missing".to_owned()
+            }
+        }
     }
 }
 
@@ -421,11 +607,12 @@ impl View for RequestView {
             return;
         }
         let selected = self.select(ctx.focus, &requests);
+        let notice = notice_line(ctx.focus, &requests, &requests[selected], &gathered);
         let trust = Trust::joined(ctx.data, gathered.results.iter().copied());
         let block_trust = Trust::joined(ctx.data, gathered.block_results.iter().copied());
 
         let list_rows = (requests.len() as u16).min(inner.height.saturating_sub(24).max(3));
-        let [summary, _, list, legend, _, detail] = Layout::vertical([
+        let [summary, under, list, legend, _, detail] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(list_rows + 1),
@@ -439,6 +626,9 @@ impl View for RequestView {
             Paragraph::new(summary_line(&requests, &trust, self.order)),
             summary,
         );
+        if let Some(notice) = notice {
+            frame.render_widget(Paragraph::new(notice), under);
+        }
         frame.render_widget(
             Paragraph::new(list_lines(&requests, selected, list, &trust)),
             list,
@@ -448,8 +638,8 @@ impl View for RequestView {
             frame,
             detail,
             &requests[selected],
+            &requests,
             &gathered,
-            ctx.data,
             &trust,
             &block_trust,
         );
@@ -560,7 +750,7 @@ fn summary_line(requests: &[Request], trust: &Trust, order: Order) -> Line<'stat
             format!(
                 " · slowest {} {} · median {}",
                 slowest.id,
-                units::duration(slowest.span()),
+                slowest.span_text(),
                 units::duration(median)
             ),
             trust.style(),
@@ -578,6 +768,57 @@ fn summary_line(requests: &[Request], trust: &Trust, order: Order) -> Line<'stat
     ];
     line.extend(trust.badges());
     Line::from(line)
+}
+
+/// The line under the summary: a focus on a request the list does not hold,
+/// the requests whose span is a lower bound, and the requests `net.request`
+/// counted and could put in no event.
+fn notice_line(
+    focus: &Focus,
+    requests: &[Request],
+    drawn: &Request,
+    gathered: &Gathered<'_>,
+) -> Option<Line<'static>> {
+    let mut spans = Vec::new();
+    if let Some(id) = &focus.request {
+        if !requests.iter().any(|request| &request.id == id) {
+            let why = if gathered.requests.iter().any(|request| &request.id == id) {
+                "hidden by the pid/tid focus"
+            } else {
+                "in no event of this run"
+            };
+            spans.push(Span::styled(
+                format!(
+                    "  the focus names {id}, {why}: {} is drawn instead",
+                    drawn.id
+                ),
+                Style::new().fg(palette::LOSS),
+            ));
+        }
+    }
+    let partial = requests.iter().filter(|request| !request.whole()).count();
+    if partial > 0 {
+        spans.push(Span::styled(
+            format!("  {partial} ≥: a network side unknown"),
+            Style::new().fg(palette::LOSS),
+        ));
+    }
+    if !gathered.undrawn.is_empty() {
+        spans.push(Span::styled(
+            gathered.undrawn.text(),
+            Style::new().fg(palette::LOSS),
+        ));
+    }
+    (!spans.is_empty()).then(|| Line::from(spans))
+}
+
+/// A duration, `≥` before it when it is a lower bound.
+fn at_least(ns: f64, known: bool) -> String {
+    if known {
+        units::duration(ns)
+    } else {
+        format!("≥{}", units::duration(ns))
+    }
 }
 
 /// Splits `width` cells between `values`, in proportion to `of`, so that the
@@ -634,11 +875,20 @@ fn state_bar(states: &[f64; 6], of: f64, width: usize, dims: bool) -> Vec<Span<'
 }
 
 /// The states that made most of a request, in words: `lock/sleep 99.8%`.
+/// When its span is a lower bound a share of it would be invented, so the
+/// states are said by their time instead.
 fn mostly_text(request: &Request) -> String {
     request
         .mostly()
         .iter()
-        .map(|(index, share)| format!("{} {}", STATES[*index].name, units::percent(share * 100.0)))
+        .map(|(index, share)| {
+            let amount = if request.whole() {
+                units::percent(share * 100.0)
+            } else {
+                at_least(request.states[*index], request.known(*index))
+            };
+            format!("{} {amount}", STATES[*index].name)
+        })
         .collect::<Vec<_>>()
         .join(" · ")
 }
@@ -685,7 +935,7 @@ fn list_lines(
             Span::styled(marker, Style::new().fg(palette::ACCENT)),
             Span::styled(format!("{:<id_w$} ", request.id), row_style),
             Span::styled(
-                format!("{:>8}  ", units::duration(request.span())),
+                format!("{:>8}  ", request.span_text()),
                 trust
                     .style()
                     .patch(if chosen { bold() } else { Style::new() }),
@@ -768,11 +1018,12 @@ fn draw_detail(
     frame: &mut Frame<'_>,
     area: Rect,
     request: &Request,
+    visible: &[Request],
     gathered: &Gathered<'_>,
-    data: &Data,
     trust: &Trust,
     block_trust: &Trust,
 ) {
+    let data = gathered.data;
     let blocks = gathered
         .blocks
         .get(&request.id)
@@ -786,9 +1037,19 @@ fn draw_detail(
     ])
     .areas(area);
     let heading = format!(
-        "── {} · {} from its first byte in to its last byte out · thread {} ",
+        "── {} · {} from {} to {} · thread {} ",
         request.id,
-        units::duration(request.span()),
+        request.span_text(),
+        if request.known(NET_IN) {
+            "its first byte in"
+        } else {
+            "request__start"
+        },
+        if request.known(NET_OUT) {
+            "its last byte out"
+        } else {
+            "request__done"
+        },
         request.tid
     );
     let rule = "─".repeat(usize::from(area.width).saturating_sub(heading.chars().count()));
@@ -803,19 +1064,32 @@ fn draw_detail(
         Paragraph::new(waterfall_lines(
             request,
             blocks,
+            gathered,
             waterfall.width,
             trust,
             block_trust,
         )),
         waterfall,
     );
+    // The two columns are as tall as the taller needs, the share column's
+    // wrapped lines counted at its width, so a narrow terminal pushes the
+    // line under them down rather than cutting the share column's last lines.
+    let share_width = tables.width.saturating_sub(WHERE_WIDTH + 2).max(1);
+    let share = share_lines(request, blocks, gathered, data, trust, block_trust);
+    let share_rows: usize = share
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(usize::from(share_width)))
+        .sum();
+    // Never fewer than nine: the where table and a row of air under it.
+    let where_rows = STATES.len() + 3;
+    let rows = share_rows.max(where_rows) as u16;
     let [columns, _, apart] = Layout::vertical([
-        Constraint::Length(9),
+        Constraint::Length(rows),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(tables);
-    if let Some(line) = against_the_others(request, &gathered.requests, trust) {
+    if let Some(line) = against_the_others(request, visible, trust) {
         frame.render_widget(Paragraph::new(line), apart);
     }
     let [left, _, right] = Layout::horizontal([
@@ -828,18 +1102,7 @@ fn draw_detail(
         Paragraph::new(where_lines(request, data, left.width, trust)),
         left,
     );
-    frame.render_widget(
-        Paragraph::new(share_lines(
-            request,
-            blocks,
-            gathered,
-            data,
-            trust,
-            block_trust,
-        ))
-        .wrap(Wrap { trim: false }),
-        right,
-    );
+    frame.render_widget(Paragraph::new(share).wrap(Wrap { trim: false }), right);
 }
 
 /// The step of a time axis of `span` nanoseconds: 1, 2 or 5 times a power of
@@ -895,6 +1158,7 @@ impl Row {
 fn waterfall_lines(
     request: &Request,
     blocks: &[BlockIo],
+    gathered: &Gathered<'_>,
     width: u16,
     trust: &Trust,
     block_trust: &Trust,
@@ -907,11 +1171,11 @@ fn waterfall_lines(
     let origin = blocks
         .iter()
         .map(|one| one.start)
-        .fold(request.first_byte, u64::min);
+        .fold(request.start(), u64::min);
     let end = blocks
         .iter()
         .map(|one| one.end)
-        .fold(request.drained, u64::max);
+        .fold(request.end(), u64::max);
     let span = end.saturating_sub(origin).max(1) as f64;
     let col = |t: u64| -> usize {
         ((t.saturating_sub(origin) as f64 / span) * bar_w as f64)
@@ -950,27 +1214,50 @@ fn waterfall_lines(
         Span::styled(axis.into_iter().collect::<String>(), dim()),
     ]));
 
-    // The network in: its first byte to its birth, where it happened.
+    // The network in: its first byte to its birth, where it happened. When
+    // `net.request` could not place the first byte, that part is unknown:
+    // said, and marked `?` at the edge of what is known, never drawn as none.
+    let unknown = Style::new().fg(palette::LOSS);
     let net_in = &STATES[NET_IN];
     let mut row = Row::new(bar_w);
-    if request.born > request.first_byte {
-        let (a, b) = cols(request.first_byte, request.born);
-        row.fill(a, b, net_in.glyph, dimmed(net_in.style(), trust.dims()));
-    }
     let mut line = vec![label("  net in", net_in.style())];
-    line.extend(row.spans());
-    line.push(note(
-        format!(
-            "{} before start{}",
-            units::duration(request.rx_queued),
-            if request.rx_wait > 0.0 {
-                format!(", {} in recv", units::duration(request.rx_wait))
-            } else {
-                String::new()
+    match request.first_byte {
+        Some(first) => {
+            if request.born > first {
+                let (a, b) = cols(first, request.born);
+                row.fill(a, b, net_in.glyph, dimmed(net_in.style(), trust.dims()));
             }
-        ),
-        trust.style(),
-    ));
+            line.extend(row.spans());
+            line.push(note(
+                format!(
+                    "{} before start{}",
+                    units::duration(request.rx_queued),
+                    if request.rx_wait > 0.0 {
+                        format!(", {} in recv", units::duration(request.rx_wait))
+                    } else {
+                        String::new()
+                    }
+                ),
+                trust.style(),
+            ));
+        }
+        None => {
+            let at = col(request.born);
+            row.fill(at, at, '?', unknown);
+            line.extend(row.spans());
+            line.push(note(
+                format!(
+                    "unknown before start{}",
+                    if request.rx_wait > 0.0 {
+                        format!(", {} in recv", units::duration(request.rx_wait))
+                    } else {
+                        String::new()
+                    }
+                ),
+                unknown,
+            ));
+        }
+    }
     lines.push(Line::from(line));
 
     // The service: between its two probes, filled by its states' shares.
@@ -1020,14 +1307,18 @@ fn waterfall_lines(
     let mut line = vec![label("  on device", disk.style())];
     line.extend(row.spans());
     line.push(if blocks.is_empty() {
-        note(
-            if request.states[DISK] > 0.0 {
-                "no block request carries its id".to_owned()
-            } else {
-                "no block request".to_owned()
-            },
-            dim(),
-        )
+        let none = if request.states[DISK] > 0.0 {
+            "no block request carries its id"
+        } else {
+            "no block request"
+        };
+        if gathered.block_results.is_empty() {
+            note("io.latency not in this run".to_owned(), dim())
+        } else if let Some(why) = gathered.blocks_unsure(request) {
+            note(format!("none seen: {}", why.short()), unknown)
+        } else {
+            note(none.to_owned(), dim())
+        }
     } else {
         note(
             format!(
@@ -1040,31 +1331,39 @@ fn waterfall_lines(
     });
     lines.push(Line::from(line));
 
-    // The network out: its end to its last byte leaving.
+    // The network out: its end to its last byte leaving; unknown when the
+    // response had not left the stack, which is not "gone when done".
     let net_out = &STATES[NET_OUT];
     let mut row = Row::new(bar_w);
-    if request.drained > request.done {
-        let (a, b) = cols(request.done, request.drained);
-        row.fill(a, b, net_out.glyph, dimmed(net_out.style(), trust.dims()));
-    }
     let mut line = vec![label("  net out", net_out.style())];
-    line.extend(row.spans());
-    line.push(if request.states[NET_OUT] > 0.0 {
-        note(
-            format!(
-                "{} after done{}",
-                units::duration(request.tx_drain),
-                if request.tx_wait > 0.0 {
-                    format!(", {} in send", units::duration(request.tx_wait))
-                } else {
-                    String::new()
-                }
-            ),
-            trust.style(),
-        )
+    let in_send = if request.tx_wait > 0.0 {
+        format!(", {} in send", units::duration(request.tx_wait))
     } else {
-        note("gone when done".to_owned(), dim())
-    });
+        String::new()
+    };
+    match request.drained {
+        Some(drained) => {
+            if drained > request.done {
+                let (a, b) = cols(request.done, drained);
+                row.fill(a, b, net_out.glyph, dimmed(net_out.style(), trust.dims()));
+            }
+            line.extend(row.spans());
+            line.push(if request.states[NET_OUT] > 0.0 {
+                note(
+                    format!("{} after done{in_send}", units::duration(request.tx_drain)),
+                    trust.style(),
+                )
+            } else {
+                note("gone when done".to_owned(), dim())
+            });
+        }
+        None => {
+            let at = col(request.done);
+            row.fill(at, at, '?', unknown);
+            line.extend(row.spans());
+            line.push(note(format!("unknown after done{in_send}"), unknown));
+        }
+    }
     lines.push(Line::from(line));
     lines.push(Line::from(Span::styled(
         "  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order",
@@ -1084,7 +1383,7 @@ fn where_lines(request: &Request, data: &Data, width: u16, trust: &Trust) -> Vec
         Span::styled(
             format!(
                 "{:<w$}",
-                format!("  where its {} went", units::duration(span)),
+                format!("  where its {} went", request.span_text()),
                 w = 4 + 11 + 8 + 8 + 1 + bar_w + 1
             ),
             bold(),
@@ -1096,7 +1395,13 @@ fn where_lines(request: &Request, data: &Data, width: u16, trust: &Trust) -> Vec
         let share = if span > 0.0 { ns / span } else { 0.0 };
         let row_style = if ns > 0.0 { trust.style() } else { dim() };
         let cells = (share * bar_w as f64).round() as usize;
-        let bar = if cells == 0 && ns > 0.0 {
+        let known = request.known(index);
+        // A share of a span that is only a lower bound would be invented:
+        // when a network side is unknown, no state gets a share or a bar.
+        let shared = request.whole();
+        let bar = if !shared {
+            String::new()
+        } else if cells == 0 && ns > 0.0 {
             "▏".to_owned()
         } else {
             state.glyph.to_string().repeat(cells)
@@ -1104,11 +1409,24 @@ fn where_lines(request: &Request, data: &Data, width: u16, trust: &Trust) -> Vec
         let evidence = decomposed(data, &request.id, state.decomposed)
             .and_then(|row| row.get("evidence")?.as_str())
             .unwrap_or("");
-        let (duration, percent) = if ns > 0.0 {
+        let (duration, percent) = if !known {
+            // A lower bound: its share of a lower bound is no share.
+            (
+                if ns > 0.0 {
+                    at_least(ns, false)
+                } else {
+                    "?".to_owned()
+                },
+                String::new(),
+            )
+        } else if ns > 0.0 && shared {
             (units::duration(ns), units::percent(share * 100.0))
+        } else if ns > 0.0 {
+            (units::duration(ns), String::new())
         } else {
             ("·".to_owned(), String::new())
         };
+        let row_style = if known { row_style } else { trust.style() };
         let mut line = vec![
             Span::styled(format!("  {} ", state.glyph), state.style()),
             Span::styled(format!("{:<11}", state.name), row_style),
@@ -1128,6 +1446,8 @@ fn where_lines(request: &Request, data: &Data, width: u16, trust: &Trust) -> Vec
             ),
         ];
         let named = match index {
+            NET_IN if !known => Some("unknown before start".to_owned()),
+            NET_OUT if !known => Some("unknown after done".to_owned()),
             LOCK if ns > 0.0 => request.holder_tid.map(|tid| format!("woken by tid {tid}")),
             NET_IN | NET_OUT if ns > 0.0 => {
                 request.sock.map(|cookie| format!("by socket {cookie}"))
@@ -1135,7 +1455,14 @@ fn where_lines(request: &Request, data: &Data, width: u16, trust: &Trust) -> Vec
             _ => None,
         };
         if let Some(named) = named {
-            line.push(Span::styled(named, dim()));
+            line.push(Span::styled(
+                named,
+                if known {
+                    dim()
+                } else {
+                    Style::new().fg(palette::LOSS)
+                },
+            ));
         }
         lines.push(Line::from(line));
     }
@@ -1158,18 +1485,31 @@ fn against_the_others(request: &Request, all: &[Request], trust: &Trust) -> Opti
     if others.is_empty() {
         return None;
     }
-    let median = |index: usize| {
-        let mut theirs: Vec<f64> = others.iter().map(|other| other.states[index]).collect();
+    // The median of the others' state, over those whose state is known: a
+    // lower bound would pull it down. A request's own unknown side is a lower
+    // bound, so what it shows above the median is "at least".
+    let median = |index: usize| -> Option<f64> {
+        let mut theirs: Vec<f64> = others
+            .iter()
+            .filter(|other| other.known(index))
+            .map(|other| other.states[index])
+            .collect();
+        if theirs.is_empty() {
+            return None;
+        }
         theirs.sort_by(f64::total_cmp);
         let half = theirs.len() / 2;
-        if theirs.len() % 2 == 0 {
+        Some(if theirs.len() % 2 == 0 {
             (theirs[half - 1] + theirs[half]) / 2.0
         } else {
             theirs[half]
-        }
+        })
     };
     let mut above: Vec<(usize, f64, f64)> = (0..STATES.len())
-        .map(|index| (index, request.states[index] - median(index), median(index)))
+        .filter_map(|index| {
+            let typical = median(index)?;
+            Some((index, request.states[index] - typical, typical))
+        })
         .filter(|(_, difference, _)| *difference >= request.span() * 0.05)
         .collect();
     above.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -1195,7 +1535,11 @@ fn against_the_others(request: &Request, all: &[Request], trust: &Trust) -> Opti
         let state = &STATES[index];
         line.push(Span::styled(format!("{} ", state.glyph), state.style()));
         line.push(Span::styled(
-            format!("{} +{}", state.name, units::duration(difference)),
+            format!(
+                "{} +{}",
+                state.name,
+                at_least(difference, request.known(index))
+            ),
             trust.style().fg(palette::WORSE),
         ));
         line.push(Span::styled(
@@ -1260,22 +1604,48 @@ fn share_lines(
 
     // Disk.
     if blocks.is_empty() {
+        let unsure = (!gathered.block_results.is_empty())
+            .then(|| gathered.blocks_unsure(request))
+            .flatten();
+        let said = if gathered.block_results.is_empty() {
+            "io.latency not in this run: its block requests are unknown".to_owned()
+        } else if request.states[DISK] > 0.0 {
+            format!(
+                "{} waiting, no block request {} its id",
+                units::duration(request.states[DISK]),
+                if unsure.is_some() {
+                    "seen carries"
+                } else {
+                    "carries"
+                }
+            )
+        } else if unsure.is_some() {
+            "no block request seen".to_owned()
+        } else {
+            "no block request issued".to_owned()
+        };
         lines.push(Line::from(vec![
             head("disk"),
             Span::styled(
-                if gathered.block_results.is_empty() {
-                    "io.latency not in this run: its block requests are unknown".to_owned()
-                } else if request.states[DISK] > 0.0 {
-                    format!(
-                        "{} waiting, no block request carries its id",
-                        units::duration(request.states[DISK])
-                    )
+                said,
+                if unsure.is_some() {
+                    block_trust.style()
                 } else {
-                    "no block request issued".to_owned()
+                    dim()
                 },
-                dim(),
             ),
         ]));
+        if let Some(why) = unsure {
+            let mut line = vec![
+                indent(),
+                Span::styled(
+                    format!("{} ", why.sentence()),
+                    Style::new().fg(palette::LOSS),
+                ),
+            ];
+            line.extend(block_trust.badges());
+            lines.push(Line::from(line));
+        }
     } else {
         let device: f64 = blocks.iter().map(|one| one.latency).sum();
         let mut devs: Vec<&str> = blocks.iter().map(|one| one.dev.as_str()).collect();
@@ -1338,8 +1708,8 @@ fn share_lines(
         Span::styled(
             format!(
                 "in {} · out {}",
-                units::duration(request.states[NET_IN]),
-                units::duration(request.states[NET_OUT]),
+                net_text(request, NET_IN),
+                net_text(request, NET_OUT),
             ),
             trust.style(),
         ),
@@ -1360,6 +1730,17 @@ fn share_lines(
         lines.push(Line::from(line));
     }
     lines
+}
+
+/// A network side's time, a lower bound or `?` when `net.request` could not
+/// close it.
+fn net_text(request: &Request, state: usize) -> String {
+    let ns = request.states[state];
+    match (request.known(state), ns > 0.0) {
+        (true, _) => units::duration(ns),
+        (false, true) => at_least(ns, false),
+        (false, false) => "?".to_owned(),
+    }
 }
 
 /// No request to draw: the source's refusal in its own words, or what the
@@ -1446,15 +1827,24 @@ mod tests {
         }
         // a003 is both: the disk is its second state.
         assert_eq!(requests[2].mostly()[1].0, DISK);
-        // The six states tile each span exactly.
+        // The six states tile each span exactly: against `net.request`'s
+        // own whole and against the wall clock from first byte to last.
         for request in &requests {
             let parts: f64 = request.states.iter().sum();
+            let span_ns = request.span_ns.expect("a whole request carries span_ns");
+            let wall =
+                (request.drained.expect("drained") - request.first_byte.expect("first")) as f64;
             assert!(
-                (parts - request.span()).abs() < 1.0,
-                "{}: {parts} against {}",
-                request.id,
-                request.span()
+                (parts - span_ns).abs() < 1.0,
+                "{}: {parts} against {span_ns}",
+                request.id
             );
+            assert!(
+                (parts - wall).abs() < 1.0,
+                "{}: {parts} against {wall}",
+                request.id
+            );
+            assert!(request.whole() && request.span_text() == units::duration(span_ns));
         }
     }
 
@@ -1634,9 +2024,224 @@ mod tests {
         let gathered = Gathered::of(&live);
         let ids: Vec<&str> = gathered.requests.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["a001", "a002", "a003"]);
-        let text = snapshot::text(&snapshot::draw(live, "request", 120, 40));
+        let text = snapshot::text(&snapshot::draw(live.clone(), "request", 120, 40));
         assert!(text.contains("3 requests served by server"), "{text}");
-        assert!(text.contains("live"), "{text}");
+        // The request figures themselves carry `live`, not only the header.
+        let trust = Trust::joined(&live, gathered.results.iter().copied());
+        assert!(trust.marks.contains(&crate::trust::Mark::Provisional));
+        let summary: String = summary_line(&gathered.requests, &trust, Order::Arrival)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(summary.contains("  live"), "{summary}");
+    }
+
+    /// The vertical run, rewritten into the shape of
+    /// `examples/vertical-abandoned.yml`'s loss path: a005's response never
+    /// left the stack, so its event has no `net_tx`, and the collector's
+    /// notes count a request that never ended, replaced on its thread, and a
+    /// `request__done` with no birth.
+    fn abandoned() -> Data {
+        let mut data = snapshot::fixture("vertical-requests");
+        let results = data
+            .run
+            .results
+            .iter_mut()
+            .find(|results| results.source == "net.request")
+            .expect("net.request");
+        for output in &mut results.outputs {
+            if let crate::model::Output::Raw { events } = output {
+                for event in events
+                    .iter_mut()
+                    .filter(|e| req_id(e).as_deref() == Some("a005"))
+                {
+                    event.attrs.retain(|attr| {
+                        !["drained_ns", "tx_drain_ns", "net_tx_ns", "span_ns"]
+                            .contains(&attr.name.as_str())
+                    });
+                }
+            }
+        }
+        results.degradations.extend([
+            "1 request never ended in the run (req:1 in task 7); a request with no end has no \
+             total and is in no event"
+                .to_owned(),
+            "1 `request__start` hit a task still carrying a request that never ended; the old \
+             one was replaced and is among those that never ended"
+                .to_owned(),
+            "2 `request__done` hits a task carrying no request: begun before the probes \
+             attached, or never declared at `request__start`"
+                .to_owned(),
+            "1 response had not left the stack when the run ended, so its request has no \
+             `net_tx` rather than a short one"
+                .to_owned(),
+        ]);
+        data
+    }
+
+    /// A response that never left the stack is drawn as unknown after done,
+    /// never as drained at `request__done`.
+    #[test]
+    fn an_undrained_response_is_unknown_not_gone_when_done() {
+        let data = abandoned();
+        let gathered = Gathered::of(&data);
+        let a005 = &gathered.requests[4];
+        assert_eq!(a005.drained, None);
+        assert!(!a005.known(NET_OUT) && !a005.whole());
+        // Only the part inside the service is known: the wait in `send`.
+        assert_eq!(a005.states[NET_OUT], a005.tx_wait);
+        assert!(a005.span_text().starts_with('≥'), "{}", a005.span_text());
+
+        let mut app = crate::app::App::new(data);
+        app.cost = crate::app::Cost::Snapshot;
+        app.open("request").expect("registered");
+        app.focus = Focus {
+            request: Some("a005".into()),
+            ..Focus::default()
+        };
+        let text = snapshot::text(&snapshot::draw_app(&mut app, 120, 40));
+        assert!(
+            text.contains("from its first byte in to request__done"),
+            "{text}"
+        );
+        assert!(text.contains("unknown after done"), "{text}");
+        assert!(!text.contains("gone when done"), "{text}");
+        assert!(!text.contains("4.21ms after done"), "{text}");
+        assert!(text.contains("out ≥28.5ms"), "{text}");
+        assert!(text.contains("1 ≥: a network side unknown"), "{text}");
+        // The summary keeps its badges in 120 columns.
+        assert!(text.contains("arrival  degraded x6"), "{text}");
+        assert!(text.contains("net out ≥28.5ms"), "{text}");
+        // The shares, of a span that is a lower bound, are not given.
+        assert!(!text.contains("net out 98"), "{text}");
+    }
+
+    /// What `net.request` counted and could put in no event is said under the
+    /// summary, by count, with the ids it named.
+    #[test]
+    fn requests_in_no_event_are_counted_on_screen() {
+        let undrawn = Gathered::of(&abandoned()).undrawn;
+        assert_eq!(
+            undrawn,
+            Undrawn {
+                never_ended: 1,
+                named: "req:1 in task 7".into(),
+                replaced: 1,
+                unborn: 2,
+                filtered: 0,
+            }
+        );
+        let text = snapshot::text(&snapshot::draw(abandoned(), "request", 160, 40));
+        assert!(
+            text.contains(
+                "in no event, not drawn: 1 never ended (req:1 in task 7, 1 replaced by a later \
+                 start) · 2 ended with no birth"
+            ),
+            "{text}"
+        );
+        // The recorded run lost nothing of the kind, and says nothing.
+        assert!(Gathered::of(&snapshot::fixture("vertical-requests"))
+            .undrawn
+            .is_empty());
+    }
+
+    /// With `io.latency` losses, a request with no block request is "none
+    /// seen", with the loss beside it, never "none issued".
+    #[test]
+    fn no_block_request_under_losses_is_none_seen_with_the_loss() {
+        let mut data = snapshot::fixture("vertical-requests");
+        for results in data
+            .run
+            .results
+            .iter_mut()
+            .filter(|r| r.source == "io.latency")
+        {
+            results.losses.dropped = 3;
+        }
+        let gathered = Gathered::of(&data);
+        assert_eq!(
+            gathered.blocks_unsure(&gathered.requests[0]),
+            Some(Unsure::Lost(3))
+        );
+        let text = snapshot::text(&snapshot::draw(data, "request", 120, 40));
+        assert!(text.contains("no block request seen"), "{text}");
+        assert!(text.contains("none seen: io.latency lost 3"), "{text}");
+        assert!(text.contains("io.latency lost 3, so some may"), "{text}");
+        assert!(text.contains("-3 lost"), "{text}");
+        assert!(!text.contains("no block request issued"), "{text}");
+        // Lost nothing, watched the whole run: a zero, said as one.
+        let clean = snapshot::fixture("vertical-requests");
+        let gathered = Gathered::of(&clean);
+        assert_eq!(gathered.blocks_unsure(&gathered.requests[0]), None);
+    }
+
+    /// `io.latency` held under two labels is one set of block requests.
+    #[test]
+    fn io_latency_under_two_labels_is_counted_once() {
+        let mut data = snapshot::fixture("vertical-requests");
+        let once = Gathered::of(&data).device_total;
+        let mut twin = data.first("io.latency").expect("io.latency").clone();
+        twin.label = "system".into();
+        data.run.results.push(twin);
+        let gathered = Gathered::of(&data);
+        assert_eq!(gathered.blocks["a002"].len(), 64);
+        assert_eq!(gathered.device_total, once);
+    }
+
+    /// A focus on a request the list does not hold says so, and which one is
+    /// drawn instead.
+    #[test]
+    fn a_focus_the_list_does_not_hold_is_said() {
+        let mut app = crate::app::App::new(snapshot::fixture("vertical-requests"));
+        app.cost = crate::app::Cost::Snapshot;
+        app.open("request").expect("registered");
+        app.focus = Focus {
+            request: Some("zz9".into()),
+            ..Focus::default()
+        };
+        let text = snapshot::text(&snapshot::draw_app(&mut app, 120, 40));
+        assert!(
+            text.contains("the focus names zz9, in no event of this run: a001 is drawn instead"),
+            "{text}"
+        );
+        let all = Gathered::of(&snapshot::fixture("vertical-requests")).requests;
+        let hidden = Focus {
+            pid: Some(1),
+            request: Some("a003".into()),
+            ..Focus::default()
+        };
+        let notice: String = notice_line(
+            &hidden,
+            &all[..1],
+            &all[0],
+            &Gathered::of(&snapshot::fixture("vertical-requests")),
+        )
+        .expect("a notice")
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+        assert!(
+            notice.contains("a003, hidden by the pid/tid focus"),
+            "{notice}"
+        );
+    }
+
+    /// On a narrow terminal the share column grows rather than cut its last
+    /// line, the lock's waker.
+    #[test]
+    fn a_narrow_share_column_keeps_its_last_line() {
+        let mut app = crate::app::App::new(snapshot::fixture("vertical-requests"));
+        app.cost = crate::app::Cost::Snapshot;
+        app.open("request").expect("registered");
+        app.focus = Focus {
+            request: Some("a003".into()),
+            ..Focus::default()
+        };
+        let text = snapshot::text(&snapshot::draw_app(&mut app, 100, 50));
+        assert!(text.contains("longest"), "{text}");
+        assert!(text.contains("what sets it apart"), "{text}");
     }
 
     #[test]

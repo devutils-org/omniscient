@@ -147,6 +147,75 @@ what `make` grants, and it changes no machine state.
   axis). The order of all states would need a per-request log of
   transitions, which is a larger change.
 
+## Review
+
+One fix round on the adversarial review. Every finding was taken; none is
+disputed.
+
+- **Defect -- unknown network time drawn as known.** `Request::of` no longer
+  fills in a side `net.request` left out. `first_byte` and `drained` are
+  `Option`s, set only when the event carries `net_rx_ns`/`net_tx_ns` and the
+  instant; an unknown side's state holds only the wait inside the service
+  (`recv`/`send`), a lower bound. On screen: the span is `≥`, the heading
+  says `to request__done` (`from request__start`), the waterfall marks the
+  edge `?` and says "unknown after done, X in send" in the loss colour (never
+  "gone when done"), no state gets a `%` or a bar of a span that is a lower
+  bound (`mostly` gives times), the network line says `out ≥X` or `?`, "what
+  sets it apart" says `+≥X` and takes medians over the others whose side is
+  known, and the line under the summary counts the requests with a side
+  unknown. Test: `an_undrained_response_is_unknown_not_gone_when_done`, on
+  the vertical recording rewritten into the shape of
+  `examples/vertical-abandoned.yml`'s third request (a005's `net_tx_ns`,
+  `drained_ns`, `tx_drain_ns`, `span_ns` removed).
+- **Gap -- `io.latency` losses beside "no block request".**
+  `Gathered::blocks_unsure` applies the join engine's rule: absence is a zero
+  only from an `io.latency` that lost nothing and watched the whole request
+  (`window.attach_ns`/`opened_ns` to `closed_ns`). Otherwise the share
+  column says "no block request seen", then "io.latency lost N, so some may
+  be missing" (or "was not watching for all of it") with `io.latency`'s
+  badges, and the waterfall note "none seen: io.latency lost N". Test:
+  `no_block_request_under_losses_is_none_seen_with_the_loss`, which also
+  holds that the clean recording still says "no block request issued".
+- **Gap -- requests counted and in no event.** `Undrawn::of` reads the
+  collector's notes (the run carries them as the result's `notes` or
+  `degradations`): never ended, with the ids it named, how many a later
+  `request__start` replaced, `request__done` with no birth, removed by the
+  filter. The line under the summary says "in no event, not drawn: 1 never
+  ended (req:1 in task 7, 1 replaced by a later start) · 2 ended with no
+  birth". `docs/view/request.md` names `vertical-abandoned` as the run that
+  has them. Test: `requests_in_no_event_are_counted_on_screen`. Reading the
+  notes' wording is the only way the run carries these counts today; a
+  structured field would be sturdier (filed below).
+- **Nit -- the live test.** It now builds the request figures' own trust and
+  asserts the summary line itself carries `live`, not the app header.
+- **Nit -- the tiling test.** Compares the states' sum against `span_ns` and
+  against `drained - first_byte` directly, and that the span is whole.
+- **Nit -- "the other N requests".** `against_the_others` takes the visible
+  (pid/tid-filtered) list.
+- **Nit -- a focus the list does not hold.** Said on the line under the
+  summary: "the focus names X, in no event of this run" (or "hidden by the
+  pid/tid focus"), "Y is drawn instead". Test:
+  `a_focus_the_list_does_not_hold_is_said`.
+- **Nit -- `io.latency` under two labels.** Block events are deduplicated by
+  (completion, opening, device, latency) before they are counted, in the
+  request's block requests and in the run's device time. Test:
+  `io_latency_under_two_labels_is_counted_once`.
+- **Nit -- the share column cut on a narrow terminal.** The two columns are
+  as tall as the share column's wrapped lines need (nine at least, so the
+  recorded snapshots are unchanged). Test:
+  `a_narrow_share_column_keeps_its_last_line`, which fails on the fixed nine
+  rows (checked by reverting the height).
+
+The seven `request--*` snapshots and the five per-request ones are unchanged:
+the recorded run has every side known, nothing lost, nothing undrawn.
+
+Still wanted, from the review: a recording of `vertical-abandoned` in
+`tests/view_fixtures/` (core's directory, and every view's snapshot set grows
+with it), so the loss path is held on a real run rather than a rewritten
+one; and the never-ended / unborn / replaced counts as structured fields of
+`net.request`'s result rather than sentences (coordinator, the collector's
+owner).
+
 ## The suite
 
 While iterating: `cargo test -p omn-view --lib views::request` (11 pass),
