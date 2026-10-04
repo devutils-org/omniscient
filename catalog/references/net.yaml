@@ -16,6 +16,12 @@
 #   increment of a counter), `series[<key>].mean`, `events.count` (raw
 #   events), `events.<attr>.sum` (an attribute summed over raw events).
 #
+# The shared runner (tests/reference/runner.rs) knows neither `alongside` nor
+# these paths, so every pair below declares a `gap:` naming that, and the
+# shared `pairs_net` reports it rather than running it. The family's own
+# `net_pairs_against_the_tools` (tests/reference/net.rs) reads this file
+# directly, ignores `gap:`, and runs every pair the way described above.
+#
 # The reference commands go through the wrappers in
 # tests/reference/workloads/net/: `around.py` reads a counter tool before
 # and after the workload, `sample.py` runs a snapshot tool while it lives,
@@ -27,6 +33,7 @@
   workload: [python3, tests/reference/workloads/net/push.py, "64", "1"]
   omn: [trace, net.bytes, --iface, lo, -m, count, -e, summary, --keys, "iface,dir", --format, json, --duration, 4s]
   alongside: {lead_ms: 1500}
+  gap: "the shared runner has no `alongside` mode (it appends `-- <workload>`, which omn refuses beside `--iface` or `--system`) and its path syntax has no series total; `net_pairs_against_the_tools` in tests/reference/net.rs runs this pair"
   reference:
     command: [python3, tests/reference/workloads/net/around.py, ip, -s, link, show, dev, lo, --]
     parse: ip_s_link_delta
@@ -44,6 +51,7 @@
   workload: [python3, tests/reference/workloads/net/push.py, "64", "1"]
   omn: [trace, net.bytes, --iface, lo, -m, count, -e, summary, --keys, "iface,dir", --format, json, --duration, 4s]
   alongside: {lead_ms: 1500}
+  gap: "the shared runner has no `alongside` mode (it appends `-- <workload>`, which omn refuses beside `--iface` or `--system`) and its path syntax has no series total; `net_pairs_against_the_tools` in tests/reference/net.rs runs this pair"
   reference:
     command: [python3, tests/reference/workloads/net/around.py, ip, -s, link, show, dev, lo, --]
     parse: ip_s_link_delta
@@ -61,6 +69,7 @@
   workload: [python3, tests/reference/workloads/net/pingpong.py, "47313", "2"]
   omn: [trace, net.packets, --iface, lo, -m, count, -e, summary, --format, json, --duration, 4s]
   alongside: {lead_ms: 1500}
+  gap: "the shared runner has no `alongside` mode (it appends `-- <workload>`, which omn refuses beside `--iface` or `--system`) and its path syntax has no series total; `net_pairs_against_the_tools` in tests/reference/net.rs runs this pair"
   reference:
     command: [python3, tests/reference/workloads/net/around.py, ip, -s, link, show, dev, lo, --]
     parse: ip_s_link_delta
@@ -78,6 +87,7 @@
   workload: [python3, tests/reference/workloads/net/push.py, "64", "1"]
   omn: [trace, net.iface, --iface, lo, -m, count, -e, summary, --format, json, --duration, 4s]
   alongside: {lead_ms: 1500}
+  gap: "the shared runner has no `alongside` mode (it appends `-- <workload>`, which omn refuses beside `--iface` or `--system`) and its path syntax has no series total; `net_pairs_against_the_tools` in tests/reference/net.rs runs this pair"
   reference:
     command: [python3, tests/reference/workloads/net/around.py, ip, -s, link, show, dev, lo, --]
     parse: ip_s_link_delta
@@ -95,6 +105,7 @@
   workload: [python3, tests/reference/workloads/net/backlog.py, "64", "1"]
   omn: [trace, net.backlog, --system, -m, count, -e, raw, --format, json, --duration, 4s]
   alongside: {lead_ms: 1500}
+  gap: "the shared runner has no `alongside` mode (it appends `-- <workload>`, which omn refuses beside `--iface` or `--system`) and its path syntax has no series total; `net_pairs_against_the_tools` in tests/reference/net.rs runs this pair"
   reference:
     command: [python3, tests/reference/workloads/net/around.py, nstat, -saz, TcpExtListenOverflows, TcpExtListenDrops, TcpRetransSegs, --]
     parse: nstat_delta
@@ -112,6 +123,7 @@
   workload: [python3, tests/reference/workloads/net/backlog.py, "64", "1"]
   omn: [trace, net.backlog, --system, -m, count, -e, raw, --format, json, --duration, 4s]
   alongside: {lead_ms: 1500}
+  gap: "the shared runner has no `alongside` mode (it appends `-- <workload>`, which omn refuses beside `--iface` or `--system`) and its path syntax has no series total; `net_pairs_against_the_tools` in tests/reference/net.rs runs this pair"
   reference:
     command: [python3, tests/reference/workloads/net/around.py, nstat, -saz, TcpExtListenOverflows, TcpExtListenDrops, TcpRetransSegs, --]
     parse: nstat_delta
@@ -129,6 +141,7 @@
   workload: [python3, tests/reference/workloads/net/backlog.py, "64", "2.5"]
   omn: [trace, net.tcp.retransmit, --system, -m, count, -e, summary, --format, json, --duration, 5s]
   alongside: {lead_ms: 1500}
+  gap: "the shared runner has no `alongside` mode (it appends `-- <workload>`, which omn refuses beside `--iface` or `--system`) and its path syntax has no series total; `net_pairs_against_the_tools` in tests/reference/net.rs runs this pair"
   reference:
     command: [python3, tests/reference/workloads/net/around.py, nstat, -saz, TcpRetransSegs, --]
     parse: nstat_delta
@@ -146,6 +159,7 @@
   workload: [python3, tests/reference/workloads/net/pingpong.py, "47311", "2.5"]
   omn: [trace, net.tcp.rtt, --system, -m, "poll@200ms", -e, summary, --filter, "sport == 47311", --format, json, --duration, 5s]
   alongside: {lead_ms: 1500}
+  gap: "the shared runner has no `alongside` mode (it appends `-- <workload>`, which omn refuses beside `--iface` or `--system`) and its path syntax has no series total; `net_pairs_against_the_tools` in tests/reference/net.rs runs this pair"
   reference:
     command: [python3, tests/reference/workloads/net/sample.py, "0.5", ss, -tinH, sport, "=", ":47311", --]
     parse: ss_ti_rtt
@@ -163,6 +177,7 @@
   workload: [python3, tests/reference/workloads/net/pingpong.py, "47312", "2"]
   omn: [trace, net.capture, --iface, lo, -m, trace, -e, raw, --filter, "dport == 47312", --format, json, --duration, 5s]
   alongside: {lead_ms: 1500}
+  gap: "the shared runner has no `alongside` mode (it appends `-- <workload>`, which omn refuses beside `--iface` or `--system`) and its path syntax has no series total; `net_pairs_against_the_tools` in tests/reference/net.rs runs this pair"
   reference:
     command: [python3, tests/reference/workloads/net/bracket.py, tcpdump, -i, lo, -w, /dev/null, tcp dst port 47312, --]
     parse: tcpdump_count
