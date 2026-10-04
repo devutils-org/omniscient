@@ -12210,5 +12210,20 @@ files uncommitted; they are now on `main`, so they can be dropped there.
   the eighteenth wave (`docs/fixes/w18-launcher.md`). Red in the `make check`
   and in the `--no-fail-fast` run, green alone (6 passed). No source under
   `src/` changed in this wave.
-- `cross_machine::a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_its_rung`:
-  red in the `--no-fail-fast` run, green alone.
+
+### `cross_machine::a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_its_rung`: the writeback lands after the program's window
+
+Red twice in this pass, both times inside a full run and on the same
+assertion (`tests/cross_machine.rs:1608`): *"to stay within 32 MiB the cgroup
+had to write back at least 64 MiB of the 96 it dirtied before it could drop
+them, and 18.3 MiB reached the file's device while the program ran"* in the
+`--no-fail-fast` run, 32.7 MiB in the final `make check`. Green alone in
+between. Not this wave's: neither `tests/cross_machine.rs` nor `src/` changed
+in it. A different check from the one filed in the twenty-first wave
+(reclaimed pages outside the program's intervals). Under the suite's load the
+dirty pages reach the device after the program's window closes, so the
+TEMPORAL rung sees less than the 64 MiB the arithmetic says must have been
+written. For the owner of the cross-machine sessions: bound the window by the
+cgroup's own writeback (`memory.stat` `file_writeback` back to 0, or a
+`syncfs` before the window closes), not by the program's exit. Now failed
+repeatedly, so it belongs on the flaky tally once its cause is read.
