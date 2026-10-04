@@ -1,6 +1,7 @@
 //! Parsers for the `perfstat` family's reference tools. Each turns a tool's
-//! output into the values a pair compares (BRIEF.md, "Decided before this
-//! wave").
+//! output into the values a pair compares (`catalog/references/README.md`).
+//! Every value of `omn`'s side is a path into its JSON, so there is no
+//! parser of `omn`'s output here.
 //!
 //! `perf stat -x,` writes one line per event on stderr:
 //! `value,unit,event,run-time,enabled-pct,metric-value,metric-unit`. The
@@ -167,6 +168,7 @@ mod tests {
     const CGROUP: &str = include_str!("captures/perfstat/cgroup-csv.txt");
     const SYSTEM: &str = include_str!("captures/perfstat/system-csv.txt");
     const ATTACH: &str = include_str!("captures/perfstat/attach-pid-csv.txt");
+    const CGROUP_RELATIVE: &str = include_str!("captures/perfstat/cgroup-relative-csv.txt");
 
     #[test]
     fn csv_reads_every_counted_event() {
@@ -203,6 +205,17 @@ mod tests {
         let v = perf_stat_csv("", SYSTEM).unwrap();
         assert_eq!(get(&v, "cycles"), Some(27_118_179_167.0));
         assert_eq!(get(&v, "context-switches"), Some(13_223.0));
+    }
+
+    /// The pair `cpu.instructions.cgroup` names its cgroup through a link in
+    /// the run's scratch directory, `-G ../../../tmp/<run>/cg`: the column
+    /// is a path with no number in it, read as the cgroup's.
+    #[test]
+    fn csv_reads_a_cgroup_named_relative_to_the_mount() {
+        let v = perf_stat_csv("", CGROUP_RELATIVE).unwrap();
+        assert_eq!(get(&v, "instructions"), Some(4_749_361_858.0));
+        assert_eq!(get(&v, "cycles"), Some(1_542_347_321.0));
+        assert_eq!(get(&v, "instructions.enabled_pct"), Some(100.0));
     }
 
     #[test]
