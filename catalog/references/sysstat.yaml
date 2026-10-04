@@ -20,7 +20,9 @@
 #                       `raw.<attr>`: the mean of that attribute over the raw
 #                       events, a leading one stamped within half a period of
 #                       the window's opening left out (it covers a few ms:
-#                       docs/fixes/w22-sysstat.md).
+#                       defect 2 of docs/fixes/w22-sysstat.md, held by
+#                       `poll_leading_event_is_held_as_a_known_defect`
+#                       because no pair can hold it: it appears in some runs).
 #   compare.scale       multiplies omn's value before the comparison (units).
 #   known_defect        the pair is expected to miss its tolerance because of
 #                       a filed omn defect, named here; it is reported as

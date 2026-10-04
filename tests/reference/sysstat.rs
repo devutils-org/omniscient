@@ -738,4 +738,95 @@ mod pairs {
         }
         assert!(failed.is_empty(), "{failed:#?}");
     }
+
+    /// Whether one short run of `source` emits a leading raw event stamped
+    /// within half a period of the window's opening: defect 2 of
+    /// docs/fixes/w22-sysstat.md, which `omn_value`'s `raw.<attr>` path
+    /// leaves out. `None` when the run gave fewer than two events.
+    fn leading_event(source: &str) -> Result<Option<bool>, String> {
+        let out = Command::new(env!("CARGO_BIN_EXE_omn"))
+            .args([source, "--system", "-m", "poll@50ms", "-e", "raw"])
+            .args(["-d", "175ms", "--format", "json"])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("omn: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "omn {source} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        let json: Value =
+            serde_json::from_slice(&out.stdout).map_err(|e| format!("omn's JSON: {e}"))?;
+        let result = &json["results"][0];
+        let opened = result["window"]["opened_ns"]
+            .as_f64()
+            .ok_or("no window.opened_ns")?;
+        let events = result["outputs"]
+            .as_array()
+            .and_then(|o| o.iter().find(|o| o["emit"] == "raw"))
+            .and_then(|o| o["events"].as_array())
+            .ok_or("no raw events")?;
+        let ts = |i: usize| events.get(i).and_then(|e| e["ts_ns"].as_f64());
+        Ok(match (ts(0), ts(1)) {
+            (Some(t0), Some(t1)) => Some(t0 - opened < (t1 - t0) / 2.0),
+            _ => None,
+        })
+    }
+
+    /// Holds defect 2 the way `known_defect` holds a pair, which no pair can
+    /// do for it: the leading event appears in one run out of six to four out
+    /// of five (measured), and its share is 0, 0.5, 0.67 or 1, so a
+    /// `summary.mean` pair would miss or agree by chance. Instead: `cpu.util`
+    /// and `cpu.pressure` must still show the leading event within forty runs,
+    /// or the defect is fixed and `omn_value`'s skip and this test go;
+    /// `mem.pressure` and `io.pressure` must not show it in five runs, or the
+    /// defect has spread to them.
+    #[test]
+    fn poll_leading_event_is_held_as_a_known_defect() {
+        let mut failed = Vec::new();
+        for source in ["cpu.util", "cpu.pressure"] {
+            let mut seen = false;
+            for _ in 0..40 {
+                match leading_event(source) {
+                    Ok(Some(true)) => {
+                        seen = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        failed.push(e);
+                        break;
+                    }
+                }
+            }
+            if seen {
+                eprintln!("KNOWN {source}: a leading event within half a period (defect 2)");
+            } else if failed.is_empty() {
+                failed.push(format!(
+                    "{source}: no leading event in forty runs; defect 2 looks fixed, \
+                     drop omn_value's skip and this test"
+                ));
+            }
+        }
+        for source in ["mem.pressure", "io.pressure"] {
+            for _ in 0..5 {
+                match leading_event(source) {
+                    Ok(Some(true)) => {
+                        failed.push(format!(
+                            "{source}: a leading event within half a period; defect 2 \
+                             has spread to it"
+                        ));
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        failed.push(e);
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
 }
