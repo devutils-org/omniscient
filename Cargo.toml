@@ -1,5 +1,5 @@
 [workspace]
-members = ["shim", "mcp"]
+members = ["shim", "mcp", "cupti"]
 
 [package]
 name = "omn"

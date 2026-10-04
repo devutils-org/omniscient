@@ -1,0 +1,15 @@
+[package]
+name = "omn-cupti"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "CUDA injection library reporting CUPTI activity to omn"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "omn_cupti"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"

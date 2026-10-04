@@ -473,3 +473,154 @@ For `examples/README.md` and `GUIDE.md`, `gpu` table:
 | `gpu-api-vulkan.yml` | How long the host spends submitting to a Vulkan queue and waiting for it. |
 | `gpu-api-unreachable.yml` | A program that drives the GPU where the shim cannot see it, and says so. |
 ```
+
+# `gpu.kernel`, through CUPTI
+
+The device's own account of what ran: one event per kernel, memcpy and memset,
+with its time on the device. The nineteenth wave wrote it on CUPTI's activity
+API, reached from an **injection library** (`cupti/`, built as
+`libomn_cupti.so`) that the CUDA driver loads into the launched program at
+`cuInit` because `omn` names it in `CUDA_INJECTION64_PATH`. The reader is
+`src/collect/gpu/kernel.rs`; the format both sides compile is one file,
+`cupti/src/wire.rs`, included by path on the `omn` side so the two cannot
+disagree on a number.
+
+## What an event is
+
+Stamped at the activity's start on the device, converted to `CLOCK_MONOTONIC`,
+with `ts_err_ns` the calibration's measured error. Attributes: `duration_ns`
+(the value: end minus start on the device), `op` (`kernel`, `memcpy`,
+`memset`), `kernel` (the demangled kernel name, or `[memcpy HtoD]`,
+`[memcpy DtoH]`, ..., `[memset]`), `device`, `stream`, `context`,
+`correlation`; for a kernel `grid` and `block` (`68x1x1`), `registers` and
+`shared_bytes`; for a copy `bytes` and `copy` (the direction); for a memset
+`bytes` and `value`; and `pid`. Keys are `task` (the process's main thread)
+and `proc`: an activity record names its device, context and stream, never the
+thread that launched it, and the `gpu` key is a fence, which a kernel record
+does not carry. Rank with `topk:10@kernel`; count only kernels with
+`--filter "op == 'kernel'"`.
+
+A `pid` target is refused: CUPTI records the process it is loaded in, and the
+driver loads it at `cuInit`, which a running program did long ago. The
+catalog's `targets` is `{launch}` and its first caveat says why, because the
+validator's refusal for a target the entry does not list is generic ("the
+catalog declares no `pid` support"); a per-entry refusal reason is filed for
+the coordinator in `docs/fixes/w19-cupti.md`.
+
+## The channel
+
+One `AF_UNIX` `SOCK_SEQPACKET` socket per launch, made by `omn` and named in
+`OMN_CUPTI_FD`. Sequenced packets keep message boundaries and never interleave
+two senders, so a program that forks after `cuInit` sends whole messages, each
+saying whose they are. The library batches frames into messages of at most
+60 KiB, one batch per CUPTI buffer and per flush, so a record costs no system
+call of its own. Sends happen on CUPTI's thread, the flush thread or at exit,
+never on a thread of the program's, and are bounded by a two-second send
+timeout: a batch that could not be sent is dropped, counted, and reported in
+the next one that is.
+
+Every collector of a launch that goes through the library reads that one
+socket (`Socket` in `kernel.rs`), the way the preload shim's readers share its
+pipe: two `gpu.kernel` requests on one launch each see every record
+(`two_requests_on_one_launch_each_read_every_record`), and a later CUPTI source
+joins by adding its `REPORT_*` bit and subscribing.
+
+`OMN_CUPTI_REPORT=0` loads the library and arms nothing: the negative control
+a tracer's cost is measured against.
+
+## The workloads, and what each guarantees
+
+All in `tests/gpu_workload.py`: PTX loaded through `libcuda.so.1` with ctypes,
+no toolkit. Each writes what it did to the file `OMN_GPU_TRUTH` names.
+
+| Command | What it does | What it guarantees |
+|---|---|---|
+| `launches N` | N launches of `tiny`, one block of 32 threads, synchronised every 1024 | exactly N kernels; a launch rate set by the host, about 1 us of device time each: the load that fills CUPTI's buffers fastest |
+| `compute N` | N launches of `spin`, about 2.4 ms each here | exactly N kernels whose time is arithmetic: no reads, one write per thread |
+| `memory N MIB` | a memset and a host-to-device copy of MIB, N launches of `copy` (grid-stride, MIB read and MIB written), a copy back | exactly N kernels, 2 copies and 1 memset, each moving exactly MIB |
+| `managed N MIB` | one managed buffer of MIB; the host writes all of it, then one `copy` kernel within it, N times | exactly N kernels, and pages migrating both ways between every two -- which are not kernels |
+| `streams S N` | S non-blocking streams, N short `spin` launches on each, round-robin | exactly N kernels on each of S distinct streams, room on the device for all S at once |
+| `selftimed N ITERS` | one warm-up and N launches of `selftimed`, each synchronised and its timings copied back | per launch: the kernel's own span from its blocks' `%globaltimer` reads, the SMs it ran on (`%smid`), its cycles (`%clock64`), and the host's `CLOCK_MONOTONIC` just before the launch and just after the synchronise |
+
+## Ground truth, measured on the 2080 Ti
+
+`tests/gpu_kernel.rs`, every number against the truth file:
+
+- **Counts are exact** on every workload: 20 000 of 20 000 `tiny`, 50 of 50
+  `spin`, 10 `copy` with 2 copies and 1 memset of exactly 8 MiB each, 10 kernels
+  under managed memory and no migration counted as one, 4 streams of 25 each.
+  Nothing dropped with the default buffers, including 50 000 launches.
+- **Concurrency is kept**: on `streams 4 25`, 99 of the 100 kernels started
+  before the previous one, on another stream, had ended.
+- **Durations against the kernel's own span**, `selftimed 20 100000` (about
+  1 ms each): CUPTI's duration is longer than the span the kernel measured on
+  itself by **1.0 to 1.3 us**, every time -- the block dispatch before the first
+  block's first instruction and the drain after the last block's last, which
+  CUPTI's start and end include and `%globaltimer` inside the kernel cannot.
+  That difference is not a clock error: the calibration's error on the same
+  run was 68 ns. The test asserts the separation (span <= duration <= span +
+  max(10 us, 1 %)), not the measurement.
+- **Placement in time**: every converted kernel starts 7 to 10 us after the
+  host's `CLOCK_MONOTONIC` before its launch and ends 1.2 to 1.9 us before the
+  host's after its synchronise. Asserted as containment within the error.
+- **The calibration**: CUPTI's clock on this machine is a wall clock
+  (`1.79e18` ns, the epoch); a bracket of it between two monotonic reads is
+  60 to 90 ns wide. The map's rate came out 1.0000002 to 1.0000015 over runs
+  of a fraction of a second -- the bracket noise over so short a line, not a
+  drift worth the name -- and the widest error any event carried was 68 to
+  264 ns.
+- **Drops are CUPTI's own count, and exact**: 50 000 launches with two
+  buffers of 64 KiB (`OMN_CUPTI_BUFFERS=2 OMN_CUPTI_BUFFER_BYTES=65536`) kept
+  41 263 and dropped 8 737 -- which add up to 50 000, so
+  `cuptiActivityGetNumDroppedRecords` counts since its last call, not since
+  the start. The run prints `LOSS: 8737 dropped` with the reason, and its
+  summary turns into a lower bound (`n>=41263`). The test asserts kept +
+  dropped = launched.
+- **A program that never calls `cuInit`** reports no event and says so
+  (`never loaded the CUDA injection library`), rather than an idle device.
+
+Other numbers the same runs gave, for orientation: a 8 MiB `copy` takes 33 us
+(about 500 GB/s of the 616 the card is rated for); the same kernel on managed
+memory the host has just written takes 1.7 ms, because the migration is paid
+inside the kernel's duration; a pageable 8 MiB host-to-device copy takes
+650 us.
+
+## Found here
+
+- **A forced flush loses kernels' times.** `cuptiActivityFlushAll` with
+  `CUPTI_ACTIVITY_FLAG_FLUSH_FORCED` hands back the buffer CUPTI is still
+  filling, kernels that have not finished included, with their timestamps zero
+  -- and those records are never delivered again. Measured: a forced flush
+  every 50 ms under 500 launches of a 2 ms kernel returned 482 of the 500
+  without a time. So the flush thread flushes unforced, a buffer comes back
+  when it is full, and the last ones at exit, after the program's own
+  synchronisation. The cost is latency: records arrive a buffer at a time
+  (about a thousand kernels with the default 256 KiB buffers), which a live
+  view of a slow program will show as nothing, then a batch. Records still
+  arrive incomplete at exit when the program exits with work queued; they are
+  counted in `dropped` with that reason, never placed at time zero.
+- **`omn list` answered `gpu.kernel` "no" although CUPTI is in the loader's
+  cache.** The probe was right: `cupti` read `available`, and the "no" was
+  "no collector is written for `vendor:cupti`". With the collector registered
+  the source is usable here. Nothing in the probe changed.
+- **The workload's `cuLaunchKernel` signature was one argument short**:
+  `sharedMemBytes` was declared as a pointer and the stream as a pointer to a
+  pointer. It worked by accident of the calling convention while the stream
+  was always null, and crashed the first time a stream was passed. Declared
+  as the driver's header has it now.
+
+## What is not measured, and why
+
+- **Which thread launched a kernel.** The activity record does not say;
+  correlating with the driver API's callbacks would, at a cost per launch,
+  and is not done.
+- **What it costs.** The reader's own cpu is on the cost line; what the
+  library spends inside the program is not measured here, and the run says
+  so. The bench stream measures it against the disarmed control.
+- **Kernels launched through CUDA graphs, and unified-memory events.** Graph
+  launches are reported as their kernels by CUPTI's concurrent-kernel
+  activity, but no workload here launches a graph; migrations are a separate
+  activity kind, not subscribed to.
+- **The clock state.** A timing on unlocked clocks depends on what ran before
+  it; reading whether they are locked belongs to the device stream, and the
+  facts line here should carry it once it exists (requested).

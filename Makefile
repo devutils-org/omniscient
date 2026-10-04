@@ -40,6 +40,8 @@ all: build
 # `--workspace` is not optional: the preload shim is a member nothing depends
 # on, so a plain `cargo build` leaves `mem.heap.alloc` without the library it
 # loads, and the failure surfaces as a resolver choosing a different backend.
+# The CUDA injection library (`cupti/`) is the same kind of member, and
+# `gpu.kernel` refuses without it, naming where it looked.
 build:
 	cargo build --workspace $(CARGOFLAGS)
 	@$(MAKE) --no-print-directory caps PROFILE=$(PROFILE)
@@ -151,8 +153,9 @@ matrix: build
 # Installing. docs/install.md is the user's side of these targets.
 #
 # The layout is the release archive's, so a tree installed from here and one
-# extracted from `make dist` are the same tree: the binaries and the preload
-# shim in bin/, side by side, because `omn` looks for the shim beside its own
+# extracted from `make dist` are the same tree: the binaries, the preload shim
+# and the CUDA injection library in bin/, side by side, because `omn` looks for
+# the shim and the injection library beside its own
 # executable and `omn-mcp` looks for `omn` beside its own; the manual page in
 # share/man/man1.
 #
@@ -184,6 +187,7 @@ install:
 	install -D -m 755 target/release/omn            $(DESTDIR)$(BINDIR)/omn
 	install -D -m 755 target/release/omn-mcp        $(DESTDIR)$(BINDIR)/omn-mcp
 	install -D -m 644 target/release/libomn_preload.so $(DESTDIR)$(BINDIR)/libomn_preload.so
+	install -D -m 644 target/release/libomn_cupti.so  $(DESTDIR)$(BINDIR)/libomn_cupti.so
 	install -D -m 644 man/omn.1                     $(DESTDIR)$(MAN1DIR)/omn.1
 	install -D -m 644 README.md                     $(DESTDIR)$(DOCDIR)/README.md
 	install -D -m 644 docs/install.md               $(DESTDIR)$(DOCDIR)/install.md
@@ -191,7 +195,7 @@ install:
 	install -D -m 644 LICENSE-APACHE                $(DESTDIR)$(DOCDIR)/LICENSE-APACHE
 	install -D -m 644 LICENSES/GPL-2.0-only.txt     $(DESTDIR)$(DOCDIR)/LICENSES/GPL-2.0-only.txt
 	@echo
-	@echo "installed omn, omn-mcp and the preload shim in $(DESTDIR)$(BINDIR)."
+	@echo "installed omn, omn-mcp, the preload shim and the CUDA injection library in $(DESTDIR)$(BINDIR)."
 	@echo "no capability was granted. Without them the eBPF and per-cpu perf backends"
 	@echo "report what they need instead of collecting; to grant them:"
 	@echo
@@ -202,6 +206,7 @@ install:
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/omn $(DESTDIR)$(BINDIR)/omn-mcp $(DESTDIR)$(BINDIR)/libomn_preload.so
+	rm -f $(DESTDIR)$(BINDIR)/libomn_cupti.so
 	rm -f $(DESTDIR)$(MAN1DIR)/omn.1 $(DESTDIR)$(DOCDIR)/README.md $(DESTDIR)$(DOCDIR)/install.md
 	rm -f $(DESTDIR)$(DOCDIR)/LICENSE-MIT $(DESTDIR)$(DOCDIR)/LICENSE-APACHE
 	rm -f $(DESTDIR)$(DOCDIR)/LICENSES/GPL-2.0-only.txt

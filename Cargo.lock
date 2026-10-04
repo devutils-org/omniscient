@@ -246,6 +246,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "omn-cupti"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "omn-mcp"
 version = "0.1.0"
 dependencies = [

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# A release someone else can install: the binaries, the preload shim and the
-# manual page in one archive, with its checksum. docs/install.md is the user's
+# A release someone else can install: the binaries, the preload shim, the CUDA
+# injection library and the manual page in one archive, with its checksum. docs/install.md is the user's
 # side of this script.
 #
 #   scripts/release.sh                 build target/dist/<name>.tar.gz and its .sha256
@@ -55,6 +55,7 @@ contents() {
 bin/omn
 bin/omn-mcp
 bin/libomn_preload.so
+bin/libomn_cupti.so
 share/man/man1/omn.1
 share/doc/omn/README.md
 share/doc/omn/install.md
@@ -70,6 +71,7 @@ source_of() {
         bin/omn) echo target/release/omn ;;
         bin/omn-mcp) echo target/release/omn-mcp ;;
         bin/libomn_preload.so) echo target/release/libomn_preload.so ;;
+        bin/libomn_cupti.so) echo target/release/libomn_cupti.so ;;
         share/man/man1/omn.1) echo man/omn.1 ;;
         share/doc/omn/README.md) echo README.md ;;
         share/doc/omn/install.md) echo docs/install.md ;;
@@ -133,7 +135,7 @@ build() {
 # is unknown, and unknown is a failure, not a pass.
 glibc_floor() {
     local binaries=("$@")
-    (( ${#binaries[@]} )) || binaries=("$ROOT"/target/release/{omn,omn-mcp,libomn_preload.so})
+    (( ${#binaries[@]} )) || binaries=("$ROOT"/target/release/{omn,omn-mcp,libomn_preload.so,libomn_cupti.so})
     command -v objdump >/dev/null || {
         echo "glibc floor: unknown, there is no objdump to read it with (binutils)" >&2
         return 1
@@ -168,7 +170,7 @@ glibc_floor() {
 # one would refuse forever, since `make release` would not relink for it.
 built() {
     local artifact depinfo newer
-    for artifact in omn omn-mcp libomn_preload.so; do
+    for artifact in omn omn-mcp libomn_preload.so libomn_cupti.so; do
         depinfo="$ROOT/target/release/${artifact%.so}.d"
         artifact="$ROOT/target/release/$artifact"
         if [[ ! -f "$artifact" || ! -f "$depinfo" ]]; then
@@ -211,7 +213,7 @@ verify() {
     local scratch status=0
     scratch="$(mktemp -d "${TMPDIR:-/tmp}/omn-verify.XXXXXX")"
     tar -C "$scratch" -xzf "$archive"
-    glibc_floor "$scratch/$top"/bin/{omn,omn-mcp,libomn_preload.so} || status=1
+    glibc_floor "$scratch/$top"/bin/{omn,omn-mcp,libomn_preload.so,libomn_cupti.so} || status=1
     local doc
     for doc in README.md install.md; do
         if grep -q "glibc $GLIBC_FLOOR or later" "$scratch/$top/share/doc/omn/$doc"; then

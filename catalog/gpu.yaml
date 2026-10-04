@@ -167,16 +167,40 @@
     - {id: "vendor:l0", requires: ["level-zero"], cost: med, equivalent: true}
   modes: [trace]
   emits: [hist, topk, raw, timeline, summary]
-  targets: {pid: native, launch: native}
-  keys: [gpu, task]
-  filter_fields: [kernel, device]
+  # A launch only. CUPTI records the activity of the process it is loaded
+  # in, and the CUDA driver loads it at `cuInit` from CUDA_INJECTION64_PATH:
+  # a running process initialised CUDA long ago and cannot be given a library
+  # at exec. The first caveat says so where a refused `--pid` sends a reader.
+  targets: {launch: native}
+  # The process that launched the work. An activity record names its device,
+  # context and stream, never its thread, so `task` is the process's main
+  # thread and the device is an attribute: a `gpu` key is a fence, which a
+  # kernel record does not carry.
+  keys: [task, proc]
+  filter_fields: [kernel, op, device, stream, context, bytes, copy, pid]
   determinism: medium
   caveats:
-    - "Vendor timestamps live in another clock domain: calibration is mandatory
-       and ts_err_ns is non-zero."
+    - "A launched program only: CUPTI works inside the process that owns the
+       CUDA context, and is loaded there by the driver at `cuInit` through
+       CUDA_INJECTION64_PATH. A `--pid` target is refused for that reason, not
+       for want of a backend."
+    - "One event per kernel, memcpy and memset the device ran (`op`), named
+       by `kernel` -- the demangled kernel name, or `[memcpy HtoD]` and the
+       like -- with its time on the device as `duration_ns`. Rank them with
+       `topk:10@kernel`; count only kernels with `--filter \"op == 'kernel'\"`."
+    - "Vendor timestamps live in another clock domain: CUPTI's clock is
+       bracketed between two CLOCK_MONOTONIC reads at the start, at every
+       flush and at the end, and every event carries the measured error as a
+       non-zero ts_err_ns."
     - "CUPTI drops activity records under a launch-bound workload and reports
        how many. An overhead measured on an incomplete trace describes a tracer
-       that gave up, so the drop count belongs beside the numbers."
+       that gave up, so the drop count belongs beside the numbers: it is the
+       run's `dropped`, and a run that lost records says so."
+    - "Records arrive a buffer at a time: CUPTI hands a buffer back when it is
+       full (about a thousand kernels) or when the program exits, never sooner,
+       because forcing it hands back kernels still running, with no time. A
+       program that is killed rather than exiting loses its last buffer, and
+       the run says so."
 
 - id: gpu.api
   family: gpu
