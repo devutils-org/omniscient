@@ -9,8 +9,10 @@ against `proc.syscall`, `sched.switches`, `sched.migrations`,
 On this machine `perf sched`, `perf trace` and `perf lock` cannot run
 unprivileged (`/sys/kernel/tracing` is `drwx------ root`, and `sudo -n` is
 not granted), so their pairs skip; their parsers are tested on captures
-written in the tools' documented layouts, not produced here. The `strace`
-pairs run.
+written in the tools' documented layouts, not produced here (four captures: `perf-trace-s.txt`,
+`perf-sched-latency.txt`, `perf-sched-timehist-s.txt`,
+`perf-lock-contention.txt`). Until they are replaced by real ones, a perf
+pair is not to be trusted. The `strace` pairs run.
 
 | Tool and use | omn equivalent | Covered | Same numbers | Missing |
 |---|---|---|---|---|
@@ -22,8 +24,8 @@ pairs run.
 | `perf trace -s -- prog`: calls per syscall | as `strace -c` | in part, as `strace -c` | skips here (needs tracefs; pair `perf trace -s`, `getppid.calls`, `abs: 0`) | as `strace -c` |
 | `perf trace -s`: latency per syscall | as `strace -c -w` | in part | skips here (pair `perf trace -s`, `clock_nanosleep.mean_ns`, `rel: 0.02`) | as above; `perf trace`'s live per-event stream is `strace -T`'s row |
 | `perf sched latency`: switches per task | `omn trace sched.switches -m count -e topk` | yes | skips here (pair `perf sched latency`, `omnref-sleep.switches`, `rel: 0.15`); omn alone: 105-117 switches for 100 sleeps, three runs | -- |
-| `perf sched latency`: average and maximum scheduling delay | `omn trace sched.runqlat -e summary` | yes; omn also gives the histogram and the kernel's own `run_delay` account | skips here (pair `perf sched latency`, `omnref-sleep.avg_delay_ns`, `abs: 200000`); omn alone: a 256-565 us mean under this wave's load | the band is wide because the runs alternate; a same-run comparison (perf records the machine, omn attaches by pid) is what would tighten it |
-| `perf sched timehist -s`: sched-in count, run time, migrations per task | `sched.switches`, `sched.migrations -m count -e topk`, `cpu.util` | in part | skips here (pairs `perf sched timehist`, `omnref-sleep.sched_in` `rel: 0.15` and `omnref-sleep.migrations` `abs: 5`) | `sched.migrations` prints no series when it saw none, rather than a zero (the pair reads it as `missing: zero`) |
+| `perf sched latency`: average and maximum scheduling delay | `omn trace sched.runqlat -e summary` | in part: omn's `summary` is the kernel's `run_delay` account, not perf's wakeup to sched-in | no pair. The two are different quantities (perf's is omn's `wake_to_run_ns`, about a microsecond a wait more, and present on `-e raw` rows only), and alternate runs put the mean anywhere from 2 to 178 us here (three runs, 2026-10-04): no band both holds and catches a broken source | a `summary` (or `hist`) over `wake_to_run_ns`, so perf's quantity has an omn value; and a same-run comparison (perf records the machine, omn attaches by pid), which the runner does not offer, so the band could be a distribution's and not the machine's load |
+| `perf sched timehist -s`: sched-in count, run time, migrations per task | `sched.switches`, `sched.migrations -m count -e topk`, `cpu.util` | in part | skips here (pairs `perf sched timehist`, `omnref-sleep.sched_in` `rel: 0.15` and `omnref-migrate.migrations` `rel: 0.1`); omn alone: 203-209 migrations for `migrate.py 200`, three runs | `sched.migrations` prints no series when it saw none, rather than a zero: a reader cannot tell "none" from "not measured", so the pair's workload makes a known, non-zero count instead |
 | `perf sched timehist`: one line per switch with wait, delay and run time | `sched.wakeup`, `sched.offcpu -e raw` | in part: the waits are there, bucketed per window | no pair: the per-switch line is not a value to compare | an undrained per-switch event stream joining wakeup, wait and run, which `perf sched timehist` prints |
 | `perf sched map`, `perf sched replay` | none | no | no pair | a per-cpu occupancy view of the switches (`omn view` lanes come closest); replay is out of scope |
 | `perf lock contention -b`: contentions, total and max wait | `omn trace sched.lock -e summary` (and `-e stack` for the callers) | in part | skips here (pair `perf lock contention`, `total.contended`, `rel: 0.3`); omn alone: 6000-7400 contentions for the 8-thread mmap churn | a key by lock type (omn has `kind` and `flags` per row but `summary` keys by task) and by lock address (`perf lock contention -l`); sched.lock dropped 1 % of its rows on that churn, which it reports |

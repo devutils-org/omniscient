@@ -5,14 +5,15 @@ and `strace -T` against omn. Branch `feat/w22-perfsched`.
 
 ## What landed
 
-- `catalog/references/perfsched.yaml`: ten pairs. Three run unprivileged
-  (`strace -c` count, `strace -c -w` latency, `strace -T` latency); seven
+- `catalog/references/perfsched.yaml`: nine pairs. Three run unprivileged
+  (`strace -c` count, `strace -c -w` latency, `strace -T` latency); six
   need tracefs or BPF for the tool and are `privileged: true` (`perf trace
-  -s` x2, `perf sched latency` x2, `perf sched timehist -s` x2, `perf lock
-  contention -b`).
+  -s` x2, `perf sched latency` switches, `perf sched timehist -s` sched-in
+  and migrations, `perf lock contention -b`). The `perf sched latency`
+  average-delay pair was removed in review (see "Review").
 - `tests/reference/perfsched.rs`: six parsers (`strace_c`, `strace_t`,
   `perf_trace_summary`, `perf_sched_latency`, `perf_sched_timehist_summary`,
-  `perf_lock_contention`), ten unit tests, every parser refusing an empty
+  `perf_lock_contention`), eleven unit tests, every parser refusing an empty
   output rather than reading zero.
 - `tests/reference/captures/perfsched/`: `strace-c.txt`, `strace-c-w.txt`,
   `strace-T.txt` captured here on the workload; `perf-trace-s.txt`,
@@ -25,7 +26,9 @@ and `strace -T` against omn. Branch `feat/w22-perfsched`.
   sleeps: syscalls nothing else in the interpreter makes), `sleeper.py`
   (renames itself `omnref-sleep` so a system-wide `perf sched record` can be
   read for it alone), `contend.py` (threads churning one process's
-  `mmap_lock`).
+  `mmap_lock`), `migrate.py` (renames itself `omnref-migrate`, then
+  alternates its affinity between two cpus N times: N migrations the kernel
+  makes before each call returns).
 - `docs/replaces/perfsched.md`: fourteen rows.
 
 ## Shown vs reasoned
@@ -46,7 +49,11 @@ not through `tests/reference.rs`):
 - omn alone on the sched workloads: `sched.switches` 105-117 for 100 sleeps,
   `sched.migrations` 0-2, `sched.runqlat` mean 256-565 us, `sched.lock`
   6000-7400 contentions for `contend.py 8 2`, with 1 % of rows dropped.
-- `cargo test --test reference perfsched`: 10 passed.
+- `sched.migrations -m count -e topk` on `migrate.py 200`: 203, 205, 209
+  over three runs; 1005 for `migrate.py 1000`.
+- `sched.runqlat` on `sleeper.py 100 2`, three runs from `-e raw`: mean
+  `wake_to_run_ns` 178, 20 and 2.4 us; mean `run_delay` 174, 16 and 0 us.
+- `cargo test --test reference perfsched`: 11 passed.
 
 Reasoned, not shown: every `perf` pair's tolerance. They are set from omn's
 spread alone; the tool's side has not run here.
@@ -58,7 +65,7 @@ spread alone; the tool's side has not run here.
 - The pairs were not run through the runner: stream reference's runner was
   not on `main`. The YAML uses three fields beyond the brief's schema,
   documented at the head of the file: `compare.across: sum`,
-  `compare.missing: zero`, `compare.scale`. The `omn` path is written
+  `compare.scale` (`compare.missing: zero` was dropped in review). The `omn` path is written
   `<emit>.<field>` (`summary.count`, `summary.mean`, `topk.total`), the
   brief's example's convention.
 - No pair for `strace` argument decoding, `perf sched map`/`replay`,
@@ -102,14 +109,17 @@ it.
    when) have no equivalent.
 5. `sched.migrations -m count -e topk` prints no series when it counted
    nothing, rather than a zero: a reader cannot tell "none" from "not
-   measured".
+   measured". (Its `rest.total` prints `-0.0` when nothing is left over.)
 6. `sched.lock`'s `summary` keys by task; `perf lock contention` groups by
    lock type and caller (`-l`: by address). The rows carry `kind` and
    `flags`; a key on them would serve it.
 7. `sched.lock` dropped 1 % of its rows on an 8-thread mmap churn (reported
    as `short`); `proc.syscall` unfiltered dropped 12 of 108 rows once on the
    5000-call workload and none on three later runs.
-8. No per-switch event stream joining wakeup, queue wait and run time, which
+8. No emit summarises `sched.runqlat`'s `wake_to_run_ns`, which is the
+   quantity `perf sched latency` and `runqlat.bt` report; only `-e raw`
+   carries it, per drained row.
+9. No per-switch event stream joining wakeup, queue wait and run time, which
    `perf sched timehist` prints one line a switch.
 
 ## Decision lines
@@ -126,7 +136,7 @@ it.
 ## Requests to other streams
 
 - **reference**: support (or rename to your schema) `compare.across: sum`,
-  `compare.missing: zero` and `compare.scale`; resolve `omn: <emit>.<field>`
+  and `compare.scale`; resolve `omn: <emit>.<field>`
   against the output whose `emit` matches; run a `privileged: true`
   reference command through `sudo -n` and skip with its refusal. The perf
   sched pairs wrap two perf commands in `sh -c '...' sh`, the workload's
@@ -134,3 +144,34 @@ it.
 - **bpftrace**: `runqlat.bt` and `syscount.bt` overlap `sched.runqlat` and
   `proc.syscall`; the workloads here (`syscalls.py`, `sleeper.py`) give
   exact counts if you want them.
+
+## Review
+
+1. **`sched.migrations` pair vacuous** -- fixed. New workload
+   `migrate.py 200` (affinity alternated between two cpus 200 times), key
+   `omnref-migrate.migrations`, tolerance `rel: 0.1`; `compare.missing:
+   zero` removed from the pair and from the file's schema notes, so an omn
+   that prints no series fails. omn measured 203-209 (three runs). The
+   reviewer's 8-or-nothing on `sleeper.py` is also what made me stop
+   reading that workload for migrations.
+2. **Four hand-written perf captures** -- agreed, not fixable here: perf
+   cannot reach `/sys/kernel/tracing` unprivileged and `sudo -n perf` asks
+   for a password, so no real capture can be made in this session. Done
+   instead: the `perf lock contention` parser now ends the table at a
+   `===` line, so perf's `=== output for debug ===` block (whose histogram
+   has its own `contended: N` line) no longer makes it error, with a test;
+   the header is matched on `contended ... caller`, not `contended` alone.
+   `docs/replaces/perfsched.md` now says plainly that no perf pair is to be
+   trusted until the four captures are replaced. The commands that make
+   them are under "Privileged runs wanted"; each parser test's expected
+   numbers change with its capture.
+3. **`sched.runqlat` / `perf sched latency` compares two quantities** --
+   agreed, pair removed rather than reshaped. omn's `summary.mean` is
+   `run_delay`; perf's average is wakeup to sched-in, omn's
+   `wake_to_run_ns`, which no emit summarises (only `-e raw` rows carry
+   it). And a relative band does not hold on alternate runs here: the same
+   workload gave a `wake_to_run_ns` mean of 178, 20 and 2.4 us over three
+   runs. A pair that either passes anything or fails at random is not kept;
+   the replaces row says "no pair" and what would make one (a summary over
+   `wake_to_run_ns`, and a same-run comparison the runner does not offer).
+   Gap 8 above.
