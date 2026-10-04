@@ -26,7 +26,11 @@ medians of three runs a side, with the spread between runs as the band.
 **The runner's verdict, 2026-10-04: 21 skipped**, every pair on
 `` `/dev/nvidiactl` is not installed here ``: the machine had rebooted into a
 kernel the NVIDIA module was not built for, so no GPU work could run
-(`docs/fixes/w23-gpu.md`). No pair has yet held under the shared runner.
+(`docs/fixes/w23-gpu.md`). No pair has yet held under the shared runner,
+and none counts as held until the four `omn_*.json` captures the `omn`
+parsers are tested on are recaptured on a loaded driver: they are composed
+by hand in today's `omn` shape, not output `omn` produced (the commands are
+in the handoff's "Privileged runs wanted").
 The numbers in the table are the twenty-second wave's, measured by the
 family's own harness (since deleted) on the same pairs: two full runs, 19
 of 21 then 20 of 21, the misses changed as `docs/fixes/w22-gpu.md` says.
