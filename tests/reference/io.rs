@@ -20,7 +20,10 @@
 //!   and their mean weighted by each series' count is the tool's read mean:
 //!   `read.total_ios` and `read.clat_mean_ns` for fio, `all.r_await_ns` for
 //!   iostat. A mean per series is a mean per device, which the path grammar
-//!   can sum but not weight.
+//!   can sum but not weight. A result whose `losses` removed records
+//!   (`dropped`, `failed_reads`, `undecoded`, `throttled`) is refused with
+//!   the counts: a count would come out short and a mean would be over the
+//!   survivors, and a pair must not hold on either.
 
 use serde_json::Value;
 
@@ -173,6 +176,10 @@ fn iostat_json(stdout: &str, stderr: &str) -> Result<Values, String> {
     Ok(out)
 }
 
+/// The `losses` counters that remove records from a summary. `late_ticks`
+/// delays a periodic emit and removes nothing from a summary of events.
+const RECORD_LOSSES: [&str; 4] = ["dropped", "failed_reads", "undecoded", "throttled"];
+
 /// The requests and their mean over every series of every `summary` emit
 /// in `omn`'s results: `(count, mean weighted by count)`.
 fn omn_summary(stdout: &str, stderr: &str) -> Result<(f64, f64), String> {
@@ -181,6 +188,22 @@ fn omn_summary(stdout: &str, stderr: &str) -> Result<(f64, f64), String> {
         .get("results")
         .and_then(Value::as_array)
         .ok_or_else(|| "omn's output has no results".to_string())?;
+    let lost: Vec<String> = results
+        .iter()
+        .filter_map(|r| r.get("losses").and_then(Value::as_object))
+        .flat_map(|losses| {
+            RECORD_LOSSES.iter().filter_map(|name| {
+                let n = losses.get(*name).and_then(Value::as_f64).unwrap_or(0.0);
+                (n > 0.0).then(|| format!("{name} {n}"))
+            })
+        })
+        .collect();
+    if !lost.is_empty() {
+        return Err(format!(
+            "omn lost records ({}): its count and mean are over the survivors only",
+            lost.join(", ")
+        ));
+    }
     let mut series_seen = 0;
     let (mut count, mut weighted) = (0.0, 0.0);
     for output in results
@@ -315,6 +338,23 @@ mod tests {
         let rate_only = r#"{"results": [{"outputs": [{"emit": "rate", "series": []}]}]}"#;
         assert!(omn_summary_as_iostat(rate_only, "").is_err());
         assert!(omn_summary_as_fio("", "omn: cannot run").is_err());
+    }
+
+    #[test]
+    fn omn_summary_refuses_a_run_that_lost_records() {
+        let lossy = OMN_SYSTEM.replacen("\"dropped\": 0", "\"dropped\": 12", 1);
+        assert_ne!(lossy, OMN_SYSTEM);
+        let err = omn_summary_as_iostat(&lossy, "").unwrap_err();
+        assert!(err.contains("dropped 12"), "{err}");
+        let lossy = OMN_LAUNCH.replacen("\"undecoded\": 0", "\"undecoded\": 3", 1);
+        let err = omn_summary_as_fio(&lossy, "").unwrap_err();
+        assert!(err.contains("undecoded 3"), "{err}");
+        // A late tick removes no record: the summary still reads.
+        let late = OMN_SYSTEM.replacen("\"late_ticks\": 0", "\"late_ticks\": 1", 1);
+        assert_eq!(
+            get(&omn_summary_as_iostat(&late, "").unwrap(), "all.r_ios"),
+            23375.0
+        );
     }
 
     #[test]
