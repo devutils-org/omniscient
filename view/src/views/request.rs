@@ -2145,6 +2145,9 @@ mod tests {
             .iter_mut()
             .find(|results| results.source == "net.request")
             .expect("net.request");
+        // What the sentences below say, and nothing published as a number:
+        // the recording's own counts, all zero, would win over them.
+        results.fields.clear();
         for output in &mut results.outputs {
             if let crate::model::Output::Raw { events } = output {
                 for event in events
