@@ -1,0 +1,590 @@
+desc: --peak-inaccuracy=0 --depth=1 --detailed-freq=1000 --threshold=10 --massif-out-file=/dev/stdout
+cmd: python3 tests/reference/workloads/heap/blocks.py 64 1048576 4 0.3
+time_unit: i
+#-----------
+snapshot=0
+#-----------
+time=0
+mem_heap_B=0
+mem_heap_extra_B=0
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=1
+#-----------
+time=1521305
+mem_heap_B=2
+mem_heap_extra_B=22
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=2
+#-----------
+time=2598245
+mem_heap_B=477970
+mem_heap_extra_B=9366
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=3
+#-----------
+time=3752526
+mem_heap_B=494835
+mem_heap_extra_B=9501
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=4
+#-----------
+time=4842723
+mem_heap_B=527108
+mem_heap_extra_B=9788
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=5
+#-----------
+time=5548979
+mem_heap_B=537767
+mem_heap_extra_B=9889
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=6
+#-----------
+time=7173448
+mem_heap_B=615589
+mem_heap_extra_B=10763
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=7
+#-----------
+time=8866317
+mem_heap_B=625409
+mem_heap_extra_B=10799
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=8
+#-----------
+time=9947466
+mem_heap_B=648334
+mem_heap_extra_B=10778
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=9
+#-----------
+time=11453071
+mem_heap_B=663742
+mem_heap_extra_B=11506
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=10
+#-----------
+time=12479470
+mem_heap_B=692459
+mem_heap_extra_B=11861
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=11
+#-----------
+time=13567331
+mem_heap_B=754463
+mem_heap_extra_B=12033
+mem_stacks_B=0
+heap_tree=detailed
+n4: 754463 (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+ n1: 262144 0x4B3439E: _PyMem_RawCalloc (obmalloc.c:77)
+  n1: 262144 0x4B3439E: PyMem_RawCalloc (obmalloc.c:1028)
+   n1: 262144 0x4B3439E: arena_map_get (obmalloc.c:1789)
+    n0: 262144 0x4B3439E: arena_map_mark_used.lto_priv.0 (obmalloc.c:1844)
+ n0: 228599 in 52 places, all below massif's threshold (10.00%)
+ n1: 132648 0x4A15C4A: _PyMem_RawMalloc (obmalloc.c:63)
+  n1: 132648 0x4A15C4A: PyMem_RawMalloc (obmalloc.c:1019)
+   n1: 132648 0x4A15C4A: _PyObject_Malloc (obmalloc.c:2337)
+    n1: 132648 0x4A15C4A: PyMem_Malloc (obmalloc.c:1060)
+     n1: 132648 0x4A15C4A: new_keys_object (dictobject.c:785)
+      n0: 132648 0x4A15C4A: dictresize.constprop.0.isra.0 (dictobject.c:2093)
+ n1: 131072 0x4B3444B: _PyMem_RawCalloc (obmalloc.c:77)
+  n1: 131072 0x4B3444B: PyMem_RawCalloc (obmalloc.c:1028)
+   n1: 131072 0x4B3444B: arena_map_get (obmalloc.c:1801)
+    n0: 131072 0x4B3444B: arena_map_mark_used.lto_priv.0 (obmalloc.c:1844)
+#-----------
+snapshot=12
+#-----------
+time=14436738
+mem_heap_B=774815
+mem_heap_extra_B=12217
+mem_stacks_B=0
+heap_tree=detailed
+n4: 774815 (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+ n1: 262144 0x4B3439E: _PyMem_RawCalloc (obmalloc.c:77)
+  n1: 262144 0x4B3439E: PyMem_RawCalloc (obmalloc.c:1028)
+   n1: 262144 0x4B3439E: arena_map_get (obmalloc.c:1789)
+    n0: 262144 0x4B3439E: arena_map_mark_used.lto_priv.0 (obmalloc.c:1844)
+ n0: 249719 in 52 places, all below massif's threshold (10.00%)
+ n1: 131880 0x4A15C4A: _PyMem_RawMalloc (obmalloc.c:63)
+  n1: 131880 0x4A15C4A: PyMem_RawMalloc (obmalloc.c:1019)
+   n1: 131880 0x4A15C4A: _PyObject_Malloc (obmalloc.c:2337)
+    n1: 131880 0x4A15C4A: PyMem_Malloc (obmalloc.c:1060)
+     n1: 131880 0x4A15C4A: new_keys_object (dictobject.c:785)
+      n0: 131880 0x4A15C4A: dictresize.constprop.0.isra.0 (dictobject.c:2093)
+ n1: 131072 0x4B3444B: _PyMem_RawCalloc (obmalloc.c:77)
+  n1: 131072 0x4B3444B: PyMem_RawCalloc (obmalloc.c:1028)
+   n1: 131072 0x4B3444B: arena_map_get (obmalloc.c:1801)
+    n0: 131072 0x4B3444B: arena_map_mark_used.lto_priv.0 (obmalloc.c:1844)
+#-----------
+snapshot=13
+#-----------
+time=15776109
+mem_heap_B=828060
+mem_heap_extra_B=12956
+mem_stacks_B=0
+heap_tree=detailed
+n4: 828060 (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+ n0: 299924 in 57 places, all below massif's threshold (10.00%)
+ n1: 262144 0x4B3439E: _PyMem_RawCalloc (obmalloc.c:77)
+  n1: 262144 0x4B3439E: PyMem_RawCalloc (obmalloc.c:1028)
+   n1: 262144 0x4B3439E: arena_map_get (obmalloc.c:1789)
+    n0: 262144 0x4B3439E: arena_map_mark_used.lto_priv.0 (obmalloc.c:1844)
+ n1: 134920 0x4A15C4A: _PyMem_RawMalloc (obmalloc.c:63)
+  n1: 134920 0x4A15C4A: PyMem_RawMalloc (obmalloc.c:1019)
+   n1: 134920 0x4A15C4A: _PyObject_Malloc (obmalloc.c:2337)
+    n1: 134920 0x4A15C4A: PyMem_Malloc (obmalloc.c:1060)
+     n1: 134920 0x4A15C4A: new_keys_object (dictobject.c:785)
+      n0: 134920 0x4A15C4A: dictresize.constprop.0.isra.0 (dictobject.c:2093)
+ n1: 131072 0x4B3444B: _PyMem_RawCalloc (obmalloc.c:77)
+  n1: 131072 0x4B3444B: PyMem_RawCalloc (obmalloc.c:1028)
+   n1: 131072 0x4B3444B: arena_map_get (obmalloc.c:1801)
+    n0: 131072 0x4B3444B: arena_map_mark_used.lto_priv.0 (obmalloc.c:1844)
+#-----------
+snapshot=14
+#-----------
+time=16734528
+mem_heap_B=807961
+mem_heap_extra_B=12999
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=15
+#-----------
+time=17969106
+mem_heap_B=819314
+mem_heap_extra_B=13230
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=16
+#-----------
+time=18681435
+mem_heap_B=837624
+mem_heap_extra_B=13424
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=17
+#-----------
+time=19847696
+mem_heap_B=886315
+mem_heap_extra_B=13509
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=18
+#-----------
+time=21373982
+mem_heap_B=864114
+mem_heap_extra_B=13694
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=19
+#-----------
+time=22587414
+mem_heap_B=1339593
+mem_heap_extra_B=14055
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=20
+#-----------
+time=24307861
+mem_heap_B=1374610
+mem_heap_extra_B=14502
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=21
+#-----------
+time=25484564
+mem_heap_B=1388092
+mem_heap_extra_B=14596
+mem_stacks_B=0
+heap_tree=detailed
+n4: 1388092 (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+ n0: 485937 in 62 places, all below massif's threshold (10.00%)
+ n1: 436339 0x4A0D1CF: _PyMem_RawMalloc (obmalloc.c:63)
+  n1: 436339 0x4A0D1CF: PyMem_RawMalloc (obmalloc.c:1019)
+   n1: 436339 0x4A0D1CF: _PyObject_Malloc (obmalloc.c:2337)
+    n0: 436339 0x4A0D1CF: PyMem_Malloc (obmalloc.c:1060)
+ n1: 262144 0x4B3439E: _PyMem_RawCalloc (obmalloc.c:77)
+  n1: 262144 0x4B3439E: PyMem_RawCalloc (obmalloc.c:1028)
+   n1: 262144 0x4B3439E: arena_map_get (obmalloc.c:1789)
+    n0: 262144 0x4B3439E: arena_map_mark_used.lto_priv.0 (obmalloc.c:1844)
+ n1: 203672 0x4A15C4A: _PyMem_RawMalloc (obmalloc.c:63)
+  n1: 203672 0x4A15C4A: PyMem_RawMalloc (obmalloc.c:1019)
+   n1: 203672 0x4A15C4A: _PyObject_Malloc (obmalloc.c:2337)
+    n1: 203672 0x4A15C4A: PyMem_Malloc (obmalloc.c:1060)
+     n1: 203672 0x4A15C4A: new_keys_object (dictobject.c:785)
+      n0: 203672 0x4A15C4A: dictresize.constprop.0.isra.0 (dictobject.c:2093)
+#-----------
+snapshot=22
+#-----------
+time=27039579
+mem_heap_B=1398731
+mem_heap_extra_B=14709
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=23
+#-----------
+time=28154497
+mem_heap_B=1408691
+mem_heap_extra_B=14797
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=24
+#-----------
+time=29420295
+mem_heap_B=1441219
+mem_heap_extra_B=15045
+mem_stacks_B=0
+heap_tree=detailed
+n4: 1441219 (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+ n0: 514463 in 62 places, all below massif's threshold (10.00%)
+ n1: 436340 0x4A0D1CF: _PyMem_RawMalloc (obmalloc.c:63)
+  n1: 436340 0x4A0D1CF: PyMem_RawMalloc (obmalloc.c:1019)
+   n1: 436340 0x4A0D1CF: _PyObject_Malloc (obmalloc.c:2337)
+    n0: 436340 0x4A0D1CF: PyMem_Malloc (obmalloc.c:1060)
+ n1: 262144 0x4B3439E: _PyMem_RawCalloc (obmalloc.c:77)
+  n1: 262144 0x4B3439E: PyMem_RawCalloc (obmalloc.c:1028)
+   n1: 262144 0x4B3439E: arena_map_get (obmalloc.c:1789)
+    n0: 262144 0x4B3439E: arena_map_mark_used.lto_priv.0 (obmalloc.c:1844)
+ n1: 228272 0x4A15C4A: _PyMem_RawMalloc (obmalloc.c:63)
+  n1: 228272 0x4A15C4A: PyMem_RawMalloc (obmalloc.c:1019)
+   n1: 228272 0x4A15C4A: _PyObject_Malloc (obmalloc.c:2337)
+    n1: 228272 0x4A15C4A: PyMem_Malloc (obmalloc.c:1060)
+     n1: 228272 0x4A15C4A: new_keys_object (dictobject.c:785)
+      n0: 228272 0x4A15C4A: dictresize.constprop.0.isra.0 (dictobject.c:2093)
+#-----------
+snapshot=25
+#-----------
+time=30284612
+mem_heap_B=1446697
+mem_heap_extra_B=15031
+mem_stacks_B=0
+heap_tree=detailed
+n4: 1446697 (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+ n0: 518333 in 63 places, all below massif's threshold (10.00%)
+ n1: 437108 0x4A0D1CF: _PyMem_RawMalloc (obmalloc.c:63)
+  n1: 437108 0x4A0D1CF: PyMem_RawMalloc (obmalloc.c:1019)
+   n1: 437108 0x4A0D1CF: _PyObject_Malloc (obmalloc.c:2337)
+    n0: 437108 0x4A0D1CF: PyMem_Malloc (obmalloc.c:1060)
+ n1: 262144 0x4B3439E: _PyMem_RawCalloc (obmalloc.c:77)
+  n1: 262144 0x4B3439E: PyMem_RawCalloc (obmalloc.c:1028)
+   n1: 262144 0x4B3439E: arena_map_get (obmalloc.c:1789)
+    n0: 262144 0x4B3439E: arena_map_mark_used.lto_priv.0 (obmalloc.c:1844)
+ n1: 229112 0x4A15C4A: _PyMem_RawMalloc (obmalloc.c:63)
+  n1: 229112 0x4A15C4A: PyMem_RawMalloc (obmalloc.c:1019)
+   n1: 229112 0x4A15C4A: _PyObject_Malloc (obmalloc.c:2337)
+    n1: 229112 0x4A15C4A: PyMem_Malloc (obmalloc.c:1060)
+     n1: 229112 0x4A15C4A: new_keys_object (dictobject.c:785)
+      n0: 229112 0x4A15C4A: dictresize.constprop.0.isra.0 (dictobject.c:2093)
+#-----------
+snapshot=26
+#-----------
+time=31589338
+mem_heap_B=1483692
+mem_heap_extra_B=15100
+mem_stacks_B=0
+heap_tree=detailed
+n4: 1483692 (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+ n0: 549200 in 64 places, all below massif's threshold (10.00%)
+ n1: 440948 0x4A0D1CF: _PyMem_RawMalloc (obmalloc.c:63)
+  n1: 440948 0x4A0D1CF: PyMem_RawMalloc (obmalloc.c:1019)
+   n1: 440948 0x4A0D1CF: _PyObject_Malloc (obmalloc.c:2337)
+    n0: 440948 0x4A0D1CF: PyMem_Malloc (obmalloc.c:1060)
+ n1: 262144 0x4B3439E: _PyMem_RawCalloc (obmalloc.c:77)
+  n1: 262144 0x4B3439E: PyMem_RawCalloc (obmalloc.c:1028)
+   n1: 262144 0x4B3439E: arena_map_get (obmalloc.c:1789)
+    n0: 262144 0x4B3439E: arena_map_mark_used.lto_priv.0 (obmalloc.c:1844)
+ n1: 231400 0x4A15C4A: _PyMem_RawMalloc (obmalloc.c:63)
+  n1: 231400 0x4A15C4A: PyMem_RawMalloc (obmalloc.c:1019)
+   n1: 231400 0x4A15C4A: _PyObject_Malloc (obmalloc.c:2337)
+    n1: 231400 0x4A15C4A: PyMem_Malloc (obmalloc.c:1060)
+     n1: 231400 0x4A15C4A: new_keys_object (dictobject.c:785)
+      n0: 231400 0x4A15C4A: dictresize.constprop.0.isra.0 (dictobject.c:2093)
+#-----------
+snapshot=27
+#-----------
+time=32184084
+mem_heap_B=1491884
+mem_heap_extra_B=15108
+mem_stacks_B=0
+heap_tree=detailed
+n4: 1491884 (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+ n0: 557392 in 64 places, all below massif's threshold (10.00%)
+ n1: 440948 0x4A0D1CF: _PyMem_RawMalloc (obmalloc.c:63)
+  n1: 440948 0x4A0D1CF: PyMem_RawMalloc (obmalloc.c:1019)
+   n1: 440948 0x4A0D1CF: _PyObject_Malloc (obmalloc.c:2337)
+    n0: 440948 0x4A0D1CF: PyMem_Malloc (obmalloc.c:1060)
+ n1: 262144 0x4B3439E: _PyMem_RawCalloc (obmalloc.c:77)
+  n1: 262144 0x4B3439E: PyMem_RawCalloc (obmalloc.c:1028)
+   n1: 262144 0x4B3439E: arena_map_get (obmalloc.c:1789)
+    n0: 262144 0x4B3439E: arena_map_mark_used.lto_priv.0 (obmalloc.c:1844)
+ n1: 231400 0x4A15C4A: _PyMem_RawMalloc (obmalloc.c:63)
+  n1: 231400 0x4A15C4A: PyMem_RawMalloc (obmalloc.c:1019)
+   n1: 231400 0x4A15C4A: _PyObject_Malloc (obmalloc.c:2337)
+    n1: 231400 0x4A15C4A: PyMem_Malloc (obmalloc.c:1060)
+     n1: 231400 0x4A15C4A: new_keys_object (dictobject.c:785)
+      n0: 231400 0x4A15C4A: dictresize.constprop.0.isra.0 (dictobject.c:2093)
+#-----------
+snapshot=28
+#-----------
+time=33431564
+mem_heap_B=1560310
+mem_heap_extra_B=15154
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=29
+#-----------
+time=34821415
+mem_heap_B=1608915
+mem_heap_extra_B=15389
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=30
+#-----------
+time=35789513
+mem_heap_B=1580210
+mem_heap_extra_B=15390
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=31
+#-----------
+time=37343001
+mem_heap_B=1707756
+mem_heap_extra_B=15820
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=32
+#-----------
+time=38355696
+mem_heap_B=1728394
+mem_heap_extra_B=16014
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=33
+#-----------
+time=39347756
+mem_heap_B=1603703
+mem_heap_extra_B=16153
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=34
+#-----------
+time=40223364
+mem_heap_B=1644614
+mem_heap_extra_B=16538
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=35
+#-----------
+time=41683797
+mem_heap_B=1665275
+mem_heap_extra_B=16725
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=36
+#-----------
+time=42624068
+mem_heap_B=1826753
+mem_heap_extra_B=17175
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=37
+#-----------
+time=44099066
+mem_heap_B=1730258
+mem_heap_extra_B=17614
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=38
+#-----------
+time=45018836
+mem_heap_B=1754122
+mem_heap_extra_B=17894
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=39
+#-----------
+time=46343992
+mem_heap_B=1788946
+mem_heap_extra_B=18278
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=40
+#-----------
+time=47447867
+mem_heap_B=1801450
+mem_heap_extra_B=18422
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=41
+#-----------
+time=49218267
+mem_heap_B=21722144
+mem_heap_extra_B=18592
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=42
+#-----------
+time=50498987
+mem_heap_B=40596512
+mem_heap_extra_B=18736
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=43
+#-----------
+time=51352767
+mem_heap_B=53179424
+mem_heap_extra_B=18832
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=44
+#-----------
+time=52493981
+mem_heap_B=68908064
+mem_heap_extra_B=18952
+mem_stacks_B=0
+heap_tree=peak
+n2: 68908064 (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+ n0: 67108864 0x5C87DB5: ffi_call_unix64 (unix64.S:105)
+ n0: 1799200 in 91 places, all below massif's threshold (10.00%)
+#-----------
+snapshot=45
+#-----------
+time=54773846
+mem_heap_B=5912342
+mem_heap_extra_B=18218
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=46
+#-----------
+time=56878905
+mem_heap_B=5873649
+mem_heap_extra_B=18087
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=47
+#-----------
+time=58172106
+mem_heap_B=5624648
+mem_heap_extra_B=14800
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=48
+#-----------
+time=59857817
+mem_heap_B=5330835
+mem_heap_extra_B=14341
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=49
+#-----------
+time=60276173
+mem_heap_B=5236668
+mem_heap_extra_B=13452
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=50
+#-----------
+time=60768255
+mem_heap_B=5187057
+mem_heap_extra_B=12911
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=51
+#-----------
+time=61561976
+mem_heap_B=5043468
+mem_heap_extra_B=12020
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=52
+#-----------
+time=61989629
+mem_heap_B=4976462
+mem_heap_extra_B=11458
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=53
+#-----------
+time=62408624
+mem_heap_B=4863830
+mem_heap_extra_B=10162
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=54
+#-----------
+time=62875291
+mem_heap_B=4812700
+mem_heap_extra_B=9620
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=55
+#-----------
+time=63313695
+mem_heap_B=4797994
+mem_heap_extra_B=9470
+mem_stacks_B=0
+heap_tree=empty
+#-----------
+snapshot=56
+#-----------
+time=64402143
+mem_heap_B=4672259
+mem_heap_extra_B=9317
+mem_stacks_B=0
+heap_tree=empty
