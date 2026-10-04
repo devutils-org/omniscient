@@ -879,6 +879,12 @@ requests:
 const CHURN: &str = r#"
 import os, sys, time
 path, mib = sys.argv[1], int(sys.argv[2])
+own = open("/proc/self/cgroup").read().split("0::", 1)[1].strip()
+def stat():
+    return dict(line.split() for line in open("/sys/fs/cgroup" + own + "/memory.stat"))
+# The cgroup's pswpin is cumulative and the test runs the program twice in the
+# same cgroup, so what this run swapped in is a delta from here.
+swapped_before = int(stat().get("pswpin", 0))
 t0 = time.monotonic_ns()
 with open(path, "wb") as f:
     for _ in range(mib):
@@ -890,9 +896,6 @@ with open(path, "rb") as f:
         pass
 t2 = time.monotonic_ns()
 io = dict(line.split(": ") for line in open("/proc/self/io").read().splitlines())
-own = open("/proc/self/cgroup").read().split("0::", 1)[1].strip()
-def stat():
-    return dict(line.split() for line in open("/sys/fs/cgroup" + own + "/memory.stat"))
 at_end = stat()
 # Under a limit, the window ends when the cgroup's own writeback has: what the
 # limit forced onto the device is on it, not still in the flusher's hands.
@@ -907,7 +910,7 @@ while time.monotonic() < deadline:
         break
     time.sleep(0.01)
 os.unlink(path)
-swapped_in = int(stat().get("pswpin", 0))
+swapped_in = int(stat().get("pswpin", 0)) - swapped_before
 # Done: what came after the last read -- these counters, the wait, the unlink
 # -- can fault and reclaim too, measured under load at 256 pages, so the
 # program's brackets end here rather than at its last read.
@@ -1161,8 +1164,8 @@ struct Churned {
     /// When the cgroup's `file_dirty` and `file_writeback` were both back to
     /// zero, polled by the program itself; 0 if they never were in 20 s.
     drained_ns: u64,
-    /// Pages the cgroup swapped in, by its own `memory.stat`, when the program
-    /// ended.
+    /// Pages the cgroup swapped in while the program ran, by its own
+    /// `memory.stat`: `pswpin` at its end less `pswpin` at its start.
     swapped_in: u64,
     /// When the program was done: after its last read, the counters it read,
     /// the wait for the writeback and the unlink, just before it reported.
@@ -1232,7 +1235,14 @@ fn churned(output: &Output, cgroup: &Cgroup) -> Result<Churned, String> {
             )
         })?;
     let fields: Vec<&str> = line.split_whitespace().collect();
-    let number = |at: usize| -> u64 { fields.get(at).and_then(|f| f.parse().ok()).unwrap_or(0) };
+    // Every field is a count or a timestamp: one that is missing, negative or
+    // not a number is a defect of the program or of this test, never a zero.
+    let number = |at: usize| -> u64 {
+        let field = fields.get(at).copied().unwrap_or("<missing>");
+        field.parse().unwrap_or_else(|_| {
+            panic!("field {at} of the program's report is {field:?}, not a count: {line}")
+        })
+    };
     Ok(Churned {
         pid: number(2),
         write_ns: number(4),
@@ -1351,6 +1361,10 @@ struct Ladder {
     /// TEMPORAL: writes to the file's device while the program ran, by whom.
     writes_meanwhile: u64,
     writes_by_program: u64,
+    /// TEMPORAL: of those, the writes up to the program's last read -- what
+    /// the limit forced out before the program finished, the cgroup's own
+    /// writeback drain excluded.
+    writes_by_end: u64,
     writers: BTreeMap<String, u64>,
     /// What `io.bytes` saw the disk move, over the whole window.
     device_read: u64,
@@ -1403,6 +1417,9 @@ fn ladder(run: &ReclaimRun, scratch: &Scratch, cgroup_id: u64) -> Ladder {
             && ts <= churned.settled_ns()
         {
             ladder.writes_meanwhile += bytes;
+            if ts <= churned.end_ns {
+                ladder.writes_by_end += bytes;
+            }
             if tid == churned.pid {
                 ladder.writes_by_program += bytes;
             }
@@ -1538,8 +1555,9 @@ fn print_ladder(title: &str, run: &ReclaimRun, ladder: &Ladder, scratch: &Scratc
     );
     eprintln!(
         "  TEMPORAL     {:>7.1} MiB written to the file's device while the program ran, {:.1} MiB \
-         of it submitted by the program; by {:?}",
+         of it by its last read, {:.1} MiB submitted by the program; by {:?}",
         mib(ladder.writes_meanwhile as f64),
+        mib(ladder.writes_by_end as f64),
         mib(ladder.writes_by_program as f64),
         ladder
             .writers
@@ -1610,8 +1628,9 @@ fn print_ladder(title: &str, run: &ReclaimRun, ladder: &Ladder, scratch: &Scratc
 /// - **TEMPORAL**: to stay within 32 MiB the cgroup had to write back at least
 ///   64 of the 96 dirty mebibytes before it could drop them, so at least that
 ///   much reached the devices of the file's filesystem between the program's
-///   first write and its cgroup's writeback drained -- and the block layer
-///   does not say it was the program's.
+///   first write and its last read -- and the block layer does not say it was
+///   the program's. By the time the cgroup's writeback drained, the whole
+///   file had: that is the trace's capture, not the limit's doing.
 ///
 /// The session launches the program, so the run's gate holds it until every
 /// collector is attached and its exit ends the run; it exits once its
@@ -1831,14 +1850,38 @@ fn a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_it
         );
     }
 
-    // TEMPORAL: the writeback the limit forced into the window.
+    // TEMPORAL: the writeback the limit forced into the window. Up to the
+    // last read, not to the drain: by the drain the program waits for, the
+    // whole file is written back whatever the limit did, so only the writes
+    // before the last read are the limit's. What was still dirty or under
+    // writeback then is at most what the limit let the cgroup keep.
     if !scratch.partitions.is_empty() {
         assert!(
-            under.writes_meanwhile >= evicted_at_least - evicted_at_least / 10,
+            under.writes_by_end >= evicted_at_least - evicted_at_least / 10,
             "to stay within {LIMIT_MIB} MiB the cgroup had to write back at least {} MiB of the \
              {WRITTEN_MIB} it dirtied before it could drop them, and {:.1} MiB reached {} \
-             between its first write and its writeback drained",
+             between its first write and its last read (the cgroup then held {:.1} MiB dirty \
+             and {:.1} MiB under writeback)",
             WRITTEN_MIB - LIMIT_MIB,
+            mib(under.writes_by_end as f64),
+            scratch.partitions.join(", "),
+            mib(capped.churned.dirty_at_end as f64),
+            mib(capped.churned.writeback_at_end as f64)
+        );
+        assert!(
+            capped.churned.dirty_at_end + capped.churned.writeback_at_end <= LIMIT_MIB << 20,
+            "capped at {LIMIT_MIB} MiB, the cgroup's memory.stat held {:.1} MiB dirty and {:.1} \
+             MiB under writeback at the program's last read: more than the limit lets it keep",
+            mib(capped.churned.dirty_at_end as f64),
+            mib(capped.churned.writeback_at_end as f64)
+        );
+        // The capture: by the drain, every dirtied byte was written back.
+        let written = WRITTEN_MIB << 20;
+        assert!(
+            under.writes_meanwhile >= written - written / 10,
+            "the cgroup's file_dirty and file_writeback were back to 0 before the program \
+             unlinked its {WRITTEN_MIB} MiB file, so all of it was written back, and {:.1} MiB \
+             reached {} between its first write and that drain",
             mib(under.writes_meanwhile as f64),
             scratch.partitions.join(", ")
         );
