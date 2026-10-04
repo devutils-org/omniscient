@@ -70,6 +70,8 @@ had `in_bytes` 368 640 with `in_zero_bytes` 217 088, so it may.
    `min`/`mean`: `-d 4s` on a 22 % busy machine gave `mean` 0.155 against
    0.19 over the four real windows. The event count also changes with the
    emits (`-e raw` alone 4 events, `-e summary,raw` 3, over `-d 3s`).
+   Held by `poll_leading_event_is_held_as_a_known_defect` in
+   `tests/reference/sysstat.rs`, not by a pair (see "Review").
 3. **`cpu.pressure` names its attributes unlike its siblings** (`some`,
    `avg10`, `total_us`, `full_avg10`, `full_total_us` against
    `stall_ratio`, `some_avg10`, `stalled_ns`, `full_stall_ratio`) and has no
@@ -127,7 +129,42 @@ If sysstat is missing on another machine: `sudo pacman -S sysstat numactl`.
   `pairs` module of `tests/reference/sysstat.rs` can be deleted.
 - **src (after the wave)**: defects 1 to 3 above; sources 4 to 8.
 
+## Review
+
+The reviewer: the system `cpu.util` and `cpu.pressure` pairs pass only
+because `omn_value` leaves out the leading event of defect 2; no pair compares
+what omn reports (`summary.mean`), and none carries a `known_defect`, so a
+fix or a regression would go unnoticed. One `summary.mean` pair marked
+`known_defect` was suggested.
+
+The gap is real; the suggested pair cannot hold it. Measured on 2026-10-04
+(`cpu.util --system -e summary,raw`, ten runs of `-d 2s` idle and ten under
+twelve spinners on 24 cpus): the leading event is present in only about
+half to four fifths of the runs (one in six in one batch of six at
+poll@100ms), and its share is 0, 0.5, 0.67 or 1. Runs without it, or with a
+share near the true one, give a `summary.mean` that agrees (0.135 vs 0.135,
+0.603 vs 0.571); others miss by 0.04 to 0.2. A `known_defect` pair would
+therefore alternate between KNOWN and "agrees now; drop its known_defect",
+which is a flaky test, not a hold.
+
+What landed instead: `poll_leading_event_is_held_as_a_known_defect`, which
+runs each source at poll@50ms for 175 ms and reads whether the first raw event
+is stamped within half a period of `window.opened_ns`. `cpu.util` and
+`cpu.pressure` must show it within forty runs (it usually shows in the first
+one or two; three runs took 2.6 to 3.5 s), or the test fails saying defect 2
+looks fixed and the skip in `omn_value` must go; `mem.pressure` and
+`io.pressure` must not show it in five runs, or it fails saying the defect has
+spread. That covers both directions the reviewer named. A `summary.mean` pair
+becomes possible once defect 2 is fixed, and belongs with that fix.
+
 ## The tests
+- Review round (2026-10-04): `cargo test --test reference sysstat`, 13 tests;
+  the new hold test passed three times on its own (2.6 to 3.5 s). The pairs
+  test failed once on `io.pressure` `some` (omn 0.208 vs 0.183, |diff| 0.025
+  against abs 0.02, on a machine running other streams' I/O) and passed on
+  the one rerun: a window misalignment of a few ms under heavy I/O pressure,
+  not this change. If it recurs, the tolerance wants scaling with the share.
+  Clippy and fmt clean.
 
 - `cargo test --test reference sysstat`: 12 passed (11 parser tests and the
   pairs test: twelve PASS, one KNOWN), 56 s.
