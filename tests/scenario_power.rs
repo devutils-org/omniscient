@@ -63,6 +63,32 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// What this machine lacks for `backend` of `source`, as `omn list` probes it
+/// -- the requirements it calls missing -- or `None` when nothing it needs is
+/// missing here. A pinned backend is refused for the machine before the build
+/// (`DECISIONS.md`, "one order for unbuilt and missing"), so which refusal a
+/// pin earns is this answer's.
+fn lacks_here(source: &str, backend: &str) -> Option<Vec<String>> {
+    let listing = run(&["list", source, "--format", "json"]);
+    assert!(listing.status.success(), "{}", stderr(&listing));
+    let entries: serde_json::Value =
+        serde_json::from_str(&stdout(&listing)).expect("the listing is JSON");
+    let probed = entries[0]["probes"]
+        .as_array()
+        .expect("the listing carries each backend's probes")
+        .iter()
+        .find(|probed| probed["backend"] == backend)
+        .unwrap_or_else(|| panic!("`{source}` lists no backend `{backend}`"));
+    let missing: Vec<String> = probed["requirements"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|requirement| requirement["probe"]["state"] == "missing")
+        .filter_map(|requirement| requirement["needs"].as_str().map(str::to_owned))
+        .collect();
+    (!missing.is_empty()).then_some(missing)
+}
+
 /// Runs a session that is not shipped as a file, from standard input.
 ///
 /// `tests/cli.rs::the_shipped_examples_validate` requires every session in
@@ -1467,16 +1493,19 @@ fn forced_watts(backend: &str) -> Option<f64> {
 }
 
 /// Where a chain has one implemented backend and others declared, the
-/// comparison is with the refusal: pinning the unimplemented one must say the
-/// build does not have it, not that the run failed.
+/// comparison is with the refusal: pinning the unimplemented one must say
+/// which road is missing, not that the run failed.
 ///
-/// Three of this family's ten backends are declared and unwritten -- the eBPF
-/// route into `power.freq`, `power.cstate` and `power.throttle`, and the
+/// Several of this family's backends are declared and unwritten -- the eBPF
+/// routes into `power.freq`, `power.cstate` and `power.throttle`, and the
 /// aperf/mperf route into `power.freq`. A reader who pins one of them is
 /// asking "what would this cost through the other road?", and has to be told
-/// which road is missing rather than handed a failure.
+/// which road is missing rather than handed a failure. Which absence is named
+/// first is the chain's order (`DECISIONS.md`, "one order for unbuilt and
+/// missing"): the machine's where it lacks something the backend needs
+/// (exit 1, as the walk says it), the build's where it lacks nothing (exit 3).
 #[test]
-fn pinning_a_backend_this_build_does_not_have_names_it_and_exits_three() {
+fn pinning_a_backend_this_build_does_not_have_names_it_in_the_chains_order() {
     let catalog = Catalog::embedded().expect("the embedded catalog loads");
     let written = omn::collect::coverage();
     let mut checked = 0;
@@ -1504,17 +1533,39 @@ fn pinning_a_backend_this_build_does_not_have_names_it_and_exits_three() {
                 &forced,
             ]);
             let message = stderr(&attempt);
-            assert_eq!(
-                attempt.status.code(),
-                Some(EXIT_NO_COLLECTOR),
-                "pinning `{}` on `{source}` is a build that lacks a mechanism, not a run that \
-                 broke: {message}",
-                backend.id
-            );
-            assert!(
-                message.contains(&backend.id) && message.contains("no collector is written"),
-                "the refusal has to name the backend that is missing: {message}"
-            );
+            if let Some(lacks) = lacks_here(&source, &backend.id) {
+                assert_eq!(
+                    attempt.status.code(),
+                    Some(EXIT_FAILED),
+                    "pinning `{}` on `{source}`, which lacks {lacks:?} here, is the machine's \
+                     refusal before the build's: {message}",
+                    backend.id
+                );
+                assert!(
+                    message.contains(&format!("{} (pinned with --backend force:", backend.id))
+                        && lacks
+                            .iter()
+                            .all(|needs| message.contains(&format!("{needs}: missing"))),
+                    "the refusal has to name the backend and what it lacks here: {message}"
+                );
+                assert!(
+                    !message.contains("no collector is written"),
+                    "a machine that cannot serve the backend is not sent after its collector: \
+                     {message}"
+                );
+            } else {
+                assert_eq!(
+                    attempt.status.code(),
+                    Some(EXIT_NO_COLLECTOR),
+                    "pinning `{}` on `{source}` is a build that lacks a mechanism, not a run \
+                     that broke: {message}",
+                    backend.id
+                );
+                assert!(
+                    message.contains(&backend.id) && message.contains("no collector is written"),
+                    "the refusal has to name the backend that is missing: {message}"
+                );
+            }
             assert!(
                 message.contains("--dump-request") || message.contains("valid"),
                 "and has to say the request itself was fine: {message}"
@@ -1810,34 +1861,64 @@ fn a_request_that_cannot_mean_anything_names_what_it_cannot_mean() {
 /// What it found is in `docs/scenarios/power.md`: the first two share exit 2,
 /// so only the message tells them apart. The messages do, which is what is
 /// asserted here.
+///
+/// The build's refusal is reached through a pinned backend this build has no
+/// collector for and this machine lacks nothing for: a pinned backend that
+/// lacks something here is the machine's first (`DECISIONS.md`, "one order for
+/// unbuilt and missing"), so which one qualifies is asked of `omn list`, not
+/// written down.
 #[test]
 fn the_three_refusals_are_told_apart_by_what_they_say() {
     let cannot_mean = run(&["power.energy", "--pid", "1", "-m", "poll", "-e", "timeline"]);
-    let not_built = run(&[
-        "power.freq",
-        "--system",
-        "-m",
-        "poll@200ms",
-        "-e",
-        "summary",
-        "-d",
-        "200ms",
-        "--backend",
-        "force:bpf:tp",
-    ]);
-
     assert_eq!(cannot_mean.status.code(), Some(EXIT_REFUSED));
-    assert_eq!(not_built.status.code(), Some(EXIT_NO_COLLECTOR));
     assert!(
         !stderr(&cannot_mean).contains("no collector"),
         "a request that cannot mean anything is not a missing mechanism: {}",
         stderr(&cannot_mean)
     );
-    assert!(
-        stderr(&not_built).contains("The request itself is valid"),
-        "a missing mechanism has to say the request was fine: {}",
-        stderr(&not_built)
-    );
+
+    let catalog = Catalog::embedded().expect("the embedded catalog loads");
+    let written = omn::collect::coverage();
+    let unbuilt = catalog.family("power").into_iter().find_map(|entry| {
+        let source = entry.id.to_string();
+        let have = written.get(source.as_str()).cloned().unwrap_or_default();
+        let backend = entry.backends.iter().find(|backend| {
+            !have.contains(&backend.id.as_str()) && lacks_here(&source, &backend.id).is_none()
+        })?;
+        Some((source, backend.id.clone(), mode_argument(entry.modes[0])))
+    });
+    match unbuilt {
+        Some((source, backend, mode)) => {
+            let forced = format!("force:{backend}");
+            let not_built = run(&[
+                &source,
+                "--system",
+                "-m",
+                mode,
+                "-e",
+                "summary",
+                "-d",
+                "200ms",
+                "--backend",
+                &forced,
+            ]);
+            assert_eq!(
+                not_built.status.code(),
+                Some(EXIT_NO_COLLECTOR),
+                "`{source}` pinned to `{backend}`: {}",
+                stderr(&not_built)
+            );
+            assert!(
+                stderr(&not_built).contains("The request itself is valid"),
+                "a missing mechanism has to say the request was fine: {}",
+                stderr(&not_built)
+            );
+        }
+        None => eprintln!(
+            "skipped the build's refusal: every power backend this build lacks also lacks \
+             something on this machine, so each pin is the machine's to refuse first"
+        ),
+    }
 
     // The third: a machine that cannot serve a valid request. Provoked with a
     // copy of the binary, because copying drops the file capabilities and an

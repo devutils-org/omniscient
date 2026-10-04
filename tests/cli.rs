@@ -1662,6 +1662,28 @@ fn a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backe
     let undeclared = run(&args);
     if stderr(&undeclared).contains("does not attach") {
         let message = stderr(&undeclared);
+        // The hint and the pin give one answer for the backend they name
+        // (`DECISIONS.md`, "one order for unbuilt and missing"): the machine's
+        // where it lacks something `bpf:raw_tp` needs -- the capabilities, on
+        // a binary that does not carry them -- and the build's where it lacks
+        // nothing.
+        let mut pinned = args.to_vec();
+        pinned[3] = "force:bpf:raw_tp";
+        let forced = run(&pinned);
+        if message.contains("`bpf:raw_tp` does, and this machine cannot run it") {
+            assert_eq!(
+                undeclared.status.code(),
+                Some(EXIT_UNAVAILABLE),
+                "{message}"
+            );
+            assert_eq!(
+                forced.status.code(),
+                Some(EXIT_UNAVAILABLE),
+                "the hint called `bpf:raw_tp` the machine's, and pinning it said: {}",
+                stderr(&forced)
+            );
+            return;
+        }
         assert!(
             message.contains("`bpf:raw_tp` does, and this build has no collector for it"),
             "{message}"
@@ -1670,6 +1692,12 @@ fn a_request_keyed_on_what_its_backend_does_not_attach_is_refused_with_the_backe
             undeclared.status.code(),
             Some(EXIT_NOT_IMPLEMENTED),
             "{message}"
+        );
+        assert!(
+            forced.status.code() == Some(EXIT_NOT_IMPLEMENTED)
+                && stderr(&forced).contains("no collector is written"),
+            "the hint called `bpf:raw_tp` unwritten, and pinning it said: {}",
+            stderr(&forced)
         );
         return;
     }

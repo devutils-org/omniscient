@@ -5284,7 +5284,26 @@ mod tests {
     /// would hide a collector that ignored the predicate it was given.
     #[test]
     fn a_filter_the_backend_pushed_down_is_not_run_a_second_time() {
-        let resolved = resolved_with_filter("io.latency", Some("bpf:tp"), "bytes > 4096");
+        // `bpf:tp` has no collector, and a pinned backend that lacks something
+        // here is refused for the machine first (the chain's order), so its
+        // requirements are cleared: the subject is the placement, not the probe.
+        let mut entry = Catalog::embedded()
+            .unwrap()
+            .get(&"io.latency".parse().unwrap())
+            .unwrap()
+            .clone();
+        for backend in &mut entry.backends {
+            backend.requires.clear();
+        }
+        let catalog = Catalog::from_entries(vec![entry]).unwrap();
+        let mut request = resolved_with_filter("mem.rss", None, "comm == 'x'").request;
+        request.source = "io.latency".parse().unwrap();
+        request.mode = crate::request::Mode::Trace;
+        request.filter = Some("bytes > 4096".parse().unwrap());
+        request.backend = Some("force:bpf:tp".parse().unwrap());
+        let capabilities = crate::capabilities::Capabilities::detect();
+        let resolved =
+            crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves");
         assert!(
             matches!(
                 resolved.filter,

@@ -320,10 +320,11 @@ pub enum KeyElsewhere {
     /// Attaches the key, serves the target and mode, is collected by this
     /// build, and nothing it needs is missing here: pinning it is the fix.
     Forceable(String),
-    /// Attaches the key and is collected by this build, but this machine lacks
-    /// something it needs.
+    /// Attaches the key, but this machine lacks something it needs, whether
+    /// or not this build collects it.
     Missing { backend: String, reason: String },
-    /// Attaches the key, and this build has no collector for it.
+    /// Attaches the key, nothing it needs is missing here, and this build has
+    /// no collector for it.
     Unwritten(String),
     /// Attaches the key, and cannot serve the request's target or mode.
     Unfit { backend: String, reason: String },
@@ -340,11 +341,20 @@ impl KeyElsewhere {
         }
     }
 
+    /// Which carrier the hint names, lowest first, ties going to the chain's
+    /// order. A carrier this machine can serve and nobody wrote outranks one
+    /// the machine cannot serve, as on the walk: the walk passes over a
+    /// backend that lacks something here and stops at the first one this
+    /// machine could run, so its answer is the build's whenever such a
+    /// backend exists, and the hint gives the same one (`DECISIONS.md`, "one
+    /// order for unbuilt and missing"). A missing carrier may be unwritten as
+    /// well, so naming it first would send a reader after privileges for a
+    /// collector nobody wrote.
     fn rank(&self) -> u8 {
         match self {
             KeyElsewhere::Forceable(_) => 0,
-            KeyElsewhere::Missing { .. } => 1,
-            KeyElsewhere::Unwritten(_) => 2,
+            KeyElsewhere::Unwritten(_) => 1,
+            KeyElsewhere::Missing { .. } => 2,
             KeyElsewhere::Unfit { .. } => 3,
         }
     }
@@ -480,12 +490,15 @@ pub fn resolve(
         // requirement no probe covers is still accepted, as it is on the walk,
         // and the resolved file lists it as unverified.
         //
-        // A pinned backend this build has no collector for is left to the
-        // runner, which refuses it before the launch as the build's gap: that
-        // answer holds on every machine, and a machine that lacks the probes
-        // as well would otherwise turn "nothing collects this" into "this
-        // machine cannot", which sends a reader after privileges for a
-        // collector nobody wrote.
+        // A backend both unwritten in this build and missing something here
+        // is answered in the chain's order: the machine first, as the walk
+        // does (`DECISIONS.md`, "one order for unbuilt and missing"). One
+        // request then exits the same way whichever path reached it -- the
+        // walk exited 1 and the pin 3 for `net.hwts` on a runner with no
+        // readable PTP clock -- and on that machine no build would serve it
+        // either. A pinned backend this build has no collector for and that
+        // lacks nothing here is left to the runner, which refuses it before
+        // the launch as the build's gap.
         let refuse = |reasons: Vec<String>| ResolveError::NoViableBackend {
             source_id: request.source.to_string(),
             rejections: vec![format!(
@@ -508,7 +521,7 @@ pub fn resolve(
             .filter(|requirement| requirement.probe.is_missing())
             .map(|requirement| format!("{}: {}", requirement.needs, requirement.probe))
             .collect();
-        if !missing.is_empty() && crate::collect::implements(request.source.as_str(), &backend.id) {
+        if !missing.is_empty() {
             return Err(refuse(missing));
         }
         return build(
@@ -952,10 +965,10 @@ fn check_keys_carried(
 }
 
 /// What stands between the request and a backend that attaches its key. The
-/// build's gap is looked at before the machine's, as the pinned path does: a
-/// backend nobody wrote is unwritten on every machine, and calling it the
-/// machine's would send a reader after privileges for a collector that does
-/// not exist.
+/// machine's gap is looked at before the build's, in the chain's order, as the
+/// walk and the pinned path do (`DECISIONS.md`, "one order for unbuilt and
+/// missing"): a backend this machine cannot serve is out of reach here
+/// whoever writes its collector.
 fn key_elsewhere(
     entry: &Entry,
     backend: &Backend,
@@ -970,22 +983,21 @@ fn key_elsewhere(
             reason,
         };
     }
-    if !crate::collect::implements(request.source.as_str(), &backend.id) {
-        return KeyElsewhere::Unwritten(backend.id.clone());
-    }
     let missing: Vec<String> = probe_all(capabilities, backend, Some(&request.target))
         .iter()
         .filter(|requirement| requirement.probe.is_missing())
         .map(|requirement| format!("{}: {}", requirement.needs, requirement.probe))
         .collect();
-    if missing.is_empty() {
-        KeyElsewhere::Forceable(backend.id.clone())
-    } else {
-        KeyElsewhere::Missing {
+    if !missing.is_empty() {
+        return KeyElsewhere::Missing {
             backend: backend.id.clone(),
             reason: missing.join("; "),
-        }
+        };
     }
+    if !crate::collect::implements(request.source.as_str(), &backend.id) {
+        return KeyElsewhere::Unwritten(backend.id.clone());
+    }
+    KeyElsewhere::Forceable(backend.id.clone())
 }
 
 /// The comparisons of a predicate the backend's program carries: the parts of
@@ -1292,8 +1304,22 @@ mod tests {
         match unwritten {
             Some(backend) if serves(entry, backend, &request) => {
                 let answer = key_elsewhere(entry, backend, &request, &capabilities);
-                assert_eq!(answer, KeyElsewhere::Unwritten(backend.id.clone()));
-                assert_eq!(answer.whose(), Whose::Build);
+                // The machine's gap first, in the chain's order: unwritten is
+                // the answer only where nothing it needs is missing.
+                let lacks = probe_all(&capabilities, backend, Some(&request.target))
+                    .iter()
+                    .any(|requirement| requirement.probe.is_missing());
+                if lacks {
+                    assert!(
+                        matches!(&answer, KeyElsewhere::Missing { backend: id, .. }
+                            if *id == backend.id),
+                        "{answer:?}"
+                    );
+                    assert_eq!(answer.whose(), Whose::Machine);
+                } else {
+                    assert_eq!(answer, KeyElsewhere::Unwritten(backend.id.clone()));
+                    assert_eq!(answer.whose(), Whose::Build);
+                }
                 assert!(!answer.to_string().contains("--backend force:"), "{answer}");
             }
             _ => eprintln!("skipped the unwritten half: every io.bytes backend is collected"),
@@ -1367,20 +1393,15 @@ mod tests {
         }
         let (message, elsewhere) = refused(&entry);
         let elsewhere = elsewhere.expect("a backend carries `rwbs`");
-        match collected.first() {
-            Some(first) => {
-                assert!(
-                    matches!(&elsewhere, KeyElsewhere::Missing { backend, reason }
-                        if *backend == entry.backends[*first].id && reason.contains(absent)),
-                    "{elsewhere:?}"
-                );
-                assert_eq!(elsewhere.whose(), Whose::Machine);
-            }
-            None => assert!(
-                matches!(elsewhere, KeyElsewhere::Unwritten(_)),
-                "{elsewhere:?}"
-            ),
-        }
+        // The machine's gap first, in the chain's order, whether or not this
+        // build collects the carrier: the first carrier the chain names.
+        let first = carriers[0];
+        assert!(
+            matches!(&elsewhere, KeyElsewhere::Missing { backend, reason }
+                if *backend == entry.backends[first].id && reason.contains(absent)),
+            "{elsewhere:?}"
+        );
+        assert_eq!(elsewhere.whose(), Whose::Machine);
         assert!(
             !message.contains("--backend force:"),
             "a pin hint for a backend this machine cannot run: {message}"
@@ -1564,12 +1585,13 @@ mod tests {
         }
     }
 
-    /// A pinned backend nothing in this build collects is the build's gap on
-    /// every machine, so its probes do not turn it into the machine's: the
-    /// resolver accepts it, and the runner refuses it before the launch with
-    /// "no collector is written".
+    /// A pinned backend nothing in this build collects and that lacks
+    /// something here is answered in the chain's order, the machine first, so
+    /// one request exits the same way by the walk and by the pin. Without the
+    /// missing requirement it is the build's gap: the resolver accepts it, and
+    /// the runner refuses it before the launch with "no collector is written".
     #[test]
-    fn a_pinned_backend_this_build_lacks_is_left_to_the_build_answer_whatever_it_probes() {
+    fn a_pinned_backend_this_build_lacks_is_refused_for_the_machine_first() {
         let embedded = Catalog::embedded().unwrap();
         let mut entry = embedded
             .get(&"proc.exec".parse().unwrap())
@@ -1591,8 +1613,43 @@ mod tests {
         request.mode = Mode::Trace;
         request.emit = vec!["summary".parse().unwrap()];
         request.backend = Some("force:bpf:tp".parse().unwrap());
+        match resolve(&catalog, &capabilities, &request) {
+            Err(ResolveError::NoViableBackend { rejections, .. }) => {
+                let text = rejections.join("\n");
+                assert!(
+                    text.contains("kernel>=999.0"),
+                    "the machine's reason: {text}"
+                );
+            }
+            other => panic!("the machine's gap first, as the walk says it: {other:?}"),
+        }
+        // The walk, over the same chain, says the same thing for this backend.
+        request.backend = None;
+        if let Err(ResolveError::NoViableBackend { rejections, .. }) =
+            resolve(&catalog, &capabilities, &request)
+        {
+            let line = rejections
+                .iter()
+                .find(|line| line.contains("bpf:tp"))
+                .expect("the walk names the backend");
+            assert!(line.contains("kernel>=999.0"), "{line}");
+        }
+
+        // And with nothing missing, the build's gap is the runner's to say.
+        let mut entry = embedded
+            .get(&"proc.exec".parse().unwrap())
+            .expect("proc.exec is in the catalog")
+            .clone();
+        let classic = entry
+            .backends
+            .iter_mut()
+            .find(|backend| backend.id == "bpf:tp")
+            .expect("proc.exec has a classic tracepoint backend");
+        classic.requires.clear();
+        let catalog = Catalog::from_entries(vec![entry]).unwrap();
+        request.backend = Some("force:bpf:tp".parse().unwrap());
         let resolved = resolve(&catalog, &capabilities, &request)
-            .expect("an unwritten pinned backend is the runner's refusal, not the resolver's");
+            .expect("an unwritten pinned backend this machine lacks nothing for is the runner's");
         assert!(resolved.backend.pinned);
     }
 
