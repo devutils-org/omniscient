@@ -34,7 +34,7 @@ omn top │ fixture sqlite-latency │ 284ms                          view: snap
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
-│no socket or file of the target's moved a byte in this run                                                            │
+│nothing to select: bytes per socket were not measured; bytes per file were not measured                               │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ socket or file  enter focus its thread

@@ -3,7 +3,8 @@
 Branch `feat/w19-flows`, from `main` at `91a0cef`. `BRIEF.md`, "flows --
 where the bytes went": bytes as flows, process -> socket -> interface and
 process -> file -> device, widths in proportion, each edge with its rate and
-its losses. A view: an experiment judged on screen, `docs/view/flows.md` and
+its losses. (A rate is drawn per socket or file, not per thread -> object
+ribbon: a ribbon's bytes are its width.) A view: an experiment judged on screen, `docs/view/flows.md` and
 its gallery.
 
 ## What landed
@@ -26,8 +27,10 @@ its gallery.
     its bytes each way, and on its second row its rate, calls and the time a
     call took. Past six objects or threads, the smallest are one row.
   - Trust: each band's title carries both its sources with backend and
-    badges; ribbons and figures take `Trust::style()`; a loss is said on the
-    object it struck and in a sentence under the bands; a refused source is
+    badges; ribbons and figures take `Trust::style()`; a loss is a badge on
+    the object it struck (its trust joined over every result its rows came
+    from) and a sentence in the detail lines when it is selected; a refused
+    source is
     its reason in place; a source not asked, or asked without bytes, says so
     in place while the other side of the band is drawn.
   - Keys: `↑`/`↓` (`j`/`k`) select a socket or file, the detail lines under
@@ -35,8 +38,9 @@ its gallery.
     thread. A focus narrows both bands to the rows of that pid or thread.
   - Live: the rows are drawn as they come; the machine's timelines are said
     to come at the end (a live run holds a timeline only then).
-  - Below 62x12 it says so in a sentence; a band too short for every node
-    drops the smallest rows (the totals still count them). Tried at 80x24,
+  - Below a view area of 62x15 it says so in a sentence, with the size it
+    has; a band too short for every node drops the smallest rows and its
+    footer says how many and their bytes. Tried at 80x24,
     100x30, 120x40 and 160x50 through `omn top --headless --size`.
 - **A recording of its own**, `docs/view/gallery/flows-run/` (`record.sh`
   and `data/`, 456 KB): no common fixture carries bytes per file, so the
@@ -60,9 +64,10 @@ its gallery.
 Shown (each a test in `flows.rs`, on the recording or the fixtures):
 
 - The three largest files are **exactly** 12 x 8 MiB, 12 x 1 MiB and
-  12 x 64 KiB read; the uploads are **twelve files of exactly 262 144 bytes**
-  written; the storage band's total is the rows' sum to the byte, the "more
-  files" row included.
+  12 x 64 KiB read (on the band); the uploads are **twelve files of exactly
+  262 144 bytes** written (on the `io.fs` rows the band sums: the view draws
+  them inside its "more files" row); the storage band's total is the rows'
+  sum to the byte, the "more files" row included.
 - One socket, its sent bytes within 1 % above the 108.75 MiB of files (the
   rest is headers), its received above the 3 MiB of uploads; **lo carried
   2.00x the socket's bytes** (held in [1.9, 2.1]): loopback counts a byte once
@@ -107,6 +112,52 @@ Reasoned, not held:
   `record.sh` are core's, and a new fixture there adds a snapshot to every
   view; the recording sits in the gallery instead, drawn by the view's own
   test.
+
+## Review
+
+One fix round, six findings, all taken:
+
+- **"no socket or file moved a byte" on unmeasured runs** (defect). A band
+  now records whether its rows were in the run (`Band::measured`); with
+  nothing to select the detail line says, per band, `no socket of the
+  target's moved a byte` only when the rows were there and carried none, and
+  `bytes per file were not measured` otherwise. The seven fixture snapshots
+  re-blessed: `sqlite-latency`, `vertical-requests` and `machine` now say
+  both were not measured; `sqlite-commits`, `http-server` and the cpython
+  pair say no socket moved a byte (their `net.socket` was asked as `raw`
+  and held no row) and that bytes per file were not measured. Held by
+  `unmeasured_bytes_are_never_said_to_be_zero`.
+- **The size guard was four rows too lenient** (gap). The least inner
+  height is now derived (`MIN_INNER`: summary, two bands of five rows,
+  two detail lines = 13, 62x15 with the border), and the sentence says the
+  size the view needs and the size it has. `draw_band` no longer returns
+  silently below its least: it says so. Held by
+  `below_its_least_size_the_view_says_so` (every height from 10 to 29:
+  either the sentence, or both footers drawn), and tried with `omn top
+  --headless --replay tests/view_fixtures/sqlite-commits --view flows
+  --size 120x15` to `120x18`.
+- **Nodes dropped by `allot` were not said** (gap). The footer now counts
+  what each column did not draw, with its bytes, in the loss colour and
+  before the caveat so a narrow screen cuts the caveat first:
+  `181 files (5.41MiB) not drawn` at 80x24. Held by
+  `a_node_the_rows_cannot_hold_is_counted_on_screen` (and nothing said at
+  120x60).
+- **The `io.syscall` `raw` fallback was untested and compared descriptors
+  with devices** (gap). In that mode the band's heading and footer say
+  `descriptor(s)`, the ratio is not drawn, and the caveat says why (a
+  descriptor may be a socket or a pipe, whose bytes never reach a device).
+  Held by `descriptors_are_not_compared_with_devices`, which drops `io.fs`
+  from the recording and checks the band holds the socket's bytes too. The
+  `NEEDS` request to core below stands: with it, the default `omn top` shows
+  bytes per descriptor without a false files-to-devices ratio.
+- **An object's trust was its first result's** (nit, taken). Each object
+  records which results its rows came from and its trust is
+  `Trust::joined` over them (the "more" row over the union). Held by
+  `an_objects_trust_is_all_of_its_results`.
+- **The handoff's wording** (nit, taken): the loss sentence is in the detail
+  lines, for the selected object; the uploads are held on the rows, not the
+  band; a rate is per socket or file, not per ribbon. Said above and in
+  `docs/view/flows.md`.
 
 ## Privileged runs wanted
 
@@ -157,7 +208,8 @@ OMN_VIEW_BLESS=1 cargo test -p omn-view --lib flows
 
 ## The suite
 
-While iterating: `cargo test -p omn-view --lib flows` (8 tests) and
+While iterating: `cargo test -p omn-view --lib flows` (13 tests after the
+review round) and
 `cargo test --test view_snapshots flows`; clippy clean on `omn-view`.
 
 Before the last commit, with the machine shared by every stream (load

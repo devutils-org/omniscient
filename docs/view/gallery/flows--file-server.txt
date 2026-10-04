@@ -17,7 +17,7 @@ omn top │ recording flows-run │ 2.56s                             view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃ wlan0    31.0KiB ▅▆▃█▃▄▃▄│
-│sockets 112MiB -> interfaces 224MiB = 2.00x (5 idle)  · lo counts a byte twice; sockets are not tied to interfaces    │
+│sockets 112MiB -> interfaces 224MiB = 2.00x · 5 interfaces idle · lo counts a byte twice; sockets are not tied to inte│
 │ storage · io.fs bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ────────────────────────────────│
 │         thread             file                                               cache         device, the machine's    │
 │Thread-1 (proce ┃█████████┃ btrfs 3316766 ███▅██▅  ←96.0MiB            ┃█████████┃█████████┃ 259:0    15.3MiB ▃█▂▃▂▂▁ │
@@ -33,7 +33,7 @@ omn top │ recording flows-run │ 2.56s                             view: snap
 │                ┃█████▀▀██┃ btrfs 3316773 █        →256KiB             ┃█████████┃                                    │
 │                ┃██▀██████┃ btrfs 3316774 █        →256KiB             ┃█████████┃                                    │
 │        python3 ┃██████▀▀▀┃ 181 more fil… █▂▂▂▂▂▂▁ →2.50MiB ←2.91MiB   ┃▀▀▀▀▀▀▀▀▀┃                                    │
-│files 115MiB -> devices 15.3MiB = 0.13x (2 idle)  · page-cache hits never reach a device; writes reach it later       │
+│files 115MiB -> devices 15.3MiB = 0.13x · 2 devices idle · page-cache hits never reach a device; writes reach it later│
 │▶ socket 81206 (inet, peer port 47744): 109MiB sent in 493 calls, 42.5MiB/s; 3.00MiB received in 75 calls, 1.17MiB/s  │
 │pid 3065440, thread 3065449 -- enter narrows every view to it                                                         │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

@@ -25,7 +25,7 @@
 //! each source's badges, and a source that was refused, or that this run did
 //! not record in a form that carries bytes, says so where its column would be.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -153,6 +153,9 @@ struct Object {
     many: usize,
     pid: Option<i32>,
     tid: Option<i32>,
+    /// Which of the band's results its rows came from: its trust is all of
+    /// theirs, not the first's.
+    from: BTreeSet<usize>,
     trust: Trust,
 }
 
@@ -201,6 +204,17 @@ struct Band {
     machine_trust: Trust,
     /// The window the target's results cover, in seconds, for the rates.
     seconds: f64,
+    /// Whether the target's rows were in the run at all: an empty middle
+    /// column means "nothing moved" only when they were.
+    measured: bool,
+    /// What the middle column holds, one and many: a socket, a file, or a
+    /// descriptor when only `io.syscall`'s rows are there.
+    object_word: &'static str,
+    object_words: &'static str,
+    /// Whether the middle column and the machine's measure the same kind of
+    /// bytes, so that their ratio means something: not for descriptors, which
+    /// include sockets and pipes that never reach a device.
+    comparable: bool,
 }
 
 impl Band {
@@ -252,9 +266,17 @@ impl View for Flows {
         ));
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        if inner.height < 10 || inner.width < 60 {
+        if inner.height < MIN_INNER.1 || inner.width < MIN_INNER.0 {
             frame.render_widget(
-                Paragraph::new("too small for the flows: 62x12 at least").wrap(Wrap { trim: true }),
+                Paragraph::new(format!(
+                    "too small for the flows: the view needs {}x{} cells, border included, \
+                     and has {}x{}",
+                    MIN_INNER.0 + 2,
+                    MIN_INNER.1 + 2,
+                    area.width,
+                    area.height
+                ))
+                .wrap(Wrap { trim: true }),
                 inner,
             );
             return;
@@ -335,6 +357,14 @@ fn selected_object(bands: &[Band; 2], at: usize) -> Option<&Object> {
 // ---------------------------------------------------------------------------
 // The model: what each band holds, read from the run.
 // ---------------------------------------------------------------------------
+
+/// The least room inside the view's border the flows are drawn in: a summary
+/// line, two bands of a title, a heading, two rows of diagram and a footer
+/// each, and two detail lines. Below it the view says so rather than draw
+/// bands that hold only their titles.
+const MIN_INNER: (u16, u16) = (60, 1 + 2 * BAND_LEAST + 2);
+/// The least rows of a band: its title, heading, footer and two of diagram.
+const BAND_LEAST: u16 = 5;
 
 /// The most objects or threads a column draws; the rest are one row.
 const MOST: usize = 6;
@@ -443,6 +473,12 @@ fn storage(ctx: &Ctx<'_>) -> Band {
         });
         band.title = title(data, &files, "io.fs");
     } else if !descriptors.is_empty() {
+        // A descriptor may be a file, a pipe or a socket: its bytes are not
+        // files' bytes, and the band says so rather than compare them with
+        // the devices'.
+        band.object_word = "descriptor";
+        band.object_words = "descriptors";
+        band.comparable = false;
         fill_target(&mut band, ctx, &descriptors, |event| {
             let fd = event.number("fd")? as u64;
             let pid = event
@@ -492,6 +528,16 @@ fn empty_band(kind: Kind) -> Band {
         target_trust: Trust::clean(),
         machine_trust: Trust::clean(),
         seconds: 0.0,
+        measured: false,
+        object_word: match kind {
+            Kind::Network => "socket",
+            Kind::Storage => "file",
+        },
+        object_words: match kind {
+            Kind::Network => "sockets",
+            Kind::Storage => "files",
+        },
+        comparable: true,
     }
 }
 
@@ -573,13 +619,13 @@ fn fill_target(
         band.seconds = (closed - opened) as f64 / 1e9;
     }
     band.target_trust = Trust::joined(data, held.iter().copied());
+    band.measured = true;
 
     let mut tasks: BTreeMap<i32, Task> = BTreeMap::new();
     let mut comm_bytes: BTreeMap<(i32, String), u64> = BTreeMap::new();
     let mut objects: BTreeMap<String, Object> = BTreeMap::new();
     let mut edges: BTreeMap<(i32, String, Dir), u64> = BTreeMap::new();
-    for results in held {
-        let trust = Trust::of(data, results);
+    for (source_index, results) in held.iter().enumerate() {
         for event in results.events() {
             let tid = event
                 .tid()
@@ -618,9 +664,9 @@ fn fill_target(
                 many: 1,
                 pid: Some(pid),
                 tid: Some(tid),
-                trust: trust.clone(),
                 ..Object::default()
             });
+            object.from.insert(source_index);
             match dir {
                 Dir::Out => {
                     object.out_bytes += bytes;
@@ -672,7 +718,6 @@ fn fill_target(
             kept.push(Object {
                 spark: vec![0.0; BINS],
                 many: 0,
-                trust: band.target_trust.clone(),
                 pid: object.pid,
                 tid: object.tid,
                 ..Object::default()
@@ -686,6 +731,7 @@ fn fill_target(
         others.in_calls += object.in_calls;
         others.total_ns += object.total_ns;
         others.errors += object.errors;
+        others.from.extend(object.from.iter().copied());
         if others.pid != object.pid {
             others.pid = None;
         }
@@ -696,11 +742,11 @@ fn fill_target(
             *bin += bytes;
         }
     }
+    for object in &mut kept {
+        object.trust = Trust::joined(data, object.from.iter().map(|&index| held[index]));
+    }
     if crowded {
-        let what = match band.kind {
-            Kind::Network => "sockets",
-            Kind::Storage => "files",
-        };
+        let what = band.object_words;
         let others = &mut kept[MOST - 1];
         others.name = format!("{} more {what}", others.many);
         others.detail = format!(
@@ -753,10 +799,7 @@ fn fill_target(
         let rows: usize = held.iter().map(|results| results.events().len()).sum();
         band.target_note = Some(vec![
             Line::from(Span::styled(
-                match band.kind {
-                    Kind::Network => "no socket moved a byte",
-                    Kind::Storage => "no file moved a byte",
-                },
+                format!("no {} moved a byte", band.object_word),
                 Style::new().add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
@@ -1118,7 +1161,16 @@ fn draw_band(frame: &mut Frame<'_>, area: Rect, band: &Band, selected: Option<us
         .title(Line::from(title));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if inner.height < 4 {
+    if inner.height + 1 < BAND_LEAST {
+        // The view's own guard keeps this from happening; should it, the band
+        // says so rather than stand empty.
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "too few rows to draw this band",
+                Style::new().add_modifier(Modifier::DIM),
+            )),
+            inner,
+        );
         return;
     }
     let [heading, diagram, footer] = Layout::vertical([
@@ -1155,6 +1207,43 @@ fn draw_band(frame: &mut Frame<'_>, area: Rect, band: &Band, selected: Option<us
     let sink_values: Vec<f64> = band.sinks.iter().map(|s| s.bytes).collect();
     let sink_rows = allot(&sink_values, column_rows(machine_total, band.sinks.len()));
     let sink_spans = stack(&sink_rows);
+    // A node the rows could not hold is not drawn: say which, and their
+    // bytes, so the drawn rows and the footer's total can be reconciled.
+    let mut dropped = Vec::new();
+    for (word, words, count, bytes) in [
+        (
+            "thread",
+            "threads",
+            dropped_nodes(&task_rows, band.tasks.iter().map(|_| 1)),
+            dropped_bytes(&task_rows, &task_values),
+        ),
+        (
+            band.object_word,
+            band.object_words,
+            dropped_nodes(&object_rows, band.objects.iter().map(|o| o.many.max(1))),
+            dropped_bytes(&object_rows, &object_values),
+        ),
+        (
+            match band.kind {
+                Kind::Network => "interface",
+                Kind::Storage => "device",
+            },
+            match band.kind {
+                Kind::Network => "interfaces",
+                Kind::Storage => "devices",
+            },
+            dropped_nodes(&sink_rows, band.sinks.iter().map(|_| 1)),
+            dropped_bytes(&sink_rows, &sink_values),
+        ),
+    ] {
+        if count > 0 {
+            dropped.push(format!(
+                "{count} {} ({}) not drawn",
+                if count == 1 { word } else { words },
+                units::bytes(bytes)
+            ));
+        }
+    }
     let object_height: usize = object_rows.iter().sum();
     let sink_height: usize = sink_rows.iter().sum();
     let junction_height = if band.objects.is_empty() && band.sinks.is_empty() {
@@ -1367,7 +1456,26 @@ fn draw_band(frame: &mut Frame<'_>, area: Rect, band: &Band, selected: Option<us
             note_area,
         );
     }
-    frame.render_widget(Paragraph::new(footer_line(band)), footer);
+    frame.render_widget(Paragraph::new(footer_line(band, &dropped)), footer);
+}
+
+/// How many nodes a column did not draw, each counted for what it stands for
+/// (the "more files" row is many).
+fn dropped_nodes(rows: &[usize], many: impl Iterator<Item = usize>) -> usize {
+    rows.iter()
+        .zip(many)
+        .filter(|(rows, _)| **rows == 0)
+        .map(|(_, many)| many)
+        .sum()
+}
+
+/// The bytes of the nodes a column did not draw.
+fn dropped_bytes(rows: &[usize], values: &[f64]) -> f64 {
+    rows.iter()
+        .zip(values)
+        .filter(|(rows, _)| **rows == 0)
+        .map(|(_, bytes)| *bytes)
+        .sum()
 }
 
 /// Each edge's slot in its node's span, in half rows: the node's edges in
@@ -1483,9 +1591,10 @@ fn sink_line(sink: &Sink, trust: &Trust, width: usize) -> Line<'static> {
 
 fn draw_heading(buffer: &mut Buffer, area: Rect, band: &Band, columns: &Columns) {
     let dim = Style::new().add_modifier(Modifier::DIM | Modifier::ITALIC);
-    let (object, sink) = match band.kind {
-        Kind::Network => ("socket", "interface, the machine's"),
-        Kind::Storage => ("file", "device, the machine's"),
+    let object = band.object_word;
+    let sink = match band.kind {
+        Kind::Network => "interface, the machine's",
+        Kind::Storage => "device, the machine's",
     };
     let width = usize::from(columns.task_width);
     buffer.set_stringn(area.x, area.y, format!("{:>width$}", "thread"), width, dim);
@@ -1510,16 +1619,13 @@ fn draw_heading(buffer: &mut Buffer, area: Rect, band: &Band, columns: &Columns)
 
 /// What the junction says: the target's bytes on its left, the machine's on
 /// its right, and what stands between them.
-fn footer_line(band: &Band) -> Line<'static> {
+fn footer_line(band: &Band, dropped: &[String]) -> Line<'static> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     let mut spans = Vec::new();
     let target = band.out_bytes() + band.in_bytes();
     let machine = band.machine_bytes();
     if !band.objects.is_empty() {
-        let what = match band.kind {
-            Kind::Network => "sockets",
-            Kind::Storage => "files",
-        };
+        let what = band.object_words;
         spans.push(Span::styled(
             format!("{what} {}", units::bytes(target as f64)),
             band.target_trust.style(),
@@ -1540,23 +1646,39 @@ fn footer_line(band: &Band) -> Line<'static> {
             ),
             band.machine_trust.style(),
         ));
-        if target > 0 && machine > 0.0 {
+        if band.comparable && target > 0 && machine > 0.0 {
             spans.push(Span::styled(
                 format!(" = {:.2}x", machine / target as f64),
                 band.machine_trust.style().add_modifier(Modifier::BOLD),
             ));
         }
-        if band.idle > 0 {
-            spans.push(Span::styled(format!(" ({} idle)", band.idle), dim));
-        }
+    }
+    // What was not drawn comes right after the totals, so a narrow screen
+    // cuts the idle count and the caveat rather than it.
+    for one in dropped {
+        spans.push(Span::styled(
+            format!(" · {one}"),
+            Style::new().fg(palette::LOSS),
+        ));
+    }
+    if !band.sinks.is_empty() && band.idle > 0 {
+        let what = match band.kind {
+            Kind::Network => "interfaces",
+            Kind::Storage => "devices",
+        };
+        spans.push(Span::styled(format!(" · {} {what} idle", band.idle), dim));
     }
     if spans.is_empty() {
         return Line::default();
     }
     spans.push(Span::styled(
         match band.kind {
-            Kind::Network => "  · lo counts a byte twice; sockets are not tied to interfaces",
-            Kind::Storage => "  · page-cache hits never reach a device; writes reach it later",
+            Kind::Network => " · lo counts a byte twice; sockets are not tied to interfaces",
+            Kind::Storage if !band.comparable => {
+                " · no ratio: a descriptor may be a socket or a pipe, whose bytes never \
+                 reach a device"
+            }
+            Kind::Storage => " · page-cache hits never reach a device; writes reach it later",
         },
         dim,
     ));
@@ -1566,10 +1688,7 @@ fn footer_line(band: &Band) -> Line<'static> {
 fn detail_lines(bands: &[Band; 2], selected: Option<usize>) -> Vec<Line<'static>> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     let Some(at) = selected else {
-        return vec![Line::from(Span::styled(
-            "no socket or file of the target's moved a byte in this run",
-            dim,
-        ))];
+        return vec![Line::from(Span::styled(nothing_to_select(bands), dim))];
     };
     let first = bands[0].objects.len();
     let band = if at < first { &bands[0] } else { &bands[1] };
@@ -1641,6 +1760,23 @@ fn detail_lines(bands: &[Band; 2], selected: Option<usize>) -> Vec<Line<'static>
         ));
     }
     vec![Line::from(spans), Line::from(second)]
+}
+
+/// Why nothing can be selected: per band, its rows were there and carried no
+/// bytes, or they were not measured at all. Never the first said of the
+/// second.
+fn nothing_to_select(bands: &[Band; 2]) -> String {
+    let parts: Vec<String> = bands
+        .iter()
+        .map(|band| {
+            if band.measured {
+                format!("no {} of the target's moved a byte", band.object_word)
+            } else {
+                format!("bytes per {} were not measured", band.object_word)
+            }
+        })
+        .collect();
+    format!("nothing to select: {}", parts.join("; "))
 }
 
 fn sparkline(values: &[f64]) -> String {
@@ -1843,6 +1979,141 @@ mod tests {
             .is_some_and(|note| note.contains("at its end")));
         let screen = text(&draw(live, "flows", WIDTH, HEIGHT));
         assert!(screen.contains("live"), "{screen}");
+    }
+
+    /// A run that did not ask for the target's sources says they were not
+    /// measured; it never says that nothing moved.
+    #[test]
+    fn unmeasured_bytes_are_never_said_to_be_zero() {
+        for name in ["sqlite-latency", "sqlite-commits", "machine"] {
+            let screen = text(&draw(
+                crate::snapshot::fixture(name),
+                "flows",
+                WIDTH,
+                HEIGHT,
+            ));
+            assert!(!screen.contains("no file"), "{name}: {screen}");
+            assert!(
+                screen.contains("bytes per file were not measured"),
+                "{name}: {screen}"
+            );
+        }
+        // Measured and empty, under a focus that matches no row: that one is
+        // said to have moved nothing.
+        let data = file_server();
+        let focus = Focus {
+            pid: Some(1),
+            ..Focus::default()
+        };
+        let ctx = ctx(&data, &focus);
+        let bands = bands(&ctx);
+        assert_eq!(selectable(&bands), 0);
+        assert_eq!(
+            nothing_to_select(&bands),
+            "nothing to select: no socket of the target's moved a byte; \
+             no file of the target's moved a byte"
+        );
+    }
+
+    /// Too short for two bands, the view says so in a sentence rather than
+    /// draw bands that hold only their titles; at the least it says, both
+    /// bands draw their diagrams and footers.
+    #[test]
+    fn below_its_least_size_the_view_says_so() {
+        let mut least = None;
+        for height in 10..30 {
+            let screen = text(&draw(file_server(), "flows", WIDTH, height));
+            if screen.contains("too small for the flows") {
+                assert!(least.is_none(), "too small at {height} after drawn");
+                continue;
+            }
+            least.get_or_insert(height);
+            for footer in ["sockets ", "files "] {
+                assert!(
+                    screen
+                        .lines()
+                        .any(|line| line.trim_start_matches('│').starts_with(footer)),
+                    "{height} rows, no `{footer}` footer:\n{screen}"
+                );
+            }
+        }
+        assert!(least.is_some(), "never drawn");
+    }
+
+    /// At the standard 80x24 the storage band cannot hold every file: what
+    /// it leaves out is counted on screen with its bytes.
+    #[test]
+    fn a_node_the_rows_cannot_hold_is_counted_on_screen() {
+        let data = file_server();
+        let focus = Focus::default();
+        let band = storage(&ctx(&data, &focus));
+        let others = band.objects.last().expect("files");
+        assert!(others.many > 1);
+        let screen = text(&draw(data, "flows", 80, 24));
+        let note = format!(
+            "{} files ({}) not drawn",
+            others.many,
+            units::bytes(others.bytes() as f64)
+        );
+        assert!(screen.contains(&note), "{note}:\n{screen}");
+        // Tall enough, nothing is left out and nothing is said.
+        let screen = text(&draw(file_server(), "flows", WIDTH, 60));
+        assert!(!screen.contains("not drawn"), "{screen}");
+    }
+
+    /// Without io.fs, the storage band falls back on io.syscall's rows per
+    /// descriptor: called descriptors, not files, and with no ratio to the
+    /// devices, since the socket's bytes are among them.
+    #[test]
+    fn descriptors_are_not_compared_with_devices() {
+        let mut data = file_server();
+        data.run.results.retain(|results| results.source != "io.fs");
+        let focus = Focus::default();
+        let band = storage(&ctx(&data, &focus));
+        assert!(band.measured && !band.comparable);
+        assert_eq!(band.object_word, "descriptor");
+        // The socket's bytes, sent and received, are read and written
+        // through a descriptor too: the band holds them.
+        let socket = network(&ctx(&data, &focus)).objects[0].bytes() as f64;
+        assert!(total(&band) > socket, "{} <= {socket}", total(&band));
+        let screen = text(&draw(data, "flows", 160, 50));
+        assert!(screen.contains("descriptor"), "{screen}");
+        assert!(screen.contains("no ratio"), "{screen}");
+        let footer = screen
+            .lines()
+            .find(|line| line.trim_start_matches('│').starts_with("descriptors "))
+            .expect("the storage footer");
+        assert!(
+            !footer.contains("x ·") && !footer.contains(" = "),
+            "{footer}"
+        );
+    }
+
+    /// An object's trust is every one of its results', not the first's.
+    #[test]
+    fn an_objects_trust_is_all_of_its_results() {
+        let mut data = file_server();
+        for results in &mut data.run.results {
+            results.losses = Default::default();
+        }
+        let mut second = data.of_source("io.fs").next().expect("io.fs").clone();
+        second.label = "io.fs again".to_owned();
+        second.losses.dropped = 7;
+        data.run.results.push(second);
+        let focus = Focus::default();
+        let band = storage(&ctx(&data, &focus));
+        for object in &band.objects {
+            assert!(
+                object
+                    .trust
+                    .marks
+                    .iter()
+                    .any(|mark| matches!(mark, trust::Mark::Lost { .. })),
+                "{}: {:?}",
+                object.name,
+                object.trust
+            );
+        }
     }
 
     #[test]

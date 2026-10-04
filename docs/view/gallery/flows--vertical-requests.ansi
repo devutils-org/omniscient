@@ -34,7 +34,7 @@
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
-│[0m[2mno socket or file of the target's moved a byte in this run[0m                                                            │[0m
+│[0m[2mnothing to select: bytes per socket were not measured; bytes per file were not measured[0m                               │[0m
 │                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m socket or file  [0m[1menter[0m focus its thread                       [0m

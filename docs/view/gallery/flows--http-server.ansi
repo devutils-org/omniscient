@@ -17,7 +17,7 @@
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m [0m[1mwlan0    [0m[2m6.78KiB[0m [0m[2;37m▁▂█▃▅ ▂ [0m│[0m
-│[0m[2msockets 28.3MiB[0m -> [0m[2minterfaces 56.6MiB[0m[1;2m = 2.00x[0m[2m (5 idle)  · lo counts a byte twice; sockets are not tied to interfaces[0m  │[0m
+│[0m[2msockets 28.3MiB[0m -> [0m[2minterfaces 56.6MiB[0m[1;2m = 2.00x[0m[2m · 5 interfaces idle · lo counts a byte twice; sockets are not tied to in[0m│[0m
 │[0m[1;37m storage [0m[37m· [0m[1;37mio.syscall[0m[37m bpf:fentry [0m[36m~low det[0m[37m [0m[33mdegraded x2[0m[37m · [0m[1;37mio.bytes[0m[37m fs:proc [0m[36m~low det[0m[37m [0m[33mdegraded[0m[37m ───────────────────────────[0m│[0m
 │[0m[2;3m         thread[0m             [0m[2;3mfile[0m                                               [0m[2;3mcache[0m         [0m[2;3mdevice, the machine's[0m    │[0m
 │ [0m[1mbytes per file: not in this run[0m                                                   [0m[2mno device moved a byte in this run[0m │[0m

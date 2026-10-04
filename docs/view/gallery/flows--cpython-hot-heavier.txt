@@ -17,7 +17,7 @@ omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃ tailsca… 1.25KiB      ▅▅█│
-│interfaces 48.3KiB (5 idle)  · lo counts a byte twice; sockets are not tied to interfaces                             │
+│interfaces 48.3KiB · 5 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                   │
 │ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
 │         thread             file                                               cache         device, the machine's    │
 │ bytes per file: not in this run                                                 ┃█████████┃ 259:0    4.86MiB        █│
@@ -33,8 +33,8 @@ omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│devices 4.86MiB (2 idle)  · page-cache hits never reach a device; writes reach it later                               │
-│no socket or file of the target's moved a byte in this run                                                            │
+│devices 4.86MiB · 2 devices idle · page-cache hits never reach a device; writes reach it later                        │
+│nothing to select: no socket of the target's moved a byte; bytes per file were not measured                           │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ socket or file  enter focus its thread

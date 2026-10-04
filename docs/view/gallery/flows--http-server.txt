@@ -17,7 +17,7 @@ omn top │ fixture http-server │ 2.84s                             view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃ wlan0    6.78KiB ▁▂█▃▅ ▂ │
-│sockets 28.3MiB -> interfaces 56.6MiB = 2.00x (5 idle)  · lo counts a byte twice; sockets are not tied to interfaces  │
+│sockets 28.3MiB -> interfaces 56.6MiB = 2.00x · 5 interfaces idle · lo counts a byte twice; sockets are not tied to in│
 │ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
 │         thread             file                                               cache         device, the machine's    │
 │ bytes per file: not in this run                                                   no device moved a byte in this run │

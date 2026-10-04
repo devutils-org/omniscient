@@ -24,7 +24,9 @@ ribbon in proportion to its bytes:
 - **socket / file**: each socket or file the target moved bytes through, out
   (sent, written; green) above in (received, read; cyan), with a sparkline of
   when its bytes moved, its rate, its calls and the time a call took. Past six,
-  the smallest are drawn as one row (`181 more files`).
+  the smallest are drawn as one row (`181 more files`). The rate is the
+  socket's or the file's over the run; a ribbon from a thread is its bytes,
+  drawn by width, with no rate of its own.
 - **stack / cache**: the kernel layer between the target's bytes and the
   machine's, drawn as a junction rather than as edges. No source ties one
   socket to one interface, or one file's bytes to one device, so the view
@@ -44,8 +46,10 @@ thread.
 The trust style is the frame's: each band's title carries its two sources
 with their backends and badges; ribbons and figures are dimmed when their
 result must not be read at face value (all four sources are `low`
-determinism, so on this machine everything is); a loss is said on the socket
-or file it struck, and in a sentence under the bands. A source that was
+determinism, so on this machine everything is); a loss is a badge on the
+socket or file it struck -- whichever of the band's results its rows came
+from, not only the first -- and a sentence in the detail lines when that
+object is selected. A source that was
 refused shows its reason where its column would be; one this run did not ask
 for, or asked in a form that carries no bytes, says so in place, and the other
 side of the band is still drawn.
@@ -100,7 +104,7 @@ What `flows--file-server` shows, and what the test holds:
 | Figure | Drawn | Ground truth | Held by |
 |---|---|---|---|
 | the three largest files read | 96.0 MiB, 12.0 MiB, 768 KiB | 12 x 8 MiB, 12 x 1 MiB, 12 x 64 KiB, exactly | `each_file_holds_the_bytes_the_workload_moved_through_it` |
-| uploads written | twelve files of 256 KiB | twelve of 262 144 bytes, exactly | the same |
+| uploads written | in the `181 more files` row | twelve of 262 144 bytes, exactly, on the `io.fs` rows the band sums (the band draws them as part of its "more files" row, so this is held on the recording, and the band total below on the view) | the same |
 | band total | 115 MiB | the rows' sum, to the byte, "more files" included | the same |
 | the socket | one: 109 MiB sent, 3.00 MiB received | 108.75 MiB of files plus 8.4 KiB of headers sent; 3 MiB of uploads plus 4 KiB of requests received | `the_socket_and_the_interface_disagree_by_the_loopback_double_count` |
 | lo / the socket | 2.00x | loopback counts a byte once sent and once received | the same, in [1.9, 2.1] |
@@ -139,8 +143,20 @@ thread's 112 MiB.
 - **Reads and writes are one figure on a device, and rx and tx on an
   interface**: `io.bytes`' and `net.bytes`' series are keyed by device and
   interface only.
-- **A terminal under 62x12 gets a sentence**, and one too short for every
-  node drops the smallest rows (the band's totals still count them).
+- **A view area under 62x15 cells gets a sentence** naming the size it needs
+  and the size it has: below that a band cannot hold its heading, two rows
+  of diagram and its footer. A band too short for every node drops the
+  smallest rows and says so in its footer, in the loss colour, with their
+  count and bytes (`181 files (5.41MiB) not drawn` at 80x24), so the drawn
+  rows and the footer's total can be reconciled.
+- **With nothing to select, it says why per band**: `no socket of the
+  target's moved a byte` only when the rows were in the run and carried
+  none; `bytes per file were not measured` when they were not.
+- **On `io.syscall`'s rows alone it draws descriptors, not files**, and no
+  ratio to the devices: a descriptor may be a socket or a pipe, so its bytes
+  can be the network band's bytes again and never reach a device. The
+  heading says `descriptor`, the footer says `no ratio` and why; held by
+  `descriptors_are_not_compared_with_devices`.
 
 **Verdict:** flows is the only view that puts the target's own bytes and the
 machine's on one scale across the kernel layer between them, so the page
