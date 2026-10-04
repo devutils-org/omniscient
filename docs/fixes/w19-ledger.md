@@ -201,6 +201,21 @@ Every ledger snapshot was re-blessed for the network line.
 
 ## The last check
 
+**Review round.** `make check` went red in `omn --lib` on three tests outside
+the view crate (`a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned`,
+in the flaky tally; `a_windowed_request_s_collection_states_its_own_window`;
+`an_ibs_sample_says_which_level_answered_the_load`), with the load average
+at 40-60. The `cargo test --workspace --no-fail-fast` that followed: 2366
+passed, 6 failed, every one outside the view crate and in code this diff
+does not touch (`page_faults` sampling, `cases`'
+`every_case_names_its_known_cause_both_ways`, the capability-refusal test,
+`fp_leaf`, a wakeup join refusal, a profile's per-task losses); clippy
+`-D warnings` and `fmt --check` passed, and the binary carried
+`cap_bpf,cap_perfmon`. Every view test passed: `omn-view` (38),
+`view_snapshots`, `view_model`, `view_live`, and `cli`.
+
+**First round.**
+
 `make check` (clippy and fmt passed) went red on one library test,
 `collect::cpu::profile::tests::a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned`,
 which is in the flaky tally (`docs/open-findings.md`); rerun alone, it
