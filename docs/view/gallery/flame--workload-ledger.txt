@@ -1,40 +1,40 @@
-omn top │ fixture workload-ledger │ 1.28s                         view: snapshot │ collectors ≥16.4% │ target 42.8% cpu
+omn top │ fixture workload-ledger │ 1.28s                         view: snapshot │ collectors ≥15.6% │ target 40.0% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
-on cpu: 609 · hottest own __tls_get_addr 7.06% │ off cpu: 656ms · hottest own clock_nanosleep 91.4%
-┌ on cpu cpu.profile 609 15 late ~low det degraded x4 ─────┐┌ off cpu sched.offcpu 656ms ~low det degraded ────────────┐
-│width ∝ samples · heaviest left            73 frames deep ││width ∝ time off cpu · heaviest left       15 frames deep │
-│▏all › ⋯10⋯ › libpython3.14+0x1b9172 594                  ││▏all › ⋯11⋯ › libpython3.14+0x5dfc1 655ms                 │
-│▏libp…▏libp…▏PyNu…▏do_…▏do_…▏lib▏_P▏i ▏l                  ││▏clock_nanosleep 91.4%                               ▏ac  │
-│▏_Py…             ▏sh▏p▏_r                                ││                                                          │
-│                                                          ││heaviest on their own (where it ends, every path summed)  │
-│                                                          ││ 91.4% ████████████ clock_nanosleep                       │
-│heaviest on their own (where it ends, every path summed)  ││ 4.36% █            accept4                               │
-│ 7.06% ████████████ __tls_get_addr                        ││ 3.16% ▏            fsync                                 │
-│ 6.24% ███████████  _Py_Dealloc                           ││ 0.87% ▏            wait4                                 │
-│ 4.93% ████████     PyNumber_Remainder                    ││ 0.12% ▏            libc+0x12071d                         │
-│ 3.94% ███████      _raw_spin_unlock_irqrestore           ││ 0.07% ▏            __recv                                │
-│ 3.12% █████        perf_swevent_event                    ││                                                          │
-│ 2.63% ████         libpython3.14+0x5ef6d                 ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
-│ 1.97% ███          libpython3.14+0x19cf26                ││  is always the scheduler, and what it was waiting for is │
-│                                                          ││  the task state                                          │
-│‼ pmu:sw: time-based sampling: blind to phases running at ││‼ names came from -- python3.14: its dynamic symbols only:│
-│  reduced frequency                                       ││  its internal functions are unnamed; libc.so.6: its      │
-│‼ 74 of 144 samples landed in a function that sets up no  ││  dynamic symbols only: its internal functions are        │
-│  frame pointer (43 in ld-linux-x86-64.so.2, 25 in        ││  unnamed; libpython3.14.so.1.0: its dynamic symbols only:│
-│  libc.so.6, 6 in libpython3.14.so.1.0), so the frames    ││  its internal functions are unnamed;                     │
-│  under the leaf are not its callers: most of them are    ││  _socket.cpython-314-x86_64-linux-gnu.so: its dynamic    │
-│  outside the target's own code, which is where the       ││  symbols only: its internal functions are unnamed        │
-│  callers are lost; `--stack fp+leaf` recovers the leaf's ││                                                          │
-│  caller and `--stack dwarf` the whole chain              ││                                                          │
-│‼ 2 frames fell in no mapping of the target and are       ││                                                          │
-│  reported by address                                     ││                                                          │
+on cpu: 637 · hottest own __tls_get_addr 5.49% │ off cpu: 641ms · hottest own clock_nanosleep 93.6%
+┌ on cpu cpu.profile 637 15 late ~low det degraded x6 ─────┐┌ off cpu sched.offcpu 641ms ~low det degraded ────────────┐
+│width ∝ samples · heaviest left            68 frames deep ││width ∝ time off cpu · heaviest left       15 frames deep │
+│▏all 637                                                  ││▏all › ⋯11⋯ › libpython3.14+0x5dfc1 641ms                 │
+│▏_start › ⋯9⋯ › libpython3.14+0x1b9172 93.1%           ▏pe││▏clock_nanosleep 93.6%                                ▏ac │
+│▏libpy…▏libp…▏_Py…▏do_…▏_r▏lib▏_▏l▏_  ▏l                  ││                                                          │
+│ ▏l    ▏PyN…      ▏sh▏p   ▏l                              ││heaviest on their own (where it ends, every path summed)  │
+│                                                          ││ 93.6% ████████████ clock_nanosleep                       │
+│                                                          ││ 4.41% █            accept4                               │
+│heaviest on their own (where it ends, every path summed)  ││ 1.12% ▏            fsync                                 │
+│ 5.49% ████████████ __tls_get_addr                        ││ 0.79% ▏            wait4                                 │
+│ 4.87% ███████████  _Py_Dealloc                           ││ 0.08% ▏            __recv                                │
+│ 4.71% ██████████   PyNumber_Remainder                    ││ 0.02% ▏            libc+0x12071d                         │
+│ 3.14% ███████      _raw_spin_unlock_irqrestore           ││                                                          │
+│                                                          ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
+│‼ pmu:sw: time-based sampling: blind to phases running at ││  is always the scheduler, and what it was waiting for is │
+│  reduced frequency                                       ││  the task state                                          │
+│‼ 1 frames fell in no mapping of the target and are       ││‼ names came from -- python3.14: its dynamic symbols only:│
+│  reported by address                                     ││  its internal functions are unnamed; libc.so.6: its      │
+│‼ 1003 frames fell in no mapping of the target and are    ││  dynamic symbols only: its internal functions are        │
+│  reported by address                                     ││  unnamed; libpython3.14.so.1.0: its dynamic symbols only:│
+│‼ 1 task the target started was found on a tick after it  ││  its internal functions are unnamed;                     │
+│  began, and had used 3.53 ms of cpu by then, by the      ││  _socket.cpython-314-x86_64-linux-gnu.so: its dynamic    │
+│  kernel's own account: that time is in no sample here. A ││  symbols only: its internal functions are unnamed        │
+│  task that started and ended between two ticks is in none││                                                          │
+│  at all                                                  ││                                                          │
+│‼ 1 process the target started was sampled too, each      ││                                                          │
+│  symbolized against its own mappings                     ││                                                          │
 │‼ stacks unwound by `fp`: the caller of a function that   ││                                                          │
 │  sets up no frame pointer is lost -- every frameless     ││                                                          │
 │  leaf, and whole stacks of a target built without them   ││                                                          │
 │‼ 1 more on the last line; ! lists every caveat whole     ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
-on cpu ▸ libpython3.14.so.1.0+0x1b9172  the last of 12 frames called in one chain from all
-594 samples ≈ 596ms · 97.5% of all · own 0 · 594 events
+on cpu ▸ all
+637 samples ≈ 639ms · 100% of all · own 0 · 637 events
 cpu.profile: names came from -- python3.14: its dynamic symbols only: its internal functions are unnamed; ld-linux-x86-…
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

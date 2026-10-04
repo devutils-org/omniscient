@@ -1,36 +1,36 @@
-[0m[1momn top[0m │ fixture workload-flows │ 1.00s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥12.4%[0m[35m │ target 5.69% cpu[0m [0m
+[0m[1momn top[0m │ fixture workload-flows │ 1.00s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥14.4%[0m[35m │ target 5.80% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request [0m[1;7m 5 timebar [0m 6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐[0m
 │ [0m[1;32mthe view's reading[0m[2m  one bar per thread, whole: the run's window[0m                                                      │[0m
 │                                                                                                                      │[0m
-│ [0m[1m▶ first suspect  1528032 flows-main: [0m[1;37mblocked: sleeping 929ms (92.6% of its wall clock)[0m                               │[0m
+│ [0m[1m▶ first suspect  1783958 flows-main: [0m[1;37mblocked: sleeping 932ms (93.2% of its wall clock)[0m                               │[0m
 │   asleep on something that is not a lock seen here: a timer, a pipe, a socket, a condition                           │[0m
 │   97 % of it from one stack, leaf first: clock_nanosleep <- libpython3.14.so.1.0+0x5dfc1 <- libpython3.14.so.1.0+0x… │[0m
-│ [0m[2m  decisive: ahead of the next state (45.6ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea…[0m │[0m
+│ [0m[2m  decisive: ahead of the next state (40.4ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea…[0m │[0m
 │                                                                                                                      │[0m
-│ [0m[1;32m▸ 1528032 flows-main  [0m[2m├[0m[2;32m███[0m[2;34m▓[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 92.6% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░[0m[2m ┤    1.00s [0m[1;37m ▶ sleep 92.6%     [0m  │[0m
-│   1528060 python3     [0m[2m├[0m[2;32m██[0m[2m                                                            ┤    1.00s [0m[1;32m ▶ on cpu 3.39%    [0m  │[0m
-│ [0m[2m                     0 ───────────────────────────┼ 502ms ───────────────────────────┤ 1.00s                        [0m │[0m
+│ [0m[1;32m▸ 1783958 flows-main  [0m[2m├[0m[2;32m███[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 93.2% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░[0m[2m ┤    1.00s [0m[1;37m ▶ sleep 93.2%     [0m  │[0m
+│   1784066 python3     [0m[2m├[0m[2;32m██[0m[2m                                                            ┤    1.00s [0m[1;32m ▶ on cpu 3.40%    [0m  │[0m
+│ [0m[2m                     0 ───────────────────────────┼ 500ms ───────────────────────────┤ 1.00s                        [0m │[0m
 │                        [0m[32m█[0m on cpu   [0m[35m▚[0m run queue   [0m[34m▓[0m I/O   [0m[95m▙[0m child   [0m[37m░[0m sleep                                            │[0m
 │                                                                                                                      │[0m
 │ [0m[1m  state                            source          amount          share   ±         reads  trust                   [0m │[0m
 │ [0m[2m  whole: the run's window                          1.00s           100%    exact                                    [0m │[0m
-│ [0m[32m█ [0m[2mon-cpu                           cpu.oncpu_time  45.6ms          4.55%   exact     0      [0m[36m~low det[0m                 │[0m
-│ [0m[2m    ↳ most-sampled leaf `perf_swevent_event`: 2 of 46 samples, every thread's: the samples are spread, no one funct…[0m │[0m
-│ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   394µs           0.04%   exact     23     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
-│ [0m[34m▓ [0m[2mblocked: uninterruptible         sched.offcpu    7.10ms          0.71%   exact     81     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
-│ [0m[2m    ↳ 81 % of it from one stack, leaf first: fsync <- libpython3.14.so.1.0+0x5dfc1 <- libpython3.14.so.1.0+0x1b9172…[0m │[0m
-│ [0m[95m▙ [0m[2mblocked: sleeping, in a wait fo… sched.offcpu    4.43ms          0.44%   exact     1      [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[32m█ [0m[2mon-cpu                           cpu.oncpu_time  40.4ms          4.04%   exact     0      [0m[36m~low det[0m                 │[0m
+│ [0m[2m    ↳ most-sampled leaf `perf_swevent_event`: 8 of 66 samples, every thread's: the samples are spread, no one funct…[0m │[0m
+│ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   391µs           0.04%   exact     16     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[34m▓ [0m[2mblocked: uninterruptible         sched.offcpu    7.16ms          0.72%   exact     19     [0m[36m~low det[0m [0m[33mdegraded x3[0m     │[0m
+│ [0m[2m    ↳ 80 % of it from one stack, leaf first: fsync <- libpython3.14.so.1.0+0x5dfc1 <- libpython3.14.so.1.0+0x1b9172…[0m │[0m
+│ [0m[95m▙ [0m[2mblocked: sleeping, in a wait fo… sched.offcpu    4.90ms          0.49%   exact     1      [0m[36m~low det[0m [0m[33mdegraded x3[0m     │[0m
 │ [0m[2m    ↳ 100 % of it from one stack, leaf first: wait4 <- libpython3.14.so.1.0+0x5dfc1 <- libpython3.14.so.1.0+0x1b917…[0m │[0m
-│ [0m[37m░ [0m[2mblocked: sleeping                sched.offcpu    929ms           92.6%   exact     11     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[37m░ [0m[2mblocked: sleeping                sched.offcpu    932ms           93.2%   exact     15     [0m[36m~low det[0m [0m[33mdegraded x3[0m     │[0m
 │ [0m[2m    ↳ 97 % of it from one stack, leaf first: clock_nanosleep <- libpython3.14.so.1.0+0x5dfc1 <- libpython3.14.so.1.…[0m │[0m
-│ [0m[2m  residue: the whole less the rows                 17.0ms          1.69%   exact     time no row accounts for       [0m │[0m
+│ [0m[2m  residue: the whole less the rows                 15.7ms          1.57%   exact     time no row accounts for       [0m │[0m
 │                                                                                                                      │[0m
 │ [0m[2mNo decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread[0m    │[0m
 │ [0m[2m  over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn[0m │[0m
 │ [0m[2m  latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.[0m                              │[0m
 │ [0m[2mTrust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it[0m  │[0m
-│ [0m[2m  gives up (2).[0m                                                                                                      │[0m
+│ [0m[2m  gives up (4).[0m                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

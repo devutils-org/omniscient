@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture workload-heatmap │ 1.96s                        [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥11.4%[0m[35m │ target 4.07% cpu[0m [0m
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows [0m[1;7m 0 process [0m                     [0m
+┌ process -- one process at a glance: pid 1528232, ran 1.94s ──────────────────────────────────────────────────────────┐[0m
+│[0m[1mfirst suspect: [0m[1;2;37m▶ sleep 96.3%[0m -- the cpu tile (flame) has the detail                                                   │[0m
+│[0m[2mone view's essence per tile: enter, or a click on the selected tile, opens it[0m                                         │[0m
+│┌[0m[1;7m time [0m[2m→ timebar [0m─────────────────────┐[0m[37m┏[0m[1;37m cpu [0m[2;37m→ flame [0m[37m━━━━━━━━━━━━━━━━━━━━━━━━━┓[0m┌[0m[1m cost [0m[2m→ ledger [0m──────────────────────┐│[0m
+││[0m[1;2;37m▶ sleep 96.3%[0m                        │[0m[37m┃[0m[1;2;32m___perf_sw_event › perf_swevent_event [0m[37m┃[0m│[0m[2mcpu 93.9ms[0m                           ││[0m
+││[0m[32m█[0m[37m░░░░░░░░░░░░░░░░░░░░░░░[0m             │[0m[37m┃[0m[2mon cpu: the hottest own code[0m          [0m[37m┃[0m│[0m[2mrss peak 13.8MiB · 3.92k faults[0m      ││[0m
+││[0m[2mheatmap-main (1528232), 1.96s wall[0m   │[0m[37m┃[0m[2;34moff cpu: PyEval_EvalCode ›[0m            [0m[37m┃[0m│[0m[2mcpu: the program's own account[0m       ││[0m
+││                                     │[0m[37m┃[0m[2;34mclock_nanosleep 53.3%[0m                 [0m[37m┃[0m│                                     ││[0m
+││                                     │[0m[37m┃[0m                                      [0m[37m┃[0m│                                     ││[0m
+││                                     │[0m[37m┃[0m                                      [0m[37m┃[0m│                                     ││[0m
+││                                     │[0m[37m┃[0m                                      [0m[37m┃[0m│                                     ││[0m
+││                                     │[0m[37m┃[0m                                      [0m[37m┃[0m│                                     ││[0m
+││[0m[36m~low det[0m [0m[33mdegraded x2[0m                 │[0m[37m┃[0m[33m21 late[0m [0m[36m~low det[0m [0m[33mdegraded x8[0m          [0m[37m┃[0m│[0m[36m~low det[0m [0m[33m23 late[0m                     ││[0m
+│└─────────────────────────────────────┘[0m[37m┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛[0m└─────────────────────────────────────┘│[0m
+│┌[0m[1m request [0m[2m→ request [0m──────────────────┐┌[0m[1m latency [0m[2m→ heatmap [0m───────────────────┐┌[0m[1m threads [0m[2m→ lanes [0m────────────────────┐│[0m
+││[0m[2mno request declared[0m                  ││[0m[2mmax 8.39ms[0m                            ││[0m[2m2 threads[0m                            ││[0m
+││[0m[2mrefused: cannot start collecting[0m     ││[0m[2;36m ▂▃ ▂▂▂█ █████ █▂▂▂▂ ▂  [0m              ││[0m[2;32m▄█▇█▇▇▆▂▂▂▂▂▂▂▇█████▁  ▁[0m             ││[0m
+││[0m[2m`net.request`: /usr/bin/python3[0m      ││[0m[2mnet.socket: 64 measured, median 16.4µs[0m││[0m[2m673 context switches[0m                 ││[0m
+││[0m[2mdeclares no request: `net.request`[0m   ││                                      ││                                     ││[0m
+││[0m[2mfollows a request from a[0m             ││                                      ││                                     ││[0m
+││[0m[2m`request__start(id)` probe to a[0m      ││                                      ││                                     ││[0m
+││[0m[2m`request__done(id)` probe the[0m        ││                                      ││                                     ││[0m
+││[0m[2mprogram fires itself, any provider,[0m  ││                                      ││                                     ││[0m
+││[0m[2mand this one carries no USDT probe…[0m  ││[0m[36m~low det[0m [0m[33mdegraded x3[0m                  ││[0m[33m20 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m         ││[0m
+│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│[0m
+│┌[0m[1m wake [0m[2m→ wake [0m────────────────────────┐┌[0m[1m flows [0m[2m→ flows [0m───────────────────────┐┌[0m[1m gpu [0m[2m→ lanes [0m────────────────────────┐│[0m
+││[0m[2msoftirq ×1.30k[0m                       ││[0m[1;2;36mnet ↓650B ↑650B[0m                       ││[0m[2mno kernel launched[0m                   ││[0m
+││[0m[2m66.5% of 1.95k wake-ups; 5 wakers[0m    ││[0m[2;34mdisk ↓0B ↑0B[0m                          ││[0m[2mdevice memory peak 0B[0m                ││[0m
+││                                     ││[0m[2m↓ received or read · ↑ sent or written[0m││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││                                     ││                                      ││                                     ││[0m
+││[0m[33m20 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m            ││[0m[36m~low det[0m [0m[33mdegraded x3[0m                  ││[0m[33m23 late[0m [0m[33mdegraded[0m                     ││[0m
+│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓ hjkl[0m move between tiles  [0m[1menter[0m open the tile's view           [0m

@@ -61,7 +61,7 @@ pub const NEEDS: &[Need] = &[
     Need {
         source: "io.syscall",
         mode: "trace",
-        emit: &["summary", "hist"],
+        emit: &["raw", "summary", "hist"],
         keys: &[],
         stack: None,
         scope: Scope::Target,
@@ -818,17 +818,19 @@ impl Sheet {
             data.run
                 .results
                 .iter()
-                .filter(|one| one.label.ends_with("@system") == system)
+                .filter(|one| crate::app::metered_on_the_machine(one) == system)
                 .filter_map(|one| one.overhead.observed_cpu_ns)
                 .filter(|cpu| *cpu > 0)
                 .max()
         };
-        // A run on the machine has no task, and its own account is the
-        // machine's. Neither account known -- a live run before its end, no
-        // task-keyed event yet -- says nothing either way.
-        let undecided = tasks.is_empty() && observed(false).is_none();
-        let machine_run =
-            tasks.is_empty() && observed(false).is_some() && observed(false) == observed(true);
+        // A run on the machine has no target: every account is the
+        // machine's, even a request keyed per task (an eBPF `cpu.oncpu_time`
+        // sees every task on the machine). Neither account known -- a live
+        // run before its end, no task-keyed event yet -- says nothing either
+        // way.
+        let undecided = tasks.is_empty() && observed(false).is_none() && observed(true).is_none();
+        let machine_run = observed(true).is_some()
+            && (observed(false).is_none() || observed(false) == observed(true));
         let context = Context {
             data,
             focus,
@@ -2193,11 +2195,13 @@ mod tests {
         }
         // Where the task did hold some, its share is drawn, not a zero; and
         // where others held some too, it is less than the whole.
-        for resource in ["memory faulted", "I/O syscalls", "network"] {
+        for resource in ["memory faulted", "I/O syscalls", "network", "cpu time"] {
             let one = line(&narrowed, resource);
             assert!(!one.blank && one.value > 0.0, "{resource}: {}", one.value);
         }
-        for resource in ["memory faulted", "I/O syscalls"] {
+        // `cpu time` is the eBPF backend's on this run, per thread: it
+        // narrows like the probes do.
+        for resource in ["memory faulted", "I/O syscalls", "cpu time"] {
             let (all, one) = (line(&whole, resource), line(&narrowed, resource));
             assert!(
                 one.value < all.value,
@@ -2206,9 +2210,10 @@ mod tests {
                 all.value
             );
         }
-        // The process-keyed sources (`fs:proc`) carry the process alone:
-        // nothing of one of its threads, said rather than drawn as a zero.
-        for resource in ["cpu time", "memory held", "GPU memory"] {
+        // The process-keyed sources (`fs:proc`, the GPU driver) carry the
+        // process alone: nothing of one of its threads, said rather than
+        // drawn as a zero.
+        for resource in ["memory held", "GPU memory"] {
             assert!(line(&narrowed, resource).blank, "{resource}");
         }
         // The machine's lines stay the machine's.
@@ -2386,13 +2391,31 @@ mod tests {
         assert!(!sheet.machine_run);
         let title = title_of(&sheet);
         assert!(title.contains("the target or the machine"), "{title}");
-        assert!(title_of(&self::sheet("machine")).contains("the machine cost"));
+        // A finished run on the machine says so, even where a request on it
+        // is keyed per task (`machine`'s eBPF `cpu.oncpu_time`), or none
+        // asks for a ledger line (`system-wakeup`).
+        for name in ["machine", "system-wakeup"] {
+            let title = title_of(&self::sheet(name));
+            assert!(title.contains("the machine cost"), "{name}: {title}");
+        }
     }
 
     /// A refused source is said on its own line, in the refusal's words.
     #[test]
     fn a_refused_line_says_why() {
-        let sheet = sheet("cpython-hot");
+        // No recording refuses a ledger line any more (`gpu.kernel` is
+        // served since the twentieth wave), so the refusal is the one an
+        // earlier recording carried, put in place of the served result.
+        let mut data = fixture("cpython-hot");
+        data.run
+            .results
+            .retain(|results| results.source != "gpu.kernel");
+        data.refused.push(Refusal {
+            label: "gpu.kernel".into(),
+            source: "gpu.kernel".into(),
+            reason: "no collector is written for `gpu.kernel` on backend `vendor:cupti` yet".into(),
+        });
+        let sheet = Sheet::of(&data, &Focus::default());
         let item = sheet
             .items
             .iter()
@@ -2401,7 +2424,7 @@ mod tests {
         assert!(
             matches!(&item.state, State::Refused(refusal) if refusal.reason.contains("gpu.kernel"))
         );
-        let text = snapshot::text(&snapshot::draw(fixture("cpython-hot"), "ledger", 120, 40));
+        let text = snapshot::text(&snapshot::draw(data, "ledger", 120, 40));
         assert!(
             text.contains("refused: no collector is written for `gpu.kernel`"),
             "{text}"
@@ -2447,7 +2470,20 @@ mod tests {
             "{} against {sum}",
             syscalls.value
         );
-        assert!(matches!(syscalls.graph, Graph::Hist(ref counts, 512, _) if counts.len() >= 5));
+        // The distribution starts at the bucket of the fastest call, a power
+        // of two, and spans the buckets the kernel filled.
+        let fastest = series
+            .iter()
+            .map(|series| series.min)
+            .fold(f64::INFINITY, f64::min);
+        let Graph::Hist(ref counts, low, _) = syscalls.graph else {
+            panic!("a histogram");
+        };
+        assert!(
+            low.is_power_of_two() && low as f64 <= fastest && fastest < 2.0 * low as f64,
+            "from {low} for a fastest call of {fastest}"
+        );
+        assert!(counts.len() >= 5, "{counts:?}");
     }
 
     fn event(ts_ns: u64, tid: i32, attrs: Vec<(&str, AttrValue)>) -> Event {

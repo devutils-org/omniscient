@@ -73,68 +73,27 @@ passed); `cargo test --test view_snapshots` 16 of 17 (the 17th is `process`,
 below); `cargo test --test cli` 27 passed (the gallery README); clippy with
 `-D warnings` and `cargo fmt --check` clean.
 
+After the review round (see "Review"): `cargo test -p omn-view` 184 passed;
+`cargo test --test view_snapshots` 17 of 17; `cargo test --test view_truth`
+10 passed; `cargo test --test view_model` 5 passed; `cargo test --test cli`
+27 passed; clippy and fmt clean.
+
+Shown since: that a re-recording draws the same screens within their
+measurement. All nine workloads were recorded a second time (`make &&
+record.sh workload-…`, 30 s) and `view_truth.rs` passed 10 of 10 on them;
+the committed recordings were then put back, so the snapshots stay drawn on
+the first. `workload-flows` and `workload-ledger` are committed re-recorded
+(with `io.syscall`'s rows), which makes three recordings of each that pass.
+
 Reasoned, not shown:
 
-- That a re-recording draws the same screens within their measurement. One
-  recording was made; the bounds in `view_truth.rs` are the manifests'
-  trust, not this run's numbers, so a re-recording should pass them, but none
-  was made to see it.
 - That a terminal delivers the clicks the `-click--` snapshots answer: the
   harness sends the event the way crossterm reports it.
 
 ## What I could not do, and why
 
-- **18 of the view crate's unit tests fail on the new fixtures**
-  (`cargo test -p omn-view`: 155 passed, 18 failed). They are in
-  `view/src/views/*.rs`, which this stream does not own, and each holds a
-  figure of the old recordings rather than a property:
-  - hard-coded pids of the old recordings: `system`'s
-    `every_thread_any_source_saw_is_listed`, `sorting_reorders_the_list`,
-    `enter_opens_the_selected_process_in_its_ledger`,
-    `the_target_is_in_the_list_with_its_cpu` (2758953 and its threads), and
-    `timebar`'s `the_gallery_holds_the_view_live_chosen_and_rescaled`
-    ("2758972 python3");
-  - durations of the old recordings: `request`'s
-    `what_sets_each_request_apart_is_its_cause` ("lock/sleep +40.1ms",
-    "disk +8.27ms") and `an_undrained_response_is_unknown_not_gone_when_done`
-    ("out ≥28.5ms"), `heatmap`'s `a_row_stamped_at_its_close_is_drawn_over_the_window_before`
-    (the slowest call's place), `flame`'s
-    `twice_the_work_moves_everything_absolutely_and_little_in_shape` (it
-    expects every moved function up; under `-X perf`, 41 of 45 are);
-  - what phase A changed in the sources, which the old recordings did not
-    carry: `gpu.kernel` is now served, not refused (`heatmap`'s
-    `snapshots_beyond_the_default`, `ledger`'s `a_refused_line_says_why`);
-    `cpu.oncpu_time` is served on the machine run and per thread
-    (`system`'s `the_machine_is_drawn_panel_by_panel` expects it refused;
-    `ledger`'s `a_focus_narrows_every_per_task_line` expects `cpu time`
-    blank on one thread; `timebar`'s
-    `a_residue_that_cannot_fail_is_not_printed_as_one` finds a residue on an
-    on-cpu-bracketed bar of `http-server`); `io.syscall` on `sqlite-commits`
-    no longer has a 512-bucket histogram (`ledger`'s
-    `syscall_time_is_exact_and_its_distribution_drawn`); the machine run's
-    title (`ledger`'s `a_live_run_without_tasks_does_not_claim_the_machine`);
-  - one worth reading before it is re-pinned: `system`'s
-    `every_timeline_of_the_machine_ends_where_the_run_does` asserts the
-    target's `cpu.oncpu_time` timeline starts at 0, and on the new recording
-    it starts at 16.4 ms -- the first recording that carries `first_ts_ns`,
-    so the view may now move the target's own timeline, which the test says
-    it must not; and `flame`'s `off_cpu_splits_by_thread_and_narrows_to_a_focused_one`
-    gets no tree from the off-cpu needs on its fixture.
-  Filed below for the view crate's owner.
-- **The `process` snapshots**: `docs/view/gallery/process--*` is the process
-  stream's. The existing ones are left as committed (drawn on the old
-  recordings by the stub) and the thirteen new fixtures have none, so
-  `view_snapshots::process` fails here until the process stream blesses them
-  on these recordings.
-- **Bytes per file in `flows` and in the ledger, on a workload's
-  recording**: `omn top`'s needs ask `io.syscall` as a summary and a
-  histogram, without `raw`, so on `workload-flows` the flows view says "bytes
-  per file: not in this run" and the ledger "bytes read and written: on the
-  raw rows only, which this run did not keep". The manifests' file bytes
-  (8 MiB, 1 MiB, 4 MiB) are therefore not held in `view_truth.rs`; the
-  socket's are, exactly. A need with `raw` is the view's table
-  (`docs/view/README.md`) to change; then `file_bytes` from
-  `tests/view_workloads.rs` is the check to add.
+- The view crate's failing tests, the `process` snapshots and the bytes per
+  file, listed here in the first round, are done: see "Review".
 - **`--against` and focus snapshots in the standard set** (the view stream's
   request): not done for time. `snapshot::draw_with` is there; the ledger's
   two stay in `ledger.rs`.
@@ -153,6 +112,12 @@ make && tests/view_fixtures/record.sh workload-lanes  # one
 OMN_VIEW_BLESS=1 cargo test --test view_snapshots     # then look at the diff
 ```
 
+`record.sh` now refuses a binary without `cap_bpf` (a `cargo build`,
+`cargo test` or `cargo clippy` since `make` relinks it and drops them): the
+first try at the second recording above was made on such a binary, and
+recorded every eBPF source as refused without a word. `OMN_RECORD_UNPRIVILEGED=1`
+records anyway, for a machine that truly cannot.
+
 ## Decision lines
 
 - **A view's truth is read off its screen**, not off its model: most views
@@ -165,18 +130,68 @@ OMN_VIEW_BLESS=1 cargo test --test view_snapshots     # then look at the diff
 
 ## Needs from another stream
 
-- **The view crate's owner (`view/src/views/*.rs`)**: the 18 unit tests
-  above re-pinned to the new recordings, or better, rewritten as properties
-  (pids read from the data, not written in the test); and
-  `every_timeline_of_the_machine_ends_where_the_run_does` read first, since
-  it may be a real shift of the target's timeline by `first_ts_ns`.
-- **process (`docs/view/gallery/process--*`)**: bless `process--<fixture>`
-  on these recordings, the thirteen new fixtures included.
-- **view (`docs/view/README.md`, the needs table)**: `io.syscall` with `raw`
-  for flows and ledger, so a workload's bytes per file are drawn; then
-  `view_truth.rs` holds the file bytes too.
 - **docs (`examples/vertical/server.c`)**: `MAX_PLAN` raised from 64, so a
   plan of a few hundred requests does not need the `sed` in `record.sh`.
-- **coordinator**: the `frame--help` and `frame--narrow` snapshots are drawn
-  on `process`; once the process stream lands its view they change, and are
-  re-blessed at that merge.
+- **coordinator**: this branch now carries the re-pinned view tests and every
+  snapshot re-blessed on these recordings, `process--*` and `frame--*`
+  included; merge it as one, with nothing to re-bless after it unless main
+  moved a view since `17521b4`.
+
+## Review
+
+The reviewer's two findings, both fixed (`7b1300a` and the commit after it).
+
+**The workspace suite red on the merge.** The 18 view unit tests now hold
+properties of the recordings, not their figures: ids read from the data
+(system, flame, timebar), a cause's size within the plan's bounds
+(`examples/vertical-one-request.yml`) rather than one run's milliseconds
+(request), the slowest call's window read off its own row (heatmap), the
+histogram's floor from the fastest call (ledger). The two worth a look:
+
+- `every_timeline_of_the_machine_ends_where_the_run_does`: the shifted track
+  is the target's `cpu.oncpu_time`, not `cpu.util@system`, and the shift is
+  the data's. Its result says `first_ts_ns` 16 416 138 ns after the window
+  opened: the target's first read, which the view places where the run says
+  it was. The view did not move it; the old recording carried no
+  `first_ts_ns`, so the inference put it at the opening. The test now holds
+  the track to `first_ts_ns` and to under 50 ms.
+- `off_cpu_splits_by_thread_and_narrows_to_a_focused_one`: the by-thread
+  build was not the one failing -- it gives its three threads. The panic is
+  the narrowing: the test focused tid 2758974, a thread of the old
+  recording, and the new one holds nothing of it, so the tree was `Empty`
+  ("no block was recorded"). `value_attr: block_ns` is not involved. The tid
+  is now read from the recording.
+
+Reading the rest turned up three real defects, fixed rather than re-pinned:
+
+- **A machine run claimed a target.** With `cpu.oncpu_time` on the eBPF
+  backend, a run with no target keys every task on the machine; the ledger
+  titled `machine` "what task 1 and 3120 more cost" with "≈ the target's"
+  energy, and the frame's corner said "target 753% cpu" (and "target 520%"
+  on `system-wakeup`). A result metered on the cpus (`observed_from`
+  "everything but idle on …") is now the machine's account, never a
+  target's (`app::metered_on_the_machine`), in the ledger and the corner.
+  Held by `a_run_on_the_machine_claims_no_target` and the ledger's title
+  test on both runs.
+- **The system view's tests assumed a per-process cpu time**; on these
+  recordings it is per thread, so the process row holds RSS and the threads
+  the cpu. The view was right; the tests now say so. timebar's derived
+  residue is held on the recordings put in the per-process shape it is
+  about, and a new test holds the per-thread case, where the residue is
+  measured and printed.
+- **The view's mirror lacked `overhead.one_time_cpu_ns`**, which these
+  recordings carry: `view_model`'s `the_mirror_holds_every_field_omn_writes`
+  failed. Added.
+
+`process--*` (21 fixtures) and `frame--help`/`frame--narrow` are blessed
+here on these recordings, now that main carries the process view.
+
+**Bytes per file not held.** flows' and ledger's `io.syscall` need now asks
+`raw` (`docs/view/README.md`'s table with it), `workload-flows` and
+`workload-ledger` are re-recorded with it, and
+`flows_draws_each_files_bytes_exactly` holds `large.bin` (fd 40: 8.00 MiB
+written, 8.00 MiB read) and `small.bin` (fd 41: 1.00 MiB written, nothing
+read) exactly, per descriptor as the manifest counts them; the ledger test
+holds its 4.00 MiB written, within 1 % above. The other recordings keep
+`io.syscall` without rows until they are next recorded, and their screens say
+so as before. "A re-recording draws the same screens" is shown, above.

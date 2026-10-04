@@ -7,7 +7,7 @@
 //! `tests/view_fixtures/` (made by `record.sh`, through `omn top --headless`
 //! with every view's needs) is drawn, and the numbers are read off the screen
 //! the way a user reads them -- the hottest function, the request's cause, the
-//! bytes per socket, the phase boundaries. A view that draws a figure the
+//! bytes per socket and per file, the phase boundaries. A view that draws a figure the
 //! manifest knows and draws it wrong fails here, not in a snapshot nobody
 //! reads.
 //!
@@ -279,6 +279,39 @@ fn flows_draws_the_sockets_bytes_exactly() {
     );
 }
 
+/// `flows`: each file's bytes are exact, each way, on the descriptor the
+/// manifest says it was opened on (`io.syscall`'s rows are per descriptor).
+#[test]
+fn flows_draws_each_files_bytes_exactly() {
+    let truth = manifest("flows");
+    let drawn = screen("flows", &[], 160, 50);
+    for file in truth["files"].as_array().expect("files") {
+        let fd = file["fd"].as_i64().expect("fd");
+        let name = file["name"].as_str().expect("name");
+        // `fd 40            █     →8.00MiB ←8.00MiB   ┃…`: the row's own
+        // words, up to the next column.
+        let row: Vec<&str> = after(&drawn, &format!(" fd {fd} "))
+            .into_iter()
+            .take_while(|word| !word.contains('┃'))
+            .collect();
+        let way = |arrow: char| {
+            row.iter()
+                .find_map(|word| word.strip_prefix(arrow).and_then(bytes))
+                .unwrap_or(0.0)
+        };
+        assert_eq!(
+            way('→'),
+            num(&file["written"]),
+            "{name} written, fd {fd}: {row:?}\n{drawn}"
+        );
+        assert_eq!(
+            way('←'),
+            num(&file["read"]),
+            "{name} read, fd {fd}: {row:?}\n{drawn}"
+        );
+    }
+}
+
 /// `heatmap`: the regimes are the phases -- 600 receives about 1.5 ms apart
 /// in two phases, 50 at about 12 ms between them, and that slow phase's span
 /// about 50 x 12 ms.
@@ -343,6 +376,12 @@ fn ledger_carries_the_manifests_costs() {
     });
     let held = num(&truth["memory"]["bytes"]);
     within("memory grown", grown, held, held * 1.1);
+    // The bytes written through descriptors are the file's (the socket's are
+    // the network line's). A few more, the interpreter's own output, may
+    // join them; never fewer.
+    let written = first(&drawn, "read,", bytes);
+    let file = num(&truth["file"]["written"]);
+    within("bytes written", written, file, file * 1.01);
     let out = first(&drawn, "moved", bytes);
     let received = first(&drawn, "out,", bytes);
     assert_eq!(out, num(&truth["socket"]["sent"]), "sent:\n{drawn}");

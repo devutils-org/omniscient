@@ -1920,14 +1920,21 @@ mod tests {
             );
             assert!(point.start + point.span_ns <= run_end as f64);
         }
+        // The slowest call, which the heatmap names: drawn over a window
+        // that ends where its row was stamped, not as a moment there.
         let slowest = samples
             .slowest_in(f64::NEG_INFINITY, f64::INFINITY)
             .expect("a slowest call");
-        let from = slowest.start - run_start as f64;
-        let to = from + slowest.span_ns;
+        let index = samples
+            .points
+            .iter()
+            .position(|point| std::ptr::eq(point, slowest))
+            .unwrap();
+        let stamped = events[index].ts_ns as f64;
+        let (from, to) = (slowest.start, slowest.start + slowest.span_ns);
         assert!(
-            (163.0e6..164.0e6).contains(&from) && (218.0e6..219.0e6).contains(&to),
-            "the slowest call drawn {from} to {to}"
+            slowest.span_ns > 0.0 && (to - stamped).abs() <= 0.5,
+            "the slowest call, stamped {stamped}, drawn {from} to {to}"
         );
     }
 
@@ -2310,7 +2317,11 @@ mod tests {
         let mut gpu = app(fixture("http-server"));
         press(&mut gpu, KeyCode::Char('s'));
         let buffer = snapshot::draw_app(&mut gpu, WIDTH, HEIGHT);
-        assert!(snapshot::text(&buffer).contains("gpu.kernel refused"));
+        // Served on this run, by CUPTI, on a target that launched no
+        // kernel: said as none, not refused and not left blank.
+        let text = snapshot::text(&buffer);
+        assert!(!text.contains("gpu.kernel refused"), "{text}");
+        assert!(text.contains("No GPU operations"), "{text}");
         assert_snapshot("heatmap--http-server--gpu.kernel", &buffer);
     }
 }

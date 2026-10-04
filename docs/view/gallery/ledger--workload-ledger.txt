@@ -1,37 +1,37 @@
-omn top │ fixture workload-ledger │ 1.28s                         view: snapshot │ collectors ≥16.4% │ target 42.8% cpu
+omn top │ fixture workload-ledger │ 1.28s                         view: snapshot │ collectors ≥15.6% │ target 40.0% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ ledger -- what task 1528848 and 1 more cost over 1.28s of wall-clock ────────────────────────────────────────────────┐
+┌ ledger -- what task 1784901 and 1 more cost over 1.28s of wall-clock ────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
-│▸ cpu time        640ms on cpu     50.2% of one cpu          ██████████▃▃▃▃▃▁▁▁▁▁▁▁▁▁    ≥18.2ms  ~low det            │
-│    1528848 ledger…     605ms  ███████████  94.6%                                                                     │
-│    task 1528877       34.8ms  █            5.43%                                                                     │
+│▸ cpu time        636ms on cpu     49.7% of one cpu          ██████████▄▄▄▄▂▁▁▁▁▁▁▁▁▁    ≥18.1ms  ~low det            │
+│    1784901 python3     603ms  ███████████  94.8%                                                                     │
+│    task 1785025       33.1ms  █            5.21%                                                                     │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
-│    own account         641ms  with its descendants, as the scheduler counts them                                     │
-│    machine busy        7.59s  █            8.45%                                                                     │
-│  memory held     78.2MiB peak     +64.3MiB from 13.9MiB     ▁▁▁▁▁▁▁▁▁▁▁▁▁▁██████████     1.01ms                      │
-│  memory faulted  17.0k faults     13.4k/s                   a total only                ≥9.72ms  -3.28k lost (16.1%) │
-│    1528848 ledger…     15.1k  ███████████  88.3%                                                                     │
-│    task 1528877        2.00k  █            11.7%                                                                     │
-│  I/O syscalls    237 calls        1.84ms inside them        256ns ▄▅▅▂▂█▂▂▁ 131µs       ≥46.4ms  ~low det degraded x2│
-│    bytes read and written: on the raw rows only, which this run did not keep                                         │
-│  network         2.25MiB moved    2.00MiB out, 256KiB in                █               ≥45.6ms  ~low det degraded x3│
-│    38 socket calls                                                                                                   │
-│  retransmits     0 sent again     machine-wide              a total only                ≥81.8µs  14 late ~low det    │
-│  GPU memory      0B peak          of 734MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁      577µs                      │
-│  GPU time        0ns on GPU       0 kernels and copies      no series kept              ≥74.2µs  14 late degraded    │
-│  energy          112J machine     87.9W on average          ██████████▇▇▇▇█████         ≥23.5µs                      │
-│    ≈ the target's      9.48J  an estimate, not a measurement: its share of the machine's busy cpu, 641ms of 7.59s    │
+│    own account         637ms  with its descendants, as the scheduler counts them                                     │
+│    machine busy        3.08s  ██           20.7%                                                                     │
+│  memory held     78.2MiB peak     +64.3MiB from 13.9MiB     ▁▁▁▁▁▁▁▁▁▁▁▁▁▁██████████     1.25ms                      │
+│  memory faulted  17.0k faults     13.3k/s                   a total only                ≥11.1ms  15 late             │
+│    1784901 python3     15.1k  ███████████  88.3%                                                                     │
+│    task 1785025        2.00k  █            11.7%                                                                     │
+│  I/O syscalls    237 calls        1.84ms inside them        256ns ▆▄▄▂▂█▃▂▁ 131µs       ≥42.5ms  ~low det degraded x2│
+│    bytes             1.63MiB  read, 4.00MiB written                                                                  │
+│  network         2.25MiB moved    2.00MiB out, 256KiB in                █               ≥43.5ms  ~low det degraded x3│
+│    36 socket calls                                                                                                   │
+│  retransmits     0 sent again     machine-wide              a total only                 ≥115µs  11 late ~low det    │
+│  GPU memory      0B peak          of 718MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁      687µs                      │
+│  GPU time        0ns on GPU       0 kernels and copies      no series kept               ≥139µs  11 late degraded    │
+│  energy          85.1J machine    66.5W on average          ██████████▇▇▇▇█████         ≥29.7µs                      │
+│    ≈ the target's      17.6J  an estimate, not a measurement: its share of the machine's busy cpu, 637ms of 3.08s    │
 │                                                                                                                      │
-│  to know all of this: ≥122ms of omn's cpu, ≥19.0% of what the target spent                                           │
+│  to know all of this: ≥117ms of omn's cpu, ≥18.4% of what the target spent                                           │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
 │· the source is not reproducible between two runs of the same workload                                                │
-│· to know it: 18.2ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
+│· to know it: 18.1ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
 │run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl       │
 │kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable                 │
 │· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │
-│where it could not be read, of 1528848 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │
+│where it could not be read, of 1784901 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │
 │in microseconds once it was reaped)                                                                                   │
 │· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│
 │own account's                                                                                                         │

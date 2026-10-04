@@ -29,6 +29,24 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 omn="$root/target/debug/omn"
+# A binary relinked since `make` has lost its capabilities, and every eBPF
+# source would be recorded as refused -- on a machine that serves them. That
+# is the binary's state, not the machine's, so it is refused here rather than
+# recorded. `OMN_RECORD_UNPRIVILEGED=1` records anyway, for a machine that
+# truly cannot.
+if [ "$(id -u)" -ne 0 ] && [ "${OMN_RECORD_UNPRIVILEGED:-}" != 1 ]; then
+    if ! command -v getcap >/dev/null; then
+        echo "record.sh: no getcap to check $omn carries cap_bpf; set OMN_RECORD_UNPRIVILEGED=1 to record anyway" >&2
+        exit 1
+    fi
+    case "$(getcap "$omn")" in
+    *cap_bpf*) ;;
+    *)
+        echo "record.sh: $omn carries no cap_bpf (relinked since \`make\`?): run \`make\` first" >&2
+        exit 1
+        ;;
+    esac
+fi
 # On a disk rather than in memory, so a write has a device under it.
 work="$root/target/omn-view-fixtures"
 rm -rf "$work"

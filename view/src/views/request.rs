@@ -2033,20 +2033,47 @@ mod tests {
                 .map(|span| span.content.as_ref())
                 .collect()
         };
-        assert!(
-            said("a001").contains("▀ lock/sleep +40.1ms"),
-            "{}",
-            said("a001")
-        );
-        assert!(said("a002").contains("▄ disk +8.27ms"), "{}", said("a002"));
-        assert!(
-            said("a003").contains("lock/sleep +20.1ms"),
-            "{}",
-            said("a003")
-        );
-        assert!(said("a003").contains("disk +1.97ms"), "{}", said("a003"));
-        assert!(said("a004").contains("net in +30.1ms"), "{}", said("a004"));
-        assert!(said("a005").contains("net out +32.7ms"), "{}", said("a005"));
+        // Each cause said with its size, within what the plan injected
+        // (`examples/vertical-one-request.yml`): the bounds are the plan's,
+        // not one recording's numbers.
+        let check = |id: &str, mark: &str, cause: &str, low_ms: f64, high_ms: f64| {
+            let text = said(id);
+            let ms = added_ms(&text, &format!("{mark} {cause}"))
+                .unwrap_or_else(|| panic!("{id}: no `{mark} {cause} +…` in {text}"));
+            assert!(
+                (low_ms..=high_ms).contains(&ms),
+                "{id}: {cause} +{ms}ms, the plan says {low_ms} to {high_ms}: {text}"
+            );
+        };
+        check("a001", "▀", "lock/sleep", 40.0, 48.0);
+        check("a002", "▄", "disk", 0.5, 50.0);
+        check("a003", "▀", "lock/sleep", 20.0, 28.0);
+        check("a003", "▄", "disk", 0.2, 50.0);
+        check("a004", "░", "net in", 30.0, 38.0);
+        check("a005", "░", "net out", 25.0, 60.0);
+        // The one cause is the first said, ahead of what differs by less.
+        assert!(said("a002").contains("from the other 4 requests: ▄ disk +"));
+    }
+
+    /// What follows `<cause> +` in a sentence, in milliseconds: `40.1ms`,
+    /// `547µs`, a lower bound `≥28.6ms`.
+    fn added_ms(text: &str, cause: &str) -> Option<f64> {
+        let rest = &text[text.find(&format!("{cause} +"))? + cause.len() + 2..];
+        let figure: String = rest
+            .trim_start_matches('≥')
+            .chars()
+            .take_while(|c| !c.is_whitespace())
+            .collect();
+        let (number, scale) = if let Some(n) = figure.strip_suffix("ms") {
+            (n, 1.0)
+        } else if let Some(n) = figure.strip_suffix("µs") {
+            (n, 1e-3)
+        } else if let Some(n) = figure.strip_suffix("ns") {
+            (n, 1e-6)
+        } else {
+            (figure.strip_suffix('s')?, 1e3)
+        };
+        number.parse::<f64>().ok().map(|n| n * scale)
     }
 
     /// Half way through a live run, the requests that ended are drawn, as
@@ -2142,12 +2169,16 @@ mod tests {
         );
         assert!(text.contains("unknown after done"), "{text}");
         assert!(!text.contains("gone when done"), "{text}");
-        assert!(!text.contains("4.21ms after done"), "{text}");
-        assert!(text.contains("out ≥28.5ms"), "{text}");
+        // No drain is timed after `done`: no `<duration> after done`.
+        assert!(!text.contains("s after done"), "{text}");
+        // The send wait, the one part known, as a lower bound.
+        let out = at_least(a005.tx_wait, false);
+        assert!(out.starts_with('≥'), "{out}");
+        assert!(text.contains(&format!("out {out}")), "{text}");
         assert!(text.contains("1 ≥: a network side unknown"), "{text}");
         // The summary keeps its badges in 120 columns.
         assert!(text.contains("arrival  degraded x6"), "{text}");
-        assert!(text.contains("net out ≥28.5ms"), "{text}");
+        assert!(text.contains(&format!("net out {out}")), "{text}");
         // The shares, of a span that is a lower bound, are not given.
         assert!(!text.contains("net out 98"), "{text}");
     }
