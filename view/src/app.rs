@@ -15,7 +15,7 @@ use crate::units;
 use crate::views::{registry, Action, Ctx, Focus, View};
 
 /// How the view's own cost is shown.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Cost {
     /// Measured on the drawing thread.
     Measured(Meter),
@@ -196,7 +196,7 @@ impl App {
     /// for the three, so they can be read against each other.
     fn cost_line(&self, with_others: bool) -> Line<'static> {
         let style = Style::new().fg(palette::COST);
-        let view = match self.cost {
+        let view = match &self.cost {
             Cost::Measured(meter) => match meter.percent() {
                 Some(percent) => format!("view {} cpu", units::percent(percent)),
                 None => "view: measuring".to_owned(),
@@ -206,8 +206,9 @@ impl App {
         if !with_others {
             return Line::from(vec![Span::styled(view, style), Span::raw(" ")]);
         }
-        let others = if self.data.live.is_some() {
-            "collectors and target: at the end".to_owned()
+        let mut spans = vec![Span::styled(view, style), Span::raw(" │ ")];
+        if self.data.live.is_some() {
+            spans.push(Span::styled("collectors and target: at the end", style));
         } else {
             let costs = run_costs(&self.data);
             let share = |ns: u64| {
@@ -217,21 +218,33 @@ impl App {
                     units::percent(ns as f64 * 100.0 / costs.wall_ns as f64)
                 }
             };
-            match costs.target_cpu_ns {
-                Some(target) => format!(
-                    "collectors {} │ target {} cpu",
-                    share(costs.collectors_cpu_ns),
-                    share(target)
-                ),
-                None => format!("collectors {} cpu", share(costs.collectors_cpu_ns)),
+            // What a collector spends inside its target is part of its cost;
+            // where some of it is unknown the figure is a lower bound, and is
+            // drawn as one: `≥`, dimmed like every figure not to be read at
+            // face value.
+            let collectors = costs.collectors_cpu_ns + costs.in_target_cpu_ns;
+            if costs.in_target_unknown > 0 {
+                spans.push(Span::styled("collectors ", style));
+                spans.push(Span::styled(
+                    format!("≥{}", share(collectors)),
+                    style.add_modifier(Modifier::DIM),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    format!("collectors {}", share(collectors)),
+                    style,
+                ));
             }
-        };
-        Line::from(vec![
-            Span::styled(view, style),
-            Span::raw(" │ "),
-            Span::styled(others, style),
-            Span::raw(" "),
-        ])
+            match costs.target_cpu_ns {
+                Some(target) => spans.push(Span::styled(
+                    format!(" │ target {} cpu", share(target)),
+                    style,
+                )),
+                None => spans.push(Span::styled(" cpu", style)),
+            }
+        }
+        spans.push(Span::raw(" "));
+        Line::from(spans)
     }
 
     fn draw_tabs(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -312,6 +325,7 @@ impl App {
             },
             Mark::Late { ticks: 3 },
             Mark::TimeError { ns: 2_500 },
+            Mark::TimeErrorUnknown,
             Mark::LowDeterminism,
             Mark::Provisional,
             Mark::Degraded { count: 1 },
@@ -349,8 +363,16 @@ impl App {
 /// What a finished run cost, as its results say it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunCosts {
-    /// The cpu every collector spent, summed.
+    /// The cpu every collector spent in this process, summed: each one's
+    /// share of `getrusage`. What measuring the cost itself took
+    /// (`measurement_ns`) is this process's cpu too, and is already in it.
     pub collectors_cpu_ns: u64,
+    /// What the collectors spent inside their targets, where it is known.
+    pub in_target_cpu_ns: u64,
+    /// How many collectors spent something inside their target that is not
+    /// known (an eBPF program without the kernel's run statistics): the
+    /// collectors' figure is then a lower bound.
+    pub in_target_unknown: usize,
     /// The target's own cpu, when a result measured one: a request on the
     /// target rather than on the machine (`@system`), since a machine-wide
     /// request's is the machine's.
@@ -367,6 +389,14 @@ pub fn run_costs(data: &Data) -> RunCosts {
             .iter()
             .map(|results| results.overhead.attributed_cpu_ns)
             .sum(),
+        in_target_cpu_ns: results
+            .iter()
+            .filter_map(|results| results.overhead.in_target_cpu_ns)
+            .sum(),
+        in_target_unknown: results
+            .iter()
+            .filter(|results| results.overhead.in_target_cpu_ns.is_none())
+            .count(),
         target_cpu_ns: results
             .iter()
             .filter(|results| !results.label.ends_with("@system"))

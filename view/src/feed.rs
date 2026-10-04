@@ -19,11 +19,14 @@ pub const LIVE_KEEP: usize = 200_000;
 #[derive(Debug, Clone)]
 pub enum Update {
     /// New events of request `index`, in arrival order, and the runner's
-    /// clock when it handed them over.
+    /// clock when it handed them over. `unconverted` counts the events read
+    /// that could not be handed over, with the first reason: they are
+    /// counted as undecoded, never let go silently.
     Events {
         index: usize,
         events: Vec<Event>,
         now_ns: u64,
+        unconverted: Option<(u64, String)>,
     },
     /// The runner's clock, when nothing new arrived.
     Tick { now_ns: u64 },
@@ -44,6 +47,7 @@ pub fn apply(data: &mut Data, update: Update) {
             index,
             events,
             now_ns,
+            unconverted,
         } => {
             if let Some(live) = data.live.as_mut() {
                 live.now_ns = live.now_ns.max(now_ns);
@@ -52,6 +56,20 @@ pub fn apply(data: &mut Data, update: Update) {
                 return;
             };
             results.events_seen += events.len() as u64;
+            if let Some((count, why)) = unconverted {
+                results.losses.undecoded += count;
+                *results
+                    .losses
+                    .reasons
+                    .entry(format!(
+                        "omn top could not hand these events to the view: {why}"
+                    ))
+                    .or_insert(0) += count;
+            }
+            let ts_err = events.iter().map(|event| event.ts_err_ns).max();
+            if let Some(ts_err) = ts_err {
+                results.ts_err_ns = Some(results.ts_err_ns.unwrap_or(0).max(ts_err));
+            }
             if !results
                 .outputs
                 .iter()
@@ -173,6 +191,7 @@ mod tests {
                 index: 0,
                 events: vec![event(1), event(2)],
                 now_ns: 5,
+                unconverted: None,
             },
         );
         assert_eq!(data.run.results[0].events().len(), 2);
@@ -189,12 +208,51 @@ mod tests {
                 index: 0,
                 events: (0..LIVE_KEEP as u64 + 7).map(event).collect(),
                 now_ns: 0,
+                unconverted: None,
             },
         );
         let results = &data.run.results[0];
         assert_eq!(results.events().len(), LIVE_KEEP);
         assert_eq!(results.losses.evicted, 7);
         assert_eq!(results.events()[0].ts_ns, 7, "the oldest go first");
+    }
+
+    #[test]
+    fn events_that_could_not_be_handed_over_are_counted_with_why() {
+        let mut data = live();
+        apply(
+            &mut data,
+            Update::Events {
+                index: 0,
+                events: vec![event(1)],
+                now_ns: 0,
+                unconverted: Some((3, "a float that is not a number".into())),
+            },
+        );
+        let results = &data.run.results[0];
+        assert_eq!(results.losses.undecoded, 3);
+        assert!(results
+            .losses
+            .reasons
+            .keys()
+            .any(|why| why.contains("a float that is not a number")));
+    }
+
+    #[test]
+    fn a_live_result_knows_its_time_error_from_its_events() {
+        let mut data = live();
+        let mut late = event(1);
+        late.ts_err_ns = 40;
+        apply(
+            &mut data,
+            Update::Events {
+                index: 0,
+                events: vec![event(0), late],
+                now_ns: 0,
+                unconverted: None,
+            },
+        );
+        assert_eq!(data.run.results[0].max_ts_err_ns(), Some(40));
     }
 
     #[test]

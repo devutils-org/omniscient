@@ -75,6 +75,13 @@ pub struct Results {
     pub period_ns: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_ring: Vec<Value>,
+    /// The worst time error of the events this result was made from, when
+    /// something saw them before they were aggregated: `omn top` writes it
+    /// in `view.json`, and a live run's events carry it. Not part of
+    /// `results.json`, whose summaries, timelines and histograms do not say
+    /// it; `None` is unknown, never zero.
+    #[serde(skip)]
+    pub ts_err_ns: Option<u64>,
 }
 
 impl Results {
@@ -95,15 +102,19 @@ impl Results {
         self.outputs.iter().find(|output| output.emit() == emit)
     }
 
-    /// The largest time error any of its events carries. Zero when every
-    /// timestamp was taken on `CLOCK_MONOTONIC` -- or when the result holds no
-    /// events to say otherwise, which [`Results::events`] being empty shows.
-    pub fn max_ts_err_ns(&self) -> u64 {
-        self.events()
-            .iter()
-            .map(|event| event.ts_err_ns)
-            .max()
-            .unwrap_or(0)
+    /// The largest time error any of its events carries: zero when every
+    /// timestamp was taken on `CLOCK_MONOTONIC`. `None` when nothing says --
+    /// a result with no `raw` events, from a recording `omn top` did not
+    /// write (`view.json` carries it) -- which is unknown, never zero.
+    pub fn max_ts_err_ns(&self) -> Option<u64> {
+        let raw = self.outputs.iter().find_map(|output| match output {
+            Output::Raw { events } => Some(events.iter().map(|event| event.ts_err_ns).max()),
+            _ => None,
+        });
+        match (raw, self.ts_err_ns) {
+            (Some(raw), held) => Some(raw.unwrap_or(0).max(held.unwrap_or(0))),
+            (None, held) => held,
+        }
     }
 
     /// The frames of a stack id, root first; empty when the id is unknown.
@@ -469,6 +480,10 @@ pub struct Overhead {
     pub measurements: u64,
     #[serde(default)]
     pub in_target_cpu_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_target_runs: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub in_target_left_out: u64,
     #[serde(default)]
     pub in_target_from: String,
     #[serde(default)]
@@ -719,6 +734,25 @@ pub struct Beside {
     pub facts: BTreeMap<String, SourceFacts>,
     #[serde(default)]
     pub refused: Vec<Refusal>,
+    /// Each result's worst time error, by label, from its events before they
+    /// were aggregated: `results.json` does not carry it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ts_err_ns: BTreeMap<String, u64>,
+    /// What the view of the live run spent, drawing and handing events over:
+    /// taken out of every collector's figure in `results.json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_cpu_ns: Option<u64>,
+}
+
+impl Beside {
+    /// Gives each result of `data` the time error this file holds for it.
+    pub fn apply_ts_err(&self, data: &mut Data) {
+        for results in &mut data.run.results {
+            if let Some(ts_err) = self.ts_err_ns.get(&results.label) {
+                results.ts_err_ns = Some(*ts_err);
+            }
+        }
+    }
 }
 
 /// The name of the file `omn top -o` writes beside `results.json`.
@@ -788,6 +822,7 @@ impl Data {
                         beside.display()
                     ))
                 })?;
+                beside.apply_ts_err(&mut data);
                 data.facts = beside.facts;
                 data.refused = beside.refused;
                 if !beside.origin.is_empty() {
@@ -911,4 +946,8 @@ impl Data {
             .max()
             .unwrap_or(0)
     }
+}
+
+fn is_zero(count: &u64) -> bool {
+    *count == 0
 }

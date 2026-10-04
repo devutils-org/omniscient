@@ -18,5 +18,11 @@
       "summary": "Run queue wait: wakeup -> on-CPU"
     }
   },
-  "refused": []
+  "refused": [],
+  "ts_err_ns": {
+    "blocked": 0,
+    "futex": 0,
+    "on-cpu": 0,
+    "runnable": 0
+  }
 }

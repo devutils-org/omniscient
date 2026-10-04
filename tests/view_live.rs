@@ -60,7 +60,7 @@ fn a_headless_live_run_writes_what_replay_draws() {
     let data = omn_view::model::Data::load(&out).expect("the live run loads");
     // Every view's need is served or refused with its reason: none is
     // dropped without a word.
-    for need in omn_view::views::all_needs() {
+    for need in omn_view::views::all_needs().expect("the views' needs merge") {
         let served = data
             .run
             .results
@@ -145,7 +145,7 @@ fn the_session_a_live_run_would_ask_for_is_printed() {
     let output = run(&["top", "--dump-session", "-d", "2s", "--", "true"]);
     assert!(output.status.success(), "{}", text(&output.stderr));
     let session = text(&output.stdout);
-    for need in omn_view::views::all_needs() {
+    for need in omn_view::views::all_needs().expect("the views' needs merge") {
         let asked = session.contains(&format!("label: {}\n", need.label));
         let refused = text(&output.stderr).contains(&format!("`{}` is not asked", need.label));
         assert!(
@@ -192,4 +192,56 @@ fn what_cannot_mean_anything_is_refused() {
     let missing = run(&["top", "--replay", "/nonexistent/run", "--headless"]);
     assert!(!missing.status.success());
     assert!(text(&missing.stderr).contains("does not exist"));
+}
+
+/// `omn top` without a controlling terminal: in a session of its own, as an
+/// agent shell, CI or `nohup` runs it.
+fn without_a_terminal(args: &[&str]) -> (Output, std::time::Duration) {
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(BINARY);
+    command.args(args).stdin(std::process::Stdio::null());
+    // SAFETY: `setsid` is async-signal-safe, and nothing else runs between
+    // the fork and the exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let started = std::time::Instant::now();
+    let output = command.output().expect("omn should run");
+    (output, started.elapsed())
+}
+
+/// A live run with no terminal to draw on is refused before it collects
+/// anything, with the way to run it instead -- not after its whole duration,
+/// with nothing written.
+#[test]
+fn a_live_run_with_no_terminal_is_refused_at_once() {
+    let out = scratch("no-terminal");
+    let (output, took) = without_a_terminal(&[
+        "top",
+        "-d",
+        "20s",
+        "-o",
+        out.to_str().unwrap(),
+        "--",
+        "sleep",
+        "30",
+    ]);
+    let stderr = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(EXIT_REJECTED), "{stderr}");
+    assert!(stderr.contains("--headless"), "{stderr}");
+    assert!(
+        took < std::time::Duration::from_secs(10),
+        "refused after {took:?}: it collected first"
+    );
+    assert!(!out.join("results.json").exists());
+
+    let (output, _) = without_a_terminal(&["top", "--replay", fixture().to_str().unwrap()]);
+    let stderr = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(EXIT_REJECTED), "{stderr}");
+    assert!(stderr.contains("--headless"), "{stderr}");
 }

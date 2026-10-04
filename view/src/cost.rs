@@ -2,15 +2,23 @@
 //!
 //! `omn` shows its own price beside every measurement, and the view is no
 //! exception: the cpu the drawing thread spent, as a share of the wall-clock
-//! it has been running. Read from `CLOCK_THREAD_CPUTIME_ID`, so it is the
-//! view's alone -- the collectors' cost is in the run's results, where every
-//! collector's is.
+//! it has been running, read from `CLOCK_THREAD_CPUTIME_ID`, plus what the
+//! view causes elsewhere: in a live run, the runner's thread hands each new
+//! event over to it, and that cpu is the view's too. `omn top` measures that
+//! hand-over on the runner's thread, adds it here, and takes the view's whole
+//! cpu out of the collectors' figures, which `getrusage` would otherwise
+//! charge it to (the whole process is one account).
 
-/// The drawing thread's cpu, since it started.
-#[derive(Debug, Clone, Copy)]
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+/// The drawing thread's cpu, since it started, and what the view spent on
+/// other threads.
+#[derive(Debug, Clone)]
 pub struct Meter {
     started_cpu_ns: u64,
     started_wall_ns: u64,
+    elsewhere: Option<Arc<AtomicU64>>,
 }
 
 impl Default for Meter {
@@ -22,16 +30,27 @@ impl Default for Meter {
 impl Meter {
     /// Starts measuring the calling thread.
     pub fn start() -> Meter {
+        Self::start_with(None)
+    }
+
+    /// Starts measuring the calling thread, with what other threads spend
+    /// for the view added from `elsewhere` (nanoseconds, a running total).
+    pub fn start_with(elsewhere: Option<Arc<AtomicU64>>) -> Meter {
         Meter {
             started_cpu_ns: thread_cpu_ns(),
             started_wall_ns: monotonic_ns(),
+            elsewhere,
         }
     }
 
-    /// The thread's cpu since the start, in nanoseconds, and the wall-clock.
+    /// The view's cpu since the start, in nanoseconds, and the wall-clock.
     pub fn spent(&self) -> (u64, u64) {
+        let elsewhere = self
+            .elsewhere
+            .as_ref()
+            .map_or(0, |elsewhere| elsewhere.load(Ordering::Relaxed));
         (
-            thread_cpu_ns().saturating_sub(self.started_cpu_ns),
+            thread_cpu_ns().saturating_sub(self.started_cpu_ns) + elsewhere,
             monotonic_ns().saturating_sub(self.started_wall_ns),
         )
     }
@@ -83,6 +102,15 @@ mod tests {
             meter.percent().unwrap() < 20.0,
             "a sleep cost {cpu} ns of {wall}"
         );
+    }
+
+    #[test]
+    fn what_the_view_spends_elsewhere_is_its_cost_too() {
+        let elsewhere = Arc::new(AtomicU64::new(0));
+        let meter = Meter::start_with(Some(Arc::clone(&elsewhere)));
+        elsewhere.fetch_add(5_000_000_000, Ordering::Relaxed);
+        let (cpu, _) = meter.spent();
+        assert!(cpu >= 5_000_000_000, "{cpu}");
     }
 
     #[test]

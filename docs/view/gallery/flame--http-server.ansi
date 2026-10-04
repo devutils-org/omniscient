@@ -1,11 +1,11 @@
-[0m[1momn top[0m │ fixture http-server │ 689ms                              [0m[35mview: snapshot[0m │ [0m[35mcollectors 15.7% │ target 66.2% cpu[0m [0m
+[0m[1momn top[0m │ fixture http-server │ 2.84s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥16.1%[0m[35m │ target 92.0% cpu[0m [0m
  1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
 ┌ flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ──────────────────────────┐[0m
 │[0m[3mNot drawn yet. What this view needs, and what this run holds of it:[0m                                                   │[0m
 │                                                                                                                      │[0m
-│[0m[1mcpu.profile              [0m[2m710 events via pmu:sw [stack][0m [0m[33m12 late[0m [0m[36m~low det[0m [0m[33mdegraded x7[0m                                   │[0m
+│[0m[1mcpu.profile              [0m[2m2.85k events via pmu:sw [stack][0m [0m[33m29 late[0m [0m[36m~low det[0m [0m[33mdegraded x7[0m                                 │[0m
 │[0m[2m                         the on-cpu icicle[0m                                                                            │[0m
-│[0m[1msched.offcpu             [0m[2m47 events via bpf:raw_tp [stack,raw][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                       │[0m
+│[0m[1msched.offcpu             [0m[2m140 events via bpf:raw_tp [stack,raw][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                      │[0m
 │[0m[2m                         the off-cpu icicle[0m                                                                           │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

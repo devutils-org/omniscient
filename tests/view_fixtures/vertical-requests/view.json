@@ -10,5 +10,9 @@
       "summary": "One request's life by state, and the network on either side of it"
     }
   },
-  "refused": []
+  "refused": [],
+  "ts_err_ns": {
+    "block": 0,
+    "requests": 0
+  }
 }

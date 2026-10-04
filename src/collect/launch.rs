@@ -236,8 +236,23 @@ impl Gated {
 
 impl Drop for Gated {
     fn drop(&mut self) {
-        // A child still parked at the gate would wait forever.
-        self.release();
+        // A child still parked at the gate is killed there, before its exec:
+        // a handle dropped unreleased -- a collector that refused to attach
+        // after the fork -- means the program was never meant to run, and
+        // releasing it first would let it run for as long as the kill takes
+        // to land (a write, a file created, a request sent).
+        if self.gate >= 0 && self.status.is_none() {
+            let mut status = 0;
+            // SAFETY: killing and reaping a child of this process that is
+            // blocked reading the gate, then closing the gate it owns.
+            unsafe {
+                libc::kill(self.pid, libc::SIGKILL);
+                libc::waitpid(self.pid, &mut status, 0);
+                libc::close(self.gate);
+            }
+            self.gate = -1;
+            self.status = Some(status);
+        }
         self.terminate();
         if self.pidfd >= 0 {
             // SAFETY: closing a descriptor this handle owns, once.
@@ -461,6 +476,33 @@ mod tests {
             !alive,
             "process {pid} is still running after its handle was dropped"
         );
+    }
+
+    /// A handle dropped before its release ends the child at the gate: the
+    /// program never runs, not even for the moment a kill takes to land.
+    #[test]
+    fn a_child_dropped_unreleased_never_runs_the_program() {
+        let marker = std::env::temp_dir().join(format!(
+            "omn-launch-unreleased-{}-{}",
+            std::process::id(),
+            monotonic_ns()
+        ));
+        for _ in 0..20 {
+            let child = gated(
+                &[
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    format!("echo ran >> {}", marker.display()),
+                ],
+                &[],
+            )
+            .expect("fork");
+            drop(child);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let ran = marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        assert!(!ran, "a program whose handle was dropped unreleased ran");
     }
 
     #[test]

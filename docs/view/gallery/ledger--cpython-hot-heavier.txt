@@ -1,24 +1,24 @@
-omn top │ fixture cpython-hot-heavier │ 289ms                      view: snapshot │ collectors 7.05% │ target 44.0% cpu
+omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snapshot │ collectors ≥5.29% │ target 96.5% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
 ┌ ledger -- what a process costs, across every resource omn measures ──────────────────────────────────────────────────┐
 │Not drawn yet. What this view needs, and what this run holds of it:                                                   │
 │                                                                                                                      │
-│cpu.oncpu_time           2 events via fs:proc [timeline,summary] ~low det degraded                                    │
+│cpu.oncpu_time           32 events via fs:proc [timeline,summary] ~low det degraded                                   │
 │                         cpu time, per thread                                                                         │
-│mem.rss                  1 events via fs:proc:smaps_rollup [timeline,summary]                                         │
+│mem.rss                  32 events via fs:proc:smaps_rollup [timeline,summary]                                        │
 │                         memory held                                                                                  │
-│mem.faults               1.00k events via pmu:sw [summary] 4 late                                                     │
+│mem.faults               3.06k events via pmu:sw [summary] 80 late                                                    │
 │                         memory faulted in                                                                            │
 │io.syscall               7 events via bpf:fentry [summary,hist] ~low det degraded x2                                  │
 │                         bytes read and written, and their latency as the program saw it                              │
-│net.tcp.retransmit@system 2 events via bpf:raw_tp [summary] 4 late ~low det degraded                                  │
+│net.tcp.retransmit@system 0 events via bpf:raw_tp [summary] 20 late ~low det                                          │
 │                         retransmissions, the machine's: a retransmission is sent from a timer, so the collector      │
 │cannot give it to a process                                                                                           │
-│gpu.mem                  2 events via vendor:nvml [timeline,summary]                                                  │
+│gpu.mem                  32 events via vendor:nvml [timeline,summary]                                                 │
 │                         GPU memory held                                                                              │
 │gpu.kernel               refused: no collector is written for `gpu.kernel` on backend `vendor:cupti` yet              │
 │                         GPU time per kernel                                                                          │
-│power.energy@system      2 events via pmu [timeline,summary]                                                          │
+│power.energy@system      32 events via pmu [timeline,summary]                                                         │
 │                         energy, where it can be attributed                                                           │
 │                                                                                                                      │
 │                                                                                                                      │

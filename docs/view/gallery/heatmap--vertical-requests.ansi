@@ -1,4 +1,4 @@
-[0m[1momn top[0m │ fixture vertical-requests │ 413ms                        [0m[35mview: snapshot[0m │ [0m[35mcollectors 1.28% │ target 4.05% cpu[0m [0m
+[0m[1momn top[0m │ fixture vertical-requests │ 408ms                       [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥0.70%[0m[35m │ target 4.10% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar [0m[1;7m 6 heatmap [0m 7 lanes  8 wake  9 flows                                 [0m
 ┌ heatmap -- latency over time: time across, latency up, density in colour ────────────────────────────────────────────┐[0m
 │[0m[3mNot drawn yet. What this view needs, and what this run holds of it:[0m                                                   │[0m

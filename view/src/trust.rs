@@ -61,6 +61,10 @@ pub enum Mark {
     /// The largest error a timestamp carries, in nanoseconds: the figure's
     /// time was converted from another clock.
     TimeError { ns: u64 },
+    /// Nothing says how far the figure's timestamps may be off: it holds
+    /// aggregates only, from a recording that does not carry their events'
+    /// time error. Unknown, never zero, so it dims as a time error does.
+    TimeErrorUnknown,
     /// The source is not reproducible between two runs of one workload.
     LowDeterminism,
     /// The run is still going: losses, cost and stack names are known only
@@ -101,6 +105,7 @@ impl Mark {
                 format!("±{}", units::duration(*ns as f64)),
                 Style::new().fg(palette::TIME),
             ),
+            Mark::TimeErrorUnknown => Span::styled("±?", Style::new().fg(palette::TIME)),
             Mark::LowDeterminism => Span::styled("~low det", Style::new().fg(palette::TIME)),
             Mark::Provisional => Span::styled(
                 "live",
@@ -140,6 +145,9 @@ impl Mark {
                 "timestamps were converted from another clock and may be off by up to {}",
                 units::duration(*ns as f64)
             ),
+            Mark::TimeErrorUnknown => "how far the timestamps may be off is unknown: the result \
+                 holds aggregates only, and the recording does not carry its events' time error"
+                .to_owned(),
             Mark::LowDeterminism => {
                 "the source is not reproducible between two runs of the same workload".to_owned()
             }
@@ -188,9 +196,10 @@ impl Trust {
                 ticks: results.losses.late_ticks,
             });
         }
-        let ts_err = results.max_ts_err_ns();
-        if ts_err > 0 {
-            marks.push(Mark::TimeError { ns: ts_err });
+        match results.max_ts_err_ns() {
+            Some(0) => {}
+            Some(ns) => marks.push(Mark::TimeError { ns }),
+            None => marks.push(Mark::TimeErrorUnknown),
         }
         if data
             .facts

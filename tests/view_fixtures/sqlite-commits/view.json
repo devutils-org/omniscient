@@ -101,5 +101,28 @@
       "source": "net.request",
       "reason": "cannot start collecting `net.request`: /usr/bin/sqlite3 declares no request: `net.request` follows a request from a `request__start(id)` probe to a `request__done(id)` probe the program fires itself, any provider, and this one carries no USDT probe at all. Nothing is inferred from the connection instead -- see `docs/scenarios/vertical.md`"
     }
-  ]
+  ],
+  "ts_err_ns": {
+    "cpu.oncpu_time": 0,
+    "cpu.profile": 0,
+    "cpu.util@system": 0,
+    "gpu.engine_busy@system": 1000000000,
+    "gpu.mem": 0,
+    "gpu.mem@system": 0,
+    "io.bytes@system": 0,
+    "io.latency": 0,
+    "io.syscall": 0,
+    "mem.faults": 0,
+    "mem.pressure@system": 0,
+    "mem.rss": 0,
+    "net.bytes@system": 0,
+    "net.socket": 0,
+    "net.tcp.retransmit@system": 0,
+    "power.energy@system": 0,
+    "sched.futex": 0,
+    "sched.offcpu": 0,
+    "sched.runqlat": 0,
+    "sched.switches": 0,
+    "sched.wakeup": 0
+  }
 }

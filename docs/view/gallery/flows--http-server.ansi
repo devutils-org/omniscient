@@ -1,15 +1,15 @@
-[0m[1momn top[0m │ fixture http-server │ 689ms                              [0m[35mview: snapshot[0m │ [0m[35mcollectors 15.7% │ target 66.2% cpu[0m [0m
+[0m[1momn top[0m │ fixture http-server │ 2.84s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥16.1%[0m[35m │ target 92.0% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake [0m[1;7m 9 flows [0m                                [0m
 ┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐[0m
 │[0m[3mNot drawn yet. What this view needs, and what this run holds of it:[0m                                                   │[0m
 │                                                                                                                      │[0m
-│[0m[1mnet.socket               [0m[2m18 events via bpf:fentry [raw,hist][0m [0m[33m1 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m                              │[0m
+│[0m[1mnet.socket               [0m[2m86 events via bpf:fentry [raw,hist][0m [0m[36m~low det[0m [0m[33mdegraded x2[0m                                     │[0m
 │[0m[2m                         bytes per socket[0m                                                                             │[0m
-│[0m[1mnet.bytes@system         [0m[2m21 events via fs:proc [timeline,summary][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                   │[0m
+│[0m[1mnet.bytes@system         [0m[2m84 events via fs:proc [timeline,summary][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                   │[0m
 │[0m[2m                         bytes per interface[0m                                                                          │[0m
-│[0m[1mio.syscall               [0m[2m27 events via bpf:fentry [summary,hist][0m [0m[36m~low det[0m [0m[33mdegraded x2[0m                                 │[0m
+│[0m[1mio.syscall               [0m[2m48 events via bpf:fentry [summary,hist][0m [0m[36m~low det[0m [0m[33mdegraded x2[0m                                 │[0m
 │[0m[2m                         bytes per file[0m                                                                               │[0m
-│[0m[1mio.bytes@system          [0m[2m9 events via fs:proc [timeline,summary][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                    │[0m
+│[0m[1mio.bytes@system          [0m[2m36 events via fs:proc [timeline,summary][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                   │[0m
 │[0m[2m                         bytes per device[0m                                                                             │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

@@ -2,10 +2,11 @@
 //!
 //! ratatui's test backend draws the whole frame -- header, tabs, the view,
 //! help line -- from a recording into a buffer of cells. Two files are written
-//! from it under `docs/view/gallery/`: `<name>.txt`, the characters, which a
-//! test compares; and `<name>.ansi`, the same with its colours and dimming
-//! as terminal escapes, which `cat` shows as the screen looked -- the trust
-//! style is in the dimming, and plain text cannot carry it.
+//! from it under `docs/view/gallery/`: `<name>.txt`, the characters; and
+//! `<name>.ansi`, the same with its colours and dimming as terminal escapes,
+//! which `cat` shows as the screen looked -- the trust style is in the
+//! dimming, and plain text cannot carry it. A test compares both: a figure
+//! drawn without its trust style has the same characters and other escapes.
 //!
 //! `OMN_VIEW_BLESS=1` rewrites both from what is drawn now.
 
@@ -189,45 +190,85 @@ fn colour(colour: Color, background: bool) -> Option<String> {
     Some(code.to_string())
 }
 
-/// Compares a view's drawing with its snapshot `docs/view/gallery/<name>.txt`,
-/// and writes `<name>.ansi` beside it. A snapshot that does not exist yet, or
+/// Compares a view's drawing with its snapshot `docs/view/gallery/<name>.txt`
+/// and its styles with `<name>.ansi`. A snapshot that does not exist yet, or
 /// any snapshot under `OMN_VIEW_BLESS=1`, is written from this drawing; the
 /// first case still fails, so a new snapshot is looked at before it counts.
 pub fn assert_snapshot(name: &str, buffer: &Buffer) {
     let dir = gallery_dir();
     let txt = dir.join(format!("{name}.txt"));
+    let colours = dir.join(format!("{name}.ansi"));
     let drawn = text(buffer);
+    let drawn_ansi = ansi(buffer);
     let bless = std::env::var_os("OMN_VIEW_BLESS").is_some_and(|value| value == "1");
     let held = std::fs::read_to_string(&txt).ok();
-    if bless || held.is_none() {
+    let held_ansi = std::fs::read_to_string(&colours).ok();
+    if bless || held.is_none() || held_ansi.is_none() {
         std::fs::create_dir_all(&dir).expect("the gallery directory");
         std::fs::write(&txt, &drawn).expect("the snapshot is written");
-        std::fs::write(dir.join(format!("{name}.ansi")), ansi(buffer))
-            .expect("the snapshot is written");
-        if held.is_none() && !bless {
+        std::fs::write(&colours, &drawn_ansi).expect("the snapshot is written");
+        if !bless {
             panic!(
                 "{} did not exist and was written from this drawing: look at it (`cat {}`), \
                  then run again",
-                txt.display(),
-                dir.join(format!("{name}.ansi")).display()
+                if held.is_none() { &txt } else { &colours }.display(),
+                colours.display()
             );
         }
         return;
     }
     let held = held.unwrap_or_default();
     if held != drawn {
-        let first = held
-            .lines()
-            .zip(drawn.lines())
-            .position(|(one, two)| one != two)
-            .unwrap_or(held.lines().count().min(drawn.lines().count()));
+        let (line, one, two) = first_difference(&held, &drawn);
         panic!(
-            "{} differs from what is drawn now, first at line {}:\n  held:  {:?}\n  drawn: {:?}\n\
-             OMN_VIEW_BLESS=1 rewrites it once the change is the one meant.\n\n{drawn}",
+            "{} differs from what is drawn now, first at line {line}:\n  held:  {one:?}\n  \
+             drawn: {two:?}\nOMN_VIEW_BLESS=1 rewrites it once the change is the one meant.\n\n\
+             {drawn}",
             txt.display(),
-            first + 1,
-            held.lines().nth(first).unwrap_or(""),
-            drawn.lines().nth(first).unwrap_or(""),
         );
+    }
+    let held_ansi = held_ansi.unwrap_or_default();
+    if held_ansi != drawn_ansi {
+        let (line, one, two) = first_difference(&held_ansi, &drawn_ansi);
+        panic!(
+            "{} holds the same characters but not the same styles -- a figure dimmed or not, a \
+             colour changed -- first at line {line}:\n  held:  {one:?}\n  drawn: {two:?}\n\
+             OMN_VIEW_BLESS=1 rewrites it once the change is the one meant (`cat` both to see \
+             it).",
+            colours.display(),
+        );
+    }
+}
+
+/// The first line two texts differ at, counted from one, and that line of
+/// each.
+fn first_difference<'a>(held: &'a str, drawn: &'a str) -> (usize, &'a str, &'a str) {
+    let first = held
+        .lines()
+        .zip(drawn.lines())
+        .position(|(one, two)| one != two)
+        .unwrap_or(held.lines().count().min(drawn.lines().count()));
+    (
+        first + 1,
+        held.lines().nth(first).unwrap_or(""),
+        drawn.lines().nth(first).unwrap_or(""),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Style;
+
+    /// The same characters drawn with and without the dimming give the same
+    /// text and different escapes: what the `.ansi` comparison catches.
+    #[test]
+    fn a_figure_drawn_without_its_dimming_differs_only_in_its_escapes() {
+        let mut plain = Buffer::empty(ratatui::layout::Rect::new(0, 0, 8, 1));
+        plain.set_string(0, 0, "12.5 ms", Style::new());
+        let mut dimmed = plain.clone();
+        dimmed.set_string(0, 0, "12.5 ms", Style::new().add_modifier(Modifier::DIM));
+        assert_eq!(text(&plain), text(&dimmed));
+        assert_ne!(ansi(&plain), ansi(&dimmed));
     }
 }

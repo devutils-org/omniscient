@@ -2481,8 +2481,15 @@ fn top_replay(catalog: &Catalog, args: &TopArgs, path: &Path) -> anyhow::Result<
     }
     let mut app = top_app(args, data)?;
     app.against = against;
+    let screen = match omn_view::term::Screen::open() {
+        Ok(screen) => screen,
+        Err(error) => {
+            eprintln!("error: {}", omn_view::term::no_screen(&error));
+            return Ok(ExitCode::from(EXIT_REJECTED));
+        }
+    };
     let quit = std::sync::atomic::AtomicBool::new(false);
-    omn_view::term::run(app, None, &quit)?;
+    screen.run(app, None, &quit, None)?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2518,11 +2525,20 @@ fn top_session(
                 path.display()
             );
         }
-        // The longest duration is the view's, like `--duration` on `omn
-        // trace -f`: every request moves with it.
-        session.duration = Some(duration);
+        // `--duration` moves every request, as on `omn trace -f`; without
+        // it the file's own durations hold, and only a session that names
+        // none takes the view's default.
+        let given = args.duration.is_some();
+        if given || session.duration.is_none() {
+            session.duration = Some(duration);
+        } else {
+            // The file says how long: the default's note does not apply.
+            notes.clear();
+        }
         for request in &mut session.requests {
-            request.duration = Some(duration);
+            if given || request.duration.is_none() {
+                request.duration = session.duration;
+            }
         }
         return Ok((session, refused, notes));
     }
@@ -2536,7 +2552,7 @@ fn top_session(
         omn::request::Target::System
     };
     let mut requests = Vec::new();
-    for need in omn_view::views::all_needs() {
+    for need in omn_view::views::all_needs().map_err(|why| anyhow::anyhow!(why))? {
         let refuse = |reason: String| omn_view::model::Refusal {
             label: need.label.clone(),
             source: need.source.to_owned(),
@@ -2732,37 +2748,64 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
         .collect();
     view_facts(catalog, &mut opening);
 
-    let quit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let drawing = if args.headless {
-        drop(receiver);
+    // The terminal is taken before anything is collected: a run with no
+    // terminal to draw on is refused now, not after its whole duration.
+    let screen = if args.headless {
         None
     } else {
-        let start_on = args.view.clone();
-        let opening = opening.clone();
-        let quit = std::sync::Arc::clone(&quit);
-        Some(std::thread::spawn(move || -> std::io::Result<()> {
-            // The app is built on the thread that draws it: its views are
-            // not shared with the runner.
-            let mut app = omn_view::app::App::new(opening);
-            if let Some(name) = start_on {
-                let _ = app.open(&name);
+        match omn_view::term::Screen::open() {
+            Ok(screen) => Some(screen),
+            Err(error) => {
+                eprintln!("error: {}", omn_view::term::no_screen(&error));
+                return Ok(ExitCode::from(EXIT_REJECTED));
             }
-            omn_view::term::run(app, Some(receiver), &quit)
-        }))
+        }
     };
+    let quit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handover = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let drawing = match screen {
+        None => {
+            drop(receiver);
+            None
+        }
+        Some(screen) => {
+            let start_on = args.view.clone();
+            let opening = opening.clone();
+            let quit = std::sync::Arc::clone(&quit);
+            let handover = std::sync::Arc::clone(&handover);
+            Some(std::thread::spawn(move || -> std::io::Result<()> {
+                // The app is built on the thread that draws it: its views are
+                // not shared with the runner.
+                let mut app = omn_view::app::App::new(opening);
+                if let Some(name) = start_on {
+                    let _ = app.open(&name);
+                }
+                screen.run(app, Some(receiver), &quit, Some(handover))
+            }))
+        }
+    };
+    // What the view spends -- the drawing thread, and the hand-over on the
+    // runner's thread -- is the view's, and is taken out of the collectors'.
+    let mut view_cpu = drawing
+        .as_ref()
+        .map(|drawing| ViewCpu::new(drawing, std::sync::Arc::clone(&handover)));
 
-    // A source the runner refuses before anything is launched -- no collector
-    // in this build, a target it cannot watch, a start that failed -- is set
-    // aside with the runner's reason and the rest are asked again, unless a
-    // session file's joins name it. Every such refusal comes before the
-    // program is launched, so asking again launches it once.
+    // A source the runner refuses before the run starts -- no collector in
+    // this build, a target it cannot watch, a start or an attach that failed
+    // -- is set aside with the runner's reason and the rest are asked again,
+    // unless a session file's joins name it. A launched program may already
+    // be forked when an attach refuses (`net.request` on a program that
+    // declares no request), but it is still parked at its gate: the runner
+    // drops it unreleased, which kills it there, before its exec
+    // (`launch::Gated`'s drop), so asking again runs the program once.
     let (collections, ladder) = loop {
         let mut ladder = Ladder::new(catalog, &capabilities, &resolutions);
         let mut tap = Tap::new(
             resolutions.len(),
             sender.clone(),
             std::sync::Arc::clone(&quit),
+            view_cpu.as_mut(),
         );
         match collect::run_all_escalating(&resolutions, &mut ladder, Some(&mut tap)) {
             Ok(collections) => break (collections, ladder),
@@ -2830,6 +2873,37 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
             }
         }
     };
+    let mut collections = collections;
+    // What the view spent inside each collection's window is not the
+    // collection's: `getrusage` charges the whole process to every one.
+    let view_spent = view_cpu.as_mut().map(|view_cpu| {
+        view_cpu.sample();
+        for collection in &mut collections {
+            view_cpu.take_out(&mut collection.overhead);
+        }
+        view_cpu.spent()
+    });
+    // Each result's worst time error, from its events before they were
+    // aggregated: a summary, a timeline or a histogram does not carry it.
+    let ts_err_ns: BTreeMap<String, u64> = resolutions
+        .iter()
+        .zip(&collections)
+        .map(|(resolved, collection)| {
+            (
+                resolved
+                    .request
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| resolved.request.source.to_string()),
+                collection
+                    .events
+                    .iter()
+                    .map(|event| u64::from(event.ts_err_ns))
+                    .max()
+                    .unwrap_or(0),
+            )
+        })
+        .collect();
     let assembled = assemble(catalog, &running, &ladder, &resolutions, collections).and_then(
         |(run, costs, served_by)| {
             let value = serde_json::to_value(&run)?;
@@ -2856,7 +2930,10 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
         origin,
         facts: ended.facts.clone(),
         refused: refused.clone(),
+        ts_err_ns,
+        view_cpu_ns: view_spent.map(|(drawing, handover)| drawing + handover),
     };
+    beside.apply_ts_err(&mut ended);
     let _ = sender.send(omn_view::feed::Update::Ended(Box::new(ended)));
     drop(sender);
     if let Some(drawing) = drawing {
@@ -2867,6 +2944,14 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
     }
 
     report_costs(&costs, &run);
+    if let Some((drawing, handover)) = view_spent {
+        eprintln!(
+            "the view: {} of cpu drawing and {} handing the events over, taken out of every \
+             collector's figure above",
+            span(drawing),
+            span(handover)
+        );
+    }
     for refusal in &refused {
         eprintln!(
             "note: `{}` was not served: {}",
@@ -2898,17 +2983,20 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
 /// quits, it lets every request go, which ends the run the way a closed
 /// window does -- and each collection says it was detached because the view
 /// was quit.
-struct Tap {
+struct Tap<'a> {
     /// How many events of each request were handed over already.
     sent: Vec<usize>,
     sender: std::sync::mpsc::Sender<omn_view::feed::Update>,
     quit: std::sync::Arc<std::sync::atomic::AtomicBool>,
     last: Option<std::time::Instant>,
-    /// Set once the drawing thread is gone: nothing more is converted.
+    /// Set once the drawing thread is gone, or from the start when there is
+    /// none (`--headless`): nothing more is converted.
     unheard: bool,
+    /// What the view spends, kept for taking it out of the collectors'.
+    view_cpu: Option<&'a mut ViewCpu>,
 }
 
-impl Tap {
+impl<'a> Tap<'a> {
     /// The least time between two hand-overs: the screen redraws at 4 Hz, and
     /// converting events more often would be the view's cost for nothing.
     const EVERY: std::time::Duration = std::time::Duration::from_millis(200);
@@ -2917,18 +3005,84 @@ impl Tap {
         count: usize,
         sender: std::sync::mpsc::Sender<omn_view::feed::Update>,
         quit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        view_cpu: Option<&'a mut ViewCpu>,
     ) -> Self {
         Self {
             sent: vec![0; count],
             sender,
             quit,
             last: None,
-            unheard: false,
+            unheard: view_cpu.is_none(),
+            view_cpu,
+        }
+    }
+
+    /// Hands the events read since the last hand-over to the drawing thread.
+    fn hand_over(&mut self, run: &collect::Progress<'_>) {
+        for (index, events) in run.events.iter().enumerate() {
+            let Some(sent) = self.sent.get_mut(index) else {
+                continue;
+            };
+            // A buffer can only grow while the run goes; one that shrank was
+            // let go by the runner, and what is in it now is all new.
+            if events.len() < *sent {
+                *sent = 0;
+            }
+            if events.len() == *sent {
+                continue;
+            }
+            let fresh = &events[*sent..];
+            *sent = events.len();
+            let (converted, unconverted) = to_view_events(fresh);
+            let update = omn_view::feed::Update::Events {
+                index,
+                events: converted,
+                now_ns: run.now_ns,
+                unconverted,
+            };
+            if self.sender.send(update).is_err() {
+                self.unheard = true;
+                return;
+            }
+        }
+        if self
+            .sender
+            .send(omn_view::feed::Update::Tick { now_ns: run.now_ns })
+            .is_err()
+        {
+            self.unheard = true;
         }
     }
 }
 
-impl collect::Escalate for Tap {
+/// `omn`'s events as the view's copy of their type, through their JSON. An
+/// event that does not convert -- a float attribute that is not a number,
+/// which JSON writes as `null` -- is counted, with the first reason, rather
+/// than taking the rest of its batch with it.
+fn to_view_events(
+    events: &[omn::event::Event],
+) -> (Vec<omn_view::model::Event>, Option<(u64, String)>) {
+    let convert = |events: &[omn::event::Event]| {
+        serde_json::to_value(events).and_then(serde_json::from_value::<Vec<omn_view::model::Event>>)
+    };
+    if let Ok(converted) = convert(events) {
+        return (converted, None);
+    }
+    let mut converted = Vec::with_capacity(events.len());
+    let mut unconverted: Option<(u64, String)> = None;
+    for event in events {
+        match convert(std::slice::from_ref(event)) {
+            Ok(mut one) => converted.append(&mut one),
+            Err(error) => {
+                let held = unconverted.get_or_insert_with(|| (0, error.to_string()));
+                held.0 += 1;
+            }
+        }
+    }
+    (converted, unconverted)
+}
+
+impl collect::Escalate for Tap<'_> {
     fn decide(&mut self, run: &collect::Progress<'_>) -> Vec<collect::Switch> {
         if self.quit.load(std::sync::atomic::Ordering::SeqCst) {
             return run
@@ -2947,41 +3101,11 @@ impl collect::Escalate for Tap {
             return Vec::new();
         }
         self.last = Some(std::time::Instant::now());
-        for (index, events) in run.events.iter().enumerate() {
-            let Some(sent) = self.sent.get_mut(index) else {
-                continue;
-            };
-            // A buffer can only grow while the run goes; one that shrank was
-            // let go by the runner, and what is in it now is all new.
-            if events.len() < *sent {
-                *sent = 0;
-            }
-            if events.len() == *sent {
-                continue;
-            }
-            let fresh = &events[*sent..];
-            *sent = events.len();
-            let converted = serde_json::to_value(fresh)
-                .and_then(serde_json::from_value::<Vec<omn_view::model::Event>>);
-            let Ok(converted) = converted else {
-                continue;
-            };
-            let update = omn_view::feed::Update::Events {
-                index,
-                events: converted,
-                now_ns: run.now_ns,
-            };
-            if self.sender.send(update).is_err() {
-                self.unheard = true;
-                return Vec::new();
-            }
-        }
-        if self
-            .sender
-            .send(omn_view::feed::Update::Tick { now_ns: run.now_ns })
-            .is_err()
-        {
-            self.unheard = true;
+        let opened = thread_cpu_ns();
+        self.hand_over(run);
+        if let Some(view_cpu) = self.view_cpu.as_mut() {
+            view_cpu.sample();
+            view_cpu.handed_over(thread_cpu_ns().saturating_sub(opened));
         }
         Vec::new()
     }
@@ -2993,6 +3117,149 @@ impl collect::Escalate for Tap {
     fn close(&mut self, _run: &collect::Progress<'_>) -> Vec<(usize, String)> {
         Vec::new()
     }
+}
+
+/// What the view of a live run spends, and when, so that it can be taken out
+/// of the collectors' figures.
+///
+/// Every collection's `collector_cpu_ns` is `getrusage(RUSAGE_SELF)` over its
+/// window: the whole process, the drawing thread and the hand-over of events
+/// included. The view's cpu is sampled against the process's own at every
+/// hand-over, so the part of it inside a window -- whose bounds are process
+/// cpu readings, `before_window_cpu_ns` and the window's end -- is found by
+/// interpolating between samples, and taken out.
+struct ViewCpu {
+    /// The drawing thread's cpu clock (`pthread_getcpuclockid`), readable
+    /// from this thread.
+    drawing: Option<libc::clockid_t>,
+    /// The hand-over's cpu on the runner's thread, a running total the
+    /// drawing thread adds to its own figure.
+    handover: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The drawing thread's last reading: once it has ended its clock reads
+    /// nothing, and what it spent stays spent.
+    drawn_ns: u64,
+    /// (this process's cpu, the view's cpu so far), in the order taken.
+    samples: Vec<(u64, u64)>,
+}
+
+impl ViewCpu {
+    fn new(
+        drawing: &std::thread::JoinHandle<std::io::Result<()>>,
+        handover: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
+        use std::os::unix::thread::JoinHandleExt;
+        let mut clock: libc::clockid_t = 0;
+        // SAFETY: the thread is joined only after this value's last use, so
+        // its handle names a thread that has not been reaped.
+        let status = unsafe { libc::pthread_getcpuclockid(drawing.as_pthread_t(), &mut clock) };
+        let mut view_cpu = Self {
+            drawing: (status == 0).then_some(clock),
+            handover,
+            drawn_ns: 0,
+            samples: Vec::new(),
+        };
+        view_cpu.sample();
+        view_cpu
+    }
+
+    fn handed_over(&mut self, ns: u64) {
+        self.handover
+            .fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// What the view has spent so far: drawing, and handing over.
+    fn spent(&mut self) -> (u64, u64) {
+        if let Some(clock) = self.drawing {
+            if let Some(now) = clock_ns(clock) {
+                self.drawn_ns = self.drawn_ns.max(now);
+            }
+        }
+        (
+            self.drawn_ns,
+            self.handover.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn sample(&mut self) {
+        let (drawing, handover) = self.spent();
+        self.samples.push((process_cpu_ns(), drawing + handover));
+    }
+
+    /// The view's cpu when this process had spent `process_ns`.
+    fn at(&self, process_ns: u64) -> u64 {
+        let after = self.samples.partition_point(|(at, _)| *at <= process_ns);
+        match (
+            after.checked_sub(1).map(|one| self.samples[one]),
+            self.samples.get(after),
+        ) {
+            (None, Some((_, first))) => {
+                // Before the first sample: no more than the view had spent
+                // by then, and taken as all of it, which leaves the
+                // collectors the smaller figure only by what the view spent
+                // before the window.
+                *first
+            }
+            (Some((_, held)), None) => held,
+            (Some((from, low)), Some((to, high))) => {
+                let span = to.saturating_sub(from).max(1);
+                low + ((high.saturating_sub(low)) as u128 * (process_ns - from) as u128
+                    / span as u128) as u64
+            }
+            (None, None) => 0,
+        }
+    }
+
+    /// Takes what the view spent out of one collection's account: its
+    /// window's, and before and after it, so that the three still add up to
+    /// what this process spent, less the view.
+    fn take_out(&self, overhead: &mut collect::Overhead) {
+        let opened = overhead.before_window_cpu_ns;
+        let closed = opened + overhead.collector_cpu_ns;
+        let handed = closed + overhead.after_window_cpu_ns;
+        let before = self.at(opened).min(overhead.before_window_cpu_ns);
+        let inside = self
+            .at(closed)
+            .saturating_sub(self.at(opened))
+            .min(overhead.collector_cpu_ns);
+        let after = self
+            .at(handed)
+            .saturating_sub(self.at(closed))
+            .min(overhead.after_window_cpu_ns);
+        if overhead.collector_cpu_ns > 0 {
+            overhead.attributed_cpu_ns -= (overhead.attributed_cpu_ns as u128 * inside as u128
+                / overhead.collector_cpu_ns as u128)
+                as u64;
+        }
+        overhead.collector_cpu_ns -= inside;
+        overhead.before_window_cpu_ns -= before;
+        overhead.after_window_cpu_ns -= after;
+    }
+}
+
+fn clock_ns(clock: libc::clockid_t) -> Option<u64> {
+    let mut spec = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `spec` is a valid timespec the call writes into.
+    (unsafe { libc::clock_gettime(clock, &mut spec) } == 0)
+        .then(|| spec.tv_sec as u64 * 1_000_000_000 + spec.tv_nsec as u64)
+}
+
+/// The calling thread's cpu.
+fn thread_cpu_ns() -> u64 {
+    clock_ns(libc::CLOCK_THREAD_CPUTIME_ID).unwrap_or(0)
+}
+
+/// This process's cpu, user and system, as `getrusage` -- the account every
+/// collection's cost is read from -- gives it.
+fn process_cpu_ns() -> u64 {
+    // SAFETY: an all-zero rusage is valid, and the call writes into it.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `usage` is a valid rusage the call writes into.
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    let of = |time: libc::timeval| time.tv_sec as u64 * 1_000_000_000 + time.tv_usec as u64 * 1_000;
+    of(usage.ru_utime) + of(usage.ru_stime)
 }
 
 fn reject(rejections: &[Rejection]) -> ExitCode {
@@ -3089,6 +3356,61 @@ mod tests {
                 && passed.contains("carry no `weight`"),
             "{passed}"
         );
+    }
+
+    /// The view's cpu inside a collection's window is taken out of it, and
+    /// what it spent before and after out of those: the three still add up
+    /// to the process's account, less the view.
+    #[test]
+    fn the_view_s_cpu_is_taken_out_of_the_collectors_account() {
+        let view_cpu = ViewCpu {
+            drawing: None,
+            handover: std::sync::Arc::default(),
+            drawn_ns: 0,
+            // At 100 ms of process cpu the view had spent 10; at 300, 50;
+            // at 500, 90.
+            samples: vec![(100, 10), (300, 50), (500, 90)],
+        };
+        assert_eq!(view_cpu.at(200), 30);
+        assert_eq!(view_cpu.at(50), 10, "before the first sample: all of it");
+        assert_eq!(view_cpu.at(900), 90);
+        let mut overhead = collect::Overhead {
+            before_window_cpu_ns: 100,
+            collector_cpu_ns: 200,
+            attributed_cpu_ns: 100,
+            after_window_cpu_ns: 200,
+            ..Default::default()
+        };
+        view_cpu.take_out(&mut overhead);
+        assert_eq!(
+            overhead.collector_cpu_ns, 160,
+            "40 of the window was the view's"
+        );
+        assert_eq!(
+            overhead.attributed_cpu_ns, 80,
+            "the share keeps its proportion"
+        );
+        assert_eq!(overhead.before_window_cpu_ns, 90);
+        assert_eq!(overhead.after_window_cpu_ns, 160);
+    }
+
+    /// A batch with one event that cannot be handed over loses that one,
+    /// counted with the reason, and not the rest.
+    #[test]
+    fn one_event_that_does_not_convert_is_counted_and_the_rest_handed_over() {
+        let event = |value: f64| omn::event::Event {
+            ts_ns: 1,
+            ts_err_ns: 0,
+            kind: "x".to_owned(),
+            keys: Vec::new(),
+            attrs: vec![omn::event::Attr::float("value", value)],
+            collector_id: omn::event::CollectorId::new("x"),
+            seq: 0,
+        };
+        let (converted, unconverted) = to_view_events(&[event(1.0), event(f64::NAN), event(2.0)]);
+        assert_eq!(converted.len(), 2);
+        let (count, why) = unconverted.expect("the NaN is counted");
+        assert_eq!(count, 1, "{why}");
     }
 
     #[test]

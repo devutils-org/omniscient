@@ -165,17 +165,44 @@ pub fn registry() -> Vec<Box<dyn View>> {
 
 /// Every need of every view, merged: one per source and scope, with the
 /// union of their emits and keys. What `omn top` asks for live when no
-/// session is given. The first view to name a source decides its mode and
-/// stack.
-pub fn all_needs() -> Vec<MergedNeed> {
+/// session is given.
+///
+/// Two views that ask one source, in one scope, in different modes or with
+/// different stacks cannot both be served by one request, and neither is
+/// given the other's silently: the conflict is refused, naming both.
+pub fn all_needs() -> Result<Vec<MergedNeed>, String> {
+    merge_needs(registry().iter().map(|view| (view.name(), view.needs())))
+}
+
+/// [`all_needs`], over any views' needs.
+pub fn merge_needs<'a>(
+    views: impl IntoIterator<Item = (&'static str, &'a [Need])>,
+) -> Result<Vec<MergedNeed>, String> {
     let mut merged: Vec<MergedNeed> = Vec::new();
-    for view in registry() {
-        for need in view.needs() {
+    for (name, needs) in views {
+        for need in needs {
             match merged
                 .iter_mut()
                 .find(|held| held.source == need.source && held.scope == need.scope)
             {
                 Some(held) => {
+                    if held.mode != need.mode || held.stack != need.stack {
+                        return Err(format!(
+                            "the views {} and {name} both need `{}`, as `{}`{} and as `{}`{}: \
+                             one request cannot be both; give them the same mode and stack, or \
+                             ask one of them in a session (`omn top -f`)",
+                            held.views.join(", "),
+                            held.label,
+                            held.mode,
+                            held.stack
+                                .map(|stack| format!(" with {stack} stacks"))
+                                .unwrap_or_default(),
+                            need.mode,
+                            need.stack
+                                .map(|stack| format!(" with {stack} stacks"))
+                                .unwrap_or_default(),
+                        ));
+                    }
                     for emit in need.emit {
                         if !held.emit.contains(emit) {
                             held.emit.push(emit);
@@ -186,7 +213,7 @@ pub fn all_needs() -> Vec<MergedNeed> {
                             held.keys.push(key);
                         }
                     }
-                    held.views.push(view.name());
+                    held.views.push(name);
                 }
                 None => merged.push(MergedNeed {
                     source: need.source,
@@ -196,12 +223,12 @@ pub fn all_needs() -> Vec<MergedNeed> {
                     stack: need.stack,
                     scope: need.scope,
                     label: need.label(),
-                    views: vec![view.name()],
+                    views: vec![name],
                 }),
             }
         }
     }
-    merged
+    Ok(merged)
 }
 
 /// A source as `omn top` asks for it: the needs of every view that names it.
@@ -300,8 +327,40 @@ mod tests {
     }
 
     #[test]
+    fn two_views_asking_one_source_in_two_modes_are_refused_naming_both() {
+        let need = |mode: &'static str, stack: Option<&'static str>| Need {
+            source: "cpu.profile",
+            mode,
+            emit: &["stack"],
+            keys: &[],
+            stack,
+            scope: Scope::Target,
+            why: "",
+        };
+        let one = [need("sample@99hz", Some("fp"))];
+        let other = [need("sample@999hz", Some("fp"))];
+        let refused = merge_needs([("flame", &one[..]), ("ledger", &other[..])])
+            .expect_err("two modes of one source cannot be one request");
+        assert!(
+            refused.contains("flame")
+                && refused.contains("ledger")
+                && refused.contains("sample@999hz"),
+            "{refused}"
+        );
+        let stacked = [need("sample@99hz", Some("dwarf"))];
+        assert!(merge_needs([("flame", &one[..]), ("ledger", &stacked[..])]).is_err());
+        let same = [need("sample@99hz", Some("fp"))];
+        assert_eq!(
+            merge_needs([("flame", &one[..]), ("ledger", &same[..])])
+                .expect("the same mode merges")[0]
+                .views,
+            ["flame", "ledger"]
+        );
+    }
+
+    #[test]
     fn merged_needs_are_one_per_source_and_scope() {
-        let merged = all_needs();
+        let merged = all_needs().expect("no two views ask one source two ways");
         for (index, one) in merged.iter().enumerate() {
             assert!(
                 !merged[index + 1..]

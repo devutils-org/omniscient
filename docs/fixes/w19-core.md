@@ -62,9 +62,10 @@ needs, in `docs/view/README.md`.
     source (`@system` for the machine-wide ones). Each need is validated
     alone, resolved alone, checked against `collect::implements`, and a need
     that fails any of the three is a **refusal with its reason**, drawn in
-    place, not a refused run. A refusal the runner gives before anything is
-    launched (a start that failed, a target a collector cannot watch) sets
-    that source aside and asks again (`Update::Restart`); a session file
+    place, not a refused run. A refusal the runner gives before the run starts (a
+    start or an attach that failed, a target a collector cannot watch) sets
+    that source aside and asks again (`Update::Restart`); a program already
+    forked is killed at its gate, never run; a session file
     whose joins or decompositions would lose a request is refused whole, as
     `omn trace` refuses it, and one with `escalate:` or `record:` is refused
     with the `omn trace -f` + `--replay` route.
@@ -86,8 +87,9 @@ needs, in `docs/view/README.md`.
   (40 synchronous commits), `sqlite-latency` (the same through `omn
   latency`'s session: the timebar's decomposition), `vertical-requests` (the
   vertical case's server through its own session: `net.request` and the two
-  decompositions). 3.9 MB in all, 2.8 MB of it `sqlite-commits`' block
-  requests and wakeups.
+  decompositions); and, since the review round, `machine` (20 s, no target,
+  the system view's needs). 5.5 MB in all; durations in
+  `docs/view/README.md`.
 - **The snapshot harness**: `tests/view_snapshots.rs`, one test per view
   drawing it on every fixture against `docs/view/gallery/<view>--<fixture>.txt`
   (and `.ansi`), plus the frame's own (`frame--help`, `--gallery`, `--live`,
@@ -129,12 +131,17 @@ Shown, on this machine with the capabilities `make` grants:
   the test failed on its first run on `losses`, which the mirror wrote with
   its defaults where `omn` skips them -- the comparison normalises defaults
   on both sides, so a field the mirror *drops* still fails it.
-- `Tap` is not what makes collectors late. Every fixture's 10 ms-tick sources
-  carry late rounds (10-20 a second, worst 50-110 ms). The same session run
-  by `omn trace -f` (`omn top --dump-session` output, minus the three this
-  build cannot collect) has the same late rounds, and removing any one of its
-  17 requests does not remove them: it is the cost of one runner serving 17
-  requests, not of the view. Filed below.
+- `Tap` is not what makes collectors late, **headless and on a terminal**.
+  Headless, the same session run by `omn trace -f` has the same late rounds,
+  and removing any one of its 17 requests does not remove them; but a
+  headless run never converts anything (no receiver), so that comparison
+  said nothing of the hand-over's cost. The review round measured it on a
+  terminal: three pairs of the 4-second `cpython-hot` workload, each run once
+  under `script` with a 120x40 pty (the view drawing, every event handed
+  over) and once headless. Late rounds, summed over the run's requests:
+  216/217, 210/206, 214/208 (terminal/headless). The hand-over costs cpu
+  (about 110 ms of the run's 200 ms of view), and does not make the reads
+  late. Filed below.
 
 Reasoned, not measured:
 
@@ -148,7 +155,95 @@ Reasoned, not measured:
 - `Update::Restart` (a source set aside by the runner and the run asked
   again) is exercised by four of the six recordings (`net.request` refused at
   start: the launched program fires no request probe), headless; not watched
-  on a terminal.
+  on a terminal. That refusal comes from the attach, **after** the program is
+  forked (the first version's comment said before): the child is parked at
+  its gate, and `Gated`'s drop now kills it there rather than releasing it
+  first (see Review).
+
+## Review
+
+An adversarial review found two defects and eight gaps; all are fixed, on
+`feat/w19-core` after `2f2094b`.
+
+- **A live run with no terminal collected for its whole duration and threw it
+  away** (`term.rs`). The terminal is now a `term::Screen`, opened on the main
+  thread before the session is run; where there is none, `omn top` is refused
+  at once (exit 2) with `--headless -o DIR` and `--replay DIR` named, live and
+  replay alike. The view raises `quit` on every way out (a guard), so a view
+  that fails mid-run stops the run too. `view_live::a_live_run_with_no_terminal_is_refused_at_once`
+  runs it in a session of its own, stdin closed: refused in 0.3 s, nothing
+  written.
+- **The view's cost was charged to the collectors** (`main.rs`). `ViewCpu`
+  reads the drawing thread's cpu clock (`pthread_getcpuclockid`) and times
+  the hand-over on the runner's thread; at every hand-over it samples the
+  view's cpu against `getrusage(RUSAGE_SELF)`, and when the run ends takes
+  the view's share out of each collection's window (and before and after
+  it), keeping `attributed_cpu_ns` in proportion. `results.json`, `cost.json`,
+  stderr and the corner then hold the collectors without the view; stderr
+  says what was taken out, and `view.json` keeps it (`view_cpu_ns`). The
+  view's figure now holds the hand-over too (`cost::Meter::start_with`).
+  Measured, three terminal/headless pairs of `cpython-hot` (4 s): the view
+  193-203 ms; the collectors' sum after taking it out 244-258 ms against
+  227-233 headless. The 11-26 ms left (5-11 %) is not explained by the
+  account -- contention, the allocator, the samples' 200 ms grain are
+  candidates, none measured -- and is said in `docs/view/README.md` rather
+  than subtracted. Without the fix the collectors would have read about
+  450 ms, twice their cost.
+- **"The Tap is not why collectors run late"** was shown headless only, where
+  the Tap converts nothing. Now measured on a terminal (above): the claim
+  holds, with numbers.
+- **The restart comment was wrong, and the race it hid was real.** The runner
+  refuses `net.request` in the attach, after the fork; the handle was dropped,
+  and `Gated`'s drop released the child (exec) before freezing and killing it.
+  The drop now kills a child that was never released at its gate, before its
+  exec, and reaps it; a released one is ended as before. This is in
+  `src/collect/launch.rs` -- outside the view, but a dropped unreleased handle
+  is a program the tool never meant to run, under `omn trace` as under `omn
+  top`. `launch::a_child_dropped_unreleased_never_runs_the_program` holds
+  it; it could not have caught the old race (500 trials of the old drop
+  never lost it -- the kill lands within microseconds), so it guards the
+  guarantee rather than reproducing the defect.
+- **`.ansi` was never compared.** `assert_snapshot` now compares the styles
+  too, and says which file differs and that the characters agree; a missing
+  `.ansi` is written and fails once, like a new snapshot. A unit test holds
+  that a figure drawn without its dimming has the same text and other
+  escapes.
+- **An aggregated result's unknown time error was drawn as zero.** `omn top
+  -o` now writes each result's worst `ts_err_ns`, from its events before
+  aggregation, in `view.json`; a live run keeps it from the events handed
+  over; `Results::max_ts_err_ns` is an `Option`, and `None` is a new mark,
+  `TimeErrorUnknown` (`±?`, dims). It surfaced at once: `gpu.engine_busy` has
+  a 1 s time error on every fixture (NVML's sampling window), which no
+  snapshot showed before.
+- **The collectors' figure ignored in-target cpu.** The corner adds
+  `in_target_cpu_ns` where known; where any is unknown the figure is drawn
+  `≥` and dimmed. `measurement_ns` is not added, on purpose: it is this
+  process's cpu, already in `getrusage`'s account, and the same run-wide
+  counter on every collection -- adding it would count it once per request.
+- **The fixtures were too short.** Re-recorded: `cpython-hot` 4 s,
+  `cpython-hot-heavier` 8 s, `http-server` 3 s (25 requests), `sqlite-commits`
+  5 s (a tenth of a second of cpu between commits, no extra process or
+  write), and a new **`machine`** fixture: 20 s, no target, through the
+  system view's own needs (80 points per poll source). Every view's needs on
+  the whole machine were 59 MB for 8 s, so the machine fixture asks only the
+  system view's, read from `docs/view/README.md`'s table by `record.sh`.
+  `sqlite-latency` and `vertical-requests` stay short: each is a
+  decomposition, not a series. 5.5 MB in all. Recording the machine fixture
+  found a bug of mine: `omn top -f` replaced a session file's own durations
+  with the default ten minutes when `--duration` was not given; the file's
+  durations now hold.
+- **`all_needs` let the first view decide a source's mode silently.** Two
+  views asking one source and scope in different modes or stacks are now
+  refused, naming both (`views::merge_needs`, and its unit test); `omn top`
+  fails with that reason.
+- **Nit, a batch that failed to convert was lost uncounted.** A batch that
+  fails is converted event by event; the ones that fail are counted as
+  undecoded, with the first reason, in the live view (`Update::Events {
+  unconverted }`). A NaN attribute is the test case.
+- **Nit, the mirror's tests.** The mirror's `Overhead` gains `in_target_runs`
+  and `in_target_left_out`. The comparison still normalises zeros and nulls
+  away, so it cannot tell `Some(0)` from `None` or check a field no fixture
+  holds: "holds every field of the seven recordings", no more.
 
 ## What I could not do, and why
 
@@ -245,9 +340,18 @@ gives the lanes more kernels to draw. Better still: add it to
   three, so they read against each other; the first half second is not
   shown, as it is the first frame and nothing else.
 - **Fixtures are recorded through `omn top --headless -o` by a committed
-  script, and snapshots carry an `.ansi` twin** (wave 19). Reason: the
-  fixtures are real runs and can be made again; the dimming is the trust
-  style, and plain text cannot show it.
+  script, and snapshots carry an `.ansi` twin that is compared too** (wave
+  19). Reason: the fixtures are real runs and can be made again; the dimming
+  is the trust style, plain text cannot show it, and a twin nobody compares
+  goes stale.
+- **The view's cpu is taken out of the collectors' figures, not left in
+  them** (wave 19): sampled against the process's account at every
+  hand-over and subtracted per collection window. Reason: `getrusage` is one
+  account for the whole process, and a collector must not read as costing
+  what the view spent.
+- **An aggregated figure's time error is unknown unless something saw its
+  events** (wave 19): `omn top -o` writes it in `view.json`; elsewhere it is
+  drawn `±?` and dimmed. Reason: unknown is never zero.
 
 ## Needs from another stream
 
@@ -262,10 +366,14 @@ gives the lanes more kernels to draw. Better still: add it to
   flags are not in the manual page or the guide yet.
 - **Coordinator, `docs/open-findings.md`**: a session of 17 requests (`omn top
   --dump-session`'s) makes every 10 ms-tick source late in about one round of
-  ten, worst 50-110 ms, under `omn trace -f` as under `omn top`; no single
-  request is the cause (each removed in turn, the late rounds stay). The
-  runner serves every request from one thread; a view that wants dense
-  series pays this.
+  ten, worst 50-110 ms, under `omn trace -f` as under `omn top`, on a terminal
+  as headless; no single request is the cause (each removed in turn, the late
+  rounds stay). The runner serves every request from one thread; a view that
+  wants dense series pays this.
+- **Coordinator, `src/collect/launch.rs`**: the review round changed
+  `Gated`'s drop (an unreleased child is killed at its gate, not released
+  first). A shared layer, one function; `launch`'s tests and the full suite
+  ran on it.
 - **Each view stream**: your file is `view/src/views/<name>.rs`; change its
   `NEEDS` as you like, but a new source is not in the fixtures until they are
   re-recorded (`tests/view_fixtures/record.sh`), which changes every

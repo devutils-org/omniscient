@@ -6,8 +6,9 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ratatui::backend::CrosstermBackend;
@@ -25,25 +26,101 @@ use crate::feed::{self, Update};
 /// updates: often enough to watch, rarely enough to cost little.
 const REFRESH: Duration = Duration::from_millis(250);
 
-/// Runs the view until the user quits. `updates` is the live run's, `None`
-/// for a replay; `quit` is raised when the user quits, for the runner to
-/// stop on. The end of a live run does not end the view: the run's final
-/// figures stay on screen until the user quits.
-pub fn run(mut app: App, updates: Option<Receiver<Update>>, quit: &AtomicBool) -> io::Result<()> {
-    let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
-    let mut terminal = enter(tty)?;
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = leave_raw();
-        previous(info);
-    }));
-    // Measured on this thread, which is the one that draws.
-    app.cost = crate::app::Cost::Measured(crate::cost::Meter::start());
-    let result = event_loop(&mut app, &mut terminal, updates);
-    let left = leave(&mut terminal);
-    let _ = std::panic::take_hook();
-    quit.store(true, Ordering::SeqCst);
-    result.and(left)
+/// The terminal the view draws on, opened and in raw mode.
+///
+/// Opened before anything is collected, by whoever starts the run, so that a
+/// run with no terminal to draw on -- an agent shell, CI, `nohup`, a `setsid`
+/// with stdin closed -- is refused at once with the reason, rather than
+/// collecting for its whole duration and throwing it away when the drawing
+/// thread finds out.
+pub struct Screen {
+    terminal: Option<Terminal<CrosstermBackend<File>>>,
+}
+
+/// Why there is no screen to draw on, in words that say what to do instead.
+pub fn no_screen(error: &io::Error) -> String {
+    format!(
+        "omn top draws on the terminal, and this process has none it can open (/dev/tty:          {error}); `omn top --headless -o DIR ...` collects without one, and `omn top --replay          DIR` draws it afterwards"
+    )
+}
+
+impl Screen {
+    /// Opens `/dev/tty` and takes it over: raw mode, the alternate screen,
+    /// the cursor hidden. Whatever fails half way is undone.
+    pub fn open() -> io::Result<Screen> {
+        let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
+        match enter(tty) {
+            Ok(terminal) => Ok(Screen {
+                terminal: Some(terminal),
+            }),
+            Err(error) => {
+                let _ = leave_raw();
+                Err(error)
+            }
+        }
+    }
+
+    /// Runs the view until the user quits. `updates` is the live run's,
+    /// `None` for a replay; `quit` is raised when the view ends, for the
+    /// runner to stop on -- on every way out, an error and a panic included,
+    /// so a run is never left collecting for a view that is gone. `elsewhere`
+    /// is the cpu the view causes on other threads (the live run's hand-over
+    /// of events), counted in its cost. The end of a live run does not end
+    /// the view: the run's final figures stay on screen until the user quits.
+    pub fn run(
+        mut self,
+        mut app: App,
+        updates: Option<Receiver<Update>>,
+        quit: &AtomicBool,
+        elsewhere: Option<Arc<AtomicU64>>,
+    ) -> io::Result<()> {
+        let _raise = Raise(quit);
+        let Some(mut terminal) = self.terminal.take() else {
+            return Ok(());
+        };
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = leave_raw();
+            previous(info);
+        }));
+        // Measured on this thread, which is the one that draws.
+        app.cost = crate::app::Cost::Measured(crate::cost::Meter::start_with(elsewhere));
+        let result = event_loop(&mut app, &mut terminal, updates);
+        let left = leave(&mut terminal);
+        let _ = std::panic::take_hook();
+        result.and(left)
+    }
+}
+
+impl Drop for Screen {
+    /// A screen opened and never run -- the run refused before the view
+    /// started -- gives the terminal back.
+    fn drop(&mut self) {
+        if let Some(mut terminal) = self.terminal.take() {
+            let _ = leave(&mut terminal);
+        }
+    }
+}
+
+/// Raises `quit` when dropped: on every way out of the view.
+struct Raise<'a>(&'a AtomicBool);
+
+impl Drop for Raise<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Opens the terminal and runs the view on it: a replay's whole life.
+pub fn run(app: App, updates: Option<Receiver<Update>>, quit: &AtomicBool) -> io::Result<()> {
+    let screen = match Screen::open() {
+        Ok(screen) => screen,
+        Err(error) => {
+            quit.store(true, Ordering::SeqCst);
+            return Err(error);
+        }
+    };
+    screen.run(app, updates, quit, None)
 }
 
 fn enter(mut tty: File) -> io::Result<Terminal<CrosstermBackend<File>>> {

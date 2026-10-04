@@ -1,20 +1,20 @@
-omn top │ fixture http-server │ 689ms        view: snapshot
+omn top │ fixture http-server │ 2.84s        view: snapshot
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatma
 ┌ system -- the overview: cpu, memory, disk, network, GPU a┐
 │Not drawn yet. What this view needs, and what this run hol│
 │                                                          │
-│cpu.util@system          4 events via fs:proc             │
+│cpu.util@system          13 events via fs:proc            │
 │[timeline,summary] ~low det                               │
 │                         the cpu panel: utilization by    │
 │state, and its sparkline                                  │
-│mem.pressure@system      3 events via fs:proc             │
+│mem.pressure@system      12 events via fs:proc            │
 │[timeline,summary] ~low det                               │
 │                         the memory panel: stall time     │
 │under memory pressure                                     │
-│io.bytes@system          9 events via fs:proc             │
+│io.bytes@system          36 events via fs:proc            │
 │[timeline,summary] ~low det degraded                      │
 │                         the disk panel: bytes read and   │
 │written per device                                        │
-│net.bytes@system         21 events via fs:proc            │
+│net.bytes@system         84 events via fs:proc            │
 └──────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help

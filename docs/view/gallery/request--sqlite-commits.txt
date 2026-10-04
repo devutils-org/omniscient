@@ -1,4 +1,4 @@
-omn top │ fixture sqlite-commits │ 470ms                           view: snapshot │ collectors 6.37% │ target 19.4% cpu
+omn top │ fixture sqlite-commits │ 4.97s                          view: snapshot │ collectors ≥5.82% │ target 87.8% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
 ┌ request -- what one request costs: its life by state, and its share of each resource ────────────────────────────────┐
 │Not drawn yet. What this view needs, and what this run holds of it:                                                   │

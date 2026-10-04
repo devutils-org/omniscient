@@ -33,7 +33,11 @@ A live run lasts until the view is quit, the launched program exits, or
 `--duration` (10 minutes when not given, and said). Quitting ends the run;
 the end of the run does not end the view, which keeps the final figures on
 screen until it is quit. The screen is drawn on `/dev/tty`, so `omn top --
-prog > prog.log` keeps the program's output off it.
+prog > prog.log` keeps the program's output off it. The terminal is taken
+before anything is collected: where there is none to open -- an agent shell,
+CI, `nohup`, `setsid` -- `omn top` is refused at once, saying to use
+`--headless -o DIR` and `--replay DIR`. A session file's own durations hold
+unless `--duration` is given.
 
 ## What the frame is
 
@@ -116,10 +120,20 @@ One style, every view, never decided by a view on its own:
 |---|---|---|---|
 | `Lost` | `-12 lost (3.1%)` | yes | records dropped, unread, undecoded, throttled or evicted |
 | `TimeError` | `±2.50µs` | yes | an event's `ts_err_ns` is non-zero: its time came from another clock |
+| `TimeErrorUnknown` | `±?` | yes | nothing says the figure's time error: it holds aggregates only, from a recording without a `view.json` |
 | `LowDeterminism` | `~low det` | yes | the catalog says the source is `low` determinism |
 | `Provisional` | `live` | yes | the run is still going |
 | `Late` | `3 late` | no | rounds of reads came late: nothing is missing, the spacing is not what was asked |
 | `Degraded` | `degraded` | no | a fallback served it and said what it gives up |
+
+A result's time error is `results.max_ts_err_ns()`: its `raw` events', or,
+for a result served only as a summary, a timeline or a histogram (which do
+not carry it), what `omn top` saw of its events before they were aggregated
+-- written per label in `view.json` (`ts_err_ns`), and kept from a live run's
+events. A recording `omn top` did not write (`omn trace -o`) has no such
+file: its aggregates' time error is unknown, and drawn as unknown, never as
+zero. On this machine `gpu.engine_busy` is the one source with a non-zero
+time error (NVML's one-second sampling window).
 
 `Trust::of(data, results)` makes it; `Trust::joined` for a figure several
 results made. `trust.style()` is the figure's style, `trust.badges()` the spans
@@ -138,19 +152,38 @@ snapshots show what it looks like.
 ### The cost corner
 
 The header's right corner says, as a share of one cpu over the run's
-wall-clock: the view's own cpu (the drawing thread's, from
-`CLOCK_THREAD_CPUTIME_ID`, after its first half second), the collectors'
-(every result's `overhead.attributed_cpu_ns`) and the target's (the largest
+wall-clock: the view's own cpu, the collectors' and the target's (the largest
 `observed_cpu_ns` of a result on the target rather than on the machine). Live,
 the last two are said at the end. A snapshot says `view: snapshot`, so it
 draws the same every time.
+
+- **The view's** is the drawing thread's cpu (`CLOCK_THREAD_CPUTIME_ID`, after
+  its first half second) plus, live, the hand-over of events on the runner's
+  thread (`omn` times it there, and the meter adds it).
+- **The collectors'** is every result's `attributed_cpu_ns` plus what it spent
+  inside its target (`in_target_cpu_ns`). Where that second part is unknown
+  -- an eBPF collector without the kernel's run statistics -- the figure is a
+  lower bound, drawn `≥` and dimmed. `measurement_ns` is not added: it is
+  this process's cpu, already in `getrusage`'s account.
+- Every collection's account is `getrusage(RUSAGE_SELF)`, the whole process,
+  so a live run with a view would charge the view to every collector. `omn
+  top` samples the view's cpu against the process's at every hand-over and
+  takes what the view spent inside each collection's window (and before and
+  after it) out of that collection's figures, in `results.json`, `cost.json`
+  and on stderr. It says how much on stderr, and `view.json` keeps it
+  (`view_cpu_ns`). On a 4-second cpu-bound run the view was about 200 ms
+  (drawing ~90, handing over ~110); after taking it out, the collectors' sum
+  was still 11-26 ms (5-11 %) above the same run headless, over three pairs
+  -- what the account does not explain, said rather than hidden.
 
 ## What each view needs
 
 `omn top` live asks for the union of these, one request per source and scope,
 labelled with the source (`@system` added for a machine-wide one); `omn top
---dump-session` prints the session. The first view to name a source decides
-its mode and stack; the emits and keys are merged. A need is validated alone,
+--dump-session` prints the session. The emits and keys of two views that
+name one source are merged; two that ask it in different modes or with
+different stacks are refused, naming both (`views::all_needs`), since one
+request cannot be both. A need is validated alone,
 so one the catalog refuses loses its panel, not the run. `tests/view_model.rs`
 holds this table to the code.
 
@@ -216,23 +249,31 @@ are rewritten to `/work` and `/omniscient`.
 
 | Fixture | Workload | What it is for |
 |---|---|---|
-| `cpython-hot` | `cases/cpython-interpreter/hot.py` on a 1 000-line input: one Python function is the time | on-cpu: flame, timebar, the overview |
-| `cpython-hot-heavier` | the same on twice the weights | the second run of a comparison: `--replay cpython-hot --against cpython-hot-heavier` |
-| `http-server` | `python3 -m http.server` and the case's client: five listings of a 15 000-entry directory on one connection | threads, sockets, a server: lanes, wake, flows, heatmap |
-| `sqlite-commits` | the `sqlite3` shell committing 40 rows one by one, rollback journal, full sync | the disk: heatmap, flows, lanes, off-cpu |
-| `sqlite-latency` | the same, asked through `omn latency`'s session | timebar's decomposition |
-| `vertical-requests` | the vertical case's server: five requests, each with an injected cause | request, and the block I/O each request issued |
+| Fixture | Run | Workload | What it is for |
+|---|---|---|---|
+| `machine` | 20 s | no target: the machine, through the system view's own needs | the overview's panels and sparklines (80 points each) |
+| `cpython-hot` | 4 s | `cases/cpython-interpreter/hot.py` on a 30 000-line input: one Python function is the time | on-cpu: flame, timebar, the overview |
+| `cpython-hot-heavier` | 8 s | the same on twice the weights | the second run of a comparison: `--replay cpython-hot --against cpython-hot-heavier` |
+| `http-server` | 3 s | `python3 -m http.server` and the case's client: 25 listings of a 15 000-entry directory on one connection | threads, sockets, a server: lanes, wake, flows, heatmap |
+| `sqlite-commits` | 5 s | the `sqlite3` shell committing 40 rows one by one, rollback journal, full sync, a tenth of a second of cpu between commits | the disk over time: heatmap, flows, lanes, off-cpu |
+| `sqlite-latency` | 0.4 s | the 40 commits back to back, asked through `omn latency`'s session | timebar's decomposition of one program's time |
+| `vertical-requests` | 0.4 s | the vertical case's server: five requests, each with an injected cause | request, and the block I/O each request issued |
 
-About 4 MB in all, most of it `sqlite-commits`' block requests and wakeups (one
-JSON event is ~800 bytes). Re-recording changes every snapshot: each view's
+The last two are short on purpose: each is a decomposition, of one program's
+time or of five requests, not a series. The `machine` fixture asks only the
+system view's sources: every view's needs on the whole machine were 60 MB for
+eight seconds (the traced sources see every task), and the system view draws
+none of them. About 5.5 MB in all, most of it `sqlite-commits`' block requests
+and wakeups (one JSON event is ~800 bytes). Re-recording changes every snapshot: each view's
 test then fails until its snapshots are looked at and blessed.
 
 ## Testing a view
 
 `tests/view_snapshots.rs` draws every view on every fixture at 120x40 and
-compares it with `docs/view/gallery/<view>--<fixture>.txt`; `<view>--<fixture>.ansi`
-beside it is the same screen with its dimming and colours (`cat` it). One test
-per view:
+compares it with `docs/view/gallery/<view>--<fixture>.txt`, and its styles
+with `<view>--<fixture>.ansi` beside it -- the same screen with its dimming
+and colours (`cat` it): a figure drawn without its trust style has the same
+characters, and fails on the `.ansi`. One test per view:
 
 ```console
 cargo test --test view_snapshots flame                    # compare
