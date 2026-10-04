@@ -3,7 +3,7 @@ omn top │ fixture http-server │ 2.84s                             view: snap
 ┌ heatmap -- net.socket latency over time ─────────────────────────────────────────────────────────────────────────────┐
 │ io.latency 0   sched.runqlat 292 in 104 rows   net.socket 176 in 86 rows   gpu.kernel refused                        │
 │176 socket calls, 1.12µs to 807µs, p50 46.9µs, p99 435µs ~low det degraded x2                                         │
-│2 regimes  ~46.9µs 99% (174) in bursts every ~110ms, all through  │  ~435µs 1.1% (2) 219ms to 421ms                   │
+│2 regimes  ~46.9µs 99% (174) in 26 bursts, all through  │  ~435µs 1.1% (2) 219ms to 421ms                             │
 │                                                                                                                      │
 │  count   ▁▁▁▁▂▆▄ ▄▄▄▄▄▄▅▄▄▃  ▂▄▄▄▄▄▄▄▄▄▃▄▄▅▄▄▅▄▄▃▄▄▄▄▄▄▄▄▄▁▃▃▇█▂   ▃▄▄▃▄▄▅▄▄▃▃▄▄▆▄▄▃▄▄▃▄▄▄▃▄▅█▅ ▃▄▄▄  the whole run  │
 │    1ms┤·   · ░▒▒   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  ▏             1│

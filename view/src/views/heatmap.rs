@@ -1483,14 +1483,22 @@ fn when(points: &[&Point], grid: &Grid, run_start: f64) -> String {
             .filter(|(index, col)| *index == 0 || columns[index - 1] + 1 != **col)
             .map(|(_, col)| *col)
             .collect();
-        match (starts.first(), starts.last()) {
-            (Some(one), Some(two)) if starts.len() >= 3 => {
-                let every = f64::from(two - one) * (grid.window.1 - grid.window.0)
-                    / f64::from(grid.cols)
+        let column_ns = (grid.window.1 - grid.window.0) / f64::from(grid.cols);
+        let gaps: Vec<u16> = starts.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        let (shortest, longest) = (
+            gaps.iter().copied().min().unwrap_or(0),
+            gaps.iter().copied().max().unwrap_or(0),
+        );
+        match starts.len() {
+            0 | 1 => place,
+            2 => format!("in two bursts, {place}"),
+            // Bursts at a steady pace: how often.
+            _ if longest <= shortest * 2 => {
+                let mean = f64::from(starts[starts.len() - 1] - starts[0]) * column_ns
                     / (starts.len() - 1) as f64;
-                format!("in bursts every ~{}, {place}", units::duration(every))
+                format!("in bursts every ~{}, {place}", units::duration(mean))
             }
-            _ => format!("in bursts, {place}"),
+            count => format!("in {count} bursts, {place}"),
         }
     } else {
         place

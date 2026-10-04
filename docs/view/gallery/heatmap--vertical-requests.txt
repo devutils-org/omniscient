@@ -4,7 +4,7 @@ omn top │ fixture vertical-requests │ 408ms                       view: snap
 │ io.latency 142   sched.runqlat not asked   net.socket not asked   gpu.kernel not asked                               │
 │142 block requests, 21.2µs to 4.70ms, p50 56.4µs, p99 4.64ms ~low det degraded x3                                     │
 │3 regimes  ~56.0µs 75% (107) in bursts every ~110ms, 18.3ms to 243ms  │  ~400µs 1.4% (2) 19.1ms to 19.5ms  │  ~4.52ms │
-│23% (33) in bursts, 17.1ms to 165ms                                                                                   │
+│23% (33) in two bursts, 17.1ms to 165ms                                                                               │
 │  count    ▄▅                                ▄█               ▃▄                                       the whole run  │
 │       │                                     │                                                                        │
 │       │                                     │                                                                        │

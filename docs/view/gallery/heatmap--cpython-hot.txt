@@ -3,7 +3,7 @@ omn top │ fixture cpython-hot │ 3.89s                             view: snap
 ┌ heatmap -- sched.runqlat latency over time ──────────────────────────────────────────────────────────────────────────┐
 │ io.latency 0   sched.runqlat 103 in 55 rows   net.socket 0   gpu.kernel refused                                      │
 │103 run queue waits, 0ns to 175µs, p50 6.81µs, p99 32.3µs ~low det degraded                                           │
-│2 regimes  ~6.81µs 99% (102) in bursts every ~156ms, all through  │  ~175µs 1.0% (1) once, at 3.19s                   │
+│2 regimes  ~6.81µs 99% (102) in 24 bursts, all through  │  ~175µs 1.0% (1) once, at 3.19s                             │
 │                                                                                                                      │
 │  count ▂▂▃▂▂▂▂▂▁▃▃▂▂▂▁ ▁▁▂▁▂▁▁    ▁▁▂▁▁  ▁▁▁▂▂▁ ▁▄▄▃▁ ▁▄▅▃▁▂▂▂▁▁▁▂▂▇█▆▅▅▄▅▃▂▁▁▁▂▂▂▁▁▁▂▁▁▂▂▁▁▁▁▁▁      the whole run  │
 │       │                                                                             │                                │

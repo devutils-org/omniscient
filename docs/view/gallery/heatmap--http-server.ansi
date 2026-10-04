@@ -3,7 +3,7 @@
 ┌ heatmap -- net.socket latency over time ─────────────────────────────────────────────────────────────────────────────┐[0m
 │[0m[2m io.latency 0 [0m  sched.runqlat 292 in 104 rows  [0m[1;7m net.socket 176 in 86 rows [0m [0m[31m gpu.kernel refused [0m                       │[0m
 │[0m[2m176 socket calls, 1.12µs to 807µs, p50 46.9µs, p99 435µs[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m                                         │[0m
-│[0m[1m2 regimes  ~46.9µs[0m[2m 99% (174) in bursts every ~110ms, all through  │  [0m[1m~435µs[0m[2m 1.1% (2) 219ms to 421ms[0m                   │[0m
+│[0m[1m2 regimes  ~46.9µs[0m[2m 99% (174) in 26 bursts, all through  │  [0m[1m~435µs[0m[2m 1.1% (2) 219ms to 421ms[0m                             │[0m
 │                                                                                                                      │[0m
 │[0m[2m  count[0m   [0m[2m▁▁▁▁▂▆▄[0m [0m[2m▄▄▄▄▄▄▅▄▄▃[0m  [0m[2m▂▄▄▄▄▄▄▄▄▄▃▄▄▅▄▄▅▄▄▃▄▄▄▄▄▄▄▄▄▁▃▃▇█▂[0m   [0m[2m▃▄▄▃▄▄▅▄▄▃▃▄▄▆▄▄▃▄▄▃▄▄▄▃▄▅█▅[0m [0m[2m▃▄▄▄[0m  [0m[2mthe whole run[0m  │[0m
 │    1ms[0m[2m┤[0m[90m·[0m   [0m[90m·[0m [0m[2;34m░[0m[2;36m▒[0m[2;34m▒[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m   [0m[90m·[0m  [0m[2m▏[0m        [0m[2m     1[0m│[0m

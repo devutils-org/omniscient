@@ -4,7 +4,7 @@
 │[0m[1;7m io.latency 142 [0m [0m[2m sched.runqlat not asked [0m [0m[2m net.socket not asked [0m [0m[2m gpu.kernel not asked [0m                              │[0m
 │[0m[2m142 block requests, 21.2µs to 4.70ms, p50 56.4µs, p99 4.64ms[0m [0m[36m~low det[0m [0m[33mdegraded x3[0m                                     │[0m
 │[0m[1m3 regimes  ~56.0µs[0m[2m 75% (107) in bursts every ~110ms, 18.3ms to 243ms  │  [0m[1m~400µs[0m[2m 1.4% (2) 19.1ms to 19.5ms  │  [0m[1m~4.52ms[0m │[0m
-│[0m[2m23% (33) in bursts, 17.1ms to 165ms[0m                                                                                   │[0m
+│[0m[2m23% (33) in two bursts, 17.1ms to 165ms[0m                                                                               │[0m
 │[0m[2m  count[0m    [0m[2m▄▅[0m                                [0m[2m▄█[0m               [0m[2m▃▄[0m                                       [0m[2mthe whole run[0m  │[0m
 │       [0m[2m│[0m                                     [0m[90m│[0m                                                                        │[0m
 │       [0m[2m│[0m                                     [0m[90m│[0m                                                                        │[0m

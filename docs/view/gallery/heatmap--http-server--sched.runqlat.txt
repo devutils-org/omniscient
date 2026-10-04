@@ -3,7 +3,7 @@ omn top │ fixture http-server │ 2.84s                             view: snap
 ┌ heatmap -- sched.runqlat latency over time ──────────────────────────────────────────────────────────────────────────┐
 │ io.latency 0   sched.runqlat 292 in 104 rows   net.socket 176 in 86 rows   gpu.kernel refused                        │
 │292 run queue waits, 0ns to 52.4µs, p50 0ns, p99 30.2µs ~low det degraded                                             │
-│one regime  ~0ns 100% (292) in bursts every ~99.7ms, all through                                                      │
+│one regime  ~0ns 100% (292) in 29 bursts, all through                                                                 │
 │                                                                                                                      │
 │  count ▂▄███▆▇▆▃▂▂▂▂▃▃▃▂▂▃▃▄▃▃▃▃▃▂▃▃▄▄▄▃▃▃▃▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▄▄▃▂▃▃▃▃▃▃▂▃▂▂▃▃▂▃▃▃▂▂▂▂▂▂▂▂▂▂▃▃▃▂▂▂▂▂▄▄▄▄  the whole run  │
 │       │                           │                                                                                  │

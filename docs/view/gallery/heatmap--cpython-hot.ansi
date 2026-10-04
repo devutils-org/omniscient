@@ -3,7 +3,7 @@
 ┌ heatmap -- sched.runqlat latency over time ──────────────────────────────────────────────────────────────────────────┐[0m
 │[0m[2m io.latency 0 [0m [0m[1;7m sched.runqlat 103 in 55 rows [0m [0m[2m net.socket 0 [0m [0m[31m gpu.kernel refused [0m                                     │[0m
 │[0m[2m103 run queue waits, 0ns to 175µs, p50 6.81µs, p99 32.3µs[0m [0m[36m~low det[0m [0m[33mdegraded[0m                                           │[0m
-│[0m[1m2 regimes  ~6.81µs[0m[2m 99% (102) in bursts every ~156ms, all through  │  [0m[1m~175µs[0m[2m 1.0% (1) once, at 3.19s[0m                   │[0m
+│[0m[1m2 regimes  ~6.81µs[0m[2m 99% (102) in 24 bursts, all through  │  [0m[1m~175µs[0m[2m 1.0% (1) once, at 3.19s[0m                             │[0m
 │                                                                                                                      │[0m
 │[0m[2m  count[0m [0m[2m▂▂▃▂▂▂▂▂▁▃▃▂▂▂▁[0m [0m[2m▁▁▂▁▂▁▁[0m    [0m[2m▁▁▂▁▁[0m  [0m[2m▁▁▁▂▂▁[0m [0m[2m▁▄▄▃▁[0m [0m[2m▁▄▅▃▁▂▂▂▁▁▁▂▂▇█▆▅▅▄▅▃▂▁▁▁▂▂▂▁▁▁▂▁▁▂▂▁▁▁▁▁▁[0m      [0m[2mthe whole run[0m  │[0m
 │       [0m[2m│[0m                                                                             [0m[90m│[0m                                │[0m
