@@ -102,6 +102,18 @@ pub struct Results {
     /// made before `omn` wrote it, where the sentences are all there is.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fields: BTreeMap<String, Value>,
+    /// Each kept stack's frames' namer, root first, frame for frame with
+    /// `stacks` under the same id (`null` for a frame nothing named), as
+    /// written. Absent when empty, and from a recording made before it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub named_by: BTreeMap<String, Value>,
+    /// The perf maps that named a frame (path, device, inode), as written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub perf_maps: Vec<Value>,
+    /// The file each task executed, by the key the result writes for it
+    /// (`task:<tid>`, `proc:<pidns>+<pid>`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub executables: BTreeMap<String, String>,
 }
 
 /// A launched program's life, as `omn` writes it in a result's `lifetime`:

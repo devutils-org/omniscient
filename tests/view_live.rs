@@ -128,13 +128,28 @@ fn a_gallery_prints_every_view() {
     ]);
     assert!(output.status.success(), "{}", text(&output.stderr));
     let screen = text(&output.stdout);
-    for view in omn_view::views::registry() {
+    let views = omn_view::views::registry();
+    for (index, view) in views.iter().enumerate() {
+        // Each view has its own page. A view that draws no frame of its own
+        // (`process`, a header line then one line per resource) is known by
+        // its page, since the tab line at 100 columns is cut before it.
+        let page = format!("gallery {}/{} ", index + 1, views.len());
+        let named = screen.contains(&format!("┌ {} -- ", view.name()))
+            || screen.contains(&format!(" {} -- ", view.name()))
+            || screen.contains(view.title());
         assert!(
-            screen.contains(&format!("┌ {} -- ", view.name())) || screen.contains(view.title()),
+            screen.contains(&page),
+            "the gallery has no page for `{}`:\n{screen}",
+            view.name()
+        );
+        assert!(
+            named || view.name() == "process",
             "the gallery does not show `{}`:\n{screen}",
             view.name()
         );
     }
+    // The process view's page is its own: its header names the target's pid.
+    assert!(screen.contains(" pid "), "{screen}");
     // Each screen is the size asked.
     let first: Vec<&str> = screen.lines().take(20).collect();
     assert!(first.iter().all(|line| line.chars().count() <= 100));
