@@ -1058,12 +1058,15 @@ impl Debuginfod {
                 "{}/buildid/{build_id}/debuginfo",
                 server.trim_end_matches('/')
             );
-            let output = std::process::Command::new("curl")
-                .args(["--fail", "--silent", "--show-error", "--location"])
-                .args(["--max-time", "60", "--output"])
-                .arg(&partial)
-                .arg(&url)
-                .output();
+            // A helper, not the program: its cpu stays out of the program's
+            // denominator, and the end of a run does not take it for an orphan.
+            let output = crate::collect::helper_output(
+                std::process::Command::new("curl")
+                    .args(["--fail", "--silent", "--show-error", "--location"])
+                    .args(["--max-time", "60", "--output"])
+                    .arg(&partial)
+                    .arg(&url),
+            );
             match output {
                 Ok(output) if output.status.success() => {
                     std::fs::rename(&partial, file).map_err(|error| {
