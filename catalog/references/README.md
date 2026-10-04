@@ -131,9 +131,13 @@ latency).
 - **`omn_launches_tool`**: the program `omn` launches is a shell that
   `exec`s the tool, so the pid `omn` watches is the tool's; the tool's
   stdout and stderr go to two files of the run, which are what its parser
-  reads, and never into omn's output. The tool's own exit status is not
-  seen (omn reports it on its stderr): a tool whose output does not parse
-  and whose stderr carries a refusal wording skips, as below. Under
+  reads, and never into omn's output. `omn` reaps the tool and exits 0
+  whatever the tool did, so the tool's exit status is read through a
+  pidfd: the shell writes its pid and waits on a fifo until the runner
+  holds a pidfd on it, and once `omn` has ended the pidfd says how the task
+  exited (`PIDFD_INFO_EXIT`, Linux 6.15). A non-zero status skips on a
+  refusal wording, as below, and otherwise fails the pair, even when the
+  output parses. Where the status cannot be read, the pair skips. Under
   `privileged: true` the shell `exec`s `sudo -n <command>`, so omn watches
   `sudo` and the tool is its child.
 
@@ -235,6 +239,7 @@ or not. `known_defect` and `gap` do not go together.
 | `privileged: true` and `sudo -n true` fails | `` `sudo -n` does not grant root here `` |
 | the tool exits non-zero with a refusal on stderr (`perf_event_paranoid`, `Permission denied`, `Operation not permitted`, `must be run as root`, `requires root`, or the pair's `refused_when`) | `` `<tool>` was refused on this machine ``, quoting those lines |
 | `omn` exits 1 (this machine cannot serve it) | `omn cannot run this here`, quoting `omn`'s stderr |
+| `omn_launches_tool` and the kernel cannot tell how the tool exited (before Linux 6.15) | `` the exit status of `<tool>` launched by omn cannot be seen here ``, quoting why |
 
 Checked in that order, `requires` and `requires_setting` before anything
 runs. A `requires_setting` file holding something other than an integer
