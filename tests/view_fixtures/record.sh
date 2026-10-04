@@ -220,10 +220,10 @@ record_many_requests() {
 # The file server the flows view was judged on (`docs/view/gallery/flows-run/`),
 # as a fixture every view is drawn on: bytes per file and per socket asked as
 # `raw`, beside the machine's devices and interfaces.
-record_file_server() {
-    rm -rf "$here/file-server"
-    "$root/docs/view/gallery/flows-run/record.sh" "$here/file-server" >/dev/null
-    keep file-server
+record_file_serving() {
+    rm -rf "$here/file-serving"
+    "$root/docs/view/gallery/flows-run/record.sh" "$here/file-serving" >/dev/null
+    keep file-serving
 }
 
 # Every wakeup on the machine for a second, no target: the wake view's
@@ -275,7 +275,7 @@ want vertical-requests "$@" && record_vertical_requests
 want machine "$@" && record_machine
 want vertical-abandoned "$@" && record_vertical_abandoned
 want many-requests "$@" && record_many_requests
-want file-server "$@" && record_file_server
+want file-serving "$@" && record_file_serving
 want system-wakeup "$@" && record_system_wakeup
 for view in $WORKLOADS; do
     want "workload-$view" "$@" && record_workload "$view"

@@ -116,3 +116,42 @@ fn frame_narrow() {
     let mut app = frame_app();
     assert_snapshot("frame--narrow", &draw_app(&mut app, 60, 20));
 }
+
+/// Each view after a click, on its own workload's recording where it has
+/// something to select there: the selection a
+/// click makes is drawn as the keys' would be. A view's regions are computed
+/// from the layout it draws with; this is where each is seen to land on what
+/// was clicked. `needle` is text the view draws, `down` the rows below it
+/// the click lands on (a row of a list under its header).
+#[test]
+fn every_view_after_a_click() {
+    use omn_view::snapshot::{click, find};
+    let clicks: [(&str, &str, &str, u16); 9] = [
+        ("system", "workload-system", "ID ", 2),
+        ("flame", "workload-flame", "py::burn", 0),
+        ("ledger", "workload-ledger", "memory held", 0),
+        ("request", "workload-request", "a003", 0),
+        ("timebar", "workload-timebar", "worker", 0),
+        ("heatmap", "workload-heatmap", "▓███", 0),
+        ("lanes", "workload-lanes", "lane-b", 0),
+        ("wake", "workload-wake", "relay-b", 0),
+        // The flows workload's one socket is selected from the start; the
+        // file server has files beside it.
+        ("flows", "file-serving", "btrfs", 0),
+    ];
+    for (view, recording, needle, down) in clicks {
+        let mut app = App::new(fixture(recording));
+        app.cost = Cost::Snapshot;
+        app.open(view).unwrap();
+        let before = draw_app(&mut app, WIDTH, HEIGHT);
+        let (column, row) = find(&before, needle)
+            .unwrap_or_else(|| panic!("`{needle}` is not drawn by {view} on its workload"));
+        // Two cells in, so a click lands inside a frame's label rather than
+        // on its left edge.
+        click(&mut app, column + 2, row + down);
+        assert_snapshot(
+            &format!("{view}-click--{recording}"),
+            &draw_app(&mut app, WIDTH, HEIGHT),
+        );
+    }
+}

@@ -4,7 +4,7 @@
 #   make && docs/view/gallery/flows-run/record.sh [OUT]
 #
 # Into OUT when given (the fixtures' `record.sh` records it as
-# `file-server`), into `data/` beside this script otherwise.
+# `file-serving`), into `data/` beside this script otherwise.
 #
 # The common fixtures (`tests/view_fixtures/`) carry `io.syscall` as a summary
 # and a histogram -- latency per thread, no bytes -- and no `io.fs` at all, so

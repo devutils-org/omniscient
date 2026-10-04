@@ -1,0 +1,40 @@
+omn top │ fixture workload-wake │ 280ms                           view: snapshot │ collectors ≥41.7% │ target 61.9% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐
+│5 late ~low det  958 wakeups of 22 threads -- from a task 100%, in 280ms                                              │
+│                                                                                                                      │
+│woken thread      wakes  mostly by      woken thread      wakes  mostly by      woken thread      wakes  mostly by    │
+│relay-a 1527172     300  relay-c  100%  migration/23 160      4  relay-c   75%  migration/20 142      2  relay-a   50%│
+│relay-b 1527173     299  relay-a  100%  tailscaled 984        4  wake-ma…  25%  tailscaled 966        2  relay-b   50%│
+│relay-c 1527174     299  relay-b  100%  migration/3 38        3  relay-c   67%  rcu_exp_gp_kt… 19     1  wake-ma… 100%│
+│wake-main 1527161     6  relay-a   33%  migration/11 86       3  relay-a   33%  migration/5 50        1  relay-a  100%│
+│migration/7 62       11  relay-a   45%  migration/19 136      3  wake-ma…  33%  ksoftirqd/7 63        1  wake-ma… 100%│
+│migration/8 68        7  relay-b   43%  migration/22 154      3  relay-a   33%  migration/12 92       1  relay-a  100%│
+│migration/6 56        4  relay-b   50%  migration/9 74        2  relay-b   50%  migration/18 130      1  relay-c  100%│
+│threads 1-21 of 22, ↑/↓ to move; 18 dimmed: outside the target, woken by it                                           │
+│                                                                                                                      │
+│relay-b 1527173 was woken 299 times, 1.07k/s                                                                          │
+│<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         │
+│└─ relay-a 1527172                                      299  100%    430µs    215µs    451µs       ▆████████████████▁ │
+│   └─ relay-c 1527174  its wakeup unseen x1             299  100%    431µs    215µs    395µs       ▆████████████████▁ │
+│      └─ relay-b 1527173  ↺ back on the chain           298  100%    431µs    215µs    297µs       ▅████████████████▁ │
+│                                                                                                                      │
+│woken at      held   the longest chains, link by link: each waker and its hold                                        │
+│+67.7ms      893µs   <- relay-a 1527172 451µs  <- relay-c 1527174 229µs  <- relay-b 1527173 213µs ↺                   │
+│+181ms       890µs   <- relay-a 1527172 238µs  <- relay-c 1527174 395µs  <- relay-b 1527173 256µs ↺                   │
+│+158ms       810µs   <- relay-a 1527172 278µs  <- relay-c 1527174 235µs  <- relay-b 1527173 297µs ↺                   │
+│+246ms       711µs   <- relay-a 1527172 285µs  <- relay-c 1527174 214µs  <- relay-b 1527173 212µs ↺                   │
+│+188ms       702µs   <- relay-a 1527172 229µs  <- relay-c 1527174 242µs  <- relay-b 1527173 230µs ↺                   │
+│+126ms       697µs   <- relay-a 1527172 251µs  <- relay-c 1527174 222µs  <- relay-b 1527173 225µs ↺                   │
+│+162ms       694µs   <- relay-a 1527172 218µs  <- relay-c 1527174 225µs  <- relay-b 1527173 251µs ↺                   │
+│+68.4ms      693µs   <- relay-a 1527172 220µs  <- relay-c 1527174 240µs  <- relay-b 1527173 234µs ↺                   │
+│+135ms       692µs   <- relay-a 1527172 239µs  <- relay-c 1527174 230µs  <- relay-b 1527173 223µs ↺                   │
+│                                                                                                                      │
+│-> it woke in turn: relay-c 1527174 x299, migration/7 62 x3, migration/8 68 x3, migration/6 56 x2, and 9 more         │
+│quiet: the woken thread's time with no sign of life in the run (no wakeup received or issued) before this one -- an   │
+│upper bound: it was blocked no longer than this. hold: the waker's time from its own wakeup to the one it issued --   │
+│how long the chain sat with it. A chain stops at an interrupt, at a thread already on it, or at a waker whose own     │
+│wakeup the run did not see. A softirq may be a loopback send served in its sender's context: the sender is not named. │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ thread  +/- chain depth  enter focus it, then its lanes  l it
