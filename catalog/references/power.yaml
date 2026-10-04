@@ -2,4 +2,168 @@
 # established tool on the same workload and holds them to a declared
 # tolerance. Read by tests/reference.rs, never by omn itself. Schema:
 # BRIEF.md, "Decided before this wave".
-[]
+#
+# Every `power.*` source is system- or cpu-scoped, and omn refuses to launch a
+# program for one (`--system` cannot be used with `-- PROGRAM`; without it,
+# "cannot be measured per launch"). So omn here measures a fixed window
+# (`-d 2s`), and this family adds fields the runner is asked to honour
+# (docs/fixes/w22-power.md, "Requests to other streams"):
+#
+#   same_run: tool_wraps_omn  # run `reference.command ++ [omn binary] ++ omn`:
+#                             # the tool launches omn, so both observe the same
+#                             # window (the tool's is omn's plus omn's ~45 ms of
+#                             # startup); omn's JSON is on stdout, the tool's
+#                             # report where it puts it. No workload is appended.
+#   same_run: back_to_back    # the tool launches nothing (`sensors`): run omn,
+#                             # then `reference.command` alone, at once.
+#   background: true          # start `workload` first, in the background, and
+#                             # stop it after the pair ran: it is load for the
+#                             # window, not the thing launched.
+#   compare.omn_series: KEY   # which of omn's series `compare.omn` reads, when
+#                             # it is not named like the tool's key.
+
+- source: power.energy
+  tool: perf stat
+  use: "perf stat -a -e power/energy-pkg/ -- prog"
+  workload: [python3, tests/reference/workloads/power/spin.py, "4", "4"]
+  background: true
+  same_run: tool_wraps_omn
+  omn: [trace, power.energy, --system, -m, count, -e, summary, --format, json, -d, 2s]
+  reference:
+    command: [perf, stat, -x, ",", -a, -e, power/energy-pkg/, --]
+    parse: power_perf_stat_energy
+    requires: [perf]
+    privileged: false
+  compare:
+    key: ""
+    omn_series: system
+    omn: summary.mean
+    tolerance: {rel: 0.05}
+    why: "both read the package RAPL counter through the same perf PMU over one window;
+          perf's window also holds omn's startup (~45 ms of 2 s, 2.3 %). Measured by hand:
+          omn 143.14 J, perf 145.92 J (1.9 %)"
+
+- source: power.energy
+  tool: turbostat
+  use: "turbostat --Joules --show Pkg_J -- prog"
+  workload: [python3, tests/reference/workloads/power/spin.py, "4", "4"]
+  background: true
+  same_run: tool_wraps_omn
+  omn: [trace, power.energy, --system, -m, count, -e, summary, --format, json, -d, 2s]
+  reference:
+    command: [turbostat, --quiet, --no-msr, --Summary, --Joules, --show, "Pkg_J"]
+    parse: power_turbostat_summary
+    requires: [turbostat]
+    privileged: false
+  compare:
+    key: Pkg_J
+    omn_series: system
+    omn: summary.mean
+    tolerance: {rel: 0.05}
+    why: "turbostat --no-msr reads the same RAPL perf event, unprivileged; its window holds
+          omn's startup on top of omn's 2 s. Measured by hand: omn 85.61 J, turbostat
+          88.37 J over 2.046 s (3.1 %, 2.3 % of it the longer window)"
+
+- source: power.energy
+  tool: the RAPL files
+  use: "cat /sys/class/powercap/intel-rapl:0/energy_uj before and after prog"
+  workload: [python3, tests/reference/workloads/power/spin.py, "4", "4"]
+  background: true
+  same_run: tool_wraps_omn
+  omn: [trace, power.energy, --system, -m, count, -e, summary, --format, json, -d, 2s]
+  reference:
+    command: [sh, tests/reference/workloads/power/rapl_window.sh]
+    parse: power_rapl_window
+    requires: [sh, /sys/class/powercap/intel-rapl:0/energy_uj]
+    privileged: true
+  compare:
+    key: ""
+    omn_series: system
+    omn: summary.mean
+    tolerance: {rel: 0.05}
+    why: "energy_uj is the powercap view of the same package counter omn opens through
+          perf; root-only, so this pair runs through sudo -n. Not run here (no sudo)"
+
+- source: power.freq
+  tool: turbostat
+  use: "turbostat -c 1 --show Bzy_MHz -- prog"
+  workload: [python3, tests/reference/workloads/power/spin.py, "4", "24"]
+  background: true
+  same_run: tool_wraps_omn
+  omn: [trace, power.freq, --cpu, "1", -m, poll@2s, -e, summary, --format, json, -d, 2s]
+  reference:
+    command: [turbostat, --quiet, --no-msr, --Summary, -c, "1", --show, "Avg_MHz,Busy%,Bzy_MHz"]
+    parse: power_turbostat_summary
+    requires: [turbostat, /sys/devices/system/cpu/cpu1/cpufreq/cpuinfo_avg_freq]
+    privileged: false
+  compare:
+    key: Bzy_Hz
+    omn_series: "cpu:1"
+    omn: summary.mean
+    tolerance: {rel: 0.03}
+    why: "both are APERF/MPERF over the cpu's busy time: turbostat's Bzy_MHz through perf,
+          omn through cpuinfo_avg_freq. Every cpu is kept busy, because on an idle cpu
+          cpuinfo_avg_freq is neither (see the handoff). Measured by hand: 3994.47 MHz
+          against 3994 MHz"
+
+- source: power.freq
+  tool: cpupower monitor
+  use: "cpupower monitor -m Mperf -- prog"
+  workload: [python3, tests/reference/workloads/power/spin.py, "4", "24"]
+  background: true
+  same_run: tool_wraps_omn
+  omn: [trace, power.freq, --cpu, "1", -m, poll@2s, -e, summary, --format, json, -d, 2s]
+  reference:
+    command: [cpupower, monitor, -m, Mperf]
+    parse: power_cpupower_monitor
+    requires: [cpupower]
+    privileged: true
+  compare:
+    key: cpu1/Freq_Hz
+    omn_series: "cpu:1"
+    omn: summary.mean
+    tolerance: {rel: 0.03}
+    why: "Mperf is APERF/MPERF read from /dev/cpu/*/msr, which needs root; the same ratio
+          cpuinfo_avg_freq exposes. Not run here (no sudo)"
+
+- source: power.cstate
+  tool: cpupower monitor
+  use: "cpupower monitor -m Idle_Stats -- prog"
+  workload: [sleep, "4"]
+  background: true
+  same_run: tool_wraps_omn
+  omn: [trace, power.cstate, --system, -m, poll@2s, -e, summary, --format, json, -d, 2s]
+  reference:
+    command: [cpupower, monitor, -m, Idle_Stats]
+    parse: power_cpupower_monitor
+    requires: [cpupower, /sys/devices/system/cpu/cpu1/cpuidle]
+    privileged: false
+  compare:
+    key: "cpu:1"
+    omn: summary.mean
+    tolerance: {abs: 100000000}
+    why: "both read the cpuidle sysfs residency files; the parser turns cpupower's
+          percentages back into nanoseconds over the command's duration. One poll in a
+          2 s window, so omn's mean is the window's residency. 0.1 s absolute because
+          residency is credited when a cpu wakes (catalog caveat). Measured by hand,
+          seconds: cpu 0 1.685 / 1.704, cpu 1 1.765 / 1.774, cpu 12 1.290 / 1.312"
+
+- source: power.temp
+  tool: sensors
+  use: "sensors (the processor's Tctl / Package id 0)"
+  workload: []
+  same_run: back_to_back
+  omn: [trace, power.temp, --system, -m, snapshot, -e, summary, --format, json]
+  reference:
+    command: [sensors, -j]
+    parse: power_sensors_json
+    requires: [sensors]
+    privileged: false
+  compare:
+    key: max_cpu
+    omn_series: system
+    omn: summary.mean
+    tolerance: {abs: 3.0}
+    why: "both read hwmon; omn reports the hottest processor sensor, the parser takes the
+          same maximum. Two reads apart, not one, so 3 degrees for what moves between
+          them. Measured by hand: 50.625 against 50.625 (Tctl)"
