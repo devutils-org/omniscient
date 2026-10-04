@@ -689,8 +689,14 @@ Each method refuses what it cannot answer and names the one that can:
 \fBomn latency\fR names the largest state only when nothing unread could
 overtake it: not the next state, not a row the run did not supply, not the
 residue and the rows' resolution. Otherwise it says undecided, and why. It
-answers for one task \(em a launched program's main thread, or the process
-asked for \(em and lists the others. A sleeping state is named by the lock
+starts from one task \(em a launched program's main thread, or the process
+asked for \(em and follows its largest row when that row is a sleep or a
+futex wait: into the child that ran during a wait for it (in the wait's
+place), or to another thread of the process that ran during the block (beside
+it), up to eight deep; the verdict says which task its state is from, and
+lists the others. A followed child's row that no source saw is unread, not
+zero. \fBsched.mutex\fR is asked in a second pass, only when a futex sleep
+needs splitting. A sleeping state is named by the lock
 source that covers more than half of it: \fBsched.mutex\fR (\fIlock\fR), then
 \fBsched.futex\fR (\fIfutex\fR), else \fIsleep\fR with the stack it began
 from; \fIuninterruptible\fR is \fIdisk\fR.

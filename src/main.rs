@@ -448,9 +448,9 @@ fn symbols_not_read(session: &Session) -> Option<String> {
                  only for the stacks of {}, and this source's are named from the files the \
                  target mapped. Leave `--symbols` out, or ask for it where it is read",
                 request.source,
-                omn::stack::UNWOUND_BY_CHOICE
+                omn::stack::symbol_readers()
                     .iter()
-                    .map(|(source, _)| format!("`{source}`"))
+                    .map(|source| format!("`{source}`"))
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -2265,9 +2265,7 @@ fn latency(args: LatencyArgs) -> anyhow::Result<ExitCode> {
         runs: args.runs,
         duration: args.duration,
         hz: args.hz,
-        // `--symbols` is stream names' flag (`src/cli.rs`); once it is on
-        // `LatencyArgs`, this reads `args.symbols`.
-        symbols: None,
+        symbols: args.symbols,
     };
     if let Err(refusal) = ask.check() {
         return Ok(refuse_triage(&refusal));
@@ -2314,6 +2312,7 @@ fn saturate(args: SaturateArgs) -> anyhow::Result<ExitCode> {
         objective,
         target,
         duration: args.duration,
+        symbols: args.symbols,
     };
     if let Err(refusal) = ask.check() {
         return Ok(refuse_triage(&refusal));

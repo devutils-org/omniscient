@@ -51,6 +51,7 @@ use crate::event::Event;
 use crate::join::Evidence;
 use crate::request::{KeyKind, Request, Session, SourceId, Target};
 use crate::scalar::Duration;
+use crate::stack::unwind::SymbolSource;
 
 use super::engine::{self, Dropped, Run};
 use super::latency::notes;
@@ -91,6 +92,8 @@ pub struct Ask {
     pub objective: Objective,
     pub target: Target,
     pub duration: Option<Duration>,
+    /// `--symbols`, set on every request whose collector reads it.
+    pub symbols: Option<SymbolSource>,
 }
 
 impl Ask {
@@ -185,6 +188,7 @@ impl Ask {
                 "summary",
             ));
         }
+        super::diff::ask_symbols(&mut requests, self.symbols);
         Session {
             name: Some(format!("omn saturate --objective {}", self.objective)),
             duration: self.duration,
@@ -507,6 +511,14 @@ fn p99(results: &Results, what: &str) -> Option<Percentile> {
 pub fn read(ask: &Ask, run: &Run, dropped: Vec<Dropped>) -> Answer {
     let window = window_of(run);
     let mut notes = notes(run);
+    if let Some(symbols) = ask.symbols {
+        if super::diff::ask_symbols(&mut ask.session().requests, Some(symbols)).is_empty() {
+            notes.push(format!(
+                "`--symbols {symbols}` names stacks, and no request of `omn saturate` reads one: \
+                 the USE method names resources, not functions. `omn latency` names them"
+            ));
+        }
+    }
     let mut resources = Vec::new();
 
     // ---------------------------------------------------------------- cpu
@@ -1159,6 +1171,7 @@ mod tests {
             objective,
             target: Target::Launch(vec!["true".to_owned()]),
             duration: None,
+            symbols: None,
         }
     }
 
@@ -1183,6 +1196,7 @@ mod tests {
             objective: Objective::Throughput,
             target: Target::Pid(vec![1]),
             duration: Some("1s".parse().unwrap()),
+            symbols: None,
         };
         crate::validate::validate_session(&catalog, &attached.session())
             .unwrap_or_else(|rejections| panic!("{rejections:?}"));
@@ -1194,6 +1208,7 @@ mod tests {
             objective: Objective::Throughput,
             target: Target::Pid(vec![1]),
             duration: None,
+            symbols: None,
         };
         assert!(ask.check().is_err());
     }

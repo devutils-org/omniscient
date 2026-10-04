@@ -221,10 +221,8 @@ impl Ask {
             "stack",
         );
         on_cpu.stack = Some(StackMode::Fp);
-        on_cpu.symbols = self.symbols;
         let mut blocked = request(BLOCKED, "sched.offcpu", "trace", "stack");
         blocked.stack = Some(StackMode::Fp);
-        blocked.symbols = self.symbols;
         let mut requests = vec![
             on_cpu,
             request(RUNNABLE, "sched.runqlat", "trace", "summary"),
@@ -234,6 +232,9 @@ impl Ask {
         if mutex {
             requests.push(request(MUTEX, "sched.mutex", "trace", "summary"));
         }
+        // Only where the collector reads it: `sched.offcpu` would carry it
+        // and never ask (`stack::reads_symbols`).
+        super::diff::ask_symbols(&mut requests, self.symbols);
         let whole = match self.target {
             Target::Launch(_) => Whole::Span(Span::Lifetime),
             _ => Whole::Span(Span::Window),
@@ -1907,33 +1908,42 @@ fn short_of(results: &Results) -> Option<Shortfall> {
     Shortfall::of(&results.losses, results.events_seen as u64, false)
 }
 
-/// The function the task's cpu samples landed in most, by leaf frame.
+/// The function the task's cpu samples landed in most: by leaf frame, or by
+/// the innermost frame a perf map named (`diff::hottest`).
 fn hottest(run: &Run, task: &str) -> Option<Naming> {
     let results = run.result(ON_CPU)?;
-    let mut by_leaf: BTreeMap<&str, u64> = BTreeMap::new();
-    let mut samples = 0u64;
-    for event in run
+    let perf = super::diff::PerfMapNames::of_run(&run.output.results);
+    let samples = run
         .events_of("cpu.profile")
         .filter(|event| is_task(event, task))
-    {
-        samples += 1;
-        let leaf = attr(event, STACK_ID_ATTR)
-            .and_then(|id| results.stacks.get(&(id as u64)))
-            .and_then(|frames| frames.last())
-            .map_or("[no stack]", String::as_str);
-        *by_leaf.entry(leaf).or_default() += 1;
-    }
-    let (leaf, count) = by_leaf.into_iter().max_by_key(|(_, count)| *count)?;
+        .map(|event| {
+            attr(event, STACK_ID_ATTR)
+                .and_then(|id| results.stacks.get(&(id as u64)))
+                .map(Vec::as_slice)
+        });
+    let says = super::diff::hottest(samples, &perf, &program(run))?;
     Some(Naming {
         source: results.source.clone(),
         evidence: Evidence::Key,
         amount: None,
-        says: format!(
-            "hottest function `{leaf}`, {count} of {samples} samples ({:.0} %)",
-            count as f64 / samples as f64 * 100.0
-        ),
+        says,
         short: None,
     })
+}
+
+/// The names the launched program's own frames may be spelled with: the
+/// file its `argv[0]` maps, symlinks followed, then `argv[0]`'s base name
+/// (`diff::executable_names`). None for an attached task.
+fn program(run: &Run) -> Vec<String> {
+    run.served
+        .iter()
+        .find_map(|served| match &served.request.target {
+            Target::Launch(argv) => argv
+                .first()
+                .map(|first| super::diff::executable_names(first)),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// Where the task's blocks in one state began, by the heaviest stack.
@@ -1957,7 +1967,8 @@ fn blocking_stack(run: &Run, task: &str, state: &str) -> Option<Naming> {
     let total: f64 = by_stack.values().sum();
     let (id, amount) = by_stack.into_iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
     let frames = results.stacks.get(&id)?;
-    let leafward: Vec<&str> = frames.iter().rev().take(4).map(String::as_str).collect();
+    let perf = super::diff::PerfMapNames::of_run(&run.output.results);
+    let leafward = super::diff::leafward(frames, &perf, &program(run));
     Some(Naming {
         source: results.source.clone(),
         evidence: Evidence::Key,
@@ -2031,6 +2042,7 @@ pub fn notes(run: &Run) -> Vec<String> {
             notes.push(format!("[{}] degraded: {degradation}", results.label));
         }
     }
+    notes.extend(super::diff::names_notes(&run.output.results));
     notes
 }
 
@@ -2402,7 +2414,7 @@ mod tests {
     }
 
     #[test]
-    fn the_first_pass_asks_no_mutex_and_both_stacks_carry_the_symbols_asked() {
+    fn the_first_pass_asks_no_mutex_and_the_stacks_that_read_symbols_carry_them() {
         let mut asked = ask(Objective::Latency, 1);
         asked.symbols = Some(SymbolSource::Debuginfod);
         let first = asked.session();
@@ -2415,23 +2427,23 @@ mod tests {
             .requests
             .iter()
             .any(|request| request.label.as_deref() == Some(MUTEX)));
-        for request in &first.requests {
-            let reads_stacks = request.stack.is_some();
+        // Set where the collector reads it and nowhere else: a source whose
+        // stacks are named from the mapped files alone would carry
+        // `debuginfod` without asking.
+        for request in first.requests.iter().chain(&second.requests) {
+            let reads = crate::stack::reads_symbols(request.source.as_str());
             assert_eq!(
                 request.symbols,
-                reads_stacks.then_some(SymbolSource::Debuginfod),
+                reads.then_some(SymbolSource::Debuginfod),
                 "{:?}",
                 request.label
             );
         }
-        assert_eq!(
-            first
-                .requests
-                .iter()
-                .filter(|r| r.symbols.is_some())
-                .count(),
-            2
-        );
+        // Not vacuous: the profile reads it.
+        assert!(first
+            .requests
+            .iter()
+            .any(|r| r.symbols.is_some() && r.source.as_str() == "cpu.profile"));
     }
 
     #[test]
