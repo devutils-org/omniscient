@@ -1380,6 +1380,97 @@ fn the_same_source_polled_at_a_sane_interval_keeps_up_with_itself() {
     assert_eq!(losses["dropped"], 0, "{losses}");
 }
 
+/// The driver refreshes the energy counter at its own pace -- every 100 ms on
+/// the board this was written on -- and a poll faster than that reads the
+/// same driver sample again. The run counts those readings, marks each event
+/// `driver_sample: repeat` or `new`, and says how often the counter actually
+/// moved.
+///
+/// The ground truth is the pace itself, held as a separation rather than a
+/// period: a 10 ms poll repeats on most readings, a 300 ms one on few. And the
+/// note's count is the count of events marked as repeats, so the sentence a
+/// person reads and the file a program reads say the same thing.
+///
+/// The fast poll also shows the counter's own defect (`docs/scenarios/gpu.md`,
+/// defect 7): read that often, it under-counts, and the run says so with the
+/// draw read beside it. This test holds `exclusive()`, because a fast poll of
+/// the counter disturbs every other reader of the board.
+#[test]
+fn a_power_poll_faster_than_the_driver_refreshes_counts_its_repeats_and_says_so() {
+    if let Err(reason) = device() {
+        return eprintln!("skipped: {reason}");
+    }
+    let _alone = exclusive();
+    let poll = |mode: &str| -> Value {
+        let output = omn(&[
+            "gpu.power",
+            "--mode",
+            mode,
+            "--emit",
+            "raw",
+            "--format",
+            "json",
+            "--",
+            "sleep",
+            "1.5",
+        ]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        serde_json::from_str(&stdout(&output)).expect("json")
+    };
+    let repeats = |run: &Value| -> (usize, usize, Vec<String>) {
+        let result = &run["results"][0];
+        let events = events(result, "raw");
+        let repeated = events
+            .iter()
+            .filter(|event| attr(event, "driver_sample") == "repeat")
+            .count();
+        let degradations = result["degradations"]
+            .as_array()
+            .map(|all| {
+                all.iter()
+                    .map(|note| note.as_str().unwrap_or_default().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        (repeated, events.len(), degradations)
+    };
+
+    let (fast_repeats, fast_reads, fast_notes) = repeats(&poll("poll@10ms"));
+    let (slow_repeats, slow_reads, slow_notes) = repeats(&poll("poll@300ms"));
+    let fast = fast_repeats as f64 / fast_reads as f64;
+    let slow = slow_repeats as f64 / slow_reads.max(1) as f64;
+    assert!(
+        fast > 0.5 && slow < fast / 2.0,
+        "polled every 10 ms the counter repeated on {fast_repeats} of {fast_reads} readings, \
+         every 300 ms on {slow_repeats} of {slow_reads}"
+    );
+
+    let said = fast_notes
+        .iter()
+        .find(|note| note.contains("found the energy counter where the previous reading left it"))
+        .unwrap_or_else(|| panic!("the repeats were not said: {fast_notes:?}"));
+    assert!(
+        said.starts_with(&format!(
+            "vendor:nvml: {fast_repeats} of {fast_reads} readings"
+        )),
+        "the note and the events disagree: {said}"
+    );
+    assert!(
+        fast_notes
+            .iter()
+            .any(|note| note.contains("energy counter implies")),
+        "a 10 ms poll starves the counter and the run did not say so: {fast_notes:?}"
+    );
+    if slow_repeats == 0 {
+        assert!(
+            !slow_notes
+                .iter()
+                .any(|note| note.contains("found the energy counter")),
+            "a run with no repeat claims some: {slow_notes:?}"
+        );
+    }
+}
+
 /// The other way a run of this family ends early: the process it was following
 /// exits. That is not a loss and is not counted as one -- it is the end of the
 /// window -- but the run has to say which process went, because a series that
