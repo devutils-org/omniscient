@@ -1295,12 +1295,80 @@ fn the_session_indexes_hold_exactly_the_sessions_on_disk() {
     }
 }
 
-/// A scratch directory of this test binary's own.
-fn scratch(name: &str) -> std::path::PathBuf {
+/// A scratch directory of this test binary's own, removed when the test
+/// that made it ends, passing or not.
+///
+/// The directories used to outlive their test: `no-shim` holds a copy of the
+/// binary, 154 MB, and a run's worth of them filled a per-user `/tmp` quota.
+/// A run killed before its guards drop still leaves its own, so each new one
+/// first removes those of test processes that are gone.
+struct Scratch(std::path::PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for Scratch {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_os_str()
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn scratch(name: &str) -> Scratch {
+    sweep_dead_scratch();
     let dir = std::env::temp_dir().join(format!("omn-cli-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
-    dir
+    Scratch(dir)
+}
+
+/// Removes the `omn-cli-<pid>-*` directories whose process no longer exists.
+fn sweep_dead_scratch() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("omn-cli-"))
+            .and_then(|rest| rest.split_once('-'))
+            .and_then(|(pid, _)| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid != std::process::id() && !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// The ground truth of the guard: a scratch directory is gone once the value
+/// that names it is, and one left by a process that no longer exists is
+/// removed by the next one made.
+#[test]
+fn a_scratch_directory_does_not_outlive_its_test() {
+    let path = {
+        let dir = scratch("guard");
+        std::fs::write(dir.join("file"), b"x").unwrap();
+        dir.to_path_buf()
+    };
+    assert!(!path.exists(), "{} outlived its test", path.display());
+
+    // A pid above the kernel's maximum names no process.
+    let dead = std::env::temp_dir().join("omn-cli-4194305-leaked");
+    std::fs::create_dir_all(&dead).unwrap();
+    let _fresh = scratch("sweep");
+    assert!(!dead.exists(), "{} was left behind", dead.display());
 }
 
 /// What a command prints, trimmed: the machine's answer, asked outside `omn`.
@@ -1611,7 +1679,7 @@ fn a_session_dumped_from_the_command_line_measures_what_the_command_line_measure
 }
 
 /// A copy of the catalog directory with one line changed, in `OMN_CATALOG_DIR`.
-fn patched_catalog(name: &str, file: &str, from: &str, to: &str) -> std::path::PathBuf {
+fn patched_catalog(name: &str, file: &str, from: &str, to: &str) -> Scratch {
     let dir = scratch(name);
     let mut patched = false;
     for entry in std::fs::read_dir("catalog").expect("the catalog directory") {
