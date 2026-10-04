@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use super::Factory;
 use crate::capabilities::Probe;
 
+pub use counters::launch_refusals;
+
 /// The collectors this family provides.
 ///
 /// The sysfs backends of these same sources -- `fs:sys:amdgpu`, `fs:sys:i915`

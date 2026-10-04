@@ -380,13 +380,13 @@ fn counters_beside_kernel_times_or_pc_sampling_are_refused() {
         .unwrap();
         let output = omn(&["-f", session.to_str().unwrap()], &[]);
         let complaint = stderr(&output);
-        if ready().is_err() {
-            // No device or no CUPTI: the resolver refuses first, which is
-            // the machine's answer and still a refusal.
-            assert!(!output.status.success(), "{complaint}");
-            continue;
-        }
-        assert!(!output.status.success(), "{complaint}");
+        // The request's error, before anything is resolved or launched:
+        // exit 2 on every machine, with or without a device.
+        assert_eq!(output.status.code(), Some(2), "{complaint}");
+        assert!(
+            !complaint.contains("cannot start collecting"),
+            "{complaint}"
+        );
         assert!(
             complaint.contains(&format!("gpu.counters cannot be asked with {other}")),
             "{complaint}"
