@@ -1117,13 +1117,16 @@ fn ndjson(results: &Results) -> Result<String, ParseError> {
                 ..
             } => {
                 for stack in stacks {
-                    let line = serde_json::json!({
+                    let mut line = serde_json::json!({
                         "record": "stack",
                         "stack": stack.stack,
                         "events": stack.events,
                         "total": stack.total,
                         "frames": results.stacks.get(&stack.stack),
                     });
+                    if let Some(series) = &stack.series {
+                        line["series"] = serde_json::Value::from(series.to_string());
+                    }
                     let _ = writeln!(out, "{line}");
                 }
                 // Always written: a profile missing nine tenths of its samples
@@ -1811,12 +1814,19 @@ fn exact_binary(value: u64) -> String {
 /// An unresolved stack is not an empty stack: a profile that silently dropped
 /// the samples it could not symbolize would understate exactly the part of the
 /// program the symbols were missing for.
+/// A row's frames, root first, under its series when the request grouped
+/// stacks by keys: the series becomes the root frame, so a flame of two
+/// tasks is two towers rather than one that adds them up.
 fn frames(results: &Results, stack: &StackCount) -> Vec<String> {
-    results
+    let frames = results
         .stacks
         .get(&stack.stack)
         .cloned()
-        .unwrap_or_else(|| vec![format!("[unresolved stack {:#x}]", stack.stack)])
+        .unwrap_or_else(|| vec![format!("[unresolved stack {:#x}]", stack.stack)]);
+    match &stack.series {
+        Some(series) => std::iter::once(series.to_string()).chain(frames).collect(),
+        None => frames,
+    }
 }
 
 /// Renders a wall-clock span for a human: three significant digits, not the
@@ -2707,6 +2717,7 @@ mod tests {
             value_attr: String::new(),
             row_stamp: None,
             drains: Vec::new(),
+            fields: Default::default(),
         }
     }
 
@@ -2941,17 +2952,20 @@ mod tests {
             stacks: vec![
                 StackCount {
                     stack: 1,
+                    series: None,
                     events: 300,
                     total: 3_000_000.0,
                 },
                 StackCount {
                     stack: 2,
+                    series: None,
                     events: 7,
                     total: 70_000.0,
                 },
                 // Seen, counted, and with no frames to show for it.
                 StackCount {
                     stack: 3,
+                    series: None,
                     events: 1,
                     total: 10_000.0,
                 },
@@ -3081,6 +3095,28 @@ mod tests {
             ],
             "{encoded}"
         );
+    }
+
+    /// A row keyed by a series (`--keys task`) roots its chain at the series,
+    /// so two tasks on one stack are two towers in a flame graph.
+    #[test]
+    fn a_keyed_stack_row_is_rooted_at_its_series() {
+        let mut keyed = profile();
+        for output in &mut keyed.outputs {
+            if let Output::Stack { stacks, .. } = output {
+                stacks.truncate(1);
+                stacks[0].series = Some("task:7".into());
+            }
+        }
+        let run = RunOutput {
+            results: vec![keyed],
+            joins: Vec::new(),
+            decompositions: Vec::new(),
+        };
+        let encoded = run_output(OutputFormat::Folded, &run).expect("encoding");
+        assert_eq!(encoded.trim(), "task:7;main;work;read 3000000", "{encoded}");
+        let lines = run_output(OutputFormat::Ndjson, &run).expect("encoding");
+        assert!(lines.contains("\"series\":\"task:7\""), "{lines}");
     }
 
     /// Two sources in one file would merge into a flame graph of neither, so

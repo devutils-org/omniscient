@@ -564,6 +564,7 @@ fn a_profile_larger_than_one_gzip_block_comes_back_whole() {
         value_attr: String::new(),
         row_stamp: None,
         drains: Vec::new(),
+        fields: Default::default(),
     };
     let mut stacks = Vec::new();
     // Frame names long enough that the string table alone passes 64 KiB.
@@ -577,6 +578,7 @@ fn a_profile_larger_than_one_gzip_block_comes_back_whole() {
         );
         stacks.push(omn::emit::StackCount {
             stack: id,
+            series: None,
             events: 1,
             total: (id + 1) as f64,
         });
@@ -622,6 +624,7 @@ fn a_unit_pprof_does_not_know_is_written_under_its_own_name_and_said_so() {
             short: None,
             stacks: vec![omn::emit::StackCount {
                 stack: 1,
+                series: None,
                 events: 4,
                 total: 145.0,
             }],
@@ -645,6 +648,7 @@ fn a_unit_pprof_does_not_know_is_written_under_its_own_name_and_said_so() {
         value_attr: String::new(),
         row_stamp: None,
         drains: Vec::new(),
+        fields: Default::default(),
     };
     results.stacks.insert(1, vec!["main".into(), "spin".into()]);
     let run = RunOutput {
@@ -1168,6 +1172,7 @@ fn distribution(losses: Losses) -> Results {
         value_attr: String::new(),
         row_stamp: None,
         drains: Vec::new(),
+        fields: Default::default(),
     }
 }
 

@@ -93,6 +93,12 @@ pub const TOTAL_OF_ATTR: &str = "total_of";
 /// its low bound, so it is never below the mean beside it (see `highest`).
 pub const SUM_NS_ATTR: &str = "total_ns";
 
+/// What a collector counted about the run, by name: a count a caveat or a
+/// fact would otherwise only say in a sentence (`net.request`'s
+/// `never_ended`, `unborn`, `replaced`, `filtered_out`). Counts, so whole
+/// numbers; ordered, so a file written twice reads the same.
+pub type Fields = BTreeMap<String, u64>;
+
 /// Everything one request produced.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Results {
@@ -194,6 +200,11 @@ pub struct Results {
     /// run (a recording's document holds the drains read in its window).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drains: Vec<crate::collect::DrainDrop>,
+    /// What the collector counted about the run, as numbers a program reads
+    /// by name ([`Fields`], `Collector::fields`). Absent when it counted
+    /// nothing, which is most collectors.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: Fields,
 }
 
 /// What a series is keyed on.
@@ -889,6 +900,13 @@ fn is_zero_usize(value: &usize) -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StackCount {
     pub stack: u64,
+    /// The series this row belongs to, when the request named keys to group
+    /// by (`--keys task`): one row per series and stack, so a followed
+    /// task's own stacks read apart from its siblings' without `raw` beside
+    /// them. Absent when the request named none, and then a row is the
+    /// stack's across the whole result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series: Option<SeriesKey>,
     /// The events on this stack, as `topk`'s `events` are: a row bucketed in
     /// the kernel is one event however many measurements it stands for.
     pub events: usize,
@@ -996,7 +1014,7 @@ pub fn aggregate(
             }
             Emit::Stack => {
                 let (output, unmeasured) =
-                    stack_counting(&collection.events, value_attr, short.as_ref())?;
+                    stack_counting(&collection.events, axes, value_attr, short.as_ref())?;
                 if unmeasured > 0 {
                     degradations.push(format!(
                         "{unmeasured} of {} events carried no `{value_attr}`: the collector saw \
@@ -1063,6 +1081,7 @@ pub fn aggregate(
         value_attr: value_attr.to_owned(),
         row_stamp: collection.row_stamp,
         drains: collection.drains,
+        fields: collection.fields,
     })
 }
 
@@ -1483,7 +1502,7 @@ fn ranked(mut totals: Vec<SeriesTotal>, k: u32) -> Output {
 /// [`Results::stacks`].
 #[cfg(test)]
 fn stack(events: &[Event], attr: &str, short: Option<&Shortfall>) -> Result<Output, EmitError> {
-    stack_counting(events, attr, short).map(|(output, _)| output)
+    stack_counting(events, &[], attr, short).map(|(output, _)| output)
 }
 
 /// The same, with how many events carried no value for the weight.
@@ -1497,10 +1516,13 @@ fn stack(events: &[Event], attr: &str, short: Option<&Shortfall>) -> Result<Outp
 /// refusal: that is a collector bug.
 fn stack_counting(
     events: &[Event],
+    axes: &[KeyKind],
     attr: &str,
     short: Option<&Shortfall>,
 ) -> Result<(Output, usize), EmitError> {
-    let mut by_stack: BTreeMap<u64, (usize, f64)> = BTreeMap::new();
+    // Keyed by series first only when the request named keys: a row per
+    // stack is what every reader without keys has always read.
+    let mut by_stack: BTreeMap<(Option<SeriesKey>, u64), (usize, f64)> = BTreeMap::new();
     let mut unattributed = 0;
     let mut unmeasured = 0;
     for event in events {
@@ -1514,15 +1536,17 @@ fn stack_counting(
         };
         // A row may stand for many measurements on one stack: the sum of
         // what they measured, exact when the row carries it; see [`weighed`].
-        let entry = by_stack.entry(id).or_insert((0, 0.0));
+        let series = (!axes.is_empty()).then(|| SeriesKey::by(event, axes));
+        let entry = by_stack.entry((series, id)).or_insert((0, 0.0));
         entry.0 += 1;
         entry.1 += weighed(event, attr, value);
     }
 
     let mut stacks: Vec<StackCount> = by_stack
         .into_iter()
-        .map(|(stack, (events, total))| StackCount {
+        .map(|((series, stack), (events, total))| StackCount {
             stack,
+            series,
             events,
             total,
         })
@@ -1532,6 +1556,7 @@ fn stack_counting(
             .total
             .partial_cmp(&left.total)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.series.cmp(&right.series))
             .then_with(|| left.stack.cmp(&right.stack))
     });
 
@@ -2043,6 +2068,7 @@ mod tests {
             facts: Vec::new(),
             row_stamp: None,
             drains: Vec::new(),
+            fields: Default::default(),
         }
     }
 
@@ -2056,9 +2082,9 @@ mod tests {
     /// How a drained source stamped its rows, and its drops placed at the
     /// drains that read them, reach `results.json` as the run said them; a
     /// collection that says neither writes neither.
-    #[test]
-    fn a_result_carries_its_row_stamp_and_its_drains() {
-        use crate::collect::{DrainDrop, RowStamp};
+    /// `mem.rss` on this process, polled, resolved on this machine with the
+    /// emits and keys given: a request every machine serves.
+    fn rss_request(emit: Vec<Emit>, keys: Vec<KeyKind>) -> ResolvedRequest {
         let catalog = crate::catalog::Catalog::embedded().unwrap();
         let capabilities = crate::capabilities::Capabilities::detect();
         let request = crate::request::Request {
@@ -2067,8 +2093,8 @@ mod tests {
             mode: crate::request::Mode::Poll {
                 interval: crate::scalar::Duration::from_nanos(10_000_000),
             },
-            emit: vec![crate::request::Emit::Summary],
-            keys: Vec::new(),
+            emit,
+            keys,
             filter: None,
             duration: Some("1s".parse().unwrap()),
             budget: None,
@@ -2078,7 +2104,39 @@ mod tests {
             label: None,
             window: None,
         };
-        let resolved = crate::resolve::resolve(&catalog, &capabilities, &request).unwrap();
+        crate::resolve::resolve(&catalog, &capabilities, &request).unwrap()
+    }
+
+    /// What a collector counted reaches the result by name, and a result
+    /// whose collector counted nothing writes no `fields`.
+    #[test]
+    fn a_result_carries_the_fields_its_collector_counted() {
+        let resolved = rss_request(vec![Emit::Summary], Vec::new());
+        let mut counted = two_threads(lost(0, 0), Vec::new());
+        counted.fields = Fields::from([("never_ended".to_owned(), 3), ("unborn".to_owned(), 0)]);
+        let results = aggregate(&resolved, counted, Unit::Bytes, "bytes").unwrap();
+        assert_eq!(results.fields["never_ended"], 3);
+        let json = serde_json::to_value(&results).unwrap();
+        assert_eq!(json["fields"]["never_ended"], 3);
+        assert_eq!(json["fields"]["unborn"], 0);
+        let back: Results = serde_json::from_value(json).unwrap();
+        assert_eq!(back.fields, results.fields);
+
+        let silent = aggregate(
+            &resolved,
+            two_threads(lost(0, 0), Vec::new()),
+            Unit::Bytes,
+            "bytes",
+        )
+        .unwrap();
+        let json = serde_json::to_value(&silent).unwrap();
+        assert!(json.get("fields").is_none(), "{json}");
+    }
+
+    #[test]
+    fn a_result_carries_its_row_stamp_and_its_drains() {
+        use crate::collect::{DrainDrop, RowStamp};
+        let resolved = rss_request(vec![Emit::Summary], Vec::new());
         let drains = vec![
             DrainDrop {
                 ts_ns: 40,
@@ -2791,6 +2849,54 @@ mod tests {
         assert_eq!(unattributed, 1);
     }
 
+    /// With keys asked for, a stack's row is per series: two threads on one
+    /// stack are two rows, each its own thread's; with none, one row, and no
+    /// `series` written.
+    #[test]
+    fn stack_rows_are_keyed_by_the_requests_keys() {
+        let on = |tid: i32, stack: u64, ns: u64| Event {
+            ts_ns: 1,
+            ts_err_ns: 0,
+            kind: "cpu.profile".to_owned(),
+            keys: vec![KeyValue::task(tid)],
+            attrs: vec![Attr::uint(STACK_ID_ATTR, stack), Attr::uint("ns", ns)],
+            collector_id: CollectorId::new("profile"),
+            seq: 0,
+        };
+        let events = vec![on(7, 1, 10), on(8, 1, 30), on(7, 1, 5), on(8, 2, 1)];
+        let (output, _) = stack_counting(&events, &[KeyKind::Task], "ns", None).unwrap();
+        let Output::Stack { stacks, .. } = output else {
+            panic!("stack produces a stack");
+        };
+        let rows: Vec<(String, u64, f64)> = stacks
+            .iter()
+            .map(|row| {
+                (
+                    row.series.as_ref().unwrap().to_string(),
+                    row.stack,
+                    row.total,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("task:8".to_owned(), 1, 30.0),
+                ("task:7".to_owned(), 1, 15.0),
+                ("task:8".to_owned(), 2, 1.0),
+            ]
+        );
+
+        let (output, _) = stack_counting(&events, &[], "ns", None).unwrap();
+        let Output::Stack { stacks, .. } = output else {
+            panic!("stack produces a stack");
+        };
+        assert_eq!(stacks.len(), 2);
+        assert_eq!((stacks[0].stack, stacks[0].total), (1, 45.0));
+        let json = serde_json::to_value(&stacks[0]).unwrap();
+        assert!(json.get("series").is_none(), "{json}");
+    }
+
     /// A stacked event the collector could not measure is counted and left
     /// out, not a refusal of the whole emit: an IBS op the cpu did not time
     /// carries a stack and no `latency_cycles`.
@@ -2812,7 +2918,7 @@ mod tests {
             }
         };
         let events = vec![with(Some(40)), with(None), with(Some(2))];
-        let (output, unmeasured) = stack_counting(&events, "latency_cycles", None).unwrap();
+        let (output, unmeasured) = stack_counting(&events, &[], "latency_cycles", None).unwrap();
         assert_eq!(unmeasured, 1);
         let Output::Stack { stacks, .. } = output else {
             panic!("stack produces a stack");
@@ -2824,6 +2930,6 @@ mod tests {
             name: "latency_cycles".to_owned(),
             value: crate::event::AttrValue::Text("x".to_owned()),
         });
-        assert!(stack_counting(&[malformed], "latency_cycles", None).is_err());
+        assert!(stack_counting(&[malformed], &[], "latency_cycles", None).is_err());
     }
 }
