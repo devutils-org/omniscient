@@ -1,40 +1,40 @@
 [0m[1momn top[0m │ fixture http-server │ 2.84s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥16.1%[0m[35m │ target 92.0% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request [0m[1;7m 5 timebar [0m 6 heatmap  7 lanes  8 wake  9 flows                                 [0m
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐[0m
-│[0m[3mNot drawn yet. What this view needs, and what this run holds of it:[0m                                                   │[0m
+│ [0m[1;32mthe view's reading[0m[2m  one bar per thread, whole: the run's window[0m                                                      │[0m
 │                                                                                                                      │[0m
-│[0m[1mcpu.profile              [0m[2m2.85k events via pmu:sw [stack][0m [0m[33m29 late[0m [0m[36m~low det[0m [0m[33mdegraded x7[0m                                 │[0m
-│[0m[2m                         on cpu[0m                                                                                       │[0m
-│[0m[1msched.runqlat            [0m[2m104 events via bpf:raw_tp [raw,summary][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                    │[0m
-│[0m[2m                         waiting to run[0m                                                                               │[0m
-│[0m[1msched.offcpu             [0m[2m140 events via bpf:raw_tp [stack,raw][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                      │[0m
-│[0m[2m                         blocked, with the stack it blocked in[0m                                                        │[0m
-│[0m[1msched.futex              [0m[2m24 events via bpf:raw_tp [summary][0m [0m[36m~low det[0m                                                  │[0m
-│[0m[2m                         waiting on a lock[0m                                                                            │[0m
+│ [0m[1m▶ first suspect  2758953 python3: [0m[1;37mblocked: sleeping 2.76s (96.9% of its wall clock)[0m                                  │[0m
+│   asleep on something that is not a lock seen here: a timer, a pipe, a socket, a condition                           │[0m
+│   100 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- select.cpython-314-x86_64-linux-gnu.so+0x3fd3 <- lib… │[0m
+│ [0m[2m  decisive: ahead of the next state (86.7ms) and of what no row read (10.0ms) -- omn latency's rule, on the view's …[0m │[0m
 │                                                                                                                      │[0m
+│ [0m[1;32m▸ 2758953 python3     [0m[2m├[0m[2;33m▒▒[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 96.9% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░░[0m[2m┤    2.84s [0m[1;37m ▶ sleep 96.9%     [0m  │[0m
+│   2758974 Thread-1 (p…[0m[2m├[0m[2;32m█████████████████████[0m[1;2;7;32m on cpu 91.6% [0m[2;32m██████████████████████[0m[2;33m▒▒▒▒▒[0m[2m┤    2.84s [0m[1;32m ▶ on cpu ≥91.6%   [0m  │[0m
+│   2758972 python3     [0m[2m├[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 96.5% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░░[0m[2m··┤    2.84s [0m[1;37m ▶ sleep 96.5%     [0m  │[0m
+│ [0m[2m  + 1 thread(s) under 1.00% of the window each: 2758973 ldconfig                                                    [0m │[0m
+│ [0m[2m                     0 ───────────────────────────┼ 1.42s ───────────────────────────┤ 2.84s                        [0m │[0m
+│                        [0m[32m█[0m on cpu   [0m[35m▚[0m run queue   [0m[31m▞[0m lock   [0m[34m▓[0m I/O   [0m[37m░[0m sleep   [0m[33m▒[0m bracketed   [0m[2m·[0m not read                  │[0m
 │                                                                                                                      │[0m
+│ [0m[1m  state                            source          amount          share   ±         reads  trust                   [0m │[0m
+│ [0m[2m  whole: the run's window                          2.84s           100%    exact                                    [0m │[0m
+│ [0m[32m█ [0m[2mon-cpu                           cpu.oncpu_time  0ns - 86.7ms    0.00%   ±10.0ms   0      [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[2m    ↳ most-sampled leaf `link_path_walk`: 173 of 2852 samples, every thread's: the samples are spread, no one funct…[0m │[0m
+│ [0m[2m    ↳ a bracket: its process's 2.70s on cpu less what its 1 other thread(s) could have run, at least; what its own …[0m │[0m
+│ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   274µs           0.01%   exact     19     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[37m░ [0m[2mblocked: sleeping                sched.offcpu    2.76s           96.9%   exact     17     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[2m    ↳ 100 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- select.cpython-314-x86_64-linux-gnu.so+0x3fd3 <-…[0m │[0m
+│ [0m[2m    ↳ 409µs waiting in futex(2) over 12 wait(s): less than half the sleep                                           [0m │[0m
+│ [0m[2m  residue: the whole less the rows                 not measured: on cpu is derived from the other rows              [0m │[0m
 │                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
+│ [0m[2mNo decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread[0m    │[0m
+│ [0m[2m  over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn[0m │[0m
+│ [0m[2m  latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.[0m                              │[0m
+│ [0m[2mOn cpu: `cpu.oncpu_time` is a per-process total here (`fs:proc`, to a tick), so a thread's share is bracketed --[0m     │[0m
+│ [0m[2m  solid to the least it can be, shaded (▒) to the most -- over the threads the sched sources saw. A thread that[0m      │[0m
+│ [0m[2m  started or ended inside the window counts its absence in the shaded part.[0m                                          │[0m
+│ [0m[2mTrust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it[0m  │[0m
+│ [0m[2m  gives up (3).[0m                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
-[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help                                                                   [0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓[0m bar  [0m[1md[0m decomposition  [0m[1ms[0m scale  [0m[1menter[0m open                     [0m
