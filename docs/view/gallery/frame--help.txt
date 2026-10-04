@@ -1,40 +1,40 @@
 omn top │ fixture http-server │ 2.84s                             view: snapshot │ collectors ≥16.1% │ target 92.0% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
-┌ system -- the overview: cpu, memory, disk, network, GPU and power, and the processes ────────────────────────────────┐
-│Not drawn yet. What this view needs, and what this run holds of it:                                                   │
-│                                                                                                                      │
-│cpu.util@system          13 events via fs:proc [timeline,summary] ~low det                                            │
-│           ┌ help ────────────────────────────────────────────────────────────────────────────────────────┐           │
-│mem.pressur│Keys                                                                                          │           │
-│           │  q          quit                                                                             │           │
-│io.bytes@sy│  ←/→ tab    view                                                                             │           │
-│           │  1-9        jump                                                                             │           │
-│net.bytes@s│  f          clear focus                                                                      │           │
-│           │  ?          help                                                                             │           │
-│gpu.engine_│                                                                                              │           │
-│           │How far a figure can be trusted                                                               │           │
-│gpu.mem@sys│  dimmed     not to be read at face value; its badge says why                                 │           │
-│           │  -12 lost   12 records were lost: every figure built from them is a lower bound              │           │
-│power.energ│  3 late     3 rounds of reads came late: nothing is missing, but the series is not spaced as │           │
-│           │asked                                                                                         │           │
-│cpu.oncpu_t│  ±2.50µs    timestamps were converted from another clock and may be off by up to 2.50µs      │           │
-│           │  ±?         how far the timestamps may be off is unknown: the result holds aggregates only,  │           │
-│           │and the recording does not carry its events' time error                                       │           │
-│           │  ~low det   the source is not reproducible between two runs of the same workload             │           │
-│           │  live       the run is still going: losses, cost and stack names are known at its end        │           │
-│           │  degraded   served by a fallback that says what it gives up (1)                              │           │
-│           │  ███▒▒      an error bar: what is certain solid, what is uncertain shaded                    │           │
-│           │  refused    a source that was not served shows why where its panel would be                  │           │
-│           │                                                                                              │           │
-│           │Any key closes this.                                                                          │           │
-│           │                                                                                              │           │
-│           │                                                                                              │           │
-│           │                                                                                              │           │
-│           │                                                                                              │           │
-│           │                                                                                              │           │
-│           └──────────────────────────────────────────────────────────────────────────────────────────────┘           │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help
+┌ cpu busy, as a share of the whole machine ───────────────────────────────────────────────────────────────── ~low det ┐
+│   20.0% ┤                                                                        now  4.69%                          │
+│         │                                                                        mean 5.99%                          │
+│         │                                                                        peak 12.0%                          │
+│         │▃┌ help ────────────────────────────────────────────────────────────────────────────────────────┐e          │
+│         │█│Keys                                                                                          │nly        │
+│         │█│  q          quit                                                                             │           │
+│         │█│  ←/→ tab    view                                                                             │           │
+│         │█│  1-9        jump                                                                             │           │
+│       0 ┤█│  f          clear focus                                                                      │           │
+├ gpu the de│  ?          help                                                                             │egraded x2 ┤
+│busy       │  ↑/↓        process                                                                          │           │
+│ ≤2.00%   █│  enter      its ledger                                                                       │           │
+│when      ├│  s          sort                                                                             │ling window│
+│memory    h│  i          idle devices                                                                     │           │
+├ memory tim│                                                                                              │─ ~low det ┤
+│stalled   ·│How far a figure can be trusted                                                               │           │
+│target    ▄│  dimmed     not to be read at face value; its badge says why                                 │B          │
+├ power watt│  -12 lost   12 records were lost: every figure built from them is a lower bound              │───────────┤
+│package   █│  3 late     3 rounds of reads came late: nothing is missing, but the series is not spaced as │52J        │
+├ disk bytes│asked                                                                                         │t degraded ┤
+│          +│  ±2.50µs    timestamps were converted from another clock and may be off by up to 2.50µs      │           │
+├ network by│  ±?         how far the timestamps may be off is unknown: the result holds aggregates only,  │t degraded ┤
+│lo        ▃│and the recording does not carry its events' time error                                       │           │
+│wlan0     ·│  ~low det   the source is not reproducible between two runs of the same workload             │           │
+│          +│  live       the run is still going: losses, cost and stack names are known at its end        │           │
+│          └│  degraded   served by a fallback that says what it gives up (1)                              │t its peak │
+└───────────│  ███▒▒      an error bar: what is certain solid, what is uncertain shaded                    │───────────┘
+┌ processes │  refused    a source that was not served shows why where its panel would be                  │pu ────────┐
+│      ID   │                                                                                              │███  0.39% │
+│ 2758953  9│Any key closes this.                                                                          │     0.04% │
+│ 2758972   │                                                                                              │     0.03% │
+│ 2758973   └──────────────────────────────────────────────────────────────────────────────────────────────┘     0.03% │
+│ 2758974      ·                        ·        ·  16.3k     695µs        26        ││gpu.mem          ▏        0.02% │
+│                                                                                    ││+3 more                  ≥0.01% │
+│CPU ~low det degraded  FAULTS 30 late  I/O CALLS ~low det degraded x2               ││all of them              ≥0.52% │
+└────────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ process  enter its ledger  s sort  i idle devices
