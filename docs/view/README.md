@@ -258,8 +258,8 @@ holds this table to the code.
 |---|---|---|---|---|---|
 | system | `cpu.util` | poll@250ms | timeline,summary | system | the cpu panel: utilization by state, and its sparkline |
 | system | `mem.pressure` | poll@250ms | timeline,summary | system | the memory panel: stall time under memory pressure |
-| system | `io.bytes` | poll@250ms | timeline,summary | system | the disk panel: bytes read and written per device |
-| system | `net.bytes` | poll@250ms | timeline,summary | system | the network panel: bytes in and out per interface |
+| system | `io.bytes` | poll@250ms | raw,timeline,summary | system | the disk panel: bytes read and written per device, apart, from the events |
+| system | `net.bytes` | poll@250ms | raw,timeline,summary | system | the network panel: bytes in and out per interface, apart, from the events |
 | system | `gpu.engine_busy` | poll@250ms | timeline,summary | system | the GPU panel: occupancy per engine |
 | system | `gpu.mem` | poll@250ms | timeline,summary | system | the GPU panel: memory held |
 | system | `power.energy` | poll@250ms | timeline,summary | system | the power panel: watts per RAPL domain |
