@@ -1692,8 +1692,14 @@ fn a_source_with_no_collector_is_refused_with_its_own_exit_code() {
 /// machine -- it is the machine's, exit 1, as the walk says it; where it lacks
 /// nothing, it is the build's, exit 3, and never the machine's. Ground truth
 /// for which is what `omn list` probes for each pinned backend. Either way the
-/// answer has to say the resolver was bypassed, because a pinned backend is
-/// not a measurement anyone should quote.
+/// answer has to say the backend was pinned, because a pinned backend is not a
+/// measurement anyone should quote.
+///
+/// Only the build's branch holds defect 8's coverage (all five requests named
+/// at once). The machine's branch names the first refused request alone,
+/// because the launcher returns at the first resolution error; that
+/// regression is filed for launcher in `docs/fixes/w18-resolver.md`, and this
+/// branch asserts no more than it can until it is fixed.
 #[test]
 fn pinning_a_backend_this_build_lacks_is_refused_in_the_chains_order() {
     const PINNED: [(&str, &str); 5] = [

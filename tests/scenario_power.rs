@@ -69,6 +69,16 @@ fn stderr(output: &Output) -> String {
 /// (`DECISIONS.md`, "one order for unbuilt and missing"), so which refusal a
 /// pin earns is this answer's.
 fn lacks_here(source: &str, backend: &str) -> Option<Vec<String>> {
+    let missing: Vec<String> = missing_here(source, backend)
+        .into_iter()
+        .map(|(needs, _)| needs)
+        .collect();
+    (!missing.is_empty()).then_some(missing)
+}
+
+/// Each requirement of `backend` of `source` that `omn list` probes missing
+/// here, with the probe's own reason (empty when it gives none).
+fn missing_here(source: &str, backend: &str) -> Vec<(String, String)> {
     let listing = run(&["list", source, "--format", "json"]);
     assert!(listing.status.success(), "{}", stderr(&listing));
     let entries: serde_json::Value =
@@ -79,14 +89,17 @@ fn lacks_here(source: &str, backend: &str) -> Option<Vec<String>> {
         .iter()
         .find(|probed| probed["backend"] == backend)
         .unwrap_or_else(|| panic!("`{source}` lists no backend `{backend}`"));
-    let missing: Vec<String> = probed["requirements"]
+    probed["requirements"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|requirement| requirement["probe"]["state"] == "missing")
-        .filter_map(|requirement| requirement["needs"].as_str().map(str::to_owned))
-        .collect();
-    (!missing.is_empty()).then_some(missing)
+        .filter_map(|requirement| {
+            let needs = requirement["needs"].as_str()?.to_owned();
+            let detail = requirement["probe"]["detail"].as_str().unwrap_or_default();
+            Some((needs, detail.to_owned()))
+        })
+        .collect()
 }
 
 /// Runs a session that is not shipped as a file, from standard input.
@@ -1879,11 +1892,24 @@ fn the_three_refusals_are_told_apart_by_what_they_say() {
 
     let catalog = Catalog::embedded().expect("the embedded catalog loads");
     let written = omn::collect::coverage();
+    // Every unwritten backend that lacks something here, with what it lacks
+    // as probed: the skip line below names them, so the reason it gives is the
+    // machine's own (a capability, tracefs) and not only this test's.
+    let mut lacking = Vec::new();
     let unbuilt = catalog.family("power").into_iter().find_map(|entry| {
         let source = entry.id.to_string();
         let have = written.get(source.as_str()).cloned().unwrap_or_default();
         let backend = entry.backends.iter().find(|backend| {
-            !have.contains(&backend.id.as_str()) && lacks_here(&source, &backend.id).is_none()
+            if have.contains(&backend.id.as_str()) {
+                return false;
+            }
+            let missing = missing_here(&source, &backend.id);
+            for (needs, detail) in &missing {
+                // The probe's first sentence: what is missing, and why.
+                let why = detail.split(". ").next().unwrap_or_default();
+                lacking.push(format!("{source} {}: {needs}: missing: {why}", backend.id));
+            }
+            missing.is_empty()
         })?;
         Some((source, backend.id.clone(), mode_argument(entry.modes[0])))
     });
@@ -1916,7 +1942,8 @@ fn the_three_refusals_are_told_apart_by_what_they_say() {
         }
         None => eprintln!(
             "skipped the build's refusal: every power backend this build lacks also lacks \
-             something on this machine, so each pin is the machine's to refuse first"
+             something on this machine, so each pin is the machine's to refuse first ({})",
+            lacking.join("; ")
         ),
     }
 

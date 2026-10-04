@@ -14,6 +14,7 @@ pinned `net.hwts` twin in `tests/scenario_net.rs`.
 | `scenario_io`'s two rows | landed (in the eleven) | `e04ef9a` |
 | The pinned `net.hwts` twin | landed | `267842a` |
 | `DECISIONS.md`'s exit-3 line, re-worded | below, for the coordinator | -- |
+| Review round: the power skip line, the rank's unit test, the cli hint, the sched comment | landed | see "Review" |
 
 ## 1. One order (`src/resolve.rs`)
 
@@ -161,6 +162,13 @@ branch will first run.
   than return at the first. Since `1aa114f`, a session of pinned backends this
   machine cannot serve reaches that path; `scenario_sched`'s pin test asserts
   all five names only on its build branch and says why in a comment.
+- **engine** (`examples/sched-forced-backends.yml`, its header): it still
+  says `echo $?   # 3` and that the exit is 3 and not 1 because "every
+  requirement of every backend below probes available here". Since `e04ef9a`
+  the session exits 1 on a machine where a pinned backend lacks something
+  (this project's own, with tracefs unreadable by uid 1000) and 3 only where
+  each lacks nothing. The header should say both, as `proc-not-built.yml`'s
+  text needs to (below).
 - **Coordinator** (`docs/scenarios/{sched,power,mem,gpu}.md`,
   `docs/families/proc.md`, `GUIDE.md`, `examples/README.md`): the renamed tests
   and the changed answer.
@@ -173,3 +181,42 @@ branch will first run.
     `proc-not-built.yml` is exit 1 on a machine whose tracefs this uid cannot
     read, exit 3 elsewhere.
 - **io** (`docs/scenarios/io.md`): `forcing_a_backend_this_build_has_not_written_names_it_and_exits_three` → `forcing_a_backend_this_build_has_not_written_names_it_in_the_chains_order`.
+
+## Review
+
+The fix round, over `a4bdf0e`:
+
+- **`scenario_power`'s skip line would have failed the skip gate (defect).**
+  `the_three_refusals_are_told_apart_by_what_they_say` skipped its build half
+  without capabilities with a reason no pattern of `.github/expected-skips*.txt`
+  matches. The skip line now ends with every unwritten power backend's missing
+  requirements, each with the first sentence of its probe's reason
+  (`power.freq bpf:raw_tp: bpf: missing: loading a tracing program needs
+  CAP_BPF and CAP_PERFMON (...)`, `... tracefs is mounted but not readable
+  ...`): the machine's own reason, which the common list already accepts
+  (`CAP_BPF|...`, `tracefs`, `unprivileged_bpf_disabled`). **Shown**: run
+  without the capabilities (the copy hard-linked over `target/debug/omn` and
+  its `deps/` twin, as under "Shown" above), its log through
+  `.github/scripts/skip-gate.sh` with the common list: "every skip names a
+  privilege or a device this cell does not have", three classes counted.
+  **Reasoned**: the CI cells word the bpf probe's first sentence the same way
+  (`src/capabilities.rs` puts "needs CAP_BPF and CAP_PERFMON" first on every
+  path), so the gate matches there too.
+- **The rank had no machine-independent test (gap).**
+  `resolve::tests::a_filter_field_another_backend_carries_is_named_for_what_keeps_the_request_from_it`
+  gains a half: every `rwbs` carrier renamed unwritten and runnable, then the
+  chain's first given a requirement that cannot hold (a path under a directory
+  that does not exist); the hint is `Unwritten("fs:unwritten1")`, the later
+  carrier, on any machine. It fails under the old rank (`Missing` first).
+- **`examples/sched-forced-backends.yml`'s header (gap).** Filed for engine
+  under "Needs from another stream"; `examples/**` is not this stream's.
+- **`cli`'s key test assumed `bpf:raw_tp` (nit, fixed).** It now reads the
+  carrier the hint names off the message and pins that one, so a machine where
+  the hint names `bpf:tp` (raw_tp lacking BTF or kernel 5.8, `bpf:tp`
+  runnable) is held to the same two answers. Passes with and without the
+  capabilities here.
+- **`scenario_sched`'s doc comment (nit, fixed).** It no longer claims the
+  machine branch holds what the build branch does: it says defect 8's
+  five-name coverage is held on the build branch only, and why, pointing at
+  the launcher item above. No test can hold it on the machine branch until
+  the launcher names every refused request.

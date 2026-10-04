@@ -1424,6 +1424,23 @@ mod tests {
         assert_eq!(elsewhere.unwrap().whose(), Whose::Build);
         assert!(!message.contains("--backend force:"), "{message}");
 
+        // The same, but the chain's first carrier also lacks a file here: the
+        // hint passes over it for a later one this machine could run and
+        // nobody wrote, as the walk stops at the first backend it could run.
+        // An unwritten carrier ranks above a missing one, whatever their order.
+        assert!(
+            carriers.len() >= 2,
+            "io.latency carries `rwbs` on two backends or more"
+        );
+        entry.backends[carriers[0]].requires = vec![absent.to_owned()];
+        let (message, elsewhere) = refused(&entry);
+        assert_eq!(
+            elsewhere,
+            Some(KeyElsewhere::Unwritten("fs:unwritten1".into())),
+            "{message}"
+        );
+        assert_eq!(elsewhere.unwrap().whose(), Whose::Build);
+
         // A collected carrier whose one requirement is a file this machine
         // has: the pin is the fix, and is named.
         let Some(first) = collected.first() else {
