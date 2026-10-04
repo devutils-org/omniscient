@@ -1,0 +1,7 @@
+2924040 getppid()                       = 2924038 <0.000055>
+2924040 getppid()                       = 2924038 <0.000015>
+2924040 getppid()                       = 2924038 <0.000009>
+2924040 clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, {tv_sec=71527, tv_nsec=484644770}, NULL) = 0 <0.007398>
+2924040 clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, {tv_sec=71527, tv_nsec=494824926}, NULL) = 0 <0.010052>
+2924040 clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, {tv_sec=71527, tv_nsec=504986233}, NULL) = 0 <0.010021>
+2924040 +++ exited with 0 +++

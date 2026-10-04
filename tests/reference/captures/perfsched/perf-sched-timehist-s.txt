@@ -1,0 +1,21 @@
+Samples of sched_switch event do not have callchains.
+
+Runtime summary
+                            comm  parent   sched-in     run-time    min-run     avg-run     max-run  stddev  migrations
+                                            (count)       (msec)     (msec)      (msec)      (msec)       %
+---------------------------------------------------------------------------------------------------------------
+                  perf[2924039]          1          2        0.412      0.051       0.206       0.361   75.24        0
+               python3[2924040]          1         23       14.823      0.004       0.644       9.877   66.12        2
+             kworker/3:1[212]            2          4        0.051      0.009       0.012       0.017   14.80        0
+
+Terminated tasks:
+                  perf[2924039]
+
+Idle stats:
+    CPU  0 idle for   1180.212  msec  ( 95.01%)
+    CPU  3 idle for   1201.008  msec  ( 96.70%)
+
+    Total number of unique tasks: 3
+Total number of context switches: 29
+           Total run time (msec): 15.286
+    Total scheduling time (msec): 1242.087
