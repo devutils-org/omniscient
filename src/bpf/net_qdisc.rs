@@ -204,22 +204,27 @@ fn enqueue_instructions(btf: &Btf, queued_fd: i32, drops_fd: i32) -> Result<Vec<
 
 /// The program on `qdisc_dequeue`: the discipline has released the packet.
 /// Where a device's network namespace inode is, from the device: the offset
-/// of `net_device.nd_net`, and of `net.ns.inum` from the `struct net` it
-/// points to. `None` on a kernel with no network namespaces, where
-/// `possible_net_t` is empty and there is nothing to read.
+/// of the `net` pointer inside `net_device.nd_net`, and of `net.ns.inum` from
+/// the `struct net` it points to. `None` on a kernel with no network
+/// namespaces, where `possible_net_t` is empty and there is nothing to read.
 ///
 /// `possible_net_t` is a typedef of an anonymous struct whose only member,
-/// under `CONFIG_NET_NS`, is the `net` pointer, so the pointer is at the
-/// member's own offset. `Btf::member_offset` does not follow a typedef, which
-/// is why that zero is written here rather than looked up.
+/// under `CONFIG_NET_NS`, is the `net` pointer. Its offset is looked up through
+/// the typedef rather than taken as zero, so a kernel that put anything before
+/// the pointer would be read where it is, not where it was assumed.
 fn netns_offsets(btf: &Btf) -> Result<Option<(i32, i32)>, String> {
     if crate::event::own_netns() == 0 {
         return Ok(None);
     }
     let nd_net_at = btf.member_offset("net_device", "nd_net")?;
+    let Ok(pointer_at) = btf.member_offset("possible_net_t", "net") else {
+        // Without `CONFIG_NET_NS` the struct is empty: every device is in the
+        // one namespace there is, and the key carries none.
+        return Ok(None);
+    };
     let ns_at = btf.member_offset("net", "ns")?;
     let inum_at = btf.member_offset("ns_common", "inum")?;
-    Ok(Some((nd_net_at, ns_at + inum_at)))
+    Ok(Some((nd_net_at + pointer_at, ns_at + inum_at)))
 }
 
 /// `only` narrows the program to one interface: its network namespace (by
@@ -610,6 +615,22 @@ mod tests {
                 .any(|insn| insn.code == 0x62 && insn.off == ROW_KEY + KEY_NETNS),
             "the namespace slot is cleared before it is read"
         );
+    }
+
+    /// The `net` pointer's place inside `nd_net` is read through the typedef,
+    /// not assumed: the offset the program reads is `nd_net` plus it.
+    #[test]
+    fn the_namespace_pointer_is_found_through_possible_net_t() {
+        let Some(btf) = kernel_btf() else { return };
+        let Some((pointer_at, _)) = netns_offsets(btf).expect("the offsets") else {
+            eprintln!("skipped: this kernel has no network namespaces");
+            return;
+        };
+        let nd_net = btf.member_offset("net_device", "nd_net").expect("nd_net");
+        let inside = btf
+            .member_offset("possible_net_t", "net")
+            .expect("CONFIG_NET_NS, since the namespace is read");
+        assert_eq!(pointer_at, nd_net + inside);
     }
 
     /// Invariant 6: one clock domain, for both ends of the wait.
