@@ -1577,10 +1577,9 @@ fn a_request_that_cannot_mean_anything_is_rejected_and_names_what_cannot() {
 /// machine is wrong; the code is not written.
 #[test]
 fn a_source_this_build_does_not_implement_exits_three_and_names_the_backend() {
-    for (source, mode, emit, backend) in [
-        ("gpu.kernel", "trace", "summary", "vendor:cupti"),
-        ("gpu.counters", "snapshot", "summary", "vendor:ncu"),
-    ] {
+    // `gpu.kernel` left this list in the nineteenth wave, when its CUPTI
+    // collector was written (`tests/gpu_kernel.rs`).
+    for (source, mode, emit, backend) in [("gpu.counters", "snapshot", "summary", "vendor:ncu")] {
         let output = omn(&[source, "--mode", mode, "--emit", emit, "--", "true"]);
         // Every backend of the chain is probed before the build is asked for a
         // collector, so a machine without the vendor's library answers first.

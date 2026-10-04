@@ -251,13 +251,14 @@ fn a_device_wide_source_refuses_a_per_process_target() {
 
 #[test]
 fn a_source_whose_collector_is_not_written_says_so_instead_of_measuring() {
-    // `gpu.kernel` needs a vendor profiling SDK and has no collector. Whether
-    // this machine has the SDK or not, the answer must name the gap rather
-    // than produce numbers from somewhere else.
+    // `gpu.counters` needs a vendor profiling SDK and has no collector (the
+    // nineteenth wave wrote `gpu.kernel`'s, which this test used to name).
+    // Whether this machine has the SDK or not, the answer must name the gap
+    // rather than produce numbers from somewhere else.
     let output = run(&[
-        "gpu.kernel",
+        "gpu.counters",
         "--mode",
-        "trace",
+        "snapshot",
         "-e",
         "summary",
         "--",
