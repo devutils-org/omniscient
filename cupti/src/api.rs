@@ -32,6 +32,10 @@ pub struct Cupti {
     pub timestamp: U64Fn,
     pub version: U32Fn,
     result_string: StringFn,
+    /// The library's handle, kept open for the life of the process, for the
+    /// modules that resolve entry points of their own (`profiler.rs`,
+    /// `pcsampling.rs`).
+    handle: usize,
 }
 
 // SAFETY: function pointers into a library that is never unloaded.
@@ -84,7 +88,20 @@ impl Cupti {
             timestamp: symbol!("cuptiGetTimestamp", U64Fn),
             version: symbol!("cuptiGetVersion", U32Fn),
             result_string: symbol!("cuptiGetResultString", StringFn),
+            handle: handle as usize,
         })
+    }
+
+    /// An entry point of CUPTI's by name, or the reason it has none.
+    pub fn symbol(&self, name: &str) -> std::result::Result<*mut c_void, String> {
+        let c_name = CString::new(name).map_err(|_| format!("`{name}` is not a symbol name"))?;
+        // SAFETY: looking up a symbol in a handle that stays open.
+        let address = unsafe { libc::dlsym(self.handle as *mut c_void, c_name.as_ptr()) };
+        if address.is_null() {
+            Err(format!("CUPTI has no `{name}`"))
+        } else {
+            Ok(address)
+        }
     }
 
     /// CUPTI's own name for a result code.
