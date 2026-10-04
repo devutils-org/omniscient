@@ -968,6 +968,10 @@ triage follows, and two ways run with different privileges are not compared
       it follows (`followed.job`), shown on a workload of three steps whose
       kernel figures it adds up to; the case still decomposes one `cc1` and
       lists its finding. Left `[~]`.*
+      *Twenty-first wave: the cases read `followed.job` where they say the
+      wait is for a child; `make-sqlite`'s one-job row is now over the
+      reference rather than under (7.1 s against 5.3 s: the job is every busy
+      task off the way, waiting on `ppid`). Left `[~]`.*
 - [~] Every number a verdict cites agrees with the reference's own account,
       within that account's resolution.
       *Seventeenth wave, partly: within the stated slack for `sqlite3-stripped`
@@ -987,6 +991,13 @@ triage follows, and two ways run with different privileges are not compared
       empty block is followed (`waiting`), shown on the triage's own Python
       server; `http-server-stdlib`'s slow client, `make-sqlite` and
       `gcc-shell` still list their findings, not re-run with it. Left
+      `[~]`.*
+      *Twenty-first wave, re-run (`docs/fixes/w21-docs.md`): `gcc-shell`
+      agrees both ways and its finding is gone, on a loosened comparison --
+      the row plus `followed.job`, an upper bound on the MCP way -- not on a
+      change in triage; `make-sqlite`'s one-job row,
+      `http-server-stdlib`'s slow client (MCP) and `sqlite3-durability`'s
+      commits (25 to 28 ms over a 6 ms slack) still list theirs. Left
       `[~]`.*
 - [~] Where the cause is out of the tool's sight (interpreted or JIT frames, a
       closed GPU), the verdict says so by name. No case ends with a confident

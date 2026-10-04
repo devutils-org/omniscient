@@ -962,7 +962,7 @@ launched program, through the vendor's own library.
 | How the library talks to `omn` | **A sequenced-packet `AF_UNIX` socket per launch, in batches of at most 60 KiB, sends bounded by 2 s**; an unsent batch's records, drop and unfinished counts are counted and a name it carried is sent again. *This departs from the brief's shared ring.* | CUPTI hands records over a buffer at a time on a thread that is not the program's, so a send per batch costs nothing per record and needs no mapping set up before `cuInit`; sequenced packets keep a forked child's messages whole; the timeout bounds the program's exit when `omn` stops reading. |
 | A forked child | **Reports nothing**: the exit handler and every send check the pid that initialised. | A child forked after `cuInit` cannot use CUDA and holds the parent's locks without its threads; flushing there hung the child for good (measured). A child that execs loads the library afresh. |
 | `ts_err_ns` on a GPU event, and a duration's ground truth | **`ts_err_ns` is the clock conversion's error, not CUPTI's placement of the device's work nor the dispatch and drain inside a duration**; a kernel's duration is held to `span <= duration <= span + max(10 us, 1 %)` of its own `%globaltimer` span, and its times to containment in the host's launch window. | Measured, the difference is 1.0-1.3 us against a 68 ns calibration: block dispatch and drain that `%globaltimer` inside the kernel cannot see. Folding a declared microsecond into `ts_err_ns` would make every event's error a guess. |
-| A refused target's reason | **Comes from the entry**: the validator quotes a caveat naming the flag and saying "refused", before the generic "declares no support". | The catalog is the data; a reason written per source in the validator is code per source. The stricter `targets: {pid: "no: <reason>"}` form is open for review (`docs/open-findings.md`). |
+| A refused target's reason | **Comes from the entry**: the validator quotes a caveat naming the flag and saying "refused", before the generic "declares no support". *Superseded: the reason lives on the `targets:` line since the twenty-first wave, and the caveat search is gone.* | The catalog is the data; a reason written per source in the validator is code per source. The stricter `targets: {pid: "no: <reason>"}` form is open for review (`docs/open-findings.md`). |
 | The flush | **Never forced before exit.** | A forced flush returned 482 of 500 kernels with zero timestamps and never redelivered them; latency, a buffer (about 1 000 kernels) at a time, is the price. |
 | Several CUPTI sources on one launch | **One socket, shared**, each source adding its `REPORT_*` bit; the inside readers' ops are 13 to 31 and a reader of activity skips them; their unsent records are counted apart. | A program has one `CUDA_INJECTION64_PATH`; one reader must not be billed for another's records. |
 | What `gpu.kernel` carries | **Kernels, memcpy and memset**, marked by `op`. | They are device time as much as kernels are. |
@@ -1045,10 +1045,10 @@ regime -- are still open, below, with the numbers the streams measured.
 | Decision | Choice | Reason |
 |---|---|---|
 | The nine views | **All kept** (the user, 2026-10-04, after using them); the gallery's `Keep?` column says "yes (2026-10-04)" on every row. Landed by record. | Each shows something no other view does (`docs/view/gallery/README.md`). |
-| The views are linked, and a process has a page | **What is selected opens the view that explains it, and back; a tenth view, `process`, is the first screen of a run with a target**, a tile per view's essence, a number and a colour each, each tile opening its view; `system` stays the first screen without one. Landed by view (the links, the history, the first-screen rule) and process (the tiles). *Not yet: a ledger line opening `timebar` (the ledger has no line of blocked time), and `process` first on a live `--pid` or launch (`src/main.rs`).* | One process at a glance, and every figure one key from its detail. |
+| The views are linked, and a process has a page | **What is selected opens the view that explains it, and back; a tenth view, `process`, is the first screen of a run with a target**, a tile per view's essence, a number and a colour each, each tile opening its view; `system` stays the first screen without one. Landed by view (the links, the history, the first-screen rule) and process (the tiles). *Both landed in the twenty-first wave: the ledger's blocked line opens `timebar`, and `process` is first on a live `--pid` or launch. The tiles were replaced by one line per resource ("Settled in the twenty-first wave").* | One process at a glance, and every figure one key from its detail. |
 | The view is clickable | **A view reports the regions it drew; a click selects, a click on the selection goes in, the wheel scrolls or zooms, a right click comes back; mouse capture on by default, `M` turns it off; keys stay complete.** Landed by view, every view's regions, and record (a snapshot per view after a click). *Reasoned, not seen: a real terminal and tmux.* | The links make the mouse cheap; capture takes the terminal's own selection, so it must be one key away. |
 | Every view has a workload | **One program per view and one for `process`, each with a truth manifest** (`view/workloads/`); the sources held to it (`tests/view_workloads.rs`, workloads) and each view held to it on screen (`tests/view_truth.rs`, record); the recordings of these programs are fixtures beside the realistic ones. | Ground truth for a view, as for a source, and fixtures a re-recording redraws within their measurement (shown on a second recording). |
-| A field, not a sentence | **What a collector says that a program would read becomes a field of the result.** Landed for `sched.wakeup`'s names and interrupt, `net.socket`'s interface, `io.fs`'s block devices, `row_stamp` and the drains' drops. *Not yet for `net.request`'s counts, which wait on a slot in the result (below).* | A sentence a view parses breaks on a rewording. |
+| A field, not a sentence | **What a collector says that a program would read becomes a field of the result.** Landed for `sched.wakeup`'s names and interrupt, `net.socket`'s interface, `io.fs`'s block devices, `row_stamp` and the drains' drops. *`net.request`'s counts since the twenty-first wave (`Results::fields`).* | A sentence a view parses breaks on a rewording. |
 | The comparison with the reference tools | **The next wave**, not this one. | One wave with nothing else pending. |
 | The open decisions | **Stay open unless a stream's measurement settles one.** Both were proposed with numbers; neither is settled (below). | A decision is taken on a measurement, not on a deadline. |
 
@@ -1056,9 +1056,9 @@ regime -- are still open, below, with the numbers the streams measured.
 
 | Decision | Choice | Reason |
 |---|---|---|
-| A target the tool killed | **The tool's failure, said as such, never only a lost read**: an injection library says when its exit path starts (`OP_EXITING`), and a death after that is reported in a `degraded:` line naming the source. For every injector, not only CUPTI. *The exit status is not yet non-zero: no channel from a collector to the run's outcome exists ("What remains").* | A crash the tool caused, read as the program's, is a silent wrong answer. |
+| A target the tool killed | **The tool's failure, said as such, never only a lost read**: an injection library says when its exit path starts (`OP_EXITING`), and a death after that is reported in a `degraded:` line naming the source. For every injector, not only CUPTI. *The exit status: non-zero since the twenty-first wave (`Collector::failure`, settled there).* | A crash the tool caused, read as the program's, is a silent wrong answer. |
 | Counters beside kernel times or PC sampling | **The request's refusal, exit 2, before the launch**, decided on the backends the resolver chose (`launch_refusals`); `omn validate` of such a session says valid, since it does not resolve. *Amends the nineteenth wave's "at attach, labelled the machine's".* | A rule about what serves the requests is decided once they are resolved; a pair served by another vendor is not refused. |
-| A refused target's reason | **In the catalog's `targets:` line** (`targets: {pid: "no: <reason>"}`), the loader refusing a `no` without a reason; until the loader reads it, the caveat search stays. *Amends the nineteenth wave's "from a caveat"; the change is the loader's ("What remains").* | The reason sits on the axis it explains and is data the loader can hold present; a reworded caveat today degrades a refusal to "declares no support" silently. |
+| A refused target's reason | **In the catalog's `targets:` line** (`targets: {pid: "no: <reason>"}`), the loader refusing a `no` without a reason; until the loader reads it, the caveat search stays. *Amends the nineteenth wave's "from a caveat". Landed in the twenty-first wave (stream data, `1b7773c`): the loader reads it, and the caveat search is gone.* | The reason sits on the axis it explains and is data the loader can hold present; a reworded caveat today degrades a refusal to "declares no support" silently. |
 | A lighter CUPTI activity kind as a fallback | **None**: the other kernel record serialises the program's kernels. `omn`'s 1.4 to 1.8 us a record is its event model's copies and allocations, not CUPTI's. | A fallback that changes what is measured is not a degraded equivalent. |
 
 **The profile and the unwinder** (`docs/fixes/w20-rings.md`):
@@ -1083,9 +1083,9 @@ regime -- are still open, below, with the numbers the streams measured.
 | Decision | Choice | Reason |
 |---|---|---|
 | A one-time cost the tool can name | **Weighed apart from the rate and said apart** (`overhead.one_time_cpu_ns`: a symbol table loaded inside the window), outside the percentage and every check, inside what the tool spent. *The first half of the open line below.* | A debuginfod profile's first check fell from 142-152 % to 45-51 %, its whole window from 36-39 % to 16-17 %. |
-| A launched program's stderr | **Can be a file of its own** (`OMN_PROGRAM_STDERR`), not passed on to the program; `run_session` always asks for it (`program_stderr`). A `--program-stderr` flag is to come. | An agent reads the program's account apart from `omn`'s lines. |
+| A launched program's stderr | **Can be a file of its own** (`OMN_PROGRAM_STDERR`), not passed on to the program; `run_session` always asks for it (`program_stderr`). The `--program-stderr` flag landed in the twenty-first wave. | An agent reads the program's account apart from `omn`'s lines. |
 | What a run leaves behind | **Nothing it launched**: `omn` is the subreaper of what it launches, and the end of every run -- a stop, or the program exiting on its own -- ends and counts what it adopted; a library caller is not and does not. A daemon meant to outlive the run is launched outside `omn`. | An orphan held `omn`'s stderr open and a run through `run_session` hung 71.7 s, unsaid. |
-| An adopted orphan's cpu | **In the launched program's denominator while it lives**, as the rest of its tree is. *Decided by the eighteenth wave's rule (the denominator is the process tree); the meter's change is to come.* | It is the program's work, and the budget weighs the program. |
+| An adopted orphan's cpu | **In the launched program's denominator while it lives**, as the rest of its tree is. *Decided by the eighteenth wave's rule (the denominator is the process tree); the meter's change landed in the twenty-first wave (stream run, `1c15958`), with numbers.* | It is the program's work, and the budget weighs the program. |
 | A session refused at resolution | **Names every request it cannot resolve**, and exits with the first gap to fix (request, then build, then machine). | One refusal at a time is one run per refusal. |
 
 **The collectors** (`docs/fixes/w20-{sched,net,cpu,io}.md`):
@@ -1095,8 +1095,8 @@ regime -- are still open, below, with the numbers the streams measured.
 | An interrupt's wakeup | **Names the task it was served in (`served_in_tid`), never as the waker**, beside the context; `irq` or `softirq` from four programs on the interrupt tracepoints. Timer and IPI wakeups carry no number. | For a softirq served in `local_bh_enable` that task is the cause; for an interrupt that only landed on it, it is not -- the context says which. |
 | `sched.offcpu`'s stamp | **At the drain that closed its window, said in the caveat**; the blocks it adds up ended in `(ts_ns - window_ns, ts_ns]`. Open only if a join needs the first wait. | The views already read rows as ending at `ts_ns`. |
 | `net.socket`'s interface | **The route's, read at the call, in this namespace only**; a socket in another namespace carries none. | Another namespace's index would name some other interface here. |
-| A byte counter's direction | **An attribute today**, carried to the results by `raw` (`net.bytes`, `io.bytes`); how it becomes a series is open (below). | Re-keying a series breaks every reader of it. |
-| A collector's run-level counts | **Fields of the result**: a `Collector::fields` hook, default empty, copied into `Results::fields`. *To come; `net.request`'s `Undrawn` is ready to answer it.* | "A field, not a sentence". |
+| A byte counter's direction | **An attribute today**, carried to the results by `raw` (`net.bytes`, `io.bytes`). *Superseded in the twenty-first wave: a key, `dir`, splits the series when a request asks it.* | Re-keying a series breaks every reader of it. |
+| A collector's run-level counts | **Fields of the result**: a `Collector::fields` hook, default empty, copied into `Results::fields`. *Landed in the twenty-first wave, `net.request`'s four counts first.* | "A field, not a sentence". |
 | `cpu.oncpu_time` per thread | **Through `sched_stat_runtime`, not `sched_switch`**: the scheduler's own increments, credited every tick, so a thread never switched out is not invisible; exact against `schedstat` over a window whose edges find it blocked. `poll` only; `trace` (a slice an event) unbuilt until a view asks. | The `sched_switch` version read nothing for a pinned spinner. |
 | A filesystem's block devices | **An attribute (`blk_devs`), not a key**: a set, as `io.bytes` keys each device. | A btrfs spans several devices; nothing has a set-valued key. |
 
@@ -1135,8 +1135,77 @@ regime -- are still open, below, with the numbers the streams measured.
 
 | Decision | Choice | Reason |
 |---|---|---|
-| `CATALOG.md`'s Cost column | **The YAML's chain, written out**, in chain order; the YAML is the authority. A test reading the column is to come. | The column drifted after the eighteenth wave. |
+| `CATALOG.md`'s Cost column | **The YAML's chain, written out**, in chain order; the YAML is the authority. Held by a test since the twenty-first wave (`tests/cli.rs`). | The column drifted after the eighteenth wave. |
 | The cases' budget check | **Gone rather than unchecked**; it comes back with a ceiling the case states if a budget is wanted. | A check that cannot pass is noise in every report. |
+
+---
+
+## Settled in the twenty-first wave
+
+What was decided before the wave (`docs/briefs/wave-21-seams.md`, "Decided
+before this wave") and what the seven streams settled, from the decision
+lines of their handoffs (`docs/fixes/w21-*.md`). One open line is settled
+(a byte counter's direction, by the brief's key); the adopted orphans'
+denominator, which the brief asked to be proposed with numbers, landed with
+them. The other open lines stay open; no stream measured them.
+
+**Decided before the wave**, each landed by the stream named:
+
+| Decision | Choice | Reason |
+|---|---|---|
+| The `process` view | **The system view for one process** (the user, 2026-10-04, after seeing the tile grid): one header, one line per resource -- CPU, Memory, Disk, Network, GPU, Energy, Time -- each a sparkline over the program's life, its current value, mean, peak and share of the machine, the time line split by state with the suspect `omn latency` names; `Enter` or a click opens the line's page (CPU `flame`, Disk `heatmap` or `flows`, Network `flows`, Time `timebar`, the header's cost `ledger`). The first screen of `omn top -- <program>` and of `--pid`; `system` without a target. The tile grid is gone. Landed by process, and run (the first screen). | One process at a glance; the detail lives in the dedicated pages. |
+| Usage colour | **By how full the resource is**: green free, through yellow, to red full, by the share of a capacity that exists (cores, memory, a GPU's engine time and VRAM); a resource with no known capacity keeps one neutral hue and says why. Trust never washes the hue out: a figure with a loss, a time error or low determinism keeps it and carries its mark (underlined, its badge). Landed by views (`trust::usage`, `system`) and process (its own three-step copy until it calls `trust::usage`; "What remains"). | A measured fraction of a known bound, not a chosen threshold; an honest screen is not a grey one. |
+| A collector can fail the run | **`Collector::failure()`**, read after `stop`, carried through the run, a detach and a recording; `omn` writes every result first, then exits 1 with the sentence (`measure`, `record` and `omn top` alike). A lost read stays a loss. Landed by run (`9f65296`, `ce5cde2`); the GPU's inside readers answer it from `died_in_exit`'s condition. | A script reading exit 0 takes the tool's failure for the program's clean run. |
+| A collector can publish fields | **`Collector::fields()` copied into `Results::fields`**, serialized only when not empty. Landed by data (`ec2b229`); `net.request` publishes `never_ended`, `unborn`, `replaced`, `filtered_out` (collectors, `f847a6d`), which the request view reads in place of sentences (views). | "A field, not a sentence". |
+| Direction is a key | **`KeyKind::Dir`** over a closed set (`read`, `write`, `discard`, `flush`, `rx`, `tx`); `io.bytes`, `io.iops`, `io.merges` and `net.bytes` on `fs:proc` give one event per direction under `--keys ...,dir`, and the one event they always gave otherwise. Landed by data (`2439ba8`) and collectors (`c7adc61`). *Settles the twentieth wave's open line.* | Every aggregating emit gets the split, and no reader of today's series moves. |
+| An adopted orphan's cpu | **In the launched program's denominator while it lives**, read as `omn`'s live descendants plus its children account when `omn` adopts; `omn`'s own helpers (`curl`, a container runtime's `inspect`) set aside. Landed by run (`1c15958`, `c1ba7ba`), with numbers: a 5 % budget moved a 1 % request onto a worse backend in 3 runs of 3 before, 0 of 3 after, for about 2 ms of the tool's cpu over a 2 s run when an orphan exists and none measurable otherwise. | It is the program's work, and the budget weighs the program. |
+
+**The run's outcome and its surface** (`docs/fixes/w21-run.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A collector that broke its program | **Fails the run after the results are written**: exit 1 with the sentence on stderr; the results, their lost read and their `degraded:` line stand. | What was read before the break was read. |
+| `--program-stderr` beside a command that launches nothing | **Refused, exit 2, with the reason**, as any flag that cannot mean anything is; a `-f` session is allowed, since it may launch. | An invalid combination is refused, never degraded silently. |
+
+**What results carry** (`docs/fixes/w21-data.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A collector's fields | **Counts** (`BTreeMap<String, u64>`), by name, absent when empty. A field that is not a count would need another type, and none was asked. | What a caveat says in a sentence, as a number a program reads. |
+| Direction | **A closed set**: a new direction is a code change. | A typo in a collector cannot invent a series. |
+| A stack row's series | **Named only under `--keys`**: without keys the table is the one every reader has always read; with keys a flame is rooted at the series, one tower per series. A difference (`omn diff`) sums the series back before comparing. | Two runs' tids differ; their stacks do not. |
+| A refused target's reason | **On its `targets:` line**; an entry-level bare `no` is a loader error. A backend-level `no` still needs no reason: it narrows a chain, it is not what a refusal quotes. | An absent kind already means `no`, so a written one exists only to say why. |
+| What stack labels cannot say | **Travels beside them** (`named_by`, `perf_maps`, `executables`), never inside `Results::stacks`. | No reader of `stacks` moves. |
+
+**The collectors** (`docs/fixes/w21-collectors.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A request's `rx_bytes` | **From its first byte's arrival**, not its birth; `tx_bytes` from its birth. | A server declares a request once it has parsed it, so a birth-to-end count reads 0 for most requests. Shown exact against the client's request lines and the worker's `sent=`. |
+| A byte count whose start was not seen | **Absent, not zero** (two net flags), as `net_rx` already is. | A zero is a measurement. |
+| A polled counter's baseline | **Taken before the release**; the runner's immediate first tick passed over rather than reported as a microsecond interval. | The program's first I/O belongs in the first interval. |
+| `cpu.oncpu_time` on `fs:proc` at a launched program's exit | **The interval the reap took away is one counted `failed_reads`, with its reason**, until the runner can read the zombie. | A loss is counted and said, always. |
+
+**The views** (`docs/fixes/w21-{views,process,record}.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| The usage gradient | **Six even steps of the share of a known capacity, in the 256-colour cube**, none near white or black; no capacity means one neutral hue and a sentence, never a guessed bound. | Readable on a dark and a light terminal and in 256 colours (chosen for it; not yet looked at by the user). |
+| A hued figure under a trust mark | **Underlined, not dimmed**, its badge beside it. | Trust must not wash the colour out. |
+| A futex wait in a sleep | **Taken out of the sleep, up to the sleep**, and drawn as a lock beside the rest. | The old half-coverage rule named a whole sleep a lock or nothing. |
+| The `process` view's time axis | **The program's life** (`lifetime`); the run's window when there is none. | The lines describe the program. |
+| A recording's capacity | **None**: drawn in the neutral hue, said, rather than with the viewing machine's. | Another machine's cores are a guess about this one. |
+| One process's energy | **An estimate, live only**, by its share of the busy cores, said `estimated`; the machine's otherwise, said so. | No source measures one process's energy. |
+| omn's cost in the `process` header | **The frame corner's figure**, not a share of the program's cpu. | Two figures for one cost would disagree. |
+| A recording that breaks a view test | **Recorded once more before the test moves**; a test that assumed an old recording's shape builds the shape it needs. | Two of three such breaks were the machine (a cold page cache, sampling noise); the third repeated exactly and is a finding. |
+
+**The documents and the bench** (`docs/fixes/w21-docs.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A replaying GPU arm | **Measured at its own size** (2000 launches), against a bare run and a control of that size, never against the 50 000-launch baseline. | Otherwise it costs two hours or is compared across two sizes. |
+| A case's job | **Added to a row only where the case says the wait is for a child**; on the MCP way it is every busy task off the chain, an upper bound, so `gcc-shell`'s finding closes on a loosened comparison, not on a change in triage. | The MCP way cannot tell a child's tasks from a thread's. |
+| A plan the vertical server cannot hold | **Refused, exit 2, with a sentence.** | Silent truncation is a degradation nobody is told about. |
 
 ---
 
@@ -1207,15 +1276,6 @@ regime -- are still open, below, with the numbers the streams measured.
   another source of evidence. Leaving it open costs every GPU timing on this
   board a hedge where it could state a fact.
 
-- **How a byte counter's direction becomes a series** (twentieth wave, io
-  and net). Settled above: the direction is an attribute, kept by `raw`. Two
-  proposals for a series per direction: a key, `KeyKind::Dir` (`dir:read`,
-  `dir:write`), produced by `io.bytes`, `io.iops`, `io.merges` and
-  `net.bytes` as one event per direction per poll, which gives every
-  aggregating emit the split (io); or an emit over an attribute, which
-  re-keys no collector and so moves no reader of today's series (net).
-  Leaving it open costs the views `raw` for a split they draw live and lose
-  in `results.json`'s aggregates.
 - **Whether the latency session asks `sched.wakeup`** (twentieth wave,
   triage). A thread blocked on a connection beside the main thread's block is
   recognised by its stack's send and receive frames; a C program's `send`

@@ -11506,6 +11506,8 @@ record stream fixed the same claim in the ledger and the frame's corner
 the machine's account, or the view says there is no process to show, as the
 first-screen rule already does (`system` without a target).
 
+**Landed in the twenty-first wave** (stream process, `3925711`): `process--machine` reads `no target: this run measured the machine`.
+
 ### For the flaky tally
 
 Each seen in a stream's run or at the merge, passing when rerun alone once
@@ -11594,11 +11596,15 @@ Option<String>` on `Collector`, carried on `Collection`, read by `measure` to
 exit 1), so "the tool killed the program it measured" is not exit 0. The GPU
 collectors answer it from `counters::died_in_exit`'s condition.
 
+**Landed in the twenty-first wave** (stream run, `9f65296`, and `ce5cde2` for `omn top`): `Collector::failure()`, exit 1 with the sentence after the results are written. The GPU's own case is reasoned, not run (`STATE.md`, "Needs privilege").
+
 ### To the catalog loader (`src/catalog.rs`): a refused target's reason in `targets:`
 
 `targets: {pid: "no: <reason>"}`, the loader refusing a `no` without a
 reason, and `validate.rs`'s `target_rejection_reason` reading it rather than
 searching caveats (`DECISIONS.md`, settled in the twentieth wave).
+
+**Landed in the twenty-first wave** (stream data, `1b7773c`); the caveat search is gone.
 
 ### To the bench's schedule (`examples/bench/gpu.rs`, `tests/bench_gpu.rs`): a launch count per arm
 
@@ -11606,10 +11612,14 @@ searching caveats (`DECISIONS.md`, settled in the twentieth wave).
 launches for a replaying arm brings the GPU step back to about fifteen
 minutes.
 
+**Landed in the twenty-first wave** (stream docs, `63309b7`): a replaying arm runs 2000 launches against a bare run and a control of that size. The fifteen minutes are reasoned; the GPU bench has not run since.
+
 ### To `docs/bench.md` and `CATALOG.md`: `vendor:ncu`, `raw`
 
 `docs/bench.md` line 620 still names `vendor:ncu`; `CATALOG.md`'s
 `gpu.engine_busy` row gains `raw`.
+
+**Landed in the twenty-first wave** (stream docs, `178e17e`).
 
 ## Needs from another stream — the twentieth wave, stream rings
 
@@ -11622,6 +11632,8 @@ Stream rings' handoff is `docs/fixes/w20-rings.md`. Landed with its branch:
 the window"; it is aliasing, and `c7c90c1` (`NAMED_PERIOD_NS`) removes it by
 construction. Off the flaky tally with it.
 
+**Landed in the twenty-first wave** (stream docs, `1ae3d1a`): aliasing, off the tally for that shape.
+
 ## Needs from another stream — the twentieth wave, stream triage
 
 Stream triage's handoff is `docs/fixes/w20-triage.md`, section 6. Landed at
@@ -11633,10 +11645,14 @@ the merge: the two cases' limit-spelling finding closed (`96b4741`).
 profile saw is `child`, not `unplaced` (the triage reads it already); and a
 child found a tick late loses up to 14 % of its on-cpu row (43 ms of 300).
 
+Not taken in the twenty-first wave (no stream's row); still open (`STATE.md`, "What remains").
+
 ### To the sched sources (`src/collect/sched/**`, `src/bpf/sched_*`): `ppid`
 
 On at least each task's first event, so a job's wait is followed into the
 chosen child's subtree rather than every process off the way.
+
+Not taken in the twenty-first wave; still open, and now also what `cases/make-sqlite`'s critical path waits on (the twenty-first wave, stream docs).
 
 ### To `docs/triage.md` and `docs/mcp.md`: `waiting`, `job`, the lossy undecided
 
@@ -11644,11 +11660,15 @@ The latency section's new relation `waiting`, the `job` field, the lossy-row
 undecided reason, and the eBPF samples set aside; for a model, one sentence
 on `followed.relation: waiting` and `followed.job`.
 
+Not taken in the twenty-first wave (neither file was in a row); still open.
+
 ### To `tests/cases.rs`: the job's cpu, and the limit's spelling
 
 `make-sqlite` and `gcc-shell` reading `followed.job.on_cpu` beside the
 decomposed child's when holding the job's cpu; the reader's `_` to `-`
 normalization of `limit` can go.
+
+**Landed in the twenty-first wave** (stream docs, `571a2bc`): the job added where the case says the wait is for a child; `gcc-shell`'s finding closes on that loosened comparison, `make-sqlite`'s stays.
 
 ## Needs from another stream — the twentieth wave, stream budget
 
@@ -11663,14 +11683,20 @@ record).
 The flag setting what the variable sets, and the man page's stop paragraph
 with the subreaper and `lifetime.adopted_ended`.
 
+**Landed in the twenty-first wave** (stream run, `4513c43`), with the stop's subreaper and `lifetime.adopted_ended` in the manual.
+
 ### To `view/src/model.rs`: `lifetime.adopted_ended`
 
 If the mirror holds `Lifetime` field by field.
+
+**Landed in the twenty-first wave** (stream views, `7253f34`): a typed `Lifetime`, held field for field to `omn::collect::Lifetime`.
 
 ### To `src/collect/task.rs`: the adopted orphans in the denominator
 
 Decided (`DECISIONS.md`, settled in the twentieth wave): a launched program's
 denominator takes in `omn`'s adopted children while they live.
+
+**Landed in the twenty-first wave** (stream run, `1c15958`), with numbers (`DECISIONS.md`).
 
 ## Needs from another stream — the twentieth wave, stream sched
 
@@ -11683,11 +11709,15 @@ wait began; it stamps at the drain, so `stamped: start` on a join to it
 covers `[ts, ts + span]` where the blocks lie in `[ts - window_ns, ts]`. The
 scenarios file's line too.
 
+Not taken in the twenty-first wave (neither file was in a row); still open.
+
 ### To `CATALOG.md`: the sched section's new fields
 
 `sched.wakeup`'s `wakee_comm`, `waker_comm`, `served_in_tid`,
 `served_in_comm`, `irq` and `softirq`; `sched.lock` launchable; lock and
 futex following children.
+
+**Landed in the twenty-first wave** (stream docs, `178e17e`).
 
 ## Needs from another stream — the twentieth wave, stream net
 
@@ -11702,6 +11732,8 @@ Storage `S_RX_BYTES`, `S_TX_BYTES` and `S_HOLDER_SINCE`, record `rx_bytes`,
 `request_net.rs`, two attributes in `collect/net/request.rs`'s `event()`,
 and `with_socket`'s length. The io stream did not take it.
 
+**Landed in the twenty-first wave** (stream collectors, `f847a6d`), exact against the client and the worker (`a8a3577`); `rx_bytes` counted from the first byte's arrival (`DECISIONS.md`).
+
 ### To `src/collect/mod.rs` and `src/emit.rs`: a collector's counts as fields
 
 `Collector::fields(&self) -> BTreeMap<String, u64>` (default empty), copied
@@ -11709,13 +11741,19 @@ into `Results::fields` (skipped when empty); `net.request` returns
 `undrawn()`'s four counts, and the view's `Undrawn::of` reads them in place
 of the sentences (`DECISIONS.md`).
 
+**Landed in the twenty-first wave** (data `ec2b229`, collectors `f847a6d`, views `7253f34`).
+
 ### To the system view (`view/src/views/system.rs`, `docs/view/README.md`): `net.bytes` as `raw`
 
 The network row can keep in apart from out past the run's end;
 `docs/view/system.md`'s "the catalog refuses `raw` for four of these
 sources" drops `net.bytes`.
 
+**Landed in the twenty-first wave** (stream views, `90e4689`), with `io.bytes`.
+
 ### To `CATALOG.md`: `net.socket`'s interface, `net.bytes`' `raw`, and a `net.request` row
+
+**Landed in the twenty-first wave** (stream docs, `178e17e`). The twenty-first wave's new `net.request` fields are re-filed (the twenty-first wave, stream collectors).
 
 ## Needs from another stream — the twentieth wave, stream cpu
 
@@ -11725,10 +11763,14 @@ The `bpf:raw_tp` backend on `sched_stat_runtime`, poll only, per thread (the
 row still names `bpf:tp sched_switch`); `raw` on `cpu.oncpu_time` and
 `power.energy`.
 
+**Landed in the twenty-first wave** (stream docs, `178e17e`).
+
 ### To `docs/scenarios/cpu.md`: the `sched_switch` version's blind spot
 
 A thread never switched out read nothing for 400 ms: a finding the scenario
 caught before the commit.
+
+Not taken in the twenty-first wave; still open.
 
 ## Needs from another stream — the twentieth wave, stream io
 
@@ -11738,11 +11780,15 @@ Open (`DECISIONS.md`): `KeyKind::Dir`, or an emit over an attribute. Once a
 key exists, `diskstats.rs` emits two events per device per poll and
 `catalog/io.yaml` declares `dir`.
 
+**Landed in the twenty-first wave**: `KeyKind::Dir` (data, `2439ba8`), produced by `diskstats.rs` and `/proc/net/dev` (collectors, `c7adc61`); the open decision is settled (`DECISIONS.md`).
+
 ### To the system and flows views: `io.bytes` as `raw`, and the file to device edge
 
 `io.bytes` as `raw` in system's needs; flows can draw a file's device by
 matching `io.fs`'s `blk_devs` against `io.bytes`' series keys, and
 `docs/view/flows.md`'s "It does not draw ... file -> device" can say so.
+
+**Landed in the twenty-first wave** (stream views, `90e4689`, `5d00ac6`): the edge said in words beside the junction (`above block device 259:0`), not yet a drawn ribbon.
 
 ## Needs from another stream — the twentieth wave, stream shared
 
@@ -11754,16 +11800,24 @@ from another stream". Landed by net: `net_qdisc`'s namespace offset.
 The eighteenth wave's diff (`docs/fixes/w18-engine.md`), repeated in the
 handoff, still applies; keep the `Command::Join` arm.
 
+**Landed in the twenty-first wave** (stream run, `43ebf0a`).
+
 ### To `src/emit.rs`: a frame's `NamedBy`, and stack rows keyed by the request's keys
+
+**Landed in the twenty-first wave** (stream data, `ec2b229`, `bcb539f`); filled by `cpu.profile` (collectors, `bb295f2`) except `perf_maps` (re-filed, the twenty-first wave, stream collectors).
 
 ### To `src/stack.rs` and `src/collect/sched/offcpu.rs`: the executable of each task
 
 One owner for both files, since the field has to agree.
 
+**Half landed in the twenty-first wave**: `stack.rs` (data, `bcb539f`) and `cpu.profile` (collectors, `bb295f2`). `sched.offcpu` is re-filed (the twenty-first wave, stream data).
+
 ### To `tests/bench_bands.rs`: `cheaper_equivalents`
 
 The loader holds the rule now; the test's copy can go, or stay a second
 reader.
+
+**Landed in the twenty-first wave** (stream docs, `85f314a`): the copy is gone.
 
 ## Needs from another stream — the twentieth wave, stream view
 
@@ -11778,19 +11832,27 @@ edits to `tests/view_snapshots.rs`, `src/triage/latency.rs`,
 given; `value_attr`, `row_stamp` and `drains` set on the live
 `omn_view::model::Results` from the collection.
 
+**Landed in the twenty-first wave** (stream run, `43ebf0a`): the fields reach a live view only before its first events; an update after them is re-filed (the twenty-first wave, stream run).
+
 ### To the heatmap's owner: drops at their drains
 
 The loss strip shading a drop in the column of the drain that read it
 (`Results::drains`), not across the window.
 
+**Landed in the twenty-first wave** (stream views, `ca160f6`); no recording holds `drains` yet, so only the unit test shows a placed drop.
+
 ### To the ledger's owner: a line of blocked time
 
 So a ledger line opens `timebar`, as "Decided before this wave" asks.
+
+**Landed in the twenty-first wave** (stream views, `37a1a01`).
 
 ### To `tests/view_snapshots.rs`: `--against` and focus snapshots
 
 Each view's through `snapshot::draw_with`, the ledger's two moved from
 `ledger.rs`.
+
+Not done in the twenty-first wave (stream record, for time); re-filed (the twenty-first wave, stream views).
 
 ## Needs from another stream — the twentieth wave, stream workloads
 
@@ -11801,17 +11863,23 @@ poll and the exit is in no point (0.93 s measured for at least 1.0 s); a
 sentence in the caveat, and a closing read of the zombie's `/proc` entry if
 the runner can make one.
 
+**Half landed in the twenty-first wave** (stream collectors, `44b012f`, `501443e`): the caveat, and the interval the reap took away counted as a loss. The closing read of the zombie is re-filed (the twenty-first wave, stream collectors).
+
 ### To the io family's owner: `io.bytes`' polled baseline
 
 Taken at the first tick, not at the release: twice in a dozen runs a
 workload's first writes were in no point (1.99 and 4.69 MB of 9 MiB). A
 counted run's early baseline would serve a polled run too.
 
+**Landed in the twenty-first wave** (stream collectors, `c7adc61`), with `io.iops` and `io.merges`; `net.bytes`' is re-filed (the twenty-first wave, stream collectors).
+
 ## Needs from another stream — the twentieth wave, stream record
 
 ### To `examples/vertical/server.c`: `MAX_PLAN`
 
 Raised from 64, so `record.sh` needs no `sed` for `many-requests`.
+
+**Landed in the twenty-first wave** (stream docs, `fb03a7e`; the `sed` dropped from `record.sh` by record, `408239e`).
 
 ## Needs from another stream — the twentieth wave, stream process
 
@@ -11823,10 +11891,14 @@ asked of record is added by the coordinator.
 `ledger::cost_lines(data)` and `flame::hottest(data)`, so the tiles say what
 the views say.
 
+**Landed in the twenty-first wave** (stream views, `37a1a01`): `ledger::reading`, `flame::hottest`. The `process` view does not call them yet (re-filed, the twenty-first wave, stream views).
+
 ### To the timebar's owner: a lock out of sleep
 
 Whether a per-task `sched.futex` summary splits a lock out of sleep on the
 program's bar (the process workload's 0.25 s on a lock reads as sleep).
+
+**Landed in the twenty-first wave** (stream views, `8b272ef`): `process-run`'s Time line reads `lock 12.2%`, though its suspect is still `sleep`.
 
 ## Needs from another stream — the twentieth wave, stream docs
 
@@ -11837,6 +11909,246 @@ Stream docs' handoff is `docs/fixes/w20-docs.md`.
 A test reading each family table's Cost cell against the chain's tiers
 (`mem.cache_l1`/`.llc`/`.tlb` the one grouped row whose ids share no prefix).
 
+**Landed in the twenty-first wave** (stream run, `ca45f35`): 87 rows read, all agreeing.
+
 ### To `docs/scenarios/proc.md` and `docs/families/proc.md`: `proc-not-built`'s exit
 
 Exit 3, or 1 where tracefs is root-only (lines 36, 161, 182).
+
+**Landed in the twenty-first wave** (stream docs, `a5b1062`).
+
+## The twenty-first wave, coordinator, after the merge
+
+Every stream merged (`309c3e4`). The full suite after the merges, once with
+`--no-fail-fast`: **2691 passed, 3 failed, 13 ignored**. Two were
+regressions where streams met, red every time and fixed on `main` in
+`65b3ba4`:
+
+- `view_live::a_gallery_prints_every_view`: the process stream's frameless
+  layout (`3925711`) draws neither `┌ process -- ` nor the old title, and at
+  100 columns the tab line is cut before `process`. The layout was intended,
+  so the test changed: every view has its own `gallery i/N` page, every view
+  but `process` still shows its frame or title, and `process` is recognised
+  by its page and the pid in its header. Run, data and collectors had each
+  seen it red before their own commits.
+- `view_model::the_mirror_holds_every_field_omn_writes`: data added
+  `named_by`, `perf_maps` and `executables` (`bcb539f`), collectors filled
+  `executables` for `cpu.profile` (`bb295f2`), record's fixtures carry it,
+  and the view's copy of the result dropped it. Data's handoff had asked
+  views for those fields; the three are now in `view/src/model.rs`'s
+  `Results`, as written.
+
+The third, `collect::tests::the_runner_closes_the_window` ("a closing read
+in `stop` would cover 4346084 ns of a 20000000 ns tick"), is in the tally and
+passed rerun alone once. The second `make check` after the fix: **green,
+2694 passed, 0 failed, 13 ignored across 64 test binaries**, clippy and fmt
+clean. Nothing else was filed at the merge.
+
+### For the flaky tally
+
+Seen in a stream's run, passing rerun alone once unless said:
+
+- `budget::a_request_attached_for_part_of_the_run_is_weighed_over_its_own_window`
+  (run): the whole request's window 749 953 597 ns against a 750 ms floor,
+  46 us short. New. If it recurs, the floor can be the duration less a poll
+  (`>= 730_000_000`), since the window opens after the attach and the
+  deadline counts from before it (`docs/fixes/w21-run.md`).
+- `scenario_cpu::a_counted_window_is_the_same_number_in_every_format_that_carries_it`
+  (collectors): a format's count not within 2 % of the instructions retired,
+  with other streams building. New.
+- `collect::tests::the_runner_closes_the_window` (data, and the merge's
+  run: 6.1 and 4.3 ms of a 20 ms tick); already on the tally.
+- `family_sched::a_launched_programs_children_are_followed_and_wait_what_their_schedstat_says`,
+  `cpu::profile::...a_profile_of_the_machine_finds_this_thread_for_the_cpu_it_burned`,
+  `triage::the_same_program_is_cpu_bound_for_latency_and_sleep_bound_for_the_tail`,
+  `unwind::dwarf_counts_and_says_the_stacks_deeper_than_its_copy` (data),
+  `join_engine::another_namespaces_lo_is_not_credited_to_this_ones` (run),
+  `scenario_net::every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`
+  (collectors); each already on the tally.
+- **Not flaky**: `scenario_sched::a_source_with_no_collector_is_refused_with_its_own_exit_code`
+  (collectors): the uprobe PMU's `CAP_SYS_ADMIN` on this machine, as filed
+  before.
+
+### How the wave ran
+
+- **Seven streams, five at once**, `collectors` once `data` was merged and
+  `record` once everything else was; fourteen merges, seven of them a
+  review's fixes, and two regressions where streams met, both caught by the
+  one full suite at the end and fixed in one commit.
+- **A request filed to the stream that was not asked to take it went red at
+  the merge**: data asked views for the provenance fields in the view's
+  mirror, the brief's views row did not list them, and the mirror test caught
+  it only once collectors filled them. A field added to `Results` should name
+  the mirror in the same row.
+- **A failing test seen by three streams on `main` was left by each** as not
+  theirs (`a_gallery_prints_every_view`, from `2ba6626` on). Each said so in
+  its handoff, which is what the brief asked; the fix waited for the merge.
+- **Edits outside a stream's row**, each said and signed off here: data's in
+  `src/collect/mod.rs`, `src/event.rs`, `catalog/gpu.yaml`,
+  `src/triage/diff.rs`; run's in `src/collect/gpu/`, `src/unwind.rs`,
+  `src/request.rs`; collectors' in `src/stack.rs` (`139450c`); docs' in
+  `cases/gcc-shell/case.yml` and `cases/make-sqlite/case.yml` -- `gcc-shell`'s
+  finding closes on a loosened comparison (the row plus `followed.job`, an
+  upper bound on the MCP way), not on a change in triage; process's and
+  views' re-blessed gallery files; record's four test-only edits
+  (`21577fd`) and the ledger workload's manifest.
+
+## Needs from another stream — the twenty-first wave, stream run
+
+Stream run's handoff is `docs/fixes/w21-run.md`, "Needs from another
+stream". Landed at the merge: the `failure: None` line in `src/emit.rs`'s
+literal; `Slot::Detached` boxed (data's review round). The flaky-tally line
+is above.
+
+### To `view/src/feed.rs`: an update describing a result
+
+`Update::Described { index, value_attr, row_stamp, drains }`, applied to
+`data.run.results[index]`, so `Tap::described` sends it on every change and
+not only before the first events; the restart bridge then goes. Until then,
+live drains and a source attached late reach the view only at the end.
+
+### To `src/triage/engine.rs`: the failure channel
+
+Read `failure` from the collections as `main.rs`'s `failures` does, and fail
+the triage the same way, once a playbook asks a source whose collector can
+break its program.
+
+### To `src/triage/**`: `--program-stderr` and `--runs`
+
+`omn latency --runs N --program-stderr FILE` keeps the last run's stderr:
+whether to write `FILE.<n>` per run, or append.
+
+## Needs from another stream — the twenty-first wave, stream data
+
+Stream data's handoff is `docs/fixes/w21-data.md`, "Needs from another
+stream". Landed: `cpu.profile`'s `provenance()` and the `dir` key on
+`io.bytes`, `io.iops`, `io.merges`, `net.bytes`, and `net.request`'s
+`fields()` (collectors); `Results::fields` and `StackCount::series` in the
+view's mirror (views, data's review); `named_by`, `perf_maps` and
+`executables` in the mirror (`65b3ba4`).
+
+### To `src/collect/sched/offcpu.rs`: the provenance
+
+`named_by`, `perf_maps` and `executables` from its `Symbolizer`s, as
+`cpu.profile` gives them; it interns stacks as labels, so `named_by` needs
+the `Stack` at interning time.
+
+### To `view/src/model.rs`: `Key::Dir`
+
+A `dir` key falls to `Key::Other` and prints as JSON; the system view could
+then ask `--keys dev,dir` and `--keys iface,dir` for series per direction
+(collectors' line, below).
+
+### To `CATALOG.md` and `docs/contributing.md`: `targets: {pid: "no: <reason>"}`, and `dir`
+
+The form where the `targets:` line is described, and `dir` among the keys.
+
+### To `src/triage/**`: the provenance from the results
+
+Read `named_by` and `perf_maps` from the results rather than reading
+`/tmp/perf-<pid>.map` back after the run.
+
+## Needs from another stream — the twenty-first wave, stream collectors
+
+Stream collectors' handoff is `docs/fixes/w21-collectors.md`, "Needs from
+another stream". Landed: `Slot`'s `large_enum_variant` (data's review round
+boxed `Detached`); the request view reading `fields` (views).
+
+### To `src/collect/mod.rs` and `src/collect/launch.rs`: the closing round before the reap
+
+See the exit with `waitid(P_PID, pid, WEXITED | WNOHANG | WNOWAIT)` in
+`Gated::finished`, take the closing round while the program is a zombie,
+then reap. `cpu.oncpu_time` on `fs:proc` then reads its last interval, and
+its caveat's second sentence and the counted loss go.
+
+### To `src/stack.rs`: `Unwinder::symbolizer`
+
+One accessor, so `cpu.profile`'s `provenance()` fills `perf_maps` from
+`perf_map_file()` and reads `executables` from `Symbolizer::executable()`,
+which follows an `execve`, rather than from `executable_of(pid)` at the
+first sample.
+
+### To `src/collect/net/dev.rs`: `net.bytes`' polled baseline
+
+Taken in `start()` as `io.bytes`' now is: the same two lines.
+
+### To `view/src/views/request.rs` and `system.rs`: the new fields
+
+`net.request`'s `rx_bytes`, `tx_bytes` and `holder_since_ns` on the request
+page; the system view's disk and network rows split by `dir`.
+
+### To `CATALOG.md`: `dir` and `net.request`'s new fields
+
+`dir` among the keys of `io.bytes`, `io.iops`, `io.merges` and `net.bytes`
+(`fs:proc`); `net.request`'s row with `rx_bytes`, `tx_bytes`,
+`holder_since_ns` and its `fields`.
+
+### To `src/collect/net/socket.rs` or `view/src/views/flows.rs`: the socket to interface edge
+
+Views says flows cannot draw it because `net.socket` does not carry `iface`;
+the twentieth wave showed `net.socket` keying its route's interface on
+loopback. The first question is which side is missing.
+
+## Needs from another stream — the twenty-first wave, stream process
+
+Stream process's handoff is `docs/fixes/w21-process.md`. Landed: the new
+`process-run` recording and its snapshots (record).
+
+### To `view/src/views/process.rs`: the shared palette and readings
+
+`trust::usage` and `Trust::hued` in place of its local `usage` and `NEUTRAL`
+(two call sites), so the brief's "one palette, used by both views" holds;
+`ledger::reading` and `flame::hottest` for its figures where they serve.
+
+### To whoever writes what `omn top` records beside a run: the machine's capacity
+
+Online cpus and the cgroup's quota, `MemTotal` and `memory.max`, each GPU's
+VRAM, link speeds where known -- in `view.json`'s `Beside` or as a machine
+source's `fields` -- so a recording's CPU and Memory lines take the gradient.
+`Capacity::of` reads it when it exists.
+
+## Needs from another stream — the twenty-first wave, stream views
+
+Stream views' handoff is `docs/fixes/w21-views.md`. Landed: `view_truth`'s
+timebar test and the `process` snapshots after the futex split (its review
+round).
+
+### To `tests/view_snapshots.rs`: `--against` and focus snapshots
+
+Still open from the twentieth wave: each view's through
+`snapshot::draw_with` in the standard set.
+
+### To the net collectors: a link's speed
+
+From `/sys/class/net/*/speed`, as a field, so the network row has a
+capacity.
+
+## Needs from another stream — the twenty-first wave, stream docs
+
+Stream docs' handoff is `docs/fixes/w21-docs.md`. Landed: `record.sh`'s
+`MAX_PLAN` `sed` dropped (record); the two `cases/` edits signed off above.
+
+### To `src/triage/latency.rs` (`Job`): the job restricted to the followed child's parent
+
+`make-sqlite`'s critical path now overshoots, 7.1 s against the reference's
+5.3 s, because the job is every busy task off the way; restricted to the
+processes under the driver the wait named, it would be the reference's
+account, and `gcc-shell`'s pass would rest on the job rather than on an upper
+bound. Needs `ppid` (the twentieth wave, stream triage).
+
+## Needs from another stream — the twenty-first wave, stream record
+
+Stream record's handoff is `docs/fixes/w21-record.md`.
+
+### To `src/collect/io/**` (`io.latency`): a request a kworker dispatched
+
+A block request dispatched from kblockd's work item is charged to the
+`kworker`, not to the task that submitted the bio, so a target's Disk bytes
+fall short by whole requests with no loss said (on `process-run`, one 128 KiB
+request of 32, reconciled to the byte). Charge it to the bio's submitter
+(`block_bio_queue` / `block_getrq`), or count it as a loss of attribution.
+
+### To `view/src/views/process.rs`: the Disk bound
+
+`the_lines_find_what_the_workload_did` allows four 128 KiB requests short of
+the file; tighten it back to the file's bytes once the request above lands.
