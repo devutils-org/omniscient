@@ -248,6 +248,11 @@ fn event(id: &CollectorId, record: &RequestRecord, seq: u64) -> Event {
         Attr::text("comm", record.comm()),
         Attr::uint("count", 1),
     ];
+    if record.holder_ns > 0 && record.holder_since_ns != 0 {
+        // Where the longest sleep sits in the request, so a reader can put it
+        // on a time axis beside what the holder was doing then.
+        attrs.push(Attr::uint("holder_since_ns", record.holder_since_ns));
+    }
     if record.anomalies > 0 {
         // Stretches whose end the programs could not place: their time is in
         // no state, so the four do not add up to the total by that much.
@@ -271,6 +276,12 @@ fn event(id: &CollectorId, record: &RequestRecord, seq: u64) -> Event {
         });
         attrs.push(Attr::uint("rx_wait_ns", record.rx_wait_ns));
         attrs.push(Attr::uint("tx_wait_ns", record.tx_wait_ns));
+        if let Some(bytes) = record.rx_bytes() {
+            attrs.push(Attr::uint("rx_bytes", bytes));
+        }
+        if let Some(bytes) = record.tx_bytes() {
+            attrs.push(Attr::uint("tx_bytes", bytes));
+        }
         let rows = net_rows(record);
         if let Some(queued) = rows.rx_queued {
             attrs.push(Attr::uint("first_byte_ns", record.first_byte_ns));
@@ -624,6 +635,18 @@ impl Collector for RequestCollector {
         self.losses.clone()
     }
 
+    /// The notes' counts by name, from the same `undrawn()` the sentences are
+    /// written from. Each is present even at zero: a zero is a finding here.
+    fn fields(&self) -> crate::emit::Fields {
+        let undrawn = self.undrawn();
+        crate::emit::Fields::from([
+            ("never_ended".to_owned(), undrawn.never_ended),
+            ("unborn".to_owned(), undrawn.unborn),
+            ("replaced".to_owned(), undrawn.replaced),
+            ("filtered_out".to_owned(), undrawn.filtered_out),
+        ])
+    }
+
     fn notes(&self) -> Vec<String> {
         let mut notes = vec![format!(
             "{} request{} born and {} ended in {}, followed by the id the program declared at \
@@ -720,8 +743,13 @@ mod tests {
     /// A record with the network half filled: the cookie, the first byte, the
     /// two waits, the drain and the flags, at the offsets the kernel writes.
     fn with_socket(flags: u32, cookie: u64, net: [u64; 4], net_flags: u32) -> RequestRecord {
-        let mut bytes = [0u8; 168];
-        let put = |bytes: &mut [u8; 168], at: usize, value: u64| {
+        RequestRecord::from_bytes(&socket_bytes(flags, cookie, net, net_flags))
+            .expect("a full record")
+    }
+
+    fn socket_bytes(flags: u32, cookie: u64, net: [u64; 4], net_flags: u32) -> [u8; 192] {
+        let mut bytes = [0u8; 192];
+        let put = |bytes: &mut [u8; 192], at: usize, value: u64| {
             bytes[at..at + 8].copy_from_slice(&value.to_ne_bytes())
         };
         put(&mut bytes, 0, 0xa3f1);
@@ -740,7 +768,7 @@ mod tests {
             put(&mut bytes, 128 + slot * 8, *value);
         }
         bytes[160..164].copy_from_slice(&net_flags.to_ne_bytes());
-        RequestRecord::from_bytes(&bytes).expect("a full record")
+        bytes
     }
 
     const DECLARED: u32 = 1;
@@ -883,6 +911,46 @@ mod tests {
         assert!(said("6 requests never ended in the run (req:1 in task 101"));
         assert!(said(&format!("2 `{DONE}` hits a task carrying no request")));
         assert!(said(&format!("1 `{START}` hit a task still carrying")));
+        let fields = Collector::fields(&collector);
+        assert_eq!(
+            fields.into_iter().collect::<Vec<_>>(),
+            [
+                ("filtered_out".to_owned(), 0),
+                ("never_ended".to_owned(), 6),
+                ("replaced".to_owned(), 1),
+                ("unborn".to_owned(), 2),
+            ],
+            "the fields are the numbers the notes are written from"
+        );
+    }
+
+    /// The bytes of a request and the start of its longest sleep are read at
+    /// the offsets the end program writes them, and a byte count the programs
+    /// could not take is absent rather than zero.
+    #[test]
+    fn a_requests_bytes_and_its_longest_sleeps_start_are_carried() {
+        const RX_BYTES: u32 = 64;
+        const TX_BYTES: u32 = 128;
+        let with = |net_flags: u32| {
+            let mut bytes = socket_bytes(0, 77, [400_000, 0, 0, 43_000_000], net_flags);
+            bytes[56..64].copy_from_slice(&30_000_000u64.to_ne_bytes());
+            bytes[168..176].copy_from_slice(&517u64.to_ne_bytes());
+            bytes[176..184].copy_from_slice(&40_960u64.to_ne_bytes());
+            bytes[184..192].copy_from_slice(&2_500_000u64.to_ne_bytes());
+            RequestRecord::from_bytes(&bytes).expect("a full record")
+        };
+        let both = event(
+            &CollectorId::new("t"),
+            &with(DECLARED | RX_BYTES | TX_BYTES),
+            0,
+        );
+        assert_eq!(value(&both, "rx_bytes"), Some(517.0));
+        assert_eq!(value(&both, "tx_bytes"), Some(40_960.0));
+        assert_eq!(value(&both, "holder_since_ns"), Some(2_500_000.0));
+        let neither = event(&CollectorId::new("t"), &with(DECLARED), 0);
+        assert_eq!(value(&neither, "rx_bytes"), None);
+        assert_eq!(value(&neither, "tx_bytes"), None);
+        assert!(RequestRecord::from_bytes(&[0u8; 168]).is_none());
     }
 
     /// Every filter field the catalog declares is on the event.

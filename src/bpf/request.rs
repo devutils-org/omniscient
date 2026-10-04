@@ -136,8 +136,17 @@ const S_TXWAIT: i16 = 112;
 const S_COOKIE: i16 = 120;
 const S_FIRST_BYTE: i16 = 128;
 const S_NET_FLAGS: i16 = 136;
+/// Where the request's bytes start on its socket, as sequence numbers: the
+/// first unread byte when its first byte arrived (`copied_seq`, claimed from
+/// the socket's entry by the birth) and the first unqueued byte at the birth
+/// (`write_seq`). The low four bytes are the sequence number, the high four
+/// are one when it was read, so a sequence number of zero is not "unread".
+const S_RX_BYTES: i16 = 144;
+const S_TX_BYTES: i16 = 152;
+/// When the longest interruptible sleep (`S_HOLDER_NS`) began.
+const S_HOLDER_SINCE: i16 = 160;
 /// The size of the value, stated once for the map and for the programs.
-pub(crate) const STORAGE_BYTES: usize = 144;
+pub(crate) const STORAGE_BYTES: usize = 168;
 
 /// The one task-storage map a run's programs share.
 ///
@@ -249,9 +258,16 @@ pub struct RequestRecord {
     /// What of the socket was followed: `NET_*` in `request_net.rs`.
     pub net_flags: u32,
     pad2: u32,
+    /// Bytes the server read off the socket from the request's first byte to
+    /// its end, and bytes it queued on it from its birth to its end. Zero
+    /// when not known; `rx_bytes()` and `tx_bytes()` say which.
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    /// When the longest interruptible sleep began; zero when there was none.
+    pub holder_since_ns: u64,
 }
 
-const RECORD_BYTES: usize = 168;
+const RECORD_BYTES: usize = 192;
 
 const R_ID: i16 = 0;
 const R_BORN: i16 = 8;
@@ -276,6 +292,9 @@ const R_RXWAIT: i16 = 136;
 const R_TXWAIT: i16 = 144;
 const R_DRAINED: i16 = 152;
 const R_NET_FLAGS: i16 = 160;
+const R_RX_BYTES: i16 = 168;
+const R_TX_BYTES: i16 = 176;
+const R_HOLDER_SINCE: i16 = 184;
 
 impl RequestRecord {
     pub fn comm(&self) -> String {
@@ -325,6 +344,18 @@ impl RequestRecord {
             None
         };
         self.socket_unknown().or(own)
+    }
+
+    /// The bytes the server read for this request, from its first byte to its
+    /// end, when the first byte was seen and the socket followed to the end.
+    pub fn rx_bytes(&self) -> Option<u64> {
+        (self.net_flags & net::NET_RX_BYTES != 0).then_some(self.rx_bytes)
+    }
+
+    /// The bytes the server queued on the request's socket between its birth
+    /// and its end: the response, when the socket was followed to the end.
+    pub fn tx_bytes(&self) -> Option<u64> {
+        (self.net_flags & net::NET_TX_BYTES != 0).then_some(self.tx_bytes)
     }
 
     /// The response is still in the stack, and a drain record will say when it
@@ -379,6 +410,9 @@ impl RequestRecord {
             drained_ns: long(R_DRAINED),
             net_flags: word(R_NET_FLAGS),
             pad2: 0,
+            rx_bytes: long(R_RX_BYTES),
+            tx_bytes: long(R_TX_BYTES),
+            holder_since_ns: long(R_HOLDER_SINCE),
         })
     }
 }
@@ -568,6 +602,8 @@ fn settle(program: &mut Program, maps: Maps) {
     program.push(Insn::ldx(BPF_DW, 1, 7, S_HOLDER_NS));
     program.jump_to("cleared", Insn::jge_reg(1, 8, 0));
     program.push(Insn::stx(BPF_DW, 7, S_HOLDER_NS, 8));
+    program.push(Insn::ldx(BPF_DW, 1, 7, S_OFF_SINCE));
+    program.push(Insn::stx(BPF_DW, 7, S_HOLDER_SINCE, 1));
     program.push(Insn::ldx(BPF_W, 1, R10, WAKER));
     program.push(Insn::stx(BPF_W, 7, S_HOLDER_TID, 1));
     program.jump_to("cleared", Insn::ja());
@@ -823,6 +859,7 @@ fn end_instructions(btf: &Btf, site: &Site, maps: Maps) -> Result<Vec<Insn>, Str
         (S_SLEEP, R_SLEEP),
         (S_DISK, R_DISK),
         (S_HOLDER_NS, R_HOLDER_NS),
+        (S_HOLDER_SINCE, R_HOLDER_SINCE),
         (S_COOKIE, R_COOKIE),
         (S_FIRST_BYTE, R_FIRST_BYTE),
         (S_RXWAIT, R_RXWAIT),
@@ -1280,6 +1317,13 @@ mod tests {
                 offset_of!(RequestRecord, net_flags),
                 "net_flags",
             ),
+            (R_RX_BYTES, offset_of!(RequestRecord, rx_bytes), "rx_bytes"),
+            (R_TX_BYTES, offset_of!(RequestRecord, tx_bytes), "tx_bytes"),
+            (
+                R_HOLDER_SINCE,
+                offset_of!(RequestRecord, holder_since_ns),
+                "holder_since_ns",
+            ),
         ] {
             assert_eq!(
                 written as usize, field,
@@ -1350,6 +1394,9 @@ mod tests {
             (S_COOKIE, 8),
             (S_FIRST_BYTE, 8),
             (S_NET_FLAGS, 4),
+            (S_RX_BYTES, 8),
+            (S_TX_BYTES, 8),
+            (S_HOLDER_SINCE, 8),
         ];
         fields.sort();
         for pair in fields.windows(2) {

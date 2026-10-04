@@ -79,12 +79,12 @@
        targets: {cgroup: native, container: native}, filter_fields: [dev],
        keys: [dev, cgroup], degraded: "per cgroup and device only"}
     - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free,
-       targets: {system: native}, filter_fields: [dev], keys: [dev],
+       targets: {system: native}, filter_fields: [dev], keys: [dev, dir],
        degraded: "system-wide, per device"}
   modes: [count, trace, poll]
   emits: [rate, summary, timeline, topk, raw]
   targets: {system: native, cgroup: native, pid: bpf_only, container: native}
-  keys: [blk, task, cgroup, dev]
+  keys: [blk, task, cgroup, dev, dir]
   filter_fields: [dev, rwbs, bytes, comm]
   determinism: low
   caveats:
@@ -97,6 +97,10 @@
        and a dm or md device's on its members, so the derived ones are left out
        -- summing every line of /proc/diskstats reports the same bytes two or
        three times."
+    - "Keyed on `dir` (`--keys dev,dir`), `fs:proc` gives one series per
+       device and direction -- `read`, `write`, and `discard` where the kernel
+       writes that column -- in place of one per device carrying both. The same
+       key splits `io.iops` (with `flush`) and `io.merges`."
     - "/proc/diskstats counts 512-byte sectors whatever the device's logical
        block size is; the kernel normalizes before writing the file."
     - "Reads and writes are measured apart and carried on the event as
@@ -115,15 +119,17 @@
   summary: "I/O operation rate"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue", "kernel>=5.8"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low, equivalent: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_issue", "kernel>=5.8"], cost: low,
+       keys: [blk, cgroup, dev]}
+    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_issue", "bpf"], cost: low, equivalent: true,
+       keys: [blk, cgroup, dev]}
     - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free,
-       targets: {system: native}, filter_fields: [dev], keys: [dev],
+       targets: {system: native}, filter_fields: [dev], keys: [dev, dir],
        degraded: "system-wide, per device"}
   modes: [count, poll]
   emits: [rate, summary, timeline, raw]
   targets: {system: native, cgroup: native, pid: bpf_only, container: native}
-  keys: [blk, cgroup, dev]
+  keys: [blk, cgroup, dev, dir]
   filter_fields: [dev, rwbs]
   determinism: low
   caveats:
@@ -157,15 +163,17 @@
   summary: "Request merges performed by the block layer"
   unit: count
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_merge", "kernel>=5.8"], cost: low}
-    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_merge", "bpf"], cost: low, equivalent: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:block_rq_merge", "kernel>=5.8"], cost: low,
+       keys: [blk, dev]}
+    - {id: "bpf:tp", requires: ["tracepoint:block:block_rq_merge", "bpf"], cost: low, equivalent: true,
+       keys: [blk, dev]}
     - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free,
-       targets: {system: native}, filter_fields: [dev],
+       targets: {system: native}, filter_fields: [dev], keys: [blk, dev, dir],
        degraded: "counters only, no per-request detail"}
   modes: [count]
   emits: [rate, summary, raw]
   targets: {system: native}
-  keys: [blk, dev]
+  keys: [blk, dev, dir]
   filter_fields: [dev, rwbs]
   determinism: medium
   caveats:

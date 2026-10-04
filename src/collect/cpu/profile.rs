@@ -288,6 +288,10 @@ pub struct ProfileCollector {
     /// the run's ids in order.
     stack_ids: BTreeMap<(u32, u64), u64>,
     stack_origins: Vec<(u32, u64)>,
+    /// The file each sampled task's process executed, by the key its events
+    /// carry (`task:<tid>`), read at the task's first sample with a stack,
+    /// while it is alive: after the run `/proc/<pid>/exe` is gone.
+    executables: BTreeMap<String, String>,
     losses: Losses,
     /// Whether every thread of `pid` is followed rather than `pid` alone.
     whole_process: bool,
@@ -334,6 +338,7 @@ impl ProfileCollector {
             unwinders,
             stack_ids: BTreeMap::new(),
             stack_origins: Vec::new(),
+            executables: BTreeMap::new(),
             losses: Losses::default(),
             whole_process,
             sampled_tasks: BTreeSet::new(),
@@ -424,6 +429,7 @@ impl ProfileCollector {
         let unwinders = &mut self.unwinders;
         let stack_ids = &mut self.stack_ids;
         let stack_origins = &mut self.stack_origins;
+        let executables = &mut self.executables;
         let seen = &mut self.sampled_tasks;
         let processes = &mut self.processes;
         let map_reads = &mut self.map_reads;
@@ -459,6 +465,16 @@ impl ProfileCollector {
                             .record(&sample)
                     });
                     let stack = stack.flatten();
+                    if stack.is_some() {
+                        let task = KeyValue::task(sample.tid as i32).to_string();
+                        if let std::collections::btree_map::Entry::Vacant(slot) =
+                            executables.entry(task)
+                        {
+                            if let Some(file) = crate::stack::executable_of(sample.pid as i32) {
+                                slot.insert(file);
+                            }
+                        }
+                    }
                     if let Some(stack) = stack {
                         let run_id = *stack_ids.entry((sample.pid, stack.0)).or_insert_with(|| {
                             stack_origins.push((sample.pid, stack.0));
@@ -734,6 +750,29 @@ impl Collector for ProfileCollector {
                 Some((run_id as u64, frames))
             })
             .collect()
+    }
+
+    /// Who named each frame of [`Collector::stacks`], under the same ids, and
+    /// the file each sampled task executed.
+    fn provenance(&self) -> crate::stack::Provenance {
+        let named_by = self
+            .stack_origins
+            .iter()
+            .enumerate()
+            .filter_map(|(run_id, (pid, local))| {
+                let stack = self
+                    .unwinders
+                    .get(pid)?
+                    .table()
+                    .get(crate::stack::StackId(*local))?;
+                Some((run_id as u64, stack.named_by_root_first()))
+            })
+            .collect();
+        crate::stack::Provenance {
+            named_by,
+            perf_maps: Vec::new(),
+            executables: self.executables.clone(),
+        }
     }
 
     fn notes(&self) -> Vec<String> {
@@ -1101,6 +1140,26 @@ mod tests {
                 );
             }
         }
+
+        // Who named each frame travels beside the labels, frame for frame,
+        // and the test binary is the file its own task executed.
+        let provenance = collector.provenance();
+        for (id, labels) in &table {
+            assert_eq!(
+                provenance.named_by.get(id).map(Vec::len),
+                Some(labels.len()),
+                "stack {id}'s namers do not line up with its labels"
+            );
+        }
+        let this_binary = crate::stack::executable_of(0).expect("this test's own executable");
+        assert!(
+            provenance
+                .executables
+                .values()
+                .any(|file| *file == this_binary),
+            "no sampled task names this test binary: {:?}",
+            provenance.executables
+        );
 
         let all: Vec<&String> = table.values().flatten().collect();
         assert!(

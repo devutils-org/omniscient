@@ -117,19 +117,19 @@
   backends:
     - {id: "fs:proc", requires: ["/proc/net/dev"], cost: free,
        targets: {system: native, iface: native}, filter_fields: [iface],
-       degraded: "per interface, system-wide"}
+       keys: [iface, dir], degraded: "per interface, system-wide"}
     - {id: "netlink", requires: ["rtnetlink"], cost: free, equivalent: true,
-       targets: {system: native, iface: native}, filter_fields: [iface]}
+       targets: {system: native, iface: native}, filter_fields: [iface], keys: [iface]}
     # `comm` lives here and nowhere else: a socket send knows its process, and
     # /proc/net/dev has no idea which one moved a byte. The interface is the
     # other way round, so this backend does not claim it.
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:sock_sendmsg"], cost: low, equivalent: true,
        targets: {system: native, pid: native, cgroup: native, container: native},
-       filter_fields: [comm]}
+       filter_fields: [comm], keys: [iface, sock, task, cgroup]}
   modes: [poll, count]
   emits: [rate, timeline, summary, topk, raw]
   targets: {system: native, iface: native, pid: bpf_only, cgroup: bpf_only, container: bpf_only}
-  keys: [iface, sock, task, cgroup]
+  keys: [iface, sock, task, cgroup, dir]
   filter_fields: [iface, comm]
   determinism: low
   caveats:
@@ -140,7 +140,9 @@
        because it is both."
     - "A series is an interface, and its `bytes` are both directions: each
        event carries `rx` and `tx` beside them, which `raw` keeps to the end
-       of the run."
+       of the run. Keyed on `dir` (`--keys iface,dir`), each interface's
+       increase is two events instead, `dir:rx` and `dir:tx`, one series per
+       direction; `fs:proc` alone splits it."
     - "Per-process attribution is not available from this file. It needs the
        eBPF backend, and the resolver will say so rather than dividing a
        machine-wide number."
@@ -453,3 +455,11 @@
        what the server had queued at `request__done` -- which on loopback is
        its arrival in the peer's receive queue. What the client then takes to
        read it is the client's, and in no row."
+    - "`rx_bytes` is what the server read off the socket from the request's
+       first byte to its end (`copied_seq` at the first byte's arrival and at
+       the end), and `tx_bytes` what it queued on it from the birth to the end
+       (`write_seq`), so a response still queued at the end is counted whole.
+       Each is absent, not zero, when its start was not seen; both wrap past
+       4 GiB in one request. `holder_since_ns` is when the longest sleep began.
+       The run's counts by name -- `never_ended`, `unborn`, `replaced`,
+       `filtered_out` -- are the result's `fields`, the numbers its notes say."

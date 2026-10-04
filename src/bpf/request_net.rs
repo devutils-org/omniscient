@@ -108,6 +108,11 @@ pub(super) const NET_TX_PENDING: u32 = 8;
 pub(super) const NET_OTHER_SOCKET: u32 = 16;
 /// The socket's entry was gone at the end, so the drain was not followed.
 pub(super) const NET_TX_UNSEEN: u32 = 32;
+/// `rx_bytes` is known: the socket's entry held where the first byte began,
+/// and the end read how far the server had read.
+pub(super) const NET_RX_BYTES: u32 = 64;
+/// `tx_bytes` is known: the birth and the end both read `write_seq`.
+pub(super) const NET_TX_BYTES: u32 = 128;
 
 /// Set on a record published by the transmit program rather than by a probe:
 /// the last byte of a request's response left the stack.
@@ -133,7 +138,11 @@ const K_TARGET: i16 = 32;
 const K_TID: i16 = 36;
 /// One while a drain is waited for; claimed by compare-and-exchange.
 const K_ARMED: i16 = 40;
-pub(super) const SOCKET_BYTES: usize = 48;
+/// `copied_seq` when the oldest unclaimed byte arrived: where that request's
+/// bytes begin in the stream. The low four bytes are the sequence number, the
+/// high four one once it is written; the birth claims it by exchange.
+const K_RX_SEQ: i16 = 48;
+pub(super) const SOCKET_BYTES: usize = 56;
 
 /// `BPF_NOEXIST`: an arrival inserts an entry only where there is none.
 const BPF_NOEXIST: i32 = 1;
@@ -194,6 +203,7 @@ pub(super) struct Offsets {
     cookie: i32,
     write_seq: i32,
     snd_nxt: i32,
+    copied_seq: i32,
 }
 
 impl Offsets {
@@ -210,6 +220,7 @@ impl Offsets {
             cookie: at("sock", "__sk_common")? + at("sock_common", "skc_cookie")?,
             write_seq: at("tcp_sock", "write_seq")?,
             snd_nxt: at("tcp_sock", "snd_nxt")?,
+            copied_seq: at("tcp_sock", "copied_seq")?,
         })
     }
 }
@@ -280,6 +291,11 @@ fn lookup_socket(program: &mut Program, sockets: i32) {
 pub(super) fn birth_socket(program: &mut Program, at: &Offsets, sockets: i32) {
     program.push(Insn::st_imm(BPF_W, 7, S_NET_FLAGS, NET_DECLARED as i32));
     socket_of_descriptor(program, at, "rx_no_socket");
+    // Where the response's bytes will start: the first byte not yet queued.
+    read_narrow(program, SEQ, 4, 8, at.write_seq);
+    program.push(Insn::ldx(BPF_W, 1, R10, SEQ));
+    program.push(Insn::stx(BPF_W, 7, S_TX_BYTES, 1));
+    program.push(Insn::st_imm(BPF_W, 7, S_TX_BYTES + 4, 1));
     cookie_of(program, at);
     program.push(Insn::ldx(BPF_DW, 1, R10, SOCK_KEY));
     program.jump_to("rx_unseen", Insn::jeq_imm(1, 0, 0));
@@ -289,6 +305,11 @@ pub(super) fn birth_socket(program: &mut Program, at: &Offsets, sockets: i32) {
     program.push(Insn::mov64_reg(9, 0));
     program.push(Insn::ldx(BPF_DW, 1, R10, ARG0));
     program.push(Insn::stx(BPF_DW, 9, K_LIVE, 1));
+    // Where the first byte began, claimed whatever follows, so that no later
+    // birth takes it for its own.
+    program.push(Insn::mov64_imm(1, 0));
+    program.push(xchg(9, K_RX_SEQ, 1));
+    program.push(Insn::stx(BPF_DW, R10, SCRATCH, 1));
     program.push(Insn::ldx(BPF_DW, 2, 9, K_RX_SINCE));
     program.push(Insn::st_imm(BPF_DW, 9, K_RX_SINCE, 0));
     program.jump_to("rx_unseen", Insn::jeq_imm(2, 0, 0));
@@ -297,6 +318,8 @@ pub(super) fn birth_socket(program: &mut Program, at: &Offsets, sockets: i32) {
     program.push(Insn::ldx(BPF_DW, 3, R10, NOW));
     program.jump_to("rx_unseen", Insn::jgt_reg(2, 3, 0));
     program.push(Insn::stx(BPF_DW, 7, S_FIRST_BYTE, 2));
+    program.push(Insn::ldx(BPF_DW, 1, R10, SCRATCH));
+    program.push(Insn::stx(BPF_DW, 7, S_RX_BYTES, 1));
     program.jump_to("rx_done", Insn::ja());
 
     program.label("rx_no_socket");
@@ -320,14 +343,33 @@ pub(super) fn end_socket(program: &mut Program, at: &Offsets, sockets: i32) {
     program.push(Insn::ldx(BPF_DW, 1, R10, SOCK_KEY));
     program.push(Insn::ldx(BPF_DW, 2, 7, S_COOKIE));
     program.jump_to("tx_other", Insn::jne_reg(1, 2, 0));
+    // How far the server had read by its end, while `r8` is the socket.
+    read_narrow(program, LIMIT, 4, 8, at.copied_seq);
+    bytes_since(
+        program,
+        S_RX_BYTES,
+        LIMIT,
+        R_RX_BYTES,
+        NET_RX_BYTES,
+        "rx_counted",
+    );
     // What the server had queued by its end: the response.
     read_narrow(program, SEQ, 4, 8, at.write_seq);
+    bytes_since(
+        program,
+        S_TX_BYTES,
+        SEQ,
+        R_TX_BYTES,
+        NET_TX_BYTES,
+        "tx_counted",
+    );
     lookup_socket(program, sockets);
     program.jump_to("tx_unseen", Insn::jeq_imm(0, 0, 0));
     program.push(Insn::mov64_reg(9, 0));
     // Whatever arrived while the request was live was its own, and the next
     // request's first byte is the first to arrive after this.
     program.push(Insn::st_imm(BPF_DW, 9, K_RX_SINCE, 0));
+    program.push(Insn::st_imm(BPF_DW, 9, K_RX_SEQ, 0));
     program.push(Insn::st_imm(BPF_DW, 9, K_LIVE, 0));
     program.push(Insn::ldx(BPF_W, 1, R10, SEQ));
     program.push(Insn::stx(BPF_W, 9, K_TARGET, 1));
@@ -368,6 +410,29 @@ pub(super) fn end_socket(program: &mut Program, at: &Offsets, sockets: i32) {
     program.label("tx_done");
 }
 
+/// `record[into] = stack[now] - storage[start]` modulo 2^32, and `flag` set on
+/// the record, when the storage holds a start (its high word is one); nothing
+/// otherwise. `label` is where it resumes, and must be unique in the program.
+fn bytes_since(
+    program: &mut Program,
+    start: i16,
+    now: i16,
+    into: i16,
+    flag: u32,
+    label: &'static str,
+) {
+    program.push(Insn::ldx(BPF_W, 1, 7, start + 4));
+    program.jump_to(label, Insn::jeq_imm(1, 0, 0));
+    program.push(Insn::ldx(BPF_W, 1, R10, now));
+    program.push(Insn::ldx(BPF_W, 2, 7, start));
+    program.push(Insn::sub64_reg(1, 2));
+    program.push(Insn::lsh64_imm(1, 32));
+    program.push(Insn::rsh64_imm(1, 32));
+    program.push(Insn::stx(BPF_DW, R10, REC + into, 1));
+    set_flag(program, R10, REC + R_NET_FLAGS, flag);
+    program.label(label);
+}
+
 /// Jumps to `yes` when the four-byte sequence number at `sent` has reached the
 /// one at `target`, modulo 2^32, and to `no` otherwise.
 ///
@@ -397,10 +462,11 @@ pub(super) struct NetMaps {
 /// `tcp_data_ready(sk)`: data was queued on a socket. The first byte no
 /// request has claimed is stamped; everything after it until a birth claims
 /// it, and everything that arrives while a request is live, is not.
-fn arrival_instructions(maps: NetMaps) -> Result<Vec<Insn>, String> {
+fn arrival_instructions(at: &Offsets, maps: NetMaps) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
-    program.push(Insn::ldx(BPF_DW, 1, 1, 0));
-    program.jump_to("done", Insn::jeq_imm(1, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 6, 1, 0));
+    program.jump_to("done", Insn::jeq_imm(6, 0, 0));
+    program.push(Insn::mov64_reg(1, 6));
     program.push(Insn::call(GET_SOCKET_COOKIE));
     program.push(Insn::stx(BPF_DW, R10, SOCK_KEY, 0));
     program.jump_to("done", Insn::jeq_imm(0, 0, 0));
@@ -416,12 +482,22 @@ fn arrival_instructions(maps: NetMaps) -> Result<Vec<Insn>, String> {
     program.push(Insn::mov64_reg(1, 0));
     program.push(Insn::mov64_imm(0, 0));
     program.push(cmpxchg(7, K_RX_SINCE, 1));
+    // Only the stamp that stood says where its bytes begin.
+    program.jump_to("done", Insn::jne_imm(0, 0, 0));
+    read_narrow(&mut program, SEQ, 4, 6, at.copied_seq);
+    program.push(Insn::ldx(BPF_W, 1, R10, SEQ));
+    program.push(Insn::stx(BPF_W, 7, K_RX_SEQ, 1));
+    program.push(Insn::st_imm(BPF_W, 7, K_RX_SEQ + 4, 1));
     program.jump_to("done", Insn::ja());
 
     program.label("insert");
     for slot in 0..(SOCKET_BYTES / 8) as i16 {
         program.push(Insn::st_imm(BPF_DW, R10, SOCK_VALUE + slot * 8, 0));
     }
+    read_narrow(&mut program, SEQ, 4, 6, at.copied_seq);
+    program.push(Insn::ldx(BPF_W, 1, R10, SEQ));
+    program.push(Insn::stx(BPF_W, R10, SOCK_VALUE + K_RX_SEQ, 1));
+    program.push(Insn::st_imm(BPF_W, R10, SOCK_VALUE + K_RX_SEQ + 4, 1));
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::stx(BPF_DW, R10, SOCK_VALUE + K_RX_SINCE, 0));
     program.extend(Insn::load_map_fd(1, maps.sockets));
@@ -594,7 +670,7 @@ impl SocketPrograms {
             (
                 ARRIVAL,
                 Side::Entry,
-                arrival_instructions(maps)?,
+                arrival_instructions(&at, maps)?,
                 "omn_req_rx",
             ),
         ] {
@@ -712,7 +788,10 @@ pub(super) mod tests {
                 .map(|pair| pair[0].code == 0xb7 && pair[0].imm == BPF_NOEXIST)
                 .collect::<Vec<bool>>()
         };
-        assert_eq!(inserts(&arrival_instructions(MAPS).unwrap()), vec![true]);
+        assert_eq!(
+            inserts(&arrival_instructions(&at, MAPS).unwrap()),
+            vec![true]
+        );
         assert!(inserts(&transmit_instructions(&at, MAPS).unwrap()).is_empty());
         for mark in [WAIT_RX, WAIT_TX, 0] {
             assert!(inserts(&wait_instructions(MAPS, mark).unwrap()).is_empty());
