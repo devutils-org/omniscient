@@ -753,6 +753,57 @@ fn build(
     pane
 }
 
+/// The hottest function of a pane, as another view reads it: the frame with
+/// the most weight of its own, the one the flame's header names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hottest {
+    /// The function as the flame draws it.
+    pub name: String,
+    /// Its own share of the pane's whole weight, `0..=1`.
+    pub share: f64,
+    /// Its own weight: samples on cpu, nanoseconds off cpu.
+    pub own: f64,
+    /// The pane's whole weight, in the same unit.
+    pub total: f64,
+    /// `true` off cpu (nanoseconds), `false` on cpu (samples).
+    pub off_cpu: bool,
+    pub trust: Trust,
+}
+
+/// The hottest function on cpu (`off_cpu` false) or off cpu, for `focus`
+/// (empty: the whole target); `None` when the run holds no stack of it, or
+/// while it is live (a live flame counts events, not weight).
+pub fn hottest(data: &Data, focus: &Focus, off_cpu: bool) -> Option<Hottest> {
+    let need = &NEEDS[if off_cpu { OFF } else { ON }];
+    let pane = build(
+        data,
+        None,
+        need,
+        "",
+        false,
+        &Reading {
+            by_thread: false,
+            focus,
+        },
+    );
+    let Body::Tree(tree) = &pane.body else {
+        return None;
+    };
+    let total = tree.weight(0);
+    let (name, own) = tree
+        .own_by_function()
+        .into_iter()
+        .max_by(|x, y| x.1[0].total_cmp(&y.1[0]).then_with(|| y.0.cmp(x.0)))?;
+    Some(Hottest {
+        name: display_name(name),
+        share: if total > 0.0 { own[0] / total } else { 0.0 },
+        own: own[0],
+        total,
+        off_cpu,
+        trust: pane.trust.clone(),
+    })
+}
+
 /// A source's own caveats: its degradations, then its notes.
 fn caveats_of(results: &[&Results]) -> Vec<String> {
     let mut caveats: Vec<String> = Vec::new();
@@ -2461,6 +2512,25 @@ mod tests {
             .expect("a block");
         assert_eq!(*hottest, "fdatasync", "the commits block in fdatasync");
         assert!(value[0] > 0.9 * off.nodes[0].value[0]);
+    }
+
+    /// The public reading names what the header names.
+    #[test]
+    fn the_hottest_function_is_read_as_the_header_says_it() {
+        let data = fixture("sqlite-commits");
+        let off = hottest(&data, &Focus::default(), true).expect("blocks");
+        assert_eq!(off.name, "fdatasync");
+        assert!(off.share > 0.9 && off.share <= 1.0, "{}", off.share);
+        assert!(off.off_cpu);
+        let on = hottest(&fixture("cpython-hot"), &Focus::default(), false).expect("samples");
+        let text = text(&crate::snapshot::draw(
+            fixture("cpython-hot"),
+            "flame",
+            160,
+            40,
+        ));
+        assert!(text.contains(&on.name), "{} not in\n{text}", on.name);
+        assert!(hottest(&fixture("cpython-hot"), &Focus::default(), true).is_none());
     }
 
     #[test]
