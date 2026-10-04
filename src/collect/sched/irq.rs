@@ -341,6 +341,11 @@ impl Collector for IrqCollector {
         "handler_ns"
     }
 
+    fn row_stamp(&self) -> Option<crate::collect::RowStamp> {
+        use crate::collect::RowStamp;
+        Some(RowStamp::FirstEvent)
+    }
+
     fn start(&mut self) -> Result<(), String> {
         self.program = Some(IrqProgram::load()?);
         self.window_opened_ns = monotonic_ns();

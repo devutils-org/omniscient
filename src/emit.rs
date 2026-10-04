@@ -184,6 +184,16 @@ pub struct Results {
     /// value by name from the run rather than from a table of its own.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub value_attr: String,
+    /// How the collector stamped a row it read from a table the kernel
+    /// filled between drains, when it says: a reader places such a row's
+    /// window by this rather than by a table of its own. Absent says nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_stamp: Option<crate::collect::RowStamp>,
+    /// The kernel's drops placed in time: each drain that found the count
+    /// grown, with what it had grown by. They sum to `losses.dropped` for a
+    /// run (a recording's document holds the drains read in its window).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drains: Vec<crate::collect::DrainDrop>,
 }
 
 /// What a series is keyed on.
@@ -1051,6 +1061,8 @@ pub fn aggregate(
         },
         by_ring: collection.by_ring,
         value_attr: value_attr.to_owned(),
+        row_stamp: collection.row_stamp,
+        drains: collection.drains,
     })
 }
 
@@ -2029,6 +2041,8 @@ mod tests {
             detached: false,
             by_ring,
             facts: Vec::new(),
+            row_stamp: None,
+            drains: Vec::new(),
         }
     }
 
@@ -2037,6 +2051,64 @@ mod tests {
             key: KeyValue::task(tid),
             losses: lost(dropped, 0),
         }
+    }
+
+    /// How a drained source stamped its rows, and its drops placed at the
+    /// drains that read them, reach `results.json` as the run said them; a
+    /// collection that says neither writes neither.
+    #[test]
+    fn a_result_carries_its_row_stamp_and_its_drains() {
+        use crate::collect::{DrainDrop, RowStamp};
+        let catalog = crate::catalog::Catalog::embedded().unwrap();
+        let capabilities = crate::capabilities::Capabilities::detect();
+        let request = crate::request::Request {
+            source: "mem.rss".parse().unwrap(),
+            target: crate::request::Target::Pid(vec![std::process::id() as i32]),
+            mode: crate::request::Mode::Poll {
+                interval: crate::scalar::Duration::from_nanos(10_000_000),
+            },
+            emit: vec![crate::request::Emit::Summary],
+            keys: Vec::new(),
+            filter: None,
+            duration: Some("1s".parse().unwrap()),
+            budget: None,
+            stack: None,
+            symbols: None,
+            backend: None,
+            label: None,
+            window: None,
+        };
+        let resolved = crate::resolve::resolve(&catalog, &capabilities, &request).unwrap();
+        let drains = vec![
+            DrainDrop {
+                ts_ns: 40,
+                dropped: 15,
+            },
+            DrainDrop {
+                ts_ns: 90,
+                dropped: 5,
+            },
+        ];
+        let mut said = two_threads(lost(20, 0), Vec::new());
+        said.row_stamp = Some(RowStamp::FirstEvent);
+        said.drains = drains.clone();
+        let results = aggregate(&resolved, said, Unit::Bytes, "bytes").unwrap();
+        assert_eq!(results.row_stamp, Some(RowStamp::FirstEvent));
+        assert_eq!(results.drains, drains);
+        let json = serde_json::to_value(&results).unwrap();
+        assert_eq!(json["row_stamp"], "first_event");
+        assert_eq!(json["drains"][1]["ts_ns"], 90);
+        assert_eq!(json["drains"][1]["dropped"], 5);
+
+        let silent = aggregate(
+            &resolved,
+            two_threads(lost(0, 0), Vec::new()),
+            Unit::Bytes,
+            "bytes",
+        )
+        .unwrap();
+        let json = serde_json::to_value(&silent).unwrap();
+        assert!(json.get("row_stamp").is_none() && json.get("drains").is_none());
     }
 
     /// Two threads, one ring each, and only one of them overflowed: the

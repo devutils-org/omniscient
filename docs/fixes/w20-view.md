@@ -142,11 +142,6 @@ them.
 
 ## What I could not do, and why
 
-- **How a drained source stamps its rows, and each drain's drop count with
-  its time.** Both are the collectors' and the runner's to say
-  (`src/collect/**`, `collect/mod.rs`, budget's and the families'); the
-  emit layer has nowhere to read them from. Filed below; the heatmap's
-  `Stamp::of` table stands until then.
 - **Clicks per view in the gallery** (a snapshot of each view after a click):
   `tests/view_snapshots.rs` is record's; the harness has what it needs.
 - **`--against` and a focus in the standard snapshot set**: same file; the
@@ -204,6 +199,13 @@ target/debug/omn top -- python3 -c 'import time; [sum(range(10**6)) or time.slee
 - **A time error dims a figure only at a resolution it can move** (a tenth
   of a cell), drawn at a known resolution; elsewhere it dims as before.
 
+- **A collector that does not say how it stamps its rows says nothing**
+  (`row_stamp` absent), rather than defaulting to "at its own event": a
+  reader falls back to what it knows, as the heatmap's table does.
+- **Drops are placed at the drains of a drained collector only**; a polled
+  collector's are read once, at its stop, since a read of its losses each
+  round would cost a clone for a count that is almost always zero.
+
 ## Needs from another stream
 
 - **budget (`src/main.rs`, `top_app` / `top_live`)**: open `process` as the
@@ -212,12 +214,12 @@ target/debug/omn top -- python3 -c 'import time; [sum(range(10**6)) or time.slee
   `lifetime` to read it from. And, when the live results are built
   (`omn_view::model::Results { .. }` near `top_live`), set `value_attr` from
   the resolved collection's value attribute so the heatmap reads it live too.
-- **budget and the family streams (`src/collect/mod.rs`, the drain loops)**:
-  (a) say how a drained source stamps its rows -- at the drain's close or at
-  the row's first event -- as a field of `Collection` that `emit::aggregate`
-  copies into `Results`; (b) keep each drain round's drop count with its
-  timestamp (`(ts_ns, dropped)`), likewise. The view stream's next owner adds
-  the `Results` fields and the model's mirror once `Collection` has them.
+- **budget (`src/main.rs`, `top_live`)**, beside `value_attr` above: set
+  `row_stamp` and `drains` on the live `omn_view::model::Results` from the
+  collection, so a live heatmap reads them too.
+- **heatmap's owner, next wave**: shade a drop in the column of the drain
+  that read it (`Results::drains`), in the loss strip, instead of across the
+  whole window; no fixture holds `drains` until record re-records.
 - **record (`tests/view_snapshots.rs`, `docs/view/gallery/**`)**: keep the
   two changes above; draw each view's `--against` and focus snapshots with
   `snapshot::draw_with` (and move the ledger's two from `ledger.rs`); add a
@@ -227,6 +229,58 @@ target/debug/omn top -- python3 -c 'import time; [sum(range(10**6)) or time.slee
   routes; `Data::has_target` is the first-screen rule.
 - **ledger's owner, next wave**: a line for blocked time, so the ledger opens
   `timebar` as "Decided" asks.
+
+## Review
+
+The reviewer found item 2's last two `results.json` entries not landed: how
+a drained source stamps its rows, and each drain's drop count with its time.
+Right: the first round filed them to the collectors' streams, but both are a
+field the runner can fill and a method each collector can answer, so this
+round lands them (one commit after the merge of `main`).
+
+- **`Collector::row_stamp()`** (`src/collect/mod.rs`), `None` by default --
+  which says nothing, and is not read as "each row at its own event" -- and
+  `RowStamp::{DrainClose, FirstEvent}`. Answered by every collector whose
+  rows I read stamped from a table the kernel fills between drains:
+  `FirstEvent` for `sched.runqlat`, `sched.futex`, `sched.irq`, `sched.lock`,
+  `net.softirq`, `net.qdisc` and `mem.stall` (traced; counted it is
+  `DrainClose`); `DrainClose` for `io::histogram` (`net.socket`, `io.vfs`),
+  `sched.offcpu` and `mem.allocations`. Every other collector says nothing
+  (its owner can add the line). Carried through `Collection.row_stamp`,
+  the detach record and a recording's documents into `Results.row_stamp`
+  (`"drain_close"` / `"first_event"`, absent when unsaid).
+- **`Collection.drains` / `Results.drains`**: `[{ts_ns, dropped}]`, one
+  entry per read of a drained collector (one with a `tick`) whose drop count
+  had grown, with that read's time; the detach's and the run's final stop
+  add what the stop read. The count is the collection's running total (the
+  runner's losses plus the collector's), so a budget's move onto another
+  backend neither loses nor double-counts; the entries sum to
+  `losses.dropped`. A polled collector's losses are read only at its stop,
+  for what a clone of its `Losses` every round would cost. A recording's
+  document holds the drains read inside its window.
+- **The view**: `model::Results` mirrors both (`row_stamp: Option<String>`,
+  `drains: Vec<Drain>`); the heatmap's `Stamp::of` takes the result's own
+  stamp and keeps its table for older recordings. The loss strip does not
+  draw `drains` yet (filed above). `docs/view/heatmap.md`'s limits say so.
+
+Shown: `collect::tests::a_drained_collector_s_drops_are_placed_at_the_drains_that_read_them`
+(a drained and a polled collector under `drive`, a detach at 60 ms: the
+entries are in order, each non-zero, sum to the drop count, the last is the
+stop's five at the detach; the polled one has none until its stop);
+`emit::tests::a_result_carries_its_row_stamp_and_its_drains` (through
+`aggregate` and into JSON, and absent when unsaid);
+`heatmap::tests::a_result_s_own_row_stamp_wins_over_the_table`;
+`tests/view_model.rs`'s
+`the_view_reads_a_result_s_row_stamp_and_drains_as_omn_writes_them`.
+Reasoned: that each named collector stamps as it says, read from its code
+(the `first_ns`-or-close and `closed_ns` stamps), not measured on a run;
+and the real drop placement on a privileged run (none here drops).
+
+Files outside my row, changed this round: `src/collect/mod.rs` (the
+runner's ledger, `Collection`, the trait), the ten collectors' one-method
+`row_stamp` (sched, net, mem, io families), `src/encode.rs`,
+`src/triage/latency.rs` and `tests/encoders.rs` (two lines per `Results`
+literal), `docs/view/heatmap.md`.
 
 ## The suite
 
@@ -248,3 +302,30 @@ failures, none in a file this stream changed; each rerun alone once:
 The three that failed twice are filed here for their owners; the runner's is
 item 4's own, and the other two measure the machine's load, which nine agents
 made heavy.
+
+### The suite, review round
+
+One `make check` after `make` (capabilities granted): it stopped at
+`tests/cases.rs`'s `every_case_names_its_known_cause_both_ways` (the mcp
+path, docs' item and in the tally), so the whole suite was then run once
+with `cargo test --workspace --no-fail-fast`: 2 628 passed, 9 failed, 13
+ignored. Each failure rerun alone once:
+
+| Test | Owner | Alone |
+|---|---|---|
+| `collect::mem::page_faults::tests::sampled_in_user_mode_the_weighed_samples_are_the_faults_the_thread_took` | mem | passed |
+| `perf::tests::an_ibs_sample_says_which_level_answered_the_load` | rings | passed |
+| `tests/dm_delay.rs` `a_device_delayed_from_outside_is_measured_with_the_delay_above_the_device` | io | passed |
+| `tests/triage.rs` `a_cpu_bound_program_is_named_cpu_bound_for_latency` | triage | passed |
+| `tests/view_workloads.rs` `lanes_schedule_is_the_manifests` | workloads | passed |
+| `tests/cross_compute.rs` `a_lossy_profile_marks_its_row_and_leaves_the_traced_rows_alone` (the row's drop count 6 616 against 16 686 expected, 328 throttles) | rings | **failed again** |
+| `tests/scenario_sched.rs` `a_workload_that_is_half_blocked_measures_as_half_blocked` (31 % blocked) | sched | **failed again** |
+| `tests/view_workloads.rs` `system_panels_carry_at_least_the_manifests_cost` (2.069 s on cpu for a 1 s program and its child) | workloads | **failed again** |
+| `tests/cases.rs` `every_case_names_its_known_cause_both_ways` | docs | not rerun (in the tally) |
+
+None is in code this round changed in behaviour: the runner only adds
+`drains` beside the losses it already counted, and `row_stamp` is a new
+field nobody else reads. The cross-compute one reads the per-ring split of a
+throttled profile, the rings stream's item 4 (the same family of failure
+as the first round's `losses_by_ring`); the other two measure cpu and
+blocked time on a machine other agents share.

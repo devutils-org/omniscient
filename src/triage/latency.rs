@@ -2912,6 +2912,8 @@ mod tests {
             period_ns: None,
             by_ring: Vec::new(),
             value_attr: String::new(),
+            row_stamp: None,
+            drains: Vec::new(),
         }
     }
 

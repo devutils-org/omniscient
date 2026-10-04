@@ -483,6 +483,11 @@ impl Collector for AllocationCollector {
         }
     }
 
+    fn row_stamp(&self) -> Option<crate::collect::RowStamp> {
+        use crate::collect::RowStamp;
+        Some(RowStamp::DrainClose)
+    }
+
     fn start(&mut self) -> Result<(), String> {
         self.program = Some(AllocProgram::load(self.allocator)?);
         self.run_opened_ns = monotonic_ns();

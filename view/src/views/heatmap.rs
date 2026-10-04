@@ -947,10 +947,16 @@ enum Stamp {
 }
 
 impl Stamp {
-    fn of(source: &str) -> Stamp {
-        match source {
-            "sched.runqlat" => Stamp::FirstWait,
-            _ => Stamp::Close,
+    /// How a result's rows are stamped: as the run says (`row_stamp`), and
+    /// by the source for a recording made before it said.
+    fn of(results: &Results, source: &str) -> Stamp {
+        match results.row_stamp.as_deref() {
+            Some("first_event") => Stamp::FirstWait,
+            Some("drain_close") => Stamp::Close,
+            _ => match source {
+                "sched.runqlat" => Stamp::FirstWait,
+                _ => Stamp::Close,
+            },
         }
     }
 }
@@ -958,7 +964,6 @@ impl Stamp {
 impl Samples {
     fn of(ctx: &Ctx<'_>, need: usize) -> Samples {
         let attr = value_attr(NEEDS[need].source);
-        let stamp = Stamp::of(NEEDS[need].source);
         let mut samples = Samples::default();
         // The rows stamped at their first wait, as (result, window, point):
         // a drain's rows share their result and their window to the
@@ -967,6 +972,7 @@ impl Samples {
         for (index, results) in held(ctx.data, need).into_iter().enumerate() {
             // The run names the attribute when it says it; the table is for
             // a recording made before it did.
+            let stamp = Stamp::of(results, NEEDS[need].source);
             let attr = results
                 .value_attr
                 .as_deref()
@@ -1958,6 +1964,33 @@ mod tests {
             // whole window has gone by.
             assert!(shorter > 0, "{name}: every row spread over a whole window");
         }
+    }
+
+    /// How a row is stamped is the run's to say when it says it: the same
+    /// `net.socket` rows, said stamped at their first event, are drawn from
+    /// their stamp onwards rather than over the window before it.
+    #[test]
+    fn a_result_s_own_row_stamp_wins_over_the_table() {
+        let mut data = fixture("http-server");
+        let before = Samples::of(&ctx(&data, &Focus::default()), need("net.socket"));
+        for results in &mut data.run.results {
+            if results.source == "net.socket" {
+                results.row_stamp = Some("first_event".to_owned());
+            }
+        }
+        let after = Samples::of(&ctx(&data, &Focus::default()), need("net.socket"));
+        let events = events_of(&data, "net.socket");
+        let (run_start, _) = run_span(&data);
+        assert_eq!(after.points.len(), events.len());
+        let mut moved = 0;
+        for ((then, now), event) in before.points.iter().zip(&after.points).zip(&events) {
+            let ts = (event.ts_ns as f64).max(run_start as f64);
+            assert!((now.start - ts).abs() < 0.5, "drawn from its stamp");
+            if (then.start - now.start).abs() > 0.5 {
+                moved += 1;
+            }
+        }
+        assert!(moved > 0, "nothing moved: the table still decided");
     }
 
     /// `io.latency` bucketed in the kernel keeps one row per bucket for the

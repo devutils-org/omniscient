@@ -329,6 +329,40 @@ pub struct Collection {
     /// [`Collector::facts`]. `notes` is what it had to give up.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub facts: Vec<String>,
+    /// How the collector stamps a row it read from a table the kernel filled
+    /// between drains: [`Collector::row_stamp`]. `None` when it does not say,
+    /// which is not a claim that each row is stamped at its own event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_stamp: Option<RowStamp>,
+    /// What the kernel dropped, placed in time: one entry per read of a
+    /// drained collector that found its drop count had grown, with that
+    /// read's time. Their sum is `losses.dropped`, so a run that lost a burst
+    /// in its first second reads apart from one that lost steadily. Empty for
+    /// a collector that is not drained, or that dropped nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drains: Vec<DrainDrop>,
+}
+
+/// How a drained collector stamps a row it read from a table the kernel
+/// filled between two drains -- a row that stands for many events, not one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RowStamp {
+    /// At the close of the drain that read it: the row covers the
+    /// `window_ns` before its timestamp.
+    DrainClose,
+    /// Where the row's first event began, and at the close of the drain that
+    /// read it when the kernel recorded no beginning: the row covers from its
+    /// timestamp to that close.
+    FirstEvent,
+}
+
+/// What one read of a drained collector found the kernel had dropped since
+/// the read before it, and when that read was taken, on `CLOCK_MONOTONIC`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrainDrop {
+    pub ts_ns: u64,
+    pub dropped: u64,
 }
 
 /// What one ring of a collection lost: the key the ring belongs to -- the
@@ -1770,6 +1804,14 @@ pub trait Collector {
         Vec::new()
     }
 
+    /// How this collector stamps a row it read from a table the kernel
+    /// filled between drains, for a collector that reads such rows. `None`
+    /// says nothing, and a reader must not take it to mean each row is
+    /// stamped at its own event.
+    fn row_stamp(&self) -> Option<RowStamp> {
+        None
+    }
+
     /// The frames behind each stack identity this collector interned.
     ///
     /// Empty for everything that does not capture stacks, which is most of
@@ -2437,6 +2479,7 @@ fn run_core(
         mut closed_because,
         stopped_because,
         mut escalated,
+        mut drains,
     } = drive(
         &mut slots,
         &mut paces,
@@ -2483,6 +2526,7 @@ fn run_core(
                 events[index].append(&mut trailing);
                 let collector_losses = collector.losses();
                 losses[index].absorb(collector_losses);
+                drains[index].grew_to(losses[index].dropped, closing_ns);
                 if let Some(stop) = resolved[index]
                     .request
                     .window
@@ -2562,13 +2606,14 @@ fn run_core(
         .iter()
         .enumerate()
         .map(|(index, slot)| {
-            let (value_attr, stacks, collector_notes, by_ring, facts) = match slot {
+            let (value_attr, stacks, collector_notes, by_ring, facts, row_stamp) = match slot {
                 Slot::Attached(collector) => (
                     collector.value_attr(),
                     collector.stacks(),
                     collector.notes(),
                     collector.losses_by_ring(),
                     collector.facts(),
+                    collector.row_stamp(),
                 ),
                 Slot::Detached(record) => (
                     record.value_attr,
@@ -2576,10 +2621,16 @@ fn run_core(
                     record.notes.clone(),
                     record.by_ring.clone(),
                     record.facts.clone(),
+                    record.row_stamp,
                 ),
-                Slot::Waiting(_) | Slot::Missed => {
-                    ("", BTreeMap::new(), Vec::new(), Vec::new(), Vec::new())
-                }
+                Slot::Waiting(_) | Slot::Missed => (
+                    "",
+                    BTreeMap::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                ),
             };
             let mut collected = std::mem::take(&mut events[index]);
             collected.sort_by_key(|event| event.ts_ns);
@@ -2613,6 +2664,8 @@ fn run_core(
                 detached: matches!(slot, Slot::Detached(_)),
                 by_ring,
                 facts,
+                row_stamp,
+                drains: std::mem::take(&mut drains[index].placed),
             }
         })
         .collect::<Vec<Collection>>();
@@ -2830,6 +2883,28 @@ struct Detached {
     notes: Vec<String>,
     by_ring: Vec<RingLoss>,
     facts: Vec<String>,
+    row_stamp: Option<RowStamp>,
+}
+
+/// One request's drops placed in time, as the runner reads them: each read
+/// that found the collection's total grown adds the growth at its time.
+#[derive(Debug, Clone, Default)]
+struct Drains {
+    placed: Vec<DrainDrop>,
+    seen: u64,
+}
+
+impl Drains {
+    /// The collection has dropped `total` in all by `ts_ns`.
+    fn grew_to(&mut self, total: u64, ts_ns: u64) {
+        if total > self.seen {
+            self.placed.push(DrainDrop {
+                ts_ns,
+                dropped: total - self.seen,
+            });
+            self.seen = total;
+        }
+    }
 }
 
 /// When one request is attached and detached, in nanoseconds after the run
@@ -3685,6 +3760,7 @@ struct Driven {
     stopped_because: String,
     /// What the escalation said about each request once the run was over.
     escalated: Vec<Vec<String>>,
+    drains: Vec<Drains>,
 }
 
 /// Why one request stopped being read before the run ended.
@@ -3780,6 +3856,7 @@ fn drive(
         // out between them, and only then are the two clock reads a round
         // worth taking: with one collector the share is the whole.
         attributing: count > 1,
+        drains: vec![Drains::default(); count],
     };
     // A held request the runner could not hold -- a collector given at exec
     // -- is never attached, and has said why already.
@@ -4044,6 +4121,7 @@ fn drive(
         closed_because: ledger.closed_because,
         stopped_because,
         escalated,
+        drains: ledger.drains,
     }
 }
 
@@ -4076,6 +4154,8 @@ struct Ledger {
     watched: Vec<Watched>,
     closed_because: Vec<Option<String>>,
     attributing: bool,
+    /// Each request's drops placed in time, and the total they sum to.
+    drains: Vec<Drains>,
 }
 
 impl Ledger {
@@ -4099,6 +4179,13 @@ impl Ledger {
             Ok(mut sampled) => {
                 self.sequences[index] += sampled.len() as u64;
                 self.events[index].append(&mut sampled);
+                // A drained collector's count is read at each drain, which is
+                // what places its drops in time; a polled one's is read once,
+                // at its stop, for what a read of its losses would cost.
+                if collector.tick().is_some() {
+                    let dropped = self.losses[index].dropped + collector.losses().dropped;
+                    self.drains[index].grew_to(dropped, monotonic_ns());
+                }
             }
             Err(SampleError::TargetGone(reason)) if about_workload => return Some(reason),
             Err(SampleError::TargetGone(reason)) => {
@@ -4261,12 +4348,14 @@ impl Ledger {
         let mut trailing = collector.stop();
         self.events[index].append(&mut trailing);
         self.losses[index].absorb(collector.losses());
+        self.drains[index].grew_to(self.losses[index].dropped, closed_ns);
         let record = Detached {
             value_attr: collector.value_attr(),
             stacks: collector.stacks(),
             notes: collector.notes(),
             by_ring: collector.losses_by_ring(),
             facts: collector.facts(),
+            row_stamp: collector.row_stamp(),
         };
         // The last look at what it spent inside the target, while its
         // programs are still open to be read.
@@ -4618,7 +4707,7 @@ impl<'r, 'a> Recording<'r, 'a> {
         let self_cpu_ns = rusage_ns(libc::RUSAGE_SELF);
         let mut collections = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
-            let (value_attr, stacks, collector_notes, collector_losses, collector_facts) =
+            let (value_attr, stacks, collector_notes, collector_losses, collector_facts, row_stamp) =
                 match slot {
                     Slot::Attached(collector) => (
                         collector.value_attr(),
@@ -4626,6 +4715,7 @@ impl<'r, 'a> Recording<'r, 'a> {
                         collector.notes(),
                         collector.losses(),
                         collector.facts(),
+                        collector.row_stamp(),
                     ),
                     Slot::Detached(record) => (
                         record.value_attr,
@@ -4633,6 +4723,7 @@ impl<'r, 'a> Recording<'r, 'a> {
                         record.notes.clone(),
                         Losses::default(),
                         record.facts.clone(),
+                        record.row_stamp,
                     ),
                     Slot::Waiting(_) | Slot::Missed => (
                         "",
@@ -4640,6 +4731,7 @@ impl<'r, 'a> Recording<'r, 'a> {
                         Vec::new(),
                         Losses::default(),
                         Vec::new(),
+                        None,
                     ),
                 };
             let mut events: Vec<Event> = ledger.events[index]
@@ -4710,6 +4802,16 @@ impl<'r, 'a> Recording<'r, 'a> {
                 // ring's are the run's: they cannot be split per document.
                 by_ring: Vec::new(),
                 facts: collector_facts,
+                row_stamp,
+                // The drains read inside this document's window. The first
+                // may hold drops made before it opened: a drain counts what
+                // was dropped since the one before it.
+                drains: ledger.drains[index]
+                    .placed
+                    .iter()
+                    .filter(|drain| drain.ts_ns >= opened_ns && drain.ts_ns <= now_ns)
+                    .copied()
+                    .collect(),
             });
         }
 
@@ -6831,6 +6933,106 @@ mod tests {
         );
         assert_eq!(driven.losses[1].dropped, 7);
         assert_eq!(driven.losses[0].dropped, 0, "and nobody else's");
+    }
+
+    /// A drained collector's drops are placed at the drains that read them:
+    /// one entry per drain whose count grew, by what it grew, in order, and
+    /// summing to the collection's drop count. A polled collector's are not
+    /// read until its stop. A detach places what its stop read last.
+    #[test]
+    fn a_drained_collector_s_drops_are_placed_at_the_drains_that_read_them() {
+        struct Dropping {
+            id: CollectorId,
+            dropped: u64,
+            reads: u64,
+            tick: Option<StdDuration>,
+        }
+        impl Collector for Dropping {
+            fn id(&self) -> &CollectorId {
+                &self.id
+            }
+            fn value_attr(&self) -> &'static str {
+                "count"
+            }
+            fn sample(&mut self, _: u64) -> Result<Vec<Event>, SampleError> {
+                // Three drops on every other drain, so some drains add none.
+                self.reads += 1;
+                if self.reads % 2 == 0 {
+                    self.dropped += 3;
+                }
+                Ok(Vec::new())
+            }
+            fn stop(&mut self) -> Vec<Event> {
+                self.dropped += 5;
+                Vec::new()
+            }
+            fn tick(&self) -> Option<StdDuration> {
+                self.tick
+            }
+            fn losses(&self) -> Losses {
+                Losses {
+                    dropped: self.dropped,
+                    ..Losses::default()
+                }
+            }
+        }
+        let dropping = |name: &str, tick| {
+            Box::new(Dropping {
+                id: CollectorId::new(name),
+                dropped: 0,
+                reads: 0,
+                tick,
+            })
+        };
+        let mut slots = vec![
+            Slot::Attached(dropping("drained", Some(StdDuration::from_millis(10)))),
+            Slot::Attached(dropping("polled", None)),
+        ];
+        let mut paces = vec![pace_ms(10), pace_ms(10)];
+        let plans = [Plan::of(Some("..60ms".parse().unwrap())), Plan::default()];
+        let mut spending = Spending::weighed_against_this_process(vec![
+            windowed(Some("..60ms"), poll_ms(10)),
+            windowed(None, poll_ms(10)),
+        ]);
+        let opened_ns = spending.opened_ns;
+        let deadline_ns = opened_ns + 100_000_000;
+        let driven = drive(
+            &mut slots,
+            &mut paces,
+            &plans,
+            &[true, true],
+            None,
+            &mut spending,
+            None,
+            None,
+            until(deadline_ns),
+        );
+
+        let drained = &driven.drains[0].placed;
+        assert!(drained.len() >= 3, "{drained:?}");
+        assert_eq!(
+            drained.iter().map(|drain| drain.dropped).sum::<u64>(),
+            driven.losses[0].dropped,
+            "{drained:?}"
+        );
+        assert!(
+            drained
+                .windows(2)
+                .all(|pair| pair[0].ts_ns <= pair[1].ts_ns),
+            "{drained:?}"
+        );
+        assert!(drained.iter().all(|drain| drain.dropped > 0));
+        // The detach's stop dropped five more, placed at the detach.
+        let last = drained.last().unwrap();
+        assert_eq!(last.dropped, 5, "{drained:?}");
+        assert_eq!(last.ts_ns, driven.watched[0].closed_ns);
+        assert!(drained
+            .iter()
+            .all(|drain| drain.ts_ns >= opened_ns && drain.ts_ns <= last.ts_ns));
+
+        // The polled one dropped on its reads too, but nobody read its count:
+        // it is placed at its stop, which `drive` leaves to the run's end.
+        assert!(driven.drains[1].placed.is_empty());
     }
 
     /// A run whose every request has a window that closes needs no duration:

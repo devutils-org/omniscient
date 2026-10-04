@@ -280,6 +280,11 @@ impl Collector for HistogramCollector {
         "lat_ns"
     }
 
+    fn row_stamp(&self) -> Option<crate::collect::RowStamp> {
+        use crate::collect::RowStamp;
+        Some(RowStamp::DrainClose)
+    }
+
     fn start(&mut self) -> Result<(), String> {
         let load = self
             .load

@@ -124,13 +124,16 @@ beside the figure.
 
 ## Limits
 
-- Losses carry no time: a collector says how many records it dropped, not
-  when. Only a live run's eviction is placed; every other loss is shaded across
-  the whole window. Placing a drop needs the runner to count drops per drain
-  round with its timestamp (filed in `docs/fixes/w19-heatmap.md`).
-- The value attribute of each source is named in the view (`latency_ns`,
-  `wait_ns`, `lat_ns`, `duration_ns`; the first numeric attribute otherwise):
-  `results.json` does not carry the collection's value attribute.
+- Losses are shaded across the whole window: the fixtures predate the run
+  placing them. `results.json` now carries each drained source's drops at
+  the drains that read them (`drains`: `ts_ns`, `dropped`); shading a drop
+  in the column of its drain is the strip's next step, once a recording
+  holds them.
+- The value attribute and how a drained source stamps its rows are read
+  from `results.json` (`value_attr`, `row_stamp`) when it says them; the
+  view's own table (`latency_ns`, `wait_ns`, `lat_ns`, `duration_ns`; at the
+  drain's close unless `sched.runqlat`) is kept for a recording made before
+  it did.
 - A kernel row's place in time is its window, ~100 ms on the fixtures: a
   column narrower than that smears it. Zooming in on `sched.runqlat` draws
   the window, not the moment.
