@@ -135,3 +135,23 @@ every witness (fio, iostat) runs without root.
   is "within 50 %, omn below", not "same numbers".
 - **src (later)**: the twenty-second wave's four io gaps above; a `dir` key
   on `io.latency`, so a read/write split needs no filter.
+
+## Review
+
+- **`omn_summary` ignored `losses`** (gap): fixed. The parser behind
+  `fio-clat` and `iostat-r-await` (and the count `omn_summary_as_fio`
+  gives) now refuses a result whose `losses` removed records -- `dropped`,
+  `failed_reads`, `undecoded`, `throttled` -- naming each non-zero counter,
+  since the count would be short and the mean over the survivors only.
+  `late_ticks` is left out: it delays a periodic emit and removes nothing
+  from a summary of events. New unit test
+  `omn_summary_refuses_a_run_that_lost_records` (the real captures with
+  `dropped: 12` and `undecoded: 3` refused, `late_ticks: 1` still read).
+  Ten io unit tests, all green.
+- **The iostat rows claimed both directions** (gap): fixed.
+  `docs/replaces/io.md` now says, on each of the three rows, that `r/s`,
+  `rkB/s` and `r_await` are held (`[key=dir:read]`, `rwbs =~ 'R'`) and that
+  `w/s`, `wkB/s` and `w_await` have no pair; "a write pair" is in each
+  row's gap column.
+- `every_row_names_a_pair_or_why_none` still fails after merging `main`
+  (`a531e7a`), on a perfrecord row only -- not this stream's.
