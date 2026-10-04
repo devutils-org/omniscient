@@ -86,8 +86,9 @@ pub struct Tile {
     /// The trust of every figure the tile draws, badged on its last line
     /// so the headline stays a number read at a glance.
     pub trust: Trust,
-    /// The run holds what the tile reads: false when it is refused or
-    /// absent, and then it is never the one marked as explaining a suspect.
+    /// The tile draws something read: false when its source is refused or
+    /// absent, or held but empty (a plain headline and nothing under it),
+    /// and then it is never the one marked as explaining a suspect.
     pub held: bool,
 }
 
@@ -108,6 +109,7 @@ impl Tile {
 
     /// The headline, in the trust style and the colour of what was found.
     fn headline(mut self, text: String, colour: Option<Color>, trust: &Trust) -> Tile {
+        self.held = true;
         let mut style = trust.style();
         if let Some(colour) = colour {
             style = style.fg(colour).add_modifier(Modifier::BOLD);
@@ -118,8 +120,10 @@ impl Tile {
         self
     }
 
-    /// A headline that is not a figure: nothing was there to read.
+    /// A headline that is not a figure: nothing was there to read, so the
+    /// tile holds nothing that could explain a suspect.
     fn plain(mut self, text: &str) -> Tile {
+        self.held = false;
         self.text = text.to_owned();
         self.figure = dim(text.to_owned());
         self
@@ -482,6 +486,9 @@ fn cpu_tile(ctx: &Ctx<'_>) -> Tile {
                 trust.style().fg(Class::Blocked.colour()),
             ));
             tile.trust.merge(trust);
+            // Off cpu is what explains a sleep or a block: the tile holds it
+            // even when on cpu has no sample.
+            tile.held = true;
             line
         }
         None if off.is_empty() => dim("off cpu: not in this run".to_owned()),
@@ -625,7 +632,7 @@ fn request_tile(ctx: &Ctx<'_>) -> Tile {
         {
             Some(refusal) => tile
                 .plain("no request declared")
-                .line(dim(format!("net.request refused: {}", refusal.reason))),
+                .line(dim(format!("refused: {}", refusal.reason))),
             None => tile.absent(data, &["net.request"]),
         };
     }
@@ -756,7 +763,10 @@ fn threads_tile(ctx: &Ctx<'_>, target: &Target) -> Tile {
     let plural = if threads.len() == 1 { "" } else { "s" };
     let tile = tile.headline(format!("{} thread{plural}", threads.len()), None, &trust);
     if events.is_empty() {
-        return tile.line(dim("no switch recorded".to_owned()));
+        // A thread count alone does not explain a run-queue wait.
+        let mut tile = tile.line(dim("no switch recorded".to_owned()));
+        tile.held = false;
+        return tile;
     }
     let points: Vec<(u64, f64)> = events
         .iter()
@@ -993,7 +1003,21 @@ fn draw_tile(frame: &mut Frame<'_>, area: Rect, tile: &Tile, selected: bool) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let mut lines = vec![tile.figure.clone()];
-    lines.extend(tile.detail.iter().cloned());
+    // A detail line is wrapped, not cut: a refusal's reason is read whole.
+    lines.extend(
+        tile.detail
+            .iter()
+            .flat_map(|line| wrap(line, inner.width as usize)),
+    );
+    let height = inner.height as usize;
+    if lines.len() > height && height > 0 {
+        // More than the tile holds: its last row says so, and the view the
+        // tile opens has the rest.
+        lines.truncate(height);
+        if let Some(last) = lines.last_mut() {
+            ellipsis(last, inner.width as usize);
+        }
+    }
     let badges = tile.trust.badges();
     if !badges.is_empty() && inner.height as usize > lines.len() {
         // The trust on the tile's last row: the headline stays a number.
@@ -1002,6 +1026,74 @@ fn draw_tile(frame: &mut Frame<'_>, area: Rect, tile: &Tile, selected: bool) {
         lines.push(Line::from(badges));
     }
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// A line broken to `width` columns, at a space when the row has one, the
+/// spans keeping their styles.
+fn wrap(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+    if width == 0 || line.width() <= width {
+        return vec![line.clone()];
+    }
+    let cells: Vec<(char, Style, usize)> = line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            span.content
+                .chars()
+                .map(move |ch| (ch, span.style, Span::raw(ch.to_string()).width()))
+        })
+        .collect();
+    let mut rows: Vec<Vec<(char, Style, usize)>> = Vec::new();
+    let mut row: Vec<(char, Style, usize)> = Vec::new();
+    let mut used = 0;
+    for cell in cells {
+        if used + cell.2 > width && !row.is_empty() {
+            let rest = match row.iter().rposition(|(ch, _, _)| *ch == ' ') {
+                Some(space) if space > 0 => {
+                    let rest = row.split_off(space + 1);
+                    row.pop();
+                    rest
+                }
+                _ => Vec::new(),
+            };
+            rows.push(std::mem::replace(&mut row, rest));
+            used = row.iter().map(|cell| cell.2).sum();
+        }
+        if row.is_empty() && cell.0 == ' ' {
+            continue;
+        }
+        used += cell.2;
+        row.push(cell);
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows.into_iter()
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (ch, style, _) in row {
+                match spans.last_mut() {
+                    Some(last) if last.style == style => last.content.to_mut().push(ch),
+                    _ => spans.push(Span::styled(ch.to_string(), style)),
+                }
+            }
+            Line::from(spans).style(line.style)
+        })
+        .collect()
+}
+
+/// A row cut short: its end replaced by `…` within `width`.
+fn ellipsis(line: &mut Line<'static>, width: usize) {
+    while line.width() + 1 > width {
+        let Some(span) = line.spans.last_mut() else {
+            break;
+        };
+        if span.content.to_mut().pop().is_none() || span.content.is_empty() {
+            line.spans.pop();
+        }
+    }
+    let style = line.spans.last().map(|span| span.style).unwrap_or_default();
+    line.spans.push(Span::styled("…", style));
 }
 
 /// What the header says of the target: its pid, and how long it ran.
@@ -1203,7 +1295,15 @@ mod tests {
         // request: python3 declares none, and the tile says so, not red.
         let request = tile(&tiles, "request");
         assert_eq!(request.text, "no request declared");
-        assert!(all_text(request).contains("net.request refused"));
+        let said = all_text(request);
+        assert!(
+            said.contains("refused: cannot start collecting `net.request`"),
+            "{said}"
+        );
+        assert!(
+            said.contains("no USDT probe"),
+            "the reason is kept whole: {said}"
+        );
 
         // threads: the main thread, the lock holder, the peer's at least.
         let threads = tile(&tiles, "threads");
@@ -1288,6 +1388,50 @@ mod tests {
             assert_eq!(tile.text, "not in this run", "{}", tile.name);
             assert!(tile.suspect.is_none());
         }
+    }
+
+    #[test]
+    fn a_long_reason_is_wrapped_not_cut() {
+        let line = dim(
+            "net.request refused: cannot start collector: python3 carries no USDT probe".to_owned(),
+        );
+        let rows = wrap(&line, 20);
+        assert!(rows.len() > 1);
+        assert!(rows.iter().all(|row| row.width() <= 20));
+        let joined: Vec<String> = rows
+            .iter()
+            .map(|row| row.spans.iter().map(|span| span.content.as_ref()).collect())
+            .collect();
+        assert_eq!(
+            joined.join(" "),
+            "net.request refused: cannot start collector: python3 carries no USDT probe"
+        );
+        assert!(rows.iter().all(|row| row
+            .spans
+            .iter()
+            .all(|span| span.style == line.spans[0].style)));
+    }
+
+    #[test]
+    fn a_row_cut_short_ends_in_an_ellipsis_within_the_width() {
+        let mut line = Line::from(vec![Span::raw("abc "), Span::raw("defgh")]);
+        ellipsis(&mut line, 6);
+        assert_eq!(line.width(), 6);
+        assert_eq!(line.to_string(), "abc d…");
+    }
+
+    #[test]
+    fn an_empty_tile_is_never_marked() {
+        for tile in [
+            Tile::new("wake", "wake", &Focus::default()).plain("no wake-up of the target"),
+            Tile::new("cpu", "flame", &Focus::default()).plain("no cpu sample"),
+        ] {
+            assert!(!tile.held, "{}", tile.text);
+        }
+        let tile = Tile::new("cpu", "flame", &Focus::default())
+            .plain("no cpu sample")
+            .headline("x".to_owned(), None, &Trust::clean());
+        assert!(tile.held);
     }
 
     #[test]

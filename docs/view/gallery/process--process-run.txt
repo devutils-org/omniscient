@@ -16,14 +16,14 @@ omn top │ recording process-run │ 2.39s                           view: snap
 │└─────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└─────────────────────────────────────┘│
 │┌ request → request ──────────────────┐┌ latency → heatmap ───────────────────┐┌ threads → lanes ────────────────────┐│
 ││no request declared                  ││max 926µs                             ││3 threads                            ││
-││net.request refused: cannot start col││                █                     ││▁ ▁▁ ▂█▇▃  ▁  ▂▁▂▁     ▂             ││
-││                                     ││io.latency: 38 measured, median 31.7µs││854 context switches                 ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││                                      ││                                     ││
-││                                     ││-79 lost (67.5%) 22 late ~low det degr││21 late ~low det degraded x2         ││
+││refused: cannot start collecting     ││                █                     ││▁ ▁▁ ▂█▇▃  ▁  ▂▁▂▁     ▂             ││
+││`net.request`: /usr/bin/python3      ││io.latency: 38 measured, median 31.7µs││854 context switches                 ││
+││declares no request: `net.request`   ││                                      ││                                     ││
+││follows a request from a             ││                                      ││                                     ││
+││`request__start(id)` probe to a      ││                                      ││                                     ││
+││`request__done(id)` probe the        ││                                      ││                                     ││
+││program fires itself, any provider,  ││                                      ││                                     ││
+││and this one carries no USDT probe…  ││-79 lost (67.5%) 22 late ~low det degr││21 late ~low det degraded x2         ││
 │└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
 │┌ wake → wake ────────────────────────┐┌ flows → flows ───────────────────────┐┌ gpu → lanes ────────────────────────┐│
 ││hardirq ×7                           ││net ↓256KiB ↑1.00MiB                  ││no kernel launched                   ││
