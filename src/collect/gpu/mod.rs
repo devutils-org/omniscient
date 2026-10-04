@@ -8,12 +8,14 @@
 //! directory has a `vendor` layer no other family needs.
 
 mod api;
+mod counters;
 mod device;
 #[cfg(test)]
 mod fixture;
 mod job;
 mod kernel;
 mod nvml;
+mod profile;
 
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +47,14 @@ pub fn factories() -> Vec<Factory> {
         // The device's side of the same calls, through CUPTI loaded into the
         // program by the driver; `kernel.rs` says why only at exec.
         Factory::new("gpu.kernel", "vendor:cupti", |_| kernel::prepare()),
+        // Inside kernels, through the same library and the same socket:
+        // `counters.rs` and `profile.rs` say what each reads.
+        Factory::new("gpu.counters", "vendor:cupti", |_| {
+            counters::prepare_counters()
+        }),
+        Factory::new("gpu.profile", "vendor:cupti", |_| {
+            counters::prepare_profile()
+        }),
         Factory::new("gpu.freq", "vendor:nvml", |resolved| {
             Ok(Box::new(Prepare::new(Metric::Freq, resolved.request.mode)))
         }),

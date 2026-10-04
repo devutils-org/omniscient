@@ -459,7 +459,8 @@ invisible to every CPU profiler.
 | `gpu.mem` | VRAM allocated / used | `fs:sys` amdgpu · `vendor:nvml` | poll | system, pid | free | medium |
 | `gpu.kernel` | GPU time per kernel | `vendor:cupti` (Activity) · `rocprof` · `l0` | trace | launch | med | medium |
 | `gpu.api` | host-side submission latency | `preload` cuLaunchKernel / vkQueueSubmit | trace | pid | low | low |
-| `gpu.counters` | internal counters (SM, cache, stalls) | `vendor:ncu` · `rocprofv3` | snapshot | pid | **extreme** | **high** |
+| `gpu.counters` | counters inside a kernel, per launch, each with its verdict | `vendor:cupti` (range profiler, kernel replay) · `rocprofv3` | trace | launch | **extreme** | medium |
+| `gpu.profile` | where time goes inside a kernel: sampled PCs, source lines, stall reasons | `vendor:cupti` (PC sampling) | trace | launch | med | low |
 
 **Caveats**
 
@@ -474,9 +475,17 @@ invisible to every CPU profiler.
   exists.
 - GPU timestamps live in **another clock domain**: calibration is mandatory, and
   `ts_err_ns` is non-zero on all these events.
-- `gpu.counters` does **not measure time** (replay destroys the timeline): its
-  value is counter determinism. It locks clocks by default (`--clock-control base`
-  in `ncu`) — to be aligned with the harness protocol.
+- `gpu.counters` does **not measure time** (kernel replay runs each launch
+  several times): its value is counter determinism, judged per counter and per
+  run (`reproducible here` / `not dominated by this workload`), never declared.
+  A run asking for it and for `gpu.kernel`, or for it and `gpu.profile`, is
+  refused. The clocks are reported, never locked: CUPTI locks them only when
+  asked, and `omn` never asks. Other work on a shared device is counted with
+  the program's; a launch whose window held more blocks than its grid is
+  found, counted as `disturbed` and left out.
+- `gpu.profile` samples a program counter per SM every `2^n` cycles: a share of
+  samples is a share of SM cycles, placed on a source line when the kernel has
+  line information (`-lineinfo`), by offset when it does not.
 
 ---
 
