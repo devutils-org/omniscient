@@ -1,0 +1,62 @@
+{
+  "results": [
+    {
+      "label": "cpu.oncpu_time",
+      "source": "cpu.oncpu_time",
+      "unit": "ns",
+      "backend": "bpf:raw_tp",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "task:232098",
+              "count": 4,
+              "min": 422780.0,
+              "max": 993587954.0,
+              "mean": 497434521.75,
+              "last": 12532806.0
+            }
+          ]
+        }
+      ],
+      "events_seen": 4,
+      "observed_ns": 2009235285,
+      "window": {
+        "run_opened_ns": 2379048480640,
+        "opened_ns": 2380051883335,
+        "closed_ns": 2382061118620,
+        "attached": true,
+        "attach_ns": 3257790
+      },
+      "stopped_because": "its window closed: detached 3.026 s into the run, as asked",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "degradations": [
+        "watched only from 1.000 s into the run, as its window asked: attaching it took 3.3ms while the target ran, and its numbers cover its window alone"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 4422000,
+        "attributed_cpu_ns": 4422000,
+        "observed_cpu_ns": 2006127106,
+        "observed_from": "the cpu time of 232098 (the scheduler's own nanoseconds, children reaped included)",
+        "wall_ns": 2025645020,
+        "measurement_ns": 159940,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel is not timing eBPF programs on this run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable",
+        "before_window_cpu_ns": 187976000,
+        "after_window_cpu_ns": 200000
+      },
+      "served_by": [
+        "bpf:raw_tp"
+      ],
+      "value_attr": "ns"
+    }
+  ]
+}
