@@ -23,20 +23,26 @@ while other streams used the board.
   device at the start, and one at the end where the event reasons moved.
 - **For GPU timings**: `collect::gpu::timing_clock_facts()` returns, per
   device, the state and -- unless a lock was *shown* -- "GPU timings on device
-  N (...) were taken on unlocked clocks" (or "clocks not shown to be locked"
-  when unknown). Unknown is never counted as locked. For cupti's and profiler's
+  N (...) were taken on clocks not shown to be locked". A range in the
+  performance levels is `ClockLock::NotShownLocked`, never "unlocked" (review,
+  section 9). Unknown is never counted as locked. For cupti's and profiler's
   `facts()` (section 7).
 - **Repeated readings are counted and said.** The driver refreshes the energy
   counter and the draw every 100 ms, and the occupancy about once a second.
   `gpu.power` and `gpu.engine_busy` events carry `driver_sample: new|repeat`.
+  The counter's repeat is its value unchanged (it only rises); the
+  occupancy's is the driver's newest sample timestamp unchanged
+  (`nvmlDeviceGetSamples`), never its value (review, section 9).
   A run with repeats gets a degradation: "90 of 101 readings found the energy
   counter where the previous reading left it ... it moved 10 times in 997 ms,
   about every 99 ms and this run read it every 10 ms". Clocks, temperature and
   memory are not counted, because the same reading twice may just mean a
   steady value.
-- **The default poll stays at 1 s.** That is already at or above every
-  refresh measured. A faster explicit poll is honoured and its repeats are
-  said, rather than silently re-paced.
+- **The default poll stays at 1 s.** That is at or above the counter's and
+  the draw's 100 ms, and just under the occupancy's 1.0-1.13 s: an occasional
+  occupancy reading at the default is a repeat, counted and said (1 of 9 in
+  an 8 s run). A faster explicit poll is honoured and its repeats are said,
+  rather than silently re-paced.
 - **NVML's cost per call kind**, measured in the thread's own cpu (the driver
   spins, so cpu ≈ wall), went into the caveats and `docs/scenarios/gpu.md`:
   persistence 6-9 µs, temperature 12-48 µs, memory ~85 µs, process list
@@ -73,9 +79,11 @@ and the repeat counts and notes through `omn`.
 Reasoned, not shown:
 - **That a `nvidia-smi -lgc` lock shows in the performance levels** as
   min = max at every level. NVML has no reader for locked clocks, and
-  `nvidia-smi -q` prints none. I could not lock the clocks (forbidden). The
-  error goes in the safe direction: a locked board read as unlocked gets an
-  extra warning, and nothing is ever falsely claimed locked.
+  `nvidia-smi -q` prints none. I could not lock the clocks (forbidden). So
+  the verdict claims neither way without evidence: one frequency at every
+  level reads "locked", a range reads "not shown locked" -- never "not
+  locked", which on a `-lgc`-locked board would be a confident false
+  statement.
 - That the 100 ms / ~1 s refresh holds on other boards. The notes report what
   each run observes, not these constants.
 - The counter under-count's mechanism (it belongs to the driver). The numbers
@@ -101,13 +109,18 @@ Reasoned, not shown:
   timing whose lock was not shown says so. *Why*: locking needs root and does
   not survive a reboot; an unlocked clock makes a timing depend on what ran
   before it. A lock is claimed only from evidence (every performance level at
-  one shader frequency, or application clocks set). Unknown is never locked.
+  one shader frequency, or application clocks set), and so is a free clock:
+  a range in the levels reads "not shown locked", since a `-lgc` lock may not
+  show there. Unknown is never locked.
 - **A reading the driver had not refreshed is counted and said, not
   dropped and not re-paced**: `driver_sample: repeat` per event, a
   degradation per run with the observed refresh. Only figures whose repeat
-  can be told from a steady value (energy counter, occupancy).
-- **The default poll stays 1 s**, at or above every NVML refresh measured
-  (100 ms energy and draw, ~1 s occupancy).
+  can be told from a steady value: the energy counter by its value, the
+  occupancy by the driver's sample timestamp, never by its value.
+- **The default poll stays 1 s**, at or above the energy counter's and the
+  draw's 100 ms and just under the occupancy's 1.0-1.13 s; the occasional
+  occupancy repeat at the default is counted and said, not avoided by a
+  per-source cadence.
 - **Energy is `--mode count`**: polling the counter starves it, for every
   reader of the board. A poll that sees its own counter below half its draw
   says so.
@@ -179,5 +192,56 @@ sudo nvidia-smi -pm 1
 sudo nvidia-smi -pm 0
 ```
 
-If run 1 prints "not locked", the verdict needs another source of evidence.
-File it against `mod.rs::shader_lock`.
+If run 1 prints "not shown locked", the levels do not show a `-lgc` lock and
+the verdict needs another source of evidence: file it against
+`mod.rs::shader_lock`. If it prints "locked at 1500 MHz", a range can then be
+read as free: `shader_lock` may return a shown-unlocked verdict again, with the
+run cited.
+
+## 9. Review
+
+One fix round, after an adversarial review. Each finding, and what came of it.
+
+- **Defect: occupancy repeats counted by value** (`device.rs`). Right. An idle
+  board at the default poll read 3 of 9 readings as stale and a 1600 ms
+  refresh. Fixed: the occupancy's fingerprint is now the timestamp of the
+  driver's newest sample (`Nvml::newest_occupancy_sample_us`, over
+  `nvmlDeviceGetSamples`, asked only for samples newer than the last one
+  seen). A driver with no sample buffer gets no occupancy count rather than a
+  guess. The same command now reads 1 of 9, "about every 1143 ms". The reviewer
+  was also right that the 1 s default is just under the occupancy's 1.0-1.13 s;
+  the docs no longer say the default is at or above every refresh. The default
+  stays (it is shared by every source, and the occasional repeat is said).
+  The sample timestamp costs 0.7-2.4 ms of cpu per reading on top of the
+  occupancy read (the caveat and the cost table say so). This is defect 8 in
+  `docs/scenarios/gpu.md`. End-to-end test:
+  `scenario_gpu::an_occupancy_repeat_is_a_driver_sample_seen_twice_not_a_value_seen_twice`
+  (200 ms poll: most readings repeat; 1.5 s poll of an idle board: repeats
+  claimed bounded by the gaps under 1.2 s in the run's own offsets, 0 here,
+  while values repeat).
+- **Gap: a range in the performance levels read as "unlocked"** (`mod.rs`).
+  Right. `ClockLock::Unlocked` is now `ClockLock::NotShownLocked` (serde
+  `not_shown_locked`); `locked()` answers `None` for it, the fact says "shader
+  clock not shown locked (the driver's performance levels let it run from 300
+  to 2205 MHz; a lock set with `nvidia-smi -lgc` is not known to show there)",
+  and the timing line says "clocks not shown to be locked". Privileged run 1
+  (section 8) decides whether a range can be read as free again.
+- **Gap: the cost test reads the counter and the draw without the energy
+  lock** (`nvml.rs`). Right. The lock moved to `collect::gpu::energy_counter_lock`
+  (`mod.rs`, test-only), one for the whole `--lib` binary; the cost test and
+  `device.rs`'s three counter tests all take it.
+- **Gap: brief item 1 not delivered in this stream.** True, and not fixable
+  from this row: the environment is `src/capabilities.rs` (coordinator), the
+  timing facts are `kernel.rs` (cupti) and `counters.rs`/`profile.rs`
+  (profiler). `timing_clock_facts()` is ready and tested; section 7 has the
+  one-line patches. **Coordinator: the decision "a GPU timing taken on
+  unlocked clocks says so in its facts line" stays unmet in this wave unless
+  those land at merge.** Note the wording changed: the line now reads "taken
+  on clocks not shown to be locked" on this board.
+- **Nit: `device.rs` outside the row.** Disclosed in section 6; this round's
+  fix also lives there, for the same reason.
+- **Nit: "five levels"** in `docs/scenarios/gpu.md`. Wrong; the board's text
+  has three (perf 0, 1 and 4). Fixed.
+- **Nit: the slow power poll's note was checked only when it had no
+  repeats.** Fixed: `note_agrees_with_events` holds every run's note to its
+  events' marks, both ways, for the power test and the new occupancy test.

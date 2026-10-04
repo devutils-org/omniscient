@@ -492,12 +492,17 @@ streams used the board. `docs/scenarios/gpu.md` has the tables and the tests.
   applications-clocks event reason is documented as unused, and this board
   answers "not supported" for application clocks. The verdict comes from the
   driver's performance levels: locked only where every level runs the shader
-  clock at one frequency. That a `-lgc` lock shows there is reasoned, not shown.
+  clock at one frequency. That a `-lgc` lock shows there is reasoned, not shown,
+  so a range there is stated as "not shown locked", never as "not locked".
 - **The driver's pace.** The energy counter and the draw move every 100 ms;
-  the occupancy about once a second, by the driver's own sample timestamps.
-  A faster poll reads the same sample again; the run counts those readings,
-  marks each event `driver_sample: repeat` or `new`, and says how often the
-  figure moved. The one-second default poll is at or above every refresh.
+  the occupancy about once a second (1.0 to 1.13 s), by the driver's own
+  sample timestamps. A faster poll reads the same sample again; the run counts
+  those readings -- the counter by its value, which only rises, the occupancy
+  by that timestamp, because an idle board reads the same value from new
+  samples -- marks each event `driver_sample: repeat` or `new`, and says how
+  often the figure moved. The one-second default poll is at or above the
+  counter's and the draw's refresh, and just under the occupancy's: at the
+  default an occasional occupancy reading is a repeat, counted and said.
 - **What a call costs** is cpu, not waiting: the driver spins. From 6 µs
   (persistence mode) and 12 to 48 µs (temperature) to 0.8 to 2.1 ms (one clock
   domain) and 2.8 to 7 ms (the energy counter, the draw). A `gpu.power` read is

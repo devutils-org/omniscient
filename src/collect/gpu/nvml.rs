@@ -27,10 +27,15 @@ use std::fmt;
 const NVML_SUCCESS: c_int = 0;
 const NVML_ERROR_UNINITIALIZED: c_int = 1;
 const NVML_ERROR_NOT_SUPPORTED: c_int = 3;
+/// `nvmlDeviceGetSamples` with nothing newer than the timestamp it was given.
+const NVML_ERROR_NOT_FOUND: c_int = 6;
 /// The buffer was too small, and `count` now holds what it would have needed.
 const NVML_ERROR_INSUFFICIENT_SIZE: c_int = 7;
 const NVML_ERROR_DRIVER_NOT_LOADED: c_int = 9;
 const NVML_ERROR_GPU_IS_LOST: c_int = 15;
+
+/// `nvmlSamplingType_t`: the driver's own samples of the occupancy.
+const NVML_GPU_UTILIZATION_SAMPLES: c_int = 1;
 
 /// `nvmlClockType_t`.
 const NVML_CLOCK_GRAPHICS: c_int = 0;
@@ -132,6 +137,16 @@ pub struct Utilization {
     pub memory: c_uint,
 }
 
+/// `nvmlSample_t`: the driver's timestamp in microseconds, then an 8-byte
+/// union whose type the call reports separately. Only the timestamp is read
+/// here, so the union is kept as its bits.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Sample {
+    pub timestamp_us: u64,
+    value: u64,
+}
+
 /// `nvmlProcessInfo_v2_t`, which is what the `_v3` entry points take.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -176,6 +191,8 @@ type FnClockOfId = unsafe extern "C" fn(*mut c_void, c_int, c_int, *mut c_uint) 
 type FnEnableState = unsafe extern "C" fn(*mut c_void, *mut c_uint) -> c_int;
 type FnReasons = unsafe extern "C" fn(*mut c_void, *mut u64) -> c_int;
 type FnPerfModes = unsafe extern "C" fn(*mut c_void, *mut PerfModes) -> c_int;
+type FnSamples =
+    unsafe extern "C" fn(*mut c_void, c_int, u64, *mut c_int, *mut c_uint, *mut Sample) -> c_int;
 
 /// `nvmlDevicePerfModes_v1_t`: a version word, then the text.
 #[repr(C)]
@@ -219,6 +236,7 @@ pub struct Nvml {
     persistence: Option<FnEnableState>,
     event_reasons: Option<FnReasons>,
     perf_modes: Option<FnPerfModes>,
+    samples: Option<FnSamples>,
 }
 
 impl Nvml {
@@ -318,6 +336,7 @@ impl Nvml {
                 event_reasons: optional(library, "nvmlDeviceGetCurrentClocksEventReasons")
                     .or_else(|| optional(library, "nvmlDeviceGetCurrentClocksThrottleReasons")),
                 perf_modes: optional(library, "nvmlDeviceGetPerformanceModes"),
+                samples: optional(library, "nvmlDeviceGetSamples"),
             }
         };
         Ok(nvml)
@@ -554,6 +573,69 @@ impl Nvml {
         Ok(utilization)
     }
 
+    /// The timestamp, in the driver's microseconds, of the newest occupancy
+    /// sample the driver took after `after_us`; `None` when it took none since.
+    ///
+    /// This is what tells a refreshed occupancy from a repeated one: the
+    /// figure itself may read the same twice because the board is steadily
+    /// idle or steadily busy, but the driver's sample timestamp only moves
+    /// when the driver sampled. `after_us` of 0 asks for the whole buffer the
+    /// driver keeps, which is how a first reading finds the newest sample.
+    pub fn newest_occupancy_sample_us(
+        &self,
+        device: DeviceHandle,
+        after_us: u64,
+    ) -> Result<Option<u64>, NvmlError> {
+        let entry = self
+            .samples
+            .ok_or_else(|| self.missing("nvmlDeviceGetSamples"))?;
+        let mut value_type: c_int = 0;
+        let mut count: c_uint = 0;
+        // SAFETY: a null buffer is how the API is asked for the number of
+        // samples it would return; both outputs are live locals.
+        let code = unsafe {
+            entry(
+                device.0,
+                NVML_GPU_UTILIZATION_SAMPLES,
+                after_us,
+                &mut value_type,
+                &mut count,
+                std::ptr::null_mut(),
+            )
+        };
+        if code == NVML_ERROR_NOT_FOUND {
+            return Ok(None);
+        }
+        self.check(code)?;
+        if count == 0 {
+            return Ok(None);
+        }
+        let mut buffer = vec![Sample::default(); count as usize];
+        let mut written = count;
+        // SAFETY: the buffer holds `count` samples, the number the library
+        // just asked for, and `written` says so.
+        let code = unsafe {
+            entry(
+                device.0,
+                NVML_GPU_UTILIZATION_SAMPLES,
+                after_us,
+                &mut value_type,
+                &mut written,
+                buffer.as_mut_ptr(),
+            )
+        };
+        if code == NVML_ERROR_NOT_FOUND {
+            return Ok(None);
+        }
+        self.check(code)?;
+        buffer.truncate((written as usize).min(count as usize));
+        Ok(buffer
+            .iter()
+            .map(|sample| sample.timestamp_us)
+            .filter(|&ts| ts > after_us)
+            .max())
+    }
+
     /// The processes holding memory on a device, compute and graphics both.
     ///
     /// The two lists are separate in the API and a process can be on either, so
@@ -747,6 +829,7 @@ mod tests {
 
         assert_eq!(size_of::<Utilization>(), 8);
         assert_eq!(align_of::<Utilization>(), 4);
+        assert_eq!(size_of::<Sample>(), 16);
 
         // `{ u32; u64; u32; u32 }` with C padding: the 64-bit field is aligned
         // to 8, which puts the two instance ids at 16 and 20 and the size at
@@ -803,6 +886,10 @@ mod tests {
         let Ok(device) = nvml.device(0) else {
             return eprintln!("skipped: the NVIDIA management library sees no device");
         };
+        // Forty back-to-back reads of the counter and of the draw starve the
+        // counter for every reader (defect 7), so no test that holds the
+        // counter against the draw may run meanwhile.
+        let _energy = super::super::energy_counter_lock();
         let thread_cpu_ns = || {
             let mut now = libc::timespec {
                 tv_sec: 0,
@@ -834,6 +921,14 @@ mod tests {
         cost("memory", &|| nvml.memory(device).is_ok());
         cost("processes", &|| nvml.processes(device).is_ok());
         cost("utilization", &|| nvml.utilization(device).is_ok());
+        let newest = nvml
+            .newest_occupancy_sample_us(device, 0)
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        cost("occupancy sample", &|| {
+            nvml.newest_occupancy_sample_us(device, newest).is_ok()
+        });
         cost("clock (one domain)", &|| nvml.sm_clock_mhz(device).is_ok());
         cost("power (instantaneous)", &|| {
             nvml.power_milliwatts(device).is_ok()

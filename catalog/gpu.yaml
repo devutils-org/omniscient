@@ -60,10 +60,13 @@
        what summary and timeline carry."
     - "Through NVML the driver refreshes the occupancy about once a second: the
        timestamps of its own sample buffer are 1.0 to 1.13 s apart on the
-       board this was measured on. A faster poll reads the same sample again;
-       the run counts the readings identical to the one before, marks each
-       event `driver_sample: repeat` or `new`, and says how often the figure
-       moved. A read costs 0.6 to 1.4 ms of the tool's cpu, spent spinning in
+       board this was measured on, so even the one-second default poll reads
+       one sample twice now and then. A repeat is told by that timestamp, never
+       by the value: a steadily idle or busy board reads the same figure from
+       new samples. The run counts the readings whose driver sample had not
+       moved, marks each event `driver_sample: repeat` or `new`, and says how
+       often the figure moved. A read costs 0.6 to 1.4 ms of the tool's cpu,
+       and the sample timestamp beside it 0.7 to 2.4 ms more, spent spinning in
        the driver rather than waiting."
 
 - id: gpu.freq

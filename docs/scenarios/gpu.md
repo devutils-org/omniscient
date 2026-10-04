@@ -172,9 +172,10 @@ each device's clock state before the observed program starts and again when the
 run stops, and states it in the run's notes:
 
 ```
-note: vendor:nvml: device 0 (NVIDIA GeForce RTX 2080 Ti): shader clock not locked
-      (the driver may run it anywhere from 300 to 2205 MHz), no application clocks
-      (this board does not have them), persistence mode off, clock event reasons: none
+note: vendor:nvml: device 0 (NVIDIA GeForce RTX 2080 Ti): shader clock not shown locked
+      (the driver's performance levels let it run from 300 to 2205 MHz; a lock set with
+      `nvidia-smi -lgc` is not known to show there), no application clocks (this board
+      does not have them), persistence mode off, clock event reasons: none
 note: at the end of the run: vendor:nvml: device 0 (...): ..., clock event reasons: reliability
 ```
 
@@ -185,7 +186,7 @@ What each part rests on, on driver 615.71.09:
 
 | part | read through | on this board |
 |---|---|---|
-| shader clock lock | `nvmlDeviceGetPerformanceModes`: the shader clock range of every performance level | five levels, 300 to 645 MHz at the lowest, 300 to 2205 at the highest: not locked |
+| shader clock lock | `nvmlDeviceGetPerformanceModes`: the shader clock range of every performance level | three levels (perf 0, 1 and 4), 300 to 645 MHz at the lowest, 300 to 2205 at the highest: not shown locked |
 | application clocks | `nvmlDeviceGetClock`, target against default | "not supported" -- `nvidia-smi` says "deprecated" for the same field |
 | persistence mode | `nvmlDeviceGetPersistenceMode` | off, as `nvidia-smi` says |
 | clock event reasons | `nvmlDeviceGetCurrentClocksEventReasons` | `gpu_idle` or `reliability` at idle |
@@ -198,14 +199,15 @@ and a lock is claimed only where *every* level runs the shader clock at one and
 the same frequency -- an idle level pinned at its floor, which NVML's own
 header shows at `perf=0`, is not a lock. That a `-lgc` lock shows in those
 levels is **reasoned, not shown**: locking the clocks is a privileged run this
-wave did not make (`docs/fixes/w19-device.md` has the command). Until it is
-made, the failure mode is the safe one: a locked board read as unlocked gets a
-warning it did not need; the reverse cannot happen, because unknown is never
-read as locked.
+wave did not make (`docs/fixes/w19-device.md` has the command). So a range in
+the levels is said as what it shows -- "not shown locked" -- and never as
+"not locked": a board someone locked with `-lgc` would otherwise be told, with
+confidence, that its clock was free. Nothing is read as locked without
+evidence, and nothing as free without evidence either.
 
 A GPU **timing** -- `gpu.kernel`, `gpu.profile` -- carries one more line for
 each device whose lock was not shown, from `collect::gpu::timing_clock_facts`:
-"GPU timings on device 0 (...) were taken on unlocked clocks: the shader clock
+"GPU timings on device 0 (...) were taken on clocks not shown to be locked: the shader clock
 ran wherever the driver put it, so a duration depends on what the device did
 before it".
 
@@ -233,10 +235,13 @@ one measurement repeated.
 | clocks, memory | at the call | they change when the board does |
 
 So the run counts what it can tell. The energy counter only rises while the
-board draws power, so a counter that has not moved is a sample read again; the
-occupancy pair repeated at a poll faster than its second-wide window is the
-same sample. Both are counted, each event says `driver_sample: repeat` or
-`new`, and the run says how often the figure actually moved:
+board draws power, so a counter that has not moved is a sample read again. The
+occupancy is not such a figure -- an idle board reads 0.02 from one sample to
+the next, a saturated one 1.0 -- so its repeat is told by the timestamp of the
+driver's newest sample (`nvmlDeviceGetSamples`, asked only for samples newer
+than the one the previous reading saw), never by the value. Both are counted,
+each event says `driver_sample: repeat` or `new`, and the run says how often
+the figure actually moved:
 
 ```
 degraded: vendor:nvml: 90 of 101 readings found the energy counter where the previous
@@ -248,11 +253,19 @@ degraded: vendor:nvml: 90 of 101 readings found the energy counter where the pre
 A clock or a temperature that reads the same twice may simply be steady, and is
 not counted: counting it would be counting a guess.
 
-**The default poll stays at one second**, which is at or above every refresh in
-the table: the 100 ms of the counter and the draw, and the occupancy's second
-within the noise of its 1.0 to 1.13 s. A request that asks for faster gets what
-it asked for, with its repeats counted and said, rather than a cadence quietly
-changed under it.
+Counting the occupancy by its value was defect 8 (below): an idle board read
+as a stale one.
+
+**The default poll stays at one second.** It is at or above the 100 ms of the
+counter and the draw. It is *not* at or above the occupancy's 1.0 to 1.13 s:
+at the default, a reading now and then finds the sample the previous one read
+(1 of 9 in the 8 s run measured after defect 8's fix), and the run counts and
+says it. The default is shared by every source
+(`Mode::DEFAULT_POLL_INTERVAL`), and a per-source one would need the request
+layer; an occasional repeat, said, is not worth a cadence special to one
+source.
+A request that asks for faster gets what it asked for, with its repeats
+counted and said, rather than a cadence quietly changed under it.
 
 **What a call costs**, in the tool's own cpu time per call, three runs of
 `what_each_kind_of_call_costs_the_calling_thread` while other streams used the
@@ -266,6 +279,7 @@ spins, it does not sleep, so every millisecond here is a millisecond of a core.
 | memory (device totals) | 81 to 86 µs |
 | process list (`gpu.mem` with a process) | 0.13 to 0.66 ms |
 | occupancy | 0.6 to 1.4 ms |
+| occupancy sample timestamp (read beside it) | 0.7 to 2.4 ms |
 | clock event reasons | 0.65 to 2.6 ms |
 | clock, one domain (`gpu.freq` reads three) | 0.8 to 2.1 ms |
 | performance levels | 1.9 to 2.0 ms |
@@ -279,8 +293,10 @@ performance levels, the event reasons, the application clocks and persistence
 mode, a few milliseconds each time.
 
 Tests: `a_power_poll_faster_than_the_driver_refreshes_counts_its_repeats_and_says_so`
-(10 ms against 300 ms, as a separation, the note's count held to the events'
-marks), `a_poll_faster_than_the_driver_refreshes_repeats_and_a_slower_one_does_not`
+(10 ms against 300 ms, as a separation, both runs' notes held to their events'
+marks), `an_occupancy_repeat_is_a_driver_sample_seen_twice_not_a_value_seen_twice`
+(200 ms against 1.5 s, the slow run's claim bounded by the gaps in its own
+offsets), `a_poll_faster_than_the_driver_refreshes_repeats_and_a_slower_one_does_not`
 beside the collector, and the cost test beside the library.
 
 ---
@@ -797,6 +813,26 @@ Pinned by `a_counter_below_half_the_draw_beside_it_is_said_and_a_close_one_is_no
 and, on the board, by the scenario that polls at 10 ms and requires the note.
 
 ---
+
+### 8. The occupancy's repeats were its values seen twice -- **fixed**
+
+Found in review of the nineteenth wave. The first cut of the repeat counter
+fingerprinted the occupancy pair by its bits: the guess the counter refuses
+for temperature and clocks, because a steady value is not a stale one. On an
+idle board at the default poll, `omn gpu.engine_busy --mode poll --emit
+timeline -- sleep 8` read 0.02, 0.04, 0.02, 0.03, 0.05, 0.05, 0.02, 0.02,
+0.02, called 3 of 9 readings one driver sample read again, put the refresh at
+"about every 1600 ms" against the 1.0 to 1.13 s measured, marked new samples
+`driver_sample: repeat`, and told the user to poll slower.
+
+The fix takes the occupancy's identity from the driver: the timestamp of the
+newest sample in its buffer (`nvmlDeviceGetSamples`, asked only for samples
+newer than the one the previous reading saw). The same command now reads 1 of
+9 as a repeat, "about every 1143 ms"; a 1.5 s poll of an idle board, whose
+values repeat, claims none. A driver that keeps no samples gets no occupancy
+count at all rather than a guess.
+
+Test: `an_occupancy_repeat_is_a_driver_sample_seen_twice_not_a_value_seen_twice`.
 
 ## Cost of running these
 

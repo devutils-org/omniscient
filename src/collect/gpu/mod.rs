@@ -173,7 +173,7 @@ fn hwmon(name: &str) -> Probe {
 /// A kernel timed on such a device is timed on a clock nobody chose. Locking
 /// the clocks needs root and does not survive a reboot, so `omn` does not do
 /// it: it reads what is set, records it beside the run, and says so on every
-/// GPU timing taken while nothing was locked.
+/// GPU timing taken while no lock was shown.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClockState {
     /// The device's index, which is only meaningful within this boot.
@@ -200,10 +200,15 @@ pub enum ClockLock {
     /// One frequency, from `how`: the application clocks in force, or every
     /// performance level of the driver's reduced to a single shader clock.
     Locked { mhz: u32, how: String },
-    /// The range the driver may run the shader clock in at its highest
-    /// performance level. Narrower than the device's own range when someone
-    /// restricted it without pinning it, which is still not a lock.
-    Unlocked {
+    /// The driver's performance levels let the shader clock range, at the
+    /// highest level, from `min_mhz` to `max_mhz` -- narrower than the
+    /// device's own range when someone restricted it without pinning it.
+    ///
+    /// Not "unlocked": NVML has no reader for a lock set with
+    /// `nvidia-smi -lgc` (`nvmlDeviceSetGpuLockedClocks`), and that such a lock
+    /// shows in these levels is not yet shown. So a range here means the lock
+    /// was not shown, which is said as such and never as a free clock.
+    NotShownLocked {
         min_mhz: u32,
         max_mhz: u32,
         device_max_mhz: Option<u32>,
@@ -317,13 +322,13 @@ impl ClockState {
     }
 
     /// `Some(true)` when the shader clock is shown held at one frequency,
-    /// `Some(false)` when it is shown free, `None` when this driver could not
-    /// say -- which is never counted as locked.
+    /// `None` otherwise -- which is never counted as locked. Nothing here can
+    /// show a clock free (see [`ClockLock::NotShownLocked`]), so `Some(false)`
+    /// is never answered; it is kept for the reader that will.
     pub fn locked(&self) -> Option<bool> {
         match self.shader_clock {
             ClockLock::Locked { .. } => Some(true),
-            ClockLock::Unlocked { .. } => Some(false),
-            ClockLock::Unknown { .. } => None,
+            ClockLock::NotShownLocked { .. } | ClockLock::Unknown { .. } => None,
         }
     }
 
@@ -331,7 +336,7 @@ impl ClockState {
     pub fn fact(&self) -> String {
         let clock = match &self.shader_clock {
             ClockLock::Locked { mhz, how } => format!("shader clock locked at {mhz} MHz ({how})"),
-            ClockLock::Unlocked {
+            ClockLock::NotShownLocked {
                 min_mhz,
                 max_mhz,
                 device_max_mhz,
@@ -341,8 +346,9 @@ impl ClockState {
                     _ => String::new(),
                 };
                 format!(
-                    "shader clock not locked (the driver may run it anywhere from {min_mhz} to \
-                     {max_mhz} MHz{narrowed})"
+                    "shader clock not shown locked (the driver's performance levels let it run \
+                     from {min_mhz} to {max_mhz} MHz{narrowed}; a lock set with `nvidia-smi -lgc` \
+                     is not known to show there)"
                 )
             }
             ClockLock::Unknown { reason } => format!("shader clock lock state unknown ({reason})"),
@@ -485,8 +491,9 @@ pub fn perf_levels(text: &str) -> Vec<PerfLevel> {
 }
 
 /// The lock verdict from the driver's performance levels: locked when every
-/// level runs the shader clock at one and the same frequency, free otherwise,
-/// with the range of the highest level -- the one a busy device runs in.
+/// level runs the shader clock at one and the same frequency, not shown locked
+/// otherwise, with the range of the highest level -- the one a busy device
+/// runs in.
 fn shader_lock(levels: &[PerfLevel], device_max_mhz: Option<u32>) -> ClockLock {
     let Some(top) = levels.iter().max_by_key(|level| level.perf) else {
         return ClockLock::Unknown {
@@ -502,7 +509,7 @@ fn shader_lock(levels: &[PerfLevel], device_max_mhz: Option<u32>) -> ClockLock {
             how: "every performance level runs the shader clock at one frequency".to_owned(),
         }
     } else {
-        ClockLock::Unlocked {
+        ClockLock::NotShownLocked {
             min_mhz: top.shader_min_mhz,
             max_mhz: top.shader_max_mhz,
             device_max_mhz,
@@ -526,6 +533,18 @@ pub fn reason_names(mask: u64) -> Vec<String> {
         names.push(format!("unnamed:{unknown:#x}"));
     }
     names
+}
+
+/// Held by every in-process test that reads the energy counter or the draw.
+/// Reading either fast makes the counter under-count for every reader of the
+/// board (`docs/scenarios/gpu.md`, defect 7), so a test that reads them back
+/// to back -- the repeat counter, the cost of each call -- and a test that
+/// holds the counter against the draw cannot run side by side. One lock for
+/// the whole test binary, because `nvml.rs`'s tests and `device.rs`'s share it.
+#[cfg(test)]
+pub(crate) fn energy_counter_lock() -> std::sync::MutexGuard<'static, ()> {
+    static ENERGY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ENERGY.lock().unwrap_or_else(|held| held.into_inner())
 }
 
 #[cfg(test)]
@@ -608,7 +627,7 @@ mod tests {
     fn a_lock_is_one_frequency_at_every_level_and_nothing_less() {
         assert_eq!(
             shader_lock(&perf_levels(THIS_BOARD), Some(2205)),
-            ClockLock::Unlocked {
+            ClockLock::NotShownLocked {
                 min_mhz: 300,
                 max_mhz: 2205,
                 device_max_mhz: Some(2205)
@@ -616,7 +635,7 @@ mod tests {
         );
         assert!(matches!(
             shader_lock(&perf_levels(HEADER_EXAMPLE), None),
-            ClockLock::Unlocked { .. }
+            ClockLock::NotShownLocked { .. }
         ));
         let pinned = "perf=0, nvclockmin=1500, nvclockmax=1500 ; perf=1, nvclockmin=1500, \
                       nvclockmax=1500";
@@ -641,8 +660,10 @@ mod tests {
         );
     }
 
-    /// Only a lock that was shown silences the timing line: unknown is said
-    /// as loudly as unlocked.
+    /// Only a lock that was shown silences the timing line. A range in the
+    /// performance levels is not shown free -- a `-lgc` lock may not show
+    /// there -- so it reads as "not shown to be locked", exactly as unknown
+    /// does, and never as "unlocked".
     #[test]
     fn a_timing_says_its_clocks_were_free_unless_a_lock_was_shown() {
         let state = |shader_clock| ClockState {
@@ -660,12 +681,18 @@ mod tests {
         });
         assert_eq!(locked.timing_fact(), None);
         assert!(locked.fact().contains("locked at 1500 MHz"));
-        let free = state(ClockLock::Unlocked {
+        let ranged = state(ClockLock::NotShownLocked {
             min_mhz: 300,
             max_mhz: 2205,
             device_max_mhz: Some(2205),
         });
-        assert!(free.timing_fact().unwrap().contains("unlocked clocks"));
+        assert_eq!(ranged.locked(), None);
+        let fact = ranged.fact();
+        assert!(fact.contains("not shown locked"), "{fact}");
+        assert!(!fact.contains("not locked"), "{fact}");
+        let timing = ranged.timing_fact().unwrap();
+        assert!(timing.contains("not shown to be locked"), "{timing}");
+        assert!(!timing.contains("unlocked"), "{timing}");
         let unknown = state(ClockLock::Unknown {
             reason: "no levels".into(),
         });
@@ -712,7 +739,7 @@ mod tests {
             };
             assert_eq!(state.persistence, expected, "{}", state.fact());
         }
-        if let (Some(max), ClockLock::Unlocked { device_max_mhz, .. }) =
+        if let (Some(max), ClockLock::NotShownLocked { device_max_mhz, .. }) =
             (smi("clocks.max.sm"), &state.shader_clock)
         {
             assert_eq!(device_max_mhz.map(|mhz| mhz.to_string()), Some(max));

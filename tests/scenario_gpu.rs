@@ -1445,30 +1445,142 @@ fn a_power_poll_faster_than_the_driver_refreshes_counts_its_repeats_and_says_so(
          every 300 ms on {slow_repeats} of {slow_reads}"
     );
 
-    let said = fast_notes
-        .iter()
-        .find(|note| note.contains("found the energy counter where the previous reading left it"))
-        .unwrap_or_else(|| panic!("the repeats were not said: {fast_notes:?}"));
-    assert!(
-        said.starts_with(&format!(
-            "vendor:nvml: {fast_repeats} of {fast_reads} readings"
-        )),
-        "the note and the events disagree: {said}"
-    );
+    note_agrees_with_events("energy counter", fast_repeats, fast_reads, &fast_notes);
     assert!(
         fast_notes
             .iter()
             .any(|note| note.contains("energy counter implies")),
         "a 10 ms poll starves the counter and the run did not say so: {fast_notes:?}"
     );
-    if slow_repeats == 0 {
+    // The slow run's note, or its absence, agrees with its own events too.
+    note_agrees_with_events("energy counter", slow_repeats, slow_reads, &slow_notes);
+}
+
+/// The repeat note a run carries says exactly as many repeats as its events
+/// are marked with, and a run none of whose events repeated says none.
+fn note_agrees_with_events(figure: &str, repeats: usize, reads: usize, notes: &[String]) {
+    let claim = format!("found the {figure} where the previous reading left it");
+    let said: Vec<&String> = notes.iter().filter(|note| note.contains(&claim)).collect();
+    if repeats == 0 {
         assert!(
-            !slow_notes
-                .iter()
-                .any(|note| note.contains("found the energy counter")),
-            "a run with no repeat claims some: {slow_notes:?}"
+            said.is_empty(),
+            "a run with no repeat claims some: {notes:?}"
+        );
+    } else {
+        assert_eq!(said.len(), 1, "{notes:?}");
+        assert!(
+            said[0].starts_with(&format!("vendor:nvml: {repeats} of {reads} readings")),
+            "the note and the events disagree ({repeats} of {reads}): {}",
+            said[0]
         );
     }
+}
+
+/// The occupancy's repeats are told by the driver's own sample timestamp, not
+/// by the value: a board that is steadily idle reads 0.02 sample after sample,
+/// and those are new samples. The ground truth is the driver's pace -- about a
+/// second between samples on the board this was written on -- held as a
+/// separation: a 200 ms poll reads most samples several times over and says
+/// so, and a 1.5 s poll, slower than any refresh measured, reads a new sample
+/// every time and claims no repeat, however many of its values are equal.
+///
+/// Before the timestamp, the repeat was the value seen twice, and an idle
+/// board at the one-second default reported a third of its readings as stale
+/// and a refresh period of 1.6 s.
+#[test]
+fn an_occupancy_repeat_is_a_driver_sample_seen_twice_not_a_value_seen_twice() {
+    if let Err(reason) = device() {
+        return eprintln!("skipped: {reason}");
+    }
+    let _together = shared();
+    // The points, as (offset, value), and the run's degradations.
+    let poll = |interval: &str, seconds: &str| -> (Vec<(u64, f64)>, Vec<String>) {
+        let ran = omn(&[
+            "gpu.engine_busy",
+            "--mode",
+            &format!("poll@{interval}"),
+            "--emit",
+            "timeline",
+            "--format",
+            "json",
+            "--",
+            "sleep",
+            seconds,
+        ]);
+        assert!(ran.status.success(), "{}", stderr(&ran));
+        let run: Value = serde_json::from_str(&stdout(&ran)).expect("json");
+        let result = &run["results"][0];
+        let points = output(result, "timeline")["series"][0]["points"]
+            .as_array()
+            .expect("a timeline carries points")
+            .iter()
+            .map(|point| {
+                (
+                    point["offset_ns"].as_u64().expect("a point has an offset"),
+                    point["value"].as_f64().expect("a point is a number"),
+                )
+            })
+            .collect();
+        let notes = result["degradations"]
+            .as_array()
+            .map(|all| {
+                all.iter()
+                    .map(|note| note.as_str().unwrap_or_default().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        (points, notes)
+    };
+    // How many repeats a run's note claims; none when it has no note.
+    let claimed = |notes: &[String]| -> usize {
+        notes
+            .iter()
+            .find(|note| note.contains("found the occupancy where the previous reading left it"))
+            .map(|said| {
+                said.trim_start_matches("vendor:nvml: ")
+                    .split(' ')
+                    .next()
+                    .and_then(|count| count.parse().ok())
+                    .unwrap_or_else(|| panic!("the note does not start with its count: {said}"))
+            })
+            .unwrap_or(0)
+    };
+
+    let (fast, fast_notes) = poll("200ms", "3");
+    let fast_repeats = claimed(&fast_notes);
+    assert!(
+        fast_repeats * 2 > fast.len(),
+        "polled every 200 ms, only {fast_repeats} of {} readings repeated a sample the driver \
+         refreshes about once a second: {fast_notes:?}",
+        fast.len()
+    );
+    note_agrees_with_events("occupancy", fast_repeats, fast.len(), &fast_notes);
+
+    // 4.4 s, so that the reading the run takes when its target exits lands
+    // 1.4 s after the last scheduled one rather than a moment after it, which
+    // would be a real repeat. The bound is still taken from the offsets: a
+    // repeat may be claimed only across a gap shorter than any refresh seen
+    // could explain, and here there is none.
+    let (slow, slow_notes) = poll("1500ms", "4.4");
+    let short_gaps = slow
+        .windows(2)
+        .filter(|pair| pair[1].0 - pair[0].0 < 1_200_000_000)
+        .count();
+    let equal = slow
+        .windows(2)
+        .filter(|pair| pair[0].1 == pair[1].1)
+        .count();
+    assert!(
+        claimed(&slow_notes) <= short_gaps,
+        "polled every 1.5 s, slower than the driver refreshes, {} readings ({equal} equal to the \
+         one before, {short_gaps} under 1.2 s after it) were claimed as repeats: {slow_notes:?}",
+        claimed(&slow_notes)
+    );
+    eprintln!(
+        "polled every 1.5 s: {} readings, {equal} equal to the one before, {} claimed as repeats",
+        slow.len(),
+        claimed(&slow_notes)
+    );
 }
 
 /// The other way a run of this family ends early: the process it was following

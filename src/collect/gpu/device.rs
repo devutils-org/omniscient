@@ -78,20 +78,19 @@ impl Metric {
         }
     }
 
-    /// What identifies one driver sample of that figure, from the attributes
-    /// of a reading.
+    /// What identifies one driver sample of the energy counter, from the
+    /// attributes of a reading: the counter itself, which only ever rises
+    /// while the board draws power. The occupancy has no such figure -- an
+    /// idle or saturated board reads the same pair sample after sample -- so
+    /// its identity is the driver's own sample timestamp, read beside it
+    /// ([`occupancy_fingerprint`]), never its value.
     fn fingerprint(self, attrs: &[Attr]) -> Option<u64> {
-        self.refreshed_figure()?;
-        let bits = |name: &str| {
-            attrs
-                .iter()
-                .find(|attr| attr.name == name)
-                .and_then(|attr| attr.value.as_f64())
-                .map(f64::to_bits)
-        };
         match self {
-            Metric::Power => bits("joules"),
-            Metric::EngineBusy => Some(bits("ratio")? ^ bits("memory_ratio")?.rotate_left(32)),
+            Metric::Power => attrs
+                .iter()
+                .find(|attr| attr.name == "joules")
+                .and_then(|attr| attr.value.as_f64())
+                .map(f64::to_bits),
             _ => None,
         }
     }
@@ -107,6 +106,41 @@ impl Metric {
             Metric::Mem => "bytes",
             Metric::EngineBusy => "ratio",
         }
+    }
+}
+
+/// The identity of the occupancy sample a reading saw: the timestamp of the
+/// newest sample the driver had taken, asked for after the one the previous
+/// reading saw. No newer sample means the reading is the previous one again,
+/// whatever its value; a newer one means the driver refreshed, even if the
+/// board is so steadily idle or busy that the figure did not move.
+///
+/// `None` -- the reading is not counted either way -- when the driver keeps no
+/// samples or the call failed: a repeat that cannot be shown is not guessed
+/// from the value.
+///
+/// The two calls are not atomic: a sample the driver takes between the
+/// occupancy read and this one is credited to this reading, and the next
+/// reading, which does carry it, is counted as a repeat. That is one reading
+/// in a refresh period at most, and only when a refresh falls inside the
+/// millisecond between two calls.
+fn occupancy_fingerprint(
+    nvml: &Nvml,
+    handle: DeviceHandle,
+    seen_us: &mut Vec<Option<u64>>,
+    device: usize,
+) -> Option<u64> {
+    if seen_us.len() <= device {
+        seen_us.resize(device + 1, None);
+    }
+    let after_us = seen_us[device].unwrap_or(0);
+    match nvml.newest_occupancy_sample_us(handle, after_us) {
+        Ok(Some(newest)) => {
+            seen_us[device] = Some(newest);
+            Some(newest)
+        }
+        Ok(None) => seen_us[device],
+        Err(_) => None,
     }
 }
 
@@ -178,6 +212,9 @@ pub struct NvmlCollector {
     /// How many readings found the driver's figure where the previous one
     /// left it. See [`Refresh`].
     refresh: Refresh,
+    /// Per device, the timestamp of the newest occupancy sample the driver
+    /// had taken at the last reading. See [`occupancy_fingerprint`].
+    occupancy_seen_us: Vec<Option<u64>>,
     /// The energy counter held against the draw read beside it. See
     /// [`CounterCheck`].
     counter_check: CounterCheck,
@@ -257,16 +294,19 @@ impl CounterCheck {
 /// Measured on the board this was written on (`docs/scenarios/gpu.md`, "What a
 /// poll can get from the driver"): the energy counter and the instantaneous
 /// draw move every 100 ms, the occupancy about once a second. Neither number
-/// is assumed here. A repeat is *observed* -- the reading is bit for bit the
-/// previous one -- and counted, and the note says how often the figure
-/// actually moved in this run.
+/// is assumed here. A repeat is *observed* -- the reading carries the driver
+/// sample the previous one carried: the same counter bit for bit, or the same
+/// occupancy sample timestamp -- and counted, and the note says how often the
+/// figure actually moved in this run.
 ///
 /// Only the two figures whose repeat can be told from a steady value are
 /// counted. The energy counter only ever rises while the board draws power,
-/// so an unchanged counter is an unrefreshed one; the occupancy pair is a
-/// driver average whose repeat at a poll faster than its window is the same
-/// sample. A clock or a temperature that reads the same twice may simply be
-/// steady, and counting it would be counting a guess.
+/// so an unchanged counter is an unrefreshed one. The occupancy's value is not
+/// such a figure -- a steadily idle or saturated board reads 0.02 or 1.0 sample
+/// after sample -- so its repeat is told by the driver's own sample timestamp,
+/// read beside it, and not by the value. A clock or a temperature that reads
+/// the same twice may simply be steady, the driver gives no sample timestamp
+/// for either, and counting them would be counting a guess.
 #[derive(Debug, Default)]
 struct Refresh {
     /// The last reading's fingerprint, per device.
@@ -382,6 +422,7 @@ impl NvmlCollector {
             clocks_at_start: Vec::new(),
             clocks_at_end: Vec::new(),
             refresh: Refresh::default(),
+            occupancy_seen_us: Vec::new(),
             counter_check: CounterCheck::default(),
         })
     }
@@ -618,7 +659,17 @@ impl Collector for NvmlCollector {
                 self.counter_check
                     .record(offset, &attrs, device.energy_base_ns, ts_ns);
             }
-            if let Some(fingerprint) = self.metric.fingerprint(&attrs) {
+            let fingerprint = if self.metric == Metric::EngineBusy {
+                occupancy_fingerprint(
+                    &self.nvml,
+                    device.handle,
+                    &mut self.occupancy_seen_us,
+                    offset,
+                )
+            } else {
+                self.metric.fingerprint(&attrs)
+            };
+            if let Some(fingerprint) = fingerprint {
                 let repeated = self.refresh.record(offset, fingerprint, ts_ns);
                 attrs.push(Attr::text(
                     "driver_sample",
@@ -785,15 +836,8 @@ mod tests {
     use super::*;
     use crate::collect::gpu::fixture::CudaArena;
 
-    /// Held by every test that reads the energy counter or polls the draw.
-    /// Reading either fast makes the counter under-count for every reader of
-    /// the board ([`CounterCheck`]), so a test that polls fast and a test that
-    /// holds the counter against the draw cannot run side by side.
-    static ENERGY: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn energy_lock() -> std::sync::MutexGuard<'static, ()> {
-        ENERGY.lock().unwrap_or_else(|held| held.into_inner())
-    }
+    // One lock for the whole test binary: see `energy_counter_lock` and `CounterCheck`.
+    use crate::collect::gpu::energy_counter_lock as energy_lock;
 
     /// Builds a collector for this process, or explains why this machine
     /// cannot run the test. Most machines have no NVIDIA device and must skip
