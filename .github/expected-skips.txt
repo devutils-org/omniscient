@@ -101,3 +101,10 @@ a-cold-file/[a-z]+: the cause was not there to be found: .*the storage was slowe
 # half of scenario_cpu's ceiling test needs a lowered sysctl or the `pmu`
 # collector (shown at paranoid 2 here, 2026-10-03).
 perf_event_max_sample_rate is [0-9]+, at or above the [0-9]+ asked
+# The reference tools (tests/reference.rs, catalog/references/README.md): the
+# cell installs none of them and grants no root, so a pair skips naming the
+# binary it lacks, the sudo it was refused, or the tool's own refusal. A pair
+# `omn` cannot serve here quotes omn's reason, which the lines above match.
+reference [a-z]+ .*: `[^`]+` is not installed here
+reference [a-z]+ .*: `sudo -n` does not grant root here
+reference [a-z]+ .*: `[^`]+` was refused on this machine
