@@ -1,1 +1,114 @@
-{"results":[{"label":"mem.latency","source":"mem.latency","unit":"cycles","backend":"pmu:ibs","outputs":[{"emit":"hist","layout":"log2","series":[{"key":"task:2984915","count":826,"min":9.0,"max":1719.0,"sum":297776.0,"buckets":[{"low":8,"high":16,"count":9},{"low":16,"high":32,"count":7},{"low":32,"high":64,"count":41},{"low":64,"high":128,"count":0},{"low":128,"high":256,"count":0},{"low":256,"high":512,"count":685},{"low":512,"high":1024,"count":66},{"low":1024,"high":2048,"count":18}],"unmeasured":720},{"key":"task:2984917","count":0,"min":0.0,"max":0.0,"sum":0.0,"buckets":[],"unmeasured":1}]}],"events_seen":1547,"observed_ns":1725902318,"window":{"run_opened_ns":71953165848621,"opened_ns":71953165848621,"closed_ns":71954891750939,"attached":true},"stopped_because":"the launched program exited with exit status 0","losses":{"dropped":0,"failed_reads":0,"late_ticks":0,"undecoded":0,"throttled":0},"lifetime":{"released_ns":71953165444814,"exited_ns":71954891734069,"exited_err_ns":5395556,"cpu_ns":1660603000},"degradations":["pmu:ibs: AMD family 17h times a load only when it misses L1d, so L1 hits are counted by level and are in no bucket; PEBS with a low latency threshold times them too","IBS tagged 5036 ops over 24 events on 24 cpus, one in every so many dispatched ops: 1547 were loads, 826 of them timed, and 47 were answered by a line another core held modified","721 of 1547 sampled loads carry no latency and are counted as unmeasured rather than bucketed: this cpu times a load only when it misses L1d, so the distribution is of the loads that missed; sampled loads by level: l1 721, l2 9, peer 49, ram 768","latencies are core cycles from the miss to the data, not nanoseconds: the core clock moves with load and temperature, and a cycle count is what the hardware measured"],"overhead":{"collector_cpu_ns":33373000,"attributed_cpu_ns":33373000,"observed_cpu_ns":1659999669,"observed_from":"the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 2984915 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)","wall_ns":1726402977,"measurement_ns":38100,"measurements":2,"in_target_cpu_ns":null,"in_target_from":"a perf event's counter is saved and restored on every context switch of the target, and a sampling event interrupts it, in the target's own context; the kernel does not account that time apart from the target's","before_window_cpu_ns":69201000,"after_window_cpu_ns":134000},"served_by":["pmu:ibs"],"period_ns":250000,"value_attr":"latency_cycles"}]}
+{
+  "results": [
+    {
+      "label": "mem.latency",
+      "source": "mem.latency",
+      "unit": "cycles",
+      "backend": "pmu:ibs",
+      "outputs": [
+        {
+          "emit": "hist",
+          "layout": "log2",
+          "series": [
+            {
+              "key": "task:211159",
+              "count": 1604,
+              "min": 9.0,
+              "max": 1993.0,
+              "sum": 498265.0,
+              "buckets": [
+                {
+                  "low": 8,
+                  "high": 16,
+                  "count": 5
+                },
+                {
+                  "low": 16,
+                  "high": 32,
+                  "count": 57
+                },
+                {
+                  "low": 32,
+                  "high": 64,
+                  "count": 144
+                },
+                {
+                  "low": 64,
+                  "high": 128,
+                  "count": 0
+                },
+                {
+                  "low": 128,
+                  "high": 256,
+                  "count": 2
+                },
+                {
+                  "low": 256,
+                  "high": 512,
+                  "count": 1312
+                },
+                {
+                  "low": 512,
+                  "high": 1024,
+                  "count": 58
+                },
+                {
+                  "low": 1024,
+                  "high": 2048,
+                  "count": 26
+                }
+              ],
+              "unmeasured": 375
+            }
+          ]
+        }
+      ],
+      "events_seen": 1979,
+      "observed_ns": 2325882756,
+      "window": {
+        "run_opened_ns": 2273705661607,
+        "opened_ns": 2273705661607,
+        "closed_ns": 2276031544363,
+        "attached": true
+      },
+      "stopped_because": "the launched program exited with exit status 0",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "lifetime": {
+        "released_ns": 2273705605456,
+        "exited_ns": 2276031535343,
+        "exited_err_ns": 5482848,
+        "cpu_ns": 2301432000
+      },
+      "degradations": [
+        "pmu:ibs: AMD family 17h times a load only when it misses L1d, so L1 hits are counted by level and are in no bucket; PEBS with a low latency threshold times them too",
+        "IBS tagged 5940 ops over 24 events on 24 cpus, one in every so many dispatched ops: 1979 were loads, 1604 of them timed, and 194 were answered by a line another core held modified",
+        "375 of 1979 sampled loads carry no latency and are counted as unmeasured rather than bucketed: this cpu times a load only when it misses L1d, so the distribution is of the loads that missed; sampled loads by level: l1 375, l2 5, peer 224, ram 1375",
+        "latencies are core cycles from the miss to the data, not nanoseconds: the core clock moves with load and temperature, and a cycle count is what the hardware measured"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 26105000,
+        "attributed_cpu_ns": 26105000,
+        "observed_cpu_ns": 2301281510,
+        "observed_from": "the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 211159 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)",
+        "wall_ns": 2326383211,
+        "measurement_ns": 35370,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "a perf event's counter is saved and restored on every context switch of the target, and a sampling event interrupts it, in the target's own context; the kernel does not account that time apart from the target's",
+        "before_window_cpu_ns": 43463000,
+        "after_window_cpu_ns": 130000
+      },
+      "served_by": [
+        "pmu:ibs"
+      ],
+      "period_ns": 250000,
+      "value_attr": "latency_cycles"
+    }
+  ]
+}

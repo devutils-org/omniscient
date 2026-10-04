@@ -1,1 +1,221 @@
-{"results":[{"label":"cpu.profile","source":"cpu.profile","unit":"count","backend":"pmu:sw","outputs":[{"emit":"stack","stacks":[{"stack":2,"events":267,"total":267.0},{"stack":5,"events":170,"total":170.0},{"stack":3,"events":90,"total":90.0},{"stack":4,"events":77,"total":77.0},{"stack":7,"events":61,"total":61.0},{"stack":6,"events":27,"total":27.0},{"stack":0,"events":1,"total":1.0},{"stack":1,"events":1,"total":1.0},{"stack":8,"events":1,"total":1.0},{"stack":9,"events":1,"total":1.0},{"stack":10,"events":1,"total":1.0},{"stack":11,"events":1,"total":1.0},{"stack":12,"events":1,"total":1.0}],"unattributed":0}],"events_seen":699,"observed_ns":1004735195,"window":{"run_opened_ns":71952055460103,"opened_ns":71952055460103,"closed_ns":71953060195298,"attached":true},"stopped_because":"the launched program exited with exit status 0","losses":{"dropped":0,"failed_reads":0,"late_ticks":0,"undecoded":0,"throttled":0},"lifetime":{"released_ns":71952055364521,"exited_ns":71953060172828,"exited_err_ns":3558354,"cpu_ns":692379000},"degradations":["pmu:sw: time-based sampling: blind to phases running at reduced frequency","20 frames fell in no mapping of the target and are reported by address","stacks unwound by `fp+leaf`: only the leaf's caller is recovered: a frameless function further down the stack still breaks the chain under it"],"stacks":{"0":["0x7f5bda38d7e8","0x7f5bda38ea61","0x7f5bda38d260","0x7f5bda390a11","0x7f5bda37f361","0x7f5bda37c4b3","0x7f5bda377b16","0x7f5bda3771f2"],"1":["0x561c0b937d25","0x7f5bda0278b9","0x7f5bda027781","0x561c0b937b3e","0x561c0b9415b9","0x561c0b95d2a2","0x561c0b95b01c","0x561c0b95900e","0x561c0b96d162","0x561c0b977f02","0x7f5bda0ebbe9","0x7f5bda0e5fe6","entry_SYSCALL_64_after_hwframe","do_syscall_64","__do_sys_clone","kernel_clone","copy_process","dup_mmap","anon_vma_fork","anon_vma_clone","kmem_cache_alloc_noprof"],"2":["_start","__libc_start_main","libc.so.6+0x27781","main [recovered]","hot_beta"],"3":["_start","__libc_start_main","libc.so.6+0x27781","main [recovered]","hot_beta"],"4":["_start","__libc_start_main","libc.so.6+0x27781","main [recovered]","hot_gamma"],"5":["_start","__libc_start_main","libc.so.6+0x27781","main [recovered]","hot_gamma"],"6":["_start","__libc_start_main","libc.so.6+0x27781","main [recovered]","hot_alpha"],"7":["_start","__libc_start_main","libc.so.6+0x27781","main [recovered]","hot_alpha"],"8":["_start","__libc_start_main","libc.so.6+0x27781","main","__clock_gettime","[vdso]+0xd36"],"9":["_start","__libc_start_main","libc.so.6+0x27781","main [recovered]","hot_gamma","asm_sysvec_apic_timer_interrupt","sysvec_apic_timer_interrupt","__irq_exit_rcu","handle_softirqs","rcu_core","rcu_do_batch","put_cred_rcu"],"10":["_start","__libc_start_main","libc.so.6+0x27781","main [recovered]","hot_gamma","asm_common_interrupt","common_interrupt","__irq_exit_rcu","handle_softirqs"],"11":["_start","__libc_start_main","libc.so.6+0x27781","main [recovered]","hot_gamma","asm_common_interrupt","common_interrupt","__irq_exit_rcu","handle_softirqs"],"12":["_start","__libc_start_main","libc.so.6+0x27781","main [recovered]","hot_beta"]},"notes":["stacks unwound by `fp+leaf`, chosen by `--stack auto` over sframe (kernel:sframe: missing: kernel 7.2 does not unwind user stacks from .sframe: its user unwinder (unwind_user, since 6.17) knows frame pointers only, and no release through 7.2 adds SFrame)","`fp+leaf` recovered the caller of the leaf in 696 of 699 samples from the leaf's CFI (696 of the 696 whose leaf sets up no frame pointer: 696 in perfrecord-hot); each is marked `[recovered]`","names came from -- perfrecord-hot: its own symbol table; libc.so.6: its dynamic symbols only: its internal functions are unnamed"],"overhead":{"collector_cpu_ns":89115000,"attributed_cpu_ns":89115000,"observed_cpu_ns":692120040,"observed_from":"the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 2984577 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)","wall_ns":1005282985,"measurement_ns":45190,"measurements":2,"in_target_cpu_ns":null,"in_target_from":"a perf event's counter is saved and restored on every context switch of the target, and a sampling event interrupts it, in the target's own context; the kernel does not account that time apart from the target's","before_window_cpu_ns":1097470000,"after_window_cpu_ns":327000,"one_time_cpu_ns":3100181},"served_by":["pmu:sw"],"period_ns":1003009,"value_attr":"count","named_by":{"0":[null,null,null,null,null,null,null,null],"1":[null,null,null,null,null,null,null,null,null,null,null,null,"kallsyms","kallsyms","kallsyms","kallsyms","kallsyms","kallsyms","kallsyms","kallsyms","kallsyms"],"2":["elf","elf",null,"elf","elf"],"3":["elf","elf",null,"elf","elf"],"4":["elf","elf",null,"elf","elf"],"5":["elf","elf",null,"elf","elf"],"6":["elf","elf",null,"elf","elf"],"7":["elf","elf",null,"elf","elf"],"8":["elf","elf",null,"elf","elf",null],"9":["elf","elf",null,"elf","elf","kallsyms","kallsyms","kallsyms","kallsyms","kallsyms","kallsyms","kallsyms"],"10":["elf","elf",null,"elf","elf","kallsyms","kallsyms","kallsyms","kallsyms"],"11":["elf","elf",null,"elf","elf","kallsyms","kallsyms","kallsyms","kallsyms"],"12":["elf","elf",null,"elf","elf"]},"executables":{"task:2984577":"/home/moha/repos/omniscient-w22-perfrecord/target/reference/perfrecord-hot"}}]}
+{
+  "results": [
+    {
+      "label": "cpu.profile",
+      "source": "cpu.profile",
+      "unit": "count",
+      "backend": "pmu:sw",
+      "outputs": [
+        {
+          "emit": "stack",
+          "stacks": [
+            {
+              "stack": 1,
+              "events": 385,
+              "total": 385.0
+            },
+            {
+              "stack": 4,
+              "events": 226,
+              "total": 226.0
+            },
+            {
+              "stack": 2,
+              "events": 168,
+              "total": 168.0
+            },
+            {
+              "stack": 6,
+              "events": 161,
+              "total": 161.0
+            },
+            {
+              "stack": 3,
+              "events": 88,
+              "total": 88.0
+            },
+            {
+              "stack": 5,
+              "events": 64,
+              "total": 64.0
+            },
+            {
+              "stack": 0,
+              "events": 1,
+              "total": 1.0
+            },
+            {
+              "stack": 7,
+              "events": 1,
+              "total": 1.0
+            }
+          ],
+          "unattributed": 0
+        }
+      ],
+      "events_seen": 1094,
+      "observed_ns": 2999995734,
+      "window": {
+        "run_opened_ns": 2923745337982,
+        "opened_ns": 2923745337982,
+        "closed_ns": 2926745333716,
+        "attached": true
+      },
+      "stopped_because": "the requested duration elapsed",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "degradations": [
+        "pmu:sw: time-based sampling: blind to phases running at reduced frequency",
+        "stacks unwound by `fp+leaf`: only the leaf's caller is recovered: a frameless function further down the stack still breaks the chain under it"
+      ],
+      "stacks": {
+        "0": [
+          "_start",
+          "__libc_start_main",
+          "libc.so.6+0x27781",
+          "main [recovered]",
+          "hot_gamma"
+        ],
+        "1": [
+          "_start",
+          "__libc_start_main",
+          "libc.so.6+0x27781",
+          "main [recovered]",
+          "hot_beta"
+        ],
+        "2": [
+          "_start",
+          "__libc_start_main",
+          "libc.so.6+0x27781",
+          "main [recovered]",
+          "hot_beta"
+        ],
+        "3": [
+          "_start",
+          "__libc_start_main",
+          "libc.so.6+0x27781",
+          "main [recovered]",
+          "hot_gamma"
+        ],
+        "4": [
+          "_start",
+          "__libc_start_main",
+          "libc.so.6+0x27781",
+          "main [recovered]",
+          "hot_gamma"
+        ],
+        "5": [
+          "_start",
+          "__libc_start_main",
+          "libc.so.6+0x27781",
+          "main [recovered]",
+          "hot_alpha"
+        ],
+        "6": [
+          "_start",
+          "__libc_start_main",
+          "libc.so.6+0x27781",
+          "main [recovered]",
+          "hot_alpha"
+        ],
+        "7": [
+          "_start",
+          "__libc_start_main",
+          "libc.so.6+0x27781",
+          "main [recovered]",
+          "hot_beta"
+        ]
+      },
+      "notes": [
+        "stacks unwound by `fp+leaf`, chosen by `--stack auto` over sframe (kernel:sframe: missing: kernel 7.2 does not unwind user stacks from .sframe: its user unwinder (unwind_user, since 6.17) knows frame pointers only, and no release through 7.2 adds SFrame)",
+        "`fp+leaf` recovered the caller of the leaf in 1094 of 1094 samples from the leaf's CFI (1094 of the 1094 whose leaf sets up no frame pointer: 1094 in perfrecord-hot); each is marked `[recovered]`",
+        "names came from -- perfrecord-hot: its own symbol table; libc.so.6: its dynamic symbols only: its internal functions are unnamed"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 58172000,
+        "attributed_cpu_ns": 58172000,
+        "observed_cpu_ns": null,
+        "observed_from": "the cpu time of 328911 (clock ticks from /proc/<pid>/stat, because the scheduler's nanosecond account could not be read here: a target that burns less than a tick between two checks reads as having burnt nothing, children reaped included)",
+        "wall_ns": 3000033075,
+        "measurement_ns": 19100,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "a perf event's counter is saved and restored on every context switch of the target, and a sampling event interrupts it, in the target's own context; the kernel does not account that time apart from the target's",
+        "before_window_cpu_ns": 877351000,
+        "after_window_cpu_ns": 160000,
+        "one_time_cpu_ns": 2174451
+      },
+      "served_by": [
+        "pmu:sw"
+      ],
+      "period_ns": 1003009,
+      "value_attr": "count",
+      "named_by": {
+        "0": [
+          "elf",
+          "elf",
+          null,
+          "elf",
+          "elf"
+        ],
+        "1": [
+          "elf",
+          "elf",
+          null,
+          "elf",
+          "elf"
+        ],
+        "2": [
+          "elf",
+          "elf",
+          null,
+          "elf",
+          "elf"
+        ],
+        "3": [
+          "elf",
+          "elf",
+          null,
+          "elf",
+          "elf"
+        ],
+        "4": [
+          "elf",
+          "elf",
+          null,
+          "elf",
+          "elf"
+        ],
+        "5": [
+          "elf",
+          "elf",
+          null,
+          "elf",
+          "elf"
+        ],
+        "6": [
+          "elf",
+          "elf",
+          null,
+          "elf",
+          "elf"
+        ],
+        "7": [
+          "elf",
+          "elf",
+          null,
+          "elf",
+          "elf"
+        ]
+      },
+      "executables": {
+        "task:328911": "/home/moha/repos/omniscient-w23-perfrecord/target/reference/perfrecord-hot"
+      }
+    }
+  ]
+}
