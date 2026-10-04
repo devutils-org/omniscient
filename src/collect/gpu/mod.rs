@@ -425,6 +425,27 @@ impl ClockState {
     }
 }
 
+/// The environment a request of `family` is resolved with: a `gpu`
+/// request's carries the devices' clock states, read once a run, or says in
+/// `not_captured` why they could not be read. Any other family's is as it was.
+pub fn with_clock_states(
+    family: &str,
+    mut environment: crate::capabilities::Environment,
+) -> crate::capabilities::Environment {
+    if family != "gpu" {
+        return environment;
+    }
+    static STATES: std::sync::OnceLock<Result<Vec<ClockState>, String>> =
+        std::sync::OnceLock::new();
+    match STATES.get_or_init(clock_states) {
+        Ok(states) => environment.gpu_clocks = states.clone(),
+        Err(reason) => environment
+            .not_captured
+            .push(format!("the GPU clock states: {reason}")),
+    }
+    environment
+}
+
 /// The clock state of every NVIDIA device on this machine, for a collector
 /// that does not already hold the library open -- a GPU timing's facts line.
 /// Opening it costs `nvmlInit`'s 3 to 5 ms, paid once by a run that asked for

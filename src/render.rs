@@ -203,6 +203,9 @@ fn push_environment(out: &mut String, resolved: &ResolvedRequest) {
     if !captured.is_empty() {
         let _ = writeln!(out, "  {}", captured.join(", "));
     }
+    for clock in &environment.gpu_clocks {
+        let _ = writeln!(out, "  {}", clock.fact());
+    }
     let _ = writeln!(
         out,
         "  btf {}, cgroup2 {}, tracefs {}{}",

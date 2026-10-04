@@ -415,3 +415,88 @@ fn a_device_stack_raises_no_unwinding_warning() {
     assert_eq!(warned.len(), 1, "{text}");
     assert!(warned[0].contains("[cpu.profile #2]"), "{text}");
 }
+
+/// A run that asks a `gpu` source carries the devices' clock states in its
+/// environment, or says why it could not read them, and the text prints
+/// each one's fact; a run that asks none reads nothing of the GPU.
+#[test]
+fn a_gpu_request_s_environment_carries_the_clock_states() {
+    let resolved = |source: &str| -> Option<serde_json::Value> {
+        let args = [
+            "trace",
+            source,
+            "-m",
+            "snapshot",
+            "-e",
+            "raw",
+            "--dump-resolved",
+            "--format",
+            "json",
+            "--",
+            "true",
+        ];
+        let output = run(&args);
+        if !output.status.success() {
+            return None;
+        }
+        Some(serde_json::from_slice(&output.stdout).unwrap())
+    };
+    let environment = |document: &serde_json::Value| -> serde_json::Value {
+        let mut found = serde_json::Value::Null;
+        fn walk(value: &serde_json::Value, found: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if let Some(environment) = map.get("environment") {
+                        *found = environment.clone();
+                        return;
+                    }
+                    map.values().for_each(|value| walk(value, found));
+                }
+                serde_json::Value::Array(items) => {
+                    items.iter().for_each(|value| walk(value, found))
+                }
+                _ => {}
+            }
+        }
+        walk(document, &mut found);
+        found
+    };
+    let Some(gpu) = resolved("gpu.freq").map(|document| environment(&document)) else {
+        eprintln!("skipped: gpu.freq does not resolve on this machine");
+        return;
+    };
+    let clocks = gpu["gpu_clocks"].as_array().cloned().unwrap_or_default();
+    let said = gpu["not_captured"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item.as_str()
+                .is_some_and(|text| text.starts_with("the GPU clock states:"))
+        })
+    });
+    assert!(!clocks.is_empty() || said, "{gpu:#}");
+    assert!(
+        clocks
+            .iter()
+            .all(|clock| clock["shader_clock"]["state"].is_string()),
+        "{gpu:#}"
+    );
+
+    let cpu = environment(&resolved("mem.rss").expect("mem.rss resolves on every machine"));
+    assert!(cpu.get("gpu_clocks").is_none(), "{cpu:#}");
+    assert!(!cpu.to_string().contains("GPU clock states"), "{cpu:#}");
+
+    if !clocks.is_empty() {
+        let output = run(&[
+            "trace",
+            "gpu.freq",
+            "-m",
+            "snapshot",
+            "-e",
+            "raw",
+            "--dump-request",
+            "--",
+            "true",
+        ]);
+        let text = stdout(&output);
+        assert!(text.contains("shader clock"), "{text}");
+    }
+}
