@@ -1,16 +1,18 @@
 # Every backend this family declares and does not implement, pinned on purpose.
 #
-#   omn -f examples/sched-forced-backends.yml ; echo $?   # 3
+#   omn -f examples/sched-forced-backends.yml ; echo $?   # 3, or 1 (below)
 #
 # `--backend force:` bypasses the resolver, which is how a comparison bench
 # measures one road at a time. This family has one comparison to make --
 # `sched.switches -m count`, `pmu:sw` against the `sched_switch` program, which
 # `scenario_sched` makes -- and otherwise each collected source has one
 # implemented backend. What a pinned backend without one gets is a refusal, and the refusal
-# has to be the right one -- exit 3, "this build does not implement it", not
-# exit 1, "this machine cannot serve it". The machine can: every requirement of
-# every backend below probes available here, which `omn list sched.offcpu`
-# shows.
+# has to be the right one, in the chain's order: exit 3, "this build does not
+# implement it", on a machine where every requirement of every backend below
+# probes available, which `omn list sched.offcpu` shows; exit 1, "this machine
+# cannot serve it", where a pinned backend lacks something here (tracefs
+# unreadable by this uid, say), because a backend both unbuilt and missing a
+# requirement is the machine's on every path.
 #
 # Eighteen of the family's twenty-three backends are in this position. The five
 # below are the ones that sit in a chain whose other end is implemented, which

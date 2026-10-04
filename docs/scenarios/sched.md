@@ -944,7 +944,7 @@ but it is visible in every session this family ships, so it is recorded here.
 > **Fixed** (stream A). Every request is asked and every refusal is reported
 > together, which is the courtesy the validator already extended one layer up.
 > Asserted inside
-> `pinning_a_backend_this_build_lacks_blames_the_build_and_not_the_machine`.
+> `pinning_a_backend_this_build_lacks_is_refused_in_the_chains_order`.
 
 `examples/sched-refusals.yml.rejected` has four invalid requests and prints four errors.
 `examples/sched-forced-backends.yml` has five requests with no collector and

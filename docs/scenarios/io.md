@@ -327,7 +327,7 @@ self-benchmark in `src/main.rs` needs two distinct backends before it prints
 anything. What the scenarios do instead is the substitute `BRIEF.md`
 prescribes — force every declared-and-unwritten backend and check the refusal
 names it and exits 3 —
-`forcing_a_backend_this_build_has_not_written_names_it_and_exits_three`. The
+`forcing_a_backend_this_build_has_not_written_names_it_in_the_chains_order`. The
 comparison that will be worth writing first, once there is a second collector,
 is `io.bytes` through `bpf:tp` against `fs:proc` over one window: they measure
 the same bytes from opposite ends of the block layer, and the gap between them

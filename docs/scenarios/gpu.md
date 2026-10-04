@@ -207,7 +207,7 @@ have: `fs:sys:amdgpu`, `fs:sys:i915`, `pmu:i915`, `pmu:xe`, `pmu:amdgpu`.
 
 So the comparison is with the refusal, which is what the brief asks for when a
 chain has one implemented backend and others declared.
-`forcing_a_backend_this_build_does_not_implement_exits_three_and_names_it`
+`forcing_a_backend_this_build_does_not_implement_names_it_in_the_chains_order`
 pins every backend of every collected source in turn and requires:
 
 - the pin is never silent — `backend ... is pinned, so the resolver's choice is

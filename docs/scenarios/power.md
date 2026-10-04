@@ -197,7 +197,7 @@ ships so that an Intel machine with `thermal_throttle` measures with it.
 | Class | Where it lives | What it found |
 |---|---|---|
 | **A** capability sweep | `every_axis_this_family_declares_is_served_or_refused_by_name`, `a_result_survives_every_format_that_claims_it`, `examples/power-every-axis.yml` | `hist` is declared by two sources and reachable through neither; `trace` on either is refused as a run failure rather than as a mechanism this build lacks; `snapshot` beside a poll is served as a poll |
-| **B** backend comparison | `the_two_roads_to_rapl_agree_where_both_are_open`, `pinning_a_backend_this_build_does_not_have_names_it_and_exits_three`, `pinning_a_backend_this_machine_does_not_offer_names_what_is_missing` | the two `power.energy` backends disagree about what `count` means |
+| **B** backend comparison | `the_two_roads_to_rapl_agree_where_both_are_open`, `pinning_a_backend_this_build_does_not_have_names_it_in_the_chains_order`, `pinning_a_backend_this_machine_does_not_offer_names_what_is_missing` | the two `power.energy` backends disagree about what `count` means |
 | **C** the loss path | `a_tick_shorter_than_a_round_of_reads_is_counted_and_surfaced`, `a_run_that_costs_more_than_its_budget_stops_and_says_which_ceiling`, `examples/power-late-ticks.yml` | nothing: the loss path is sound, counted per round and named in the text a person reads |
 | **D** the refusal | `a_request_that_cannot_mean_anything_names_what_it_cannot_mean`, `the_three_refusals_are_told_apart_by_what_they_say`, `examples/power-throttle.yml` | the three refusals are two exit codes; the messages tell them apart and the codes do not |
 

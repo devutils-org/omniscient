@@ -322,7 +322,7 @@ went back to exit 3 -- and then the sixth wave wrote the collector, so it now
 exits 0. `mem.latency` is the illustration that will last: PEBS and IBS, one of
 which every x86 cpu has, and neither written.
 
-`forcing_a_backend_with_no_collector_exits_three_and_names_it` walks that
+`forcing_a_backend_with_no_collector_names_it_in_the_chains_order` walks that
 systematically: every backend declared in a `mem` chain that has no collector —
 `mem.faults` on `bpf:tp`, `mem.heap.alloc` on `bpf:usdt` and `bpf:uprobe`,
 `mem.heap.live` on `fs:proc`, `mem.numa` on `pmu`, `mem.wss` on `fs:sys:damon`
