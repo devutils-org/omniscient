@@ -1,0 +1,301 @@
+{
+  "results": [
+    {
+      "label": "gpu.counters",
+      "source": "gpu.counters",
+      "unit": "count",
+      "backend": "vendor:cupti",
+      "outputs": [
+        {
+          "emit": "raw",
+          "events": [
+            {
+              "ts_ns": 2101000000000,
+              "ts_err_ns": 9000000,
+              "kind": "gpu.counters",
+              "keys": [
+                {
+                  "task": {
+                    "tid": 2934411
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "value",
+                  "value": 16838688.0
+                },
+                {
+                  "name": "counter",
+                  "value": "dram__bytes_read.sum"
+                },
+                {
+                  "name": "kernel",
+                  "value": "copy"
+                },
+                {
+                  "name": "min",
+                  "value": 16781728.0
+                },
+                {
+                  "name": "max",
+                  "value": 18531040.0
+                },
+                {
+                  "name": "spread",
+                  "value": 0.0
+                },
+                {
+                  "name": "launches",
+                  "value": 5
+                },
+                {
+                  "name": "disturbed",
+                  "value": 0
+                },
+                {
+                  "name": "outliers",
+                  "value": 1
+                },
+                {
+                  "name": "verdict",
+                  "value": "reproducible but for outliers"
+                },
+                {
+                  "name": "passes",
+                  "value": 1
+                },
+                {
+                  "name": "device",
+                  "value": 0
+                },
+                {
+                  "name": "pid",
+                  "value": 2934411
+                }
+              ],
+              "collector_id": "gpu.counters/vendor:cupti",
+              "seq": 0
+            },
+            {
+              "ts_ns": 2101000000000,
+              "ts_err_ns": 9000000,
+              "kind": "gpu.counters",
+              "keys": [
+                {
+                  "task": {
+                    "tid": 2934411
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "value",
+                  "value": 33554432.0
+                },
+                {
+                  "name": "counter",
+                  "value": "l1tex__t_bytes.sum"
+                },
+                {
+                  "name": "kernel",
+                  "value": "copy"
+                },
+                {
+                  "name": "min",
+                  "value": 33554432.0
+                },
+                {
+                  "name": "max",
+                  "value": 33554432.0
+                },
+                {
+                  "name": "spread",
+                  "value": 0.0
+                },
+                {
+                  "name": "launches",
+                  "value": 5
+                },
+                {
+                  "name": "disturbed",
+                  "value": 0
+                },
+                {
+                  "name": "outliers",
+                  "value": 0
+                },
+                {
+                  "name": "verdict",
+                  "value": "reproducible"
+                },
+                {
+                  "name": "passes",
+                  "value": 1
+                },
+                {
+                  "name": "device",
+                  "value": 0
+                },
+                {
+                  "name": "pid",
+                  "value": 2934411
+                }
+              ],
+              "collector_id": "gpu.counters/vendor:cupti",
+              "seq": 1
+            },
+            {
+              "ts_ns": 2101000000000,
+              "ts_err_ns": 9000000,
+              "kind": "gpu.counters",
+              "keys": [
+                {
+                  "task": {
+                    "tid": 2934411
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "value",
+                  "value": 272.0
+                },
+                {
+                  "name": "counter",
+                  "value": "sm__ctas_launched.sum"
+                },
+                {
+                  "name": "kernel",
+                  "value": "copy"
+                },
+                {
+                  "name": "min",
+                  "value": 272.0
+                },
+                {
+                  "name": "max",
+                  "value": 272.0
+                },
+                {
+                  "name": "spread",
+                  "value": 0.0
+                },
+                {
+                  "name": "launches",
+                  "value": 5
+                },
+                {
+                  "name": "disturbed",
+                  "value": 0
+                },
+                {
+                  "name": "outliers",
+                  "value": 0
+                },
+                {
+                  "name": "verdict",
+                  "value": "reproducible"
+                },
+                {
+                  "name": "passes",
+                  "value": 1
+                },
+                {
+                  "name": "device",
+                  "value": 0
+                },
+                {
+                  "name": "pid",
+                  "value": 2934411
+                }
+              ],
+              "collector_id": "gpu.counters/vendor:cupti",
+              "seq": 2
+            },
+            {
+              "ts_ns": 2101000000000,
+              "ts_err_ns": 9000000,
+              "kind": "gpu.counters",
+              "keys": [
+                {
+                  "task": {
+                    "tid": 2934411
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "value",
+                  "value": 808192.0
+                },
+                {
+                  "name": "counter",
+                  "value": "smsp__inst_executed.sum"
+                },
+                {
+                  "name": "kernel",
+                  "value": "copy"
+                },
+                {
+                  "name": "min",
+                  "value": 808192.0
+                },
+                {
+                  "name": "max",
+                  "value": 808192.0
+                },
+                {
+                  "name": "spread",
+                  "value": 0.0
+                },
+                {
+                  "name": "launches",
+                  "value": 5
+                },
+                {
+                  "name": "disturbed",
+                  "value": 0
+                },
+                {
+                  "name": "outliers",
+                  "value": 0
+                },
+                {
+                  "name": "verdict",
+                  "value": "reproducible"
+                },
+                {
+                  "name": "passes",
+                  "value": 1
+                },
+                {
+                  "name": "device",
+                  "value": 0
+                },
+                {
+                  "name": "pid",
+                  "value": 2934411
+                }
+              ],
+              "collector_id": "gpu.counters/vendor:cupti",
+              "seq": 3
+            }
+          ]
+        }
+      ],
+      "events_seen": 4,
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "served_by": [
+        "vendor:cupti"
+      ],
+      "value_attr": "value"
+    }
+  ]
+}

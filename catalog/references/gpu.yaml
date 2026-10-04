@@ -1,318 +1,331 @@
-# Reference pairs for the `gpu` family of tools: each entry runs omn and an
-# established tool on the same workload and holds them to a declared
-# tolerance. Read by tests/reference.rs, never by omn itself. Schema:
-# BRIEF.md, "Decided before this wave", plus the fields below, which the gpu
-# pairs need and the runner may not know yet (docs/fixes/w22-gpu.md, "Needs
-# from another stream"):
+# Reference pairs for the `gpu` family: omn against nsys, ncu and
+# nvidia-smi on the GPU scenarios' own workloads (tests/gpu_workload.py,
+# plus the two wrappers under tests/reference/workloads/gpu/). The schema is
+# catalog/references/README.md; the verdicts are docs/replaces/gpu.md.
 #
-#   same_run: omn_launches_tool
-#       as io.yaml defines it: `omn <omn...> --program-stderr <file> --
-#       <reference.command...> <workload...>`, and the parser is handed
-#       <file> (as stderr; the gpu parsers read stdout and stderr alike).
-#       Used for nvidia-smi, which launches nothing: the wrapper
-#       tests/reference/workloads/gpu/smi_during.sh runs the workload and
-#       samples nvidia-smi beside it, its samples on standard error.
-#   same_run: alternate
-#       omn and the tool each launch the workload, one after the other. nsys
-#       and ncu inject into the CUDA process through the same driver hook
-#       omn's CUPTI library uses (CUDA_INJECTION64_PATH), so the two cannot
-#       share a process. The workloads decide their kernels, launches and
-#       grids, so a count is the same on every run and is held exactly;
-#       durations carry the run-to-run spread measured here.
-#   compare.omn: "<emit>[<key glob>].<field>"
-#       as io.yaml defines it. `compare.omn_jq` is the same value as a jq
-#       expression over omn's JSON document, for a runner that prefers it.
+# How the runs are paired:
 #
-# Every value a parser returns is already in omn's unit (ns, Hz, W, bytes,
-# a fraction of one) and omn's spelling of names (tests/reference/gpu.rs).
+# - nsys and ncu inject into the CUDA process through the hook omn's CUPTI
+#   library uses (CUDA_INJECTION64_PATH), so they cannot share a process with
+#   omn: those pairs are `run: separate`. They compare what the workload
+#   decides -- counts, held exactly -- and durations, with the spread
+#   measured between runs as the band and the median of three runs a side.
+# - nvidia-smi launches nothing: omn launches the tool
+#   (`run: omn_launches_tool`), which is smi_during.sh sampling nvidia-smi
+#   over the workload, so both observe the same run. The device-wide sources
+#   (power, clock, utilisation, temperature) do not care which pid omn
+#   watches.
+# - Every pair `requires` /dev/nvidiactl beside the tools: with the tools
+#   installed and the driver not loaded (a kernel the module was not built
+#   for), nothing on the GPU can run, and that is the machine's reason.
+#
+# Every value a parser returns is in omn's unit (ns, Hz, W, bytes, a
+# fraction of one) and omn's spelling of names (tests/reference/gpu.rs), so
+# no pair scales. The machine they were measured on holds one GPU, so
+# `series.0` is its series.
 
 # --- nsys: kernel and memory-operation counts and device durations --------
 
-- source: gpu.kernel
+- id: kernel-launches-nsys
+  source: gpu.kernel
   tool: nsys
   use: "nsys profile + nsys stats -r cuda_gpu_kern_sum: how many times each kernel ran"
   workload: [python3, tests/gpu_workload.py, launches, "5000"]
-  omn: [trace, gpu.kernel, -e, "topk:20@kernel", --format, json]
-  same_run: alternate
+  omn: [trace, gpu.kernel, -e, "topk:20@kernel", --format, json, -o, "{out}"]
+  run: separate
+  timeout_s: 300
   reference:
     command: [sh, -c, 'd=$(mktemp -d) && nsys profile -t cuda --force-overwrite=true -o "$d/r" -- "$@" >"$d/log" 2>&1 && nsys stats -q --report cuda_gpu_kern_sum --report cuda_gpu_mem_time_sum --format csv "$d/r.nsys-rep"; s=$?; rm -rf "$d"; exit $s', sh]
     parse: nsys_gpu_sum
-    requires: [nsys, nvidia-smi]
-    privileged: false
+    requires: [nsys, nvidia-smi, /dev/nvidiactl]
   compare:
     key: tiny/count
-    omn: "topk[kernel=tiny].events"
-    omn_jq: '.results[0].outputs[0].series[] | select(.key == "kernel=tiny") | .events'
+    omn: "results.0.outputs[emit=topk].series[key=kernel=tiny].events"
     tolerance: {abs: 0}
-    why: "alternate runs: the workload launches `tiny` exactly 5000 times;
+    why: "separate runs: the workload launches `tiny` exactly 5000 times;
       CUPTI's activity records and nsys's agree on every launch (5000 and
-      5000, omn dropping none under the launch-bound regime)"
+      5000 in the twenty-second wave, omn dropping none under the
+      launch-bound regime)"
 
-- source: gpu.kernel
+- id: kernel-time-launch-bound-nsys
+  source: gpu.kernel
   tool: nsys
   use: "nsys stats -r cuda_gpu_kern_sum: total device time of a launch-bound kernel"
   workload: [python3, tests/gpu_workload.py, launches, "5000"]
-  omn: [trace, gpu.kernel, -e, "topk:20@kernel", --format, json]
-  same_run: alternate
+  omn: [trace, gpu.kernel, -e, "topk:20@kernel", --format, json, -o, "{out}"]
+  run: separate
+  runs: 3
+  timeout_s: 300
   reference:
     command: [sh, -c, 'd=$(mktemp -d) && nsys profile -t cuda --force-overwrite=true -o "$d/r" -- "$@" >"$d/log" 2>&1 && nsys stats -q --report cuda_gpu_kern_sum --report cuda_gpu_mem_time_sum --format csv "$d/r.nsys-rep"; s=$?; rm -rf "$d"; exit $s', sh]
     parse: nsys_gpu_sum
-    requires: [nsys, nvidia-smi]
-    privileged: false
+    requires: [nsys, nvidia-smi, /dev/nvidiactl]
   compare:
     key: tiny/total_ns
-    omn: "topk[kernel=tiny].total"
-    omn_jq: '.results[0].outputs[0].series[] | select(.key == "kernel=tiny") | .total'
+    omn: "results.0.outputs[emit=topk].series[key=kernel=tiny].total"
     tolerance: {rel: 0.05}
-    why: "alternate runs, both reading CUPTI's kernel activity timestamps:
-      6 221 828 ns against 6 223 302 (0.02 %). 5 % covers a clock the
-      driver moved between the two runs (the clocks are not locked, and
-      omn never locks them)"
+    why: "separate runs, medians of three a side, both reading CUPTI's kernel
+      activity timestamps: 6 221 828 ns against 6 223 302 (0.02 %) in the
+      twenty-second wave. 5 % covers a clock the driver moved between two
+      runs (the clocks are not locked, and omn never locks them)"
 
-- source: gpu.kernel
+- id: kernel-time-memory-bound-nsys
+  source: gpu.kernel
   tool: nsys
   use: "nsys stats -r cuda_gpu_kern_sum: total device time of a memory-bound kernel"
   workload: [python3, tests/gpu_workload.py, memory, "5", "16"]
-  omn: [trace, gpu.kernel, -e, "topk:20@kernel", --format, json]
-  same_run: alternate
+  omn: [trace, gpu.kernel, -e, "topk:20@kernel", --format, json, -o, "{out}"]
+  run: separate
+  runs: 3
+  timeout_s: 300
   reference:
     command: [sh, -c, 'd=$(mktemp -d) && nsys profile -t cuda --force-overwrite=true -o "$d/r" -- "$@" >"$d/log" 2>&1 && nsys stats -q --report cuda_gpu_kern_sum --report cuda_gpu_mem_time_sum --format csv "$d/r.nsys-rep"; s=$?; rm -rf "$d"; exit $s', sh]
     parse: nsys_gpu_sum
-    requires: [nsys, nvidia-smi]
-    privileged: false
+    requires: [nsys, nvidia-smi, /dev/nvidiactl]
   compare:
     key: copy/total_ns
-    omn: "topk[kernel=copy].total"
-    omn_jq: '.results[0].outputs[0].series[] | select(.key == "kernel=copy") | .total'
+    omn: "results.0.outputs[emit=topk].series[key=kernel=copy].total"
     tolerance: {rel: 0.10}
-    why: "alternate runs: five 16 MiB grid-stride copies, 310 495 ns
-      against 309 599 and 310 335 (0.3 %), 309 918 against 309 600, a
-      duration set by DRAM bandwidth rather than by the shader clock. One
-      run in four was 7.1 % apart (336 224 against 313 920) under the
-      wave's load, five launches being too few to average a disturbed one
-      out; hence 10 %"
+    why: "separate runs, medians of three a side: five 16 MiB grid-stride
+      copies, 310 495 ns against 309 599 and 310 335 (0.3 %), a duration set
+      by DRAM bandwidth rather than by the shader clock. One run in four was
+      7.1 % apart (336 224 against 313 920) under the twenty-second wave's
+      load, five launches being too few to average a disturbed one out;
+      hence 10 %, and the median of three"
 
-- source: gpu.kernel
+- id: copy-count-nsys
+  source: gpu.kernel
   tool: nsys
   use: "nsys stats -r cuda_gpu_mem_time_sum: how many host-to-device copies ran"
   workload: [python3, tests/gpu_workload.py, memory, "5", "16"]
-  omn: [trace, gpu.kernel, -e, "topk:20@kernel", --format, json]
-  same_run: alternate
+  omn: [trace, gpu.kernel, -e, "topk:20@kernel", --format, json, -o, "{out}"]
+  run: separate
+  timeout_s: 300
   reference:
     command: [sh, -c, 'd=$(mktemp -d) && nsys profile -t cuda --force-overwrite=true -o "$d/r" -- "$@" >"$d/log" 2>&1 && nsys stats -q --report cuda_gpu_kern_sum --report cuda_gpu_mem_time_sum --format csv "$d/r.nsys-rep"; s=$?; rm -rf "$d"; exit $s', sh]
     parse: nsys_gpu_sum
-    requires: [nsys, nvidia-smi]
-    privileged: false
+    requires: [nsys, nvidia-smi, /dev/nvidiactl]
   compare:
     key: "[memcpy HtoD]/count"
-    omn: "topk[kernel=\\[memcpy HtoD\\]].events"
-    omn_jq: '.results[0].outputs[0].series[] | select(.key == "kernel=[memcpy HtoD]") | .events'
+    # The series' key, `kernel=[memcpy HtoD]`, holds a `]`, which the path
+    # grammar's filter cannot spell: omn_topk reads it.
+    omn_parse: omn_topk
     tolerance: {abs: 0}
-    why: "alternate runs: one copy in, one copy out and one memset, decided
+    why: "separate runs: one copy in, one copy out and one memset, decided
       by the workload; nsys's `[CUDA memcpy Host-to-Device]` is omn's
       `[memcpy HtoD]` (the parser renames)"
 
-- source: gpu.kernel
+- id: copy-time-nsys
+  source: gpu.kernel
   tool: nsys
   use: "nsys stats -r cuda_gpu_mem_time_sum: device time of a host-to-device copy"
   workload: [python3, tests/gpu_workload.py, memory, "5", "16"]
-  omn: [trace, gpu.kernel, -e, "topk:20@kernel", --format, json]
-  same_run: alternate
+  omn: [trace, gpu.kernel, -e, "topk:20@kernel", --format, json, -o, "{out}"]
+  run: separate
+  runs: 3
+  timeout_s: 300
   reference:
     command: [sh, -c, 'd=$(mktemp -d) && nsys profile -t cuda --force-overwrite=true -o "$d/r" -- "$@" >"$d/log" 2>&1 && nsys stats -q --report cuda_gpu_kern_sum --report cuda_gpu_mem_time_sum --format csv "$d/r.nsys-rep"; s=$?; rm -rf "$d"; exit $s', sh]
     parse: nsys_gpu_sum
-    requires: [nsys, nvidia-smi]
-    privileged: false
+    requires: [nsys, nvidia-smi, /dev/nvidiactl]
   compare:
     key: "[memcpy HtoD]/total_ns"
-    omn: "topk[kernel=\\[memcpy HtoD\\]].total"
-    omn_jq: '.results[0].outputs[0].series[] | select(.key == "kernel=[memcpy HtoD]") | .total'
+    omn_parse: omn_topk
     tolerance: {rel: 0.25}
-    why: "alternate runs: a 16 MiB copy from pageable host memory, staged
-      by the driver through a pinned buffer, so its time follows the host's
-      memory as much as the device's: 1 522 330 and 1 513 794 ns under omn
-      against 1 321 595 to 1 560 666 under nsys, a 15 % spread between
-      runs of the same tool"
+    why: "separate runs, medians of three a side: a 16 MiB copy from
+      pageable host memory, staged by the driver through a pinned buffer, so
+      its time follows the host's memory as much as the device's: 1 522 330
+      and 1 513 794 ns under omn against 1 321 595 to 1 560 666 under nsys
+      in the twenty-second wave, a 15 % spread between runs of the same tool"
 
 # --- nsys: the host side, driver calls -------------------------------------
 
-- source: gpu.api
+- id: api-launches-nsys
+  source: gpu.api
   tool: nsys
   use: "nsys stats -r cuda_api_sum: how many kernel launches the host made"
   workload: [tests/reference/workloads/gpu/linked.sh, memory, "5", "16"]
-  omn: [trace, gpu.api, -e, "topk:20@api", --format, json]
-  same_run: alternate
+  omn: [trace, gpu.api, -e, "topk:20@api", --format, json, -o, "{out}"]
+  run: separate
+  timeout_s: 300
   reference:
     command: [sh, -c, 'd=$(mktemp -d) && nsys profile -t cuda --force-overwrite=true -o "$d/r" -- "$@" >"$d/log" 2>&1 && nsys stats -q --report cuda_api_sum --format csv "$d/r.nsys-rep"; s=$?; rm -rf "$d"; exit $s', sh]
     parse: nsys_api_sum
-    requires: [nsys, nvidia-smi, cc]
-    privileged: false
+    requires: [nsys, nvidia-smi, cc, /dev/nvidiactl]
   compare:
     key: cuLaunchKernel/count
-    omn: "topk[api=cuLaunchKernel].events"
-    omn_jq: '.results[0].outputs[0].series[] | select(.key == "api=cuLaunchKernel") | .events'
+    omn: "results.0.outputs[emit=topk].series[key=api=cuLaunchKernel].events"
     tolerance: {abs: 0}
-    why: "alternate runs of examples/bench/gpu.c linked with -lcuda (gpu.api
+    why: "separate runs of examples/bench/gpu.c linked with -lcuda (gpu.api
       sees only calls bound through the dynamic linker, so the ctypes
       workloads are invisible to it): 5 launches under both"
 
-- source: gpu.api
+- id: api-allocs-nsys
+  source: gpu.api
   tool: nsys
   use: "nsys stats -r cuda_api_sum: how many allocations the host made"
   workload: [tests/reference/workloads/gpu/linked.sh, memory, "5", "16"]
-  omn: [trace, gpu.api, -e, "topk:20@api", --format, json]
-  same_run: alternate
+  omn: [trace, gpu.api, -e, "topk:20@api", --format, json, -o, "{out}"]
+  run: separate
+  timeout_s: 300
   reference:
     command: [sh, -c, 'd=$(mktemp -d) && nsys profile -t cuda --force-overwrite=true -o "$d/r" -- "$@" >"$d/log" 2>&1 && nsys stats -q --report cuda_api_sum --format csv "$d/r.nsys-rep"; s=$?; rm -rf "$d"; exit $s', sh]
     parse: nsys_api_sum
-    requires: [nsys, nvidia-smi, cc]
-    privileged: false
+    requires: [nsys, nvidia-smi, cc, /dev/nvidiactl]
   compare:
     key: cuMemAlloc/count
-    omn: "topk[api=cuMemAlloc].events"
-    omn_jq: '.results[0].outputs[0].series[] | select(.key == "api=cuMemAlloc") | .events'
+    omn: "results.0.outputs[emit=topk].series[key=api=cuMemAlloc].events"
     tolerance: {abs: 0}
-    why: "alternate runs: 3 cuMemAlloc_v2 under both, nsys's name losing its
+    why: "separate runs: 3 cuMemAlloc_v2 under both, nsys's name losing its
       ABI suffix in the parser as omn's does"
 
-- source: gpu.api
+- id: api-copies-nsys
+  source: gpu.api
   tool: nsys
   use: "nsys stats -r cuda_api_sum: how many synchronous copies the host made"
   workload: [tests/reference/workloads/gpu/linked.sh, memory, "5", "16"]
-  omn: [trace, gpu.api, -e, "topk:20@api", --format, json]
-  same_run: alternate
+  omn: [trace, gpu.api, -e, "topk:20@api", --format, json, -o, "{out}"]
+  run: separate
+  timeout_s: 300
   reference:
     command: [sh, -c, 'd=$(mktemp -d) && nsys profile -t cuda --force-overwrite=true -o "$d/r" -- "$@" >"$d/log" 2>&1 && nsys stats -q --report cuda_api_sum --format csv "$d/r.nsys-rep"; s=$?; rm -rf "$d"; exit $s', sh]
     parse: nsys_api_sum
-    requires: [nsys, nvidia-smi, cc]
-    privileged: false
+    requires: [nsys, nvidia-smi, cc, /dev/nvidiactl]
   compare:
     key: cuMemcpyDtoH/count
-    omn: "topk[api=cuMemcpyDtoH].events"
-    omn_jq: '.results[0].outputs[0].series[] | select(.key == "api=cuMemcpyDtoH") | .events'
+    omn: "results.0.outputs[emit=topk].series[key=api=cuMemcpyDtoH].events"
     tolerance: {abs: 0}
-    why: "alternate runs: one copy out under both. The host time inside it is
+    why: "separate runs: one copy out under both. The host time inside it is
       not compared: under nsys the same 16 MiB copy took 3 466 928 ns of
       host time in one run and 1 461 798 in another, against 1 524 678 and
       1 577 206 under omn -- nsys's own tracing is in the call it times, so
       the tool is not a reference for that duration (docs/replaces/gpu.md)"
 
 # --- ncu: counters inside a kernel -----------------------------------------
+#
+# gpu.counters emits one raw event per kernel and counter, the median over
+# the kernel's launches as its `value` attribute. Selecting it takes two
+# attributes inside `attrs`, which the path grammar does not reach:
+# omn_counters reads it, under the keys ncu_metrics_csv gives.
 
-- source: gpu.counters
+- id: inst-copy-ncu
+  source: gpu.counters
   tool: ncu
   use: "ncu --metrics smsp__inst_executed.sum: instructions a kernel executed"
   workload: [python3, tests/gpu_workload.py, memory, "5", "16"]
-  omn: [trace, gpu.counters, -e, raw, --format, json]
-  same_run: alternate
+  omn: [trace, gpu.counters, -e, raw, --format, json, -o, "{out}"]
+  run: separate
+  timeout_s: 300
   reference:
     command: [ncu, --csv, --metrics, "smsp__inst_executed.sum,sm__ctas_launched.sum,dram__bytes_read.sum,l1tex__t_bytes.sum", --]
     parse: ncu_metrics_csv
-    requires: [ncu, nvidia-smi]
-    privileged: false
+    requires: [ncu, nvidia-smi, /dev/nvidiactl]
+    refused_when: [ERR_NVGPUCTRPERM]
   compare:
     key: copy/smsp__inst_executed.sum
-    omn: "raw[kernel=copy,counter=smsp__inst_executed.sum].value"
-    omn_jq: '.results[0].outputs[0].events[] | select(any(.attrs[]; .name == "kernel" and .value == "copy") and any(.attrs[]; .name == "counter" and .value == "smsp__inst_executed.sum")) | .attrs[] | select(.name == "value") | .value'
+    omn_parse: omn_counters
     tolerance: {abs: 0}
-    why: "alternate runs, both kernel replay through the same range
-      profiler: 808 192 instructions on every launch under both. Exact
-      unless another process runs kernels meanwhile, which omn flags as
-      `disturbed` and ncu does not"
+    why: "separate runs, both kernel replay through the same range profiler:
+      808 192 instructions on every launch under both. Exact unless another
+      process runs kernels meanwhile, which omn flags as `disturbed` and
+      ncu does not"
 
-- source: gpu.counters
+- id: inst-spin-ncu
+  source: gpu.counters
   tool: ncu
   use: "ncu --metrics smsp__inst_executed.sum: instructions of a compute-bound kernel"
   workload: [python3, tests/gpu_workload.py, compute, "3"]
-  omn: [trace, gpu.counters, -e, raw, --format, json]
-  same_run: alternate
+  omn: [trace, gpu.counters, -e, raw, --format, json, -o, "{out}"]
+  run: separate
+  timeout_s: 300
   reference:
     command: [ncu, --csv, --metrics, "smsp__inst_executed.sum,sm__ctas_launched.sum", --]
     parse: ncu_metrics_csv
-    requires: [ncu, nvidia-smi]
-    privileged: false
+    requires: [ncu, nvidia-smi, /dev/nvidiactl]
+    refused_when: [ERR_NVGPUCTRPERM]
   compare:
     key: spin/smsp__inst_executed.sum
-    omn: "raw[kernel=spin,counter=smsp__inst_executed.sum].value"
-    omn_jq: '.results[0].outputs[0].events[] | select(any(.attrs[]; .name == "kernel" and .value == "spin") and any(.attrs[]; .name == "counter" and .value == "smsp__inst_executed.sum")) | .attrs[] | select(.name == "value") | .value'
+    omn_parse: omn_counters
     tolerance: {abs: 0}
-    why: "alternate runs: 353 620 672 instructions under both"
+    why: "separate runs: 353 620 672 instructions under both"
 
-- source: gpu.counters
+- id: blocks-ncu
+  source: gpu.counters
   tool: ncu
   use: "ncu --metrics sm__ctas_launched.sum: blocks a kernel launched"
   workload: [python3, tests/gpu_workload.py, memory, "5", "16"]
-  omn: [trace, gpu.counters, -e, raw, --format, json]
-  same_run: alternate
+  omn: [trace, gpu.counters, -e, raw, --format, json, -o, "{out}"]
+  run: separate
+  timeout_s: 300
   reference:
     command: [ncu, --csv, --metrics, "smsp__inst_executed.sum,sm__ctas_launched.sum,dram__bytes_read.sum,l1tex__t_bytes.sum", --]
     parse: ncu_metrics_csv
-    requires: [ncu, nvidia-smi]
-    privileged: false
+    requires: [ncu, nvidia-smi, /dev/nvidiactl]
+    refused_when: [ERR_NVGPUCTRPERM]
   compare:
     key: copy/sm__ctas_launched.sum
-    omn: "raw[kernel=copy,counter=sm__ctas_launched.sum].value"
-    omn_jq: '.results[0].outputs[0].events[] | select(any(.attrs[]; .name == "kernel" and .value == "copy") and any(.attrs[]; .name == "counter" and .value == "sm__ctas_launched.sum")) | .attrs[] | select(.name == "value") | .value'
+    omn_parse: omn_counters
     tolerance: {abs: 0}
-    why: "alternate runs: the grid is 272 blocks, and both count 272"
+    why: "separate runs: the grid is 272 blocks, and both count 272"
 
-- source: gpu.counters
+- id: l1-bytes-ncu
+  source: gpu.counters
   tool: ncu
   use: "ncu --metrics l1tex__t_bytes.sum: bytes through L1"
   workload: [python3, tests/gpu_workload.py, memory, "5", "16"]
-  omn: [trace, gpu.counters, -e, raw, --format, json]
-  same_run: alternate
+  omn: [trace, gpu.counters, -e, raw, --format, json, -o, "{out}"]
+  run: separate
+  timeout_s: 300
   reference:
     command: [ncu, --csv, --metrics, "smsp__inst_executed.sum,sm__ctas_launched.sum,dram__bytes_read.sum,l1tex__t_bytes.sum", --]
     parse: ncu_metrics_csv
-    requires: [ncu, nvidia-smi]
-    privileged: false
+    requires: [ncu, nvidia-smi, /dev/nvidiactl]
+    refused_when: [ERR_NVGPUCTRPERM]
   compare:
     key: copy/l1tex__t_bytes.sum
-    omn: "raw[kernel=copy,counter=l1tex__t_bytes.sum].value"
-    omn_jq: '.results[0].outputs[0].events[] | select(any(.attrs[]; .name == "kernel" and .value == "copy") and any(.attrs[]; .name == "counter" and .value == "l1tex__t_bytes.sum")) | .attrs[] | select(.name == "value") | .value'
+    omn_parse: omn_counters
     tolerance: {abs: 0}
-    why: "alternate runs: 16 MiB read and 16 MiB written, 33 554 432 bytes
+    why: "separate runs: 16 MiB read and 16 MiB written, 33 554 432 bytes
       under both, to the byte"
 
-- source: gpu.counters
+- id: dram-bytes-ncu
+  source: gpu.counters
   tool: ncu
   use: "ncu --metrics dram__bytes_read.sum: bytes read from DRAM"
   workload: [python3, tests/gpu_workload.py, memory, "5", "16"]
-  omn: [trace, gpu.counters, -e, raw, --format, json]
-  same_run: alternate
+  omn: [trace, gpu.counters, -e, raw, --format, json, -o, "{out}"]
+  run: separate
+  timeout_s: 300
   reference:
     command: [ncu, --csv, --metrics, "smsp__inst_executed.sum,sm__ctas_launched.sum,dram__bytes_read.sum,l1tex__t_bytes.sum", --]
     parse: ncu_metrics_csv
-    requires: [ncu, nvidia-smi]
-    privileged: false
+    requires: [ncu, nvidia-smi, /dev/nvidiactl]
+    refused_when: [ERR_NVGPUCTRPERM]
   compare:
     key: copy/dram__bytes_read.sum
-    omn: "raw[kernel=copy,counter=dram__bytes_read.sum].value"
-    omn_jq: '.results[0].outputs[0].events[] | select(any(.attrs[]; .name == "kernel" and .value == "copy") and any(.attrs[]; .name == "counter" and .value == "dram__bytes_read.sum")) | .attrs[] | select(.name == "value") | .value'
+    omn_parse: omn_counters
     tolerance: {rel: 0.05}
-    why: "alternate runs, the median over five launches on both sides (the
+    why: "separate runs, the median over five launches on both sides (the
       parser takes ncu's median, omn reports its own): 16 861 664 against
       16 838 688 (0.1 %). DRAM traffic is the device's, not the kernel's,
       so one launch in five reads 10 % more under ncu"
 
 # --- nvidia-smi: the device's state, sampled over the same run --------------
 
-- source: gpu.power
+- id: power-smi
+  source: gpu.power
   tool: nvidia-smi
   use: "nvidia-smi --query-gpu=power.draw -lms 200: the board's mean draw over a run"
   workload: [python3, tests/gpu_workload.py, kernel, "3000"]
   omn: [trace, gpu.power, -m, count, -e, rate, --format, json]
-  same_run: omn_launches_tool
+  run: omn_launches_tool
   reference:
     command: [tests/reference/workloads/gpu/smi_during.sh, gpu]
     parse: smi_query_gpu
-    requires: [nvidia-smi]
-    privileged: false
+    requires: [nvidia-smi, /dev/nvidiactl]
   compare:
     key: power.draw.mean
-    omn: "rate[*].per_second"
-    omn_jq: '.results[0].outputs[0].series[0].per_second'
+    omn: "results.0.outputs[emit=rate].series.0.per_second"
     tolerance: {rel: 0.10}
     why: "the same run: omn's energy counter at each end of the window over
       its length, against the mean of nvidia-smi's 200 ms samples: 200.5 W
@@ -320,81 +333,76 @@
       average over a window the driver chooses, so its first samples lag
       the ramp from idle"
 
-- source: gpu.power
+- id: power-dmon
+  source: gpu.power
   tool: nvidia-smi dmon
   use: "nvidia-smi dmon -s p: the board's draw, a line a second"
   workload: [python3, tests/gpu_workload.py, kernel, "3000"]
   omn: [trace, gpu.power, -m, count, -e, rate, --format, json]
-  same_run: omn_launches_tool
+  run: omn_launches_tool
   reference:
     command: [tests/reference/workloads/gpu/smi_during.sh, dmon]
     parse: smi_dmon
-    requires: [nvidia-smi]
-    privileged: false
+    requires: [nvidia-smi, /dev/nvidiactl]
   compare:
     key: pwr.mean
-    omn: "rate[*].per_second"
-    omn_jq: '.results[0].outputs[0].series[0].per_second'
+    omn: "results.0.outputs[emit=rate].series.0.per_second"
     tolerance: {rel: 0.15}
     why: "the same run: 211.1 W against dmon's 216 (four samples, the first
       on the ramp). Four samples a run is what a second's interval gives a
       3 s workload, hence the wider band"
 
-- source: gpu.freq
+- id: clock-smi
+  source: gpu.freq
   tool: nvidia-smi
   use: "nvidia-smi --query-gpu=clocks.sm -lms 200: the shader clock over a run"
   workload: [python3, tests/gpu_workload.py, kernel, "3000"]
   omn: [trace, gpu.freq, -m, poll, -e, summary, --format, json]
-  same_run: omn_launches_tool
+  run: omn_launches_tool
   reference:
     command: [tests/reference/workloads/gpu/smi_during.sh, gpu]
     parse: smi_query_gpu
-    requires: [nvidia-smi]
-    privileged: false
+    requires: [nvidia-smi, /dev/nvidiactl]
   compare:
     key: clocks.sm.mean
-    omn: "summary[*].mean"
-    omn_jq: '.results[0].outputs[0].series[0].mean'
+    omn: "results.0.outputs[emit=summary].series.0.mean"
     tolerance: {rel: 0.05}
     why: "the same run: 1914 MHz against 1915.6 (0.1 %). Both read NVML's
       current clock; they sample at different instants (omn once a second
       by default, nvidia-smi every 200 ms), which the ramp from 300 MHz
       at the start puts in the band"
 
-- source: gpu.freq
+- id: clock-dmon
+  source: gpu.freq
   tool: nvidia-smi dmon
   use: "nvidia-smi dmon -s c: pclk, a line a second"
   workload: [python3, tests/gpu_workload.py, kernel, "3000"]
   omn: [trace, gpu.freq, -m, poll, -e, summary, --format, json]
-  same_run: omn_launches_tool
+  run: omn_launches_tool
   reference:
     command: [tests/reference/workloads/gpu/smi_during.sh, dmon]
     parse: smi_dmon
-    requires: [nvidia-smi]
-    privileged: false
+    requires: [nvidia-smi, /dev/nvidiactl]
   compare:
     key: pclk.mean
-    omn: "summary[*].mean"
-    omn_jq: '.results[0].outputs[0].series[0].mean'
+    omn: "results.0.outputs[emit=summary].series.0.mean"
     tolerance: {rel: 0.05}
-    why: "the same run, both once a second: 1920 against 1905 MHz in
-      alternate runs, 0.8 %"
+    why: "the same run, both once a second: 1920 against 1905 MHz, 0.8 %"
 
-- source: gpu.engine_busy
+- id: busy-smi
+  source: gpu.engine_busy
   tool: nvidia-smi
   use: "nvidia-smi --query-gpu=utilization.gpu: how busy the device was"
   workload: [python3, tests/gpu_workload.py, kernel, "6000"]
   omn: [trace, gpu.engine_busy, -m, poll, -e, summary, --format, json]
-  same_run: omn_launches_tool
+  run: omn_launches_tool
   reference:
     command: [tests/reference/workloads/gpu/smi_during.sh, gpu]
     parse: smi_query_gpu
-    requires: [nvidia-smi]
-    privileged: false
+    requires: [nvidia-smi, /dev/nvidiactl]
   compare:
     key: utilization.gpu.mean
-    omn: "summary[*].mean"
-    omn_jq: '.results[0].outputs[0].series[0].mean'
+    omn: "results.0.outputs[emit=summary].series.0.mean"
     tolerance: {abs: 0.10}
     why: "the same run: 0.771 against 0.799, 0.851 against 0.867, 0.876
       against 0.863. Both are NVML's utilisation rate, a share of a sample
@@ -403,63 +411,60 @@
       difference of start, not of measure. 6 s rather than 3 so the start
       weighs less (at 3 s one dmon run was 0.17 apart)"
 
-- source: gpu.engine_busy
+- id: busy-dmon
+  source: gpu.engine_busy
   tool: nvidia-smi dmon
   use: "nvidia-smi dmon -s u: sm %, a line a second"
   workload: [python3, tests/gpu_workload.py, kernel, "6000"]
   omn: [trace, gpu.engine_busy, -m, poll, -e, summary, --format, json]
-  same_run: omn_launches_tool
+  run: omn_launches_tool
   reference:
     command: [tests/reference/workloads/gpu/smi_during.sh, dmon]
     parse: smi_dmon
-    requires: [nvidia-smi]
-    privileged: false
+    requires: [nvidia-smi, /dev/nvidiactl]
   compare:
     key: sm.mean
-    omn: "summary[*].mean"
-    omn_jq: '.results[0].outputs[0].series[0].mean'
+    omn: "results.0.outputs[emit=summary].series.0.mean"
     tolerance: {abs: 0.15}
     why: "the same run, both once a second: 0.761 against 0.761, 0.86
       against 0.92. Six samples a run, so one straddling the workload's
       start moves the mean by a tenth, hence the wider band"
 
-- source: gpu.temp
+- id: temp-smi
+  source: gpu.temp
   tool: nvidia-smi
   use: "nvidia-smi --query-gpu=temperature.gpu: the die's temperature over a run"
   workload: [python3, tests/gpu_workload.py, kernel, "3000"]
   omn: [trace, gpu.temp, -m, poll, -e, summary, --format, json]
-  same_run: omn_launches_tool
+  run: omn_launches_tool
   reference:
     command: [tests/reference/workloads/gpu/smi_during.sh, gpu]
     parse: smi_query_gpu
-    requires: [nvidia-smi]
-    privileged: false
+    requires: [nvidia-smi, /dev/nvidiactl]
   compare:
     key: temperature.gpu.mean
-    omn: "summary[*].mean"
-    omn_jq: '.results[0].outputs[0].series[0].mean'
+    omn: "results.0.outputs[emit=summary].series.0.mean"
     tolerance: {abs: 4}
     why: "the same run: 74.4 C against 74.1. The die heats by about 20 C over
       the 3 s, so two samplers at different instants differ by the
       temperature's slope, not by their reading"
 
-- source: gpu.mem
+- id: vram-process-smi
+  source: gpu.mem
   tool: nvidia-smi
   use: "nvidia-smi --query-compute-apps=pid,used_memory: the VRAM a process holds"
   workload: [python3, tests/gpu_workload.py, arena, "268435456", "500", "1500"]
-  omn: [trace, gpu.mem, -m, poll, -e, summary, --format, json]
-  same_run: alternate
+  omn: [trace, gpu.mem, -m, poll, -e, summary, --format, json, -o, "{out}"]
+  run: separate
   reference:
     command: [tests/reference/workloads/gpu/smi_during.sh, apps]
     parse: smi_compute_apps
-    requires: [nvidia-smi]
-    privileged: false
+    requires: [nvidia-smi, /dev/nvidiactl]
   compare:
     key: used_memory.max
-    omn: "summary[*].max"
-    omn_jq: '.results[0].outputs[0].series[0].max'
+    omn: "results.0.outputs[emit=summary].series.0.max"
     tolerance: {abs: 0}
-    why: "alternate runs, because omn launching the wrapper reads the
+    why: "separate runs, because omn launching the wrapper would read the
       wrapper's pid and not its child's (docs/fixes/w22-gpu.md, gap 1): the
       workload holds 256 MiB on top of its context, 412 MiB to the byte
       under both (432 013 312 bytes), the same NVML per-process figure"

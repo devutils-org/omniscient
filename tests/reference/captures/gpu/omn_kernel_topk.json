@@ -1,0 +1,55 @@
+{
+  "results": [
+    {
+      "label": "gpu.kernel",
+      "source": "gpu.kernel",
+      "unit": "ns",
+      "backend": "vendor:cupti",
+      "outputs": [
+        {
+          "emit": "topk",
+          "k": 20,
+          "series": [
+            {
+              "key": "kernel=[memcpy HtoD]",
+              "events": 1,
+              "total": 1522330.0
+            },
+            {
+              "key": "kernel=[memcpy DtoH]",
+              "events": 1,
+              "total": 1427898.0
+            },
+            {
+              "key": "kernel=copy",
+              "events": 5,
+              "total": 310495.0
+            },
+            {
+              "key": "kernel=[memset]",
+              "events": 1,
+              "total": 27232.0
+            }
+          ],
+          "rest": {
+            "series": 0,
+            "events": 0,
+            "total": -0.0
+          }
+        }
+      ],
+      "events_seen": 8,
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "served_by": [
+        "vendor:cupti"
+      ],
+      "value_attr": "duration_ns"
+    }
+  ]
+}

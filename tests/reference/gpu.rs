@@ -37,6 +37,14 @@ pub fn parsers() -> Vec<Parser> {
             name: "smi_compute_apps",
             parse: smi_compute_apps,
         },
+        Parser {
+            name: "omn_topk",
+            parse: omn_topk,
+        },
+        Parser {
+            name: "omn_counters",
+            parse: omn_counters,
+        },
     ]
 }
 
@@ -356,6 +364,91 @@ fn smi_compute_apps(stdout: &str, stderr: &str) -> Result<Values, String> {
     summarise(vec![("used_memory", used)], rows)
 }
 
+/// `omn`'s results document, and every output of it that `emit` names.
+fn omn_outputs(stdout: &str, emit: &str) -> Result<Vec<serde_json::Value>, String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| format!("omn's output is not JSON: {e}"))?;
+    let results = doc["results"]
+        .as_array()
+        .ok_or("no `results` array in omn's output")?;
+    let outputs: Vec<_> = results
+        .iter()
+        .flat_map(|r| r["outputs"].as_array().cloned().unwrap_or_default())
+        .filter(|o| o["emit"] == emit)
+        .collect();
+    if outputs.is_empty() {
+        return Err(format!("no `{emit}` output in omn's results"));
+    }
+    Ok(outputs)
+}
+
+/// `omn trace gpu.kernel -e topk:N@kernel` or `gpu.api -e topk:N@api`, its
+/// `results.json`: per series, `<name>/count` (its `events`) and
+/// `<name>/total_ns` (its `total`), the name being the series' key without
+/// its attribute (`kernel=[memcpy HtoD]` is `[memcpy HtoD]`) -- the keys
+/// `nsys_gpu_sum` and `nsys_api_sum` give. For the names the path grammar
+/// cannot spell: a `]` ends its filter.
+fn omn_topk(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let mut values = Values::new();
+    for output in omn_outputs(stdout, "topk")? {
+        for series in output["series"].as_array().into_iter().flatten() {
+            let key = series["key"]
+                .as_str()
+                .ok_or_else(|| format!("a series without a key: {series}"))?;
+            let name = key.split_once('=').map_or(key, |(_, name)| name);
+            let field = |f: &str| {
+                series[f]
+                    .as_f64()
+                    .ok_or_else(|| format!("no number `{f}` in {series}"))
+            };
+            values.push((format!("{name}/count"), field("events")?));
+            values.push((format!("{name}/total_ns"), field("total")?));
+        }
+    }
+    Ok(values)
+}
+
+/// `omn trace gpu.counters -e raw`, its `results.json`: one event per kernel
+/// and counter, `<kernel>/<counter>` its `value` attribute (the median over
+/// the kernel's launches) and `<kernel>/launches` its `launches` -- the keys
+/// `ncu_metrics_csv` gives. An event is picked by two of its attributes,
+/// which the path grammar does not reach.
+fn omn_counters(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let mut values = Values::new();
+    for output in omn_outputs(stdout, "raw")? {
+        for event in output["events"].as_array().into_iter().flatten() {
+            let attr = |name: &str| {
+                event["attrs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|a| a["name"] == name)
+                    .map(|a| a["value"].clone())
+                    .ok_or_else(|| format!("no `{name}` attribute in {event}"))
+            };
+            let kernel = attr("kernel")?;
+            let counter = attr("counter")?;
+            let (Some(kernel), Some(counter)) = (kernel.as_str(), counter.as_str()) else {
+                return Err(format!("`kernel` or `counter` is not text in {event}"));
+            };
+            let number = |name: &str| {
+                attr(name)?
+                    .as_f64()
+                    .ok_or_else(|| format!("`{name}` is not a number in {event}"))
+            };
+            values.push((format!("{kernel}/{counter}"), number("value")?));
+            let launches = format!("{kernel}/launches");
+            if !values.iter().any(|(k, _)| *k == launches) {
+                values.push((launches, number("launches")?));
+            }
+        }
+    }
+    if values.is_empty() {
+        return Err("omn counted no kernel".into());
+    }
+    Ok(values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,7 +472,9 @@ mod tests {
                 "ncu_metrics_csv",
                 "smi_query_gpu",
                 "smi_dmon",
-                "smi_compute_apps"
+                "smi_compute_apps",
+                "omn_topk",
+                "omn_counters"
             ]
         );
     }
@@ -492,136 +587,106 @@ mod tests {
         assert_eq!(get(&v, "samples"), 4.0);
     }
 
-    /// Runs every pair of `catalog/references/gpu.yaml` on this machine,
-    /// with the family's own parsers and `compare.omn_jq`, until the shared
-    /// runner (stream reference) reads `same_run` and `compare.omn`. Ignored
-    /// by default: it drives the GPU for about a minute. Run it alone with
-    /// `cargo test --test reference gpu_pairs -- --ignored --nocapture`;
-    /// `OMN_GPU_PAIRS=<text>` keeps the pairs whose `use` contains it.
-    #[test]
-    #[ignore = "drives the GPU for about a minute; the shared runner is the default"]
-    fn gpu_pairs_hold_on_this_machine() {
-        use serde_norway::Value as Yaml;
-        use std::process::Command;
-        let root = env!("CARGO_MANIFEST_DIR");
-        let omn = env!("CARGO_BIN_EXE_omn");
-        let text = std::fs::read_to_string(format!("{root}/catalog/references/gpu.yaml")).unwrap();
-        let pairs: Vec<Yaml> = serde_norway::from_str(&text).unwrap();
-        let strings = |v: &Yaml| -> Vec<String> {
-            v.as_sequence()
-                .map(|s| s.iter().map(|x| x.as_str().unwrap().to_string()).collect())
-                .unwrap_or_default()
-        };
-        let have = |tool: &str| {
-            Command::new("sh")
-                .args(["-c", &format!("command -v {tool}")])
-                .output()
-                .is_ok_and(|o| o.status.success())
-        };
-        let scratch = std::env::temp_dir().join(format!("omn-gpu-pairs-{}", std::process::id()));
-        std::fs::create_dir_all(&scratch).unwrap();
-        let mut failures = Vec::new();
-        for (n, pair) in pairs.iter().enumerate() {
-            let use_ = pair["use"].as_str().unwrap();
-            if let Ok(only) = std::env::var("OMN_GPU_PAIRS") {
-                if !use_.contains(&only) {
-                    continue;
-                }
-            }
-            let reference = &pair["reference"];
-            let missing: Vec<_> = strings(&reference["requires"])
-                .into_iter()
-                .filter(|t| !have(t))
-                .collect();
-            if !missing.is_empty() {
-                println!("SKIP {use_}: {missing:?} not installed");
-                continue;
-            }
-            let workload = strings(&pair["workload"]);
-            let command = strings(&reference["command"]);
-            let same_run = pair["same_run"].as_str() == Some("omn_launches_tool");
-            let program_stderr = scratch.join(format!("{n}.stderr"));
-            let mut omn_args = strings(&pair["omn"]);
-            if same_run {
-                omn_args.push("--program-stderr".into());
-                omn_args.push(program_stderr.to_str().unwrap().into());
-                omn_args.push("--".into());
-                omn_args.extend(command.iter().cloned());
-            } else {
-                omn_args.push("--".into());
-            }
-            omn_args.extend(workload.iter().cloned());
-            let omn_out = Command::new(omn)
-                .current_dir(root)
-                .args(&omn_args)
-                .output()
-                .unwrap();
-            assert!(
-                omn_out.status.success(),
-                "{use_}: omn failed: {}",
-                String::from_utf8_lossy(&omn_out.stderr)
-            );
-            let (stdout, stderr) = if same_run {
-                (
-                    String::new(),
-                    std::fs::read_to_string(&program_stderr).unwrap(),
-                )
-            } else {
-                let out = Command::new(&command[0])
-                    .current_dir(root)
-                    .args(&command[1..])
-                    .args(&workload)
-                    .output()
-                    .unwrap();
-                assert!(out.status.success(), "{use_}: the tool failed");
-                (
-                    String::from_utf8_lossy(&out.stdout).into_owned(),
-                    String::from_utf8_lossy(&out.stderr).into_owned(),
-                )
-            };
-            let name = reference["parse"].as_str().unwrap();
-            let parser = parsers().into_iter().find(|p| p.name == name).unwrap();
-            let values = (parser.parse)(&stdout, &stderr).unwrap();
-            let key = pair["compare"]["key"].as_str().unwrap();
-            let tool = get(&values, key);
-            let jq = Command::new("jq")
-                .arg(pair["compare"]["omn_jq"].as_str().unwrap())
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .and_then(|mut child| {
-                    use std::io::Write;
-                    child.stdin.take().unwrap().write_all(&omn_out.stdout)?;
-                    child.wait_with_output()
-                })
-                .unwrap();
-            let ours: f64 = String::from_utf8_lossy(&jq.stdout)
-                .trim()
-                .parse()
-                .unwrap_or_else(|_| panic!("{use_}: no omn value for {key}"));
-            let tolerance = &pair["compare"]["tolerance"];
-            let (within, band) = match (tolerance["rel"].as_f64(), tolerance["abs"].as_f64()) {
-                (Some(rel), _) => (
-                    (ours - tool).abs() <= rel * tool.abs(),
-                    format!("rel {rel}"),
-                ),
-                (_, Some(abs)) => ((ours - tool).abs() <= abs, format!("abs {abs}")),
-                _ => panic!("{use_}: no tolerance"),
-            };
-            let verdict = if within { "PASS" } else { "FAIL" };
-            println!("{verdict} {use_}: omn {ours} tool {tool} ({band})");
-            if !within {
-                failures.push(use_.to_string());
-            }
-        }
-        let _ = std::fs::remove_dir_all(&scratch);
-        assert!(failures.is_empty(), "outside their tolerance: {failures:?}");
-    }
-
     #[test]
     fn a_sampler_with_no_sample_is_an_error_not_a_zero() {
         assert!(smi_query_gpu("", "context open\n").is_err());
         assert!(smi_compute_apps("", "").is_err());
         assert!(smi_dmon("", "").is_err());
+    }
+
+    // The three `omn` captures below are composed, not captured: written in
+    // the shape today's `omn` gives `topk` and `raw` (captured from
+    // `cpu.instructions` on 2026-10-04) with the gpu sources' attributes
+    // (`src/collect/gpu/counters.rs`) and the twenty-second wave's numbers,
+    // because this machine's NVIDIA driver was not loaded when they were
+    // written (docs/fixes/w23-gpu.md). Replace them by a real run's
+    // `results.json` once it is.
+
+    #[test]
+    fn omn_topk_reads_kernels_copies_and_calls_under_the_tools_keys() {
+        let v = omn_topk(include_str!("captures/gpu/omn_kernel_topk.json"), "").unwrap();
+        assert_eq!(get(&v, "copy/count"), 5.0);
+        assert_eq!(get(&v, "copy/total_ns"), 310495.0);
+        assert_eq!(get(&v, "[memcpy HtoD]/count"), 1.0);
+        assert_eq!(get(&v, "[memcpy HtoD]/total_ns"), 1522330.0);
+        assert_eq!(get(&v, "[memset]/count"), 1.0);
+        // The same keys as nsys's parser, so a pair's `key` names both.
+        let nsys = nsys_gpu_sum(include_str!("captures/gpu/nsys_gpu_sum.csv"), "").unwrap();
+        for (key, _) in &nsys {
+            assert!(v.iter().any(|(k, _)| k == key), "omn lacks nsys's `{key}`");
+        }
+
+        let v = omn_topk(include_str!("captures/gpu/omn_api_topk.json"), "").unwrap();
+        assert_eq!(get(&v, "cuLaunchKernel/count"), 5.0);
+        assert_eq!(get(&v, "cuMemAlloc/count"), 3.0);
+        assert_eq!(get(&v, "cuMemcpyDtoH/count"), 1.0);
+    }
+
+    #[test]
+    fn omn_counters_reads_each_kernels_counter_under_ncus_keys() {
+        let v = omn_counters(include_str!("captures/gpu/omn_counters_raw.json"), "").unwrap();
+        assert_eq!(get(&v, "copy/smsp__inst_executed.sum"), 808192.0);
+        assert_eq!(get(&v, "copy/sm__ctas_launched.sum"), 272.0);
+        assert_eq!(get(&v, "copy/l1tex__t_bytes.sum"), 33554432.0);
+        assert_eq!(get(&v, "copy/dram__bytes_read.sum"), 16838688.0);
+        assert_eq!(get(&v, "copy/launches"), 5.0);
+        let ncu = ncu_metrics_csv(include_str!("captures/gpu/ncu_metrics.csv"), "").unwrap();
+        for (key, _) in &ncu {
+            assert!(v.iter().any(|(k, _)| k == key), "omn lacks ncu's `{key}`");
+        }
+    }
+
+    #[test]
+    fn the_omn_parsers_refuse_what_holds_no_value() {
+        assert!(omn_topk("not json", "").is_err());
+        assert!(omn_topk(r#"{"results": []}"#, "").is_err());
+        assert!(omn_counters(
+            r#"{"results": [{"outputs": [{"emit": "raw", "events": []}]}]}"#,
+            ""
+        )
+        .is_err());
+        let no_kernel = r#"{"results": [{"outputs": [{"emit": "raw", "events": [{"attrs": [{"name": "value", "value": 1}]}]}]}]}"#;
+        assert!(omn_counters(no_kernel, "").is_err());
+    }
+
+    #[test]
+    fn every_topk_path_finds_its_number_in_omns_output() {
+        // The pairs' own paths, evaluated by the runner on the captures:
+        // a series' key holding `=` is spelt whole inside the filter.
+        let captures = [
+            (
+                "gpu.kernel",
+                "launches",
+                include_str!("captures/gpu/omn_kernel_topk_launches.json"),
+            ),
+            (
+                "gpu.kernel",
+                "memory",
+                include_str!("captures/gpu/omn_kernel_topk.json"),
+            ),
+            (
+                "gpu.api",
+                "memory",
+                include_str!("captures/gpu/omn_api_topk.json"),
+            ),
+        ];
+        let mut checked = 0;
+        for pair in crate::runner::load("gpu").unwrap() {
+            let Some((_, _, capture)) = captures
+                .iter()
+                .find(|(s, w, _)| *s == pair.source && pair.workload.iter().any(|a| a == w))
+            else {
+                continue;
+            };
+            let doc = crate::runner::parse_json(capture).unwrap();
+            for compare in pair.compare.all() {
+                if let Some(path) = &compare.omn {
+                    crate::runner::eval_path(&doc, path)
+                        .unwrap_or_else(|e| panic!("{}: {path}: {e}", pair.label()));
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 6);
     }
 }
