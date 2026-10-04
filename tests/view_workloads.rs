@@ -418,8 +418,11 @@ fn each_session_asks_its_views_sources_or_says_why_not() {
     }
 }
 
-/// Every session is understood: parsed, validated and resolved, measuring
-/// nothing, so this holds on a machine with no privilege at all.
+/// Every session is understood. Validated against the catalog, which needs no
+/// privilege, so that half holds on any machine; then resolved
+/// (`--dump-request`), measuring nothing -- but resolving picks backends, and
+/// on a binary without `CAP_BPF` and `CAP_PERFMON` most of these sources have
+/// none, so that half skips, loudly, per session, when that is the reason.
 #[test]
 fn every_session_is_understood() {
     let mut views: Vec<String> = omn_view::views::registry()
@@ -430,13 +433,101 @@ fn every_session_is_understood() {
     views.dedup();
     for view in views {
         let path = format!("view/workloads/{view}/session.yml");
-        let output = Command::new(BINARY)
+        let validated = Command::new(BINARY)
+            .current_dir(root())
+            .args(["validate", "-f", &path])
+            .output()
+            .expect("omn should run");
+        assert!(
+            validated.status.success(),
+            "{path}:\n{}",
+            spoken(&validated)
+        );
+
+        let resolved = Command::new(BINARY)
             .current_dir(root())
             .args(["-f", &path, "--dump-request"])
             .output()
             .expect("omn should run");
-        assert!(output.status.success(), "{path}:\n{}", spoken(&output));
+        let said = spoken(&resolved);
+        if !resolved.status.success() && said.contains("no viable backend") && unprivileged(&said) {
+            eprintln!(
+                "skipped resolving {path}: its sources need CAP_BPF and CAP_PERFMON, which this \
+                 binary does not carry (`make` grants them):\n{said}"
+            );
+            continue;
+        }
+        assert!(resolved.status.success(), "{path}:\n{said}");
     }
+}
+
+/// The request session's plan is the manifest's: the server takes its plan on
+/// its command line, not from the manifest, so this is what keeps the two
+/// from drifting apart. Each kind's plan string must say the figures the
+/// manifest gives it (`lock:reads[:gap]`, zero where the kind has none), and
+/// the session must launch the kinds interleaved, `count` rounds, in the
+/// manifest's order -- which is what `request_causes_are_the_manifests` reads
+/// a request's id against.
+fn request_plan_is_the_manifests() {
+    let truth = manifest("request");
+    let kinds = truth["requests"].as_array().expect("requests");
+    let field = |kind: &Value, name: &str| kind[name].as_i64().unwrap_or(0);
+    for kind in kinds {
+        let plan = kind["plan"].as_str().expect("plan");
+        let words: Vec<i64> = plan
+            .split(':')
+            .map(|word| word.parse().unwrap_or_else(|_| panic!("plan `{plan}`")))
+            .collect();
+        let said = |at: usize| words.get(at).copied().unwrap_or(0);
+        assert_eq!(
+            (said(0), said(1), said(2)),
+            (
+                field(kind, "lock_ms"),
+                field(kind, "reads"),
+                field(kind, "gap_ms")
+            ),
+            "the {} kind's plan `{plan}` is `lock:reads[:gap]`, and must say the manifest's \
+             lock_ms, reads and gap_ms",
+            kind["cause"]
+        );
+    }
+    let rounds = field(&kinds[0], "count");
+    assert!(
+        kinds.iter().all(|kind| field(kind, "count") == rounds),
+        "the kinds interleave, so each comes the same number of times"
+    );
+    let run: Vec<&str> = truth["run"]
+        .as_array()
+        .expect("run")
+        .iter()
+        .filter_map(Value::as_str)
+        .take_while(|word| *word != "<plan...>")
+        .collect();
+    let mut expected: Vec<String> = run.iter().map(|word| (*word).to_owned()).collect();
+    for _ in 0..rounds {
+        expected.extend(
+            kinds
+                .iter()
+                .map(|kind| kind["plan"].as_str().expect("plan").to_owned()),
+        );
+    }
+    let session: serde_norway::Value =
+        serde_norway::from_str(&session_text("request")).expect("the session is yaml");
+    let launched: Vec<String> = session["requests"][0]["target"]["launch"]
+        .as_sequence()
+        .expect("the session launches the server")
+        .iter()
+        .map(|word| word.as_str().expect("a word").to_owned())
+        .collect();
+    assert_eq!(
+        launched, expected,
+        "view/workloads/request/session.yml must launch the manifest's plan"
+    );
+}
+
+#[test]
+fn request_session_runs_the_manifests_plan() {
+    request_plan_is_the_manifests();
 }
 
 // ----------------------------------------------------------- one per view
@@ -965,6 +1056,7 @@ fn request_server() -> Result<(), String> {
 
 #[test]
 fn request_causes_are_the_manifests() {
+    request_plan_is_the_manifests();
     let truth = manifest("request");
     if let Err(why) = request_server() {
         eprintln!("skipped: {why}");
