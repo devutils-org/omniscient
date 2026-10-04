@@ -1,33 +1,33 @@
 [0m[1momn top[0m │ fixture vertical-requests │ 408ms                       [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥0.70%[0m[35m │ target 4.10% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request [0m[1;7m 5 timebar [0m 6 heatmap  7 lanes  8 wake  9 flows                                 [0m
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐[0m
-│[0m[3mNot drawn yet. What this view needs, and what this run holds of it:[0m                                                   │[0m
+│ [0m[1;32mone-request[0m[2m  one bar per request, whole: `net.request` span_ns  (1 of 2: d for the next)[0m                             │[0m
 │                                                                                                                      │[0m
-│[0m[1mcpu.profile              [0m[2mnot in this run[0m                                                                              │[0m
-│[0m[2m                         on cpu[0m                                                                                       │[0m
-│[0m[1msched.runqlat            [0m[2mnot in this run[0m                                                                              │[0m
-│[0m[2m                         waiting to run[0m                                                                               │[0m
-│[0m[1msched.offcpu             [0m[2mnot in this run[0m                                                                              │[0m
-│[0m[2m                         blocked, with the stack it blocked in[0m                                                        │[0m
-│[0m[1msched.futex              [0m[2mnot in this run[0m                                                                              │[0m
-│[0m[2m                         waiting on a lock[0m                                                                            │[0m
+│ [0m[1m▶ first suspect  req:a001: [0m[1;31mlock_wait 40.1ms (99.8% of its whole)[0m                                                     │[0m
+│   asleep on a lock another thread held: lock-contended                                                               │[0m
+│   holder tid 2759758, on 1 of its 1 event(s)                                                                         │[0m
+│ [0m[2m  decisive: ahead of the next state (54.0µs) and of what no row read (0ns) -- omn latency's rule, on the run's deco…[0m │[0m
 │                                                                                                                      │[0m
+│ [0m[1;32m▸ req:a001            [0m[2m├[0m[31m▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞[0m[1;7;31m lock 99.8% [0m[31m▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞[0m[2m┤[0m   40.2ms [0m[1;31m ▶ lock 99.8%      [0m  │[0m
+│   req:a005            [0m[2m├[0m[36m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m[1;7;36m network 98.8% [0m[36m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m[2m┤[0m              33.1ms [0m[1;36m ▶ network 98.8%   [0m  │[0m
+│   req:a004            [0m[2m├[0m[36m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m[1;7;36m network 99.9% [0m[36m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m[2m┤[0m                   30.1ms [0m[1;36m ▶ network 99.9%   [0m  │[0m
+│   req:a003            [0m[2m├[0m[32m█[0m[31m▞▞▞▞▞▞▞▞▞[0m[1;7;31m lock 87.4% [0m[31m▞▞▞▞▞▞▞▞▞▞[0m[34m▓▓▓[0m[2m┤[0m                              23.0ms [0m[1;31m ▶ lock 87.4%      [0m  │[0m
+│   req:a002            [0m[2m├[0m[32m██[0m[35m▚[0m[34m▓[0m[1;7;34m I/O 81.8% [0m[34m▓[0m[2m┤[0m                                                 10.1ms [0m[1;34m ▶ I/O 81.8%       [0m  │[0m
+│ [0m[2m                     0 ──────────────────────────┼ 20.1ms ───────────────────────────┤ 40.2ms                       [0m │[0m
+│                        [0m[32m█[0m on cpu   [0m[35m▚[0m run queue   [0m[31m▞[0m lock   [0m[34m▓[0m I/O   [0m[36m▄[0m network                                           │[0m
 │                                                                                                                      │[0m
+│ [0m[1m  state                            source          amount          share   ±         reads  trust                   [0m │[0m
+│   whole: `net.request` span_ns                     40.2ms          100%    exact                                     │[0m
+│ [0m[32m█ [0mcpu_on                           net.request     54.0µs          0.13%   exact     1      [0m[33mdegraded x2[0m              │[0m
+│ [0m[35m▚ [0msched_wait                       net.request     22.6µs          0.06%   exact     1      [0m[33mdegraded x2[0m              │[0m
+│ [0m[31m▞ [0mlock_wait                        net.request     40.1ms          99.8%   exact     1      [0m[33mdegraded x2[0m              │[0m
+│ [0m[2m    ↳ holder tid 2759758, on 1 of its 1 event(s)                                                                    [0m │[0m
+│ [0m[34m▓ [0mblock_io                         net.request     0ns             0.00%   exact     1      [0m[33mdegraded x2[0m              │[0m
+│ [0m[36m▄ [0mnet_rx                           net.request     20.7µs          0.05%   exact     1      [0m[33mdegraded x2[0m              │[0m
+│ [0m[36m▄ [0mnet_tx                           net.request     0ns             0.00%   exact     1      [0m[33mdegraded x2[0m              │[0m
+│ [0m[2m  residue: the whole less the rows                 0ns             0.00%   exact     within its resolution          [0m │[0m
 │                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
+│ [0m[2mTrust: served by a fallback that says what it gives up (12).[0m                                                         │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
@@ -37,4 +37,4 @@
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
-[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help                                                                   [0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓[0m bar  [0m[1md[0m decomposition  [0m[1ms[0m scale  [0m[1menter[0m open                     [0m

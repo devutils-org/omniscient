@@ -1,40 +1,40 @@
 omn top │ fixture http-server │ 2.84s                             view: snapshot │ collectors ≥16.1% │ target 92.0% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
-│Not drawn yet. What this view needs, and what this run holds of it:                                                   │
+│ the view's reading  one bar per thread, whole: the run's window                                                      │
 │                                                                                                                      │
-│cpu.profile              2.85k events via pmu:sw [stack] 29 late ~low det degraded x7                                 │
-│                         on cpu                                                                                       │
-│sched.runqlat            104 events via bpf:raw_tp [raw,summary] ~low det degraded                                    │
-│                         waiting to run                                                                               │
-│sched.offcpu             140 events via bpf:raw_tp [stack,raw] ~low det degraded                                      │
-│                         blocked, with the stack it blocked in                                                        │
-│sched.futex              24 events via bpf:raw_tp [summary] ~low det                                                  │
-│                         waiting on a lock                                                                            │
+│ ▶ first suspect  2758953 python3: blocked: sleeping 2.76s (96.9% of its wall clock)                                  │
+│   asleep on something that is not a lock seen here: a timer, a pipe, a socket, a condition                           │
+│   100 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- select.cpython-314-x86_64-linux-gnu.so+0x3fd3 <- lib… │
+│   decisive: ahead of the next state (86.7ms) and of what no row read (10.0ms) -- omn latency's rule, on the view's … │
 │                                                                                                                      │
+│ ▸ 2758953 python3     ├▒▒░░░░░░░░░░░░░░░░░░░░░░░ sleep 96.9% ░░░░░░░░░░░░░░░░░░░░░░░░┤    2.84s  ▶ sleep 96.9%       │
+│   2758974 Thread-1 (p…├█████████████████████ on cpu 91.6% ██████████████████████▒▒▒▒▒┤    2.84s  ▶ on cpu ≥91.6%     │
+│   2758972 python3     ├░░░░░░░░░░░░░░░░░░░░░░░ sleep 96.5% ░░░░░░░░░░░░░░░░░░░░░░░░··┤    2.84s  ▶ sleep 96.5%       │
+│   + 1 thread(s) under 1.00% of the window each: 2758973 ldconfig                                                     │
+│                      0 ───────────────────────────┼ 1.42s ───────────────────────────┤ 2.84s                         │
+│                        █ on cpu   ▚ run queue   ▞ lock   ▓ I/O   ░ sleep   ▒ bracketed   · not read                  │
 │                                                                                                                      │
+│   state                            source          amount          share   ±         reads  trust                    │
+│   whole: the run's window                          2.84s           100%    exact                                     │
+│ █ on-cpu                           cpu.oncpu_time  0ns - 86.7ms    0.00%   ±10.0ms   0      ~low det degraded        │
+│     ↳ most-sampled leaf `link_path_walk`: 173 of 2852 samples, every thread's: the samples are spread, no one funct… │
+│     ↳ a bracket: its process's 2.70s on cpu less what its 1 other thread(s) could have run, at least; what its own … │
+│ ▚ runnable                         sched.runqlat   274µs           0.01%   exact     19     ~low det degraded        │
+│ ░ blocked: sleeping                sched.offcpu    2.76s           96.9%   exact     17     ~low det degraded        │
+│     ↳ 100 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- select.cpython-314-x86_64-linux-gnu.so+0x3fd3 <-… │
+│     ↳ 409µs waiting in futex(2) over 12 wait(s): less than half the sleep                                            │
+│   residue: the whole less the rows                 0ns             0.00%   ±10.0ms   within its resolution           │
 │                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
+│ No decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread    │
+│   over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn │
+│   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │
+│ On cpu: `cpu.oncpu_time` is a per-process total here (`fs:proc`, to a tick), so a thread's share is bracketed --     │
+│   solid to the least it can be, shaded (▒) to the most -- over the threads the sched sources saw. A thread that      │
+│   started or ended inside the window counts its absence in the shaded part.                                          │
+│ Trust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it  │
+│   gives up (3).                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ bar  d decomposition  s scale  enter open
