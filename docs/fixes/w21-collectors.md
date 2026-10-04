@@ -136,7 +136,7 @@ Wanted: `rx_bytes` 52 52 53 51 56, `tx_bytes` 59 59 59 59 131134, four
   the `wait4` reap. `cpu.oncpu_time` on `fs:proc` then reads the zombie's
   `/proc/<pid>/stat` (still whole: the zombie leader is in its thread list)
   and its last interval is no longer missing; its caveat's second sentence
-  can then go.
+  and the loss the review round now counts (see "Review") can then go.
 - **run (`src/collect/mod.rs:2954`)**: `cargo clippy --workspace
   --all-targets -- -D warnings` is red on `main` itself:
   `clippy::large_enum_variant` on `enum Slot` (`Detached` at least 240
@@ -172,3 +172,33 @@ Wanted: `rx_bytes` 52 52 53 51 56, `tx_bytes` 59 59 59 59 131134, four
 - `cargo clippy --workspace --all-targets -- -D warnings`: red on `main`'s
   `Slot` only; clean with `-A clippy::large_enum_variant`. `cargo fmt
   --check`: clean.
+
+## Review
+
+The fix round, after `main` was merged at `6f5d1a6`. Two findings, both
+taken; a third defect found while testing them.
+
+| Commit | What |
+|---|---|
+| `a8a3577` | **`net.request`'s bytes against a truth outside the tool** (finding 1). `scenario_net::a_requests_bytes_are_what_its_client_sent_and_its_worker_wrote` builds `examples/vertical/server.c` under `target/omn-scenario-net/` (its own name, so it never races `tests/vertical.rs` for the binary) and runs `omn net.request -m trace -e raw -k req` over a plan of five requests the test chose: bodies 2, 7, 300 and 20000 bytes, one request sent in two halves 20 ms apart, one 40 ms on the lock. Each `rx_bytes` is held, exactly, to the length of the request line the client formats with those numbers; each `tx_bytes`, exactly, to the response's header and body and to the worker's own `sent=`; the lock's `holder_since_ns` lies between the worker's `born_ns` and its own clock around the lock less the holder's `held_ns` (5 ms slack); `fields` are all zero. Skips, saying why, without `cc`/`<sys/sdt.h>` or without the capabilities. |
+| `501443e` | **`cpu.oncpu_time` on `fs:proc` counts the interval the reap took away** (finding 2). The closing read finds no `/proc/<pid>`; that read is now one `failed_reads` in the run's `losses`, with the reason ("the task ended before the closing read ... up to one interval, is in no event (a launched program's exit carries the whole as `cpu_ns`)"), counted once however often the run asks again. The catalog caveat says so. The closing read while the target is a zombie is still run's (`src/collect/mod.rs`, `launch.rs`), filed above under "Needs from another stream"; what changed is that the loss is no longer silent in the results. |
+| `139450c` | **`named_by` reads back from JSON** (found here, not by the review). `Provenance` is `#[serde(flatten)]`ed into `Results`, and a flattened `BTreeMap<u64, _>` does not parse JSON's string keys: every `cpu.profile` run with namers -- which this stream's `provenance()` made every one -- failed to load in `omn diff` (`invalid type: string "0", expected u64`; `triage::the_function_whose_cost_doubled_is_the_only_difference` red on `main`). `src/stack.rs` (data's) reads the keys as strings and parses them; `emit::tests::a_result_carries_what_its_stacks_labels_cannot_say` now round-trips a result whose `named_by` is kept through JSON text, and fails without the fix. |
+
+Shown: the new scenario passes three times in a row (0.83 s each), and fails
+with a deliberate `rx_bytes + 1` in the decoder (`req:a001's client sent a
+51-byte request`, left 52). `omn cpu.oncpu_time -m poll@200ms -e raw
+--backend fs:proc -- python3 <0.5 s busy loop>`: series 390 ms, `lifetime.cpu_ns`
+507.9 ms, `losses.failed_reads` 1 with the reason (before: 0, nothing said).
+`cargo test --test triage`: 29 passed (was 28, 1 failed).
+
+Tests of the round: `cargo test --test scenario_net`: 41 passed but
+`every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason` (in the
+flaky tally), which passed alone. `cargo test --lib -- stack:: emit::
+collect::cpu::`: 154 passed, 1 ignored. `--test family_cpu` 17, `--test
+scenario_cpu` 42, `--test runner` 30, `--test cross_compute` 8, `--test
+triage` 29, `--test catalog_model` 19 passed. `--test scenario_sched`
+54 passed, 1 failed (`a_source_with_no_collector_is_refused_with_its_own_exit_code`,
+the uprobe PMU's CAP_SYS_ADMIN on this machine, `docs/open-findings.md`);
+`--test view_live` 4 passed, 1 failed (`a_gallery_prints_every_view`, red on
+`main` before this round, `w21-run.md`, `w21-data.md`). `cargo clippy
+--workspace --all-targets -- -D warnings` and `cargo fmt --check`: clean.
