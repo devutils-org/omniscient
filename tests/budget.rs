@@ -531,6 +531,56 @@ fn a_waiting_program_is_weighed_with_the_process_it_started_and_its_stop_ends_bo
     );
 }
 
+/// An orphan the program left -- its parent gone first, in a session of its
+/// own, adopted by `omn` -- is in the program's denominator while it runs
+/// (`DECISIONS.md`, an adopted orphan's cpu). The program here sleeps two
+/// seconds while its orphan burns one: weighed against the sleeping shell
+/// alone, `mem.rss`'s cost read hundreds of percent mid-run and a 5 % budget
+/// moved it off `smaps_rollup` onto `statm` in each of three runs; weighed
+/// with the orphan it is under 1 %, and the request is served as asked.
+#[test]
+fn an_orphan_the_program_left_is_weighed_with_it_while_it_runs() {
+    if Command::new("python3").arg("-V").output().is_err() {
+        eprintln!("skipped: no python3 to burn a second of cpu in the orphan");
+        return;
+    }
+    let directory = scratch("orphan");
+    let out = directory.join("out").to_string_lossy().into_owned();
+    let program = "( setsid python3 -c 'import time\nt = time.process_time()\n\
+                   while time.process_time() - t < 1.0: pass\ntime.sleep(5)' & ); sleep 2";
+    let output = run(&[
+        "mem.rss",
+        "-e",
+        "summary",
+        "-m",
+        "poll@100ms",
+        "--budget",
+        "5%",
+        "-o",
+        out.as_str(),
+        "--",
+        "/bin/sh",
+        "-c",
+        program,
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let cost = cost_record(Path::new(&out));
+    let _ = std::fs::remove_dir_all(&directory);
+    let observed = cost["overhead"]["observed_cpu_ns"].as_u64().unwrap_or(0);
+    assert!(
+        observed >= 500_000_000,
+        "the orphan's second of cpu is not in the target's {observed} ns: {}",
+        cost["overhead"]["observed_from"]
+    );
+    assert_eq!(
+        cost["served_by"],
+        serde_json::json!(["fs:proc:smaps_rollup"]),
+        "the budget moved the request although the program's tree, orphan included, spent a \
+         second: {}",
+        stderr(&output)
+    );
+}
+
 /// The help and the run tell the same story about `--budget`.
 ///
 /// The help once read "the resolver degrades to stay under it", describing a

@@ -1427,13 +1427,23 @@ impl Meter {
     /// baseline taken when the window opened.
     fn read(&self) -> Option<u64> {
         match self {
-            Meter::Launched(pid, high) => Some(
-                high.keep(
+            Meter::Launched(pid, high) => {
+                // Adopting, every descendant of this process is the program's
+                // -- its tree, and the orphans that left it while they live --
+                // and every child reaped is in this process's children
+                // account: one walk, and no orphan's work missing from the
+                // denominator while it runs.
+                let spent = if launch::adopting() {
+                    // SAFETY: getpid cannot fail.
+                    rusage_ns(libc::RUSAGE_CHILDREN)
+                        + task::descendants_cpu(unsafe { libc::getpid() })
+                } else {
                     task::tree_cpu(*pid)
                         .map(|read| read.ns)
-                        .unwrap_or_else(|| rusage_ns(libc::RUSAGE_CHILDREN)),
-                ),
-            ),
+                        .unwrap_or_else(|| rusage_ns(libc::RUSAGE_CHILDREN))
+                };
+                Some(high.keep(spent))
+            }
             Meter::Tasks(pids) => {
                 let mut total = 0;
                 let mut any = false;
@@ -1460,8 +1470,9 @@ impl Meter {
         match self {
             Meter::Launched(pid, _) => format!(
                 "the launched program's cpu time and its descendants' ({}, of {pid} and of \
-                 every process it started while they ran, and getrusage(RUSAGE_CHILDREN) in \
-                 microseconds once it was reaped)",
+                 every process it started while they ran, its orphans adopted by omn \
+                 included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was \
+                 reaped)",
                 task::tree_cpu(*pid).map_or(
                     "the scheduler's own nanoseconds, or clock ticks where it could not be read",
                     |read| read.grain.says()
