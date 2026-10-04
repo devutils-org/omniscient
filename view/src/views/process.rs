@@ -1451,15 +1451,23 @@ mod tests {
             sent + received
         );
 
-        // Disk: the file goes through the device, at least its bytes.
+        // Disk: the file goes through the device as the process's own block
+        // requests, 128 KiB each, plus the filesystem's metadata the fsync
+        // commits. The line counts the requests issued in the process's
+        // context; one the block layer hands to kblockd's worker to dispatch
+        // is the worker's, and leaves a hole of one request in the file's
+        // sectors (one of 32 in both recordings made, docs/fixes/w21-record.md
+        // reconciles the bytes). So: the file less a few such requests, and
+        // no more than the file and a bounded metadata share.
         let disk = row(&screen, "Disk");
         assert!(disk.held, "{}", disk.text);
         assert!(disk.text.contains(" p99 "), "{}", disk.text);
         let written = truth["file"]["written"].as_f64().unwrap();
+        let request = 131_072.0;
+        let moved = integral(disk, &axis);
         assert!(
-            integral(disk, &axis) >= written,
-            "the device moved {} bytes of the process's, the file is {written}",
-            integral(disk, &axis)
+            moved >= written - 4.0 * request && moved <= written + 1_048_576.0,
+            "the device moved {moved} bytes of the process's, the file is {written}"
         );
 
         // GPU: the workload launches none, and the line says so, dimmed.
