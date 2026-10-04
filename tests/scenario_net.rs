@@ -4580,3 +4580,218 @@ print(\"omn-sent\", sum(int(line) for line in os.fdopen(reader).read().split()))
         sent - counted - lost
     );
 }
+
+// ---------------------------------------------- Class: a request's own bytes
+//
+// `net.request`'s `rx_bytes`, `tx_bytes` and `holder_since_ns`, held to what a
+// server and its client did rather than to anything the tool decoded. The
+// server is the vertical case's (`examples/vertical/server.c`), built here
+// under a name of its own so this file never races `tests/vertical.rs` for the
+// binary; it declares each request with `omn:request__start(id, fd)` and
+// `omn:request__done(id, fd)`, and its client sends one request per
+// connection.
+
+/// The vertical case's server, built for this file once per process.
+fn usdt_server() -> Result<std::path::PathBuf, String> {
+    static BUILT: std::sync::OnceLock<Result<std::path::PathBuf, String>> =
+        std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            const SOURCE: &str = include_str!("../examples/vertical/server.c");
+            let dir =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/omn-scenario-net");
+            std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+            let source = dir.join("server.c");
+            std::fs::write(&source, SOURCE).map_err(|error| error.to_string())?;
+            let path = dir.join("server");
+            let partial = dir.join(format!("server.{}", std::process::id()));
+            let built = Command::new("cc")
+                .args(["-O0", "-pthread", "-o"])
+                .arg(&partial)
+                .arg(&source)
+                .output()
+                .map_err(|error| format!("no C compiler (`cc`): {error}"))?;
+            if !built.status.success() {
+                return Err(format!(
+                    "the server did not build, most likely for want of <sys/sdt.h>: {}",
+                    stderr(&built)
+                ));
+            }
+            std::fs::rename(&partial, &path).map_err(|error| error.to_string())?;
+            Ok(path)
+        })
+        .clone()
+}
+
+/// One `vertical: key=value ...` line the server printed.
+fn said(text: &str) -> Vec<BTreeMap<String, String>> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("vertical: "))
+        .map(|line| {
+            line.split_whitespace()
+                .filter_map(|pair| pair.split_once('='))
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect()
+        })
+        .collect()
+}
+
+/// Each request's `rx_bytes` is the length of the request the client sent,
+/// `tx_bytes` the length of the response the worker wrote, and the start of
+/// its longest sleep is where the worker began waiting for the lock.
+///
+/// The ground truth is chosen here and printed by the programs, never read off
+/// the tool: the request line is the client's format with this plan's numbers
+/// in it, so its length is known before the run (four lengths, one of them
+/// sent in two halves 20 ms apart); the response is the server's header and a
+/// body of a length the plan chose, and the worker prints how many bytes its
+/// `send` calls returned. The lock's request holds `holder_since_ns` between
+/// the worker's own birth stamp and the end of its own clock around the lock,
+/// less the holder's own clock around its sleep under it.
+///
+/// An arithmetic slip in `copied_seq` or `write_seq`, or a start claimed from
+/// the wrong arrival, is off by a request's length or more; nothing here has a
+/// tolerance on a byte count.
+#[test]
+fn a_requests_bytes_are_what_its_client_sent_and_its_worker_wrote() {
+    let server = match usdt_server() {
+        Ok(server) => server,
+        Err(reason) => {
+            eprintln!("skipped: this machine cannot serve a USDT server: {reason}");
+            return;
+        }
+    };
+    let data = server.with_file_name("data");
+    // lock_ms:reads:gap_ms:body. A body of 0 is the server's two-byte answer
+    // read at once; any other is read through a small receive buffer.
+    const PLAN: [(u64, u64, u64, u64); 5] = [
+        (0, 0, 0, 0),
+        (0, 0, 0, 7),
+        (0, 0, 20, 300),
+        (0, 0, 0, 20_000),
+        (40, 0, 0, 0),
+    ];
+    let plan: Vec<String> = PLAN
+        .iter()
+        .map(|(lock, reads, gap, body)| format!("{lock}:{reads}:{gap}:{body}"))
+        .collect();
+    let mut args = vec![
+        "net.request",
+        "--mode",
+        "trace",
+        "--emit",
+        "raw",
+        "--keys",
+        "req",
+        "--format",
+        "json",
+        "--",
+        server.to_str().expect("a utf-8 path"),
+        data.to_str().expect("a utf-8 path"),
+    ];
+    args.extend(plan.iter().map(String::as_str));
+    let outcome = omn(&args);
+    let complaint = stderr(&outcome);
+    if unprivileged(&complaint) {
+        eprintln!(
+            "skipped: net.request needs CAP_BPF and CAP_PERFMON, which this machine does not \
+             grant"
+        );
+        return;
+    }
+    assert_eq!(code(&outcome), 0, "{complaint}");
+    let run = results(&outcome);
+    let events = raw_events(&run, "net.request");
+    let said = said(&complaint);
+    let worker = |id: &str| {
+        said.iter()
+            .find(|line| {
+                line.get("role").map(String::as_str) == Some("worker")
+                    && line.get("req").map(String::as_str) == Some(id)
+            })
+            .unwrap_or_else(|| panic!("the worker said nothing about req {id}:\n{complaint}"))
+    };
+    let number = |line: &BTreeMap<String, String>, name: &str| -> u64 {
+        line.get(name)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("the server said no `{name}`: {line:?}"))
+    };
+
+    for (index, (lock, reads, _, body)) in PLAN.iter().enumerate() {
+        let id = format!("{:x}", 0xa001 + index);
+        let event = events
+            .iter()
+            .find(|event| {
+                event["keys"].as_array().is_some_and(|keys| {
+                    keys.iter()
+                        .any(|key| key["req"]["id"].as_str() == Some(id.as_str()))
+                })
+            })
+            .unwrap_or_else(|| panic!("no net.request event for req:{id} in {events:?}"));
+        let attributes = attrs(event);
+        let count = |name: &str| {
+            attributes
+                .get(name)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_else(|| panic!("req:{id} carries no `{name}`: {attributes:?}"))
+        };
+
+        let request =
+            format!("GET /?lock={lock}&reads={reads}&body={body} HTTP/1.1\r\nHost: omn\r\n\r\n");
+        assert_eq!(
+            count("rx_bytes"),
+            request.len() as u64,
+            "req:{id}'s client sent a {}-byte request",
+            request.len()
+        );
+
+        let length = if *body == 0 { 2 } else { *body };
+        let header =
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n");
+        let wrote = number(worker(&id), "sent");
+        assert_eq!(
+            wrote,
+            header.len() as u64 + length,
+            "the worker's own count of req:{id}'s response"
+        );
+        assert_eq!(
+            count("tx_bytes"),
+            wrote,
+            "req:{id}'s worker wrote {wrote} bytes"
+        );
+
+        if *lock == 0 {
+            continue;
+        }
+        let born = number(worker(&id), "born_ns");
+        let lock_ns = number(worker(&id), "lock_ns");
+        let held_ns = number(
+            said.iter()
+                .find(|line| line.contains_key("held_ns"))
+                .expect("the holder says how long it held the lock"),
+            "held_ns",
+        );
+        let since = count("holder_since_ns");
+        // The worker cannot have begun waiting before its birth, and the wait
+        // on the mutex lasted at least the holder's sleep under it, so it began
+        // that long before the worker's own clock around the lock ended. Five
+        // milliseconds of slack for the worker's wake-up after the holder's
+        // signal, against a 40 ms sleep.
+        const SLACK_NS: u64 = 5_000_000;
+        assert!(
+            since >= born,
+            "req:{id}'s longest sleep began {} ns before its birth",
+            born - since
+        );
+        assert!(
+            since + held_ns <= born + lock_ns + SLACK_NS,
+            "req:{id}'s longest sleep began {} ns after its birth, too late to have lasted the \
+             holder's {held_ns} ns under the lock within the worker's {lock_ns} ns around it",
+            since - born
+        );
+    }
+    let fields = &labelled(&run, "net.request")["fields"];
+    for name in ["never_ended", "unborn", "replaced", "filtered_out"] {
+        assert_eq!(fields[name], 0, "`{name}` in {fields}");
+    }
+}
