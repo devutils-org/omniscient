@@ -12,9 +12,10 @@ machine with the other eleven streams loading it (load average up to 67).
 |---|---|
 | `7781ad7` | `catalog/references/top.yaml`: **nine pairs**. `tests/reference/top.rs`: **five parsers** (`top_batch_pid`, `top_batch_cpus`, `pmap_x_total`, `pmap_XX_total`, `smem_uss_pss_rss`), eight unit tests on captures in `tests/reference/captures/top/`. `tests/reference/workloads/top/`: `hold.py` (a footprint and a cpu total fixed by its arguments, phases announced on stderr) and `onpid.py` (launches the workload, waits for its `ready` or `done` line, runs a pid-taking tool with `{pid}` substituted). `docs/replaces/top.md`: 21 rows. |
 | this | the handoff |
+| fix round | the review's three findings, below under "Review": the TIME+ pair reads `cpu.oncpu_time`'s own series; smem's capture is real; ten pairs are one run (`same_run: onpid_attach`), two of them new (`%CPU`, `%Cpu(s)`); `tests/reference/workloads/top/run_pairs.py` runs all eleven |
 
-The pairs, all alternate runs of `hold.py 64 2 1` (omn launches its own run;
-the tool sees one launched by `onpid.py`):
+The pairs as first landed, all alternate runs of `hold.py 64 2 1` (superseded
+by the fix round's table under "Review"):
 
 | Pair (source / tool / key) | omn path | Tolerance | Measured (3 runs, then the YAML's exact commands once) |
 |---|---|---|---|
@@ -52,7 +53,7 @@ Reasoned, not shown:
   with the workload (omn's launch has no python beside it). Consistent with
   the sign and the size (1-1.5 %, roughly libpython's shared pages halved),
   not isolated by an experiment.
-- The smem parser is tested on a capture **written by hand** in the format
+- *(Fix round: replaced by a real smem 1.5 capture; see "Review".)* The smem parser is tested on a capture **written by hand** in the format
   smem's manual gives for `-H -c "uss pss rss"`, with `pmap -XX`'s numbers;
   smem's real output may differ in padding. The test says so.
 - The smem `-P '^python3 \S*hold\.py'` regex matching the workload alone
@@ -60,11 +61,11 @@ Reasoned, not shown:
 
 ## Not done, and why
 
-- **No pair for `top`'s `%Cpu(s)` against `cpu.util --system`.** The machine
+- *(Fix round: now a pair, one run; see "Review".)* **No pair for `top`'s `%Cpu(s)` against `cpu.util --system`.** The machine
   is the target, so alternate seconds are different workloads: 0.37 apart at
   worst above. The parser `top_batch_cpus` is ready; the pair needs the
   runner to run both over the same seconds (request below).
-- **No pair for `%CPU`** (`top -n 2 -d 1` against `cpu.oncpu_time -e rate`):
+- *(Fix round: now a pair, one run; see "Review".)* **No pair for `%CPU`** (`top -n 2 -d 1` against `cpu.oncpu_time -e rate`):
   not attempted, time. `top_batch_pid` already parses `cpu`.
 - **`htop`**: not installed, and interactive only; **`btop`**: installed,
   interactive only. Rows say so; no pair is possible without a batch mode.
@@ -73,8 +74,9 @@ Reasoned, not shown:
 ## Gaps in omn, each a line of work (filed, not fixed)
 
 1. `cpu.oncpu_time`'s summary has **no total**: a pid's cpu over the run is
-   `count * mean`. The TIME+ pair reads the reap's `lifetime.cpu_ns`
-   instead, so a `--pid` target (no reap) has no comparable field.
+   `count * mean`, which the pairs compute in `compare.omn_jq`. A ratio of
+   one cpu (`%CPU`) is that over `observed_ns`; `-e rate` is trace mode
+   only.
 2. **No per-process table of the whole machine**: `mem.rss`, `mem.pss`,
    `mem.uss` take no `system` target, and `cpu.oncpu_time --system` is
    `bpf:raw_tp` only. `omn top`'s system view shows totals, not processes --
@@ -96,12 +98,15 @@ Reasoned, not shown:
 
 ## Privileged runs and installs wanted
 
-None of this family's pairs needs a privilege. To run the three skipped
-smem pairs:
+None of this family's pairs needs a privilege. smem has no Arch package
+(`pacman -Si smem`: not found; it is in the AUR). The fix round ran Debian's
+`smem_1.5-3_all.deb` script in place from a scratch directory, nothing
+installed. To run the smem pairs on the development machine for good, either
+of:
 
 ```console
-sudo pacman -S smem           # Arch; the pairs' `requires: [smem]` then passes
-cargo test --test reference   # once stream reference's runner is merged
+paru -S smem                  # AUR, or any helper; the pairs' `requires: [smem]` then passes
+python3 tests/reference/workloads/top/run_pairs.py . 3
 ```
 
 `htop` (`sudo pacman -S htop`) would not add a pair: it has no batch mode.
@@ -111,7 +116,7 @@ cargo test --test reference   # once stream reference's runner is merged
 - **Pid-taking tools run through `onpid.py`**, which launches the workload
   and passes `{pid}`: a pair's reference command ends with `--` and gets the
   workload appended, as the schema says, with no runner support needed.
-- **Alternate runs of a deterministic workload**, not one run observed
+- *(Fix round: superseded by `same_run: onpid_attach` for every pair but TIME+; see "Review".)* **Alternate runs of a deterministic workload**, not one run observed
   twice: omn takes no pid from another launcher's output, and none of these
   tools launches a program. `hold.py` fixes the footprint and the cpu total
   by its arguments so alternate runs agree to 0.2 % (memory) and 17 ms (cpu).
@@ -122,16 +127,19 @@ cargo test --test reference   # once stream reference's runner is merged
 ## Requests to other streams
 
 - **reference** (the runner):
-  - substitute nothing in `reference.command`: `{pid}` is `onpid.py`'s, not
-    the runner's; it must be passed through verbatim;
-  - `compare.omn` paths used here: `summary.max` and `summary.mean` (the
-    first `summary` output's single series) and `lifetime.cpu_ns` (the
-    first result's `lifetime`);
+  - substitute nothing in `reference.command` or `omn`: `{pid}` is
+    `onpid.py`'s, not the runner's; it must be passed through verbatim;
+  - `same_run: onpid_attach` and `compare.omn_jq`, as `top.yaml`'s header
+    documents them and `run_pairs.py` reads them: the runner puts omn's argv
+    in `ONPID_OMN` (JSON) and a file in `ONPID_OMN_OUT`, runs the reference
+    command with the workload appended, and reads omn's JSON from the file;
+  - `compare.omn` notations used here: `summary.max`,
+    `summary[system].mean`, `summary.total` (count * mean summed over the
+    series) and `summary.total/observed`, each with its exact `omn_jq`;
   - an **empty `workload: []` passes no `--`** to omn and nothing to the
     tool, for system-wide pairs;
-  - a way to run omn and the tool **over the same seconds** (both started
-    together, for a system target), or `runs: N` with a median, so the
-    `%Cpu(s)` pair can exist.
+  - (answered in-family by `onpid_attach`: the `%Cpu(s)` pair starts both
+    together beside an idle workload.)
 - **sysstat**: `top`'s `MiB Mem`/`MiB Swap` lines, its load average and
   `smem -w` are pointed at your `free` and `uptime` rows in
   `docs/replaces/top.md`.
@@ -142,3 +150,58 @@ cargo test --test reference   # once stream reference's runner is merged
 runner yet), `cargo test --test cli` (28 passed), `cargo clippy --workspace
 --all-targets -- -D warnings` (clean), `cargo fmt --check` (clean). No
 `make check`, no workspace test.
+
+## Review
+
+The fix round, on `main` merged at `62c8e84`. Every pair below was run by
+`tests/reference/workloads/top/run_pairs.py . 3` (three rounds, 33 runs, all
+inside tolerance) plus one round before it; smem from Debian's 1.5 script
+on PATH.
+
+1. **The TIME+ pair read the launcher's `wait4`, not the source** -- right.
+   It now compares `[.results[0].outputs[0].series[] | .count * .mean] |
+   add`, the sum of `cpu.oncpu_time`'s own per-poll deltas (`compare.omn:
+   summary.total`, with `omn_jq`). Measured 2.0027-2.0043 s against top's
+   1.99 s through `bpf:raw_tp`, and 1.99 s exactly through `fs:proc`
+   (`--backend force:fs:proc`, one run; the closing read's loss counted).
+   It stays alternate runs, and says why: TIME+ counts from the process's
+   start, an attach from the attach. `docs/replaces/top.md`'s row now says
+   which field it reads, and why not `lifetime.cpu_ns`.
+2. **The smem capture was hand-written** -- right. smem 1.5 (Debian's
+   `smem_1.5-3_all.deb`, the script run in place; Arch has no package) was
+   run through `onpid.py` with the pairs' exact command; its output is now
+   the capture (same layout, a trailing space, one row: the `-P` regex
+   matched the workload alone) and the unit test's numbers are its. The
+   three smem pairs ran: RSS and USS equal to omn's, PSS 0.27-0.29 % below
+   -- smem is itself a python3 mapping the interpreter while it reads.
+3. **Alternate runs, not one run** -- right where a tool takes a pid.
+   `onpid.py` now also starts omn on the workload's pid when the
+   environment carries `ONPID_OMN` (`same_run: onpid_attach`, documented in
+   `top.yaml`'s header). Ten pairs are one run:
+
+| Pair (source / tool / key) | omn path | Tolerance | Measured, one run each (4 runs) |
+|---|---|---|---|
+| `mem.rss` / `top` / `res` | `summary.max` | rel 0.01 | equal |
+| `cpu.oncpu_time` / `top` / `cpu` (`-n 2 -d 1`), **new** | `summary.total/observed` | abs 0.05 | 0.9955-0.9965 against 0.999 |
+| `cpu.util` / `top` / `busy` (`%Cpu(s)`, `-n 2 -d 2`), **new** | `summary[system].mean` | abs 0.05 | 0.001-0.009 apart, busy 0.01-0.54 |
+| `mem.rss` / `pmap` / `""` and `rss` | `summary.max` | rel 0.01 | equal |
+| `mem.pss` / `pmap` / `pss` | `summary.max` | rel 0.01 (was 0.03) | 0.01-0.04 % |
+| `mem.uss` / `pmap` / `uss` | `summary.max` | rel 0.01 | equal |
+| `mem.rss`, `mem.uss` / `smem` | `summary.max` | rel 0.01 | equal |
+| `mem.pss` / `smem` | `summary.max` | rel 0.01 | 0.27-0.29 % |
+
+   The `%Cpu(s)` pair's runs met a machine between 0.01 and 0.54 busy, not
+   the wave's twelve streams at once: its 0.05 is shown on that range only.
+   `omn top` still has no pair: it has no batch output to parse, and its
+   system view has no per-process table (gap 2). That is the brief's target
+   this family leaves open.
+
+Shown versus reasoned, for the round: the field reading, the capture, the
+eleven pairs and the `fs:proc` TIME+ total are shown above. Reasoned: smem's
+PSS deficit is its own python3 (consistent with sign and size; pmap, not a
+python, shows 0.01-0.04 %).
+
+Tests run: `cargo test --test reference top::` (8 passed), `cargo test
+--test cli` (28 passed), `cargo clippy --workspace --all-targets -- -D
+warnings` and `cargo fmt --check` (clean); `run_pairs.py . 3`
+(33 runs, 0 failing). No `make check`.

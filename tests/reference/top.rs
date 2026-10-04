@@ -307,14 +307,14 @@ mod tests {
     }
 
     #[test]
-    // smem is not installed here: this capture is written in the format its
-    // manual gives for `-H -c "uss pss rss"`, with the numbers `pmap -XX`
-    // read off the same workload (`pmap-XX.txt`), not produced by smem.
+    // Captured from smem 1.5 (Debian's smem_1.5-3, the script run in place;
+    // no Arch package) through onpid.py on `hold.py 64 2 1`, the pairs'
+    // exact command: the regex matched the workload alone.
     fn smem_reads_one_row_and_refuses_many() {
         let v = smem_uss_pss_rss(&capture("smem-H-c-uss-pss-rss.txt"), "").unwrap();
-        assert_eq!(get(&v, "uss"), 68780.0 * KIB);
-        assert_eq!(get(&v, "pss"), 70058.0 * KIB);
-        assert_eq!(get(&v, "rss"), 75392.0 * KIB);
+        assert_eq!(get(&v, "uss"), 68800.0 * KIB);
+        assert_eq!(get(&v, "pss"), 69803.0 * KIB);
+        assert_eq!(get(&v, "rss"), 75484.0 * KIB);
         let two = "    68780    70058    75392 \n     9000    10000    12000 \n";
         assert!(smem_uss_pss_rss(two, "").is_err());
         assert!(smem_uss_pss_rss("", "").is_err());
