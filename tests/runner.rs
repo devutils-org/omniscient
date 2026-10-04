@@ -2389,3 +2389,57 @@ fn a_window_closes_before_its_collector_s_last_read_not_after_the_last_stop() {
         "{kept} blocks kept, more than the {ceiling} the task made since omn started"
     );
 }
+
+/// `--program-stderr FILE` writes the launched program's standard error to
+/// the file and not into `omn`'s, as `OMN_PROGRAM_STDERR` does; and the flag
+/// wins over the variable when both are given.
+#[test]
+fn the_program_s_stderr_goes_to_the_file_the_flag_names() {
+    let flagged = scratch("program-stderr-flag");
+    let variable = scratch("program-stderr-variable");
+    let _ = std::fs::remove_file(&flagged);
+    let _ = std::fs::remove_file(&variable);
+    let output = Command::new(BINARY)
+        .env("OMN_PROGRAM_STDERR", &variable)
+        .args(["mem.rss", "-m", "poll", "-e", "summary", "--program-stderr"])
+        .arg(&flagged)
+        .args(["--", "/bin/sh", "-c", "echo from-the-program >&2"])
+        .output()
+        .expect("omn should run");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let written = std::fs::read_to_string(&flagged).expect("the flag's file is written");
+    assert_eq!(written, "from-the-program\n");
+    assert!(
+        !stderr(&output).contains("from-the-program"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!variable.exists(), "the flag overrides the variable");
+    let _ = std::fs::remove_file(&flagged);
+}
+
+/// Beside a command that launches nothing the flag cannot mean anything, and
+/// is refused with the reason rather than dropped.
+#[test]
+fn the_program_s_stderr_flag_without_a_program_is_refused() {
+    for args in [
+        &[
+            "mem.rss",
+            "-m",
+            "poll",
+            "--pid",
+            "1",
+            "--program-stderr",
+            "x",
+        ][..],
+        &["list", "--program-stderr", "x"][..],
+    ] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(EXIT_REJECTED), "{args:?}");
+        assert!(
+            stderr(&output).contains("launches no program"),
+            "{}",
+            stderr(&output)
+        );
+    }
+}

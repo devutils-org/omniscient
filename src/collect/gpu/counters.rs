@@ -568,6 +568,16 @@ impl Common {
         notes
     }
 
+    /// The first process the injection library killed in its exit handler,
+    /// as [`Collector::failure`] says it.
+    pub fn failure(&self) -> Option<String> {
+        let source = self.kind.source();
+        self.senders
+            .iter()
+            .find(|(_, sender)| sender.hello && !sender.ended && sender.exiting)
+            .map(|(pid, _)| died_in_exit(*pid, source))
+    }
+
     /// At the end: a process that said hello and never said it had finished
     /// lost what it had not sent; one that died inside the library's exit
     /// handler was ended by the tool, which is a failure, not a lost read.
@@ -909,6 +919,10 @@ impl Collector for CountersCollector {
 
     fn losses(&self) -> Losses {
         self.common.losses.clone()
+    }
+
+    fn failure(&self) -> Option<String> {
+        self.common.failure()
     }
 
     fn facts(&self) -> Vec<String> {

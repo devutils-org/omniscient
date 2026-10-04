@@ -341,6 +341,10 @@ pub struct Collection {
     /// a collector that is not drained, or that dropped nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drains: Vec<DrainDrop>,
+    /// The collector broke the program it measured: [`Collector::failure`].
+    /// The run's outcome reads it and exits non-zero with the sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 
 /// How a drained collector stamps a row it read from a table the kernel
@@ -1423,13 +1427,23 @@ impl Meter {
     /// baseline taken when the window opened.
     fn read(&self) -> Option<u64> {
         match self {
-            Meter::Launched(pid, high) => Some(
-                high.keep(
+            Meter::Launched(pid, high) => {
+                // Adopting, every descendant of this process is the program's
+                // -- its tree, and the orphans that left it while they live --
+                // and every child reaped is in this process's children
+                // account: one walk, and no orphan's work missing from the
+                // denominator while it runs.
+                let spent = if launch::adopting() {
+                    // SAFETY: getpid cannot fail.
+                    rusage_ns(libc::RUSAGE_CHILDREN)
+                        + task::descendants_cpu(unsafe { libc::getpid() })
+                } else {
                     task::tree_cpu(*pid)
                         .map(|read| read.ns)
-                        .unwrap_or_else(|| rusage_ns(libc::RUSAGE_CHILDREN)),
-                ),
-            ),
+                        .unwrap_or_else(|| rusage_ns(libc::RUSAGE_CHILDREN))
+                };
+                Some(high.keep(spent))
+            }
             Meter::Tasks(pids) => {
                 let mut total = 0;
                 let mut any = false;
@@ -1456,8 +1470,9 @@ impl Meter {
         match self {
             Meter::Launched(pid, _) => format!(
                 "the launched program's cpu time and its descendants' ({}, of {pid} and of \
-                 every process it started while they ran, and getrusage(RUSAGE_CHILDREN) in \
-                 microseconds once it was reaped)",
+                 every process it started while they ran, its orphans adopted by omn \
+                 included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was \
+                 reaped)",
                 task::tree_cpu(*pid).map_or(
                     "the scheduler's own nanoseconds, or clock ticks where it could not be read",
                     |read| read.grain.says()
@@ -1553,6 +1568,23 @@ pub trait Escalate {
     /// is over: the decisions taken, and the layers named that could not be
     /// served. Pairs of a request's index and a sentence.
     fn close(&mut self, run: &Progress<'_>) -> Vec<(usize, String)>;
+
+    /// What each request's collector says of its own events so far, shown
+    /// before [`Escalate::decide`] each round: what a live view reads a value
+    /// by, how a drained row is stamped, and the drops placed at their drains.
+    /// Ignored unless an escalation draws the run as it goes.
+    fn described(&mut self, _said: &[Described<'_>]) {}
+}
+
+/// What one request's collector says of its events while the run goes: the
+/// fields the run's results carry at the end ([`Collection::value_attr`],
+/// [`Collection::row_stamp`], [`Collection::drains`]), as they stand now.
+/// Empty and `None` for a request not attached yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Described<'a> {
+    pub value_attr: &'static str,
+    pub row_stamp: Option<RowStamp>,
+    pub drains: &'a [DrainDrop],
 }
 
 /// What the escalation is shown of a run in progress.
@@ -1809,6 +1841,17 @@ pub trait Collector {
     /// says nothing, and a reader must not take it to mean each row is
     /// stamped at its own event.
     fn row_stamp(&self) -> Option<RowStamp> {
+        None
+    }
+
+    /// The sentence saying this collector broke the program it measured --
+    /// the GPU's injection library killing its target in its exit handler --
+    /// read after `stop`. `None` is the normal case.
+    ///
+    /// Not a loss: a lost read leaves the program's own outcome standing, and
+    /// this does not, so the run carries it to its outcome and `omn` exits
+    /// non-zero with it rather than exit 0 over a program the tool ended.
+    fn failure(&self) -> Option<String> {
         None
     }
 
@@ -2606,32 +2649,36 @@ fn run_core(
         .iter()
         .enumerate()
         .map(|(index, slot)| {
-            let (value_attr, stacks, collector_notes, by_ring, facts, row_stamp) = match slot {
-                Slot::Attached(collector) => (
-                    collector.value_attr(),
-                    collector.stacks(),
-                    collector.notes(),
-                    collector.losses_by_ring(),
-                    collector.facts(),
-                    collector.row_stamp(),
-                ),
-                Slot::Detached(record) => (
-                    record.value_attr,
-                    record.stacks.clone(),
-                    record.notes.clone(),
-                    record.by_ring.clone(),
-                    record.facts.clone(),
-                    record.row_stamp,
-                ),
-                Slot::Waiting(_) | Slot::Missed => (
-                    "",
-                    BTreeMap::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    None,
-                ),
-            };
+            let (value_attr, stacks, collector_notes, by_ring, facts, row_stamp, failure) =
+                match slot {
+                    Slot::Attached(collector) => (
+                        collector.value_attr(),
+                        collector.stacks(),
+                        collector.notes(),
+                        collector.losses_by_ring(),
+                        collector.facts(),
+                        collector.row_stamp(),
+                        collector.failure(),
+                    ),
+                    Slot::Detached(record) => (
+                        record.value_attr,
+                        record.stacks.clone(),
+                        record.notes.clone(),
+                        record.by_ring.clone(),
+                        record.facts.clone(),
+                        record.row_stamp,
+                        record.failure.clone(),
+                    ),
+                    Slot::Waiting(_) | Slot::Missed => (
+                        "",
+                        BTreeMap::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        None,
+                    ),
+                };
             let mut collected = std::mem::take(&mut events[index]);
             collected.sort_by_key(|event| event.ts_ns);
             // The filter is the request's, and a degradation does not change
@@ -2666,6 +2713,7 @@ fn run_core(
                 facts,
                 row_stamp,
                 drains: std::mem::take(&mut drains[index].placed),
+                failure,
             }
         })
         .collect::<Vec<Collection>>();
@@ -2884,6 +2932,7 @@ struct Detached {
     by_ring: Vec<RingLoss>,
     facts: Vec<String>,
     row_stamp: Option<RowStamp>,
+    failure: Option<String>,
 }
 
 /// One request's drops placed in time, as the runner reads them: each read
@@ -4018,6 +4067,26 @@ fn drive(
         // nothing; and before the budget, so a layer attached now is weighed
         // from its first round.
         if let Some(escalation) = escalation.as_deref_mut() {
+            let said: Vec<Described<'_>> = slots
+                .iter()
+                .zip(&ledger.drains)
+                .map(|(slot, drains)| {
+                    let (value_attr, row_stamp) = match slot {
+                        Slot::Attached(collector) => {
+                            (collector.value_attr(), collector.row_stamp())
+                        }
+                        Slot::Detached(record) => (record.value_attr, record.row_stamp),
+                        Slot::Waiting(_) | Slot::Missed => ("", None),
+                    };
+                    Described {
+                        value_attr,
+                        row_stamp,
+                        drains: &drains.placed,
+                    }
+                })
+                .collect();
+            escalation.described(&said);
+            drop(said);
             let standing = standing_of(slots, &ledger.closed_because);
             let switches = escalation.decide(&Progress {
                 opened_ns,
@@ -4356,6 +4425,7 @@ impl Ledger {
             by_ring: collector.losses_by_ring(),
             facts: collector.facts(),
             row_stamp: collector.row_stamp(),
+            failure: collector.failure(),
         };
         // The last look at what it spent inside the target, while its
         // programs are still open to be read.
@@ -4707,33 +4777,43 @@ impl<'r, 'a> Recording<'r, 'a> {
         let self_cpu_ns = rusage_ns(libc::RUSAGE_SELF);
         let mut collections = Vec::with_capacity(slots.len());
         for (index, slot) in slots.iter().enumerate() {
-            let (value_attr, stacks, collector_notes, collector_losses, collector_facts, row_stamp) =
-                match slot {
-                    Slot::Attached(collector) => (
-                        collector.value_attr(),
-                        collector.stacks(),
-                        collector.notes(),
-                        collector.losses(),
-                        collector.facts(),
-                        collector.row_stamp(),
-                    ),
-                    Slot::Detached(record) => (
-                        record.value_attr,
-                        record.stacks.clone(),
-                        record.notes.clone(),
-                        Losses::default(),
-                        record.facts.clone(),
-                        record.row_stamp,
-                    ),
-                    Slot::Waiting(_) | Slot::Missed => (
-                        "",
-                        BTreeMap::new(),
-                        Vec::new(),
-                        Losses::default(),
-                        Vec::new(),
-                        None,
-                    ),
-                };
+            let (
+                value_attr,
+                stacks,
+                collector_notes,
+                collector_losses,
+                collector_facts,
+                row_stamp,
+                failure,
+            ) = match slot {
+                Slot::Attached(collector) => (
+                    collector.value_attr(),
+                    collector.stacks(),
+                    collector.notes(),
+                    collector.losses(),
+                    collector.facts(),
+                    collector.row_stamp(),
+                    collector.failure(),
+                ),
+                Slot::Detached(record) => (
+                    record.value_attr,
+                    record.stacks.clone(),
+                    record.notes.clone(),
+                    Losses::default(),
+                    record.facts.clone(),
+                    record.row_stamp,
+                    record.failure.clone(),
+                ),
+                Slot::Waiting(_) | Slot::Missed => (
+                    "",
+                    BTreeMap::new(),
+                    Vec::new(),
+                    Losses::default(),
+                    Vec::new(),
+                    None,
+                    None,
+                ),
+            };
             let mut events: Vec<Event> = ledger.events[index]
                 .iter()
                 .filter(|event| event.ts_ns >= opened_ns && event.ts_ns <= now_ns)
@@ -4812,6 +4892,7 @@ impl<'r, 'a> Recording<'r, 'a> {
                     .filter(|drain| drain.ts_ns >= opened_ns && drain.ts_ns <= now_ns)
                     .copied()
                     .collect(),
+                failure,
             });
         }
 

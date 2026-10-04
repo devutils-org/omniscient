@@ -717,6 +717,13 @@ impl Collector for KernelCollector {
         self.losses.clone()
     }
 
+    fn failure(&self) -> Option<String> {
+        self.senders
+            .iter()
+            .find(|(_, sender)| sender.hello.is_some() && !sender.ended && sender.exiting)
+            .map(|(pid, _)| super::counters::died_in_exit(*pid, "gpu.kernel"))
+    }
+
     fn facts(&self) -> Vec<String> {
         let mut facts = Vec::new();
         for (pid, sender) in &self.senders {

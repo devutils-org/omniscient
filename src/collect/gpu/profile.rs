@@ -310,6 +310,10 @@ impl Collector for ProfileCollector {
         self.common.losses.clone()
     }
 
+    fn failure(&self) -> Option<String> {
+        self.common.failure()
+    }
+
     fn stacks(&self) -> BTreeMap<u64, Vec<String>> {
         self.stacks.clone()
     }

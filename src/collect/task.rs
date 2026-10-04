@@ -398,6 +398,24 @@ pub fn tree_cpu(pid: i32) -> Option<CpuRead> {
     Some(total)
 }
 
+/// The cpu time of every live (or not yet reaped) descendant of `me`, each
+/// on its own account as [`tree_cpu`] reads them, in one walk; zero when there
+/// are none.
+///
+/// For the `omn` binary, the subreaper of what it launches
+/// ([`super::launch::adopt_orphans`]): its descendants are the launched
+/// program's tree and the orphans that left it, so this with this process's
+/// own children account is the program's whole spend, orphans included. What
+/// else it starts is a helper that ends within the call that started it
+/// (`nvidia-smi`, `curl` for a debug file), and is counted with it.
+pub fn descendants_cpu(me: i32) -> u64 {
+    descendants(me)
+        .into_iter()
+        .filter_map(process_cpu)
+        .map(|read| read.ns)
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

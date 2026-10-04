@@ -2035,3 +2035,132 @@ fn a_target_and_mode_no_backend_declares_together_is_refused_as_the_request_s() 
     );
     assert!(stdout(&output).is_empty(), "{}", stdout(&output));
 }
+
+/// The sources a family table's Metric cell names: the first in full, and
+/// each `.x` after it as the family's `x` or, where the family has no such
+/// source, the first id's stem before its last `_` with `_x` (`mem.cache_l1`
+/// / `.llc` is `mem.cache_llc`).
+fn row_sources(cell: &str, catalog: &omn::Catalog) -> Vec<String> {
+    let named: Vec<&str> = cell
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|token| !token.is_empty())
+        .collect();
+    let Some(first) = named.first() else {
+        return Vec::new();
+    };
+    let exists = |id: &str| {
+        id.parse::<omn::request::SourceId>()
+            .ok()
+            .is_some_and(|id| catalog.get(&id).is_some())
+    };
+    let family = first.split('.').next().unwrap_or_default();
+    let mut ids = vec![(*first).to_owned()];
+    for short in &named[1..] {
+        let Some(rest) = short.strip_prefix('.') else {
+            continue;
+        };
+        let in_family = format!("{family}.{rest}");
+        let beside = first
+            .rsplit_once('_')
+            .map(|(stem, _)| format!("{stem}_{rest}"));
+        match beside.filter(|beside| !exists(&in_family) && exists(beside)) {
+            Some(beside) => ids.push(beside),
+            None => ids.push(in_family),
+        }
+    }
+    ids
+}
+
+/// The tiers a chain declares, in chain order and without repeats, written as
+/// `CATALOG.md`'s Cost column writes them.
+fn chain_tiers<'a>(entries: impl IntoIterator<Item = &'a omn::catalog::Entry>) -> String {
+    let mut tiers: Vec<String> = Vec::new();
+    for entry in entries {
+        for backend in &entry.backends {
+            let tier = backend.cost.to_string();
+            if !tiers.contains(&tier) {
+                tiers.push(tier);
+            }
+        }
+    }
+    tiers.join(" / ")
+}
+
+/// Each family table's Cost cell in `CATALOG.md` is the catalog's chain
+/// written out: the tiers its backends declare, in order and without repeats.
+/// A row naming several sources holds each one's chain to it, or their chains
+/// end to end. A row naming a source the catalog does not hold is named too:
+/// the table would describe something nothing resolves.
+#[test]
+fn the_catalog_document_s_cost_column_is_the_catalog_s_chain() {
+    let catalog = omn::Catalog::embedded().expect("the embedded catalog loads");
+    let document = std::fs::read_to_string("CATALOG.md").expect("CATALOG.md ships");
+    // The Cost column of the table being read; the Metric column is first.
+    let mut cost_column: Option<usize> = None;
+    let mut checked = 0;
+    let mut wrong: Vec<String> = Vec::new();
+    for (number, line) in document.lines().enumerate() {
+        let cells: Vec<&str> = line
+            .trim()
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .collect();
+        if !line.starts_with('|') {
+            cost_column = None;
+            continue;
+        }
+        if cells.first() == Some(&"Metric") {
+            cost_column = cells.iter().position(|cell| *cell == "Cost");
+            continue;
+        }
+        let Some(cost) = cost_column else {
+            continue;
+        };
+        let (Some(named), Some(cell)) = (cells.first(), cells.get(cost)) else {
+            continue;
+        };
+        if named.starts_with("---") {
+            continue;
+        }
+        let ids = row_sources(named, &catalog);
+        if ids.is_empty() {
+            continue;
+        }
+        let mut entries = Vec::new();
+        for id in &ids {
+            match id
+                .parse::<omn::request::SourceId>()
+                .ok()
+                .and_then(|parsed| catalog.get(&parsed))
+            {
+                Some(entry) => entries.push(entry),
+                None => wrong.push(format!(
+                    "CATALOG.md:{}: `{id}` is in no catalog file",
+                    number + 1
+                )),
+            }
+        }
+        if entries.len() != ids.len() {
+            continue;
+        }
+        let each_alike = entries.iter().all(|entry| chain_tiers([*entry]) == *cell);
+        let end_to_end = chain_tiers(entries.iter().copied()) == *cell;
+        checked += 1;
+        if !each_alike && !end_to_end {
+            let declared: Vec<String> = entries
+                .iter()
+                .map(|entry| format!("{}: {}", entry.id, chain_tiers([*entry])))
+                .collect();
+            wrong.push(format!(
+                "CATALOG.md:{}: Cost is `{cell}`, and the chain declares {}",
+                number + 1,
+                declared.join("; ")
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    assert!(checked >= 80, "only {checked} rows read: the tables moved");
+}

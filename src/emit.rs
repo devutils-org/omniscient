@@ -2043,6 +2043,7 @@ mod tests {
             facts: Vec::new(),
             row_stamp: None,
             drains: Vec::new(),
+            failure: None,
         }
     }
 

@@ -108,6 +108,12 @@ pub fn adopt_orphans() -> bool {
     adopted
 }
 
+/// Whether this process adopts the orphans of the programs it launches:
+/// [`adopt_orphans`] was called, and the kernel took it.
+pub(crate) fn adopting() -> bool {
+    ADOPTING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether `pid` has exited and waits to be reaped: a signal still reaches
 /// it, and succeeds, without ending anything.
 fn is_zombie(pid: i32) -> bool {
