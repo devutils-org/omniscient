@@ -869,7 +869,13 @@ requests:
 /// read issued before any window of the write phase has closed has no open
 /// state to be attributed to. `/proc/self/io`'s `read_bytes` is the kernel's
 /// count of the bytes this process caused to be fetched from storage, which is
-/// the reference for the IDENTITY rung.
+/// the reference for the IDENTITY rung -- less what its cgroup swapped in,
+/// which that count includes and the block layer's requests do not show when
+/// the swap is a bio-based device such as zram: measured under load at 2 217
+/// pages, 8.7 MiB, the whole gap between the two counts. The cgroup keeps its
+/// swap: refused it (`memory.swap.max` 0), the program was killed out of
+/// memory in two runs of six under load, its anonymous pages with nowhere to
+/// go while every file page was dirty or under writeback.
 const CHURN: &str = r#"
 import os, sys, time
 path, mib = sys.argv[1], int(sys.argv[2])
@@ -901,10 +907,15 @@ while time.monotonic() < deadline:
         break
     time.sleep(0.01)
 os.unlink(path)
+swapped_in = int(stat().get("pswpin", 0))
+# Done: what came after the last read -- these counters, the wait, the unlink
+# -- can fault and reclaim too, measured under load at 256 pages, so the
+# program's brackets end here rather than at its last read.
+t4 = time.monotonic_ns()
 print("omn-cross pid", os.getpid(), "write", t0, "read", t1, t2,
-      "read_bytes", io["read_bytes"].strip(),
+      "file_read_bytes", int(io["read_bytes"]) - swapped_in * os.sysconf("SC_PAGE_SIZE"),
       "file_dirty", at_end.get("file_dirty", 0), "file_writeback", at_end.get("file_writeback", 0),
-      "drained", t3, file=sys.stderr)
+      "drained", t3, "pswpin", swapped_in, "done", t4, file=sys.stderr)
 # Past the last 100 ms window of `mem.reclaim` and the device poller's next
 # tick, so both are read before the launched program's exit ends the run.
 time.sleep(0.3)
@@ -979,6 +990,19 @@ impl Cgroup {
 
     fn stat(&self, name: &str) -> u64 {
         read(self.dir.join("memory.stat"))
+            .and_then(|text| {
+                text.lines().find_map(|line| {
+                    line.strip_prefix(name)
+                        .and_then(|rest| rest.strip_prefix(' '))
+                        .and_then(|value| value.trim().parse().ok())
+                })
+            })
+            .unwrap_or(0)
+    }
+
+    /// A counter of the cgroup's `memory.events`.
+    fn event(&self, name: &str) -> u64 {
+        read(self.dir.join("memory.events"))
             .and_then(|text| {
                 text.lines().find_map(|line| {
                     line.strip_prefix(name)
@@ -1128,6 +1152,7 @@ struct Churned {
     write_ns: u64,
     read_ns: u64,
     end_ns: u64,
+    /// `/proc/self/io`'s `read_bytes`, less what the cgroup swapped in.
     read_bytes: u64,
     /// The cgroup's dirty and under-writeback page cache when the program
     /// finished reading, by its own `memory.stat`, in bytes.
@@ -1136,6 +1161,12 @@ struct Churned {
     /// When the cgroup's `file_dirty` and `file_writeback` were both back to
     /// zero, polled by the program itself; 0 if they never were in 20 s.
     drained_ns: u64,
+    /// Pages the cgroup swapped in, by its own `memory.stat`, when the program
+    /// ended.
+    swapped_in: u64,
+    /// When the program was done: after its last read, the counters it read,
+    /// the wait for the writeback and the unlink, just before it reported.
+    done_ns: u64,
 }
 
 impl Churned {
@@ -1173,15 +1204,31 @@ fn churned(output: &Output, cgroup: &Cgroup) -> Result<Churned, String> {
         .ok_or_else(|| {
             // A `cgroup.procs` the shell could not write, a python3 that is
             // missing, and a program that died on a signal all print nothing
-            // here, and the run says how its launched program exited.
+            // here; the run says how its launched program exited, and the
+            // cgroup whether it killed it.
+            let said: Vec<&str> = text
+                .lines()
+                .filter(|line| {
+                    !["cost: ", "note: ", "warning: ", "caveat: "]
+                        .iter()
+                        .any(|prefix| line.starts_with(prefix))
+                })
+                .take(6)
+                .collect();
+            let stopped = serde_json::from_slice::<Value>(&output.stdout)
+                .ok()
+                .and_then(|document| {
+                    document["results"][0]["stopped_because"]
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| "no document".to_owned());
             format!(
-                "the program did not report itself (moved into {}); the run said: {}",
+                "the program did not report itself (moved into {}): the run stopped because {stopped}; \
+                 the cgroup counted {} out-of-memory kills; the run said: {}",
                 cgroup.dir.display(),
-                text.lines()
-                    .filter(|line| !line.starts_with("cost: "))
-                    .take(6)
-                    .collect::<Vec<_>>()
-                    .join(" / ")
+                cgroup.event("oom_kill"),
+                said.join(" / ")
             )
         })?;
     let fields: Vec<&str> = line.split_whitespace().collect();
@@ -1195,6 +1242,8 @@ fn churned(output: &Output, cgroup: &Cgroup) -> Result<Churned, String> {
         dirty_at_end: number(11),
         writeback_at_end: number(13),
         drained_ns: number(15),
+        swapped_in: number(17),
+        done_ns: number(19),
     })
 }
 
@@ -1446,7 +1495,7 @@ fn ladder(run: &ReclaimRun, scratch: &Scratch, cgroup_id: u64) -> Ladder {
         ladder.overlap_credited += pages;
         // A poll reports what happened since the tick before: the interval
         // (opened, closed] holds the program if it overlaps its brackets.
-        if closed > churned.write_ns && opened < churned.end_ns {
+        if closed > churned.write_ns && opened < churned.done_ns.max(churned.end_ns) {
             ladder.overlap_in_brackets += pages;
         } else if closed <= churned.write_ns {
             ladder.overlap_before += pages;
@@ -1468,8 +1517,9 @@ fn print_ladder(title: &str, run: &ReclaimRun, ladder: &Ladder, scratch: &Scratc
     eprintln!("{title}");
     eprintln!(
         "  program      wrote {WRITTEN_MIB} MiB, read it back; the kernel charged it {:.1} MiB \
-         of storage reads",
-        mib(run.churned.read_bytes as f64)
+         of storage reads; its cgroup swapped in {} pages",
+        mib(run.churned.read_bytes as f64),
+        run.churned.swapped_in
     );
     eprintln!(
         "  cgroup       reclaimed {} pages by its own memory.stat, stalled {:.1} ms",
@@ -1516,7 +1566,7 @@ fn print_ladder(title: &str, run: &ReclaimRun, ladder: &Ladder, scratch: &Scratc
     eprintln!(
         "  edges        the trace attached {:+.0} ms from the first write; at the end the cgroup \
          held {:.1} MiB dirty and {:.1} MiB under writeback, {}; {:.1} MiB written to the \
-         file's device after that; {:.0} pages laid before the first write, {:.0} after the end",
+         file's device after that; {:.0} pages laid before the first write, {:.0} after it was done",
         (ladder.requests_opened_ns as f64 - run.churned.write_ns as f64) / 1e6,
         mib(run.churned.dirty_at_end as f64),
         mib(run.churned.writeback_at_end as f64),
@@ -1736,21 +1786,25 @@ fn a_memory_limit_turns_a_cached_read_into_device_reads_and_each_byte_carries_it
         under.overlap_uncredited,
         under.reclaimed_machine_wide
     );
-    // The pages credited outside the program's intervals. The cgroup's own
-    // cannot be there: an episode, or the window a bucket was drained over,
-    // that began after the first write and before the last read lies in an
-    // interval that overlaps the program, by construction. What can is
-    // another cgroup's reclaim on the same machine -- the session reads it
-    // machine-wide -- and nothing else: the twenty-first wave's 64 and 72
-    // stray pages, against a machine-wide total within its slack of the
-    // cgroup's own.
+    // The pages credited outside the program's intervals. The program's
+    // brackets run from its first write to when it was done -- not its last
+    // read: under load, the counters it read after it and the wait for the
+    // writeback faulted pages back in, and 256 pages it reclaimed then lay
+    // after the last read, all of them this cgroup's (the twenty-first wave's
+    // 64 and 72 stray pages, read on that edge in this wave). Inside those
+    // brackets an episode, or the window a bucket was drained over, lies in an
+    // interval that overlaps the program, by construction. What can lie
+    // outside is another cgroup's reclaim -- the session reads it
+    // machine-wide -- and nothing else.
     let outside = under.overlap_credited - under.overlap_in_brackets;
     let elsewhere = under
         .reclaimed_machine_wide
         .saturating_sub(under.reclaimed_pages) as f64;
     assert!(
         outside <= elsewhere + 1.0,
-        "{outside:.0} of the {:.0} pages credited lie in intervals the program did not overlap          ({:.0} before its first write, {:.0} after its last read), and only {elsewhere:.0} of          the pages the tool saw reclaimed were another cgroup's",
+        "{outside:.0} of the {:.0} pages credited lie in intervals the program did not overlap \
+         ({:.0} before its first write, {:.0} after it was done), and only {elsewhere:.0} of \
+         the pages the tool saw reclaimed were another cgroup's",
         under.overlap_credited,
         under.overlap_before,
         under.overlap_after
@@ -1849,7 +1903,7 @@ fn laid(document: &Value, rule: &str, churned: &Churned) -> Laid {
         let closed = row["closed_ns"].as_u64().unwrap_or(0);
         let pages = row["change"]["delta"].as_f64().unwrap_or(0.0);
         laid.credited += pages;
-        if closed > churned.write_ns && opened < churned.end_ns {
+        if closed > churned.write_ns && opened < churned.done_ns.max(churned.end_ns) {
             laid.in_brackets += pages;
         }
     }
