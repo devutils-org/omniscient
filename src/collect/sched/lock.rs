@@ -89,6 +89,9 @@ pub struct LockCollector {
     /// Every stack the run resolved, by the id the kernel gave it.
     stacks: BTreeMap<u64, Vec<String>>,
     symbolizers: HashMap<i32, Symbolizer>,
+    /// Processes whose symbolizer outlived their place in the followed set
+    /// at the last tick, dropped at the next one; see `retire_symbolizers`.
+    leaving: Vec<i32>,
     /// Whether the frames behind a stack id will be read by anyone.
     wants_stacks: bool,
     /// Waits whose stack the kernel could not walk, and waits whose id it had
@@ -123,6 +126,7 @@ impl LockCollector {
             notes: Vec::new(),
             stacks: BTreeMap::new(),
             symbolizers: HashMap::new(),
+            leaving: Vec::new(),
             wants_stacks,
             unwalkable: 0,
             evicted_stacks: 0,
@@ -215,19 +219,18 @@ impl LockCollector {
             return;
         }
         // A thread's `/proc/<tid>/maps` is its process's, so a thread target
-        // is symbolised through its own id.
-        let tgid = match self.filter {
-            Whose::Process(id) | Whose::Thread(id) => id,
+        // is symbolised through its own id. A process target is followed into
+        // the processes it starts, and each of those is read too.
+        let mut followed = match self.filter {
+            Whose::Process(id) | Whose::Thread(id) => vec![id],
             Whose::Any | Whose::Cgroup(_) => return,
         };
-        match self.symbolizers.entry(tgid as i32) {
-            std::collections::hash_map::Entry::Occupied(mut held) => {
-                held.get_mut().refresh();
-            }
-            std::collections::hash_map::Entry::Vacant(empty) => {
-                empty.insert(Symbolizer::for_process(tgid as i32));
-            }
+        if let Some(program) = self.program.as_ref() {
+            followed.extend(program.processes());
         }
+        followed.sort_unstable();
+        followed.dedup();
+        super::refresh_followed_symbols(&mut self.symbolizers, &mut self.leaving, &followed);
     }
 
     /// Symbolizes the stack behind a row, once per distinct id.
@@ -299,6 +302,16 @@ impl LockCollector {
                  upper bound on the target's share, and every total here is a lower bound",
             );
             self.skipped = skipped;
+        }
+        let unfollowed = program.unfollowed();
+        if unfollowed > 0 {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so {} waits are in no row",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "its" } else { "their" },
+            ));
         }
         let now = program.dropped();
         if now.skipped_idle > self.skipped_idle {

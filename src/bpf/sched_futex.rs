@@ -32,11 +32,12 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{helper, push_current_filter, Insn, Program, Whose, BPF_DW, BPF_W, R10};
+use super::insn::{helper, Insn, Program, Whose, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows, StackTraces};
 use super::sched_common::{
-    bucket_low_ns, count_drop, count_update_failure, push_log2_bucket, read_field, text_of,
-    Log2Labels, BPF_F_USER_STACK, BPF_NOEXIST, E2BIG, EEXIST,
+    bucket_low_ns, count_drop, count_update_failure, push_current_followed_filter,
+    push_log2_bucket, read_field, text_of, Descendants, Followed, Log2Labels, BPF_F_USER_STACK,
+    BPF_NOEXIST, E2BIG, EEXIST,
 };
 use super::syscall;
 
@@ -255,35 +256,19 @@ fn check(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
 /// everything` neighbours are about. This comparison is the first thing either
 /// program does, so the cost of a syscall that is not the run's is four
 /// instructions.
-fn current_and_filter(program: &mut Program, whose: Whose, resume: &'static str) {
-    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
-    program.push(Insn::mov64_reg(7, 0));
-    match whose {
-        Whose::Process(tgid) => {
-            // The thread group is the high half of what the helper returns.
-            program.push(Insn::mov64_reg(1, 7));
-            program.push(Insn::rsh64_imm(1, 32));
-            program.jump_to(resume, Insn::jne_imm(1, tgid as i32, 0));
-        }
-        Whose::Thread(tid) => {
-            // The low half, compared 32 bits wide: the high half holds the
-            // thread group and a 64-bit compare would never match.
-            program.push(Insn::stx(BPF_W, R10, SCRATCH, 7));
-            program.push(Insn::ldx(BPF_W, 1, R10, SCRATCH));
-            program.jump_to(resume, Insn::jne_imm(1, tid as i32, 0));
-        }
-        // One helper call for the cgroup, and below it; `r7` survives it.
-        Whose::Cgroup(_) => push_current_filter(program, whose, SCRATCH, resume),
-        // Not a target the collector builds: this source has no machine-wide
-        // form. Were one asked for, it would be every syscall on the machine.
-        Whose::Any => {}
-    }
+fn current_and_filter(
+    program: &mut Program,
+    followed: &Followed,
+    resume: &'static str,
+    kept: &'static str,
+) {
+    push_current_followed_filter(program, followed, 7, SCRATCH, resume, kept);
 }
 
 /// The program on `sys_enter`: a thread is about to wait, if this is a wait.
 fn enter_instructions(
     btf: &Btf,
-    whose: Whose,
+    followed: &Followed,
     waiting_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
@@ -299,7 +284,7 @@ fn enter_instructions(
     program.push(Insn::ldx(BPF_DW, 1, 6, ARG_ID));
     program.jump_to("done", Insn::jne_imm(1, SYS_FUTEX, 0));
 
-    current_and_filter(&mut program, whose, "done");
+    current_and_filter(&mut program, followed, "done", "followed");
 
     // r9 keeps the register block the syscall arrived with.
     program.push(Insn::ldx(BPF_DW, 9, 6, ARG_REGS));
@@ -384,7 +369,7 @@ fn enter_instructions(
 /// finds an entry is that syscall's own return.
 fn exit_instructions(
     btf: &Btf,
-    whose: Whose,
+    followed: &Followed,
     waiting_fd: i32,
     rows_fd: i32,
     drops_fd: i32,
@@ -398,7 +383,7 @@ fn exit_instructions(
     // wait it is closing.
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::mov64_reg(8, 0));
-    current_and_filter(&mut program, whose, "done");
+    current_and_filter(&mut program, followed, "done", "followed");
 
     program.push(Insn::st_imm(BPF_DW, R10, WAIT_KEY, 0));
     program.push(Insn::stx(BPF_W, R10, WAIT_KEY, 7));
@@ -524,6 +509,8 @@ pub struct FutexDrops {
 
 /// Two loaded, attached programs and the maps they share.
 pub struct FutexProgram {
+    /// The processes a process target started, followed in the kernel.
+    descendants: Option<Descendants>,
     waiting: Hash,
     rows: Rows,
     drops: Counters,
@@ -542,10 +529,37 @@ impl FutexProgram {
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
         crate::bpf::attach::fentry::skipped([&self.enter_program, &self.exit_program])
+            + self.descendants.as_ref().map_or(0, Descendants::skipped)
+    }
+
+    /// The processes the target started and this run follows now, beside the
+    /// target itself; empty for any other target.
+    pub fn processes(&self) -> Vec<u32> {
+        self.descendants
+            .as_ref()
+            .map_or_else(Vec::new, Descendants::processes)
+    }
+
+    /// Processes the target started that no program here followed, because
+    /// the map of them was full.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants.as_ref().map_or(0, Descendants::missed)
     }
 
     pub fn load(whose: Whose) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
+        // A process target is followed into every process it starts, as
+        // `sched.offcpu` and `sched.wakeup` follow it: a program on
+        // `sched_process_fork` adds a child to the set before it has run.
+        let descendants = match whose {
+            Whose::Process(root) => Some(Descendants::follow(root)?),
+            _ => None,
+        };
+        let followed = descendants
+            .as_ref()
+            .map_or(Followed::only(whose), |descendants| {
+                descendants.followed(whose)
+            });
 
         let waiting = Hash::create(
             WAIT_KEY_BYTES,
@@ -561,10 +575,10 @@ impl FutexProgram {
         let stacks = StackTraces::create(MAX_STACKS, MAX_STACK_DEPTH, "omn_futex_stk")
             .map_err(|error| map_failure("futex stack map", error))?;
 
-        let enter = enter_instructions(btf, whose, waiting.as_raw_fd(), drops.as_raw_fd())?;
+        let enter = enter_instructions(btf, &followed, waiting.as_raw_fd(), drops.as_raw_fd())?;
         let exit = exit_instructions(
             btf,
-            whose,
+            &followed,
             waiting.as_raw_fd(),
             rows.as_raw_fd(),
             drops.as_raw_fd(),
@@ -583,6 +597,7 @@ impl FutexProgram {
             .map_err(|error| format!("cannot attach to the `sys_exit` tracepoint: {error}"))?;
 
         Ok(Self {
+            descendants,
             waiting,
             rows,
             drops,
@@ -671,11 +686,11 @@ mod tests {
     }
 
     fn enter(btf: &Btf, whose: Whose) -> Vec<Insn> {
-        enter_instructions(btf, whose, 3, 4).expect("a program")
+        enter_instructions(btf, &Followed::only(whose), 3, 4).expect("a program")
     }
 
     fn exit(btf: &Btf, whose: Whose) -> Vec<Insn> {
-        exit_instructions(btf, whose, 3, 4, 5, 6).expect("a program")
+        exit_instructions(btf, &Followed::only(whose), 3, 4, 5, 6).expect("a program")
     }
 
     /// Both tracepoints fire on every syscall of every process on the machine.
@@ -916,7 +931,8 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = exit_instructions(&btf, Whose::Process(1), 3, 4, 5, 6).expect("a program");
+        let program = exit_instructions(&btf, &Followed::only(Whose::Process(1)), 3, 4, 5, 6)
+            .expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

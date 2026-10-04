@@ -339,6 +339,65 @@ pub fn push_followed_filter(
     program.label(kept);
 }
 
+/// Loads the current task's ids into `ids_reg` and falls through when the
+/// task is one `followed` keeps, or jumps to `skip`.
+///
+/// The form of [`push_followed_filter`] for a program that runs in its
+/// subject's own context -- `sched.lock`'s and `sched.futex`'s -- and so takes
+/// the subject's ids from one helper call rather than out of a `task_struct`.
+/// A process with descendants is compared with its root first, as a
+/// constant, and looked up in the map only when it is not the root. Clobbers
+/// `r0` to `r5` and the four bytes at `scratch`; `ids_reg` should be one of
+/// `r6` to `r9`, since the filter may call helpers. `kept` is the label the
+/// root's comparison jumps to, one per program.
+pub fn push_current_followed_filter(
+    program: &mut Program,
+    followed: &Followed,
+    ids_reg: u8,
+    scratch: i16,
+    skip: &'static str,
+    kept: &'static str,
+) {
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::mov64_reg(ids_reg, 0));
+    match (followed.whose, followed.descendants) {
+        (Whose::Any, _) => {}
+        // The thread group is the high half. Known before the program loads
+        // and never changing, so the root's comparison is in the instruction
+        // stream; the processes it starts are in the map.
+        (Whose::Process(root), descendants) => {
+            program.push(Insn::mov64_reg(1, ids_reg));
+            program.push(Insn::rsh64_imm(1, 32));
+            match descendants {
+                None => {
+                    program.jump_to(skip, Insn::jne_imm(1, root as i32, 0));
+                }
+                Some(map) => {
+                    program.push(Insn::stx(BPF_W, R10, scratch, 1));
+                    program.jump_to(kept, Insn::jeq_imm(1, root as i32, 0));
+                    program.extend(Insn::load_map_fd(1, map));
+                    program.push(Insn::mov64_reg(2, R10));
+                    program.push(Insn::add64_imm(2, scratch as i32));
+                    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+                    program.jump_to(skip, Insn::jeq_imm(0, 0, 0));
+                    program.label(kept);
+                }
+            }
+        }
+        // The low half, compared 32 bits wide: a 64-bit compare would include
+        // the thread group and never match.
+        (Whose::Thread(tid), _) => {
+            program.push(Insn::stx(BPF_W, R10, scratch, ids_reg));
+            program.push(Insn::ldx(BPF_W, 1, R10, scratch));
+            program.jump_to(skip, Insn::jne_imm(1, tid as i32, 0));
+        }
+        // One helper call for the cgroup; `ids_reg` survives it.
+        (whose @ Whose::Cgroup(_), _) => {
+            super::insn::push_current_filter(program, whose, scratch, skip)
+        }
+    }
+}
+
 impl Descendants {
     /// Loads the two programs for `root`, attaches them, and adds the
     /// processes `root` already has under it.
