@@ -170,6 +170,53 @@ pub enum KeyValue {
     Node {
         node: u32,
     },
+    /// The direction a byte or an operation went: one series per direction
+    /// of a counter that counts both, so every aggregating emit splits them
+    /// without `raw` beside it.
+    Dir {
+        dir: Direction,
+    },
+}
+
+/// Which way a counted byte or operation went. A closed set: a block device
+/// reads, writes, discards and flushes; a link receives and transmits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    Read,
+    Write,
+    Discard,
+    Flush,
+    Rx,
+    Tx,
+}
+
+impl Direction {
+    pub const ALL: [Direction; 6] = [
+        Direction::Read,
+        Direction::Write,
+        Direction::Discard,
+        Direction::Flush,
+        Direction::Rx,
+        Direction::Tx,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Direction::Read => "read",
+            Direction::Write => "write",
+            Direction::Discard => "discard",
+            Direction::Flush => "flush",
+            Direction::Rx => "rx",
+            Direction::Tx => "tx",
+        }
+    }
+}
+
+impl fmt::Display for Direction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl KeyValue {
@@ -262,6 +309,10 @@ impl KeyValue {
         KeyValue::Node { node }
     }
 
+    pub fn dir(dir: Direction) -> Self {
+        KeyValue::Dir { dir }
+    }
+
     pub fn task(tid: i32) -> Self {
         KeyValue::Task { tid }
     }
@@ -305,6 +356,7 @@ impl KeyValue {
             KeyValue::Dev { .. } => KeyKind::Dev,
             KeyValue::Cpu { .. } => KeyKind::Cpu,
             KeyValue::Node { .. } => KeyKind::Node,
+            KeyValue::Dir { .. } => KeyKind::Dir,
         }
     }
 }
@@ -336,6 +388,7 @@ impl fmt::Display for KeyValue {
             KeyValue::Dev { major, minor } => write!(f, "dev:{major}+{minor}"),
             KeyValue::Cpu { cpu } => write!(f, "cpu:{cpu}"),
             KeyValue::Node { node } => write!(f, "node:{node}"),
+            KeyValue::Dir { dir } => write!(f, "dir:{dir}"),
         }
     }
 }
