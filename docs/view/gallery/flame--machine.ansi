@@ -1,4 +1,4 @@
-[0m[1momn top[0m │ fixture machine │ 20.0s                                                [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥3.13%[0m[35m cpu[0m [0m
+[0m[1momn top[0m │ fixture machine │ 20.0s                                                [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥2.90%[0m[35m cpu[0m [0m
  1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 [0m[1;2m flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference [0m[2m────────────────────────────[0m
 [0m[1mon cpu: [0mnot in this run │ [0m[1moff cpu: [0mnot in this run                                                                      [0m

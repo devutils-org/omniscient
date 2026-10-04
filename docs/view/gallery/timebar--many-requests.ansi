@@ -1,40 +1,40 @@
-[0m[1momn top[0m │ fixture many-requests │ 15.8s                           [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥6.10%[0m[35m │ target 0.50% cpu[0m [0m
+[0m[1momn top[0m │ fixture many-requests │ 15.8s                           [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥5.21%[0m[35m │ target 0.35% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request [0m[1;7m 5 timebar [0m 6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐[0m
 │ [0m[1;32mthe view's reading[0m[2m  one bar per thread, whole: the run's window[0m                                                      │[0m
 │                                                                                                                      │[0m
-│ [0m[1m▶ first suspect  1504111 server (the program): [0m[1;37mblocked: sleeping 15.3s (96.4% of its wall clock)[0m                     │[0m
+│ [0m[1m▶ first suspect  2619831 server (the program): [0m[1;37mblocked: sleeping 15.2s (96.4% of its wall clock)[0m                     │[0m
 │   asleep on something that is not a lock seen here: a timer, a pipe, a socket, a condition                           │[0m
 │   the sleep less the futex waits `sched.futex` saw                                                                   │[0m
-│ [0m[2m  decisive: ahead of the next state (195ms) and of what no row read (0ns) -- omn latency's rule, on the view's read…[0m │[0m
+│ [0m[2m  decisive: ahead of the next state (363ms) and of what no row read (0ns) -- omn latency's rule, on the view's read…[0m │[0m
 │                                                                                                                      │[0m
-│ [0m[1;32m▸ 1504111 server      [0m[2m├[0m[2;31m▞[0m[2;34m▓[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 96.4% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░░[0m[2m┤    15.8s [0m[1;37m ▶ sleep 96.4%     [0m  │[0m
-│   1504265 server      [0m[2m├[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 99.0% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░░[0m[2m ┤    15.8s [0m[1;37m ▶ sleep 99.0%     [0m  │[0m
-│   1504266 server      [0m[2m├[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 98.4% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░░[0m[2m ┤    15.8s [0m[1;37m ▶ sleep 98.4%     [0m  │[0m
-│ [0m[2m                     0 ───────────────────────────┼ 7.91s ───────────────────────────┤ 15.8s                        [0m │[0m
+│ [0m[1;32m▸ 2619831 server      [0m[2m├[0m[2;31m▞[0m[2;34m▓[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 96.4% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░░[0m[2m┤    15.8s [0m[1;37m ▶ sleep 96.4%     [0m  │[0m
+│   2619832 server      [0m[2m├[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 99.9% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░░░[0m[2m┤    15.8s [0m[1;37m ▶ sleep 99.9%     [0m  │[0m
+│   2619833 server      [0m[2m├[0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░░[0m[1;2;7;37m sleep 99.6% [0m[2;37m░░░░░░░░░░░░░░░░░░░░░░░░░[0m[2m┤    15.8s [0m[1;37m ▶ sleep 99.6%     [0m  │[0m
+│ [0m[2m                     0 ───────────────────────────┼ 7.89s ───────────────────────────┤ 15.8s                        [0m │[0m
 │                        [0m[32m█[0m on cpu   [0m[35m▚[0m run queue   [0m[31m▞[0m lock   [0m[34m▓[0m I/O   [0m[37m░[0m sleep                                             │[0m
 │                                                                                                                      │[0m
 │ [0m[1m  state                            source          amount          share   ±         reads  trust                   [0m │[0m
 │ [0m[2m  whole: the run's window                          15.8s           100%    exact                                    [0m │[0m
-│ [0m[32m█ [0m[2mon-cpu                           cpu.oncpu_time  40.9ms          0.26%   exact     0      [0m[33m1 late[0m [0m[36m~low det[0m          │[0m
-│ [0m[2m    ↳ most-sampled leaf `htab_map_update_elem`: 6 of 112 samples, every thread's: the samples are spread, no one fu…[0m │[0m
-│ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   30.3ms          0.19%   exact     366    [0m[33m4 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m │[0m
-│ [0m[31m▞ [0m[2mblocked: sleeping, on a futex    sched.offcpu    158ms           1.00%   exact     77     [0m[33m3 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m │[0m
-│ [0m[2m    ↳ 158ms waiting in futex(2) over 77 wait(s), from `sched.futex`                                                 [0m │[0m
+│ [0m[32m█ [0m[2mon-cpu                           cpu.oncpu_time  27.7ms          0.18%   exact     0      [0m[36m~low det[0m                 │[0m
+│ [0m[2m    ↳ most-sampled leaf `nft_do_chain`: 2 of 71 samples, every thread's: the samples are spread, no one function do…[0m │[0m
+│ [0m[35m▚ [0m[2mrunnable                         sched.runqlat   203µs           0.00%   exact     198    [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[31m▞ [0m[2mblocked: sleeping, on a futex    sched.offcpu    163ms           1.03%   exact     77     [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[2m    ↳ 163ms waiting in futex(2) over 77 wait(s), from `sched.futex`                                                 [0m │[0m
 │ [0m[2m    ↳ 98 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <-…[0m │[0m
-│ [0m[34m▓ [0m[2mblocked: uninterruptible         sched.offcpu    195ms           1.23%   exact     158    [0m[33m3 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m │[0m
-│ [0m[2m    ↳ 97 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <-…[0m │[0m
-│ [0m[37m░ [0m[2mblocked: sleeping                sched.offcpu    15.3s           96.4%   exact     471    [0m[33m3 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m │[0m
+│ [0m[34m▓ [0m[2mblocked: uninterruptible         sched.offcpu    363ms           2.30%   exact     157    [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
+│ [0m[2m    ↳ 98 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <-…[0m │[0m
+│ [0m[37m░ [0m[2mblocked: sleeping                sched.offcpu    15.2s           96.4%   exact     455    [0m[36m~low det[0m [0m[33mdegraded[0m        │[0m
 │ [0m[2m    ↳ the sleep less the futex waits `sched.futex` saw                                                              [0m │[0m
 │ [0m[2m    ↳ 98 % of it from one stack, leaf first: libc.so.6+0xa08f2 <- main <- libc.so.6+0x27781 <- __libc_start_main <-…[0m │[0m
-│ [0m[2m  residue: the whole less the rows                 144ms           0.91%   exact     time no row accounts for       [0m │[0m
+│ [0m[2m  residue: the whole less the rows                 13.8ms          0.09%   exact     time no row accounts for       [0m │[0m
 │                                                                                                                      │[0m
-│ [0m[2mtask:1504111 is the program's: its main thread, the one whose id is its process's.[0m                                   │[0m
+│ [0m[2mtask:2619831 is the program's: its main thread, the one whose id is its process's.[0m                                   │[0m
 │ [0m[2mNo decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread[0m    │[0m
 │ [0m[2m  over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn[0m │[0m
 │ [0m[2m  latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.[0m                              │[0m
-│ [0m[2mTrust: 8 rounds of reads came late: nothing is missing, but the series is not spaced as asked; the source is not[0m     │[0m
-│ [0m[2m  reproducible between two runs of the same workload; served by a fallback that says what it gives up (2).[0m           │[0m
+│ [0m[2mTrust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it[0m  │[0m
+│ [0m[2m  gives up (2).[0m                                                                                                      │[0m
 │                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓[0m bar  [0m[1md[0m decomposition  [0m[1ms[0m scale  [0m[1menter[0m open                     [0m

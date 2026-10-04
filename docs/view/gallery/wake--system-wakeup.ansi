@@ -1,23 +1,23 @@
-[0m[1momn top[0m │ fixture system-wakeup │ 1.00s                                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥2.08%[0m[35m cpu[0m [0m
+[0m[1momn top[0m │ fixture system-wakeup │ 1.00s                                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥0.99%[0m[35m cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes [0m[1;7m 8 wake [0m 9 flows  0 process                      [0m
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐[0m
-│[0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m4.08k wakeups of 294 threads -- from a task 42.5%, hardirq 46.7%, softirq 10.8%, in 1.00s[0m          │[0m
+│[0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m426 wakeups of 73 threads -- from a task 17.1%, hardirq 71.6%, softirq 11.3%, in 1.00s[0m             │[0m
 │                                                                                                                      │[0m
 │[0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m│[0m
-│[0m[1;7mpython3 1531678  [0m[2m   770  hardirq  100%[0m  zed-remot… 604981[0m[2m   100  hardirq  100%[0m  wc 1531841       [0m[2m    55  1531840  100%[0m│[0m
-│tailscaled 982   [0m[2m   235  hardirq   59%[0m  zed-remot… 605009[0m[2m   100  hardirq  100%[0m  every_ca… 1503268[0m[2m    50  hardirq  100%[0m│[0m
-│rcu_preempt 16   [0m[2m   210  softirq   98%[0m  zed-remot… 711460[0m[2m   100  hardirq  100%[0m  omn 1531775      [0m[2m    47  omn       64%[0m│[0m
-│tailscaled 1026  [0m[2m   161  tailsca…  25%[0m  zed-remot… 711489[0m[2m   100  hardirq  100%[0m  omn 1531776      [0m[2m    45  omn       78%[0m│[0m
-│nvidia-modes… 309[0m[2m   141  hardirq   87%[0m  omn 1531759      [0m[2m   100  hardirq  100%[0m  tmux: server 2412[0m[2m    41  tmux: c…  10%[0m│[0m
-│tailscaled 1024  [0m[2m   125  tailsca…  28%[0m  claude 3083      [0m[2m    65  HTTP Cl…  18%[0m  HeapHelp… 1528870[0m[2m    41  claude    22%[0m│[0m
-│tailscaled 984   [0m[2m   100  tailsca…  44%[0m  mi-scavenger 3085[0m[2m    63  claude    51%[0m  HeapHelp… 1528871[0m[2m    40  claude    25%[0m│[0m
-│[0m[2;3mthreads 1-21 of 294, ↑/↓ to move[0m                                                                                      │[0m
+│[0m[1;7mnvidia-modes… 309[0m[2m   120  hardirq  100%[0m  tailscaled 982   [0m[2m    11  hardirq  100%[0m  rcu_tasks_kt… 170[0m[2m     3  softirq   67%[0m│[0m
+│omn 2620550      [0m[2m   100  hardirq  100%[0m  containerd 990   [0m[2m     8  contain…  75%[0m  tailscaled 1055  [0m[2m     3  hardirq   67%[0m│[0m
+│mi-scavenger 3085[0m[2m    21  claude    67%[0m  kworker/… 2617808[0m[2m     6  softirq  100%[0m  Hyprland 1768    [0m[2m     3  hardirq  100%[0m│[0m
+│claude 3083      [0m[2m    16  hardirq   56%[0m  irq/84-iwlwi… 772[0m[2m     5  hardirq  100%[0m  kworker/… 2591943[0m[2m     3  softirq   67%[0m│[0m
+│containerd 997   [0m[2m    15  hardirq   67%[0m  1Password… 101408[0m[2m     5  hardirq  100%[0m  kworker/… 2600282[0m[2m     3  softirq  100%[0m│[0m
+│rcu_preempt 16   [0m[2m    12  softirq   92%[0m  1password 101299 [0m[2m     4  1passwo…  75%[0m  kcompactd0 178   [0m[2m     2  softirq  100%[0m│[0m
+│containerd 987   [0m[2m    12  hardirq  100%[0m  kworker/… 2606364[0m[2m     4  softirq  100%[0m  systemd-udevd 546[0m[2m     2  (udev-w…  50%[0m│[0m
+│[0m[2;3mthreads 1-21 of 73, ↑/↓ to move[0m                                                                                       │[0m
 │                                                                                                                      │[0m
-│[0m[1;32mpython3 1531678[0m[2m was woken 770 times, 769.97/s[0m                                                                         │[0m
+│[0m[1;32mnvidia-modeset/ 309[0m[2m was woken 120 times, 119.93/s[0m                                                                     │[0m
 │[0m[2;4m<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         [0m│[0m
-│[0m[2m└─ [0m[36mhardirq[0m[2m  a device[0m                                 [0m[2m   770  100%   1.28ms       --       --[0m  [0m[2;32m████████████████████████[0m│[0m
+│[0m[2m└─ [0m[36mhardirq[0m[2m  a device[0m                                 [0m[2m   120  100%   8.33ms       --       --[0m  [0m[2;32m████████████████████████[0m│[0m
 │                                                                                                                      │[0m
-│[0m[1m-> it woke in turn: [0mmigration/22 154[0m[2m x3[0m, migration/5 50[0m[2m x2[0m, migration/9 74[0m[2m x2[0m, migration/17 124[0m[2m x2, and 2 more[0m        │[0m
+│[0m[1m-> it woke in turn: [0m[2mno thread[0m                                                                                         │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

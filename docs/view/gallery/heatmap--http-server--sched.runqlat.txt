@@ -1,40 +1,40 @@
-omn top │ fixture http-server │ 3.24s                             view: snapshot │ collectors ≥24.3% │ target 90.6% cpu
+omn top │ fixture http-server │ 2.85s                             view: snapshot │ collectors ≥19.9% │ target 90.9% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ heatmap -- sched.runqlat latency over time ──────────────────────────────────────────────────────────────────────────┐
-│ io.latency 0   sched.runqlat 227 in 77 rows   net.socket 176 in 86 rows   gpu.kernel 0                               │
-│227 run queue waits, 0ns to 1.98ms, p50 0ns, p99 656µs 2 late ~low det degraded                                       │
-│2 regimes  ~0ns 99% (225) in 27 bursts, all through  │  ~1.97ms 0.9% (2) all through                                  │
+│ io.latency 0   sched.runqlat 256 in 97 rows   net.socket 176 in 80 rows   gpu.kernel 0                               │
+│256 run queue waits, 0ns to 194µs, p50 0ns, p99 48.9µs ~low det degraded                                              │
+│2 regimes  ~0ns 100% (255) in 27 bursts, all through  │  ~194µs 0.4% (1) once, at 1.01s                               │
 │                                                                                                                      │
-│  count ▂▄██▃▂▃▁▁▃▁▁▂▃▂▂▃▁▁▁▂▂▁▂▂▁▂▂▁▁▂▂▂▂▂▂▂▂▂▂▂▂▁▃▃▃▃▃ ▁▂▂▂▂▂▂▁▂▂▂▄▂ ▁▂▂▁▂▂▂▂▂▃▃▃  ▁▂▂  ▂▅▅▃▁▁▂▂▁▂▆  the whole run  │
-│       │     ░░                                                                                 ░░░    ▏             2│
-│       │                                                                                         │                    │
-│    1ms┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·│  ·                 │
-│       │                                                                                         │                    │
-│       │                                                                             ░░░         │     ▏             1│
-│       │                                                                                         │                    │
-│       │                                                                                         │                    │
-│       │                                                                             ░░░  ░▒▒░   │     ▏             3│
-│       │                                                                                      ░░░░░    ▏             2│
-│       │                                                                                        ░░░    ▏             1│
-│  100µs┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   · ░▒▒░  ·│  ▒  ▏             3│
-│       │                                                                                         │                    │
-│       │                                                                                         │                    │
-│       │                                                                                  ░▒▒░   │     ▏             2│
-│       │                                                                             ░░░         │     ▏             1│
-│       │                                          ░░░░                      ░▒░ ░░░       ▒▒▒▒   │     ▏             9│
-│       │ ░░░░░░░░░░░▒▒░░░                     ░░░░░                                              │     ▏             6│
-│       │░▒▒▒░░░ ░▒░     ░▒░   ░░░░                                                               │     ▏             7│
-│   10µs┤░░░▒░   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·│  ·  ▏             2│
-│       │                                                                                         │                    │
-│       │                                                                                         │                    │
-│       │                                             ░░░                                         │     ▏             1│
-│      0┤▒▓██▓▒▒ ·▒▒ ▒▓▓▓▓  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▓▒▒▒▒▒▒▒▒░▓▓▒▓▓·░▓▓▒▒▒▒░▒▒▒▓▓ ▒▒▒▒▒▒▒▒▓▓▓▓ ·░░░· ▒▓▓▒░░░░░▒█  █████████   187│
-│       └┬─────────────┬─────────────┬──────────────┬─────────────┬─────────────┬──────────────┬──▲───                 │
-│        0           500ms         1.00s          1.50s         2.00s         2.50s          3.00s                     │
-│   lost nothing lost; 2 rounds of reads came late: nothing is missing, the drains were further apart than asked       │
+│  count ▁▄█▆▁▁▂▂▁▁▂▁▁▂▂▂▁▂▂▂▂▂▂▁▂▂▂▂▂▂▁▂▂▂▂▂▂▁▂▂▁▁▂▂▂▂▂ ▁▂▂▂▂▂ ▁▂▂▂▂▂ ▁▁▂▁▂▂▂▁▁▂▂▁▂▂▂▁▂▂▂▂▂▁▂▂▂ ▁▂▂▂▅  the whole run  │
+│       │                                 │                                                                            │
+│       │                                ░▒░                                                            ▏             1│
+│       │                                 │                                                                            │
+│       │                                 │                                                                            │
+│  100µs┤·   ·   ·   ·   ·   ·   ·   ·   ·│  ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
+│       │                                 │                                                                            │
+│       │                                 │                                                         ░▒  ▏             1│
+│       │                              ░░░░░                    ░░░░░                                   ▏             2│
+│       │                                 │                                                                            │
+│       │  ░░                          ░░░░░                                                            ▏             2│
+│       │░░░░                    ░░░      │         ░░░░                                                ▏             3│
+│       │                   ░░░    ░░░░   │                 ░░░    ░░░ ░░░                              ▏             6│
+│       │ ▒▒░  ░▒ ░▒░                  ░░░░░  ░░░░                ░░░░     ░▒▒░        ░░░░░            ▏            10│
+│       │░▒▒▒            ░░░░░            │                                       ░░░░░                 ▏             6│
+│   10µs┤░▒▒▒░░░░░░░░·   ·   ·   ·   ·   ·│  ·   ·   ·   ░░░░░  ░░░░░·   ·   ·   ·   ·   ·   ·   ·   ·  ▏            10│
+│       │░▒▒▒   ░░░░░                     │                     ░░░░░      ░░░░       ░░░░              ▏             8│
+│       │ ░▒▒                             │                                        ░░░░             ░▒  ▏             6│
+│       │                                 │                                                                            │
+│       │                                 │                                                                            │
+│       │                                 │                                                         ░▒  ▏             1│
+│       │                                 │                                                                            │
+│       │                                 │                                                                            │
+│      0┤░▓██·░▒▒·▒▒░░▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░▒▒▒▒▓▓▒▒▒▒▒▒▒▒▒▒ ░▒▒▒▓▓ ░▒▒▒▒▓  ▒▒▒▒▒▒░▒▒▒▒▒▒▒▒▒▒▒▓▒░▒▓▒ ▒▒▒▒█  █████████   200│
+│       └┬───────────────┬───────────────┬▲──────────────┬────────────────┬───────────────┬───────────                 │
+│        0             500ms           1.00s           1.50s            2.00s           2.50s                          │
+│   lost nothing lost                                                                                                  │
 │                                                                                                                      │
-│▲ 3.10s to 3.14s   2 run queue waits   p50 174µs   p99 1.98ms   max 1.98ms                                            │
-│  its slowest 1.98ms: Thread-1 (proce tid 1493226 (alone in a 70.9ms kernel window)                                   │
-│per cell ░<1 ▒1 ▒2 ▓3 ▓5 █8   rows 2.4/octave, columns 34.9ms each, kernel rows spread over their ~91.0ms window      │
+│▲ 1.01s to 1.04s   3 run queue waits   p50 15.0µs   p99 194µs   max 194µs                                             │
+│  its slowest 194µs: Thread-1 (proce tid 2618479 (alone in a 46.5ms kernel window)                                    │
+│per cell ░<1 ▒1 ▒2 ▓4 ▓6 █10   rows 3.1/octave, columns 30.6ms each, kernel rows spread over their ~85.5ms window     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it

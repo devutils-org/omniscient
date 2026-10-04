@@ -1,16 +1,16 @@
-omn top │ fixture workload-flows │ 1.00s                          view: snapshot │ collectors ≥14.4% │ target 5.80% cpu
+omn top │ fixture workload-flows │ 993ms                          view: snapshot │ collectors ≥16.4% │ target 5.63% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
- flows-main  pid 1783958 · 2 threads · 986ms · omn costs ≥14.4% cpu
+ flows-main  pid 2621407 · 2 threads · 982ms · omn costs ≥16.4% cpu
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- CPU     ▂▂▂▂▂▂▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁   0.00927 cores   avg 0.0756   peak 0.850  ~low det
- Memory   ███████████████████       14.1MiB        +195KiB/s   peak 14.1MiB
- Disk    ▁▁▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁   R 0B/s         W 9.14MiB/s   p99 4.64ms  10 late ~low det degraded x2
- Network ▁▁▁▁▁▁▁▄██▄▁▁▁▁▁▁▁▁▁▁▁▁▁   ↓ 1.01MiB/s    ↑ 4.06MiB/s   0 retrans (machine)  ~low det degraded x3
+ CPU     ▂▂▂▂▂▂▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁   0.00897 cores   avg 0.0746   peak 0.856  ~low det
+ Memory  ███████████████████        14.1MiB        +196KiB/s   peak 14.1MiB
+ Disk    ▁▁▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁   R 0B/s         W 9.31MiB/s   p99 4.64ms  10 late ~low det degraded x2
+ Network ▁▁▁▁▁▁▁▄██▄▁▁▁▁▁▁▁▁▁▁▁▁▁   ↓ 1.02MiB/s    ↑ 4.07MiB/s   0 retrans (machine)  ~low det degraded x3
  GPU                                no kernel launched   VRAM 0B
- Energy  ▆▇▇▇▇▇▇▇▇▇▇▇███████▇▇▇▇▇   61.6 W         avg 62.6 W   the machine's, not apportioned
- Time    █░░░░░░░░░░░░░░░░░░░░░░░   sleep 93.2%   on cpu 4.04%   I/O 0.72%   child 0.49%  ~low det degraded x4
+ Energy  ▆▇▇▇▇▇███████▇▇▇▇▇▇▆▆▆▆▆   36.2 W         avg 45.0 W   the machine's, not apportioned
+ Time    █░░░░░░░░░░░░░░░░░░░░░░░   sleep 93.6%   on cpu 3.92%   I/O 0.74%   child 0.50%  ~low det degraded x4
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-▶ suspect: sleep (blocked: sleeping)  93.2%                                                         Enter/click → detail
+▶ suspect: sleep (blocked: sleeping)  93.6%                                                         Enter/click → detail
 
 CPU in one hue: the machine's cores are not in the recording
 Memory in one hue: the machine's memory is not in the recording

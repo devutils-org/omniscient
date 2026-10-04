@@ -1,26 +1,26 @@
-omn top │ fixture workload-flame │ 2.07s                          view: snapshot │ collectors ≥14.9% │ target 62.4% cpu
+omn top │ fixture workload-flame │ 2.05s                          view: snapshot │ collectors ≥13.2% │ target 61.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐
-│sched.switches 39 23 late ~low det degraded  sched.wakeup 25 23 late ~low det degraded  sched.offcpu 21 ~low det      │
-│degraded  gpu.kernel 0 19 late degraded                                                                               │
-│24.9ms a cell          ╷0ns                ╷500ms              ╷1.00s              ╷1.50s                  of the span│
-│flame-main     1524065│█▂                                       ▁                                       ▁▁│awake 1.61%│
-│              off cpu │ ▇████████████████████████████████████████████████████████████████████████████████ │ blkd 97.3%│
-│hot            1524067│ ▇████████████████████▇                                                            │awake 26.1%│
+│sched.switches 50 22 late ~low det degraded  sched.wakeup 29 22 late ~low det degraded  sched.offcpu 23 ~low det      │
+│degraded  gpu.kernel 0 3 late degraded                                                                                │
+│24.7ms a cell          ╷0ns                ╷500ms              ╷1.00s              ╷1.50s                  of the span│
+│flame-main     2620696│█▁                                       ▁                                        ▁│awake 1.18%│
+│              off cpu │▁█████████████████████████████████████████████████████████████████████████████████▄│ blkd 98.1%│
+│hot            2620697│▁██████████████████████████████                                                    │awake 36.1%│
 │              off cpu │ ▁                                                                                 │ blkd 0.00%│
-│warm           1524143│                                         ▂█▂ ▄█▂ ▃█▃ ▃█▃ ▃█▃ ▃█▃ ▂█▃ ▂█▄ ▂█▄ ▂█▄   │awake 19.3%│
-│              off cpu │                                         ▁ ▇█▅ ▇█▆ ▆█▆ ▆█▆ ▆█▆ ▆█▇ ▆█▇ ▅█▇ ▅█▇ ▅██ │ blkd 29.0%│
-│────────────────────────────────────────────▲ 533ms───────────────────────────────────────────────────────────────────│
-│flame-main 1524065 (pid 1524065) at 533ms: blocked, sleeping 1.01s, 28.6ms → 1.04s, left cpu 0                        │
-│  woken by hot 1524067, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone            │
+│warm           2620698│                                         ▁█▄ ▂█▄ ▁█▅ ▁█▅  █▆  █▆  ▇▇  ▇▇  ▆█  ▆█   │awake 19.5%│
+│              off cpu │                                         ▂ ▅█▇ ▅██ ▄██ ▄██▁▃██▁▃██▂▂██▂▂██▃▁██▃▁██▄│ blkd 29.5%│
+│────────────────────────────────────────────▲ 530ms───────────────────────────────────────────────────────────────────│
+│flame-main 2620696 (pid 2620696) at 530ms: blocked, sleeping 1.00s, 28.9ms → 1.03s, left cpu 12                       │
+│  woken by hot 2620697, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone            │
 │  in libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← PyEvent_WaitTimed ← libpython3.14.so.1.0 x4 ← …          │
-│  16 switch-outs and 9 wakeups seen; awake 1.61% of the run                                                           │
-│  meanwhile awake: hot 1524067                                                                                        │
+│  15 switch-outs and 11 wakeups seen; awake 1.18% of the run                                                          │
+│  meanwhile awake: hot 2620697                                                                                        │
 │  where it was off a cpu over the run, 2.01s in all (sched.offcpu, by state and stack) ~low det degraded:             │
-│     1.01s 50.1% sleeping      1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …                    │
+│     1.00s 49.8% sleeping      1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …                    │
 │     999ms 49.7% sleeping      1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …                    │
-│    5.09ms 0.25% sleeping      2 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …             │
-│    91.2µs 0.00% sleeping      1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …                    │
+│    5.07ms 0.25% sleeping      2 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …             │
+│    5.06ms 0.25% sleeping      1 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …             │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

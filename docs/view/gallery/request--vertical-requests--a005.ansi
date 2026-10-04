@@ -1,35 +1,35 @@
-[0m[1momn top[0m │ fixture vertical-requests │ 409ms                       [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥1.19%[0m[35m │ target 4.31% cpu[0m [0m
+[0m[1momn top[0m │ fixture vertical-requests │ 413ms                       [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥0.73%[0m[35m │ target 4.00% cpu[0m [0m
  1 system  2 flame  3 ledger [0m[1;7m 4 request [0m 5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────┐[0m
-│[0m[1m5 requests served by server (pid 1499921)[0m · slowest a001 40.2ms · median 30.1ms[0m[2m · in order of arrival  [0m[33mdegraded x2[0m    │[0m
+│[0m[1m5 requests served by server (pid 2619020)[0m · slowest a001 40.8ms · median 30.3ms[0m[2m · in order of arrival  [0m[33mdegraded x2[0m    │[0m
 │                                                                                                                      │[0m
-│[0m[1m  req      span  its life by state, to one scale: the slowest is 40.2ms             mostly[0m                            │[0m
-│[0m[32m  [0ma001   40.2ms  [0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m  lock/sleep 99.8%                  │[0m
-│[0m[32m  [0ma002   9.35ms  [0m[32m█[0m[34m▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m                                                    disk 90.2% · on cpu 7.47%         │[0m
-│[0m[32m  [0ma003   22.3ms  [0m[32m█[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m[34m▄▄▄[0m                               lock/sleep 89.7% · disk 8.30%     │[0m
-│[0m[32m  [0ma004   30.1ms  [0m[36m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░[0m                  net in 99.9%                      │[0m
-│[0m[32m▶ [0m[1;32ma005 [0m[1m  33.2ms  [0m[32m█[0m[96m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░[0m             net out 99.0%                     │[0m
+│[0m[1m  req      span  its life by state, to one scale: the slowest is 40.8ms             mostly[0m                            │[0m
+│[0m[32m  [0ma001   40.8ms  [0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m  lock/sleep 99.8%                  │[0m
+│[0m[32m  [0ma002   10.3ms  [0m[32m█[0m[33m▓[0m[34m▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m                                                   disk 88.4% · on cpu 8.56%         │[0m
+│[0m[32m  [0ma003   23.6ms  [0m[32m█[0m[33m▓[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m[34m▄▄▄▄[0m                             lock/sleep 85.9% · disk 10.8%     │[0m
+│[0m[32m  [0ma004   30.3ms  [0m[36m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░[0m                   net in 99.9%                      │[0m
+│[0m[32m▶ [0m[1;32ma005 [0m[1m  34.4ms  [0m[32m█[0m[96m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░[0m            net out 98.8%                     │[0m
 │  [0m[36m░░ [0m[2mnet in   [0m[32m██ [0m[2mon cpu   [0m[33m▓▓ [0m[2mrun queue   [0m[35m▀▀ [0m[2mlock/sleep   [0m[34m▄▄ [0m[2mdisk   [0m[96m░░ [0m[2mnet out   [0m                                      │[0m
 │                                                                                                                      │[0m
-│[0m[1;32m── a005 · 33.2ms from its first byte in to its last byte out · thread 1499921 [0m[2m────────────────────────────────────────[0m│[0m
-│[0m[2m            ┊0                 ┊10.0ms             ┊20.0ms             ┊30.0ms[0m                                        │[0m
-│[0m[36m  net in    ░[0m                                                                   9.82µs before start                   │[0m
-│[0m[1m  serving   [0m[32m█[0m[96m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░[0m          28.9ms from start to done             │[0m
+│[0m[1;32m── a005 · 34.4ms from its first byte in to its last byte out · thread 2619020 [0m[2m────────────────────────────────────────[0m│[0m
+│[0m[2m            ┊0                 ┊10.0ms            ┊20.0ms            ┊30.0ms  [0m                                        │[0m
+│[0m[36m  net in    ░[0m                                                                   18.7µs before start                   │[0m
+│[0m[1m  serving   [0m[32m█[0m[96m░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░[0m            29.0ms from start to done             │[0m
 │[0m[34m  on device [0m                                                                  [0m[2m  no block request[0m                      │[0m
-│[0m[96m  net out   [0m                                                         [0m[96m░░░░░░░░░[0m  4.24ms after done, 28.6ms in send     │[0m
+│[0m[96m  net out   [0m                                                       [0m[96m░░░░░░░░░░░[0m  5.39ms after done, 28.6ms in send     │[0m
 │[0m[2;3m  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order[0m                 │[0m
 │                                                                                                                      │[0m
-│[0m[1m  where its 33.2ms went              [0m[2mevidence[0m                       [0m[1mits share of each resource[0m                        │[0m
-│[0m[36m  ░ [0mnet in       9.82µs   0.03% [0m[36m▏    [0m[2mKEY      by socket 115858[0m      [0m[1mcpu        [0m245µs: 1.38% of the 17.8ms server took │[0m
-│[0m[32m  █ [0mon cpu        245µs   0.74% [0m[32m▏    [0mIDENTITY                                  off cpu 9 times, preempted 0           │[0m
-│[0m[33m  ▓ [0mrun queue    68.5µs   0.21% [0m[33m▏    [0mIDENTITY                       [0m[1mdisk       [0m[2mno block request issued[0m                │[0m
-│[0m[35m  ▀ [0m[2mlock/sleep        ·         [0m[35m     [0mIDENTITY                       [0m[1mnetwork    [0min 9.82µs · out 32.9ms                 │[0m
+│[0m[1m  where its 34.4ms went              [0m[2mevidence[0m                       [0m[1mits share of each resource[0m                        │[0m
+│[0m[36m  ░ [0mnet in       18.7µs   0.05% [0m[36m▏    [0m[2mKEY      by socket 196640[0m      [0m[1mcpu        [0m244µs: 1.44% of the 16.9ms server took │[0m
+│[0m[32m  █ [0mon cpu        244µs   0.71% [0m[32m▏    [0mIDENTITY                                  off cpu 9 times, preempted 0           │[0m
+│[0m[33m  ▓ [0mrun queue     152µs   0.44% [0m[33m▏    [0mIDENTITY                       [0m[1mdisk       [0m[2mno block request issued[0m                │[0m
+│[0m[35m  ▀ [0m[2mlock/sleep        ·         [0m[35m     [0mIDENTITY                       [0m[1mnetwork    [0min 18.7µs · out 33.9ms                 │[0m
 │[0m[34m  ▄ [0m[2mdisk              ·         [0m[34m     [0mIDENTITY                                                                         │[0m
-│[0m[96m  ░ [0mnet out      32.9ms   99.0% [0m[96m░░░░ [0m[2mKEY      by socket 115858[0m                                                        │[0m
+│[0m[96m  ░ [0mnet out      33.9ms   98.8% [0m[96m░░░░ [0m[2mKEY      by socket 196640[0m                                                        │[0m
 │[0m[2m  IDENTITY: read off the serving thread  KEY: joined by the socket[0m                                                    │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
-│[0m[1m  what sets it apart from the other 4 requests: [0m[96m░ [0m[31mnet out +32.9ms[0m[2m (theirs 0ns)[0m                                        │[0m
+│[0m[1m  what sets it apart from the other 4 requests: [0m[96m░ [0m[31mnet out +33.9ms[0m[2m (theirs 0ns)[0m                                        │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

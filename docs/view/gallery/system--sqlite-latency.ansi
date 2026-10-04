@@ -1,4 +1,4 @@
-[0m[1momn top[0m │ fixture sqlite-latency │ 347ms                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥4.48%[0m[35m │ target 8.15% cpu[0m [0m
+[0m[1momn top[0m │ fixture sqlite-latency │ 288ms                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥3.93%[0m[35m │ target 8.74% cpu[0m [0m
 [0m[1;7m 1 system [0m 2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌[0m[1m system -- [0m[2mthe overview: cpu, memory, disk, network, GPU and power, and the processes [0m────────────────────────────────┐[0m
 │[0m[2mThis run did not measure the machine: no cpu, memory, disk, network, GPU or power source is in it. The session that[0m   │[0m
@@ -7,12 +7,12 @@
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 ┌[0m[1m processes [0m[2mthe target's, by cpu [0m────────────────────────────────────────────────────┐[0m[35m┌ cost, share of one cpu ────────┐[0m
 │[0m[1m       ID RUN QUEUE ON LOCKS [0m                                                       │[0m[35m│[0m[2;35mnone of this view's collectors[0m  [0m[35m│[0m
-│  1497910 [0m[2m   15.0ms        · [0m                                                       │[0m[35m│[0m[2;35mis in this run[0m                  [0m[35m│[0m
+│  2619011 [0m[2m   5.05ms        · [0m                                                       │[0m[35m│[0m[2;35mis in this run[0m                  [0m[35m│[0m
 │                                                                                    │[0m[35m│[0m                                [0m[35m│[0m
 │                                                                                    │[0m[35m│[0m                                [0m[35m│[0m
 │                                                                                    │[0m[35m│[0m                                [0m[35m│[0m
 │                                                                                    │[0m[35m│[0m                                [0m[35m│[0m
-│[0m[2mRUN QUEUE [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2mON LOCKS [0m[33m-4 lost[0m [0m[36m~low det[0m                              │[0m[35m│[0m                                [0m[35m│[0m
+│[0m[2mRUN QUEUE [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2mON LOCKS [0m[36m~low det[0m                                      │[0m[35m│[0m                                [0m[35m│[0m
 └────────────────────────────────────────────────────────────────────────────────────┘[0m[35m└────────────────────────────────┘[0m
                                                                                                                         [0m
                                                                                                                         [0m

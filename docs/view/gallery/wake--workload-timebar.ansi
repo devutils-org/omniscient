@@ -1,30 +1,30 @@
-[0m[1momn top[0m │ fixture workload-timebar │ 3.28s                        [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥14.7%[0m[35m │ target 35.9% cpu[0m [0m
+[0m[1momn top[0m │ fixture workload-timebar │ 2.69s                        [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥11.2%[0m[35m │ target 42.9% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes [0m[1;7m 8 wake [0m 9 flows  0 process                      [0m
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐[0m
-│[0m[33m47 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m121 wakeups of 13 threads -- from a task 96.7%, hardirq 3.31%, in 3.28s[0m                    │[0m
+│[0m[33m29 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m51 wakeups of 11 threads -- from a task 92.2%, hardirq 7.84%, in 2.69s[0m                     │[0m
 │                                                                                                                      │[0m
 │[0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m│[0m
-│[0m[1;7mworker 1525671   [0m[2m     9  holder    44%[0m  [0m[2mrcu_exp_gp_kt… 19    24  worker    54%[0m  [0m[2mmigration/23 160      1  worker   100%[0m│[0m
-│python3 1525319  [0m[2m     7  worker    57%[0m  [0m[2mrcub/2 96             6  worker    83%[0m  [0m[2mtailscaled 1024       1  rival    100%[0m│[0m
-│holder 1526045   [0m[2m     1  hardirq  100%[0m  [0m[2mtailscaled 1055       2  python3   50%[0m  [0m[2mtailscaled 1026       1  python3  100%[0m│[0m
-│[0m[2mrcub/1 17            35  rival     57%[0m  [0m[2mmigration/8 68        1  python3  100%[0m                                        │[0m
-│[0m[2mrcu_preempt 16       32  worker    59%[0m  [0m[2mmigration/19 136      1  rival    100%[0m                                        │[0m
-│[0m[2;3m10 dimmed: outside the target, woken by it[0m                                                                            │[0m
+│[0m[1;7mworker 2620839   [0m[2m    10  holder    50%[0m  [0m[2mrcu_exp_gp_kt… 19    12  rival     67%[0m  [0m[2mmigration/2 32        1  python3  100%[0m│[0m
+│python3 2620821  [0m[2m     6  worker    50%[0m  [0m[2mtailscal… 1374244     3  python3   67%[0m  [0m[2mtailscaled 18352      1  rival    100%[0m│[0m
+│holder 2620966   [0m[2m     1  hardirq  100%[0m  [0m[2mmigration/14 106      2  worker    50%[0m  [0m[2momn 2620817           1  python3  100%[0m│[0m
+│[0m[2mrcub/1 17            13  rival     62%[0m  [0m[2mrcu_preempt 16        1  worker   100%[0m                                        │[0m
+│[0m[2;3m8 dimmed: outside the target, woken by it[0m                                                                             │[0m
 │                                                                                                                      │[0m
-│[0m[1;32mworker 1525671[0m (pid 1525319)[0m[2m was woken 9 times, 2.74/s[0m                                                                │[0m
+│[0m[1;32mworker 2620839[0m (pid 2620821)[0m[2m was woken 10 times, 3.72/s[0m                                                               │[0m
 │[0m[2;4m<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         [0m│[0m
-│[0m[2m├─ [0m[1mholder 1526045[0m[2m  its wakeup unseen x1[0m              [0m[2m     4   44%    132µs    179µs    310µs[0m  [0m[2;32m           ▂ ▆          [0m│[0m
-│[0m[2m│  └─ [0m[36mhardirq[0m[2m  a device[0m                              [0m[2m     3   33%    400ms       --       --[0m  [0m[2;32m             ▆          [0m│[0m
-│[0m[2m├─ [0m[1mrival 1526152[0m[2m  its wakeup unseen[0m                  [0m[2m     3   33%   25.9ms       --       --[0m  [0m[2;32m             ▂▂    ▂    [0m│[0m
-│[0m[2m├─ [0m[1mpython3 1525319[0m                                   [0m[2m     1   11%   36.7µs   36.7µs   36.7µs[0m  [0m[2;32m ▂                      [0m│[0m
-│[0m[2m│  └─ [0m[1mworker 1525671[0m[2m  ↺ back on the chain[0m            [0m[2m     1   11%   5.52ms       --       --[0m  [0m[2;32m ▂                      [0m│[0m
-│[0m[2m└─ [0m[36mhardirq[0m[2m  a device[0m                                 [0m[2m     1   11%    693ms       --       --[0m  [0m[2;32m           ▂            [0m│[0m
+│[0m[2m├─ [0m[1mholder 2620966[0m[2m  its wakeup unseen x2[0m              [0m[2m     5   50%   82.9µs   66.9µs    150µs[0m  [0m[2;32m         ▄  ▆           [0m│[0m
+│[0m[2m│  └─ [0m[36mhardirq[0m[2m  a device[0m                              [0m[2m     3   30%    400ms       --       --[0m  [0m[2;32m            ▆           [0m│[0m
+│[0m[2m├─ [0m[1mrival 2620967[0m[2m  its wakeup unseen[0m                  [0m[2m     3   30%   14.9ms       --       --[0m  [0m[2;32m            ▂▂    ▂     [0m│[0m
+│[0m[2m├─ [0m[1mpython3 2620821[0m                                   [0m[2m     1   10%   5.08ms   17.9µs   17.9µs[0m  [0m[2;32m▂                       [0m│[0m
+│[0m[2m│  └─ [0m[36mhardirq[0m[2m  a device[0m                              [0m[2m     1   10%   5.06ms       --       --[0m  [0m[2;32m▂                       [0m│[0m
+│[0m[2m└─ [0m[36mhardirq[0m[2m  a device[0m                                 [0m[2m     1   10%   1000ms       --       --[0m  [0m[2;32m         ▂              [0m│[0m
 │                                                                                                                      │[0m
 │[0m[2;4mwoken at      held   the longest chains, link by link: each waker and its hold                                        [0m│[0m
-│[0m[2m+1.91s   [0m[1;2m    310µs[0m [0m[2m  <- [0mholder 1526045[0m[2;32m 310µs[0m[2m  <- [0m[36mhardirq[0m[2m  x3[0m                                                          │[0m
-│[0m[2m+145ms   [0m[1;2m   36.7µs[0m [0m[2m  <- [0mpython3 1525319[0m[2;32m 36.7µs[0m[2m  <- [0mworker 1525671[0m[2m ↺[0m                                                   │[0m
+│[0m[2m+1.44s   [0m[1;2m    150µs[0m [0m[2m  <- [0mholder 2620966[0m[2;32m 150µs[0m[2m  <- [0m[36mhardirq[0m[2m  x3[0m                                                          │[0m
+│[0m[2m+34.6ms  [0m[1;2m   17.9µs[0m [0m[2m  <- [0mpython3 2620821[0m[2;32m 17.9µs[0m[2m  <- [0m[36mhardirq[0m                                                            │[0m
 │                                                                                                                      │[0m
-│[0m[1m-> it woke in turn: [0mrcu_preempt 16[0m[2m x19[0m, rcub/1 17[0m[2m x15[0m, rcu_exp_gp_kthr 19[0m[2m x13[0m, rcub/2 96[0m[2m x5, and 2 more[0m               │[0m
+│[0m[1m-> it woke in turn: [0mrcub/1 17[0m[2m x5[0m, rcu_exp_gp_kthr 19[0m[2m x4[0m, python3 2620821[0m[2m x3[0m, rcu_preempt 16[0m[2m x1, and 1 more[0m            │[0m
+│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

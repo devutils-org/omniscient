@@ -1,21 +1,21 @@
-omn top │ fixture workload-ledger │ 1.28s                         view: snapshot │ collectors ≥15.6% │ target 40.0% cpu
+omn top │ fixture workload-ledger │ 1.26s                         view: snapshot │ collectors ≥16.3% │ target 41.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐
-│sched.switches 89 13 late ~low det degraded x2  sched.wakeup 84 13 late ~low det degraded  sched.offcpu 18 ~low det   │
-│degraded  gpu.kernel 0 11 late degraded                                                                               │
-│15.4ms a cell          ╷0ns        ╷200ms       ╷400ms       ╷600ms       ╷800ms       ╷1.00s       ╷1.20s of the span│
-│ledger-main    1784901│██████████████████████████████████████▅ ▁▁                                      █▁ │awake 47.7%│
-│              off cpu │                                      ▄█████████████████████████████████████████▁  │ blkd 49.9%│
-│───────────────────────────────────────────────────────────────────────────────────▲ 935ms────────────────────────────│
-│ledger-main 1784901 (pid 1784901) at 935ms: blocked, sleeping 600ms, 635ms → 1.23s, left cpu 9                        │
+│sched.switches 29 13 late ~low det degraded x2  sched.wakeup 57 13 late ~low det degraded  sched.offcpu 14 ~low det   │
+│degraded  gpu.kernel 0 4 late degraded                                                                                │
+│15.2ms a cell          ╷0ns         ╷200ms       ╷400ms       ╷600ms       ╷800ms       ╷1.00s             of the span│
+│ledger-main    2621625│██████████████████████████████████████▇▂ ▁                                         │awake 47.0%│
+│              off cpu │                                      ▂▇█████████████████████████████████████████▁ │ blkd 50.7%│
+│────────────────────────────────────────────────────────────────────────────────────▲ 934ms───────────────────────────│
+│ledger-main 2621625 (pid 2621625) at 934ms: blocked, sleeping 600ms, 634ms → 1.23s, left cpu 12                       │
 │  woken by an interrupt (hardirq), then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone │
 │  in clock_nanosleep ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← libpython3.14.so.1.0 x4 ← Py_RunMain ← …           │
-│  89 switch-outs and 46 wakeups seen; awake 47.7% of the run                                                          │
+│  29 switch-outs and 17 wakeups seen; awake 47.0% of the run                                                          │
 │  where it was off a cpu over the run, 641ms in all (sched.offcpu, by state and stack) ~low det degraded:             │
-│     600ms 93.6% sleeping      1 blocks  clock_nanosleep ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …              │
-│    28.3ms 4.41% sleeping      1 blocks  accept4 ← _socket.cpython-314-x86_64-linux-gnu.so x2 ← …                     │
-│    7.21ms 1.12% uninterr.    37 blocks  fsync ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
-│    5.07ms 0.79% sleeping      1 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
+│     600ms 93.7% sleeping      1 blocks  clock_nanosleep ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …              │
+│    29.5ms 4.61% sleeping      1 blocks  accept4 ← _socket.cpython-314-x86_64-linux-gnu.so x2 ← …                     │
+│    6.32ms 0.99% uninterr.     8 blocks  fsync ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
+│    4.60ms 0.72% sleeping      1 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

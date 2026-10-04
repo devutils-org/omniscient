@@ -1,11 +1,11 @@
-omn top │ fixture workload-system │ 2.01s                         view: snapshot │ collectors ≥14.2% │ target 90.5% cpu
+omn top │ fixture workload-system │ 2.00s                         view: snapshot │ collectors ≥14.6% │ target 92.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ heatmap -- io.latency latency over time ─────────────────────────────────────────────────────────────────────────────┐
-│ io.latency 139   sched.runqlat 243 in 97 rows   net.socket 286 in 9 rows   gpu.kernel 0                              │
-│139 block requests, 21.1µs to 4.64ms, p50 30.2µs, p99 4.63ms 21 late ~low det degraded x2                             │
-│3 regimes  ~30.2µs 88% (122) 1.38s to 1.38s  │  ~369µs 1.4% (2) 1.39s to 1.39s  │  ~4.60ms 11% (15) 1.38s to 1.38s    │
+│ io.latency 139   sched.runqlat 186 in 42 rows   net.socket 258 in 11 rows   gpu.kernel 0                             │
+│139 block requests, 19.8µs to 4.64ms, p50 30.3µs, p99 4.63ms 23 late ~low det degraded x2                             │
+│3 regimes  ~30.2µs 88% (122) 1.37s to 1.38s  │  ~436µs 1.4% (2) 1.38s to 1.38s  │  ~4.59ms 11% (15) 1.37s to 1.37s    │
 │                                                                                                                      │
-│  count                                                                █▁                              the whole run  │
+│  count                                                                █▃                              the whole run  │
 │       │                                                               │                                              │
 │       │                                                               │                                              │
 │       │                                                               ▓                               █            15│
@@ -14,27 +14,27 @@ omn top │ fixture workload-system │ 2.01s                         view: snap
 │       │                                                               │                                              │
 │       │                                                               │                                              │
 │    1ms┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  │·   ·   ·   ·   ·   ·   ·   ·                 │
+│       │                                                               │░                              ▏             1│
 │       │                                                               │                                              │
 │       │                                                               │░                              ▏             1│
 │       │                                                               │                                              │
-│       │                                                               ░                               ▏             1│
 │       │                                                               │                                              │
 │       │                                                               │                                              │
 │       │                                                               │                                              │
 │       │                                                               │                                              │
 │  100µs┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·  │·   ·   ·   ·   ·   ·   ·   ·                 │
 │       │                                                               │                                              │
-│       │                                                               │                                              │
-│       │                                                               ▒                               ▏             4│
-│       │                                                               █                               █████████   112│
-│       │                                                               ▒                               ▏             5│
+│       │                                                               │░                              ▏             1│
 │       │                                                               ░                               ▏             1│
-│       └┬──────────────────────┬──────────────────────┬────────────────▲─────┬──────────────────────┬                 │
-│        0                    500ms                  1.00s                  1.50s                  2.00s               │
-│   lost nothing lost; 21 rounds of reads came late: nothing is missing, the drains were further apart than asked      │
+│       │                                                               █▓                              █████████   114│
+│       │                                                               │▒                              ▏             5│
+│       │                                                               │░                              ▏             1│
+│       └┬──────────────────────┬──────────────────────┬────────────────▲─────┬───────────────────────                 │
+│        0                    500ms                  1.00s                  1.50s                                      │
+│   lost nothing lost; 23 rounds of reads came late: nothing is missing, the drains were further apart than asked      │
 │                                                                                                                      │
-│▲ 1.36s to 1.39s   138 block requests   p50 30.2µs   p99 4.63ms   max 4.64ms                                          │
-│  its slowest 4.64ms: system-main tid 1529755 WS 128KiB on nvme0n1p6                                                  │
-│per cell ░1 ▒2 ▒4 ▓10 ▓23 █51   rows 2.6/octave, columns 21.6ms each                                                  │
+│▲ 1.35s to 1.38s   108 block requests   p50 30.4µs   p99 4.63ms   max 4.64ms                                          │
+│  its slowest 4.64ms: system-main tid 2621722 WS 128KiB on nvme0n1p6                                                  │
+│per cell ░1 ▒2 ▒4 ▓9 ▓20 █43   rows 2.6/octave, columns 21.5ms each                                                   │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it

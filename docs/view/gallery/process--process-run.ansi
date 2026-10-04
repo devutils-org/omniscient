@@ -1,16 +1,16 @@
-[0m[1momn top[0m │ recording process-run │ 2.39s                           [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥10.7%[0m[35m │ target 28.3% cpu[0m [0m
+[0m[1momn top[0m │ recording process-run │ 2.05s                           [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥14.0%[0m[35m │ target 37.0% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows [0m[1;7m 0 process [0m                     [0m
- [0m[1mprocess-main[0m  pid 1476208 · 3 threads · 2.37s · [0m[35momn costs ≥10.7% cpu[0m                                                   [0m
+ [0m[1mprocess-main[0m  pid 2631109 · 3 threads · 2.32s · [0m[35momn costs ≥14.0% cpu[0m                                                   [0m
 [0m[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
- [0m[1;7mCPU     [0m[34m▇████▆▆▆▄▃▂▁▁▁▂▂▂▂▅▁▁▁▁▁[0m   [0m[1;34m0.0249 cores[0m   avg 0.375   peak 0.993  [0m[33m2 late[0m [0m[36m~low det[0m                              [0m
- [0m[1mMemory  [0m[34m▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃████[0m     [0m[1;34m46.7MiB     [0m   +13.7MiB/s   peak 46.7MiB  [0m[33m1 late[0m                                    [0m
- [0m[1mDisk    [0m[34m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█▁▁▁▁▁▁▁[0m   [0m[1;34mR 0B/s      [0m   W 1.71MiB/s   p99 926µs  [0m[33m-79 lost (67.5%)[0m [0m[33m22 late[0m [0m[36m~low det[0m [0m[33mdegraded x[0m
- [0m[1mNetwork [0m[34m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▆██▂▁▁▁▁▁▁[0m   [0m[1;34m↓ 108KiB/s  [0m   ↑ 431KiB/s   0 retrans (machine)  [0m[33m7 late[0m [0m[36m~low det[0m [0m[33mdegraded x3[0m        [0m
+ [0m[1;7mCPU     [0m[34m▇██████▇▂▂▁▁▁▂▂▄▁▁▁▁▁▁▁[0m    [0m[1;34m0.00158 cores[0m   avg 0.370   peak 1.03  [0m[36m~low det[0m                                     [0m
+ [0m[1mMemory  [0m[34m▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃█████▃[0m      [0m[1;34m14.6MiB     [0m   +178KiB/s   peak 46.6MiB                                             [0m
+ [0m[1mDisk    [0m[34m▁▁▁▁▁▁▁▁▁▁▁▁▁▁█▁▁▁▁▁▁▁▁▁[0m   [0m[1;34mR 0B/s      [0m   W 1.70MiB/s   p99 4.64ms  [0m[33m21 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m               [0m
+ [0m[1mNetwork [0m[34m▁▁▁▁▁▁▁▁▁▁▁▁▁▅█▁▁▁▁▁▁▁▁▁[0m   [0m[1;34m↓ 110KiB/s  [0m   ↑ 442KiB/s   0 retrans (machine)  [0m[36m~low det[0m [0m[33mdegraded x3[0m               [0m
  [0m[1;2mGPU     [0m                           [0m[2mno kernel launched   VRAM 0B[0m                                                        [0m
- [0m[1mEnergy  [0m[34m▄▄▄▄▄▇▇▇████████████████[0m   [0m[1;34m145 W       [0m   avg 127 W   the machine's, not apportioned  [0m[33m2 late[0m                   [0m
- [0m[1mTime    [0m[32m████████[0m[35m▚▚▚[0m[31m▞▞[0m[37m░░░░░░░░░░[0m[2m·[0m   [0m[37msleep 40.9%[0m   [0m[32mon cpu 35.1%[0m   [0m[35mrun queue 10.6%[0m   [0m[31mlock 10.5%[0m  [0m[33m17 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m
+ [0m[1mEnergy  [0m[34m▆▇▇▇▇██▇▅▅▅▄▄▇▇▆▅▅▄▄▃[0m      [0m[1;34m22.2 W      [0m   avg 42.0 W   the machine's, not apportioned                          [0m
+ [0m[1mTime    [0m[32m██████████[0m[31m▞▞▞[0m[37m░░░░░░░░░░░[0m   [0m[37msleep 45.6%[0m   [0m[32mon cpu 40.0%[0m   [0m[31mlock 12.2%[0m   [0m[34mI/O 0.30%[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m           [0m
 [0m[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
-[0m[1m▶ suspect: [0m[1;37msleep (blocked: sleeping)  40.9%[0m                                                         [0m[2mEnter/click → detail[0m
+[0m[1m▶ suspect: [0m[1;37msleep (blocked: sleeping)  45.6%[0m                                                         [0m[2mEnter/click → detail[0m
                                                                                                                         [0m
 [0m[2mCPU in one hue: the machine's cores are not in the recording[0m                                                            [0m
 [0m[2mMemory in one hue: the machine's memory is not in the recording[0m                                                         [0m

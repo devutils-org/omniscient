@@ -1,40 +1,40 @@
-omn top │ fixture workload-lanes │ 2.24s                          view: snapshot │ collectors ≥11.5% │ target 69.5% cpu
+omn top │ fixture workload-lanes │ 2.24s                          view: snapshot │ collectors ≥9.70% │ target 73.8% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
-on cpu: 1.60k · hottest own PyNumber_Remainder 7.54% │ off cpu: 9.46s · hottest own libc+0xa08f2 99.9%
-┌ on cpu cpu.profile 1.60k 35 late ~low det degraded x4 ───┐┌ off cpu sched.offcpu 9.46s ~low det degraded x2 ─────────┐
-│width ∝ samples · heaviest left            68 frames deep ││width ∝ time off cpu · heaviest left       20 frames deep │
-│▏all 1.60k                                                ││▏all 9.46s                                                │
-│▏⋯libpython3.14+0x1e478b 86.0%                    ▏lib…▏o ││▏libc+0x12072c › libc+0x98042 66.3%   ▏+0x1b9172   ▏lib▏li│
-│▏⋯libpython3.14+0x1e478b 60.4%     ▏+0x1e478b     ▏li     ││▏+0x1e478b 28.2%▏+0x366bc3    ▏lib▏lib▏libc+0…▏lib…       │
-│▏PyN…▏lib▏do_▏_Py▏li▏_             ▏_▏P▏_         ▏_      ││▏+0xa08f2  ▏lib…▏+0xa08f2  ▏li                            │
-│         ▏_                                               ││                                                          │
+on cpu: 1.61k · hottest own __tls_get_addr 7.64% │ off cpu: 9.24s · hottest own libc+0xa08f2 99.9%
+┌ on cpu cpu.profile 1.61k 26 late ~low det degraded x4 ───┐┌ off cpu sched.offcpu 9.24s ~low det degraded x2 ─────────┐
+│width ∝ samples · heaviest left            71 frames deep ││width ∝ time off cpu · heaviest left       20 frames deep │
+│▏all 1.61k                                                ││▏all 9.24s                                                │
+│▏libc+0x12072c › ⋯4⋯ › libpython3.14+0x1e478b 88.1%▏lib…  ││▏libc+0x12072c › libc+0x98042 66.2%   ▏+0x1b9172   ▏lib▏li│
+│▏⋯libpython3.14+0x1e478b 59.9%     ▏+0x1e478b 28.1%▏li    ││▏+0x1e478b 28.8% ▏+0x366bc3    ▏lib▏li▏+0xa08f2▏lib       │
+│▏lib…▏PyN▏lib…▏_▏li▏_              ▏_▏P▏l ▏_       ▏_     ││▏+0xa08f2   ▏lib…▏+0xa08f2 ▏lib                           │
+│▏_Py                                                      ││                                                          │
 │                                                          ││heaviest on their own (where it ends, every path summed)  │
-│heaviest on their own (where it ends, every path summed)  ││ 99.9% ████████████ libc+0xa08f2                          │
-│ 7.54% ████████████ PyNumber_Remainder                    ││ 0.05% ▏            ioctl                                 │
-│ 7.10% ███████████  __tls_get_addr                        ││ 0.02% ▏            [no stack]                            │
-│ 5.61% █████████    osDevReadReg032                       ││ 0.00% ▏            mmap                                  │
-│ 4.42% ███████      _Py_Dealloc                           ││                                                          │
-│ 3.74% ██████       _raw_spin_unlock_irqrestore           ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
-│ 2.62% ████         libpython3.14+0x5bd00                 ││  is always the scheduler, and what it was waiting for is │
-│ 2.55% ████         libpython3.14+0x59653                 ││  the task state                                          │
-│ 2.31% ████         libpython3.14+0x19cf26                ││‼ 14 blocks had no user stack to walk: a kernel thread has│
+│                                                          ││ 99.9% ████████████ libc+0xa08f2                          │
+│heaviest on their own (where it ends, every path summed)  ││ 0.05% ▏            ioctl                                 │
+│ 7.64% ████████████ __tls_get_addr                        ││ 0.00% ▏            mmap                                  │
+│ 6.46% ██████████   PyNumber_Remainder                    ││ 0.00% ▏            [no stack]                            │
+│ 5.65% █████████    osDevReadReg032                       ││                                                          │
+│ 5.47% █████████    _Py_Dealloc                           ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
+│ 3.91% ██████       _raw_spin_unlock_irqrestore           ││  is always the scheduler, and what it was waiting for is │
+│ 2.92% █████        libpython3.14+0x5bd00                 ││  the task state                                          │
+│ 2.42% ████         libpython3.14+0x59653                 ││‼ 17 blocks had no user stack to walk: a kernel thread has│
 │                                                          ││  none, and a task built without frame pointers may have  │
 │‼ pmu:sw: time-based sampling: blind to phases running at ││  none the kernel can follow                              │
 │  reduced frequency                                       ││‼ names came from -- libomn_cupti.so: its own symbol      │
-│‼ 158 frames fell in no mapping of the target and are     ││  table; libcupti.so.2026.3.1: its dynamic symbols only:  │
+│‼ 131 frames fell in no mapping of the target and are     ││  table; libcupti.so.2026.3.1: its dynamic symbols only:  │
 │  reported by address                                     ││  its internal functions are unnamed; python3.14: its     │
 │‼ 11 tasks the target started were found on a tick after  ││  dynamic symbols only: its internal functions are        │
-│  they began, and had used 71.23 ms of cpu by then, by the││  unnamed; libc.so.6: its dynamic symbols only: its       │
+│  they began, and had used 33.99 ms of cpu by then, by the││  unnamed; libc.so.6: its dynamic symbols only: its       │
 │  kernel's own account: that time is in no sample here. A ││  internal functions are unnamed; libcuda.so.615.71.09:   │
 │  task that started and ended between two ticks is in none││  its dynamic symbols only: its internal functions are    │
 │  at all                                                  ││  unnamed; libffi.so.8.5.0: its dynamic symbols only: its │
 │‼ stacks unwound by `fp`: the caller of a function that   ││  internal functions are unnamed; libpython3.14.so.1.0:   │
 │  sets up no frame pointer is lost -- every frameless     ││  its dynamic symbols only: its internal functions are    │
-│  leaf, and whole stacks of a target built without them   ││  unnamed; _ctypes.cpython-314-x86_64-linux-gnu.so: its   │
-│‼ 1 more on the last line; ! lists every caveat whole     ││  dynamic symbols only: its internal functions are unnamed│
+│  leaf, and whole stacks of a target built without them   ││  unnamed                                                 │
+│‼ 1 more on the last line; ! lists every caveat whole     ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
 on cpu ▸ all
-1.60k samples ≈ 1.61s · 100% of all · own 0 · 1.60k events
+1.61k samples ≈ 1.61s · 100% of all · own 0 · 1.61k events
 cpu.profile: names came from -- libomn_cupti.so: its own symbol table; libcupti.so.2026.3.1: its dynamic symbols only: …
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

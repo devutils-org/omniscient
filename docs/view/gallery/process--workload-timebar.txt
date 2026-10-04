@@ -1,16 +1,16 @@
-omn top │ fixture workload-timebar │ 3.28s                        view: snapshot │ collectors ≥14.7% │ target 35.9% cpu
+omn top │ fixture workload-timebar │ 2.69s                        view: snapshot │ collectors ≥11.2% │ target 42.9% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
- timebar-main  pid 1525319 · 4 threads · 3.70s · omn costs ≥14.7% cpu
+ timebar-main  pid 2620821 · 4 threads · 2.68s · omn costs ≥11.2% cpu
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- CPU     ▄▄▅▅▆▇▆▃▂▁▁▂▃▇██▆▅▁▁▁▁     0.0436 cores   avg 0.359   peak 0.911  ~low det
- Memory  ▆███████████████████       14.3MiB        +1.08MiB/s   peak 14.3MiB
+ CPU     ▇███▇▅▄▁▁▁▁▂▃▅████▃▃▂▁▁▁   0.0125 cores   avg 0.473   peak 1.01  ~low det
+ Memory  ███████████████████████    14.3MiB        +179KiB/s   peak 14.3MiB
  Disk                               no block request of the process
  Network                            no socket bytes   0 retrans (machine)
  GPU                                no kernel launched   VRAM 0B
- Energy  ▇▇▇▇█████████████████▂     31.2 W         avg 123 W   the machine's, not apportioned
- Time    █▚▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞░░░░   lock 77.1%   sleep 18.1%   run queue 2.49%   on cpu 2.13%  ~low det degraded x3 2 la
+ Energy  ██▇▇▇█▇▅▅▅▅▅▆▆▇▇▇▇▇▇▅▅▅▅   35.9 W         avg 48.7 W   the machine's, not apportioned
+ Time    ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞░░░░░░   lock 75.9%   sleep 22.3%   on cpu 1.27%   run queue 0.00%  ~low det degraded x2
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-▶ suspect: lock (blocked: sleeping, on a futex)  77.1%                                              Enter/click → detail
+▶ suspect: lock (blocked: sleeping, on a futex)  75.9%                                              Enter/click → detail
 
 CPU in one hue: the machine's cores are not in the recording
 Memory in one hue: the machine's memory is not in the recording

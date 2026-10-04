@@ -1,40 +1,40 @@
-[0m[1momn top[0m │ fixture workload-wake │ 280ms                           [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥41.7%[0m[35m │ target 61.9% cpu[0m [0m
+[0m[1momn top[0m │ fixture workload-wake │ 264ms                           [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥34.7%[0m[35m │ target 54.8% cpu[0m [0m
 [0m[1;7m 1 system [0m 2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ [0m[1msystem --[0m [0m[2mthe overview: cpu, memory, disk, network, GPU and power, and the processes [0m────────────────────────────────┐[0m
 ├ [0m[1mcpu[0m [0m[2mbusy, as a share of the whole machine [0m───────────────────────────────────────────────────────────────── [0m[36m~low det[0m ┤[0m
-│[0m[2m   50.0% ┤[0m[4;38;5;178m                                                                   [0m[4;38;5;34m    [0m [0m[2mlast [0m[1;4;38;5;178m38.7%[0m                          │[0m
-│[0m[2m         │[0m[4;38;5;178m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ [0m[4;38;5;34m    [0m [0m[2mmean [0m[4;38;5;178m39.1%[0m                          │[0m
-│[0m[2m         │[0m[4;38;5;178m███████████████████████████████████████████████████████████████████[0m[4;38;5;34m    [0m [0m[2mpeak [0m[4;38;5;178m39.5%[0m                          │[0m
-│[0m[2m         │[0m[4;38;5;178m███████████████████████████████████████████████████████████████████[0m[4;38;5;34m    [0m [0m[4;38;5;67m8.71[0m[2m cpus busy, on average[0m          │[0m
-│[0m[2m         │[0m[4;38;5;178m███████████████████████████████████████████████████████████████████[0m[4;38;5;34m    [0m [0m[2mby state: in the events only[0m        │[0m
-│[0m[2m         │[0m[4;38;5;178m███████████████████████████████████████████████████████████████████[0m[4;38;5;34m    [0m                                     │[0m
-│[0m[2m         │[0m[4;38;5;178m███████████████████████████████████████████████████████████████████[0m[4;38;5;34m    [0m                                     │[0m
-│[0m[2m         │[0m[4;38;5;178m███████████████████████████████████████████████████████████████████[0m[4;38;5;34m    [0m                                     │[0m
-│[0m[2m       0 ┤[0m[4;38;5;178m███████████████████████████████████████████████████████████████████[0m[4;38;5;34m    [0m                                     │[0m
+│[0m[2m   10.0% ┤[0m[4;38;5;34m                                                                       [0m [0m[2mlast [0m[1;4;38;5;34m6.45%[0m                          │[0m
+│[0m[2m         │[0m[4;38;5;34m                                                                       [0m [0m[2mmean [0m[4;38;5;34m5.33%[0m                          │[0m
+│[0m[2m         │[0m[4;38;5;34m                                                                       [0m [0m[2mpeak [0m[4;38;5;34m6.45%[0m                          │[0m
+│[0m[2m         │[0m[4;38;5;34m                                                                   ▆   [0m [0m[4;38;5;67m0.93[0m[2m cpus busy, on average[0m          │[0m
+│[0m[2m         │[0m[4;38;5;34m                                                                   █   [0m [0m[2mby state: in the events only[0m        │[0m
+│[0m[2m         │[0m[4;38;5;34m▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆█   [0m                                     │[0m
+│[0m[2m         │[0m[4;38;5;34m████████████████████████████████████████████████████████████████████   [0m                                     │[0m
+│[0m[2m         │[0m[4;38;5;34m████████████████████████████████████████████████████████████████████   [0m                                     │[0m
+│[0m[2m       0 ┤[0m[4;38;5;34m████████████████████████████████████████████████████████████████████   [0m                                     │[0m
 ├ [0m[1mgpu[0m [0m[2mthe device, as its driver says [0m───────────────────────────────────────────────────── [0m[36m±1.00s[0m [0m[36m~low det[0m [0m[33mdegraded x3[0m ┤[0m
 │busy      [0m[4;38;5;34m████████████████████████████████████████████████████████████████████   [0m [0m[1;4;38;5;34m2.00%[0m[2m mean  [0m[4;38;5;34m2.00%[0m[2m peak[0m              │[0m
 │[0m[2m ≤2.00%   [0m[4;38;5;34m████████████████████████████████████████████████████████████████████   [0m                                     │[0m
 │[0m[2mwhen      [0m[36m├─────────────────────────────────────────────────────────────────────┤[0m [0m[36m±1.00s: the driver's sampling window[0m│[0m
-│memory    [0m[2mheld the whole run, unmoved (the device's size: in its events)[0m          [0m[1;38;5;67m734MiB[0m[2m held[0m                         │[0m
+│memory    [0m[2mheld the whole run, unmoved (the device's size: in its events)[0m          [0m[1;38;5;67m675MiB[0m[2m held[0m                         │[0m
 ├ [0m[1mmemory[0m [0m[2mtime the machine stalled waiting for it [0m──────────────────────────────────────────────────────────── [0m[36m~low det[0m ┤[0m
-│stalled   [0m[4;38;5;34m                                                                  ·    [0m [0m[4;38;5;34mnever stalled[0m                       │[0m
-│target    [0m[38;5;67m        █                                                              [0m [0m[1;38;5;67m13.6MiB[0m[2m held, peak [0m[38;5;67m13.6MiB[0m          │[0m
+│stalled   [0m[4;38;5;34m                                                                   ·   [0m [0m[4;38;5;34mnever stalled[0m                       │[0m
+│target    [0m[38;5;67m       █                                                               [0m [0m[1;38;5;67m13.5MiB[0m[2m held, peak [0m[38;5;67m13.5MiB[0m          │[0m
 ├ [0m[1mpower[0m [0m[2mwatts, from the RAPL counters, no capacity so one hue; per domain by name: in the events only [0m─────────────────┤[0m
-│all       [0m[38;5;67m                                                                       [0m [0m[1;38;5;67m102W[0m[2m mean  [0m[38;5;67m0.00W[0m[2m peak  [0m[38;5;67m28J[0m          │[0m
-├ [0m[1mdisk[0m [0m[2mbytes moved, per device, speed unknown so one hue; read apart from written: in the events o…[0m─ [0m[36m~low det[0m [0m[33mdegraded[0m ┤[0m
+│all       [0m[38;5;67m                                                                       [0m [0m[1;38;5;67m55.8W[0m[2m mean  [0m[38;5;67m0.00W[0m[2m peak  [0m[38;5;67m15J[0m         │[0m
+├ [0m[1mdisk[0m [0m[2mbytes moved, per device; speed unknown, so one hue [0m────────────────────────────────────────── [0m[36m~low det[0m [0m[33mdegraded[0m ┤[0m
 │          [0m[2m+3 moved nothing: 253:0 259:0 7:0[0m                                                                           │[0m
-├ [0m[1mnetwork[0m [0m[2mbytes moved, per interface, speed unknown so one hue; in apart from out: in the events o…[0m─ [0m[36m~low det[0m [0m[33mdegraded[0m ┤[0m
-│wlan0     [0m[4;38;5;67m                                                                       [0m [0m[1;4;38;5;67m1.42KiB[0m[2m  peak [0m[4;38;5;67m0B/s[0m                  │[0m
-│          [0m[2m+6 moved nothing: br-bf6c2e1afced br-cb843b6eb1dd docker0 enp38s0 lo tailscale0[0m                             │[0m
-│          [0m[2m└0s──────────────────────────────140ms───────────────────────────280ms┘ a cell is 3.94ms, drawn at its peak[0m │[0m
+├ [0m[1mnetwork[0m [0m[2mbytes moved, per interface; speed unknown, so one hue [0m──────────────────────────────────── [0m[36m~low det[0m [0m[33mdegraded[0m ┤[0m
+│          [0m[2m+7 moved nothing: br-bf6c2e1afced br-cb843b6eb1dd docker0 enp38s0 lo tailscale0 wlan0[0m                       │[0m
+│          [0m[2m└0s──────────────────────────────132ms───────────────────────────264ms┘ a cell is 3.72ms, drawn at its peak[0m │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 ┌[0m[1m processes [0m[2mthe target's, by cpu [0m────────────────────────────────────────────────────┐[0m[35m┌ cost, share of one cpu ────────┐[0m
-│[0m[1m       ID [0m[1;4m   CPU [0m[1mcpu over the run [0m[1;4m ON CPU [0m[1m     RSS FAULTS RUN QUEUE I/O CALLS [0m      │[0m[35m│[0mcpu.oncpu_time   [0m[35m███████[0m[2;35m ≥3.24%[0m [0m[35m│[0m
-│  1527174 [0m[2m 35.4%                 [0m [0m[2m 99.1ms [0m       ·  1.95k [0m[2m    626µs         · [0m      │[0m[35m│[0mgpu.engine_busy  [0m[35m███      1.42%[0m [0m[35m│[0m
-│  1527173 [0m[2m 34.4%                 [0m [0m[2m 96.3ms [0m       ·  1.95k [0m[2m    307µs         · [0m      │[0m[35m│[0mio.bytes         [0m[35m▏        0.10%[0m [0m[35m│[0m
-│  1527172 [0m[2m 33.8%                 [0m [0m[2m 94.7ms [0m       ·  1.95k [0m[2m    468µs         · [0m      │[0m[35m│[0mcpu.util         [0m[35m▏        0.08%[0m [0m[35m│[0m
-│ t1527161 [0m[2m 12.4% ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m [0m[2m 34.8ms [0m       ·  1.95k [0m[2m   55.4µs       170 [0m      │[0m[35m│[0mnet.bytes        [0m[35m▏        0.06%[0m [0m[35m│[0m
-│  1527161 [0m[2m     · [0m                 [0m[2m      · [0m 13.6MiB      · [0m[2m        ·         · [0m      │[0m[35m│[0m[2m+3 more                 [0m[2;35m ≥0.08%[0m [0m[35m│[0m
-│[0m[2mCPU [0m[36m~low det[0m  [0m[2mFAULTS [0m[33m5 late[0m  [0m[2mRUN QUEUE [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2mI/O CALLS [0m[36m~low det[0m [0m[33mdegrade[0m│[0m[35m│[0m[1mall of them             [0m[1;35m ≥4.97%[0m [0m[35m│[0m
+│[0m[1m       ID [0m[1;4m   CPU [0m[1mcpu over the run [0m[1;4m ON CPU [0m[1m     RSS FAULTS RUN QUEUE I/O CALLS [0m      │[0m[35m│[0mcpu.oncpu_time   [0m[35m███████[0m[2;35m ≥2.88%[0m [0m[35m│[0m
+│  2621139 [0m[2m 35.1%                 [0m [0m[2m 92.8ms [0m       ·  1.95k [0m[2m    119µs         · [0m      │[0m[35m│[0mgpu.engine_busy  [0m[35m████     1.62%[0m [0m[35m│[0m
+│  2621138 [0m[2m 34.9%                 [0m [0m[2m 92.1ms [0m       ·  1.95k [0m[2m   35.4µs         · [0m      │[0m[35m│[0mcpu.util         [0m[35m▏        0.09%[0m [0m[35m│[0m
+│  2621137 [0m[2m 34.6%                 [0m [0m[2m 91.3ms [0m       ·  1.95k [0m[2m    131µs         · [0m      │[0m[35m│[0mnet.bytes        [0m[35m▏        0.06%[0m [0m[35m│[0m
+│ t2621136 [0m[2m 11.5% ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m [0m[2m 30.5ms [0m       ·  1.95k [0m[2m   66.3µs       170 [0m      │[0m[35m│[0mgpu.mem          [0m[35m▏        0.04%[0m [0m[35m│[0m
+│  2621136 [0m[2m     · [0m                 [0m[2m      · [0m 13.5MiB      · [0m[2m        ·         · [0m      │[0m[35m│[0mio.bytes         [0m[35m▏        0.04%[0m [0m[35m│[0m
+│                                                                                    │[0m[35m│[0m[2m+2 more                 [0m[2;35m ≥0.02%[0m [0m[35m│[0m
+│[0m[2mCPU [0m[36m~low det[0m  [0m[2mFAULTS [0m[33m6 late[0m  [0m[2mRUN QUEUE [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2mI/O CALLS [0m[36m~low det[0m [0m[33mdegrade[0m│[0m[35m│[0m[1mall of them             [0m[1;35m ≥4.74%[0m [0m[35m│[0m
 └────────────────────────────────────────────────────────────────────────────────────┘[0m[35m└────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m process  [0m[1menter[0m its ledger  [0m[1ms[0m sort  [0m[1mi[0m idle devices            [0m

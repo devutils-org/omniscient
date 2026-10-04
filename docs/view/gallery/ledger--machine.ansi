@@ -1,13 +1,13 @@
-[0m[1momn top[0m │ fixture machine │ 20.0s                                                [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥3.13%[0m[35m cpu[0m [0m
+[0m[1momn top[0m │ fixture machine │ 20.0s                                                [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥2.90%[0m[35m cpu[0m [0m
  1 system  2 flame [0m[1;7m 3 ledger [0m 4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ ledger -- [0m[1mwhat the machine cost over 20.0s of wall-clock[0m ────────────────────────────────────────────────────────────┐[0m
 │[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
-│[0m[1;32m▸ cpu time        [0m[2m2m31s on cpu[0m     [0m[2m756% of one cpu[0m           [0m[2;32m▄▄▄█▆▅▅▅▄▃▃▃▂▂▂▂▂▃▃▃▃▃▃▃[0m [0m[35m    ≥424ms[0m  [0m[36m~low det[0m            │[0m
-│    task 1501295    [0m[2m    18.7s  █            12.3%[0m                                                                     │[0m
-│    task 1496381    [0m[2m    10.2s  █            6.77%[0m                                                                     │[0m
-│    task 1496399    [0m[2m    9.74s  █            6.44%[0m                                                                     │[0m
-│    task 1501528    [0m[2m    9.05s  █            5.99%[0m                                                                     │[0m
-│[0m[2;3m    and 3117 more tasks: 1m44s[0m                                                                                        │[0m
+│[0m[1;32m▸ cpu time        [0m[2m2.75s on cpu[0m     [0m[2m13.7% of one cpu[0m          [0m[2;32m█▃▃▃▃▃▃▂▂▂▂▃▂▂▂▂▂▂▂▂▃▄▂▂[0m [0m[35m    ≥323ms[0m  [0m[36m~low det[0m            │[0m
+│    task 2619032    [0m[2m    591ms  ███          21.5%[0m                                                                     │[0m
+│    task 3085       [0m[2m    171ms  █            6.23%[0m                                                                     │[0m
+│    task 2412       [0m[2m    110ms  ▏            3.99%[0m                                                                     │[0m
+│    task 1980       [0m[2m   94.8ms  ▏            3.45%[0m                                                                     │[0m
+│[0m[2;3m    and 979 more tasks: 1.78s[0m                                                                                         │[0m
 │[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
 │  [0m[1mblocked time    [0m[2;3mnot in this run: sched.offcpu was not asked for[0m                                                     │[0m
 │  [0m[1mmemory held     [0m[2;3mnot in this run: mem.rss was not asked for[0m                                                          │[0m
@@ -15,16 +15,16 @@
 │  [0m[1mI/O syscalls    [0m[2;3mnot in this run: io.syscall was not asked for[0m                                                       │[0m
 │  [0m[1mnetwork         [0m[2;3mnot in this run: net.socket was not asked for[0m                                                       │[0m
 │  [0m[1mretransmits     [0m[2;3mnot in this run: net.tcp.retransmit@system was not asked for[0m                                        │[0m
-│  [0m[1mGPU memory      [0m734MiB peak      [0m[2mof 734MiB on the device[0m   [0m[32m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m [0m[35m    4.98ms[0m                      │[0m
+│  [0m[1mGPU memory      [0m654MiB peak      [0m[2mof 654MiB on the device[0m   [0m[32m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m [0m[35m    7.05ms[0m                      │[0m
 │  [0m[1mGPU time        [0m[2;3mnot in this run: gpu.kernel was not asked for[0m                                                       │[0m
-│  [0m[1menergy          [0m2.01kJ machine   101W on average           [0m[32m▅▆██▇▇▇▇▇▆▆▆▅▅▅▅▅▆▆▆▆▆▆▆[0m [0m[35m    ≥635µs[0m                      │[0m
+│  [0m[1menergy          [0m431J machine     21.5W on average          [0m[32m█▄▄▄▄▄▇▄▄▄▅▅▇▄▄▄▄▄▇▄█▇▆▆[0m [0m[35m    ≥754µs[0m                      │[0m
 │                                                                                                                      │[0m
-│[0m[1m  to know all of this[0m[35m: ≥429ms of omn's cpu[0m                                                                            │[0m
+│[0m[1m  to know all of this[0m[35m: ≥331ms of omn's cpu[0m                                                                            │[0m
 │[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
 │[0m[2;32m cpu time -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────────[0m│[0m
 │[0m[1mcpu.oncpu_time via bpf:raw_tp[0m -- cpu time, per thread                                                                 │[0m
 │· the source is not reproducible between two runs of the same workload                                                │[0m
-│[0m[35m· to know it: 424ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this run:[0m│[0m
+│[0m[35m· to know it: 323ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this run:[0m│[0m
 │[0m[35m`kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl[0m            │[0m
 │[0m[35mkernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable[0m                 │[0m
 │                                                                                                                      │[0m

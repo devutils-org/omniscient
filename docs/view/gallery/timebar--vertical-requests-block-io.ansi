@@ -1,24 +1,24 @@
-[0m[1momn top[0m │ fixture vertical-requests │ 409ms                       [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥1.19%[0m[35m │ target 4.31% cpu[0m [0m
+[0m[1momn top[0m │ fixture vertical-requests │ 413ms                       [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥0.73%[0m[35m │ target 4.00% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request [0m[1;7m 5 timebar [0m 6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐[0m
 │ [0m[1;32mblock-io[0m[2m  one bar per request, whole: `net.request` disk_ns  (2 of 2: d for the next)[0m                                │[0m
 │                                                                                                                      │[0m
-│ [0m[1m▶ first suspect  req:a002: [0m[1;34mdevice 8.28ms (98.2% of its whole)[0m                                                        │[0m
+│ [0m[1m▶ first suspect  req:a002: [0m[1;34mdevice 8.56ms (94.4% of its whole)[0m                                                        │[0m
 │   blocked on a device, usually a disk: I/O-bound                                                                     │[0m
 │   dev nvme0n1p6, on 64 of its 64 event(s)                                                                            │[0m
 │ [0m[2m  decisive: ahead of the next state (0ns) and of what no row read (0ns) -- omn latency's rule, on the run's decompo…[0m │[0m
 │                                                                                                                      │[0m
-│ [0m[1;32m▸ req:a002            [0m[2m├[0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[1;2;7;34m I/O 98.2% [0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[2m ┤   8.43ms [0m[1;34m ▶ I/O 98.2%       [0m  │[0m
-│   req:a003            [0m[2m├[0m[2;34m▓[0m[1;2;7;34m I/O 97.1% [0m[2;34m▓[0m[2m ┤[0m                                                [0m[2m   1.86ms [0m[1;34m ▶ I/O 97.1%       [0m  │[0m
+│ [0m[1;32m▸ req:a002            [0m[2m├[0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[1;2;7;34m I/O 94.4% [0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[2m   ┤   9.07ms [0m[1;34m ▶ I/O 94.4%       [0m  │[0m
+│   req:a003            [0m[2m├[0m[2;34m▓[0m[1;2;7;34m I/O 82.1% [0m[2;34m▓▓[0m[2m   ┤[0m                                             [0m[2m   2.55ms [0m[1;34m ▶ I/O 82.1%       [0m  │[0m
 │   req:a001            [0m[2m├┤[0m                                                              [0m[2m      0ns  ≈ no single state [0m  │[0m
-│ [0m[2m                     0 ──────────────────────────┼ 4.22ms ───────────────────────────┤ 8.43ms                       [0m │[0m
+│ [0m[2m                     0 ──────────────────────────┼ 4.53ms ───────────────────────────┤ 9.07ms                       [0m │[0m
 │                        [0m[34m▓[0m I/O                                                                                         │[0m
 │                                                                                                                      │[0m
 │ [0m[1m  state                            source          amount          share   ±         reads  trust                   [0m │[0m
-│ [0m[2m  whole: `net.request` disk_ns                     8.43ms          100%    exact                                    [0m │[0m
-│ [0m[34m▓ [0m[2mdevice                           io.latency      8.28ms          98.2%   exact     64     [0m[36m~low det[0m [0m[33mdegraded x3[0m     │[0m
+│ [0m[2m  whole: `net.request` disk_ns                     9.07ms          100%    exact                                    [0m │[0m
+│ [0m[34m▓ [0m[2mdevice                           io.latency      8.56ms          94.4%   exact     64     [0m[36m~low det[0m [0m[33mdegraded x3[0m     │[0m
 │ [0m[2m    ↳ dev nvme0n1p6, on 64 of its 64 event(s)                                                                       [0m │[0m
-│ [0m[2m  residue: the whole less the rows                 149µs           1.77%   exact     time no row accounts for       [0m │[0m
+│ [0m[2m  residue: the whole less the rows                 504µs           5.55%   exact     time no row accounts for       [0m │[0m
 │                                                                                                                      │[0m
 │ [0m[2mTrust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it[0m  │[0m
 │ [0m[2m  gives up (3).[0m                                                                                                      │[0m

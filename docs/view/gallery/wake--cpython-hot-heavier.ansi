@@ -1,18 +1,18 @@
-[0m[1momn top[0m │ fixture cpython-hot-heavier │ 8.49s                     [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥7.69%[0m[35m │ target 94.5% cpu[0m [0m
+[0m[1momn top[0m │ fixture cpython-hot-heavier │ 7.93s                     [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥8.12%[0m[35m │ target 95.9% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes [0m[1;7m 8 wake [0m 9 flows  0 process                      [0m
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐[0m
-│[0m[33m89 late[0m [0m[36m~low det[0m  [0m[2m4 wakeups of 4 threads -- from a task 100%, in 8.49s[0m                                                │[0m
+│[0m[33m89 late[0m [0m[36m~low det[0m  [0m[2m4 wakeups of 4 threads -- from a task 100%, in 7.93s[0m                                                │[0m
 │                                                                                                                      │[0m
 │[0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m                                        │[0m
-│[0m[1;7mpython3 1492174  [0m[2m     1  1491255  100%[0m  [0m[2mtailscaled 1059       1  python3  100%[0m                                        │[0m
-│[0m[2mmigration/19 136      1  python3  100%[0m  [0m[2mtailscaled 1060       1  python3  100%[0m                                        │[0m
+│[0m[1;7mpython3 2627262  [0m[2m     1  2627257  100%[0m  [0m[2mtailscaled 966        1  python3  100%[0m                                        │[0m
+│[0m[2mmigration/12 92       1  python3  100%[0m  [0m[2mtailscaled 983        1  python3  100%[0m                                        │[0m
 │[0m[2;3m3 dimmed: outside the target, woken by it[0m                                                                             │[0m
 │                                                                                                                      │[0m
-│[0m[1;32mpython3 1492174[0m[2m was woken 1 time, 0.12/s[0m                                                                              │[0m
+│[0m[1;32mpython3 2627262[0m[2m was woken 1 time, 0.13/s[0m                                                                              │[0m
 │[0m[2;4m<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         [0m│[0m
-│[0m[2m└─ [0mtid 1491255[0m[2m  outside the target: stops[0m            [0m[2m     1  100%       --       --       --[0m  [0m[2;32m█                       [0m│[0m
+│[0m[2m└─ [0mtid 2627257[0m[2m  outside the target: stops[0m            [0m[2m     1  100%       --       --       --[0m  [0m[2;32m█                       [0m│[0m
 │                                                                                                                      │[0m
-│[0m[1m-> it woke in turn: [0mmigration/19 136[0m[2m x1[0m, tailscaled 1059[0m[2m x1[0m, tailscaled 1060[0m[2m x1[0m                                       │[0m
+│[0m[1m-> it woke in turn: [0mmigration/12 92[0m[2m x1[0m, tailscaled 966[0m[2m x1[0m, tailscaled 983[0m[2m x1[0m                                          │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

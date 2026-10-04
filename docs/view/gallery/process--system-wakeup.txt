@@ -1,6 +1,6 @@
-omn top │ fixture system-wakeup │ 1.00s                                          view: snapshot │ collectors ≥2.08% cpu
+omn top │ fixture system-wakeup │ 1.00s                                          view: snapshot │ collectors ≥0.99% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
- no target: this run measured the machine  1.00s · every task's, not one process's · omn costs ≥2.08% cpu
+ no target: this run measured the machine  1.00s · every task's, not one process's · omn costs ≥0.99% cpu
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  CPU                                not asked: needs cpu.oncpu_time
  Memory                             not asked: needs mem.rss

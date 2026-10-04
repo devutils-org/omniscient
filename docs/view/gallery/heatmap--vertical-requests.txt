@@ -1,40 +1,40 @@
-omn top │ fixture vertical-requests │ 409ms                       view: snapshot │ collectors ≥1.19% │ target 4.31% cpu
+omn top │ fixture vertical-requests │ 413ms                       view: snapshot │ collectors ≥0.73% │ target 4.00% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ heatmap -- io.latency latency over time ─────────────────────────────────────────────────────────────────────────────┐
-│ io.latency 142   sched.runqlat not asked   net.socket not asked   gpu.kernel not asked                               │
-│142 block requests, 29.0µs to 4.69ms, p50 57.5µs, p99 4.63ms ~low det degraded x3                                     │
-│3 regimes  ~57.2µs 75% (107) in bursts every ~110ms, 19.7ms to 243ms  │  ~415µs 1.4% (2) 20.5ms to 20.9ms  │  ~4.56ms │
-│23% (33) 18.3ms to 167ms                                                                                              │
-│  count     ▇                                ▂█               ▂▄                                       the whole run  │
-│       │                                     │                                                                        │
-│       │                                     │                                                                        │
-│       │    █                                ▒                                                         ███          33│
-│       │                                     │                                                                        │
-│       │                                     │                                                                        │
-│       │                                     │                                                                        │
-│       │                                     │                                                                        │
-│    1ms┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·│  ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
-│       │    ▒                                │                                                         ▏             1│
-│       │                                     │                                                                        │
-│       │                                     │                                                                        │
-│       │    ▒                                │                                                         ▏             1│
-│       │                                     │                                                                        │
-│       │                                     │                                                                        │
-│       │                                     │                                                                        │
-│       │                                     │                                                                        │
-│  100µs┤·   ·   ·   ·   ·   ·   ·   ·   ·   ·│  ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
-│       │                                     │                                                                        │
-│       │                                     ▒█               ▒▓                                       █████████    95│
-│       │    ▓                                │                                                         █             7│
-│       │    ▒                                │                                                         ▏             5│
-│       │                                     │                                                                        │
-│       │                                     │                                                                        │
-│       └┬─────────────────────┬──────────────▲───────┬──────────────────────┬──────────────────────┬─                 │
-│        0                   100ms                  200ms                  300ms                  400ms                │
+│ io.latency 140   sched.runqlat not asked   net.socket not asked   gpu.kernel not asked                               │
+│140 block requests, 20.7µs to 4.76ms, p50 67.3µs, p99 4.73ms ~low det degraded x3                                     │
+│3 regimes  ~58.8µs 75% (105) in bursts every ~111ms, 18.3ms to 246ms  │  ~423µs 1.4% (2) 19.2ms to 19.6ms  │  ~4.63ms │
+│24% (33) in two bursts, 17.2ms to 166ms                                                                               │
+│  count    ▅▅                                ▅█               ▃▄                                       the whole run  │
+│       │    │                                                                                                         │
+│       │    │                                                                                                         │
+│       │   █▓                                ▒                                                         ██████       33│
+│       │    │                                                                                                         │
+│       │    │                                                                                                         │
+│       │    │                                                                                                         │
+│       │    │                                                                                                         │
+│    1ms┤·   │   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
+│       │    ▒                                                                                          ▏             1│
+│       │    │                                                                                                         │
+│       │    │                                                                                                         │
+│       │    ▒                                                                                          ▏             1│
+│       │    │                                                                                                         │
+│       │    │                                                                                                         │
+│       │    │                                                                                                         │
+│       │    │                                                                                                         │
+│  100µs┤·   │   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·   ·                 │
+│       │    │                                ▓▒               ▓▓                                       ████████     44│
+│       │    │                                ▓█               ▒▓                                       █████████    51│
+│       │    │                                                                                                         │
+│       │    ▒                                                                                          █             4│
+│       │    ▒                                                                                          █             5│
+│       │    ▒                                                                                          ▏             1│
+│       └┬───▲─────────────────┬──────────────────────┬─────────────────────┬──────────────────────┬──                 │
+│        0                   100ms                  200ms                 300ms                  400ms                 │
 │   lost nothing lost                                                                                                  │
 │                                                                                                                      │
-│▲ 163ms to 167ms   7 block requests   p50 55.3µs   p99 4.69ms   max 4.69ms                                            │
-│  its slowest 4.69ms: server tid 1499921 RA 16.0KiB on nvme0n1p6 request a002                                         │
-│per cell ▒1 ▒3 ▓7 ▓14 █29   rows 2.6/octave, columns 4.39ms each                                                      │
+│▲ 17.7ms to 22.2ms   21 block requests   p50 423µs   p99 4.76ms   max 4.76ms                                          │
+│  its slowest 4.76ms: server tid 2619020 WS 128KiB on nvme0n1p6                                                       │
+│per cell ▒1 ▒3 ▓6 ▓11 █20   rows 2.6/octave, columns 4.44ms each                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  s source  h/l cursor  +/- zoom  t narrow to slowest  ⏎ open it

@@ -1,33 +1,33 @@
-omn top │ fixture sqlite-latency │ 347ms                          view: snapshot │ collectors ≥4.48% │ target 8.15% cpu
+omn top │ fixture sqlite-latency │ 288ms                          view: snapshot │ collectors ≥3.93% │ target 8.74% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
-on cpu: 58 · hottest own __btrfs_check_leaf 12.1% │ off cpu: 243ms · hottest own fdatasync 100%
-┌ on cpu cpu.profile 58 3 late ~low det degraded x3 ───────┐┌ off cpu sched.offcpu 243ms ~low det degraded x2 ─────────┐
-│width ∝ samples · heaviest left            37 frames deep ││width ∝ time off cpu · heaviest left       15 frames deep │
-│▏all 58                                                   ││▏all › ⋯11⋯ › sqlite3+0x19a888 243ms                      │
-│▏sqlite3+0x5f75 › ⋯4⋯ › sqlite3+0x41514 98.3%             ││▏sqlite3+0x6eabb 75.9%                      ▏⋯fdatasync   │
-│▏sqlite3+0x2fbd3 › ⋯1⋯ › sqlite3+0x9aa57 96.6%            ││▏⋯fdatasync 50.5%            ▏⋯fdatasync                  │
-│▏sqlite3+0x99a16 91.4%                               ▏s   ││                                                          │
-│▏sqlite3+0x8ae0e › sqlite3+0x19a888 81.0%      ▏sql       ││heaviest on their own (where it ends, every path summed)  │
-│▏sqlite3+0x6eabb 58.6%            ▏fdatas…▏s▏_ ▏fi        ││  100% ████████████ fdatasync                             │
-│▏sqlite3+0x19a6a9 41.4% ▏fdata…▏bt▏btrfs…      ▏b         ││                                                          │
-│▏fdatasync 39.7%        ▏do_s… ▏b ▏__b▏b                  ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
-│▏btrfs_sync_file 37.9%  ▏btr…     ▏b                      ││  is always the scheduler, and what it was waiting for is │
-│▏btrfs_sync_log▏btr…    ▏bt                               ││  the task state                                          │
-│▏btrfs_wr…▏bt▏w▏cop     ▏_                                ││‼ 1 blocks ended without this run having seen the wakeup  │
-│▏write_m… ▏a   ▏b                                         ││  that released them, so their `wake_to_run_ns` is zero   │
-│▏__btrf…                                                  ││  because it is unknown rather than because there was no  │
-│▏b                                                        ││  wait: the task was woken before the programs attached,  │
-│                                                          ││  or by a path that does not raise `sched_wakeup`         │
-│heaviest on their own (where it ends, every path summed)  ││‼ names came from -- sqlite3: no names: it carries no     │
-│ 12.1% ████████████ __btrfs_check_leaf                    ││  function symbols; libc.so.6: its dynamic symbols only:  │
-│ 8.62% █████████    btrfs_get_32                          ││  its internal functions are unnamed                      │
-│ 5.17% █████        fdatasync                             ││                                                          │
+on cpu: 39 · hottest own __btrfs_check_leaf 17.9% │ off cpu: 251ms · hottest own fdatasync 100%
+┌ on cpu cpu.profile 39 3 late ~low det degraded x3 ───────┐┌ off cpu sched.offcpu 251ms ~low det degraded ────────────┐
+│width ∝ samples · heaviest left            35 frames deep ││width ∝ time off cpu · heaviest left       15 frames deep │
+│▏all 39                                                   ││▏all › ⋯11⋯ › sqlite3+0x19a888 251ms                      │
+│▏sqlite3+0x5f75 › __libc_start_main 97.4%                 ││▏sqlite3+0x6eabb 76.5%                      ▏⋯fdatasync   │
+│▏libc+0x27781 › ⋯2⋯ › sqlite3+0x41514 94.9%            ▏l ││▏⋯fdatasync 52.3%             ▏⋯fdatasync                 │
+│▏sqlite3+0x2fbd3 › ⋯1⋯ › sqlite3+0x9aa57 92.3%            ││                                                          │
+│▏sqlite3+0x99a16 82.1%                          ▏sql▏s    ││heaviest on their own (where it ends, every path summed)  │
+│▏⋯sqlite3+0x19a888 69.2%                ▏sqlite…▏sq       ││  100% ████████████ fdatasync                             │
+│▏sqlite3+0x6eabb 43.6%   ▏btrfs_sync_f… ▏file…▏_ ▏b       ││                                                          │
+│▏btrfs_sync_file▏__x64_… ▏write_meta…▏_ ▏__b…             ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
+│▏btrfs_sy…▏btr… ▏btrf…   ▏__btrfs…▏wr   ▏b ▏b             ││  is always the scheduler, and what it was waiting for is │
+│▏btrf…▏wr ▏dr▏b ▏btr…             ▏_                      ││  the task state                                          │
+│▏__ ▏b ▏_ ▏b    ▏wr▏m                                     ││‼ names came from -- sqlite3: no names: it carries no     │
+│                ▏x                                        ││  function symbols; libc.so.6: its dynamic symbols only:  │
+│                                                          ││  its internal functions are unnamed                      │
+│heaviest on their own (where it ends, every path summed)  ││                                                          │
+│ 17.9% ████████████ __btrfs_check_leaf                    ││                                                          │
+│ 5.13% ███          btrfs_set_32                          ││                                                          │
+│ 2.56% ██           __folio_start_writeback               ││                                                          │
+│ 2.56% ██           __fput                                ││                                                          │
+│ 2.56% ██           __kmalloc_noprof                      ││                                                          │
 │                                                          ││                                                          │
 │‼ pmu:sw: time-based sampling: blind to phases running at ││                                                          │
 │  reduced frequency                                       ││                                                          │
-│‼ 51 of 52 samples landed in a function that sets up no   ││                                                          │
-│  frame pointer (51 in libc.so.6), so the frames under the││                                                          │
+│‼ 34 of 35 samples landed in a function that sets up no   ││                                                          │
+│  frame pointer (34 in libc.so.6), so the frames under the││                                                          │
 │  leaf are not its callers: most of them are outside the  ││                                                          │
 │  target's own code, which is where the callers are lost; ││                                                          │
 │  `--stack fp+leaf` recovers the leaf's caller and        ││                                                          │
@@ -35,6 +35,6 @@ on cpu: 58 · hottest own __btrfs_check_leaf 12.1% │ off cpu: 243ms · hottest
 │‼ 2 more on the last line; ! lists every caveat whole     ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
 on cpu ▸ all
-58 samples ≈ 58.2ms · 100% of all · own 0 · 58 events
+39 samples ≈ 39.1ms · 100% of all · own 0 · 39 events
 cpu.profile (+1 more, ! lists them): stacks unwound by `fp`: the caller of a function that sets up no frame pointer is …
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

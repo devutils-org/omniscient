@@ -1,40 +1,40 @@
-omn top │ fixture http-server │ 3.24s                             view: snapshot │ collectors ≥24.3% │ target 90.6% cpu
+omn top │ fixture http-server │ 2.85s                             view: snapshot │ collectors ≥19.9% │ target 90.9% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
-on cpu: 3.21k · hottest own link_path_walk 5.57% │ off cpu: 6.27s · hottest own libc+0xa08f2 50.3%
-┌ on cpu cpu.profile 3.21k 54 late ~low det degraded x7 ───┐┌ off cpu sched.offcpu 6.27s ~low det degraded ────────────┐
-│width ∝ samples · heaviest left            80 frames deep ││width ∝ time off cpu · heaviest left       25 frames deep │
-│▏all 3.21k                                                ││▏all › ⋯4⋯ › Py_RunMain 6.25s                             │
-│▏libc+0x12072c › ⋯19⋯ › libpython3.14+0x1e478b 95.1%   ▏Py││▏⋯libc+0xa08f2 49.9%         ▏libpython3.14+0x1b9172 49.7%│
-│▏libpython3.14+0x67661 55.6%    ▏libp…▏l▏l                ││                             ▏⋯__recv 47.5%               │
-│▏⋯do_syscall_64 39.3%  ▏li▏li   ▏lib                      ││                                                          │
-│▏__do_sys_newfstat…▏k                                     ││heaviest on their own (where it ends, every path summed)  │
-│▏vfs_fstatat                                              ││ 50.3% ████████████ libc+0xa08f2                          │
-│▏vfs_statx    ▏_                                          ││ 49.7% ████████████ __recv                                │
-│▏path_loo…▏b                                              ││ 0.03% ▏            __poll                                │
-│▏link_…                                                   ││ 0.01% ▏            __read                                │
-│ ▏s                                                       ││ 0.00% ▏            libc+0x12071d                         │
-│                                                          ││ 0.00% ▏            getdents64                            │
-│heaviest on their own (where it ends, every path summed)  ││ 0.00% ▏            __open_nocancel                       │
-│ 5.57% ████████████ link_path_walk                        ││ 0.00% ▏            ld-linux-x86-64+0x1071a               │
-│ 3.92% ████████     __d_lookup_rcu                        ││ 0.00% ▏            libpython3.14+0x5c76c                 │
-│ 3.39% ███████      __tls_get_addr                        ││                                                          │
-│ 2.80% ██████       do_syscall_64                         ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
-│                                                          ││  is always the scheduler, and what it was waiting for is │
-│‼ pmu:sw: time-based sampling: blind to phases running at ││  the task state                                          │
-│  reduced frequency                                       ││‼ names came from -- python3.14: its dynamic symbols only:│
-│‼ 1566 of 1787 samples landed in a function that sets up  ││  its internal functions are unnamed;                     │
-│  no frame pointer (1413 in libc.so.6, 108 in             ││  ld-linux-x86-64.so.2: its dynamic symbols only: its     │
-│  ld-linux-x86-64.so.2, 45 in libpython3.14.so.1.0), so   ││  internal functions are unnamed; libc.so.6: its dynamic  │
-│  the frames under the leaf are not its callers: most of  ││  symbols only: its internal functions are unnamed;       │
-│  them are outside the target's own code, which is where  ││  libpython3.14.so.1.0: its dynamic symbols only: its     │
-│  the callers are lost; `--stack fp+leaf` recovers the    ││  internal functions are unnamed;                         │
-│  leaf's caller and `--stack dwarf` the whole chain       ││  _socket.cpython-314-x86_64-linux-gnu.so: its dynamic    │
-│‼ 22 frames fell in no mapping of the target and are      ││  symbols only: its internal functions are unnamed;       │
-│  reported by address                                     ││  select.cpython-314-x86_64-linux-gnu.so: its dynamic     │
-│‼ 5 more on the last line; ! lists every caveat whole     ││  symbols only: its internal functions are unnamed        │
+on cpu: 2.83k · hottest own link_path_walk 5.51% │ off cpu: 5.50s · hottest own libc+0xa08f2 50.1%
+┌ on cpu cpu.profile 2.83k 33 late ~low det degraded x7 ───┐┌ off cpu sched.offcpu 5.50s ~low det degraded ────────────┐
+│width ∝ samples · heaviest left            90 frames deep ││width ∝ time off cpu · heaviest left       25 frames deep │
+│▏all 2.83k                                                ││▏all › ⋯4⋯ › Py_RunMain 5.49s                             │
+│▏libc+0x12072c › ⋯19⋯ › libpython3.14+0x1e478b 95.6%   ▏Py││▏⋯libc+0xa08f2 50.0%         ▏libpython3.14+0x1b9172 49.8%│
+│▏libpython3.14+0x67661 56.7%     ▏lib…▏li▏l            ▏c ││                             ▏⋯__recv 47.6%               │
+│▏⋯do_syscall_64 38.9%  ▏li▏li    ▏lib                     ││                                                          │
+│▏__do_sys_newfstat…                                       ││heaviest on their own (where it ends, every path summed)  │
+│▏vfs_fstatat                                              ││ 50.1% ████████████ libc+0xa08f2                          │
+│▏vfs_statx    ▏_                                          ││ 49.8% ████████████ __recv                                │
+│▏path_loo…▏b                                              ││ 0.08% ▏            __poll                                │
+│▏link…▏_                                                  ││ 0.02% ▏            clock_nanosleep                       │
+│                                                          ││ 0.01% ▏            __read                                │
+│                                                          ││ 0.00% ▏            libc+0x12071d                         │
+│heaviest on their own (where it ends, every path summed)  ││                                                          │
+│ 5.51% ████████████ link_path_walk                        ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
+│ 4.24% █████████    __tls_get_addr                        ││  is always the scheduler, and what it was waiting for is │
+│ 3.88% ████████     __d_lookup_rcu                        ││  the task state                                          │
+│ 2.40% █████        do_syscall_64                         ││‼ names came from -- python3.14: its dynamic symbols only:│
+│                                                          ││  its internal functions are unnamed; libc.so.6: its      │
+│‼ pmu:sw: time-based sampling: blind to phases running at ││  dynamic symbols only: its internal functions are        │
+│  reduced frequency                                       ││  unnamed; libpython3.14.so.1.0: its dynamic symbols only:│
+│‼ 1402 of 1613 samples landed in a function that sets up  ││  its internal functions are unnamed;                     │
+│  no frame pointer (1245 in libc.so.6, 119 in             ││  _socket.cpython-314-x86_64-linux-gnu.so: its dynamic    │
+│  ld-linux-x86-64.so.2, 38 in libpython3.14.so.1.0), so   ││  symbols only: its internal functions are unnamed;       │
+│  the frames under the leaf are not its callers: most of  ││  select.cpython-314-x86_64-linux-gnu.so: its dynamic     │
+│  them are outside the target's own code, which is where  ││  symbols only: its internal functions are unnamed        │
+│  the callers are lost; `--stack fp+leaf` recovers the    ││                                                          │
+│  leaf's caller and `--stack dwarf` the whole chain       ││                                                          │
+│‼ 22 frames fell in no mapping of the target and are      ││                                                          │
+│  reported by address                                     ││                                                          │
+│‼ 6 more on the last line; ! lists every caveat whole     ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
 on cpu ▸ all
-3.21k samples ≈ 3.22s · 100% of all · own 0 · 3.21k events
-cpu.profile (+4 more, ! lists them): 25 of 32 samples landed in a function that sets up no frame pointer (20 in libc.so…
+2.83k samples ≈ 2.84s · 100% of all · own 0 · 2.83k events
+cpu.profile (+5 more, ! lists them): 23 of 32 samples landed in a function that sets up no frame pointer (22 in libc.so…
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

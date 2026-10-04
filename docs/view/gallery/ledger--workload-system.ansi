@@ -1,40 +1,40 @@
-[0m[1momn top[0m │ fixture workload-system │ 2.01s                         [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥14.2%[0m[35m │ target 90.5% cpu[0m [0m
+[0m[1momn top[0m │ fixture workload-system │ 2.00s                         [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥14.6%[0m[35m │ target 92.6% cpu[0m [0m
  1 system  2 flame [0m[1;7m 3 ledger [0m 4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
-┌ ledger -- [0m[1mwhat task 1529755 and 2 more cost over 2.01s of wall-clock[0m ────────────────────────────────────────────────┐[0m
+┌ ledger -- [0m[1mwhat task 2621722 and 2 more cost over 2.00s of wall-clock[0m ────────────────────────────────────────────────┐[0m
 │[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
-│[0m[1;32m▸ cpu time        [0m[2m2.08s on cpu[0m     [0m[2m103% of one cpu[0m           [0m[2;32m▃▃▃▃▅▅█████████▆▃▃▁▁▁▁▁▁[0m [0m[35m   ≥23.5ms[0m  [0m[36m~low det[0m            │[0m
-│    1529755 system… [0m[2m    1.05s  ██████       50.3%[0m                                                                     │[0m
-│    task 1529769    [0m[2m    1.03s  ██████       49.6%[0m                                                                     │[0m
-│    1529839 Thread… [0m[2m   1.61ms  ▏            0.08%[0m                                                                     │[0m
+│[0m[1;32m▸ cpu time        [0m[2m2.07s on cpu[0m     [0m[2m104% of one cpu[0m           [0m[2;32m▂▂▂▃▅▅█████████▆▄▄▁▁▁▁▁▁[0m [0m[35m   ≥23.6ms[0m  [0m[36m~low det[0m            │[0m
+│    2621722 system… [0m[2m    1.04s  ██████       50.3%[0m                                                                     │[0m
+│    task 2621723    [0m[2m    1.03s  ██████       49.6%[0m                                                                     │[0m
+│    2621802 Thread… [0m[2m   1.54ms  ▏            0.07%[0m                                                                     │[0m
 │[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
-│    own account     [0m[1m    2.08s[0m  [0m[2mwith its descendants, as the scheduler counts them[0m                                     │[0m
-│    machine busy        7.65s  ███          27.2%                                                                     │[0m
-│  [0m[1mblocked time    [0m[2m940ms[0m            [0m[2m0.47 threads[0m              [0m[2;32m     ▅           ▁     █[0m [0m[35m   ≥45.9ms[0m  [0m[36m~low det[0m [0m[33mdegraded[0m   │[0m
-│    1529755 system… [0m[2m    939ms  ████████████ 99.9%[0m                                                                     │[0m
-│    1529839 Thread… [0m[2m   1.28ms  ▏            0.14%[0m                                                                     │[0m
-│  [0m[1mmemory held     [0m14.7MiB peak     +820KiB from 13.9MiB      [0m[32m▁▁▁▁▁▂▂▂▂▂▂▂▂▂▂▂▂███████[0m [0m[35m     585µs[0m                      │[0m
-│  [0m[1mmemory faulted  [0m3.98k faults     1.98k/s                   [0m[2;3ma total only[0m             [0m[35m   ≥2.60ms[0m  [0m[33m23 late[0m             │[0m
-│    1529755 system…     2.02k  ██████       50.8%                                                                     │[0m
-│    task 1529769        1.94k  ██████       48.6%                                                                     │[0m
-│    1529839 Thread…        22  ▏            0.55%                                                                     │[0m
-│  [0m[1mI/O syscalls    [0m[2m437 calls[0m        [0m[2m4.06ms inside them[0m        [0m[2m256ns [0m[2;32m▂▂▂▁▁█▂▁▁[0m[2m 131µs[0m    [0m[35m   ≥48.0ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
-│[0m[2;3m    bytes read and written: on the raw rows only, which this run did not keep[0m                                         │[0m
-│  [0m[1mnetwork         [0m[2m16.0MiB moved[0m    [0m[2m8.00MiB out, 8.00MiB in[0m   [0m[2;32m                 █      [0m [0m[35m   ≥56.6ms[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m│[0m
-│    1529755 system… [0m[2m  8.00MiB  ██████       50.0%[0m                                                                     │[0m
-│    1529839 Thread… [0m[2m  8.00MiB  ██████       50.0%[0m                                                                     │[0m
-│[0m[2;3m    286 socket calls[0m                                                                                                  │[0m
-│  [0m[1mretransmits     [0m[2m11 sent again[0m    [0m[3mmachine-wide[0m              [0m[2;3ma total only[0m             [0m[35m    ≥213µs[0m  [0m[33m22 late[0m [0m[36m~low det[0m [0m[33mdeg[0m│[0m
-│  [0m[1mGPU memory      [0m0B peak          [0m[2mof 734MiB on the device[0m   [0m[32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m [0m[35m     962µs[0m                      │[0m
-│  [0m[1mGPU time        [0m0ns on GPU       0 kernels and copies      [0m[2;3mno series kept[0m           [0m[35m    ≥222µs[0m  [0m[33m22 late[0m [0m[33mdegraded[0m    │[0m
-│  [0m[1menergy          [0m158J machine     78.6W on average          [0m[32m▇▇▇▇████████▇▇▇▇▆▆▆▆▆▆  [0m [0m[35m   ≥36.0µs[0m                      │[0m
-│    ≈ the target's  [0m[3m    43.0J[0m  [0m[2;3man estimate, not a measurement: its share of the machine's busy cpu, 2.08s of 7.65s[0m    │[0m
+│    own account     [0m[1m    2.07s[0m  [0m[2mwith its descendants, as the scheduler counts them[0m                                     │[0m
+│    machine busy        2.76s  █████████    75.1%                                                                     │[0m
+│  [0m[1mblocked time    [0m[2m938ms[0m            [0m[2m0.47 threads[0m              [0m[2;32m     ▅           ▁     █[0m [0m[35m   ≥47.0ms[0m  [0m[36m~low det[0m [0m[33mdegraded[0m   │[0m
+│    2621722 system… [0m[2m    937ms  ████████████ 99.9%[0m                                                                     │[0m
+│    2621802 Thread… [0m[2m   1.14ms  ▏            0.12%[0m                                                                     │[0m
+│  [0m[1mmemory held     [0m14.7MiB peak     +1.52MiB from 13.1MiB     [0m[32m▁▁▁▄▄▅▅▅▅▅▅▅▅▅▅▅▅███████[0m [0m[35m     924µs[0m                      │[0m
+│  [0m[1mmemory faulted  [0m3.98k faults     1.99k/s                   [0m[2;3ma total only[0m             [0m[35m   ≥3.45ms[0m  [0m[33m23 late[0m             │[0m
+│    2621722 system…     2.02k  ██████       50.8%                                                                     │[0m
+│    task 2621723        1.93k  ██████       48.6%                                                                     │[0m
+│    2621802 Thread…        21  ▏            0.53%                                                                     │[0m
+│  [0m[1mI/O syscalls    [0m[2m437 calls[0m        [0m[2m3.63ms inside them[0m        [0m[2m256ns [0m[2;32m▃▁▂▁▁█▁▁▁[0m[2m 131µs[0m    [0m[35m   ≥50.0ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
+│    bytes           [0m[2m  1.70MiB[0m  [0m[2mread, 16.0MiB written[0m                                                                  │[0m
+│  [0m[1mnetwork         [0m[2m16.0MiB moved[0m    [0m[2m8.00MiB out, 8.00MiB in[0m   [0m[2;32m                 █      [0m [0m[35m   ≥42.3ms[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m│[0m
+│    2621722 system… [0m[2m  8.00MiB  ██████       50.0%[0m                                                                     │[0m
+│    2621802 Thread… [0m[2m  8.00MiB  ██████       50.0%[0m                                                                     │[0m
+│[0m[2;3m    258 socket calls[0m                                                                                                  │[0m
+│  [0m[1mretransmits     [0m[2m0 sent again[0m     [0m[3mmachine-wide[0m              [0m[2;3ma total only[0m             [0m[35m    ≥239µs[0m  [0m[33m10 late[0m [0m[36m~low det[0m    │[0m
+│  [0m[1mGPU memory      [0m0B peak          [0m[2mof 655MiB on the device[0m   [0m[32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m [0m[35m    1.24ms[0m                      │[0m
+│  [0m[1mGPU time        [0m0ns on GPU       0 kernels and copies      [0m[2;3mno series kept[0m           [0m[35m    ≥312µs[0m  [0m[33m12 late[0m [0m[33mdegraded[0m    │[0m
+│  [0m[1menergy          [0m102J machine     51.2W on average          [0m[32m▆▆▆▇█████▇▇▇▆▆▆▅▄▄▄▄▄▄  [0m [0m[35m   ≥45.7µs[0m                      │[0m
+│    ≈ the target's  [0m[3m    76.8J[0m  [0m[2;3man estimate, not a measurement: its share of the machine's busy cpu, 2.07s of 2.76s[0m    │[0m
 │                                                                                                                      │[0m
-│[0m[1m  to know all of this[0m[35m: ≥179ms of omn's cpu, ≥8.58% of what the target spent[0m                                           │[0m
+│[0m[1m  to know all of this[0m[35m: ≥169ms of omn's cpu, ≥8.16% of what the target spent[0m                                           │[0m
 │[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
 │[0m[2;32m cpu time -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────────[0m│[0m
 │[0m[1mcpu.oncpu_time via bpf:raw_tp[0m -- cpu time, per thread                                                                 │[0m
 │· the source is not reproducible between two runs of the same workload                                                │[0m
-│[0m[35m· to know it: 23.5ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this[0m    │[0m
+│[0m[35m· to know it: 23.6ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this[0m    │[0m
 │[0m[35mrun: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl[0m       │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m line  [0m[1mt[0m next task  [0m[1menter[0m the view behind the line            [0m

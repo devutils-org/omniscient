@@ -1,21 +1,21 @@
-omn top │ fixture sqlite-commits │ 6.84s                          view: snapshot │ collectors ≥8.41% │ target 79.5% cpu
+omn top │ fixture sqlite-commits │ 5.11s                          view: snapshot │ collectors ≥9.53% │ target 86.5% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐
-│sched.switches 1.75k 109 late ~low det degraded  sched.wakeup 1.17k 109 late ~low det degraded  sched.offcpu 507 ~low │
-│det degraded  gpu.kernel 0 60 late degraded                                                                           │
-│82.4ms a cell          ╷0ns        ╷1.00s      ╷2.00s      ╷3.00s      ╷4.00s      ╷5.00s      ╷6.00s      of the span│
-│sqlite3        1494341│▇████████████████████████████████████████████████████████████████████████████████▇▆│awake 94.8%│
-│              off cpu │▂▁ ▁▁ ▁▁ ▁▁ ▁▁▁▁ ▁▁ ▁▁ ▁ ▁▁ ▁ ▁  ▁▁  ▁     ▁   ▁  ▁  ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▂ │ blkd 4.89%│
-│────────────────────────────────────────────────────────────────────────────────────────────────────────▲ 6.69s───────│
-│sqlite3 1494341 (pid 1494341) at 6.69s: blocked, uninterruptible 5.77ms, 6.69s → 6.69s, left cpu 2                    │
-│  woken by tid 1248339, outside the target, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this    │
-│block alone                                                                                                           │
+│sched.switches 1.37k 58 late ~low det degraded  sched.wakeup 1.43k 59 late ~low det degraded  sched.offcpu 506 ~low   │
+│det degraded  gpu.kernel 0 27 late degraded                                                                           │
+│61.5ms a cell          ╷0ns            ╷1.00s          ╷2.00s          ╷3.00s           ╷4.00s             of the span│
+│sqlite3        2618623│█▇▆█▇█▇█▇█▇█▇█▇█▇█▇█▇███▇█▇█▇███▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇▁ │awake 89.7%│
+│              off cpu │▁▂▃ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▁ ▂ ▂ ▂ ▁ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂  │ blkd 8.03%│
+│────────────────────────▲ 118ms───────────────────────────────────────────────────────────────────────────────────────│
+│sqlite3 2618623 (pid 2618623) at 118ms: blocked, uninterruptible 9.59ms, 113ms → 123ms, left cpu 17                   │
+│  woken by tid 2618682, outside the target; state, stack: its window's sched.offcpu row nearest in size               │
 │  in fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3                                                │
-│  1751 switch-outs and 975 wakeups seen; awake 94.8% of the run                                                       │
-│  where it was off a cpu over the run, 385ms in all (sched.offcpu, by state and stack) ~low det degraded:             │
-│     261ms 67.7% uninterr.   477 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │
-│    62.6ms 16.2% uninterr.   248 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │
-│    61.9ms 16.1% uninterr.   249 blocks  fdatasync ← sqlite3 x10 ← libc.so.6 ← __libc_start_main ← sqlite3            │
+│  1366 switch-outs and 1011 wakeups seen; awake 89.7% of the run                                                      │
+│  where it was off a cpu over the run, 420ms in all (sched.offcpu, by state and stack) ~low det degraded:             │
+│     303ms 72.3% uninterr.   513 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │
+│    59.2ms 14.1% uninterr.   248 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │
+│    57.4ms 13.7% uninterr.   249 blocks  fdatasync ← sqlite3 x10 ← libc.so.6 ← __libc_start_main ← sqlite3            │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

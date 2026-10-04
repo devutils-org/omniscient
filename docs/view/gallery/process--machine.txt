@@ -1,13 +1,13 @@
-omn top │ fixture machine │ 20.0s                                                view: snapshot │ collectors ≥3.13% cpu
+omn top │ fixture machine │ 20.0s                                                view: snapshot │ collectors ≥2.90% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
- no target: this run measured the machine  20.0s · every task's, not one process's · omn costs ≥3.13% cpu
+ no target: this run measured the machine  20.0s · every task's, not one process's · omn costs ≥2.90% cpu
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- CPU     ▂▃█▇▆▅▅▄▅▃▃▃▂▂▂▂▃▃▄▄▃▃▃▃   6.39 cores     avg 7.56   peak 19.1  ~low det
+ CPU     ▆▂▂▂▂▂▆▂▂▂▂▂▆▂▂▂▂▂▆▂█▄▃▅   0.249 cores    avg 0.137   peak 0.461  ~low det
  Memory                             not asked: needs mem.rss
  Disk                               not asked: needs io.latency
  Network                            not asked: needs net.socket
- GPU                                kernels not asked   VRAM 734MiB
- Energy  ▅▆██▇▇▇▇▇▆▆▆▅▅▅▅▆▆▆▆▆▆▆▆   93.5 W         avg 101 W   the machine's, not apportioned
+ GPU                                kernels not asked   VRAM 654MiB
+ Energy  █▄▄▄▄▄▇▄▄▄▅▄▇▅▄▄▄▄▇▅█▇▆▆   27.1 W         avg 21.5 W   the machine's, not apportioned
  Time                               nothing on the target from cpu.oncpu_time
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ▶ suspect: none read                                                                                Enter/click → detail

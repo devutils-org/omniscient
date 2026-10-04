@@ -1,21 +1,21 @@
-[0m[1momn top[0m │ fixture sqlite-commits │ 6.84s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥8.41%[0m[35m │ target 79.5% cpu[0m [0m
+[0m[1momn top[0m │ fixture sqlite-commits │ 5.11s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥9.53%[0m[35m │ target 86.5% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  9 flows  0 process                      [0m
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐[0m
-│[0m[1msched.switches [0m[2m1.75k[0m [0m[33m109 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.wakeup [0m[2m1.17k[0m [0m[33m109 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.offcpu [0m[2m507[0m [0m[36m~low[0m │[0m
-│[0m[36mdet[0m [0m[33mdegraded[0m  [0m[1mgpu.kernel [0m0 [0m[33m60 late[0m [0m[33mdegraded[0m                                                                           │[0m
-│[0m[2m82.4ms a cell[0m          [0m[2m╷0ns[0m        [0m[2m╷1.00s[0m      [0m[2m╷2.00s[0m      [0m[2m╷3.00s[0m      [0m[2m╷4.00s[0m      [0m[2m╷5.00s[0m      [0m[2m╷6.00s[0m      [0m[2mof the span[0m│[0m
-│[0m[1;7msqlite3        1494341[0m[2m│[0m[2;32m▇████████████████████████████████████████████████████████████████████████████████[0m[2;7;32m▇[0m[2;32m▆[0m[2m│awake 94.8%[0m│[0m
-│[0m[2m              off cpu │[0m[2;33m▂▁[0m[2m [0m[2;33m▁▁[0m[2m [0m[2;33m▁▁[0m[2m [0m[2;33m▁▁[0m[2m [0m[2;33m▁▁▁▁[0m[2m [0m[2;33m▁▁[0m[2m [0m[2;33m▁▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m  [0m[2;33m▁▁[0m[2m  [0m[2;33m▁[0m[2m     [0m[2;33m▁[0m[2m   [0m[2;33m▁[0m[2m  [0m[2;33m▁[0m[2m  [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▁[0m[2m [0m[2;7;33m▂[0m[2m │ blkd 4.89%[0m│[0m
-│[0m[2m────────────────────────────────────────────────────────────────────────────────────────────────────────[0m[2;32m▲ 6.69s[0m[2m───────[0m│[0m
-│[0m[1msqlite3 1494341 (pid 1494341) at 6.69s: [0m[2;33mblocked, uninterruptible[0m[2m 5.77ms, 6.69s → 6.69s, left cpu 2[0m                    │[0m
-│  woken by [0m[1mtid 1248339, outside the target[0m[2m, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this[0m    │[0m
-│[0m[2mblock alone[0m                                                                                                           │[0m
+│[0m[1msched.switches [0m[2m1.37k[0m [0m[33m58 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.wakeup [0m[2m1.43k[0m [0m[33m59 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.offcpu [0m[2m506[0m [0m[36m~low[0m   │[0m
+│[0m[36mdet[0m [0m[33mdegraded[0m  [0m[1mgpu.kernel [0m0 [0m[33m27 late[0m [0m[33mdegraded[0m                                                                           │[0m
+│[0m[2m61.5ms a cell[0m          [0m[2m╷0ns[0m            [0m[2m╷1.00s[0m          [0m[2m╷2.00s[0m          [0m[2m╷3.00s[0m           [0m[2m╷4.00s[0m             [0m[2mof the span[0m│[0m
+│[0m[1;7msqlite3        2618623[0m[2m│[0m[2;32m█[0m[2;7;32m▇[0m[2;32m▆█▇█▇█▇█▇█▇█▇█▇█▇█▇███▇█▇█▇███▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇▁[0m[2m │awake 89.7%[0m│[0m
+│[0m[2m              off cpu │[0m[2;33m▁[0m[2;7;33m▂[0m[2;33m▃[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▁[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m [0m[2;33m▂[0m[2m  │ blkd 8.03%[0m│[0m
+│[0m[2m────────────────────────[0m[2;32m▲ 118ms[0m[2m───────────────────────────────────────────────────────────────────────────────────────[0m│[0m
+│[0m[1msqlite3 2618623 (pid 2618623) at 118ms: [0m[2;33mblocked, uninterruptible[0m[2m 9.59ms, 113ms → 123ms, left cpu 17[0m                   │[0m
+│  woken by [0m[1mtid 2618682, outside the target[0m[2m; state, stack: its window's sched.offcpu row nearest in size[0m               │[0m
 │[0m[2m  in [0m[2;33mfdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3[0m                                                │[0m
-│[0m[2m  1751 switch-outs and 975 wakeups seen; awake 94.8% of the run[0m                                                       │[0m
-│[0m[2m  where it was off a cpu over the run, 385ms in all (sched.offcpu, by state and stack)[0m [0m[36m~low det[0m [0m[33mdegraded[0m[2m:[0m             │[0m
-│  [0m[2m   261ms 67.7%[0m [0m[2;33muninterr. [0m[2m  477 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3[0m            │[0m
-│  [0m[2m  62.6ms 16.2%[0m [0m[2;33muninterr. [0m[2m  248 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3[0m            │[0m
-│  [0m[2m  61.9ms 16.1%[0m [0m[2;33muninterr. [0m[2m  249 blocks  fdatasync ← sqlite3 x10 ← libc.so.6 ← __libc_start_main ← sqlite3[0m            │[0m
+│[0m[2m  1366 switch-outs and 1011 wakeups seen; awake 89.7% of the run[0m                                                      │[0m
+│[0m[2m  where it was off a cpu over the run, 420ms in all (sched.offcpu, by state and stack)[0m [0m[36m~low det[0m [0m[33mdegraded[0m[2m:[0m             │[0m
+│  [0m[2m   303ms 72.3%[0m [0m[2;33muninterr. [0m[2m  513 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3[0m            │[0m
+│  [0m[2m  59.2ms 14.1%[0m [0m[2;33muninterr. [0m[2m  248 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3[0m            │[0m
+│  [0m[2m  57.4ms 13.7%[0m [0m[2;33muninterr. [0m[2m  249 blocks  fdatasync ← sqlite3 x10 ← libc.so.6 ← __libc_start_main ← sqlite3[0m            │[0m
+│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

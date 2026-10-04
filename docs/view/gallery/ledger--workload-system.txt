@@ -1,40 +1,40 @@
-omn top │ fixture workload-system │ 2.01s                         view: snapshot │ collectors ≥14.2% │ target 90.5% cpu
+omn top │ fixture workload-system │ 2.00s                         view: snapshot │ collectors ≥14.6% │ target 92.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ ledger -- what task 1529755 and 2 more cost over 2.01s of wall-clock ────────────────────────────────────────────────┐
+┌ ledger -- what task 2621722 and 2 more cost over 2.00s of wall-clock ────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
-│▸ cpu time        2.08s on cpu     103% of one cpu           ▃▃▃▃▅▅█████████▆▃▃▁▁▁▁▁▁    ≥23.5ms  ~low det            │
-│    1529755 system…     1.05s  ██████       50.3%                                                                     │
-│    task 1529769        1.03s  ██████       49.6%                                                                     │
-│    1529839 Thread…    1.61ms  ▏            0.08%                                                                     │
+│▸ cpu time        2.07s on cpu     104% of one cpu           ▂▂▂▃▅▅█████████▆▄▄▁▁▁▁▁▁    ≥23.6ms  ~low det            │
+│    2621722 system…     1.04s  ██████       50.3%                                                                     │
+│    task 2621723        1.03s  ██████       49.6%                                                                     │
+│    2621802 Thread…    1.54ms  ▏            0.07%                                                                     │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
-│    own account         2.08s  with its descendants, as the scheduler counts them                                     │
-│    machine busy        7.65s  ███          27.2%                                                                     │
-│  blocked time    940ms            0.47 threads                   ▅           ▁     █    ≥45.9ms  ~low det degraded   │
-│    1529755 system…     939ms  ████████████ 99.9%                                                                     │
-│    1529839 Thread…    1.28ms  ▏            0.14%                                                                     │
-│  memory held     14.7MiB peak     +820KiB from 13.9MiB      ▁▁▁▁▁▂▂▂▂▂▂▂▂▂▂▂▂███████      585µs                      │
-│  memory faulted  3.98k faults     1.98k/s                   a total only                ≥2.60ms  23 late             │
-│    1529755 system…     2.02k  ██████       50.8%                                                                     │
-│    task 1529769        1.94k  ██████       48.6%                                                                     │
-│    1529839 Thread…        22  ▏            0.55%                                                                     │
-│  I/O syscalls    437 calls        4.06ms inside them        256ns ▂▂▂▁▁█▂▁▁ 131µs       ≥48.0ms  ~low det degraded x2│
-│    bytes read and written: on the raw rows only, which this run did not keep                                         │
-│  network         16.0MiB moved    8.00MiB out, 8.00MiB in                    █          ≥56.6ms  ~low det degraded x3│
-│    1529755 system…   8.00MiB  ██████       50.0%                                                                     │
-│    1529839 Thread…   8.00MiB  ██████       50.0%                                                                     │
-│    286 socket calls                                                                                                  │
-│  retransmits     11 sent again    machine-wide              a total only                 ≥213µs  22 late ~low det deg│
-│  GPU memory      0B peak          of 734MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁      962µs                      │
-│  GPU time        0ns on GPU       0 kernels and copies      no series kept               ≥222µs  22 late degraded    │
-│  energy          158J machine     78.6W on average          ▇▇▇▇████████▇▇▇▇▆▆▆▆▆▆      ≥36.0µs                      │
-│    ≈ the target's      43.0J  an estimate, not a measurement: its share of the machine's busy cpu, 2.08s of 7.65s    │
+│    own account         2.07s  with its descendants, as the scheduler counts them                                     │
+│    machine busy        2.76s  █████████    75.1%                                                                     │
+│  blocked time    938ms            0.47 threads                   ▅           ▁     █    ≥47.0ms  ~low det degraded   │
+│    2621722 system…     937ms  ████████████ 99.9%                                                                     │
+│    2621802 Thread…    1.14ms  ▏            0.12%                                                                     │
+│  memory held     14.7MiB peak     +1.52MiB from 13.1MiB     ▁▁▁▄▄▅▅▅▅▅▅▅▅▅▅▅▅███████      924µs                      │
+│  memory faulted  3.98k faults     1.99k/s                   a total only                ≥3.45ms  23 late             │
+│    2621722 system…     2.02k  ██████       50.8%                                                                     │
+│    task 2621723        1.93k  ██████       48.6%                                                                     │
+│    2621802 Thread…        21  ▏            0.53%                                                                     │
+│  I/O syscalls    437 calls        3.63ms inside them        256ns ▃▁▂▁▁█▁▁▁ 131µs       ≥50.0ms  ~low det degraded x2│
+│    bytes             1.70MiB  read, 16.0MiB written                                                                  │
+│  network         16.0MiB moved    8.00MiB out, 8.00MiB in                    █          ≥42.3ms  ~low det degraded x3│
+│    2621722 system…   8.00MiB  ██████       50.0%                                                                     │
+│    2621802 Thread…   8.00MiB  ██████       50.0%                                                                     │
+│    258 socket calls                                                                                                  │
+│  retransmits     0 sent again     machine-wide              a total only                 ≥239µs  10 late ~low det    │
+│  GPU memory      0B peak          of 655MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁     1.24ms                      │
+│  GPU time        0ns on GPU       0 kernels and copies      no series kept               ≥312µs  12 late degraded    │
+│  energy          102J machine     51.2W on average          ▆▆▆▇█████▇▇▇▆▆▆▅▄▄▄▄▄▄      ≥45.7µs                      │
+│    ≈ the target's      76.8J  an estimate, not a measurement: its share of the machine's busy cpu, 2.07s of 2.76s    │
 │                                                                                                                      │
-│  to know all of this: ≥179ms of omn's cpu, ≥8.58% of what the target spent                                           │
+│  to know all of this: ≥169ms of omn's cpu, ≥8.16% of what the target spent                                           │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via bpf:raw_tp -- cpu time, per thread                                                                 │
 │· the source is not reproducible between two runs of the same workload                                                │
-│· to know it: 23.5ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
+│· to know it: 23.6ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this    │
 │run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl       │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line

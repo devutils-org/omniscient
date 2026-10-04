@@ -1,30 +1,30 @@
-omn top │ fixture workload-timebar │ 3.28s                        view: snapshot │ collectors ≥14.7% │ target 35.9% cpu
+omn top │ fixture workload-timebar │ 2.69s                        view: snapshot │ collectors ≥11.2% │ target 42.9% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐
-│47 late ~low det degraded  121 wakeups of 13 threads -- from a task 96.7%, hardirq 3.31%, in 3.28s                    │
+│29 late ~low det degraded  51 wakeups of 11 threads -- from a task 92.2%, hardirq 7.84%, in 2.69s                     │
 │                                                                                                                      │
 │woken thread      wakes  mostly by      woken thread      wakes  mostly by      woken thread      wakes  mostly by    │
-│worker 1525671        9  holder    44%  rcu_exp_gp_kt… 19    24  worker    54%  migration/23 160      1  worker   100%│
-│python3 1525319       7  worker    57%  rcub/2 96             6  worker    83%  tailscaled 1024       1  rival    100%│
-│holder 1526045        1  hardirq  100%  tailscaled 1055       2  python3   50%  tailscaled 1026       1  python3  100%│
-│rcub/1 17            35  rival     57%  migration/8 68        1  python3  100%                                        │
-│rcu_preempt 16       32  worker    59%  migration/19 136      1  rival    100%                                        │
-│10 dimmed: outside the target, woken by it                                                                            │
+│worker 2620839       10  holder    50%  rcu_exp_gp_kt… 19    12  rival     67%  migration/2 32        1  python3  100%│
+│python3 2620821       6  worker    50%  tailscal… 1374244     3  python3   67%  tailscaled 18352      1  rival    100%│
+│holder 2620966        1  hardirq  100%  migration/14 106      2  worker    50%  omn 2620817           1  python3  100%│
+│rcub/1 17            13  rival     62%  rcu_preempt 16        1  worker   100%                                        │
+│8 dimmed: outside the target, woken by it                                                                             │
 │                                                                                                                      │
-│worker 1525671 (pid 1525319) was woken 9 times, 2.74/s                                                                │
+│worker 2620839 (pid 2620821) was woken 10 times, 3.72/s                                                               │
 │<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         │
-│├─ holder 1526045  its wakeup unseen x1                   4   44%    132µs    179µs    310µs             ▂ ▆          │
-││  └─ hardirq  a device                                   3   33%    400ms       --       --               ▆          │
-│├─ rival 1526152  its wakeup unseen                       3   33%   25.9ms       --       --               ▂▂    ▂    │
-│├─ python3 1525319                                        1   11%   36.7µs   36.7µs   36.7µs   ▂                      │
-││  └─ worker 1525671  ↺ back on the chain                 1   11%   5.52ms       --       --   ▂                      │
-│└─ hardirq  a device                                      1   11%    693ms       --       --             ▂            │
+│├─ holder 2620966  its wakeup unseen x2                   5   50%   82.9µs   66.9µs    150µs           ▄  ▆           │
+││  └─ hardirq  a device                                   3   30%    400ms       --       --              ▆           │
+│├─ rival 2620967  its wakeup unseen                       3   30%   14.9ms       --       --              ▂▂    ▂     │
+│├─ python3 2620821                                        1   10%   5.08ms   17.9µs   17.9µs  ▂                       │
+││  └─ hardirq  a device                                   1   10%   5.06ms       --       --  ▂                       │
+│└─ hardirq  a device                                      1   10%   1000ms       --       --           ▂              │
 │                                                                                                                      │
 │woken at      held   the longest chains, link by link: each waker and its hold                                        │
-│+1.91s       310µs   <- holder 1526045 310µs  <- hardirq  x3                                                          │
-│+145ms      36.7µs   <- python3 1525319 36.7µs  <- worker 1525671 ↺                                                   │
+│+1.44s       150µs   <- holder 2620966 150µs  <- hardirq  x3                                                          │
+│+34.6ms     17.9µs   <- python3 2620821 17.9µs  <- hardirq                                                            │
 │                                                                                                                      │
-│-> it woke in turn: rcu_preempt 16 x19, rcub/1 17 x15, rcu_exp_gp_kthr 19 x13, rcub/2 96 x5, and 2 more               │
+│-> it woke in turn: rcub/1 17 x5, rcu_exp_gp_kthr 19 x4, python3 2620821 x3, rcu_preempt 16 x1, and 1 more            │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

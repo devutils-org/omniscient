@@ -1,36 +1,36 @@
-[0m[1momn top[0m │ fixture sqlite-commits │ 6.84s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥8.41%[0m[35m │ target 79.5% cpu[0m [0m
+[0m[1momn top[0m │ fixture sqlite-commits │ 5.11s                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥9.53%[0m[35m │ target 86.5% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes [0m[1;7m 8 wake [0m 9 flows  0 process                      [0m
 ┌ wake -- who woke whom: from a blocked thread to what unblocked it ───────────────────────────────────────────────────┐[0m
-│[0m[33m109 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m1.17k wakeups of 36 threads -- from a task 44.3%, hardirq 44.3%, softirq 11.4%, in 6.84s[0m  │[0m
+│[0m[33m59 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[2m1.43k wakeups of 31 threads -- from a task 53.0%, hardirq 39.0%, softirq 7.98%, in 5.11s[0m   │[0m
 │                                                                                                                      │[0m
 │[0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m  [0m[2;4mwoken thread      wakes  mostly by    [0m│[0m
-│[0m[1;7msqlite3 1494341  [0m[2m   975  hardirq   53%[0m  [0m[2mkworker/3:1H 448     11  sqlite3  100%[0m  [0m[2mmigration/8 68        4  sqlite3  100%[0m│[0m
-│[0m[2mkworker/14:1H 449    27  sqlite3  100%[0m  [0m[2mkworker/13:1H 451    11  sqlite3  100%[0m  [0m[2mkworker/19:1H 462     4  sqlite3  100%[0m│[0m
-│[0m[2mkworker/17:1H 453    15  sqlite3  100%[0m  [0m[2mkworker/5:1H 676     10  sqlite3  100%[0m  [0m[2mkworker/15:1H 452     3  sqlite3  100%[0m│[0m
-│[0m[2mkworker/2:1H 447     14  sqlite3  100%[0m  [0m[2mkworker/11:1H 728     9  sqlite3  100%[0m  [0m[2mkworker/21:1H 463     3  sqlite3  100%[0m│[0m
-│[0m[2mkworker/12:1H 466    14  sqlite3  100%[0m  [0m[2mmigration/6 56        5  sqlite3  100%[0m  [0m[2mmigration/1 26        2  sqlite3  100%[0m│[0m
-│[0m[2mkworker/1:1H 465     13  sqlite3  100%[0m  [0m[2mkworker/0:1H 446      5  sqlite3  100%[0m  [0m[2mmigration/4 44        2  sqlite3  100%[0m│[0m
-│[0m[2mkworker/16:1H 964    12  sqlite3  100%[0m  [0m[2mkworker/9:1H 514      5  sqlite3  100%[0m  [0m[2mmigration/5 50        2  sqlite3  100%[0m│[0m
-│[0m[2;3mthreads 1-21 of 36, ↑/↓ to move; 35 dimmed: outside the target, woken by it[0m                                           │[0m
+│[0m[1;7msqlite3 2618623  [0m[2m 1.01k  hardirq   55%[0m  [0m[2mkworker/3:1H 448     12  sqlite3  100%[0m  [0m[2mmigration/15 112      3  sqlite3  100%[0m│[0m
+│[0m[2mgmain 1128318       194  sqlite3  100%[0m  [0m[2mkworker/10:1H 482    12  sqlite3  100%[0m  [0m[2mmigration/0 20        2  sqlite3  100%[0m│[0m
+│[0m[2mkworker/1:1H 465     41  sqlite3  100%[0m  [0m[2mkworker/0:1H 446     11  sqlite3  100%[0m  [0m[2mmigration/5 50        2  sqlite3  100%[0m│[0m
+│[0m[2mkworker/2:1H 447     37  sqlite3  100%[0m  [0m[2mmigration/1 26        7  sqlite3  100%[0m  [0m[2mmigration/14 106      2  sqlite3  100%[0m│[0m
+│[0m[2mkworker/12:1H 466    27  sqlite3  100%[0m  [0m[2mmigration/13 100      7  sqlite3  100%[0m  [0m[2mkworker/17:1H 453     2  sqlite3  100%[0m│[0m
+│[0m[2mkworker/14:1H 449    19  sqlite3  100%[0m  [0m[2mmigration/3 38        4  sqlite3  100%[0m  [0m[2mtailscaled 1024       2  sqlite3  100%[0m│[0m
+│[0m[2mkworker/13:1H 451    19  sqlite3  100%[0m  [0m[2mkworker/15:1H 452     4  sqlite3  100%[0m  [0m[2mmigration/2 32        1  sqlite3  100%[0m│[0m
+│[0m[2;3mthreads 1-21 of 31, ↑/↓ to move; 30 dimmed: outside the target, woken by it[0m                                           │[0m
 │                                                                                                                      │[0m
-│[0m[1;32msqlite3 1494341[0m[2m was woken 975 times, 142.64/s[0m                                                                         │[0m
+│[0m[1;32msqlite3 2618623[0m[2m was woken 1.01k times, 198.03/s[0m                                                                       │[0m
 │[0m[2;4m<- woken by   <- and what woke it before              wakes share    quiet     hold max hold  when in the run         [0m│[0m
-│[0m[2m├─ [0m[36mhardirq[0m[2m  a device[0m                                 [0m[2m   517   53%    381µs       --       --[0m  [0m[2;32m▅▂▃▂▃▂▃▃▃▁  ▂▂▂▂▃▃▂▃▃▃▂▂[0m│[0m
-│[0m[2m├─ [0m[36msoftirq[0m[2m  a device, or a loopback send[0m             [0m[2m   133   14%    397µs       --       --[0m  [0m[2;32m▁▂ ▂▂▂ ▁ ▁▂       ▁  ▁▁▂[0m│[0m
-│[0m[2m├─ [0mtid 1019465[0m[2m  outside the target: stops[0m            [0m[2m    54    6%    218µs       --       --[0m  [0m[2;32m▁ ▁▁  ▁▁▁▁▁ ▁▁▁▁▁▁      [0m│[0m
-│[0m[2m├─ [0mtid 1030789[0m[2m  outside the target: stops[0m            [0m[2m    48    5%    226µs       --       --[0m  [0m[2;32m▁ ▁▁  ▁▁▁▁▁ ▁▁▁▁▁▁      [0m│[0m
-│[0m[2m├─ [0mtid 1248339[0m[2m  outside the target: stops[0m            [0m[2m    41    4%    199µs       --       --[0m  [0m[2;32m      ▁▁▁       ▁▁▁    ▁[0m│[0m
-│[0m[2m├─ [0mtid 1345264[0m[2m  outside the target: stops[0m            [0m[2m    37    4%    211µs       --       --[0m  [0m[2;32m ▁▁ ▁▁          ▁  ▁▁▁▁ [0m│[0m
-│[0m[2m├─ [0mtid 1144059[0m[2m  outside the target: stops[0m            [0m[2m    32    3%    209µs       --       --[0m  [0m[2;32m ▁  ▁▁          ▁  ▁▁▁▁ [0m│[0m
-│[0m[2m├─ [0mtid 1034502[0m[2m  outside the target: stops[0m            [0m[2m    26    3%    108µs       --       --[0m  [0m[2;32m▁▁▁▁  ▁                 [0m│[0m
-│[0m[2m├─ [0mtid 1017464[0m[2m  outside the target: stops[0m            [0m[2m    22    2%    231µs       --       --[0m  [0m[2;32m                   ▁▁▁▁ [0m│[0m
-│[0m[2m├─ [0mtid 1476760[0m[2m  outside the target: stops[0m            [0m[2m    18    2%    140µs       --       --[0m  [0m[2;32m▁▁               ▁▁▁   ▁[0m│[0m
-│[0m[2m├─ [0mtid 962468[0m[2m  outside the target: stops[0m             [0m[2m    14    1%    114µs       --       --[0m  [0m[2;32m ▁▁ ▁                   [0m│[0m
-│[0m[2m├─ [0mtid 1459748[0m[2m  outside the target: stops[0m            [0m[2m    11    1%   79.8µs       --       --[0m  [0m[2;32m▁▁                ▁    ▁[0m│[0m
-│[0m[2m├─ [0mtid 952382[0m[2m  outside the target: stops[0m             [0m[2m     8    1%    174µs       --       --[0m  [0m[2;32m     ▁                 ▁[0m│[0m
-│[0m[2m   ... 4 smaller links not drawn (14 wakeups)[0m                                                                         │[0m
+│[0m[2m├─ [0m[36mhardirq[0m[2m  a device[0m                                 [0m[2m   557   55%    385µs       --       --[0m  [0m[2;32m▅▂▂▃▄ ▄▄▄▂▄▃▃▂▂▄▄▃▂▄▂▄▄▂[0m│[0m
+│[0m[2m├─ [0mtid 2589657[0m[2m  outside the target: stops[0m            [0m[2m   124   12%   92.3µs       --       --[0m  [0m[2;32m▁▁▁▁▂▁▁▁▂▁▁▁▂▁▁▁▁▁ ▁▁▁▁▁[0m│[0m
+│[0m[2m├─ [0m[36msoftirq[0m[2m  a device, or a loopback send[0m             [0m[2m   114   11%    389µs       --       --[0m  [0m[2;32m▂▂▁▁▁▂ ▁   ▂▁ ▂   ▂     [0m│[0m
+│[0m[2m├─ [0mtid 2303204[0m[2m  outside the target: stops[0m            [0m[2m    91    9%   94.2µs       --       --[0m  [0m[2;32m▁▂▁▁▁▁▁ ▁▁▁▁▁▁▁▂▁▁      [0m│[0m
+│[0m[2m├─ [0mtid 2589658[0m[2m  outside the target: stops[0m            [0m[2m    48    5%   99.6µs       --       --[0m  [0m[2;32m      ▁▂         ▁ ▁▁▂▂▁[0m│[0m
+│[0m[2m├─ [0mtid 2606110[0m[2m  outside the target: stops[0m            [0m[2m    17    2%    162µs       --       --[0m  [0m[2;32m▁▁▁▁▁▁▁                 [0m│[0m
+│[0m[2m├─ [0mtid 2535215[0m[2m  outside the target: stops[0m            [0m[2m    15    1%    102µs       --       --[0m  [0m[2;32m           ▁  ▁   ▁▁    [0m│[0m
+│[0m[2m├─ [0mtid 2614035[0m[2m  outside the target: stops[0m            [0m[2m    15    1%    109µs       --       --[0m  [0m[2;32m▁          ▁  ▁   ▁▁    [0m│[0m
+│[0m[2m├─ [0mtid 2618469[0m[2m  outside the target: stops[0m            [0m[2m    13    1%    147µs       --       --[0m  [0m[2;32m   ▁  ▁         ▁ ▁     [0m│[0m
+│[0m[2m├─ [0mtid 2521908[0m[2m  outside the target: stops[0m            [0m[2m     8    1%    110µs       --       --[0m  [0m[2;32m   ▁            ▁▁▁     [0m│[0m
+│[0m[2m├─ [0mtid 2535059[0m[2m  outside the target: stops[0m            [0m[2m     6    1%   41.4µs       --       --[0m  [0m[2;32m   ▁                    [0m│[0m
+│[0m[2m├─ [0mtid 2618682[0m[2m  outside the target: stops[0m            [0m[2m     2    0%   1.89ms       --       --[0m  [0m[2;32m▁                       [0m│[0m
+│[0m[2m└─ [0momn 2618614[0m[2m  outside the target: stops[0m            [0m[2m     1    0%       --       --       --[0m  [0m[2;32m▁                       [0m│[0m
 │                                                                                                                      │[0m
-│[0m[1m-> it woke in turn: [0mkworker/14:1H 449[0m[2m x27[0m, kworker/17:1H 453[0m[2m x15[0m, kworker/2:1H 447[0m[2m x14[0m, kworker/12:1H 466[0m[2m x14, and 31 [0m│[0m
+│[0m[1m-> it woke in turn: [0mgmain 1128318[0m[2m x194[0m, kworker/1:1H 465[0m[2m x41[0m, kworker/2:1H 447[0m[2m x37[0m, kworker/12:1H 466[0m[2m x27, and 26 more[0m│[0m
+│                                                                                                                      │[0m
 │[0m[1;2mquiet[0m[2m: the woken thread's time with no sign of life in the run (no wakeup received or issued) before this one -- an[0m   │[0m
 │[0m[2mupper bound: it was blocked no longer than this. [0m[1;2mhold[0m[2m: the waker's time from its own wakeup to the one it issued --[0m   │[0m
 │[0m[2mhow long the chain sat with it. A chain stops at an interrupt, at a thread already on it, or at a waker whose own[0m     │[0m

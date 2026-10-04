@@ -1,14 +1,14 @@
-omn top │ fixture cpython-hot-heavier │ 8.49s                     view: snapshot │ collectors ≥7.69% │ target 94.5% cpu
+omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snapshot │ collectors ≥8.12% │ target 95.9% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐
-│sched.switches 296 89 late ~low det degraded  sched.wakeup 4 89 late ~low det  sched.offcpu 0 ~low det degraded       │
-│gpu.kernel 0 89 late degraded                                                                                         │
-│102ms a cell           ╷0ns               ╷2.00s              ╷4.00s             ╷6.00s                    of the span│
-│python3        1492174│█████████████████████████████████████████████████████████████████████████████████▆ │awake 98.5%│
+│sched.switches 86 89 late ~low det degraded  sched.wakeup 4 89 late ~low det  sched.offcpu 0 ~low det degraded        │
+│gpu.kernel 0 20 late degraded                                                                                         │
+│95.6ms a cell          ╷0ns                ╷2.00s               ╷4.00s               ╷6.00s                of the span│
+│python3        2627262│██████████████████████████████████████████████████████████████████████████████████▅│awake 99.4%│
 │              off cpu │                                                                                   │ blkd 0.00%│
-│────────────────────────────────────────────────────────────────▲ 4.24s───────────────────────────────────────────────│
-│python3 1492174 (pid 1492174) at 4.24s: awake 8.36s, 0ns → 8.36s, on a cpu or queued for one                          │
-│  296 switch-outs and 1 wakeups seen; awake 98.5% of the run                                                          │
+│────────────────────────────────────────────────────────────────▲ 3.97s───────────────────────────────────────────────│
+│python3 2627262 (pid 2627262) at 3.97s: awake 7.89s, 0ns → 7.89s, on a cpu or queued for one                          │
+│  86 switch-outs and 1 wakeups seen; awake 99.4% of the run                                                           │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

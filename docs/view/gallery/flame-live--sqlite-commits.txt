@@ -1,7 +1,7 @@
-omn top │ fixture sqlite-commits │ 3.42s live                        view: snapshot │ collectors and target: at the end
+omn top │ fixture sqlite-commits │ 2.55s live                        view: snapshot │ collectors and target: at the end
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
-on cpu: 0 so far │ off cpu: 273 so far
+on cpu: 0 so far │ off cpu: 264 so far
 ┌ on cpu cpu.profile ──────────────────────────────────────────────────────────────────────────────────────────────────┐
 │0 samples on 0 stacks so far ~low det live degraded x5                                                                │
 │the icicle is drawn when the run ends: the runner names the stacks then. Below, what arrived over time.               │
@@ -9,9 +9,9 @@ on cpu: 0 so far │ off cpu: 273 so far
 │‼ this recording kept `cpu.profile` as `stack` only, without `raw`: replayed as live it arrives empty, where a live   │
 │  run hands its events over as they come                                                                              │
 │‼ pmu:sw: time-based sampling: blind to phases running at reduced frequency                                           │
-│‼ 59 of 62 samples landed in a function that sets up no frame pointer (59 in libc.so.6), so the frames under the leaf │
-│  are not its callers: most of them are outside the target's own code, which is where the callers are lost; `--stack  │
-│  fp+leaf` recovers the leaf's caller and `--stack dwarf` the whole chain                                             │
+│‼ 186 of 186 samples landed in a function that sets up no frame pointer (186 in libc.so.6), so the frames under the   │
+│  leaf are not its callers: most of them are outside the target's own code, which is where the callers are lost;      │
+│  `--stack fp+leaf` recovers the leaf's caller and `--stack dwarf` the whole chain                                    │
 │‼ 1 frames fell in no mapping of the target and are reported by address                                               │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -19,20 +19,20 @@ on cpu: 0 so far │ off cpu: 273 so far
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ off cpu sched.offcpu ────────────────────────────────────────────────────────────────────────────────────────────────┐
-│273 blocks on 3 stacks so far ~low det live degraded                                                                  │
+│264 blocks on 3 stacks so far ~low det live degraded                                                                  │
 │the icicle is drawn when the run ends: the runner names the stacks then. Below, what arrived over time.               │
 │                                                                                                                      │
 │‼ bpf:raw_tp: user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the│
 │  task state                                                                                                          │
 │‼ names came from -- sqlite3: no names: it carries no function symbols; libc.so.6: its dynamic symbols only: its      │
 │  internal functions are unnamed                                                                                      │
-│█                                                                                                                     │
-│█     █   ▄      █  ▄   █  ▁          ▄  █  ▁       █    ▄  ▄ ▄      ▄   █   ▄     █  ▄                       ▁       │
-│█     █   █      █  █   █  █          █  █  █       █    █  █ █      █   █   █     █  █                       █       │
-│█     █   █      █  █   █  █      ▂   █  █  █       █    █  █ █      █   █   █     █  █         ▅             █       │
-│█     █   █      █  █   █  █   ▂  █   █  █  █       █    █  █ █      █   █   █     █  █         █   ▆         █       │
-│█     █   █      █  █   █  █   █  █   █  █  █       █    █  █ █      █   █   █     █  █         █   █         █       │
-│█     █   █      █  █   █  █   █  █   █  █  █       █    █  █ █      █   █   █     █  █         █   █         █       │
+│         █                      ▄             █   ▄    ▄    ▄                 ▄                                     █ │
+│         █   █         ▄   ▄    █    █        █   █    █    █         ▄  ▁    █    ▄   ▁         ▄   ▄    ▄   ▄     █ │
+│         █   █         █   █    █    █        █   █    █    █         █  █    █    █   █         █   █    █   █     █ │
+│         █   █         █   █    █    █        █   █    █    █         █  █    █    █   █         █   █    █   █     █ │
+│         █   █         █   █    █    █        █   █    █    █         █  █    █    █   █         █   █    █   █     █ │
+│▃        █   █         █   █    █    █        █   █    █    █         █  █    █    █   █         █   █    █   █     █ │
+│█        █   █         █   █    █    █        █   █    █    █   ▇     █  █    █    █   █         █   █    █   █     █ │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 

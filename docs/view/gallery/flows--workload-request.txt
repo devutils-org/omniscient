@@ -1,40 +1,40 @@
-omn top │ fixture workload-request │ 1.18s                        view: snapshot │ collectors ≥11.1% │ target 0.90% cpu
+omn top │ fixture workload-request │ 1.14s                        view: snapshot │ collectors ≥12.8% │ target 0.98% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ flows -- where the bytes went: process to socket to interface, process to file to device ────────────────────────────┐
-│pid 1530298 over 1.18s   1.73KiB sent, 1.73KiB received   █ out █ in █ the machine's                                  │
+│pid 2622175 over 1.14s   1.73KiB sent, 1.73KiB received   2.01MiB written, 2.50MiB read   █ out █ in █ the machine's  │
 │ network · net.socket bpf:fentry ~low det degraded x3 · net.bytes fs:proc ~low det degraded ──────────────────────────│
 │         thread             socket                                             stack         interface, the machine's │
-│         server ┃▀▀█▀▀▀▀▀▀┃▶inet :48176      █     ↑59B ↓52B           ┃▀▀▀▀▀▀▀▀▀┃█████████┃ lo       66.9KiB ▂█ ▂ ▂▁ │
-│         server ┃▀▀█▀▀▀▀▀▀┃ inet :39443      █     ↑52B ↓59B           ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
-│                  ▀▀▀▀▄▀▀▀┃ inet :48212       █    ↑59B ↓52B           ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
-│                    ▀█▀█▀▀┃ inet :39443       █    ↑52B ↓59B           ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
-│                      ▀▀▀▀┃ inet :48218        █   ↑59B ↓52B           ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
-│                        ▀▀┃ 27 more sock… ▄▅█▂▅▃▅█ ↑1.45KiB ↓1.46KiB   ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
+│         server ┃▀▀█▀▀▀▀▀▀┃▶inet :38700    █       ↑59B ↓52B           ┃▀▀▀▀▀▀▀▀▀┃█████████┃ lo       21.0KiB ▆█ ▆ █▅ │
+│         server ┃▀▀█▀▀▀▀▀▀┃ inet :35627    █       ↑52B ↓59B           ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
+│                  ▀▀▀▀▄▀▀▀┃ inet :38730     ▇█     ↑59B ↓52B           ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
+│                    ▀█▀█▀▀┃ inet :35627     ▇█     ↑52B ↓59B           ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
+│                      ▀▀▀▀┃ inet :38744      █     ↑59B ↓52B           ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
+│                        ▀▀┃ 27 more sock… ▃▃▆▂▃█▆█ ↑1.45KiB ↓1.46KiB   ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃ wlan0    19.7KiB ▂▁ █ ▁▁ │
 │                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃ tailsca… 14.1KiB    █    │
 │                                                                                 ┃█████████┃                          │
-│sockets 3.45KiB -> interfaces 101KiB = 29.14x · 4 interfaces idle · lo counts a byte twice; sockets are not tied to in│
+│                                                                                 ┃█████████┃                          │
+│                                                                                 ┃█████████┃ wlan0       760B ██ █  █ │
+│sockets 3.45KiB -> interfaces 21.8KiB = 6.30x · 5 interfaces idle · lo counts a byte twice; sockets are not tied to in│
 │ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
-│         thread             file                                               cache         device, the machine's    │
-│ bytes per file: not in this run                                                 ┃█████████┃ 259:0    18.3MiB █▁ ▁  ▁ │
-│ io.syscall is in this run as a summary and a histogram: latency per             ┃█████████┃                          │
-│ thread, which carries no bytes. Its `raw` rows (per descriptor) or              ┃█████████┃                          │
-│ io.fs's (per file) do.                                                          ┃█████████┃                          │
-│ docs/view/flows.md has the session that draws it.                               ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│                                                                                 ┃█████████┃                          │
-│devices 18.3MiB · 2 devices idle · page-cache hits never reach a device; writes reach it later                        │
-│▶ socket 143807 (inet, peer port 48176): 59B sent in 1 calls, 50B/s; 52B received in 1 calls, 44B/s                   │
-│pid 1530298, thread 1530298 -- enter narrows every view to it                                                         │
+│         thread             descriptor                                         cache         device, the machine's    │
+│         server ┃█████████┃ fd 3          █▁▁ ▁  ▁ →2.00MiB ←1.04KiB   ┃█████████┃█████████┃ 259:0    3.33MiB █▁   ▁▁ │
+│    tid 2622175 ┃█████████┃  1.75MiB/s, 43 calls, 23.2ms each          ┃█████████┃█████████┃                          │
+│                ┃█████████┃                                            ┃█████████┃█████████┃                          │
+│                ┃█████████┃                                            ┃█████████┃█████████┃                          │
+│                ┃█████████┃                                            ┃█████████┃█████████┃                          │
+│                ┃████▀▀▀▀▀┃                                            ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
+│                ┃███████▀▀┃ fd 4          █▁▁ ▁  ▁ →32B ←2.00MiB       ┃▀▀▀▀▀▀▀▀▀┃█████████┃                          │
+│                ┃██████▀██┃  1.75MiB/s, 40 calls, 129µs each           ┃█████████┃█████████┃                          │
+│                ┃█████▀███┃                                            ┃█████████┃█████████┃                          │
+│                ┃████▀████┃                                            ┃█████████┃█████████┃                          │
+│                ┃▀▀█▀█████┃                                            ┃█████████┃                                    │
+│         server ┃████▀▀▀██┃ fd 8           █ █ █ █ ←512KiB             ┃█████████┃                                    │
+│         server ┃█▄▄██████┃ fd 2          ▄▆▅▆█▃▅█ →6.91KiB            ┃█████████┃                                    │
+│descriptors 4.51MiB -> devices 3.33MiB · 2 devices idle · no ratio: a descriptor may be a socket or a pipe, whose byte│
+│▶ socket 139119 (inet, peer port 38700): 59B sent in 1 calls, 52B/s; 52B received in 1 calls, 45B/s                   │
+│pid 2622175, thread 2622175 -- enter narrows every view to it                                                         │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ socket or file  enter focus its thread

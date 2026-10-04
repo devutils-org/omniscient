@@ -1,38 +1,38 @@
-omn top │ fixture workload-lanes │ 2.24s                          view: snapshot │ collectors ≥11.5% │ target 69.5% cpu
+omn top │ fixture workload-lanes │ 2.24s                          view: snapshot │ collectors ≥9.70% │ target 73.8% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
 │ the view's reading  one bar per thread, whole: the run's window                                                      │
 │                                                                                                                      │
-│ ▶ first suspect  1529959 lanes-main (the program): blocked: sleeping, on a futex 2.11s (94.1% of its wall clock)     │
+│ ▶ first suspect  2621955 lanes-main (the program): blocked: sleeping, on a futex 2.08s (92.6% of its wall clock)     │
 │   asleep on a lock another thread held: lock-contended                                                               │
-│   2.11s waiting in futex(2) over 22 wait(s), from `sched.futex`                                                      │
-│   decisive: ahead of the next state (30.7ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
+│   2.08s waiting in futex(2) over 24 wait(s), from `sched.futex`                                                      │
+│   decisive: ahead of the next state (26.7ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
 │                                                                                                                      │
-│ ▸ 1529959 lanes-main  ├█▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 94.1% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞   ┤    2.24s  ▶ lock 94.1%        │
-│   1529975 lane-c      ├█████████████▞▞▞▞▞▞▞ lock 43.2% ▞▞▞▞▞▞▞▞                      ┤    2.24s  ▶ lock 43.2%        │
-│   1529974 lane-b      ├█████████████▞▞▞▞▞▞ lock 39.6% ▞▞▞▞▞▞▞                        ┤    2.24s  ▶ lock 39.6%        │
-│   1529973 lane-a      ├█████████████▞▞▞▞▞ lock 36.0% ▞▞▞▞▞                           ┤    2.24s  ▶ lock 36.0%        │
-│   1530068 cuda-EvtHan…├██░ sleep 26.1% ░░                                            ┤    2.24s  ▶ sleep 26.1%       │
-│   1530061 cuda0000140…├░░ sleep 29.3% ░░░                                            ┤    2.24s  ▶ sleep 29.3%       │
-│   1530062 lane-gpu    ├▞▞▞ lock 29.0% ▞▞▞                                            ┤    2.24s  ▶ lock 29.0%        │
-│   1530060 lane-gpu    ├█████▞▞▞▞▞▞▞▞▞▞▞▞▞                                            ┤    2.24s  ▶ lock 20.2%        │
-│   1530063 omn-cupti-f…├░░ sleep 28.8% ░░░                                            ┤    2.24s  ▶ sleep 28.8%       │
-│   1530064 lane-gpu    ├▞▞ lock 27.4% ▞▞▞                                             ┤    2.24s  ▶ lock 27.4%        │
-│   1530067 lane-gpu    ├▞▞ lock 26.3% ▞▞                                              ┤    2.24s  ▶ lock 26.3%        │
-│   1530125 lane-gpu    ├░░░░░░░░░░░░░                                                 ┤    2.24s  ▶ sleep 21.0%       │
+│ ▸ 2621955 lanes-main  ├█▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 92.6% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞    ┤    2.24s  ▶ lock 92.6%        │
+│   2621958 lane-c      ├█████████████▞▞▞▞▞▞▞ lock 43.2% ▞▞▞▞▞▞▞▞                      ┤    2.24s  ▶ lock 43.2%        │
+│   2621957 lane-b      ├█████████████▞▞▞▞▞▞ lock 39.6% ▞▞▞▞▞▞▞                        ┤    2.24s  ▶ lock 39.6%        │
+│   2621956 lane-a      ├█████████████▞▞▞▞▞ lock 36.0% ▞▞▞▞▞                           ┤    2.24s  ▶ lock 36.0%        │
+│   2622150 lane-gpu    ├███▞▞ lock 25.4% ▞▞                                           ┤    2.24s  ▶ lock 25.4%        │
+│   2622146 cuda0000140…├░░ sleep 27.8% ░░                                             ┤    2.24s  ▶ sleep 27.8%       │
+│   2622145 lane-gpu    ├█████▞▞▞▞▞▞▞▞▞▞▞▞                                             ┤    2.24s  ▶ lock 20.0%        │
+│   2622147 lane-gpu    ├▞▞ lock 27.6% ▞▞▞                                             ┤    2.24s  ▶ lock 27.6%        │
+│   2622148 omn-cupti-f…├░░ sleep 27.5% ░░                                             ┤    2.24s  ▶ sleep 27.5%       │
+│   2622149 lane-gpu    ├▞▞ lock 26.4% ▞▞                                              ┤    2.24s  ▶ lock 26.4%        │
+│   2622151 cuda-EvtHan…├░ sleep 25.3% ░░                                              ┤    2.24s  ▶ sleep 25.3%       │
+│   2622152 lane-gpu    ├░░░░░░░░░░░░░                                                 ┤    2.24s  ▶ sleep 20.4%       │
 │                      0 ───────────────────────────┼ 1.12s ───────────────────────────┤ 2.24s                         │
 │                        █ on cpu   ▚ run queue   ▞ lock   ▓ I/O   ░ sleep                                             │
 │                                                                                                                      │
 │   state                            source          amount          share   ±         reads  trust                    │
 │   whole: the run's window                          2.24s           100%    exact                                     │
-│ █ on-cpu                           cpu.oncpu_time  30.7ms          1.37%   exact     0      ~low det                 │
-│     ↳ most-sampled leaf `PyNumber_Remainder`: 121 of 1605 samples, every thread's: the samples are spread, no one f… │
-│ ▚ runnable                         sched.runqlat   2.18ms          0.10%   exact     15     ~low det degraded        │
-│ ▞ blocked: sleeping, on a futex    sched.offcpu    2.11s           94.1%   exact     18     ~low det degraded x2     │
-│     ↳ 2.11s waiting in futex(2) over 22 wait(s), from `sched.futex`                                                  │
-│   residue: the whole less the rows                 100ms           4.48%   exact     time no row accounts for        │
+│ █ on-cpu                           cpu.oncpu_time  26.7ms          1.19%   exact     0      ~low det                 │
+│     ↳ most-sampled leaf `__tls_get_addr`: 123 of 1610 samples, every thread's: the samples are spread, no one funct… │
+│ ▚ runnable                         sched.runqlat   52.4µs          0.00%   exact     9      ~low det degraded        │
+│ ▞ blocked: sleeping, on a futex    sched.offcpu    2.08s           92.6%   exact     20     ~low det degraded x2     │
+│     ↳ 2.08s waiting in futex(2) over 24 wait(s), from `sched.futex`                                                  │
+│   residue: the whole less the rows                 139ms           6.19%   exact     time no row accounts for        │
 │                                                                                                                      │
-│ task:1529959 is the program's: its main thread, the one whose id is its process's.                                   │
+│ task:2621955 is the program's: its main thread, the one whose id is its process's.                                   │
 │ No decomposition splits this run by task: these bars are the view's own reading of the traced sources, per thread    │
 │   over the run's window, and the suspect follows `omn latency`'s rule without being its answer. For its answer: `omn │
 │   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.…                             │

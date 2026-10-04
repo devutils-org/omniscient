@@ -1,40 +1,40 @@
-omn top │ fixture workload-request │ 1.18s                        view: snapshot │ collectors ≥11.1% │ target 0.90% cpu
+omn top │ fixture workload-request │ 1.14s                        view: snapshot │ collectors ≥12.8% │ target 0.98% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
-on cpu: 15 · hottest own chacha_permute 26.7% │ off cpu: 3.29s · hottest own libc+0xa08f2 96.3%
-┌ on cpu cpu.profile 15 20 late ~low det degraded x5 ──────┐┌ off cpu sched.offcpu 3.29s ~low det degraded ────────────┐
-│width ∝ samples · heaviest left            35 frames deep ││width ∝ time off cpu · heaviest left        6 frames deep │
-│▏all 15                                                   ││▏all 3.29s                                                │
-│▏_start › ⋯2⋯ › main 66.7%             ▏do_syscal…▏__z▏ld-││▏libc+0x12072c › libc+0x98042 66.7%    ▏⋯main 33.3%       │
-│▏get_random_bytes_…▏do_sys…▏che▏cle▏cle▏__sys…▏rel        ││▏holder 33.4%      ▏client 33.3%       ▏+0xa08f2 29.6%  ▏l│
-│▏chacha_permute    ▏__t▏__t            ▏loo               ││▏+0xa08f2 29.7%  ▏l▏+0xa08f2 29.2%  ▏li                   │
-│                                                          ││                                                          │
-│heaviest on their own (where it ends, every path summed)  ││heaviest on their own (where it ends, every path summed)  │
-│ 26.7% ████████████ chacha_permute                        ││ 96.3% ████████████ libc+0xa08f2                          │
-│ 13.3% ██████       clear_highpages_kasan_tagged          ││ 3.67% ▏            libc+0x94e9e                          │
-│ 6.67% ███          __sys_sendto                          ││ 0.04% ▏            fsync                                 │
-│                                                          ││                                                          │
-│‼ pmu:sw: time-based sampling: blind to phases running at ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
-│  reduced frequency                                       ││  is always the scheduler, and what it was waiting for is │
-│‼ 6 of 7 samples landed in a function that sets up no     ││  the task state                                          │
-│  frame pointer (6 in libc.so.6), so the frames under the ││‼ names came from -- server: its own symbol table;        │
-│  leaf are not its callers: most of them are outside the  ││  libc.so.6: its dynamic symbols only: its internal       │
-│  target's own code, which is where the callers are lost; ││  functions are unnamed                                   │
-│  `--stack fp+leaf` recovers the leaf's caller and        ││                                                          │
-│  `--stack dwarf` the whole chain                         ││                                                          │
-│‼ 1 frames fell in no mapping of the target and are       ││                                                          │
+on cpu: 13 · hottest own clear_highpages_kasan_tagged 23.1% │ off cpu: 3.35s · hottest own libc+0xa08f2 91.4%
+┌ on cpu cpu.profile 13 14 late ~low det degraded x5 ──────┐┌ off cpu sched.offcpu 3.35s ~low det degraded x2 ─────────┐
+│width ∝ samples · heaviest left            33 frames deep ││width ∝ time off cpu · heaviest left        6 frames deep │
+│▏all 13                                                   ││▏all 3.35s                                                │
+│▏_start › ⋯1⋯ › libc+0x27781 69.2%      ▏do_sysc…▏__z…▏ld-││▏libc+0x12072c › libc+0x98042 61.8% ▏⋯main 33.2%       ▏[n│
+│▏main 61.5%                         ▏cle▏__m…▏__u         ││▏holder 33.3%      ▏client 28.5%    ▏+0xa08f2 29.6%  ▏l   │
+│▏do_syscall_…▏btrfs_buffer…▏get_ran…                      ││▏+0xa08f2 29.7%  ▏l▏⋯libc+0xa08f2▏li                      │
+│▏__netif…▏iom▏clear_h…▏__t…▏cha                           ││                                                          │
+│▏nft▏nft…                                                 ││heaviest on their own (where it ends, every path summed)  │
+│                                                          ││ 91.4% ████████████ libc+0xa08f2                          │
+│heaviest on their own (where it ends, every path summed)  ││ 4.79% █            [no stack]                            │
+│ 23.1% ████████████ clear_highpages_kasan_tagged          ││ 3.59% ▏            libc+0x94e9e                          │
+│ 15.4% ████████     nft_do_chain                          ││ 0.18% ▏            fsync                                 │
+│ 7.69% ████         __memcg_slab_free_hook                ││                                                          │
+│ 7.69% ████         __tree_search.constprop.0.isra.0      ││‼ bpf:raw_tp: user stacks only: the kernel side of a block│
+│                                                          ││  is always the scheduler, and what it was waiting for is │
+│‼ pmu:sw: time-based sampling: blind to phases running at ││  the task state                                          │
+│  reduced frequency                                       ││‼ 4 blocks were walked and their stack not kept: the      │
+│‼ 6 of 6 samples landed in a function that sets up no     ││  kernel's stack map holds one stack per bucket over 4096 │
+│  frame pointer (6 in libc.so.6), so the frames under the ││  buckets and refuses a second, so a stack that hashed    │
+│  leaf are not its callers: most of them are outside the  ││  onto one already taken is not kept -- the blocks are    │
+│  target's own code, which is where the callers are lost; ││  counted, and cannot be placed                           │
+│  `--stack fp+leaf` recovers the leaf's caller and        ││‼ names came from -- server: its own symbol table;        │
+│  `--stack dwarf` the whole chain                         ││  libc.so.6: its dynamic symbols only: its internal       │
+│‼ 1 frames fell in no mapping of the target and are       ││  functions are unnamed                                   │
 │  reported by address                                     ││                                                          │
 │‼ 2 tasks the target started were found on a tick after   ││                                                          │
-│  they began, and had used 0.07 ms of cpu by then, by the ││                                                          │
+│  they began, and had used 0.10 ms of cpu by then, by the ││                                                          │
 │  kernel's own account: that time is in no sample here. A ││                                                          │
 │  task that started and ended between two ticks is in none││                                                          │
 │  at all                                                  ││                                                          │
-│‼ stacks unwound by `fp`: the caller of a function that   ││                                                          │
-│  sets up no frame pointer is lost -- every frameless     ││                                                          │
-│  leaf, and whole stacks of a target built without them   ││                                                          │
-│‼ 1 more on the last line; ! lists every caveat whole     ││                                                          │
+│‼ 2 more on the last line; ! lists every caveat whole     ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
 on cpu ▸ all
-15 samples ≈ 15.0ms · 100% of all · own 0 · 15 events
-cpu.profile: names came from -- server: its own symbol table; ld-linux-x86-64.so.2: its dynamic symbols only: its inter…
+13 samples ≈ 13.0ms · 100% of all · own 0 · 13 events
+cpu.profile (+1 more, ! lists them): stacks unwound by `fp`: the caller of a function that sets up no frame pointer is …
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats
