@@ -1025,14 +1025,39 @@ fn a_lossy_profile_marks_its_row_and_leaves_the_traced_rows_alone() {
     let short = series_of(profile, "hist", lossy.task())
         .map(|series| series["short"].clone())
         .unwrap_or(Value::Null);
-    assert!(
-        !short.is_null(),
-        "the run dropped {dropped} samples and was throttled {throttled} times, and its \
-         histogram does not say so:\n{}",
-        lossy.text
-    );
-    assert_eq!(short["dropped"].as_u64(), Some(dropped), "{short}");
-    assert_eq!(short["throttled"].as_u64(), Some(throttled), "{short}");
+    // The profile keeps one ring per task, and a series is short by its own
+    // ring's losses when the rings account for the run's (`emit.rs`,
+    // `Shortfalls`); the run's whole loss is on it only when they do not.
+    let rings = profile["by_ring"].as_array().cloned().unwrap_or_default();
+    let (own_dropped, own_throttled) = if rings.is_empty() {
+        (dropped, throttled)
+    } else {
+        rings
+            .iter()
+            .find(|ring| ring["key"]["task"]["tid"].as_u64() == Some(lossy.task()))
+            .map(|ring| {
+                (
+                    ring["losses"]["dropped"].as_u64().unwrap_or(0),
+                    ring["losses"]["throttled"].as_u64().unwrap_or(0),
+                )
+            })
+            .unwrap_or((0, 0))
+    };
+    if own_dropped == 0 && own_throttled == 0 {
+        assert!(
+            short.is_null(),
+            "the decomposed task's ring lost nothing and its histogram is marked: {short}"
+        );
+    } else {
+        assert!(
+            !short.is_null(),
+            "the decomposed task's ring dropped {own_dropped} samples and was throttled \
+             {own_throttled} times, and its histogram does not say so:\n{}",
+            lossy.text
+        );
+        assert_eq!(short["dropped"].as_u64(), Some(own_dropped), "{short}");
+        assert_eq!(short["throttled"].as_u64(), Some(own_throttled), "{short}");
+    }
 
     // The samples the mark says were dropped are time some sampled task spent
     // holding its cpu. Counted back in, they must still fit in the room the
