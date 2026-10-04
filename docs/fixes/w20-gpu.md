@@ -34,12 +34,13 @@ merged with `main` at `444900b`.
   `gpu.profile`, `gpu.counters` and `gpu.kernel`; the program's exit status
   is its own (`exit status 0`), no failed read, and its report is written.
 - **Counters beside kernel times or PC sampling are refused before the
-  launch, exit 2** (`src/collect/gpu/counters.rs`'s `launch_refusals`, one
-  call in `src/validate.rs`'s `validate_session`). The rule is the one the
-  attach already applied, now one function used in both places: requests
-  that launch the same command line and would ask the library for counters
-  beside activity, or counters beside PC sampling, are the request's error.
-  A request pinned to a backend other than `vendor:cupti` is left out.
+  launch, exit 2** (`src/collect/gpu/counters.rs`'s `launch_refusals`,
+  called from `src/main.rs`'s `trace` and `top_live` once the requests are
+  resolved; see "Review"). The rule is the one the attach already applied,
+  now one function used in both places: requests that launch the same
+  command line, resolved onto `vendor:cupti`, and that would ask the library
+  for counters beside activity, or counters beside PC sampling, are the
+  request's error. A request resolved onto any other backend is left out.
 - **No unwinding warning for `gpu.profile`** (`src/collect/gpu/mod.rs`'s
   `DEVICE_STACKS`, one condition in `src/validate.rs`'s `check_stack`): its
   stacks are kernel;file:line;stall and nothing is unwound. A host profile in
@@ -192,11 +193,48 @@ cargo test --test gpu_counters --test gpu_kernel -- --test-threads=1
   this wave): fewer launches on the `launch` regime for a replaying arm
   (`gpu.counters`: 108 of 117 minutes), e.g. a launch count per arm, so the
   GPU step fits in about fifteen minutes again.
-- **coordinator**: `src/validate.rs` (`validate_session`, `check_stack`),
+- **coordinator**: `src/validate.rs` (`check_stack`), `src/main.rs`
+  (`launch_rejections` and its two calls, after the review),
   `src/resolve.rs` (one call) and `src/capabilities.rs` (one field) were
   touched outside this stream's row, because the items assigned here could
   not be done otherwise; each is a few lines and calls into
   `src/collect/gpu/`.
+
+## Review
+
+The fix round, after the merge (`main` merged in first, a fast-forward).
+
+- **`launch_refusals` decided from source names, before resolution**
+  (fixed). It took an unpinned request as CUPTI's, so a pair that would
+  resolve onto another vendor's library was refused with CUPTI's
+  kernel-replay reason. It now takes each request with the backend the
+  resolver chose and counts only those resolved onto `vendor:cupti`; the
+  call moved out of `validate_session` (which reverts that edit) into
+  `src/main.rs`, after resolution and before any dump or launch, in `trace`
+  and in `top_live`, beside the budget's refusal, as a `Rejection` the same
+  renderer prints. Consequences: `omn validate` of such a session now says
+  it is valid (it never resolves, and the rule is about what serves the
+  requests), and on a machine where CUPTI does not resolve the resolver
+  answers first, so `gpu_counters`'s refusal test now skips there instead of
+  expecting exit 2 everywhere. The unit test holds the new half: the same
+  pair resolved onto `vendor:rocprof`, or one of the two onto it, is not
+  refused.
+- **Edits outside the stream's files** (agreed, nothing to fix here): the
+  list is under "Needs from another stream", coordinator, now with
+  `src/main.rs` in place of `validate_session`. They are for the
+  coordinator to land as shared-layer changes.
+- **A target the tool killed still exits 0** (agreed, not fixed here). The
+  `degraded:` line says it, but a script reading `omn`'s exit status cannot
+  tell. Making it a failure needs a channel from a collector to the run's
+  outcome: a `Collector` method (`src/collect/mod.rs`), carried on
+  `Collection` through the three places the runner assembles one, and read
+  by `src/main.rs`'s `measure` to exit 1 (a failure of this run, as an
+  attach failure is). That is the collector layer and the CLI, not this
+  stream's, and a new outcome channel is a decision for every family, not a
+  GPU fix; it is filed under "Needs from another stream" (budget) with the
+  GPU side ready to answer it from `counters::died_in_exit`'s condition.
+  The read the target took with it stays counted in `failed_reads`: the
+  last drain did not arrive, so that loss is real and is said as well.
 
 ## The tests
 
@@ -211,3 +249,8 @@ cargo test --test gpu_counters --test gpu_kernel -- --test-threads=1
   `--test cli` 26, `--test cross_machine` 6, all passed.
 - `cargo clippy --workspace --all-targets -- -D warnings` and
   `cargo fmt --check`: clean.
+- Fix round: `cargo test --lib collect::gpu` 63, `--lib validate` 23,
+  `--bin omn` 6, `--test family_gpu` 12, `--test gpu_counters
+  counters_beside` 1 (run, not skipped: the device and CUPTI are here), all
+  passed; `omn -f` of the counters-and-kernel session shown exiting 2 with
+  the refusal. Clippy and fmt clean.

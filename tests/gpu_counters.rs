@@ -361,9 +361,15 @@ fn a_counter_s_verdict_is_held_to_two_workloads_that_disagree_about_it() {
 
 /// Counters replay every launch, so a run that would also time kernels is
 /// refused before the program runs, and so is one with PC sampling, which
-/// CUPTI cannot run in the same process.
+/// CUPTI cannot run in the same process. The rule is CUPTI's, so it is asked
+/// of what the requests resolved onto: where CUPTI does not resolve, the
+/// resolver's answer comes first and the pair is not refused for CUPTI.
 #[test]
 fn counters_beside_kernel_times_or_pc_sampling_are_refused() {
+    if let Err(why) = ready() {
+        eprintln!("skipped: CUPTI's rule is asked only where CUPTI serves the requests: {why}");
+        return;
+    }
     let session = scratch("refused").with_extension("yml");
     let launch = "[python3, tests/gpu_workload.py, compute, \"1\"]";
     for other in ["gpu.kernel", "gpu.profile"] {
@@ -380,8 +386,8 @@ fn counters_beside_kernel_times_or_pc_sampling_are_refused() {
         .unwrap();
         let output = omn(&["-f", session.to_str().unwrap()], &[]);
         let complaint = stderr(&output);
-        // The request's error, before anything is resolved or launched:
-        // exit 2 on every machine, with or without a device.
+        // The request's error, once resolved and before anything is
+        // launched: exit 2, not an attach failure.
         assert_eq!(output.status.code(), Some(2), "{complaint}");
         assert!(
             !complaint.contains("cannot start collecting"),
