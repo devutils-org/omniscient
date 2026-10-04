@@ -10,7 +10,8 @@ Branch `feat/w20-workloads`. Owns `view/workloads/**` and
   (the manifest, a thread's name, a burn on the thread's own cpu clock, a
   file written or read through a chosen descriptor, a scratch directory under
   `target/omn-view-workloads/`). Each program reads its parameters from its
-  manifest, so the truth and the program cannot drift apart. Python, fixed
+  manifest, so the truth and the program cannot drift apart (the request
+  server cannot read it; a test holds its session to it instead). Python, fixed
   sizes, no randomness, 1 to 3 s each, no privilege. `view/workloads/README.md`
   tabulates what each one makes known.
 - **The request workload is C**, not Python: a request is declared by USDT
@@ -23,11 +24,14 @@ Branch `feat/w20-workloads`. Owns `view/workloads/**` and
   driver calls (no toolkit), in a context whose synchronisation blocks: 12
   `spin` launches one at a time after three lanes take six turns of 80 ms in
   order. A machine with no device runs the lanes alone and says so.
-- **`tests/view_workloads.rs`**, 13 tests: three that need no privilege (every
+- **`tests/view_workloads.rs`**, 14 tests: four that need no privilege (every
   view in the registry, and `process`, has a manifest naming its view, a
   program that exists and a session; every source a view needs is asked by
   its session or excused, with a reason, in the manifest's `not_exercised`;
-  every session is understood by `--dump-request`), and one per workload
+  every session passes `omn validate`, and resolves under `--dump-request`
+  -- that half skips loudly, per session, on a binary without the
+  capabilities, where nine of the ten sessions have no viable backend; the
+  request session launches exactly the manifest's plan), and one per workload
   holding its sources to its manifest. Each run's results are kept as
   `target/omn-view-workloads/<view>.json`, for reading a failure after the
   fact.
@@ -104,6 +108,29 @@ Reasoned, not shown:
   workloads got their tail; its message was not captured, and every whole-file
   run since was green. If it returns, `target/omn-view-workloads/flame.json` holds the
   run.
+
+## Review
+
+- **`every_session_is_understood` was not privilege-free** (reviewer: right).
+  `--dump-request` resolves backends, and on a binary without `CAP_BPF` and
+  `CAP_PERFMON` nine of the ten sessions fail with "no viable backend". The
+  test now runs `omn validate -f` on each session first, which needs no
+  privilege and must pass everywhere, then `--dump-request`, skipping that
+  half loudly when the failure says "no viable backend" and names the
+  capabilities. Shown both ways: right after a `cargo test` relink (no file
+  capabilities) it passed with nine "skipped resolving" lines and `system`
+  resolved; after `make`, all ten resolved, none skipped.
+- **The request session's plan was unchecked against the manifest**
+  (reviewer: right). The server takes its plan on its command line, so it
+  cannot read the manifest the way the Python workloads do. A new
+  privilege-free test, `request_session_runs_the_manifests_plan` (also called
+  at the top of `request_causes_are_the_manifests`), checks that each kind's
+  `plan` string says its `lock_ms`, `reads` and `gap_ms` (`lock:reads[:gap]`,
+  zero where absent), that every kind has the same `count`, and that the
+  session launches the manifest's `run` prefix followed by the kinds
+  interleaved `count` times in manifest order -- the order the measurement
+  test reads request ids against. Shown to fail on a changed plan entry in the
+  session and on a changed `lock_ms` in the manifest.
 
 ## Privileged runs wanted
 
