@@ -1,0 +1,20 @@
+; The io family's reference workload: 4 KiB random direct reads for two
+; seconds, one thread, synchronous. Direct, so every read is a block request
+; (page cache hits never reach the device); 4 KiB random, so the block layer
+; has nothing to merge and fio's operation count is the device's request
+; count; --thread, so the job runs inside the process omn launched (a forked
+; job is not followed, docs/fixes/w22-io.md). The file lives under target/,
+; which is on a block device where tmpfs-backed /tmp is not.
+[global]
+directory=target
+filename=omn-reference-io.dat
+size=64M
+bs=4k
+direct=1
+ioengine=psync
+thread
+time_based
+runtime=2
+
+[randread]
+rw=randread

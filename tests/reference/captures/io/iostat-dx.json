@@ -1,0 +1,20 @@
+{"sysstat": {
+	"hosts": [
+		{
+			"nodename": "reference",
+			"sysname": "Linux",
+			"release": "6.17.0",
+			"machine": "x86_64",
+			"number-of-cpus": 16,
+			"date": "10/04/2026",
+			"statistics": [
+				{
+					"disk": [
+						{"disk_device": "nvme0n1", "r/s": 14612.00, "rkB/s": 58448.00, "rrqm/s": 0.00, "%rrqm": 0.00, "r_await": 0.06, "rareq-sz": 4.00, "w/s": 2.50, "wkB/s": 50.00, "wrqm/s": 0.00, "%wrqm": 0.00, "w_await": 0.40, "wareq-sz": 20.00, "d/s": 0.00, "dkB/s": 0.00, "drqm/s": 0.00, "%drqm": 0.00, "d_await": 0.00, "dareq-sz": 0.00, "f/s": 0.00, "f_await": 0.00, "aqu-sz": 0.82, "util": 99.20},
+						{"disk_device": "sda", "r/s": 0.00, "rkB/s": 0.00, "rrqm/s": 0.00, "%rrqm": 0.00, "r_await": 0.00, "rareq-sz": 0.00, "w/s": 0.00, "wkB/s": 0.00, "wrqm/s": 0.00, "%wrqm": 0.00, "w_await": 0.00, "wareq-sz": 0.00, "d/s": 0.00, "dkB/s": 0.00, "drqm/s": 0.00, "%drqm": 0.00, "d_await": 0.00, "dareq-sz": 0.00, "f/s": 0.00, "f_await": 0.00, "aqu-sz": 0.00, "util": 0.00}
+					]
+				}
+			]
+		}
+	]
+}}
