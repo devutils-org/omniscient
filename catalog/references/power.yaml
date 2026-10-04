@@ -21,6 +21,15 @@
 #                             # window, not the thing launched.
 #   compare.omn_series: KEY   # which of omn's series `compare.omn` reads, when
 #                             # it is not named like the tool's key.
+#   reference.requires_setting: [{file: PATH, at_most: N}]
+#                             # a kernel setting the tool needs: skip, with
+#                             # "PATH is V, the tool needs at most N", when the
+#                             # file holds more. The unprivileged perf and
+#                             # `turbostat --no-msr` pairs open cpu-wide perf
+#                             # events, which the kernel refuses an unprivileged
+#                             # user above perf_event_paranoid 0; there turbostat
+#                             # prints no summary and perf no count, which would
+#                             # otherwise read as a failure of the pair.
 
 - source: power.energy
   tool: perf stat
@@ -33,6 +42,7 @@
     command: [perf, stat, -x, ",", -a, -e, power/energy-pkg/, --]
     parse: power_perf_stat_energy
     requires: [perf]
+    requires_setting: [{file: /proc/sys/kernel/perf_event_paranoid, at_most: 0}]
     privileged: false
   compare:
     key: ""
@@ -54,6 +64,7 @@
     command: [turbostat, --quiet, --no-msr, --Summary, --Joules, --show, "Pkg_J"]
     parse: power_turbostat_summary
     requires: [turbostat]
+    requires_setting: [{file: /proc/sys/kernel/perf_event_paranoid, at_most: 0}]
     privileged: false
   compare:
     key: Pkg_J
@@ -95,6 +106,7 @@
     command: [turbostat, --quiet, --no-msr, --Summary, -c, "1", --show, "Avg_MHz,Busy%,Bzy_MHz"]
     parse: power_turbostat_summary
     requires: [turbostat, /sys/devices/system/cpu/cpu1/cpufreq/cpuinfo_avg_freq]
+    requires_setting: [{file: /proc/sys/kernel/perf_event_paranoid, at_most: 0}]
     privileged: false
   compare:
     key: Bzy_Hz
