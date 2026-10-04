@@ -1,9 +1,9 @@
 # `omn top`: the frame every view draws in
 
 Stream core of the nineteenth wave. `omn top` is an interactive terminal view
-of everything `omn` measures, live or from a recording, and nine ways of
-looking at one run, each an experiment the user keeps or drops on what it
-shows. This page is the guide for a view's author: what the frame hands a
+of everything `omn` measures, live or from a recording, and ten ways of
+looking at one run -- the nine the user kept on 2026-10-04, and `process`,
+one process at a glance. This page is the guide for a view's author: what the frame hands a
 view, how a figure says how far it can be trusted, which sources each view
 needs, the recordings every view is drawn on, and how a view is tested.
 
@@ -25,9 +25,15 @@ omn top --headless -o DIR -- ./prog      # live, no screen: collect and write
 omn top --dump-session -- ./prog         # the session a live run would ask for
 ```
 
-Keys: `q` quits, `←`/`→` or `tab` move between views, `1`-`9` jump, `f`
-clears the focus, `?` opens the help (the keys and the trust legend). A view
-adds its own keys to the help line.
+Keys: `q` quits, `←`/`→` or `tab` move between views, `1`-`9` jump and `0`
+opens the tenth, `enter` goes into what is selected and `⌫` (backspace)
+comes back, `f` clears the focus, `M` turns the mouse off and on, `?` opens
+the help (the keys and the trust legend). A view adds its own keys to the
+help line.
+
+The first screen is `process` when the run has a target of its own (a
+launched program: its results carry its `lifetime`), and `system` when it is
+the machine's. `--view NAME` opens on another.
 
 A live run lasts until the view is quit, the launched program exits, or
 `--duration` (10 minutes when not given, and said). Quitting ends the run;
@@ -45,9 +51,9 @@ unless `--duration` is given.
 |---|---|---|
 | The data | `view/src/model.rs` | `Data`: one run, as `omn` wrote it -- a mirror of `results.json`, field for field -- with the catalog's facts per source, the refusals, a recorder document's trigger, and `live` while a run goes on |
 | The trust style | `view/src/trust.rs` | `Trust::of(data, results)`, its `style()` and `badges()`, `figure()`, `error_bar()`, `render_refusal()`, the `palette` |
-| The views | `view/src/views.rs` | the `View` trait, `Ctx`, `Focus`, `Action`, `Need`, and `registry()` -- all nine registered |
-| The frame | `view/src/app.rs` | header, tabs, help line, the cost corner, the keys, focus and navigation |
-| Units | `view/src/units.rs` | `duration`, `bytes`, `count`, `percent`, `quantity(value, unit)` |
+| The views | `view/src/views.rs` | the `View` trait, `Ctx`, `Focus`, `Action`, `Need`, `Region`, and `registry()` -- all ten registered |
+| The frame | `view/src/app.rs` | header, tabs, help line, the cost corner, the keys, focus, the links between views and their history, the mouse |
+| Units | `view/src/units.rs` | `duration`, `bytes`, `count`, `percent`, `approx` (three significant digits for a measured float), `quantity(value, unit)` |
 | Live | `view/src/feed.rs` | a live run's `Update`s, and `as_live_until` to test a view on a run as it looked half way |
 | The loop | `view/src/term.rs` | the terminal, keys and updates |
 | Snapshots | `view/src/snapshot.rs` | a view drawn into text and into ANSI, the fixtures, the comparison |
@@ -65,6 +71,10 @@ pub trait View {
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>);
     fn key(&mut self, key: KeyEvent, ctx: &Ctx<'_>) -> Action { Action::None }
     fn keys(&self) -> &'static [(&'static str, &'static str)] { &[] }
+    fn takes_text(&self) -> bool { false }    // a search being typed
+    fn regions(&self) -> &[Region] { &[] }    // what a click can select
+    fn select(&mut self, id: usize, ctx: &Ctx<'_>) -> Action { Action::None }
+    fn wheel(&mut self, down: bool, ctx: &Ctx<'_>) -> Action { /* ↑/↓ */ }
 }
 ```
 
@@ -73,8 +83,65 @@ pub trait View {
 screen to. A key returns `Action::Focus(focus)` to narrow every view, or
 `Action::Goto { view, focus }` to open another view narrowed -- from a process
 in the overview into its ledger, from a request into its waterfall. The frame
-takes `q`, `?`, `f`, the arrows, `tab` and the digits before a view sees a
-key.
+takes `q`, `?`, `f`, `M`, the arrows, `tab`, the digits and (when there is
+somewhere to go back to) `⌫` before a view sees a key -- unless the view
+`takes_text()`: while a search is being typed every key is the view's, `q`,
+`?`, digits and `f` included, and the frame keeps only `Ctrl-C`.
+
+### The links between views
+
+What is selected in one view opens the view that explains it, by `enter`,
+and `⌫` (or a right click) comes back to where it was, with the focus it had:
+
+| From | Selected | `enter` opens |
+|---|---|---|
+| system | a process | its `ledger` |
+| ledger | a line | the view behind it: cpu time its `flame`, I/O and the network `flows`, GPU time `lanes`, memory, GPU memory and energy `system` (the sheet has no line of blocked time yet, so none opens `timebar`) |
+| request | a request | focuses every view on it; once focused, its threads in `lanes` (`l`), and `w` its wake-ups in `wake` |
+| timebar | a bar | its request in `request`, or its thread in `lanes` |
+| heatmap | a column | its slowest measurement's request, or its thread's lane |
+| wake | a thread | focuses it; once focused, its `lanes` |
+| lanes, flows | a lane, a socket or file | focuses its thread |
+| process | a tile | the view that has its detail (its stream's) |
+
+The frame keeps the history of each `Goto`; a `Goto` to where the frame
+already is does not add to it. A view's own `⌫` (the flame's zoom out) is
+reached by its other key (`u`) while there is a history to go back through.
+
+### The mouse
+
+Every view reports the **regions** it drew -- a frame, a lane, a ledger line,
+a request, a process row, a heatmap column, a wake cell, a socket or file --
+each a rectangle and an id of the view's own, rebuilt at every draw. The frame
+routes the mouse to them:
+
+- a **click** selects what is under it, through the view's `select(id)`,
+  which moves the selection exactly as the keys would;
+- a **click on the selection** goes in, as `enter` does;
+- the **wheel** scrolls as `↑`/`↓` do (`wheel`), and zooms where the view
+  zooms (the heatmap: in time, as `+`/`-`);
+- a **right click** comes back, as `⌫` does;
+- a click on a **tab** opens its view.
+
+Keys stay complete on their own: nothing is reachable by the mouse only.
+Capture is on by default; `M` turns it off, which gives the terminal back
+its own text selection (most terminals also select with `shift` held while
+capture is on).
+
+The mouse is decoded in SGR mode (`?1006`), which any terminal of the last
+decade speaks -- Ghostty, kitty, WezTerm, iTerm2, foot, Alacritty, xterm,
+GNOME's VTE, Windows Terminal -- and which carries columns past 223. Inside
+**tmux**, the mouse reaches the view only with `set -g mouse on` in
+`~/.tmux.conf` (or `tmux set -g mouse on` in the session): tmux then passes
+the reports through to the program that asked for them; without it, tmux
+keeps the mouse for itself and the view sees no clicks. GNU `screen` passes
+no mouse reports at all. Over `ssh` nothing more is needed.
+
+The snapshot harness sends a click like a key: `snapshot::click(&mut app,
+column, row)`, `right_click` and `wheel`, on what the app last drew;
+`snapshot::find(&buffer, text)` finds where a label was drawn, so a test
+clicks on what it reads. `snapshot::draw_with(data, view, against, focus, ...)`
+draws a view compared or narrowed, for the gallery's standard set.
 
 A view **reads only `ctx`**. It never opens a source, reads a file or starts
 a program: that is the projection the brief settled. A view that needs data
