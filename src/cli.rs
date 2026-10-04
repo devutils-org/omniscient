@@ -66,11 +66,13 @@ pub enum Command {
     Saturate(SaturateArgs),
     /// Two profiles and a subtraction: which function is the difference.
     Diff(DiffArgs),
+    /// An interactive view of everything omn measures, live or from a recording.
+    Top(Box<TopArgs>),
 }
 
 /// The subcommand names, used to tell `omn io.latency` from `omn list`.
-pub const SUBCOMMANDS: [&str; 8] = [
-    "trace", "list", "formats", "validate", "latency", "saturate", "diff", "help",
+pub const SUBCOMMANDS: [&str; 9] = [
+    "trace", "list", "formats", "validate", "latency", "saturate", "diff", "top", "help",
 ];
 
 #[derive(Debug, Args)]
@@ -895,4 +897,85 @@ mod tests {
         let result = Cli::try_parse_from(["omn", "trace", "io.latency", "-f", "session.yml"]);
         assert!(result.is_err());
     }
+}
+
+/// `omn top`: a terminal view of a run, live or recorded.
+///
+/// The view is a projection: live, it asks for the sources its views need --
+/// or for a session file's requests -- through the same resolver and runner as
+/// `omn trace`, and draws what the runner holds between its rounds. A source
+/// this machine cannot serve is not a reason to refuse the run: its reason is
+/// drawn where its panel would be.
+#[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("top_target").multiple(false)))]
+pub struct TopArgs {
+    /// Draw a recorded run instead of a live one: a `results.json`, a flight
+    /// recorder's `trigger-<n>.json`, or a directory holding either.
+    #[arg(long, value_name = "RUN", conflicts_with_all = ["gallery", "file", "top_target"])]
+    pub replay: Option<PathBuf>,
+
+    /// Step through every view on one recorded run.
+    #[arg(long, value_name = "RUN", conflicts_with_all = ["file", "top_target"])]
+    pub gallery: Option<PathBuf>,
+
+    /// A second recorded run, for the views that draw a difference.
+    #[arg(long, value_name = "RUN")]
+    pub against: Option<PathBuf>,
+
+    /// The view to open on: system, flame, ledger, request, timebar, heatmap,
+    /// lanes, wake or flows.
+    #[arg(long, value_name = "NAME")]
+    pub view: Option<String>,
+
+    /// Run this session's requests live instead of the views' own (`omn
+    /// latency --dump-session` writes the one the timebar view reads).
+    #[arg(short = 'f', long, value_name = "PATH", conflicts_with = "top_target")]
+    pub file: Option<PathBuf>,
+
+    /// An existing process or processes.
+    #[arg(long, value_name = "PID", value_delimiter = ',', group = "top_target")]
+    pub pid: Vec<i32>,
+
+    /// A cgroup v2 path.
+    #[arg(long, value_name = "PATH", group = "top_target")]
+    pub cgroup: Option<PathBuf>,
+
+    /// Program to launch and follow, after `--`. Without a target, the view
+    /// is of the whole machine.
+    #[arg(last = true, value_name = "PROGRAM", group = "top_target")]
+    pub program: Vec<String>,
+
+    /// The longest a live run lasts. It ends sooner when the view is quit or
+    /// a launched program exits. Default: 10m, said when taken.
+    #[arg(short = 'd', long, value_name = "DURATION")]
+    pub duration: Option<Duration>,
+
+    /// Write the live run's results.json, resolved.json, cost.json and the
+    /// view's view.json to this directory when it ends: `--replay DIR` draws
+    /// it again.
+    #[arg(short = 'o', long, value_name = "DIR")]
+    pub out: Option<PathBuf>,
+
+    /// Print the session a live run would ask for, as YAML, then exit: `omn
+    /// trace -f` runs the same requests without the view.
+    #[arg(long, conflicts_with_all = ["replay", "gallery"])]
+    pub dump_session: bool,
+
+    /// No terminal: a live run is collected and written to `--out`; a replay
+    /// prints its view, and a gallery every view, as text on stdout.
+    #[arg(long)]
+    pub headless: bool,
+
+    /// The size a headless view is printed at, as COLUMNSxROWS.
+    #[arg(
+        long,
+        value_name = "SIZE",
+        default_value = "120x40",
+        requires = "headless"
+    )]
+    pub size: String,
+
+    /// Load the catalog from this directory instead of the built-in one.
+    #[arg(long, value_name = "DIR")]
+    pub catalog: Option<PathBuf>,
 }

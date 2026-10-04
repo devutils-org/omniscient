@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture http-server │ 689ms                              [0m[35mview: snapshot[0m │ [0m[35mcollectors 15.7% │ target 66.2% cpu[0m [0m
+[0m[1;7m 1 system [0m 2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
+┌ system -- the overview: cpu, memory, disk, network, GPU and power, and the processes ────────────────────────────────┐[0m
+│[0m[3mNot drawn yet. What this view needs, and what this run holds of it:[0m                                                   │[0m
+│                                                                                                                      │[0m
+│[0m[1mcpu.util@system          [0m[2m4 events via fs:proc [timeline,summary][0m [0m[36m~low det[0m                                             │[0m
+│[0m[2m           [0m┌ help ────────────────────────────────────────────────────────────────────────────────────────┐           │[0m
+│[0m[1mmem.pressur[0m│[0m[1mKeys[0m                                                                                          │           │[0m
+│[0m[2m           [0m│  q          quit                                                                             │           │[0m
+│[0m[1mio.bytes@sy[0m│  ←/→ tab    view                                                                             │           │[0m
+│[0m[2m           [0m│  1-9        jump                                                                             │           │[0m
+│[0m[1mnet.bytes@s[0m│  f          clear focus                                                                      │           │[0m
+│[0m[2m           [0m│  ?          help                                                                             │           │[0m
+│[0m[1mgpu.engine_[0m│                                                                                              │           │[0m
+│[0m[2m           [0m│[0m[1mHow far a figure can be trusted[0m                                                               │           │[0m
+│[0m[1mgpu.mem@sys[0m│  [0m[2mdimmed[0m     not to be read at face value; its badge says why                                 │           │[0m
+│[0m[2m           [0m│  [0m[33m-12 lost[0m   12 records were lost: every figure built from them is a lower bound              │           │[0m
+│[0m[1mpower.energ[0m│  [0m[33m3 late[0m     3 rounds of reads came late: nothing is missing, but the series is not spaced as │           │[0m
+│[0m[2m           [0m│asked                                                                                         │           │[0m
+│[0m[1mcpu.oncpu_t[0m│  [0m[36m±2.50µs[0m    timestamps were converted from another clock and may be off by up to 2.50µs      │           │[0m
+│[0m[2m           [0m│  [0m[36m~low det[0m   the source is not reproducible between two runs of the same workload             │           │[0m
+│           │  [0m[3;34mlive[0m       the run is still going: losses, cost and stack names are known at its end        │           │[0m
+│           │  [0m[33mdegraded[0m   served by a fallback that says what it gives up (1)                              │           │[0m
+│           │  ███▒▒      an error bar: what is certain solid, what is uncertain shaded                    │           │[0m
+│           │  [0m[31mrefused[0m    a source that was not served shows why where its panel would be                  │           │[0m
+│           │                                                                                              │           │[0m
+│           │Any key closes this.                                                                          │           │[0m
+│           │                                                                                              │           │[0m
+│           │                                                                                              │           │[0m
+│           │                                                                                              │           │[0m
+│           │                                                                                              │           │[0m
+│           │                                                                                              │           │[0m
+│           │                                                                                              │           │[0m
+│           │                                                                                              │           │[0m
+│           └──────────────────────────────────────────────────────────────────────────────────────────────┘           │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help                                                                   [0m

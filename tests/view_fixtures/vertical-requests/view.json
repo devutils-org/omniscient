@@ -1,0 +1,14 @@
+{
+  "origin": "live: examples/vertical-one-request.yml",
+  "facts": {
+    "io.latency": {
+      "determinism": "low",
+      "summary": "Block request latency, submit -> completion"
+    },
+    "net.request": {
+      "determinism": "medium",
+      "summary": "One request's life by state, and the network on either side of it"
+    }
+  },
+  "refused": []
+}

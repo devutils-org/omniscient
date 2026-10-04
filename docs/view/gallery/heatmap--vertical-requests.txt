@@ -1,0 +1,40 @@
+omn top │ fixture vertical-requests │ 413ms                        view: snapshot │ collectors 1.28% │ target 4.05% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
+┌ heatmap -- latency over time: time across, latency up, density in colour ────────────────────────────────────────────┐
+│Not drawn yet. What this view needs, and what this run holds of it:                                                   │
+│                                                                                                                      │
+│io.latency               142 events via bpf:raw_tp [raw,summary] ~low det degraded x3                                 │
+│                         block request latency, of the requests the target issued                                     │
+│sched.runqlat            not in this run                                                                              │
+│                         run queue latency                                                                            │
+│net.socket               not in this run                                                                              │
+│                         socket read and write latency                                                                │
+│gpu.kernel               not in this run                                                                              │
+│                         kernel durations                                                                             │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help

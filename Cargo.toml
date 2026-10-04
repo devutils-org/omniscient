@@ -1,5 +1,5 @@
 [workspace]
-members = ["shim", "mcp"]
+members = ["shim", "mcp", "view"]
 
 [package]
 name = "omn"
@@ -26,6 +26,7 @@ perf-event-open-sys = "7.0.0"
 rustc-demangle = "0.1"
 cpp_demangle = "0.5"
 framehop = { version = "0.16", default-features = false, features = ["std"] }
+omn-view = { path = "view" }
 
 [profile.release]
 lto = "thin"

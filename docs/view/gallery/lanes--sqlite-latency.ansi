@@ -1,0 +1,40 @@
+[0m[1momn top[0m │ fixture sqlite-latency │ 274ms                           [0m[35mview: snapshot[0m │ [0m[35mcollectors 5.31% │ target 12.0% cpu[0m [0m
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  9 flows                                 [0m
+┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐[0m
+│[0m[3mNot drawn yet. What this view needs, and what this run holds of it:[0m                                                   │[0m
+│                                                                                                                      │[0m
+│[0m[1msched.switches           [0m[2mnot in this run[0m                                                                              │[0m
+│[0m[2m                         each thread's on and off cpu[0m                                                                 │[0m
+│[0m[1msched.offcpu             [0m[2m69 events via bpf:raw_tp [stack][0m [0m[36m~low det[0m [0m[33mdegraded[0m                                           │[0m
+│[0m[2m                         why a thread was off cpu, each block on its own[0m                                              │[0m
+│[0m[1mgpu.kernel               [0m[2mnot in this run[0m                                                                              │[0m
+│[0m[2m                         a lane per GPU stream[0m                                                                        │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help                                                                   [0m

@@ -1,0 +1,22 @@
+{
+  "origin": "live: /work/latency.yml",
+  "facts": {
+    "cpu.profile": {
+      "determinism": "low",
+      "summary": "On-CPU profile with call stacks"
+    },
+    "sched.futex": {
+      "determinism": "low",
+      "summary": "Userspace futex wait"
+    },
+    "sched.offcpu": {
+      "determinism": "low",
+      "summary": "Blocked time with the blocking stack"
+    },
+    "sched.runqlat": {
+      "determinism": "low",
+      "summary": "Run queue wait: wakeup -> on-CPU"
+    }
+  },
+  "refused": []
+}

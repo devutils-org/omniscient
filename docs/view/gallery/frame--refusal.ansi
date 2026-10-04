@@ -1,0 +1,6 @@
+[0m[31m┌ gpu.kernel refused ──────────────────────────────────────┐[0m
+[0m[31m│gpu.kernel was not served:[0m                                [0m[31m│[0m
+[0m[31m│[0mno collector is written for `gpu.kernel` on backend       [0m[31m│[0m
+[0m[31m│[0m`vendor:cupti` yet                                        [0m[31m│[0m
+[0m[31m│[0m                                                          [0m[31m│[0m
+[0m[31m└──────────────────────────────────────────────────────────┘[0m

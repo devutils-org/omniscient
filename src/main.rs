@@ -15,8 +15,8 @@ use serde::Serialize;
 use omn::capabilities::Capabilities;
 use omn::catalog::Catalog;
 use omn::cli::{
-    Cli, Command, Defaulted, DiffArgs, FormatsArgs, LatencyArgs, ListArgs, SaturateArgs, TraceArgs,
-    ValidateArgs, SUBCOMMANDS,
+    Cli, Command, Defaulted, DiffArgs, FormatsArgs, LatencyArgs, ListArgs, SaturateArgs, TopArgs,
+    TraceArgs, ValidateArgs, SUBCOMMANDS,
 };
 use omn::format::{FormatStatus, OutputFormat};
 use omn::request::Session;
@@ -148,6 +148,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Latency(args) => latency(args),
         Command::Saturate(args) => saturate(args),
         Command::Diff(args) => diff(args),
+        Command::Top(args) => top(*args),
     }
 }
 
@@ -2353,6 +2354,645 @@ fn diff(args: DiffArgs) -> anyhow::Result<ExitCode> {
         format => print_answer(format, &result, || result.text(args.top))?,
     }
     Ok(ExitCode::SUCCESS)
+}
+
+// ---------------------------------------------------------------------------
+// `omn top`
+//
+// The view is a projection, never a collector. Live, it builds a session --
+// the sources its views need, or a session file's -- and runs it through the
+// same resolver, ladder and runner as `omn trace`; between rounds a `Tap`
+// hands what the runner already holds to the drawing thread. Nothing in the
+// collectors changes for it, and a run without `omn top` never reaches here.
+
+/// The longest a live `omn top` runs when no `--duration` is given.
+const TOP_DEFAULT_DURATION: &str = "10m";
+
+fn top(args: TopArgs) -> anyhow::Result<ExitCode> {
+    let catalog = catalog(args.catalog.as_deref())?;
+    if let Some(name) = &args.view {
+        let names: Vec<&str> = omn_view::views::registry()
+            .iter()
+            .map(|view| view.name())
+            .collect();
+        if !names.contains(&name.as_str()) {
+            eprintln!(
+                "error: there is no view `{name}`; the views are {}",
+                names.join(", ")
+            );
+            return Ok(ExitCode::from(EXIT_REJECTED));
+        }
+    }
+    if args.against.is_some() && args.replay.is_none() && args.gallery.is_none() {
+        eprintln!("error: --against compares two recordings, and needs --replay or --gallery");
+        return Ok(ExitCode::from(EXIT_REJECTED));
+    }
+    match args.replay.as_ref().or(args.gallery.as_ref()) {
+        Some(path) => top_replay(&catalog, &args, path),
+        None => top_live(&catalog, &args),
+    }
+}
+
+/// What the catalog says of each source a run names, which a result file
+/// does not carry.
+fn view_facts(catalog: &Catalog, data: &mut omn_view::model::Data) {
+    let sources: Vec<String> = data
+        .run
+        .results
+        .iter()
+        .map(|results| results.source.clone())
+        .chain(data.refused.iter().map(|refusal| refusal.source.clone()))
+        .collect();
+    for source in sources {
+        if data.facts.contains_key(&source) {
+            continue;
+        }
+        let Ok(id) = source.parse::<omn::request::SourceId>() else {
+            continue;
+        };
+        if let Some(entry) = catalog.get(&id) {
+            data.facts.insert(
+                source,
+                omn_view::model::SourceFacts {
+                    determinism: entry.determinism.to_string(),
+                    summary: entry.summary.clone(),
+                },
+            );
+        }
+    }
+}
+
+fn top_load(catalog: &Catalog, path: &Path) -> anyhow::Result<omn_view::model::Data> {
+    let mut data = omn_view::model::Data::load(path).map_err(|error| anyhow::anyhow!("{error}"))?;
+    view_facts(catalog, &mut data);
+    Ok(data)
+}
+
+fn top_app(args: &TopArgs, data: omn_view::model::Data) -> anyhow::Result<omn_view::app::App> {
+    let mut app = omn_view::app::App::new(data);
+    app.gallery = args.gallery.is_some();
+    if let Some(name) = &args.view {
+        app.open(name).map_err(|error| anyhow::anyhow!(error))?;
+    }
+    Ok(app)
+}
+
+fn top_size(args: &TopArgs) -> anyhow::Result<(u16, u16)> {
+    args.size
+        .split_once('x')
+        .and_then(|(columns, rows)| Some((columns.parse().ok()?, rows.parse().ok()?)))
+        .filter(|(columns, rows): &(u16, u16)| *columns >= 40 && *rows >= 10)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--size is COLUMNSxROWS, at least 40x10, such as 120x40; `{}` is not",
+                args.size
+            )
+        })
+}
+
+fn top_replay(catalog: &Catalog, args: &TopArgs, path: &Path) -> anyhow::Result<ExitCode> {
+    let data = top_load(catalog, path)?;
+    let against = args
+        .against
+        .as_deref()
+        .map(|path| top_load(catalog, path))
+        .transpose()?;
+    if args.headless {
+        let (columns, rows) = top_size(args)?;
+        let names: Vec<String> = match (&args.gallery, &args.view) {
+            (Some(_), None) => omn_view::views::registry()
+                .iter()
+                .map(|view| view.name().to_owned())
+                .collect(),
+            (_, Some(name)) => vec![name.clone()],
+            (None, None) => vec![omn_view::views::registry()[0].name().to_owned()],
+        };
+        let mut out = std::io::stdout().lock();
+        for name in names {
+            let mut app = top_app(args, data.clone())?;
+            app.against.clone_from(&against);
+            app.cost = omn_view::app::Cost::Snapshot;
+            app.open(&name).map_err(|error| anyhow::anyhow!(error))?;
+            let buffer = omn_view::snapshot::draw_app(&mut app, columns, rows);
+            write!(out, "{}", omn_view::snapshot::text(&buffer))?;
+            writeln!(out)?;
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mut app = top_app(args, data)?;
+    app.against = against;
+    let quit = std::sync::atomic::AtomicBool::new(false);
+    omn_view::term::run(app, None, &quit)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The session `omn top` runs live: a file's, or every view's needs on the
+/// target given.
+fn top_session(
+    catalog: &Catalog,
+    args: &TopArgs,
+) -> anyhow::Result<(Session, Vec<omn_view::model::Refusal>, Vec<String>)> {
+    let mut notes = Vec::new();
+    let duration = match args.duration {
+        Some(duration) => duration,
+        None => {
+            notes.push(format!(
+                "the live run lasts at most {TOP_DEFAULT_DURATION} (--duration), or until the \
+                 view is quit or the launched program exits"
+            ));
+            TOP_DEFAULT_DURATION.parse()?
+        }
+    };
+    let mut refused = Vec::new();
+    if let Some(path) = &args.file {
+        let (mut session, _origin) = session_file::load(path, None)?;
+        // The view watches the runner through the one hook an escalation
+        // also needs, and a recording's documents are cut from the run the
+        // view would be drawing: either is run with `omn trace -f`, and its
+        // output replayed.
+        if session.escalate.is_some() || session.record.is_some() {
+            anyhow::bail!(
+                "{} escalates or records, which `omn top` cannot watch live: run it with `omn \
+                 trace -f {} --format json -o DIR`, then `omn top --replay DIR`",
+                path.display(),
+                path.display()
+            );
+        }
+        // The longest duration is the view's, like `--duration` on `omn
+        // trace -f`: every request moves with it.
+        session.duration = Some(duration);
+        for request in &mut session.requests {
+            request.duration = Some(duration);
+        }
+        return Ok((session, refused, notes));
+    }
+    let target = if !args.program.is_empty() {
+        omn::request::Target::Launch(args.program.clone())
+    } else if !args.pid.is_empty() {
+        omn::request::Target::Pid(args.pid.clone())
+    } else if let Some(cgroup) = &args.cgroup {
+        omn::request::Target::Cgroup(cgroup.clone())
+    } else {
+        omn::request::Target::System
+    };
+    let mut requests = Vec::new();
+    for need in omn_view::views::all_needs() {
+        let refuse = |reason: String| omn_view::model::Refusal {
+            label: need.label.clone(),
+            source: need.source.to_owned(),
+            reason,
+        };
+        let built = (|| -> Result<omn::request::Request, String> {
+            Ok(omn::request::Request {
+                source: need.source.parse().map_err(|error| format!("{error}"))?,
+                target: match need.scope {
+                    omn_view::views::Scope::Target => target.clone(),
+                    omn_view::views::Scope::System => omn::request::Target::System,
+                },
+                mode: need.mode.parse().map_err(|error| format!("{error}"))?,
+                emit: need
+                    .emit
+                    .iter()
+                    .map(|emit| emit.parse().map_err(|error| format!("{error}")))
+                    .collect::<Result<_, _>>()?,
+                keys: need
+                    .keys
+                    .iter()
+                    .map(|key| key.parse().map_err(|error| format!("{error}")))
+                    .collect::<Result<_, _>>()?,
+                filter: None,
+                duration: Some(duration),
+                budget: None,
+                stack: need
+                    .stack
+                    .map(|stack| stack.parse().map_err(|error| format!("{error}")))
+                    .transpose()?,
+                symbols: None,
+                backend: None,
+                label: Some(need.label.clone()),
+                window: None,
+            })
+        })();
+        let request = match built {
+            Ok(request) => request,
+            Err(reason) => {
+                refused.push(refuse(reason));
+                continue;
+            }
+        };
+        // Each need is asked alone: a view that asks for something the
+        // catalog refuses loses that panel, not the run.
+        if let Err(rejections) = validate::validate_request(catalog, &request, OutputFormat::Json) {
+            let reason = rejections
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            refused.push(refuse(reason));
+            continue;
+        }
+        requests.push(request);
+    }
+    let session = Session {
+        name: Some("omn top".to_owned()),
+        duration: Some(duration),
+        budget: None,
+        out: args.out.clone(),
+        format: OutputFormat::Json,
+        requests,
+        joins: Vec::new(),
+        decompose: Vec::new(),
+        escalate: None,
+        record: None,
+    };
+    Ok((session, refused, notes))
+}
+
+fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
+    if args.headless && args.out.is_none() && !args.dump_session {
+        eprintln!(
+            "error: a headless live run draws nothing, so it needs --out <dir> to write what it \
+             collects"
+        );
+        return Ok(ExitCode::from(EXIT_REJECTED));
+    }
+    let (session, mut refused, notes) = top_session(catalog, args)?;
+    if args.dump_session {
+        print_triage_session(OutputFormat::Yaml, &session)?;
+        for refusal in &refused {
+            eprintln!("note: `{}` is not asked: {}", refusal.label, refusal.reason);
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    for note in &notes {
+        eprintln!("note: {note}");
+    }
+    let file_has_joins = !session.joins.is_empty() || !session.decompose.is_empty();
+    if args.file.is_some() {
+        if let Err(rejections) = validate::validate_session(catalog, &session) {
+            return Ok(reject(&rejections));
+        }
+    }
+    let capabilities = Capabilities::detect();
+    let mut resolutions = Vec::new();
+    for request in &session.requests {
+        match resolve::resolve(catalog, &capabilities, request) {
+            // Resolved onto a backend this build has no collector for: the
+            // runner would refuse it in these words before anything starts.
+            Ok(resolved)
+                if !file_has_joins
+                    && !collect::implements(
+                        &resolved.request.source.to_string(),
+                        &resolved.backend.id,
+                    ) =>
+            {
+                refused.push(omn_view::model::Refusal {
+                    label: request
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| request.source.to_string()),
+                    source: request.source.to_string(),
+                    reason: collect::CollectError::NoCollector {
+                        source_id: resolved.request.source.to_string(),
+                        backend: resolved.backend.id.clone(),
+                    }
+                    .to_string(),
+                })
+            }
+            Ok(resolved) => resolutions.push(resolved),
+            // A session file's joins and decompositions name its requests,
+            // and one set aside would leave them naming nothing: such a
+            // session is refused whole, as `omn trace` refuses it.
+            Err(error) if file_has_joins => {
+                eprintln!("error: {error}");
+                return Ok(ExitCode::from(exit_for(resolution_is(&error))));
+            }
+            Err(error) => refused.push(omn_view::model::Refusal {
+                label: request
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| request.source.to_string()),
+                source: request.source.to_string(),
+                reason: error.to_string(),
+            }),
+        }
+    }
+    if resolutions.is_empty() {
+        eprintln!("error: no source the view needs can be served on this machine:");
+        for refusal in &refused {
+            eprintln!("  {}: {}", refusal.label, refusal.reason);
+        }
+        return Ok(ExitCode::from(exit_for(omn::collect::Whose::Machine)));
+    }
+    // The session as it runs: the requests that resolved.
+    let mut running = session.clone();
+    running.requests = resolutions
+        .iter()
+        .map(|resolved| resolved.request.clone())
+        .collect();
+
+    let origin = match (&args.file, args.program.is_empty(), args.pid.is_empty()) {
+        (Some(path), _, _) => format!("live: {}", path.display()),
+        (None, false, _) => format!("live: {}", args.program.join(" ")),
+        (None, true, false) => format!(
+            "live: pid {}",
+            args.pid
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        (None, true, true) => match &args.cgroup {
+            Some(cgroup) => format!("live: cgroup {}", cgroup.display()),
+            None => "live: the machine".to_owned(),
+        },
+    };
+    let mut opening = omn_view::model::Data {
+        origin: origin.clone(),
+        refused: refused.clone(),
+        live: Some(omn_view::model::Live {
+            opened_ns: omn::clock::monotonic_ns(),
+            now_ns: omn::clock::monotonic_ns(),
+        }),
+        ..Default::default()
+    };
+    opening.run.results = resolutions
+        .iter()
+        .map(|resolved| omn_view::model::Results {
+            label: resolved
+                .request
+                .label
+                .clone()
+                .unwrap_or_else(|| resolved.request.source.to_string()),
+            source: resolved.request.source.to_string(),
+            backend: resolved.backend.id.clone(),
+            degradations: resolved.degradations.clone(),
+            ..Default::default()
+        })
+        .collect();
+    view_facts(catalog, &mut opening);
+
+    let quit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let drawing = if args.headless {
+        drop(receiver);
+        None
+    } else {
+        let start_on = args.view.clone();
+        let opening = opening.clone();
+        let quit = std::sync::Arc::clone(&quit);
+        Some(std::thread::spawn(move || -> std::io::Result<()> {
+            // The app is built on the thread that draws it: its views are
+            // not shared with the runner.
+            let mut app = omn_view::app::App::new(opening);
+            if let Some(name) = start_on {
+                let _ = app.open(&name);
+            }
+            omn_view::term::run(app, Some(receiver), &quit)
+        }))
+    };
+
+    // A source the runner refuses before anything is launched -- no collector
+    // in this build, a target it cannot watch, a start that failed -- is set
+    // aside with the runner's reason and the rest are asked again, unless a
+    // session file's joins name it. Every such refusal comes before the
+    // program is launched, so asking again launches it once.
+    let (collections, ladder) = loop {
+        let mut ladder = Ladder::new(catalog, &capabilities, &resolutions);
+        let mut tap = Tap::new(
+            resolutions.len(),
+            sender.clone(),
+            std::sync::Arc::clone(&quit),
+        );
+        match collect::run_all_escalating(&resolutions, &mut ladder, Some(&mut tap)) {
+            Ok(collections) => break (collections, ladder),
+            Err(error) => {
+                let named: Option<Vec<(String, String)>> = error
+                    .each()
+                    .iter()
+                    .map(|one| match one {
+                        collect::CollectError::NoCollector { source_id, .. }
+                        | collect::CollectError::UnsupportedTarget { source_id, .. }
+                        | collect::CollectError::Start { source_id, .. }
+                        | collect::CollectError::Window { source_id, .. } => {
+                            Some((source_id.clone(), one.to_string()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let set_aside = named.filter(|named| {
+                    !file_has_joins
+                        && !named.is_empty()
+                        && resolutions.iter().any(|resolved| {
+                            !named
+                                .iter()
+                                .any(|(source, _)| *source == resolved.request.source.to_string())
+                        })
+                });
+                let Some(named) = set_aside else {
+                    quit.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = sender.send(omn_view::feed::Update::Abort);
+                    drop(sender);
+                    if let Some(drawing) = drawing {
+                        let _ = drawing.join();
+                    }
+                    return Ok(refused_at_collect(catalog, &error, &resolutions));
+                };
+                let mut kept = Vec::new();
+                let mut kept_results = Vec::new();
+                for (resolved, shell) in resolutions.into_iter().zip(opening.run.results.drain(..))
+                {
+                    match named
+                        .iter()
+                        .find(|(source, _)| *source == resolved.request.source.to_string())
+                    {
+                        Some((_, reason)) => refused.push(omn_view::model::Refusal {
+                            label: shell.label.clone(),
+                            source: shell.source.clone(),
+                            reason: reason.clone(),
+                        }),
+                        None => {
+                            kept.push(resolved);
+                            kept_results.push(shell);
+                        }
+                    }
+                }
+                resolutions = kept;
+                opening.run.results = kept_results;
+                opening.refused.clone_from(&refused);
+                running.requests = resolutions
+                    .iter()
+                    .map(|resolved| resolved.request.clone())
+                    .collect();
+                // The view was drawing the requests as they stood; it is told
+                // what was set aside by starting it over.
+                let _ = sender.send(omn_view::feed::Update::Restart(Box::new(opening.clone())));
+            }
+        }
+    };
+    let assembled = assemble(catalog, &running, &ladder, &resolutions, collections).and_then(
+        |(run, costs, served_by)| {
+            let value = serde_json::to_value(&run)?;
+            let ended = omn_view::model::Data::from_json(value)?;
+            Ok((run, costs, served_by, ended))
+        },
+    );
+    let (run, costs, served_by, mut ended) = match assembled {
+        Ok(assembled) => assembled,
+        Err(error) => {
+            // The screen is given back before the error is said on it.
+            let _ = sender.send(omn_view::feed::Update::Abort);
+            drop(sender);
+            if let Some(drawing) = drawing {
+                let _ = drawing.join();
+            }
+            return Err(error);
+        }
+    };
+    ended.origin = origin.clone();
+    ended.refused = refused.clone();
+    view_facts(catalog, &mut ended);
+    let beside = omn_view::model::Beside {
+        origin,
+        facts: ended.facts.clone(),
+        refused: refused.clone(),
+    };
+    let _ = sender.send(omn_view::feed::Update::Ended(Box::new(ended)));
+    drop(sender);
+    if let Some(drawing) = drawing {
+        match drawing.join() {
+            Ok(result) => result?,
+            Err(_) => anyhow::bail!("the view's thread panicked"),
+        }
+    }
+
+    report_costs(&costs, &run);
+    for refusal in &refused {
+        eprintln!(
+            "note: `{}` was not served: {}",
+            refusal.label, refusal.reason
+        );
+    }
+    if let Some(directory) = &args.out {
+        let output = encode::run_output_bytes(OutputFormat::Json, &run)?;
+        write_artifacts(directory, OutputFormat::Json, &served_by, &costs, &output)?;
+        std::fs::write(
+            directory.join(omn_view::model::BESIDE),
+            serde_json::to_string_pretty(&beside)?,
+        )?;
+        eprintln!(
+            "\nwrote results, the resolved requests, what they cost and the view's {} to {}: \
+             `omn top --replay {}` draws it again",
+            omn_view::model::BESIDE,
+            directory.display(),
+            directory.display()
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Hands what the runner holds to the drawing thread, between rounds.
+///
+/// An [`collect::Escalate`] that never attaches anything: it is the one place
+/// the runner shows a run in progress, and the view only reads. When the user
+/// quits, it lets every request go, which ends the run the way a closed
+/// window does -- and each collection says it was detached because the view
+/// was quit.
+struct Tap {
+    /// How many events of each request were handed over already.
+    sent: Vec<usize>,
+    sender: std::sync::mpsc::Sender<omn_view::feed::Update>,
+    quit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    last: Option<std::time::Instant>,
+    /// Set once the drawing thread is gone: nothing more is converted.
+    unheard: bool,
+}
+
+impl Tap {
+    /// The least time between two hand-overs: the screen redraws at 4 Hz, and
+    /// converting events more often would be the view's cost for nothing.
+    const EVERY: std::time::Duration = std::time::Duration::from_millis(200);
+
+    fn new(
+        count: usize,
+        sender: std::sync::mpsc::Sender<omn_view::feed::Update>,
+        quit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            sent: vec![0; count],
+            sender,
+            quit,
+            last: None,
+            unheard: false,
+        }
+    }
+}
+
+impl collect::Escalate for Tap {
+    fn decide(&mut self, run: &collect::Progress<'_>) -> Vec<collect::Switch> {
+        if self.quit.load(std::sync::atomic::Ordering::SeqCst) {
+            return run
+                .standing
+                .iter()
+                .enumerate()
+                .filter(|(_, standing)| matches!(standing, collect::Standing::Attached))
+                .map(|(index, _)| collect::Switch {
+                    index,
+                    attach: false,
+                    why: "the view was quit".to_owned(),
+                })
+                .collect();
+        }
+        if self.unheard || self.last.is_some_and(|last| last.elapsed() < Self::EVERY) {
+            return Vec::new();
+        }
+        self.last = Some(std::time::Instant::now());
+        for (index, events) in run.events.iter().enumerate() {
+            let Some(sent) = self.sent.get_mut(index) else {
+                continue;
+            };
+            // A buffer can only grow while the run goes; one that shrank was
+            // let go by the runner, and what is in it now is all new.
+            if events.len() < *sent {
+                *sent = 0;
+            }
+            if events.len() == *sent {
+                continue;
+            }
+            let fresh = &events[*sent..];
+            *sent = events.len();
+            let converted = serde_json::to_value(fresh)
+                .and_then(serde_json::from_value::<Vec<omn_view::model::Event>>);
+            let Ok(converted) = converted else {
+                continue;
+            };
+            let update = omn_view::feed::Update::Events {
+                index,
+                events: converted,
+                now_ns: run.now_ns,
+            };
+            if self.sender.send(update).is_err() {
+                self.unheard = true;
+                return Vec::new();
+            }
+        }
+        if self
+            .sender
+            .send(omn_view::feed::Update::Tick { now_ns: run.now_ns })
+            .is_err()
+        {
+            self.unheard = true;
+        }
+        Vec::new()
+    }
+
+    fn shed(&mut self, _index: usize, _over: &str) -> Option<String> {
+        None
+    }
+
+    fn close(&mut self, _run: &collect::Progress<'_>) -> Vec<(usize, String)> {
+        Vec::new()
+    }
 }
 
 fn reject(rejections: &[Rejection]) -> ExitCode {

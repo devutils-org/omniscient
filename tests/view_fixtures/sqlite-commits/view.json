@@ -1,0 +1,105 @@
+{
+  "origin": "live: sqlite3 -init /work/commits.sql /work/commits.db .quit",
+  "facts": {
+    "cpu.oncpu_time": {
+      "determinism": "low",
+      "summary": "CPU time actually consumed"
+    },
+    "cpu.profile": {
+      "determinism": "low",
+      "summary": "On-CPU profile with call stacks"
+    },
+    "cpu.util": {
+      "determinism": "low",
+      "summary": "CPU utilization by state (user/sys/iowait/idle/steal)"
+    },
+    "gpu.engine_busy": {
+      "determinism": "low",
+      "summary": "Per-engine occupancy"
+    },
+    "gpu.kernel": {
+      "determinism": "medium",
+      "summary": "GPU time per compute kernel"
+    },
+    "gpu.mem": {
+      "determinism": "medium",
+      "summary": "VRAM held, by device or by process"
+    },
+    "io.bytes": {
+      "determinism": "low",
+      "summary": "I/O volume"
+    },
+    "io.latency": {
+      "determinism": "low",
+      "summary": "Block request latency, submit -> completion"
+    },
+    "io.syscall": {
+      "determinism": "low",
+      "summary": "I/O latency as the application sees it"
+    },
+    "mem.faults": {
+      "determinism": "medium",
+      "summary": "Minor and major page faults"
+    },
+    "mem.pressure": {
+      "determinism": "low",
+      "summary": "PSI: memory stall time"
+    },
+    "mem.rss": {
+      "determinism": "medium",
+      "summary": "Resident footprint (pages in RAM, shared ones counted in full)"
+    },
+    "net.bytes": {
+      "determinism": "low",
+      "summary": "Network volume"
+    },
+    "net.request": {
+      "determinism": "medium",
+      "summary": "One request's life by state, and the network on either side of it"
+    },
+    "net.socket": {
+      "determinism": "low",
+      "summary": "Socket read and write latency"
+    },
+    "net.tcp.retransmit": {
+      "determinism": "low",
+      "summary": "TCP retransmissions"
+    },
+    "power.energy": {
+      "determinism": "medium",
+      "summary": "Energy consumed per RAPL domain (pkg / cores / dram / gpu)"
+    },
+    "sched.futex": {
+      "determinism": "low",
+      "summary": "Userspace futex wait"
+    },
+    "sched.offcpu": {
+      "determinism": "low",
+      "summary": "Blocked time with the blocking stack"
+    },
+    "sched.runqlat": {
+      "determinism": "low",
+      "summary": "Run queue wait: wakeup -> on-CPU"
+    },
+    "sched.switches": {
+      "determinism": "low",
+      "summary": "Context switches"
+    },
+    "sched.wakeup": {
+      "determinism": "low",
+      "summary": "Wakeup chain: who unblocks whom"
+    }
+  },
+  "refused": [
+    {
+      "label": "gpu.kernel",
+      "source": "gpu.kernel",
+      "reason": "no collector is written for `gpu.kernel` on backend `vendor:cupti` yet"
+    },
+    {
+      "label": "net.request",
+      "source": "net.request",
+      "reason": "cannot start collecting `net.request`: /usr/bin/sqlite3 declares no request: `net.request` follows a request from a `request__start(id)` probe to a `request__done(id)` probe the program fires itself, any provider, and this one carries no USDT probe at all. Nothing is inferred from the connection instead -- see `docs/scenarios/vertical.md`"
+    }
+  ]
+}
