@@ -694,13 +694,15 @@ injection library loaded by the driver and disarmed:
 
 | backend | launch-bound (a kernel every 2 us) | compute- or memory-bound (a kernel every ms) | band |
 |---|---|---|---|
-| `gpu.kernel` through `vendor:cupti` | +74 to +78 %, against the control | under 1 % | `extreme` (was `med`) |
-| `gpu.api` through `preload` | 7.6 to 8.9 % of the target's cpu, +9.6 % at a load of 8 | about 1 % | `high` (was `low`) |
+| `gpu.kernel` through `vendor:cupti` | +67 % of the time, +83 % of the cpu, against the control | under 1 % | `extreme` (was `med`) |
+| `gpu.api` through `preload` | +11.3 % | 3 % or less | `high` (was `low`) |
 | the NVML polls | what the poll reads | the same | unchanged |
 | the library loaded, disarmed | inside the floor | inside the floor | - |
 
-CUPTI's price is paid inside each launch, by the launching thread (the cpu
-dilation equals the time dilation), about 1.5 us a launch; `nsys` on the same
-program costs +112 to +125 %. A band per backend holds the worst regime, and
+CUPTI's price is paid inside each launch, by the launching thread, about
+1.3 us a launch: with the workload's other threads kept off its cpu, that
+thread's own cpu grew by 66 %, and every other thread spent 17 ms more on
+other cpus. `nsys`, CUPTI underneath too, costs the launching thread about as
+much (+74 %). A band per backend holds the worst regime, and
 each source's caveat names it. `gpu.counters` and `gpu.profile` are pending in
 the record until their collectors land.

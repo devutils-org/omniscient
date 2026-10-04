@@ -27,7 +27,7 @@ other streams of the wave building and testing beside it.
   state read by `nvidia-smi` before and after.
 - **`tests/bench_gpu.rs`**: the measurement (`#[ignore]`, about 15 minutes),
   writing `table.md`, `table.json` (with every repetition) and `record.md`
-  under `target/bench/gpu-<stamp>/`; and ten tests in `make check` that
+  under `target/bench/gpu-<stamp>/`; and eleven tests in `make check` that
   measure nothing: the GPU record in `docs/bench.md` held to the catalog
   (declared band, worst regime within it or a `stands` reason, no stale
   reason, every regime present, row count, coverage of every launch-only
@@ -66,60 +66,71 @@ other streams of the wave building and testing beside it.
 
 ## Shown versus reasoned
 
-**Shown** (two tables, 20 repetitions round-robin, release build;
-`target/bench/gpu-1791094863/` at a load of 8, `target/bench/gpu-1791095811/`
-at a load of 41-54, the record):
+**Shown** (the record, `target/bench/gpu-1791099533/`: 20 repetitions
+round-robin, release build, the workload's threads placed apart, load 13
+falling to 1; floors 0.57 / 0.73 / 0.14 %):
 
-- `gpu.kernel` through CUPTI: **+74 % / +78 %** on the launch-bound program
-  against the control, the fastest repetitions too (101 ms bare, 174.5 ms
-  armed); cpu dilation equal to time dilation, so the launching thread pays
-  (about 1.5 us a launch), not the flush thread. Compute- and memory-bound:
-  under the floor (+0.4 to +0.6 %, -3 to -0.9 %). Exit flush 0.1-0.3 ms.
-- `omn`'s own cpu decoding CUPTI's records: 91 ms for 53 000 records, about
-  **1.7 us a record** (9-10 % of the launch-bound target's cpu).
-- The control against bare: inside the floor on every regime, timed section
-  and cpu. Loading the library disarmed costs nothing these tables resolve.
-- `gpu.api` through the shim: 7.6 / 8.9 % of the launch-bound target's cpu;
-  about 1 % elsewhere.
-- `nsys --trace=cuda`: +112 / +125 % launch-bound, under the floor elsewhere,
-  +105 to +261 ms at `cuInit`, +11 to +27 ms at exit.
+- `gpu.kernel` through CUPTI: **+67.05 %** on the launch-bound program
+  against the control, the fastest repetitions too (98 ms bare, 161 ms
+  armed); process cpu +82.75 %, the band's figure. Compute- and
+  memory-bound: +0.81 % and +0.14 % (under 1 %). Exit flush 0.1-0.2 ms.
+- **The launching thread pays**: with every other thread kept off its cpu
+  (checked on every run), its own cpu grew 66.04 %, about 65 ms, 1.3 us a
+  launch; every other thread together spent 16.9 ms more, on other cpus.
+  The first round's single-cpu placement had billed those 17 ms to the wall
+  clock (+74 to +78 % then).
+- `omn`'s own cpu decoding CUPTI's records: 67 ms for 53 000 records, about
+  **1.3 us a record** (7.8 % of the launch-bound target's cpu).
+- The control against bare: inside the floor on every regime, timed
+  section, process cpu and launching thread; the library checked mapped in
+  every control and CUPTI run, absent in every bare one.
+- `gpu.api` through the shim: +11.31 % launch-bound, on the launching thread
+  alone (+11.29 %, other threads +0.0 ms); +3.18 % compute-bound, nothing
+  memory-bound. The first round's +9.6 / +38.7 % disagreement is settled
+  inside `high`; its `stands` row is gone.
+- `nsys --trace=cuda`: +74.71 % launch-bound, its launching thread +74.40 %
+  and other threads +48 ms; under the floor elsewhere; +77 to +124 ms at
+  `cuInit`, +4.9 to +14.9 ms at exit.
 - The NVML polls on GPU workloads: within the bands the backends table gave
   them, on every regime.
+- Losses: one late tick each for `gpu.freq` and `gpu.kernel` in twenty
+  launch-bound runs (1 of 185, 1 of 1 060 872), nothing elsewhere.
 - The clocks: a `compute` section ran 78 ms warm, 119 ms after an idle
   second; 200 ms of warming after three idle seconds left 100 ms, 500 ms
   79-80 ms.
-- The record checks: each fault shown on a synthetic record (`bench_gpu`, 10
-  passed).
+- The record and table checks: each fault shown on a synthetic record or
+  table (`bench_gpu`, 11 passed).
 
 **Reasoned, not shown**:
 
-- That the CUPTI cost is CUPTI's per-launch instrumentation and not this
-  library's: inferred from cpu dilation = time dilation and from `nsys`
-  costing more on the same program. Not isolated by disabling activity kinds
-  one at a time.
-- `gpu.api`'s launch-bound dilation: +9.6 % at a load of 8, +38.7 % at 41.
-  I read the second as preemption (the bare launch-bound series spans 101 to
-  541 ms there) and the band `high` stands on the first; only a quiet run
-  shows it. The record says so in the row's `stands` reason.
+- That what the launching thread pays is CUPTI's activity instrumentation
+  and not this library's code: the library registers no per-launch callback
+  (three activity kinds and the two buffer callbacks, `cupti/src/lib.rs`),
+  and `nsys`, CUPTI underneath, costs that thread about as much. Not
+  isolated by disabling activity kinds one at a time.
 - Arming CUPTI at `cuInit` (the `init` column): not resolved -- `cuInit`'s
-  own spread is tens to hundreds of milliseconds between runs.
+  own spread is tens of milliseconds between runs.
 - That one band per backend is the worst regime: a choice consistent with
   `worst_case_percent`, not a measurement. Its consequence: `--budget` under
   20 % refuses `gpu.kernel` on a program where it costs 1 %.
+- That an unpinned real program pays what the placed workload pays: the
+  launching thread had a cpu to itself here; on a program whose threads
+  compete for cpus, CUPTI's other threads' 17 ms can become wall time too.
+  The band holds the cpu figure (+82.75 %), which covers that case.
 
 ## What I could not do, and why
 
-- **A quiet table.** Both were taken with the wave's other streams running
-  (loads 8 and 41-54 on 24 cpus, the device shared in between). The
-  floors are wide on the launch-bound regime (13.6 % in the record). The
-  coordinator's run alone is below.
+- **A table with the machine alone.** The record was taken while the other
+  streams finished (load 13 falling to 1); its floors (0.14 to 0.73 %) are a
+  tenth of the first round's, and no row is near its band's ceiling, so the
+  coordinator's run alone is a confirmation rather than a correction.
 - **`gpu.counters` and `gpu.profile`**: their collectors are the profiler
   stream's and had not landed. They are `pending` in the record; once they
   land, the same test measures them with no change (its plan is the
   catalog's). If profiler names the backend other than `vendor:cupti`, the
   coverage test names the pair and the pending rows need renaming.
-- **The variance gate** is not applied to the GPU table: on this shared
-  machine it would refuse every time. The table carries its floors instead,
+- **The variance gate** is not applied to the GPU table: on the shared
+  machine of the first round it refused every time. The table carries its floors instead,
   and the rule reads a dilation under them as zero.
 - **`scripts/bench.sh`**: not my file; the GPU table has no step there yet
   (request below).
@@ -138,10 +149,24 @@ cd /home/moha/repos/omniscient && make release && \
 
 about 15 minutes; then paste `target/bench/gpu-<stamp>/record.md` over the
 `gpu-bands` block of `docs/bench.md`, set `was`/`declared`/verdicts, and run
-`cargo test --test bench_gpu`. It settles `gpu.api`'s launch-bound dilation
-(the `stands` row) and measures `gpu.counters` and `gpu.profile`.
+`cargo test --test bench_gpu`. It confirms the record with the machine
+alone and measures `gpu.counters` and `gpu.profile`.
 
 ## Decision lines for DECISIONS.md
+
+- **A GPU workload's threads are placed apart** (wave 19): the launching
+  thread alone on one cpu for the timed section, every other thread (the
+  driver's, a tracer's) on three others, and the table reports the
+  launching thread's cpu and the other threads' apart. Reason: on one
+  shared cpu, a tracer thread's work is the launching thread's wall time,
+  and the table cannot say which thread a cost lands on (found in review:
+  the first round's +74 to +78 % for CUPTI was +67 % with the threads
+  apart).
+- **A GPU row that loses more than one record in a hundred is refused**
+  (wave 19), by the measurement and by the record's test; every loss is in
+  the record as `<lost> of <seen>`. Reason: a tracer that drops records
+  skips the work they cost, and under one in a hundred the understatement
+  is below every regime's floor.
 
 - **A GPU tracer is costed on GPU workloads, per regime** (wave 19): a `gpu`
   source served on a launched program alone is left out of the backends
@@ -156,8 +181,8 @@ about 15 minutes; then paste `target/bench/gpu-<stamp>/record.md` over the
   loader's cost is not the tracer's (measured: the control is inside the
   floor).
 - **A GPU band is its worst regime, and the regime is named in a caveat**
-  (wave 19): `gpu.kernel` `extreme` (+74-78 % launch-bound, under 1 %
-  otherwise), `gpu.api` `high`. Reason: a band is a worst case
+  (wave 19): `gpu.kernel` `extreme` (+67 % of the time and +83 % of the
+  cpu launch-bound, under 1 % otherwise), `gpu.api` `high` (+11.3 %). Reason: a band is a worst case
   (`worst_case_percent`) and the catalog has one per backend; a cost per
   regime would be a schema change, left open.
 - **The GPU bench judges a row on the largest of three columns**, the share
@@ -176,8 +201,8 @@ about 15 minutes; then paste `target/bench/gpu-<stamp>/record.md` over the
 
 ## Needs from another stream
 
-- **cupti**: (1) `omn`'s decoding costs about 1.7 us a record in a release
-  build (91 ms for 53 000 records), more than CUPTI's own 1.5 us a launch
+- **cupti**: (1) `omn`'s decoding costs about 1.3 us a record in a release
+  build (67 ms for 53 000 records), as much as CUPTI's own 1.3 us a launch
   inside the program: worth a profile of `kernel.rs`'s read path. (2) The
   per-launch price is CUPTI's concurrent-kernel activity; whether a lighter
   kind (or a sampling of launches) is worth offering as a degraded fallback
@@ -200,7 +225,17 @@ about 15 minutes; then paste `target/bench/gpu-<stamp>/record.md` over the
 
 ## The suite
 
-While iterating: `cargo test --test bench_gpu` (10 passed, 1 ignored),
+**Fix round**: `make check` at a load of 1 to 3 went red on one test,
+`runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`
+(the known gap filed for stream profile, below). `cargo test --workspace
+--no-fail-fast` then ran 2375 passed, 2 failed, 12 ignored: that one, and
+`unwind::user_only_stacks_carry_no_kernel_frame...`, which passed rerun
+alone once. Clippy on every target with `-D warnings` and `cargo fmt
+--check` clean. The GPU measurement passed (`gpu-1791099533`, 711 s).
+
+**First round**:
+
+While iterating: `cargo test --test bench_gpu` (11 passed, 1 ignored),
 `--test bench_bands` (8), `--test catalog_model` (19); clippy on the bench
 tests with `-D warnings`, fmt.
 
@@ -230,3 +265,51 @@ passed, 11 failed, 12 ignored, at loads of 35 to 54:
   `/tmp/omn-cli-<pid>-no-shim` directories, 154 MB each, had filled the
   per-user quota. I removed the ones whose pid was gone; the `cli` tests
   leak that directory -- a finding for whoever owns `tests/cli.rs`.)
+
+## Review (fix round)
+
+The adversarial review's six points, each fixed:
+
+1. **Every thread pinned to one cpu** (defect, `examples/bench/gpu.rs`,
+   `gpu.c`). Right: the main thread was pinned before `cuInit`, every later
+   thread inherited the one cpu, and "the launching thread pays" rested on
+   it. Fixed by placing the threads apart (`GPU_CPUS = 4`, the main thread
+   moved alone onto the first cpu after the warm phase, every thread
+   `cuInit` created on the other three), reporting the launching thread's
+   cpu (`CLOCK_THREAD_CPUTIME_ID`) beside the process's, and failing the
+   measurement if any run let another thread onto the launching thread's
+   cpu. Re-measured (`gpu-1791099533`): the launching thread still pays
+   (+66 % of its own cpu), and the other threads' 17 ms, billed to the wall
+   clock before, are now their own column; CUPTI's dilation is +67 %, not
+   +74-78 %. The claim is now shown; what it is attributed to (CUPTI, not
+   this library) stays reasoned, from the library's code and from `nsys`.
+   `docs/bench.md` says how the threads are placed and why the first round's
+   two tables are superseded.
+2. **`gpu.api`'s caveat on an untracked table** (gap). The record is now the
+   rerun, which settles the row inside `high` (+11.31 %); the caveat and the
+   cost-line comment quote the record (`gpu-1791099533`), and the `stands`
+   row is gone.
+3. **Losses and unplanned pairs not checked** (gap, `tests/bench_gpu.rs`).
+   The record carries a `losses` column (`<lost> of <seen>`, over every
+   repetition), the table the losses by counter; a row losing more than one
+   in a hundred fails the measurement and the record's test, and a row with
+   no count fails the record's. A pair the tool accepts here whose trial run
+   fails now fails the measurement (`Unplanned::failed_its_trial`), as does a
+   CUPTI row with no control. The first rerun was refused on one lost
+   record in a million, which is why the threshold is a share and not zero.
+4. **The control's library never checked loaded** (nit). `gpu.c` reports
+   whether the library `CUDA_INJECTION64_PATH` names is in `/proc/self/maps`
+   after `cuInit`; the measurement fails unless every control and CUPTI run
+   loaded it and no bare run did. The `init` column is still put down to
+   `cuInit`'s spread, not measured: said so as reasoned.
+5. **Stale doc comment, `within` with a moved band** (nit). The comment
+   reads the band from the catalog; `band_faults` names a `within` whose
+   `was` differs from its `declared`.
+6. **The gpu.kernel caveat's unqualified "nothing measurable"** (nit). It
+   now says the control was inside what the bench resolves (0.14 to 0.73 %),
+   on every regime; the launch-bound floor is 0.57 %, and the control
+   measured -0.39 % there.
+
+Outside my row, still: the two caveats in `catalog/gpu.yaml` were reworded
+to the record's figures (no band changed in this round), and `CATALOG.md`'s
+cost cells are unchanged since the first round.

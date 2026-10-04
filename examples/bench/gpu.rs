@@ -20,6 +20,12 @@
 //!
 //! Every row is held to the band its backend declares on the worst of its
 //! regimes, by the rule `docs/bench.md` writes down beside the record.
+//!
+//! The workload's threads are placed apart (`GPU_CPUS`): the launching thread
+//! alone on one cpu for the timed section, every other thread -- the
+//! driver's, a tracer's in the target -- on the others. On one shared cpu a
+//! tracer thread's work would be the launching thread's wall time, and the
+//! table could not say which thread a cost lands on.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -63,6 +69,12 @@ pub fn gpu_workloads() -> Vec<GpuWorkload> {
         new("memory", "memory-bound", &["memory", "200", "64"]),
     ]
 }
+
+/// How many cpus the GPU workload is given: the first for the launching
+/// thread alone, the rest for every other thread of the process (`gpu.c`).
+/// Four is more than the driver's and a tracer's threads keep busy here
+/// (CUPTI's run left 17 ms of other threads' cpu over a 170 ms section).
+pub const GPU_CPUS: usize = 4;
 
 /// The GPU workload program, built once per test process and linked against
 /// `libcuda.so.1` by name. `Err` is the machine's: no compiler, or no driver
@@ -169,12 +181,22 @@ impl GpuRun {
 
     /// Every loss counter the tool reported, added up.
     pub fn losses(&self) -> u64 {
+        self.losses_by_kind().values().sum()
+    }
+
+    /// Every loss counter the tool reported, by its name.
+    pub fn losses_by_kind(&self) -> BTreeMap<String, u64> {
         self.results
             .as_ref()
             .and_then(|results| results.get("losses"))
             .and_then(Value::as_object)
-            .map(|losses| losses.values().filter_map(Value::as_u64).sum())
-            .unwrap_or(0)
+            .map(|losses| {
+                losses
+                    .iter()
+                    .filter_map(|(kind, count)| Some((kind.clone(), count.as_u64()?)))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn events(&self) -> u64 {
@@ -250,7 +272,7 @@ pub fn run_gpu(omn: &Omn, arm: &Arm, workload: &GpuWorkload) -> Result<GpuRun, S
     command
         .args(&workload.args)
         .env("BENCH_REPORT", &report)
-        .env("BENCH_CPUS", workload_cpus(1))
+        .env("BENCH_CPUS", workload_cpus(GPU_CPUS))
         .env_remove("CUDA_INJECTION64_PATH")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -320,6 +342,18 @@ pub fn gpu_ready() -> Result<(), String> {
 
 // ------------------------------------------------------------------ plan
 
+/// A (source, backend) the GPU bench does not measure, and why.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Unplanned {
+    pub source: String,
+    pub backend: String,
+    pub why: String,
+    /// The pair has a collector, the tool accepted it here, and its trial run
+    /// failed: a defect of the bench or of the collector, not of the machine,
+    /// which fails the table rather than leaving a row out.
+    pub failed_its_trial: bool,
+}
+
 /// A (source, backend) the GPU bench measures, with the setting it is asked
 /// under.
 #[derive(Debug, Clone)]
@@ -334,7 +368,7 @@ pub struct GpuPlanned {
 /// planned too: the backends table measured them on a cpu workload, and
 /// whether a poll's price moves with what the device is doing is a question
 /// only a GPU workload answers.
-pub fn gpu_plan(omn: &Omn) -> (Vec<GpuPlanned>, Vec<(String, String, String)>) {
+pub fn gpu_plan(omn: &Omn) -> (Vec<GpuPlanned>, Vec<Unplanned>) {
     let catalog = omn::Catalog::embedded().expect("the embedded catalog loads");
     let trial = &gpu_workloads()[1];
     let mut planned = Vec::new();
@@ -351,14 +385,16 @@ pub fn gpu_plan(omn: &Omn) -> (Vec<GpuPlanned>, Vec<(String, String, String)>) {
         let emits: Vec<String> = entry.emits.iter().map(|e| e.to_string()).collect();
         for backend in &entry.backends {
             if !omn::collect::implements(&source, &backend.id) {
-                unplanned.push((
-                    source.clone(),
-                    backend.id.clone(),
-                    "no collector is written for it".into(),
-                ));
+                unplanned.push(Unplanned {
+                    source: source.clone(),
+                    backend: backend.id.clone(),
+                    why: "no collector is written for it".into(),
+                    failed_its_trial: false,
+                });
                 continue;
             }
             let mut last = String::from("no mode and emit the source declares");
+            let mut accepted = false;
             let found = combinations(&modes, &emits)
                 .map(|(mode, emit)| Method {
                     source: source.clone(),
@@ -369,9 +405,12 @@ pub fn gpu_plan(omn: &Omn) -> (Vec<GpuPlanned>, Vec<(String, String, String)>) {
                     system: false,
                 })
                 .find(|method| {
-                    let tried = resolves(omn, method)
-                        .and_then(|_| run_gpu(omn, &Arm::Served(method.clone()), trial));
-                    match tried {
+                    if let Err(error) = resolves(omn, method) {
+                        last = first_line(&error);
+                        return false;
+                    }
+                    accepted = true;
+                    match run_gpu(omn, &Arm::Served(method.clone()), trial) {
                         Ok(_) => true,
                         Err(error) => {
                             last = first_line(&error);
@@ -384,7 +423,12 @@ pub fn gpu_plan(omn: &Omn) -> (Vec<GpuPlanned>, Vec<(String, String, String)>) {
                     method,
                     declared: backend.cost,
                 }),
-                None => unplanned.push((source.clone(), backend.id.clone(), last)),
+                None => unplanned.push(Unplanned {
+                    source: source.clone(),
+                    backend: backend.id.clone(),
+                    why: last,
+                    failed_its_trial: accepted,
+                }),
             }
         }
     }
@@ -398,13 +442,25 @@ pub fn gpu_plan(omn: &Omn) -> (Vec<GpuPlanned>, Vec<(String, String, String)>) {
 pub struct Series {
     pub elapsed: Vec<f64>,
     pub section_cpu: Vec<f64>,
+    /// The launching thread's cpu over the timed section.
+    pub thread_cpu: Vec<f64>,
+    /// Every other thread's: the process's less the launching thread's.
+    pub others_cpu: Vec<f64>,
     pub init: Vec<f64>,
     pub exit: Vec<f64>,
     pub share: Vec<f64>,
     pub collector: Vec<f64>,
     pub events: Vec<f64>,
     pub losses: u64,
+    /// The same losses by the counter that reported them.
+    pub losses_by_kind: BTreeMap<String, u64>,
     pub served_by: Vec<String>,
+    /// The largest number of other threads any run allowed on the launching
+    /// thread's cpu: zero when the placement held.
+    pub sharing: u64,
+    /// What each run said of its injection library: 1 mapped, 0 not, -1 no
+    /// `CUDA_INJECTION64_PATH`.
+    pub injection: Vec<i64>,
 }
 
 impl Series {
@@ -416,6 +472,19 @@ impl Series {
         };
         take(&mut self.elapsed, "elapsed_ns");
         take(&mut self.section_cpu, "section_cpu_ns");
+        take(&mut self.thread_cpu, "section_thread_cpu_ns");
+        if let (Some(all), Some(own)) = (
+            run.field("section_cpu_ns"),
+            run.field("section_thread_cpu_ns"),
+        ) {
+            self.others_cpu.push(all - own);
+        }
+        self.sharing = self
+            .sharing
+            .max(run.field("threads_on_launch_cpu").unwrap_or(0.0) as u64);
+        if let Some(injection) = run.report.get("injection").and_then(Value::as_i64) {
+            self.injection.push(injection);
+        }
         take(&mut self.init, "init_ns");
         take(&mut self.exit, "exit_ns");
         if let Some(share) = run.share_percent() {
@@ -427,6 +496,9 @@ impl Series {
         if run.cost.is_some() {
             self.events.push(run.events() as f64);
             self.losses += run.losses();
+            for (kind, count) in run.losses_by_kind() {
+                *self.losses_by_kind.entry(kind).or_default() += count;
+            }
         }
         if let Some(backend) = run.served_by() {
             if !self.served_by.contains(&backend) {
@@ -438,6 +510,11 @@ impl Series {
 
 fn median(values: &[f64]) -> Option<f64> {
     Stats::of(values).map(|stats| stats.median)
+}
+
+/// The difference of one median from another, in ms.
+pub fn difference_ms(of: &[f64], from: &[f64]) -> Option<f64> {
+    Some((median(of)? - median(from)?) / 1e6)
 }
 
 /// The relative change of one median against another, in percent.
@@ -472,10 +549,11 @@ pub fn resolves_percent(baseline: &[f64]) -> Option<f64> {
 /// record: the bench cannot tell it from zero. A negative one is zero too.
 ///
 /// The cpu dilation is there because a tracer's own thread in the target --
-/// CUPTI's flush thread -- costs the program cpu without necessarily
-/// stretching its timed section, and the tool's `cost.json` cannot see inside
-/// the target ("a vendor profiler injects into the target, and says nothing
-/// of what that cost it").
+/// CUPTI's flush thread -- costs the program cpu on another cpu than the
+/// launching thread's (`GPU_CPUS` keeps them apart), which need not stretch
+/// the timed section, and the tool's `cost.json` cannot see inside the
+/// target ("a vendor profiler injects into the target, and says nothing of
+/// what that cost it").
 pub fn judged_cost(
     share: Option<f64>,
     elapsed_dilation: Option<f64>,
@@ -518,11 +596,17 @@ pub struct GpuRow {
     pub share: Option<f64>,
     pub dilation: Option<f64>,
     pub cpu_dilation: Option<f64>,
+    /// The launching thread's cpu dilation: where a per-launch cost lands.
+    pub thread_cpu_dilation: Option<f64>,
+    /// Every other thread's cpu, against the baseline's, in ms.
+    pub others_cpu_ms: Option<f64>,
     pub init_ms: Option<f64>,
     pub exit_ms: Option<f64>,
     pub against: &'static str,
     pub resolution: f64,
+    /// Every record lost over every repetition, and every event seen.
     pub losses: u64,
+    pub events_total: u64,
     pub events: Option<f64>,
     pub served_by: Vec<String>,
     pub declared: omn::catalog::Cost,
@@ -569,7 +653,6 @@ pub fn row(
         Some(control) if arm.baseline_is_control() => (control, "control"),
         _ => (bare, "bare"),
     };
-    let difference_ms = |of: &[f64], from: &[f64]| Some((median(of)? - median(from)?) / 1e6);
     GpuRow {
         source: planned.method.source.clone(),
         backend: planned.method.backend.clone().unwrap_or_default(),
@@ -578,11 +661,14 @@ pub fn row(
         share: median(&series.share),
         dilation: dilation(&series.elapsed, &baseline.elapsed),
         cpu_dilation: dilation(&series.section_cpu, &baseline.section_cpu),
+        thread_cpu_dilation: dilation(&series.thread_cpu, &baseline.thread_cpu),
+        others_cpu_ms: difference_ms(&series.others_cpu, &baseline.others_cpu),
         init_ms: difference_ms(&series.init, &baseline.init),
         exit_ms: difference_ms(&series.exit, &baseline.exit),
         against,
         resolution,
         losses: series.losses,
+        events_total: series.events.iter().sum::<f64>() as u64,
         events: median(&series.events),
         served_by: series.served_by.clone(),
         declared: planned.declared,
@@ -590,17 +676,28 @@ pub fn row(
 }
 
 /// Every reason the GPU table is wrong, which fails the test that wrote it: a
-/// planned pair with no row on some workload, a row served by another backend
-/// than it forced, a row with nothing to judge it on. A row over its band is
-/// not here: it is a catalog claim to correct, flagged in the table.
+/// pair with a collector the tool accepted whose trial run failed, a planned
+/// pair with no row on some workload, a row served by another backend than it
+/// forced, a CUPTI row measured against anything but the control, a row with
+/// nothing to judge it on, and a row that lost records -- a tracer that
+/// dropped records under the load understates its own cost, so its row
+/// cannot set a band. A row over its band is not here: it is a catalog claim
+/// to correct, flagged in the table.
 pub fn gpu_table_failures(
     planned: &[GpuPlanned],
+    unplanned: &[Unplanned],
     rows: &[GpuRow],
     workloads: usize,
 ) -> Vec<String> {
     let mut failures = Vec::new();
     if rows.is_empty() {
         failures.push("the GPU table measured nothing".to_owned());
+    }
+    for pair in unplanned.iter().filter(|pair| pair.failed_its_trial) {
+        failures.push(format!(
+            "{} through {} was accepted here and failed its trial run, so it has no row: {}",
+            pair.source, pair.backend, pair.why
+        ));
     }
     for pair in planned {
         let backend = pair.method.backend.as_deref().unwrap_or("");
@@ -616,19 +713,80 @@ pub fn gpu_table_failures(
         }
     }
     for row in rows {
+        let what = format!("{} through {} on {}", row.source, row.backend, row.workload);
         if row.served_by.iter().any(|served| *served != row.backend) {
+            failures.push(format!("{what} was served by {}", row.served_by.join(", ")));
+        }
+        if row.backend == "vendor:cupti" && row.against != "control" {
             failures.push(format!(
-                "{} through {} on {} was served by {}",
-                row.source,
-                row.backend,
-                row.workload,
-                row.served_by.join(", ")
+                "{what} is measured against {}, not the control: there is no injection \
+                 library beside the binary, or no control series",
+                row.against
             ));
         }
         if row.cost().is_none() {
             failures.push(format!(
-                "{} through {} on {} has neither a share nor a dilation to judge",
-                row.source, row.backend, row.workload
+                "{what} has neither a share nor a dilation to judge"
+            ));
+        }
+        if lossy(row.losses, row.events_total) {
+            failures.push(format!(
+                "{what} lost {} of {} records: a tracer that drops records under the load \
+                 understates its own cost",
+                row.losses, row.events_total
+            ));
+        }
+    }
+    failures
+}
+
+/// The share of its records a row may lose and still set a band: one in a
+/// hundred. A tracer that drops records under the load skips the work they
+/// would have cost, so its row understates its price by about the share it
+/// lost; under this one, by less than the floor of every regime here. Above
+/// it, the row is refused rather than read as a cost. Every loss is shown
+/// either way, in the table and in the record.
+pub const MAX_LOSS_SHARE: f64 = 0.01;
+
+/// Whether `losses` of `events` records is more than a row may lose.
+pub fn lossy(losses: u64, events: u64) -> bool {
+    losses > 0 && losses as f64 > events as f64 * MAX_LOSS_SHARE
+}
+
+/// What is wrong with one arm's series on one workload, whatever its row: a
+/// run whose threads shared the launching thread's cpu (the placement did
+/// not hold), and a run whose injection library is not the arm's -- a
+/// control or a CUPTI run that never loaded it would measure a cost of
+/// zero, and a bare run that did would not be bare.
+pub fn series_failures(arm: &Arm, workload: &str, series: &Series) -> Vec<String> {
+    let mut failures = Vec::new();
+    let what = format!("{} on {workload}", arm.label());
+    if series.sharing > 0 {
+        failures.push(format!(
+            "{what}: {} other threads were allowed on the launching thread's cpu",
+            series.sharing
+        ));
+    }
+    let wanted = match arm {
+        Arm::Bare => Some(-1),
+        Arm::Control(_) => Some(1),
+        Arm::Served(method) if method.backend.as_deref() == Some("vendor:cupti") => Some(1),
+        // `nsys` injects its own library; a shim or a poll none or whatever
+        // the tool sets, which the row does not depend on.
+        _ => None,
+    };
+    if let Some(wanted) = wanted {
+        let off = series
+            .injection
+            .iter()
+            .filter(|&&seen| seen != wanted)
+            .count();
+        if off > 0 || series.injection.len() != series.elapsed.len() {
+            failures.push(format!(
+                "{what}: {off} of {} runs did not {} the injection library ({:?})",
+                series.elapsed.len(),
+                if wanted == 1 { "load" } else { "go without" },
+                series.injection
             ));
         }
     }
@@ -721,14 +879,16 @@ pub fn since(started: Instant) -> String {
 /// Prints one note about a row as the bench goes.
 pub fn note_row(row: &GpuRow) {
     say(format!(
-        "{} via {} on {}: share {}, dilation {} / cpu {} against {} (resolves {:.2} %), \
-         init {}, exit {}, losses {}",
+        "{} via {} on {}: share {}, dilation {} / cpu {} / launching thread {} / others {} \
+         against {} (resolves {:.2} %), init {}, exit {}, losses {}",
         row.source,
         row.backend,
         row.workload,
         share_cell(row.share),
         percent_cell(row.dilation),
         percent_cell(row.cpu_dilation),
+        percent_cell(row.thread_cpu_dilation),
+        ms_cell(row.others_cpu_ms),
         row.against,
         row.resolution,
         ms_cell(row.init_ms),

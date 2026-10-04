@@ -33,8 +33,26 @@
  *               measures it is registered before cuInit, so it runs after
  *               every handler registered there, a tracer's included
  *
- * and section_cpu_ns, the process's cpu over the timed section, every thread
- * of it: the driver's, and a tracer's flush thread.
+ * and two cpu times over the timed section: section_cpu_ns, the process's,
+ * every thread of it, and section_thread_cpu_ns, the launching thread's alone.
+ * What every other thread spent -- the driver's, a tracer's flush thread -- is
+ * the difference.
+ *
+ * BENCH_CPUS places the threads, a comma-separated list: the launching
+ * thread runs alone on the first cpu for the timed section, and every other
+ * thread on the rest. The other threads are created inside cuInit (the
+ * driver's, and an injection library's), while the launching thread is still
+ * on the rest, so they inherit that set and never the launching thread's
+ * cpu; the launching thread moves to its own cpu after the warm phase. So a
+ * tracer thread's work cannot pass for the launching thread's time, nor the
+ * other way round. With one cpu in the list, every thread shares it.
+ * `threads` and `threads_on_launch_cpu` (the other threads allowed on the
+ * launching thread's cpu, read at the end of the section) say what happened.
+ *
+ * `injection` says whether the library CUDA_INJECTION64_PATH names, when it
+ * is set, is mapped into the process after cuInit: 1 loaded, 0 not, -1 the
+ * variable unset. A negative control that never loaded its library would
+ * show a loading cost of zero without measuring it.
  *
  * The device is reached through `libcuda.so.1`, linked by name rather than
  * opened at runtime, so that a tracer interposing on the dynamic linker
@@ -45,12 +63,14 @@
  * driver will open: the bench reads that as "this machine cannot serve me".
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -168,21 +188,103 @@ static void check(const char *call, CUresult code) {
     }
 }
 
-static void pin(void) {
+/* The launching thread's cpu, and every other cpu BENCH_CPUS lists. */
+static cpu_set_t launch_set, others_set;
+static int launch_cpu = -1;
+
+static void place(void) {
     const char *list = getenv("BENCH_CPUS");
     if (!list || !*list)
         return;
-    cpu_set_t set;
-    CPU_ZERO(&set);
-    CPU_SET(atoi(list), &set);
-    sched_setaffinity(0, sizeof(set), &set);
+    CPU_ZERO(&launch_set);
+    CPU_ZERO(&others_set);
+    char *end;
+    for (const char *at = list; *at;) {
+        long cpu = strtol(at, &end, 10);
+        if (end == at)
+            break;
+        if (launch_cpu < 0) {
+            launch_cpu = (int)cpu;
+            CPU_SET(cpu, &launch_set);
+        } else {
+            CPU_SET(cpu, &others_set);
+        }
+        at = *end == ',' ? end + 1 : end;
+    }
+    if (launch_cpu < 0)
+        return;
+    if (CPU_COUNT(&others_set) == 0)
+        others_set = launch_set;
+    /* This thread only: the threads cuInit creates inherit the rest. */
+    sched_setaffinity(0, sizeof(others_set), &others_set);
+}
+
+/* Moves the launching thread to its own cpu, once every other thread exists. */
+static void pin_launching_thread(void) {
+    if (launch_cpu >= 0)
+        sched_setaffinity(0, sizeof(launch_set), &launch_set);
+}
+
+static uint64_t thread_cpu_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* The process's threads, and how many besides this one may run on the
+ * launching thread's cpu. */
+static void count_threads(uint64_t *threads, uint64_t *sharing) {
+    *threads = 0;
+    *sharing = 0;
+    DIR *tasks = opendir("/proc/self/task");
+    if (!tasks)
+        return;
+    pid_t self = (pid_t)syscall(SYS_gettid);
+    struct dirent *task;
+    while ((task = readdir(tasks))) {
+        if (task->d_name[0] == '.')
+            continue;
+        pid_t tid = (pid_t)atoi(task->d_name);
+        *threads += 1;
+        cpu_set_t allowed;
+        if (tid != self && launch_cpu >= 0 &&
+            sched_getaffinity(tid, sizeof(allowed), &allowed) == 0 &&
+            CPU_ISSET(launch_cpu, &allowed))
+            *sharing += 1;
+    }
+    closedir(tasks);
+}
+
+/* 1 if the library CUDA_INJECTION64_PATH names is mapped here, 0 if not, -1
+ * if the variable is unset. Compared by file name: the driver may resolve
+ * the path it was given. */
+static int injection_loaded(void) {
+    const char *path = getenv("CUDA_INJECTION64_PATH");
+    if (!path || !*path)
+        return -1;
+    const char *name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps)
+        return 0;
+    char line[4096];
+    int found = 0;
+    while (!found && fgets(line, sizeof(line), maps)) {
+        line[strcspn(line, "\n")] = 0;
+        const char *mapped = strrchr(line, '/');
+        found = mapped && !strcmp(mapped + 1, name);
+    }
+    fclose(maps);
+    return found;
 }
 
 /* What the exit handler writes: everything but exit_ns is known by then. */
 static struct {
     const char *mode;
     uint64_t kernels, memcpy, memset;
-    uint64_t init_ns, elapsed_ns, section_cpu_ns;
+    uint64_t init_ns, elapsed_ns, section_cpu_ns, section_thread_cpu_ns;
+    uint64_t threads, threads_on_launch_cpu;
+    int injection;
     uint64_t main_end_ns;
 } done;
 
@@ -198,12 +300,16 @@ static void write_report(void) {
     }
     fprintf(out,
             "{\"mode\":\"%s\",\"pid\":%d,\"kernels\":%llu,\"memcpy\":%llu,\"memset\":%llu,"
-            "\"init_ns\":%llu,\"elapsed_ns\":%llu,\"section_cpu_ns\":%llu,\"exit_ns\":%llu,"
-            "\"cpu_ns\":%llu}\n",
+            "\"init_ns\":%llu,\"elapsed_ns\":%llu,\"section_cpu_ns\":%llu,"
+            "\"section_thread_cpu_ns\":%llu,\"threads\":%llu,\"threads_on_launch_cpu\":%llu,"
+            "\"injection\":%d,\"exit_ns\":%llu,\"cpu_ns\":%llu}\n",
             done.mode, getpid(), (unsigned long long)done.kernels,
             (unsigned long long)done.memcpy, (unsigned long long)done.memset,
             (unsigned long long)done.init_ns, (unsigned long long)done.elapsed_ns,
-            (unsigned long long)done.section_cpu_ns, (unsigned long long)exit_ns,
+            (unsigned long long)done.section_cpu_ns,
+            (unsigned long long)done.section_thread_cpu_ns, (unsigned long long)done.threads,
+            (unsigned long long)done.threads_on_launch_cpu, done.injection,
+            (unsigned long long)exit_ns,
             (unsigned long long)cpu_ns());
     fclose(out);
 }
@@ -225,16 +331,18 @@ static void launches(uint64_t count) {
     CUdeviceptr out;
     check("cuMemAlloc", cuMemAlloc_v2(&out, 4 * 32));
     void *params[] = {&out};
-    uint64_t start = now_ns(), cpu = cpu_ns();
+    uint64_t start = now_ns(), cpu = cpu_ns(), own = thread_cpu_ns();
     for (uint64_t i = 0; i < count; i++) {
         launch(tiny, 1, 32, params);
         if (i % 1024 == 1023)
             check("cuCtxSynchronize", cuCtxSynchronize());
     }
     check("cuCtxSynchronize", cuCtxSynchronize());
+    done.section_thread_cpu_ns = thread_cpu_ns() - own;
     done.section_cpu_ns = cpu_ns() - cpu;
     done.elapsed_ns = now_ns() - start;
     done.kernels = count;
+    count_threads(&done.threads, &done.threads_on_launch_cpu);
 }
 
 static void compute(uint64_t count, uint64_t iterations) {
@@ -242,13 +350,15 @@ static void compute(uint64_t count, uint64_t iterations) {
     CUdeviceptr out;
     check("cuMemAlloc", cuMemAlloc_v2(&out, 8));
     void *params[] = {&out, &iterations};
-    uint64_t start = now_ns(), cpu = cpu_ns();
+    uint64_t start = now_ns(), cpu = cpu_ns(), own = thread_cpu_ns();
     for (uint64_t i = 0; i < count; i++)
         launch(spin, 68, 256, params);
     check("cuCtxSynchronize", cuCtxSynchronize());
+    done.section_thread_cpu_ns = thread_cpu_ns() - own;
     done.section_cpu_ns = cpu_ns() - cpu;
     done.elapsed_ns = now_ns() - start;
     done.kernels = count;
+    count_threads(&done.threads, &done.threads_on_launch_cpu);
 }
 
 static void memory(uint64_t count, uint64_t mib) {
@@ -265,16 +375,18 @@ static void memory(uint64_t count, uint64_t mib) {
     memset(host, 7, size);
     uint64_t words = size / 8;
     void *params[] = {&destination, &source, &words};
-    uint64_t start = now_ns(), cpu = cpu_ns();
+    uint64_t start = now_ns(), cpu = cpu_ns(), own = thread_cpu_ns();
     check("cuMemsetD8", cuMemsetD8_v2(source, 7, size));
     check("cuMemcpyHtoD", cuMemcpyHtoD_v2(source, host, size));
     for (uint64_t i = 0; i < count; i++)
         launch(copy, 272, 256, params);
     check("cuCtxSynchronize", cuCtxSynchronize());
     check("cuMemcpyDtoH", cuMemcpyDtoH_v2(host, destination, size));
+    done.section_thread_cpu_ns = thread_cpu_ns() - own;
     done.section_cpu_ns = cpu_ns() - cpu;
     done.elapsed_ns = now_ns() - start;
     done.kernels = count;
+    count_threads(&done.threads, &done.threads_on_launch_cpu);
     done.memcpy = 2;
     done.memset = 1;
     free(host);
@@ -312,7 +424,7 @@ static void usage(void) {
 int main(int argc, char **argv) {
     if (argc < 3)
         usage();
-    pin();
+    place();
     done.mode = argv[1];
     /* Before cuInit: the handlers registered there -- a tracer's -- run
      * first, and this one measures them. */
@@ -326,8 +438,10 @@ int main(int argc, char **argv) {
     check("cuCtxCreate", cuCtxCreate_v2(&context, 0, device));
     check("cuModuleLoadData", cuModuleLoadData(&module, PTX));
     done.init_ns = now_ns() - start;
+    done.injection = injection_loaded();
 
     warm();
+    pin_launching_thread();
     uint64_t first = strtoull(argv[2], NULL, 10);
     if (!strcmp(argv[1], "launches") && argc == 3)
         launches(first);

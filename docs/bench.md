@@ -1073,16 +1073,29 @@ mode per regime:
 
 | workload | regime | what | bare timed section |
 |---|---|---|---|
-| `launch` | launch-bound | 50 000 launches of `tiny`, one block of 32, synchronised every 1024 | 101-111 ms |
+| `launch` | launch-bound | 50 000 launches of `tiny`, one block of 32, synchronised every 1024 | 98 ms |
 | `compute` | compute-bound | 50 launches of `spin`, 200 000 dependent additions per thread, 68 blocks | 80 ms |
-| `memory` | memory-bound | a memset and a copy of 64 MiB in, 200 grid-stride copies of it, a copy out | 66-71 ms |
+| `memory` | memory-bound | a memset and a copy of 64 MiB in, 200 grid-stride copies of it, a copy out | 62 ms |
 
 Each measures itself on `CLOCK_MONOTONIC`: `init_ns` (`cuInit` to the module
 loaded: where the driver loads an injection library and where it arms
 CUPTI), `elapsed_ns` (the first launch to the last synchronise), `exit_ns`
 (the end of `main` to the last exit handler -- registered before `cuInit`, so
 it runs after a tracer's, and measures that tracer's last flush), and
-`section_cpu_ns`, the process's cpu over the timed section, every thread of it.
+`section_cpu_ns`, the process's cpu over the timed section, every thread of
+it, and `section_thread_cpu_ns`, the launching thread's alone; what every
+other thread spent is the difference. It also reports how many of its
+threads were allowed on the launching thread's cpu, and whether the library
+`CUDA_INJECTION64_PATH` names is mapped into it after `cuInit`.
+
+**The threads are placed apart.** `BENCH_CPUS` gives the workload four cpus
+(`gpu::GPU_CPUS`). The main thread starts on the last three, so every thread
+`cuInit` creates -- the driver's, CUPTI's, the injection library's flush
+thread -- inherits those three; after the warm phase the main thread moves
+alone to the first, for the timed section. A tracer thread's work then
+cannot become the launching thread's wall time, and the launching thread's
+cpu and the other threads' are two columns of the table. The measurement
+fails if any run let another thread onto the launching thread's cpu.
 
 **The clocks are warmed, never set.** Each run spins kernels for 500 ms
 before its timed section. The device's clocks are not locked (`omn` does not
@@ -1104,7 +1117,9 @@ Round-robin per workload, twenty repetitions after two warmups each:
   driver and disarmed. What loading costs is control against bare; what
   CUPTI costs is armed against control. A `vendor:cupti` row is measured
   against the control, any other against bare (a shim or a poll loads
-  nothing the control would).
+  nothing the control would). Every control and CUPTI run must report its
+  library mapped and every bare run none, or the measurement fails: a
+  control that never loaded the library would show its loading as free.
 - **served**: `omn trace <source> --backend force:<backend> -- gpu ...`, for
   every `gpu` (source, backend) this build serves for a launched program: the
   two tracers and the five NVML polls.
@@ -1118,7 +1133,8 @@ A row's cost is the largest of three columns: the share of the target's cpu
 `cost.json` reports (the tool's own work), the dilation of the timed section,
 and the dilation of the process's cpu over it -- each against the row's
 baseline. The third is new: a tracer's thread inside the target costs it cpu
-without necessarily stretching its timed section, and `cost.json` says of
+on another cpu than the launching thread's, which need not stretch its timed
+section (CUPTI's other threads: 16.9 ms over a 98 ms section), and `cost.json` says of
 `vendor:cupti` that "a vendor profiler injects into the target, and says
 nothing of what that cost it". A dilation no larger than what the workload
 resolves reads as zero, as in the backends record.
@@ -1128,7 +1144,7 @@ the spread taken as `IQR / 1.349` rather than the standard deviation
 (`gpu::resolves_percent`), over the bare and the control series of the
 workload, the coarsest of the four. These tables were taken on a machine and
 a device other streams shared, and one repetition another tenant held up
-moves a standard deviation and not an IQR: the first table put the `compute`
+moves a standard deviation and not an IQR: a first-round table put the `compute`
 floor at 24 % on a series whose IQR was 1.4 % of its median. The medians
 compared are robust to that repetition, so their floor is too
 (`bench_gpu::one_held_up_repetition_does_not_move_the_floor`).
@@ -1137,71 +1153,94 @@ A pair's band holds its **worst regime**. The catalog has one band per
 backend; the regime it was set on is named in a caveat of the source, where a
 reader of `--budget` looks, and in a comment beside the cost line.
 
-### The two tables
+### The three tables
 
-Both by the stream, with the other streams of the wave building and testing
-beside it: `target/bench/gpu-1791094863/` at a load of 8, and
-`target/bench/gpu-1791095811/` at a load of 41 to 54 on 24 cpus, which is the
-record. Release build with its capabilities, twenty repetitions, no other
-process on the device at either end (it was shared during the runs). The
-second carries every repetition in its `table.json`.
+All three by the stream, release build with its capabilities, twenty
+repetitions, no other process on the device at either end:
 
-The baselines, second table:
+- `target/bench/gpu-1791094863/`, at a load of 8 on 24 cpus, and
+  `target/bench/gpu-1791095811/`, at a load of 41 to 54, the first round:
+  **every thread of the workload pinned to one cpu.** The workload pinned
+  its main thread before `cuInit`, so the driver's threads, CUPTI's and the
+  library's flush thread inherited that one cpu, and any of their work
+  became the launching thread's wall time. Those two tables cannot tell
+  which thread a cost lands on, and the review that found it was right: the
+  claim the first round made on them ("the launching thread pays") rested
+  on the setup. They are superseded and quoted nowhere below.
+- `target/bench/gpu-1791099533/`, **the record**: the threads placed apart
+  (above), the injection checked loaded on every control and CUPTI run and
+  absent on every bare one, no thread sharing the launching thread's cpu on
+  any run, losses counted per row. Taken at a load of 13 falling to 1 as the
+  other streams finished; the floors are a tenth of the first round's.
 
-| workload | bare section | resolves | control: dilation | control: cpu | control: init |
-|---|---|---|---|---|---|
-| launch | 111.4 ms | 13.61 % | +3.36 % | +3.24 % | -6.1 ms |
-| compute | 80.5 ms | 2.05 % | +0.20 % | +0.28 % | -44.9 ms |
-| memory | 66.6 ms | 6.20 % | +0.24 % | +0.22 % | -37.4 ms |
+The baselines:
 
-The tracers, both tables (first / second):
-
-| source | backend | workload | % of target | dilation | cpu dilation | against | exit |
+| workload | bare section | resolves | control: dilation | control: cpu | control: launching thread | control: other threads | control: init |
 |---|---|---|---|---|---|---|---|
-| gpu.kernel | vendor:cupti | launch | 9.33 / 9.97 % | +74.40 / +78.09 % | +73.83 / +70.28 % | control | +0.2 / +0.3 ms |
-| gpu.kernel | vendor:cupti | compute | 1.01 / 0.97 % | +0.40 / +0.61 % | -0.57 / +0.77 % | control | +0.2 / +0.1 ms |
-| gpu.kernel | vendor:cupti | memory | 0.99 / 0.96 % | -3.05 / -0.85 % | +1.04 / -1.62 % | control | +0.1 / +0.1 ms |
-| gpu.api | preload | launch | 7.63 / 8.94 % | +9.55 / +38.72 % | +10.04 / +21.17 % | bare | 0 |
-| gpu.api | preload | compute | 1.19 / 0.95 % | +1.17 / +1.48 % | +0.03 / +0.63 % | bare | 0 |
-| gpu.api | preload | memory | 1.05 / 1.00 % | -8.89 / +1.81 % | +1.14 / +0.45 % | bare | 0 |
+| launch | 98.1 ms | 0.57 % | -0.39 % | -0.32 % | -0.32 % | -0.0 ms | -33.6 ms |
+| compute | 80.6 ms | 0.73 % | +0.17 % | +0.21 % | +0.21 % | -0.0 ms | -7.2 ms |
+| memory | 61.6 ms | 0.14 % | +0.02 % | +0.04 % | +0.02 % | +0.0 ms | -1.3 ms |
 
-`nsys profile --trace=cuda`, against bare, both tables: launch +112.0 /
-+125.5 %, compute +0.5 / +0.4 %, memory -8.6 / -1.0 %; `init` +105 to
-+261 ms and `exit` +11 to +27 ms, against `omn`'s 0.1 to 0.3 ms at exit.
+The tracers ("launching thread": its cpu dilation; "other threads": every
+other thread's cpu over the section, against the baseline's):
+
+| source | backend | workload | % of target | dilation | cpu dilation | launching thread | other threads | against | exit |
+|---|---|---|---|---|---|---|---|---|---|
+| gpu.kernel | vendor:cupti | launch | 7.83 % | +67.05 % | +82.75 % | +66.04 % | +16.9 ms | control | +0.2 ms |
+| gpu.kernel | vendor:cupti | compute | 0.62 % | +0.81 % | +0.90 % | +0.76 % | +0.1 ms | control | +0.1 ms |
+| gpu.kernel | vendor:cupti | memory | 0.66 % | +0.14 % | +0.27 % | +0.14 % | +0.1 ms | control | +0.1 ms |
+| gpu.api | preload | launch | 6.12 % | +11.31 % | +11.30 % | +11.29 % | +0.0 ms | bare | 0 |
+| gpu.api | preload | compute | 0.61 % | +3.18 % | +3.15 % | +3.15 % | -0.0 ms | bare | 0 |
+| gpu.api | preload | memory | 0.65 % | -0.01 % | -0.05 % | -0.06 % | +0.0 ms | bare | 0 |
+
+`nsys profile --trace=cuda`, against bare: launch +74.71 % (launching
+thread +74.40 %, other threads +48.0 ms), compute +0.25 %, memory +0.17 %;
+`init` +77 to +124 ms and `exit` +4.9 to +14.9 ms, against `omn`'s 0.1 to
+0.2 ms at exit.
 
 The NVML polls, in the record below, are within the band the backends table
-gave them on every regime: `gpu.freq` 6.3 to 14.7 % of the target, `gpu.temp`
-0.76 to 0.99 %, `gpu.mem` 1.3 to 1.9 %, `gpu.engine_busy` and `gpu.power`
-(`count`: two reads) 1.2 to 2.0 %. What a poll costs is what it reads,
-whatever the device does.
+gave them on every regime: `gpu.freq` 7.7 to 10.5 % of the target,
+`gpu.temp` 0.7 to 0.9 %, `gpu.mem` 1.0 to 1.3 %, `gpu.engine_busy` and
+`gpu.power` (`count`: two reads) 1.1 to 1.6 %; no dilation outside the
+floor but `gpu.mem`'s +1.28 % on `compute`. What a poll costs is what it
+reads, whatever the device does.
 
 ### What the tables say
 
-- **CUPTI costs about 1.5 us a launch, inside the launch.** 50 000 launches
-  ran 74 to 78 % longer armed than with the library loaded and disarmed, the
-  fastest repetitions included (101 ms bare, 174.5 ms armed). The cpu
-  dilation is the same as the time dilation, so it is the launching thread
-  that pays -- CUPTI's per-launch instrumentation -- not the flush thread,
-  whose cpu would show as cpu without time. On 50 kernels of 1.6 ms it is
-  under the floor. `nsys`, which reads the same activity and the API calls
-  besides, costs the launch-bound program more (+112 to +125 %), so the price
-  is CUPTI's and not this library's way of draining it.
-- **Loading the library costs nothing measurable.** Control against bare is
-  inside the floor on every regime, the timed section and the cpu alike. The
-  `init` column moves by tens of milliseconds either way between arms, which
-  is `cuInit`'s own spread (an IQR of 12 to 180 ms in the first table), not a
-  cost: arming CUPTI is not resolved by these tables.
-- **`omn`'s own share is the decoding**: 9.3 to 10 % of the launch-bound
-  target's cpu, 91 ms of the tool's cpu for 53 000 records (the 50 000 and
-  the warm phase's), about 1.7 us a record -- more than CUPTI's 1.5 us inside
-  the launch, on another cpu; about 1 % (6.5 ms) on the other regimes. The
-  shim's reader is about the same: 64 ms for 53 000 calls.
-- **The preload shim is a price per call too**: 7.6 to 8.9 % of the
-  launch-bound program's cpu, about 1 % on the others. Its dilation on that
-  program, +9.6 % at a load of 8 and +38.7 % at a load of 41, is the one
-  number the two tables disagree on; the second is preemption -- the bare
-  launch-bound series runs from 101 to 541 ms there -- and the quiet rerun
-  is what settles it.
+- **CUPTI's price is paid by the launching thread, about 1.3 us a launch.**
+  50 000 launches ran 67 % longer armed than with the library loaded and
+  disarmed, the fastest repetitions too (98 ms bare, 161 ms armed). With
+  every other thread kept off its cpu, the launching thread's own cpu grew
+  by 66 % -- about 65 ms, 1.3 us a launch -- and every other thread together
+  spent 16.9 ms more, on other cpus: that is the flush thread and CUPTI's
+  own, and the reason the process's cpu dilation (+82.75 %) is larger than
+  the time dilation. The library registers no per-launch callback (its
+  activity kinds and two buffer callbacks, `cupti/src/lib.rs`), so what the
+  launching thread pays is CUPTI's activity instrumentation; `nsys`, whose
+  injection is CUPTI too, costs that thread about as much (+74 %). On 50
+  kernels of 1.6 ms it is under 1 %. The first round's single-cpu placement
+  had put it at +74 to +78 %: the other threads' 17 ms were billed to the
+  wall clock there.
+- **Loading the library costs nothing these tables resolve.** Control
+  against bare is inside the floor on every regime -- 0.57 %, 0.73 % and
+  0.14 % -- the timed section, the process's cpu and the launching thread's
+  alike, with the library checked mapped into every control run
+  (`/proc/self/maps`). The `init` column moves by tens of milliseconds
+  either way between arms, which is `cuInit`'s own spread, not a cost:
+  arming CUPTI is not resolved by these tables.
+- **`omn`'s own share is the decoding**: 7.8 % of the launch-bound target's
+  cpu for 53 000 records (the 50 000 and the warm phase's), about 0.6 % on
+  the other regimes.
+- **The preload shim is a price per call, on the calling thread**: +11.3 %
+  on the launch-bound program, in time and in the launching thread's cpu
+  alike, and nothing on other threads; 6.1 % of the target's cpu for the
+  tool's reader; +3.2 % on `compute` (50 launches and the warm phase's
+  3 400 calls), nothing on `memory`. The first round disagreed with itself
+  on this row (+9.6 % and +38.7 %); this table settles it inside `high`.
+- **Losses**: one late tick of `gpu.freq`'s poll and one of CUPTI's
+  collector in twenty launch-bound runs, nothing elsewhere. Shown in the
+  record; a row losing more than one record in a hundred is refused, by the
+  measurement and by the record's test.
 - **A tracer's cost ranges over two orders of magnitude with the program.**
   One band per backend cannot say that; a caveat can. With `extreme` on
   `vendor:cupti`, `--budget` under 20 % now refuses `gpu.kernel` on a program
@@ -1212,12 +1251,12 @@ whatever the device does.
 ### The bands set
 
 - `gpu.kernel` through `vendor:cupti`: `med` to **`extreme`**, on the
-  launch-bound regime; `vendor:rocprof` and `vendor:l0`, unmeasured, moved
-  with it, since an equivalent backend declares no cheaper band than the one
-  it stands in for (the backends record's rule).
+  launch-bound regime (+82.75 % of the process's cpu, +67 % of its time);
+  `vendor:rocprof` and `vendor:l0`, unmeasured, moved with it, since an
+  equivalent backend declares no cheaper band than the one it stands in for
+  (the backends record's rule).
 - `gpu.api` through `preload`: `low` to **`high`**, on the launch-bound
-  regime, standing on the first table while the second's dilation is
-  preemption.
+  regime (+11.3 %).
 - The NVML polls: unchanged.
 - `gpu.counters` and `gpu.profile`: pending, below. Their collectors land
   with the profiler stream after this table; their rows are measured by the
@@ -1229,46 +1268,52 @@ whatever the device does.
 row's `declared` is not the catalog's band, when a pair's worst regime is
 over its band without a `stands ...: <reason>`, when a `stands` reason is no
 longer needed, when a `corrected` changed nothing, when a pair is measured on
-some regimes and not on others, when the row count is not the marker's, and
+some regimes and not on others, when a row lost more than one record in a
+hundred or gives no count of losses, when a `within` changed its band, when
+the row count is not the marker's, and
 when a `gpu` source served on a launched program alone has a collector and no
 row, measured or `pending: <reason>`. Each is shown failing on a synthetic
 record. The measurement itself is
 `cargo test --test bench_gpu -- --ignored --nocapture` (about 15 minutes);
 it writes `table.md`, `table.json` and `record.md`, the block to paste here,
 under `target/bench/gpu-<stamp>/`.
+It fails, rather than leaving a row out, when a pair the tool accepts here
+fails its trial run, when a CUPTI row has no control to stand against, when a
+run's injection library is not its arm's, when a thread shared the launching
+thread's cpu, and when a row lost more than one record in a hundred.
 
-<!-- gpu-bands:begin gpu-1791095811 rows=23 -->
+<!-- gpu-bands:begin gpu-1791099533 rows=23 -->
 | workload | regime | resolves |
 |---|---|---|
-| launch | launch-bound | 13.61 % |
-| compute | compute-bound | 2.05 % |
-| memory | memory-bound | 6.20 % |
+| launch | launch-bound | 0.57 % |
+| compute | compute-bound | 0.73 % |
+| memory | memory-bound | 0.14 % |
 
-| source | backend | mode | workload | % of target | dilation | cpu dilation | against | was | declared | verdict |
-|---|---|---|---|---|---|---|---|---|---|---|
-| gpu.engine_busy | vendor:nvml | count | launch | 1.33 % | +0.48 % | +0.40 % | bare | med | med | within |
-| gpu.freq | vendor:nvml | poll@100ms | launch | 10.36 % | +9.05 % | +6.57 % | bare | high | high | within |
-| gpu.power | vendor:nvml | count | launch | 1.54 % | +1.25 % | +0.88 % | bare | high | high | within |
-| gpu.temp | vendor:nvml | poll@100ms | launch | 0.80 % | +1.05 % | +0.93 % | bare | low | low | within |
-| gpu.mem | vendor:nvml | poll@100ms | launch | 1.88 % | +0.27 % | +0.23 % | bare | med | med | within |
-| gpu.kernel | vendor:cupti | trace | launch | 9.97 % | +78.09 % | +70.28 % | control | med | extreme | corrected |
-| gpu.api | preload | trace | launch | 8.94 % | +38.72 % | +21.17 % | bare | low | high | stands on the first table: this one ran at a load of 41 on 24 cpus, and its launch-bound tail is preemption (bare 101 to 541 ms); the first, at a load of 8, measured 7.63 % of the target and +9.55 %, inside `high`, and the quiet rerun decides |
-| gpu.engine_busy | vendor:nvml | count | compute | 1.18 % | +0.60 % | +0.51 % | bare | med | med | within |
-| gpu.freq | vendor:nvml | poll@100ms | compute | 6.31 % | +0.49 % | +0.46 % | bare | high | high | within |
-| gpu.power | vendor:nvml | count | compute | 1.47 % | +1.30 % | +0.71 % | bare | high | high | within |
-| gpu.temp | vendor:nvml | poll@100ms | compute | 0.86 % | +0.65 % | +0.75 % | bare | low | low | within |
-| gpu.mem | vendor:nvml | poll@100ms | compute | 1.93 % | +1.33 % | +0.74 % | bare | med | med | within |
-| gpu.kernel | vendor:cupti | trace | compute | 0.97 % | +0.61 % | +0.77 % | control | med | extreme | corrected |
-| gpu.api | preload | trace | compute | 0.95 % | +1.48 % | +0.63 % | bare | low | high | corrected |
-| gpu.engine_busy | vendor:nvml | count | memory | 1.26 % | +1.70 % | -1.64 % | bare | med | med | within |
-| gpu.freq | vendor:nvml | poll@100ms | memory | 8.27 % | -1.15 % | -0.46 % | bare | high | high | within |
-| gpu.power | vendor:nvml | count | memory | 1.55 % | +0.26 % | -0.63 % | bare | high | high | within |
-| gpu.temp | vendor:nvml | poll@100ms | memory | 0.76 % | -1.18 % | -0.36 % | bare | low | low | within |
-| gpu.mem | vendor:nvml | poll@100ms | memory | 1.62 % | -0.87 % | -0.41 % | bare | med | med | within |
-| gpu.kernel | vendor:cupti | trace | memory | 0.96 % | -0.85 % | -1.62 % | control | med | extreme | corrected |
-| gpu.api | preload | trace | memory | 1.00 % | +1.81 % | +0.45 % | bare | low | high | corrected |
-| gpu.counters | vendor:cupti | - | - | - | - | - | - | - | - | pending: the collector lands with the profiler stream of the nineteenth wave, after this table |
-| gpu.profile | vendor:cupti | - | - | - | - | - | - | - | - | pending: the collector lands with the profiler stream of the nineteenth wave, after this table |
+| source | backend | mode | workload | % of target | dilation | cpu dilation | against | losses | was | declared | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| gpu.engine_busy | vendor:nvml | count | launch | 1.12 % | -0.05 % | +0.03 % | bare | 0 of 40 | med | med | within |
+| gpu.freq | vendor:nvml | poll@100ms | launch | 8.42 % | -0.11 % | -0.16 % | bare | 1 of 185 | high | high | within |
+| gpu.power | vendor:nvml | count | launch | 1.47 % | +0.16 % | +0.16 % | bare | 0 of 20 | high | high | within |
+| gpu.temp | vendor:nvml | poll@100ms | launch | 0.69 % | -0.29 % | -0.23 % | bare | 0 of 190 | low | low | within |
+| gpu.mem | vendor:nvml | poll@100ms | launch | 1.09 % | -0.16 % | -0.13 % | bare | 0 of 165 | med | med | within |
+| gpu.kernel | vendor:cupti | trace | launch | 7.83 % | +67.05 % | +82.75 % | control | 1 of 1060872 | med | extreme | corrected |
+| gpu.api | preload | trace | launch | 6.12 % | +11.31 % | +11.30 % | bare | 0 of 1069915 | low | high | corrected |
+| gpu.engine_busy | vendor:nvml | count | compute | 1.12 % | +0.22 % | +0.21 % | bare | 0 of 40 | med | med | within |
+| gpu.freq | vendor:nvml | poll@100ms | compute | 7.68 % | +0.33 % | +0.31 % | bare | 0 of 180 | high | high | within |
+| gpu.power | vendor:nvml | count | compute | 1.49 % | +0.30 % | +0.29 % | bare | 0 of 20 | high | high | within |
+| gpu.temp | vendor:nvml | poll@100ms | compute | 0.72 % | +0.88 % | +0.88 % | bare | 0 of 180 | low | low | within |
+| gpu.mem | vendor:nvml | poll@100ms | compute | 1.06 % | +1.28 % | +1.23 % | bare | 0 of 152 | med | med | within |
+| gpu.kernel | vendor:cupti | trace | compute | 0.62 % | +0.81 % | +0.90 % | control | 0 of 61520 | med | extreme | corrected |
+| gpu.api | preload | trace | compute | 0.61 % | +3.18 % | +3.15 % | bare | 0 of 69199 | low | high | corrected |
+| gpu.engine_busy | vendor:nvml | count | memory | 1.19 % | +0.01 % | +0.01 % | bare | 0 of 40 | med | med | within |
+| gpu.freq | vendor:nvml | poll@100ms | memory | 10.50 % | -0.02 % | -0.04 % | bare | 0 of 180 | high | high | within |
+| gpu.power | vendor:nvml | count | memory | 1.59 % | -0.01 % | -0.04 % | bare | 0 of 20 | high | high | within |
+| gpu.temp | vendor:nvml | poll@100ms | memory | 0.71 % | +0.05 % | +0.05 % | bare | 0 of 180 | low | low | within |
+| gpu.mem | vendor:nvml | poll@100ms | memory | 0.98 % | -0.07 % | -0.08 % | bare | 0 of 151 | med | med | within |
+| gpu.kernel | vendor:cupti | trace | memory | 0.66 % | +0.14 % | +0.27 % | control | 0 of 64692 | med | extreme | corrected |
+| gpu.api | preload | trace | memory | 0.65 % | -0.01 % | -0.05 % | bare | 0 of 72349 | low | high | corrected |
+| gpu.counters | vendor:cupti | - | - | - | - | - | - | - | - | - | pending: the collector lands with the profiler stream of the nineteenth wave, after this table |
+| gpu.profile | vendor:cupti | - | - | - | - | - | - | - | - | - | pending: the collector lands with the profiler stream of the nineteenth wave, after this table |
 <!-- gpu-bands:end -->
 
 ## Exit criteria of phase 8

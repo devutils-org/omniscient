@@ -53,8 +53,11 @@ fn every_gpu_tracer_is_costed_against_a_negative_control() {
 
     let library = injection_library(&omn);
     let (planned, unplanned) = gpu_plan(&omn);
-    for (source, backend, why) in &unplanned {
-        say(format!("not measured: {source} through {backend}: {why}"));
+    for pair in &unplanned {
+        say(format!(
+            "not measured: {} through {}: {}",
+            pair.source, pair.backend, pair.why
+        ));
     }
     let nsys = which("nsys");
     let mut arms = vec![Arm::Bare];
@@ -114,8 +117,11 @@ fn every_gpu_tracer_is_costed_against_a_negative_control() {
             "resolves_percent": resolution,
             "bare_elapsed_ms": stats_ms(&bare.elapsed),
             "bare_init_ms": stats_ms(&bare.init),
+            "bare_others_cpu_ms": stats_ms(&bare.others_cpu),
             "control_elapsed_dilation": control.and_then(|c| dilation(&c.elapsed, &bare.elapsed)),
             "control_cpu_dilation": control.and_then(|c| dilation(&c.section_cpu, &bare.section_cpu)),
+            "control_thread_cpu_dilation": control.and_then(|c| dilation(&c.thread_cpu, &bare.thread_cpu)),
+            "control_others_cpu_ms": control.and_then(|c| difference_ms(&c.others_cpu, &bare.others_cpu)),
             "control_init_ms": control.and_then(|c| difference_ms(&c.init, &bare.init)),
         }));
         for (offset, pair) in planned.iter().enumerate() {
@@ -136,6 +142,8 @@ fn every_gpu_tracer_is_costed_against_a_negative_control() {
                     "workload": workload.name,
                     "dilation": dilation(&measured.elapsed, &bare.elapsed),
                     "cpu_dilation": dilation(&measured.section_cpu, &bare.section_cpu),
+                    "thread_cpu_dilation": dilation(&measured.thread_cpu, &bare.thread_cpu),
+                    "others_cpu_ms": difference_ms(&measured.others_cpu, &bare.others_cpu),
                     "init_ms": difference_ms(&measured.init, &bare.init),
                     "exit_ms": difference_ms(&measured.exit, &bare.exit),
                 }));
@@ -178,7 +186,10 @@ fn every_gpu_tracer_is_costed_against_a_negative_control() {
     eprintln!("{record}");
     say(format!("wrote {} after {}", dir.display(), since(started)));
 
-    let mut wrong = gpu_table_failures(&planned, &rows, workloads.len());
+    let mut wrong = gpu_table_failures(&planned, &unplanned, &rows, workloads.len());
+    for ((index, workload), measured) in &series {
+        wrong.extend(series_failures(&arms[*index], workload, measured));
+    }
     wrong.extend(
         failures
             .iter()
@@ -216,6 +227,12 @@ fn raw_series(arms: &[Arm], series: &BTreeMap<(usize, &str), Series>) -> Value {
                 "workload": workload,
                 "elapsed_ns": series.elapsed,
                 "section_cpu_ns": series.section_cpu,
+                "section_thread_cpu_ns": series.thread_cpu,
+                "others_cpu_ns": series.others_cpu,
+                "threads_on_launch_cpu": series.sharing,
+                "injection": series.injection,
+                "losses": series.losses,
+                "losses_by_kind": series.losses_by_kind,
                 "init_ns": series.init,
                 "exit_ns": series.exit,
                 "share_percent": series.share,
@@ -234,12 +251,6 @@ fn stats_ms(values: &[f64]) -> Value {
     }
 }
 
-fn difference_ms(of: &[f64], from: &[f64]) -> Option<f64> {
-    let of = harness::Stats::of(of)?.median;
-    let from = harness::Stats::of(from)?.median;
-    Some((of - from) / 1e6)
-}
-
 fn row_json(row: &GpuRow) -> Value {
     json!({
         "source": row.source,
@@ -249,11 +260,14 @@ fn row_json(row: &GpuRow) -> Value {
         "share_percent": row.share,
         "dilation_percent": row.dilation,
         "cpu_dilation_percent": row.cpu_dilation,
+        "thread_cpu_dilation_percent": row.thread_cpu_dilation,
+        "others_cpu_ms": row.others_cpu_ms,
         "against": row.against,
         "init_ms": row.init_ms,
         "exit_ms": row.exit_ms,
         "resolves_percent": row.resolution,
         "losses": row.losses,
+        "events_total": row.events_total,
         "events": row.events,
         "served_by": row.served_by,
         "declared": row.declared.as_str(),
@@ -285,13 +299,14 @@ fn render_table(
         after["other_tenants"].as_str().unwrap_or("?"),
     ));
     out.push_str(
-        "| workload | regime | bare section | resolves | control: dilation | control: cpu | control: init |\n\
-         |---|---|---|---|---|---|---|\n",
+        "| workload | regime | bare section | resolves | control: dilation | control: cpu | \
+         control: launching thread | control: other threads | control: init |\n\
+         |---|---|---|---|---|---|---|---|---|\n",
     );
     for baseline in baselines {
         let number = |key: &str| baseline.get(key).and_then(Value::as_f64);
         out.push_str(&format!(
-            "| {} | {} | {:.1} ms | {:.2} % | {} | {} | {} |\n",
+            "| {} | {} | {:.1} ms | {:.2} % | {} | {} | {} | {} | {} |\n",
             baseline["workload"].as_str().unwrap_or("?"),
             baseline["regime"].as_str().unwrap_or("?"),
             baseline
@@ -301,13 +316,15 @@ fn render_table(
             number("resolves_percent").unwrap_or(f64::NAN),
             percent_cell(number("control_elapsed_dilation")),
             percent_cell(number("control_cpu_dilation")),
+            percent_cell(number("control_thread_cpu_dilation")),
+            ms_cell(number("control_others_cpu_ms")),
             ms_cell(number("control_init_ms")),
         ));
     }
     out.push_str(
-        "\n| source | backend | mode | workload | % of target | dilation | cpu dilation | against | \
-         init | exit | events | losses | declared | band |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
+        "\n| source | backend | mode | workload | % of target | dilation | cpu dilation | \
+         launching thread | other threads | against | init | exit | events | losses | declared | band |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     for row in rows {
         let band = match row.cost() {
@@ -321,7 +338,7 @@ fn render_table(
             None => "**missing**".into(),
         };
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             row.source,
             row.backend,
             row.mode,
@@ -329,6 +346,8 @@ fn render_table(
             share_cell(row.share),
             percent_cell(row.dilation),
             percent_cell(row.cpu_dilation),
+            percent_cell(row.thread_cpu_dilation),
+            ms_cell(row.others_cpu_ms),
             row.against,
             ms_cell(row.init_ms),
             ms_cell(row.exit_ms),
@@ -342,15 +361,18 @@ fn render_table(
     if !references.is_empty() {
         out.push_str(
             "\n`nsys profile --trace=cuda`, against bare, measured and never served:\n\n\
-             | workload | dilation | cpu dilation | init | exit |\n|---|---|---|---|---|\n",
+             | workload | dilation | cpu dilation | launching thread | other threads | init | exit |\n\
+             |---|---|---|---|---|---|---|\n",
         );
         for reference in references {
             let number = |key: &str| reference.get(key).and_then(Value::as_f64);
             out.push_str(&format!(
-                "| {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} |\n",
                 reference["workload"].as_str().unwrap_or("?"),
                 percent_cell(number("dilation")),
                 percent_cell(number("cpu_dilation")),
+                percent_cell(number("thread_cpu_dilation")),
+                ms_cell(number("others_cpu_ms")),
                 ms_cell(number("init_ms")),
                 ms_cell(number("exit_ms")),
             ));
@@ -384,8 +406,8 @@ fn render_record(dir: &std::path::Path, baselines: &[Value], rows: &[GpuRow]) ->
         ));
     }
     out.push_str(
-        "\n| source | backend | mode | workload | % of target | dilation | cpu dilation | against | was | declared | verdict |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|\n",
+        "\n| source | backend | mode | workload | % of target | dilation | cpu dilation | against | losses | was | declared | verdict |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     for row in rows {
         let verdict = match row.cost() {
@@ -394,7 +416,7 @@ fn render_record(dir: &std::path::Path, baselines: &[Value], rows: &[GpuRow]) ->
             None => "missing".into(),
         };
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} of {} | {} | {} | {} |\n",
             row.source,
             row.backend,
             row.mode,
@@ -403,6 +425,8 @@ fn render_record(dir: &std::path::Path, baselines: &[Value], rows: &[GpuRow]) ->
             percent_cell(row.dilation),
             percent_cell(row.cpu_dilation),
             row.against,
+            row.losses,
+            row.events_total,
             row.declared.as_str(),
             row.declared.as_str(),
             verdict
@@ -423,6 +447,9 @@ struct Recorded {
     share: Option<f64>,
     dilation: Option<f64>,
     cpu_dilation: Option<f64>,
+    /// Records the tracer dropped over every repetition, of every event it
+    /// saw (`N of M`); `None` (`-`) on a pending row only.
+    losses: Option<(u64, u64)>,
     /// `None` (`-`) on a pending row only.
     was: Option<Cost>,
     declared: Option<Cost>,
@@ -501,18 +528,29 @@ fn parse(text: &str) -> GpuRecord {
                     percent(cells[2]).expect("a workload's resolution"),
                 );
             }
-            11 if cells[0] != "source" => rows.push(Recorded {
+            12 if cells[0] != "source" => rows.push(Recorded {
                 source: cells[0].to_owned(),
                 backend: cells[1].to_owned(),
                 workload: cells[3].to_owned(),
                 share: percent(cells[4]),
                 dilation: percent(cells[5]),
                 cpu_dilation: percent(cells[6]),
-                was: (cells[8] != "-").then(|| cost(cells[8])),
-                declared: (cells[9] != "-").then(|| cost(cells[9])),
-                verdict: cells[10].to_owned(),
+                losses: (cells[8] != "-").then(|| {
+                    let count = |text: &str| -> u64 {
+                        text.trim()
+                            .parse()
+                            .unwrap_or_else(|_| panic!("`{}` is not `<lost> of <seen>`", cells[8]))
+                    };
+                    let (lost, seen) = cells[8]
+                        .split_once(" of ")
+                        .unwrap_or_else(|| panic!("`{}` is not `<lost> of <seen>`", cells[8]));
+                    (count(lost), count(seen))
+                }),
+                was: (cells[9] != "-").then(|| cost(cells[9])),
+                declared: (cells[10] != "-").then(|| cost(cells[10])),
+                verdict: cells[11].to_owned(),
             }),
-            3 | 11 => {}
+            3 | 12 => {}
             other => panic!("a GPU record line with {other} cells: {line}"),
         }
     }
@@ -534,7 +572,8 @@ fn label(row: &Recorded) -> String {
 /// What is wrong with the record as a record: its row count, a workload with
 /// no resolution, a verdict that is not one of the four, a reason left empty,
 /// a pending row that carries a measurement or a measured one that carries
-/// none, and a pair measured on some regimes and not on others.
+/// none, a measured row with losses (or no count of them), and a pair
+/// measured on some regimes and not on others.
 fn record_faults(record: &GpuRecord) -> Vec<String> {
     let mut faults = Vec::new();
     if record.expected_rows != Some(record.rows.len()) {
@@ -549,7 +588,10 @@ fn record_faults(record: &GpuRecord) -> Vec<String> {
     }
     let mut regimes: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     for row in &record.rows {
-        let measured = row.share.is_some() || row.dilation.is_some() || row.cpu_dilation.is_some();
+        let measured = row.share.is_some()
+            || row.dilation.is_some()
+            || row.cpu_dilation.is_some()
+            || row.losses.is_some();
         let reason = row
             .verdict
             .split_once(':')
@@ -585,6 +627,19 @@ fn record_faults(record: &GpuRecord) -> Vec<String> {
         if row.was.is_none() || row.declared.is_none() {
             faults.push(format!("{} gives no band and is not pending", label(row)));
         }
+        match row.losses {
+            None => faults.push(format!(
+                "{} gives no count of losses and is not pending",
+                label(row)
+            )),
+            Some((lost, seen)) if lossy(lost, seen) => faults.push(format!(
+                "{} lost {lost} of {seen} records, more than one in {:.0}: a tracer that \
+                 drops records understates its own cost, and its row cannot hold a band",
+                label(row),
+                1.0 / MAX_LOSS_SHARE
+            )),
+            Some(_) => {}
+        }
         if !record.resolves.contains_key(&row.workload) {
             faults.push(format!(
                 "{}: the record gives no resolution for `{}`",
@@ -619,7 +674,7 @@ fn recorded_cost(record: &GpuRecord, row: &Recorded) -> Option<f64> {
 /// What is wrong between the record and the catalog: a row whose `declared`
 /// is not the catalog's band, a pair whose worst regime is over its band with
 /// no `stands` reason, a `stands` reason no longer needed, a `corrected` with
-/// no change of band.
+/// no change of band, and a `within` whose band changed.
 fn band_faults(record: &GpuRecord, catalog: &Catalog) -> Vec<String> {
     let mut faults = Vec::new();
     let mut worst: BTreeMap<(String, String), (f64, String)> = BTreeMap::new();
@@ -648,6 +703,14 @@ fn band_faults(record: &GpuRecord, catalog: &Catalog) -> Vec<String> {
             faults.push(format!(
                 "{} says `corrected` and its band did not change",
                 label(row)
+            ));
+        }
+        if row.verdict == "within" && was != recorded {
+            faults.push(format!(
+                "{} says `within` and its band moved from `{}` to `{}`: that is `corrected`",
+                label(row),
+                was.as_str(),
+                recorded.as_str()
             ));
         }
         if let Some(cost) = recorded_cost(record, row) {
@@ -752,8 +815,8 @@ fn synthetic(rows: &[&str]) -> GpuRecord {
         "<!-- gpu-bands:begin synthetic rows={} -->\n\
          | workload | regime | resolves |\n|---|---|---|\n\
          | launch | launch-bound | 0.50 % |\n| compute | compute-bound | 0.50 % |\n\n\
-         | source | backend | mode | workload | % of target | dilation | cpu dilation | against | was | declared | verdict |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|\n",
+         | source | backend | mode | workload | % of target | dilation | cpu dilation | against | losses | was | declared | verdict |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|\n",
         rows.len()
     );
     for row in rows {
@@ -771,8 +834,8 @@ fn says(faults: &[String], what: &str) {
     );
 }
 
-/// `gpu.api` through `preload` declares `low` today; the synthetic rows lean
-/// on that, and say so if it moves.
+/// The band `gpu.api` through `preload` declares today, read from the
+/// catalog, so the synthetic rows hold whatever it is.
 fn api_band() -> &'static str {
     let catalog = catalog();
     let band = find(&catalog, "gpu.api")
@@ -830,7 +893,7 @@ fn one_held_up_repetition_does_not_move_the_floor() {
 fn a_gpu_record_wrong_in_each_way_is_named() {
     let band = api_band();
     let ok = |workload: &str| {
-        format!("| gpu.api | preload | trace | {workload} | 0.10 % | +0.20 % | +0.10 % | bare | {band} | {band} | within |")
+        format!("| gpu.api | preload | trace | {workload} | 0.10 % | +0.20 % | +0.10 % | bare | 0 of 1000 | {band} | {band} | within |")
     };
     // Whole, it is clean.
     let clean = synthetic(&[&ok("launch"), &ok("compute")]);
@@ -867,12 +930,15 @@ fn a_gpu_record_wrong_in_each_way_is_named() {
     );
     // A pending row with a number, and a measured row without one.
     let pending =
-        "| gpu.api | preload | - | launch | 1.00 % | - | - | - | low | low | pending: later |";
+        "| gpu.api | preload | - | launch | 1.00 % | - | - | - | - | low | low | pending: later |";
     says(
         &record_faults(&synthetic(&[pending])),
         "pending and carries a measurement",
     );
-    let empty = ok("compute").replace("0.10 % | +0.20 % | +0.10 %", "- | - | -");
+    let empty = ok("compute").replace(
+        "0.10 % | +0.20 % | +0.10 % | bare | 0 of 1000",
+        "- | - | - | bare | -",
+    );
     says(
         &record_faults(&synthetic(&[&ok("launch"), &empty])),
         "carries no measurement",
@@ -917,7 +983,7 @@ fn a_gpu_record_wrong_in_each_way_is_named() {
     // A pending row names a collector that has not landed, under a backend
     // the catalog may not have yet: nothing to hold to a band.
     let later =
-        "| gpu.profile | vendor:cupti | - | - | - | - | - | - | - | - | pending: lands later |";
+        "| gpu.profile | vendor:cupti | - | - | - | - | - | - | - | - | - | pending: lands later |";
     let waiting = synthetic(&[&ok("launch"), &ok("compute"), later]);
     assert!(
         record_faults(&waiting).is_empty(),
@@ -935,6 +1001,30 @@ fn a_gpu_record_wrong_in_each_way_is_named() {
         &record_faults(&synthetic(&[&ok("launch"), &unbanded])),
         "gives no band",
     );
+    // A measured row that lost records, and one that does not say.
+    let lossy = ok("compute").replace("| bare | 0 of 1000 |", "| bare | 12 of 1000 |");
+    says(
+        &record_faults(&synthetic(&[&ok("launch"), &lossy])),
+        "lost 12 of 1000 records",
+    );
+    // One in a thousand is shown and not refused.
+    let rare = ok("compute").replace("| bare | 0 of 1000 |", "| bare | 1 of 1000 |");
+    assert!(record_faults(&synthetic(&[&ok("launch"), &rare])).is_empty());
+    let uncounted = ok("compute").replace("| bare | 0 of 1000 |", "| bare | - |");
+    says(
+        &record_faults(&synthetic(&[&ok("launch"), &uncounted])),
+        "no count of losses",
+    );
+    // A `within` whose band moved.
+    let other_band = if band == "low" { "high" } else { "low" };
+    let moved = ok("launch").replace(
+        &format!("| {band} | {band} | within |"),
+        &format!("| {other_band} | {band} | within |"),
+    );
+    says(
+        &band_faults(&synthetic(&[&moved, &ok("compute")]), &catalog()),
+        "that is `corrected`",
+    );
     // A backend the catalog does not have.
     let unknown = ok("launch").replace("| preload |", "| vendor:none |");
     says(
@@ -947,8 +1037,8 @@ fn a_gpu_record_wrong_in_each_way_is_named() {
 fn a_gpu_tracer_missing_from_the_record_is_named() {
     let band = api_band();
     let only_api = synthetic(&[
-        &format!("| gpu.api | preload | trace | launch | 0.10 % | +0.20 % | +0.10 % | bare | {band} | {band} | within |"),
-        &format!("| gpu.api | preload | trace | compute | 0.10 % | +0.20 % | +0.10 % | bare | {band} | {band} | within |"),
+        &format!("| gpu.api | preload | trace | launch | 0.10 % | +0.20 % | +0.10 % | bare | 0 of 1000 | {band} | {band} | within |"),
+        &format!("| gpu.api | preload | trace | compute | 0.10 % | +0.20 % | +0.10 % | bare | 0 of 1000 | {band} | {band} | within |"),
     ]);
     says(
         &coverage_faults(&only_api, &catalog()),
@@ -1025,4 +1115,100 @@ fn the_record_rows_are_the_table_rows() {
     );
     assert_eq!(record.rows[0].share, Some(0.2));
     assert_eq!(record.rows[0].verdict, "within");
+}
+
+#[test]
+fn a_gpu_table_that_lost_records_or_left_a_pair_out_or_misplaced_a_run_fails() {
+    let method = |source: &str, backend: &str| harness::Method {
+        source: source.into(),
+        backend: Some(backend.into()),
+        mode: "trace".into(),
+        emit: "summary".into(),
+        filter: None,
+        system: false,
+    };
+    let cupti = GpuPlanned {
+        method: method("gpu.kernel", "vendor:cupti"),
+        declared: Cost::Extreme,
+    };
+    let mut bare = Series::default();
+    let mut armed = Series::default();
+    for value in [100.0e6, 101.0e6, 99.0e6, 100.5e6] {
+        bare.elapsed.push(value);
+        bare.section_cpu.push(value);
+        armed.elapsed.push(value * 1.7);
+        armed.section_cpu.push(value * 1.7);
+        armed.share.push(9.0);
+    }
+    let control = bare.clone();
+    let clean = row(&cupti, "launch", &armed, &bare, Some(&control), 2.0);
+    assert_eq!(clean.against, "control");
+    let planned = [cupti.clone()];
+    assert!(
+        gpu_table_failures(&planned, &[], std::slice::from_ref(&clean), 1).is_empty(),
+        "{:?}",
+        gpu_table_failures(&planned, &[], std::slice::from_ref(&clean), 1)
+    );
+
+    // Records dropped under the load.
+    let mut lossy = clean.clone();
+    lossy.losses = 40;
+    lossy.events_total = 1000;
+    says(
+        &gpu_table_failures(&planned, &[], &[lossy.clone()], 1),
+        "lost 40 of 1000 records",
+    );
+    lossy.losses = 4;
+    assert!(gpu_table_failures(&planned, &[], &[lossy], 1).is_empty());
+    // No control: the CUPTI row falls back to bare, which is not its baseline.
+    let uncontrolled = row(&cupti, "launch", &armed, &bare, None, 2.0);
+    says(
+        &gpu_table_failures(&planned, &[], &[uncontrolled], 1),
+        "not the control",
+    );
+    // A pair the tool accepted whose trial run failed has no row, and is named.
+    let failed = Unplanned {
+        source: "gpu.kernel".into(),
+        backend: "vendor:cupti".into(),
+        why: "the trial run failed".into(),
+        failed_its_trial: true,
+    };
+    says(
+        &gpu_table_failures(&[], &[failed], std::slice::from_ref(&clean), 1),
+        "failed its trial run",
+    );
+    // One the machine cannot serve is not a failure.
+    let refused = Unplanned {
+        source: "gpu.kernel".into(),
+        backend: "vendor:rocprof".into(),
+        why: "no collector is written for it".into(),
+        failed_its_trial: false,
+    };
+    assert!(gpu_table_failures(&planned, &[refused], &[clean], 1).is_empty());
+
+    // A control that never loaded its library, a bare run that did, and a run
+    // whose threads shared the launching thread's cpu.
+    let library = std::path::PathBuf::from("libomn_cupti.so");
+    let mut unloaded = control.clone();
+    unloaded.injection = vec![1, 0, 1, 1];
+    says(
+        &series_failures(&Arm::Control(library.clone()), "launch", &unloaded),
+        "did not load",
+    );
+    let mut loaded = control.clone();
+    loaded.injection = vec![1, 1, 1, 1];
+    assert!(series_failures(&Arm::Control(library), "launch", &loaded).is_empty());
+    let mut injected = bare.clone();
+    injected.injection = vec![-1, -1, 1, -1];
+    says(
+        &series_failures(&Arm::Bare, "launch", &injected),
+        "go without",
+    );
+    let mut shared = bare.clone();
+    shared.injection = vec![-1; 4];
+    shared.sharing = 3;
+    says(
+        &series_failures(&Arm::Bare, "launch", &shared),
+        "launching thread's cpu",
+    );
 }
