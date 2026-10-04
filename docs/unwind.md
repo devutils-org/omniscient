@@ -718,10 +718,20 @@ missing whole branches, seen once in the sixteenth wave. Not reproduced in 22
 runs alone at load 22 to 27, then seen once in a workspace run at load 30 to
 48: the reference's 299 samples held only `hash_block` (146) and
 `parse_record` (153), no `compare` and no `checksum`, where the stripped run
-beside it held all four. A branch absent from a profile of an unchanged
-binary is one that did not run while it was sampled, so this reads as the
-workload or the window, not the names. Left to the flaky tally with that
-message.
+beside it held all four.
+
+It was aliasing, not the workload and not the names. The test sampled once a
+millisecond, and a batch of the program's call tree takes about a millisecond
+of cpu (973 us here): one sample a batch, at a phase that drifts by the
+difference between the two periods. When the two are close the samples stay
+in one or two neighbouring branches for the whole run. Shown by matching the
+period to the batch on purpose (972 us): one run in seven put 229 of its 299
+samples in `hash_block`, a branch built to take 40 %. The sampling period is
+now `NAMED_PERIOD_NS` in `tests/unwind.rs`, 61 us (`c7c90c1`), under the
+shortest branch (`checksum`, about 97 us), so every branch holds a sample
+point in every batch whatever the phase; 61 us leaves room for a machine half
+again as fast and divides nothing the program does. The test is off the
+flaky tally for this shape.
 
 ### `mem.faults`' sampled rung where paranoid 2 serves it
 
