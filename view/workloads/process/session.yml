@@ -43,3 +43,8 @@ requests:
     target: *workload
     mode: trace
     emit: [raw, hist]
+  - label: disk
+    source: io.latency
+    target: *workload
+    mode: trace
+    emit: [raw, hist]

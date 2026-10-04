@@ -1601,6 +1601,59 @@ mod tests {
         assert_eq!(network.figures[0].style.fg, Some(NEUTRAL));
     }
 
+    /// The manifest's phases repeat the figures the program reads: they
+    /// must not drift from them.
+    #[test]
+    fn the_manifest_s_phases_are_the_program_s_figures() {
+        let truth = manifest();
+        let phases = truth["phases"].as_array().expect("phases");
+        let of = |line: &str, field: &str| -> Vec<f64> {
+            phases
+                .iter()
+                .filter(|phase| phase["line"] == line)
+                .filter_map(|phase| phase[field].as_f64())
+                .collect()
+        };
+        let cpu = truth["cpu"]["seconds"].as_f64().unwrap()
+            + truth["cpu"]["minor"]["seconds"].as_f64().unwrap();
+        assert_eq!(of("CPU", "seconds"), [cpu]);
+        assert_eq!(
+            of("Time", "seconds"),
+            [
+                truth["sleep"]["seconds"].as_f64().unwrap(),
+                truth["lock"]["seconds"].as_f64().unwrap()
+            ]
+        );
+        assert_eq!(
+            of("Memory", "bytes"),
+            [truth["memory"]["bytes"].as_f64().unwrap()]
+        );
+        assert_eq!(
+            of("Memory", "seconds"),
+            [truth["memory"]["hold_s"].as_f64().unwrap()]
+        );
+        assert_eq!(
+            of("Disk", "written"),
+            [truth["file"]["written"].as_f64().unwrap()]
+        );
+        assert_eq!(
+            of("Network", "sent"),
+            [truth["socket"]["sent"].as_f64().unwrap()]
+        );
+        assert_eq!(
+            of("Network", "received"),
+            [truth["socket"]["received"].as_f64().unwrap()]
+        );
+        // Every line the view draws is a phase, or is said not exercised.
+        for line in ["CPU", "Memory", "Disk", "Network", "GPU", "Energy", "Time"] {
+            assert!(
+                phases.iter().any(|phase| phase["line"] == line)
+                    || truth["not_exercised"][line].is_string(),
+                "{line}"
+            );
+        }
+    }
+
     #[test]
     fn an_amount_is_spread_over_the_cells_it_covers() {
         let axis = Axis {
