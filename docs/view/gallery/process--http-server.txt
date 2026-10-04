@@ -1,40 +1,40 @@
 omn top │ fixture http-server │ 2.84s                             view: snapshot │ collectors ≥16.1% │ target 92.0% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ process -- one process at a glance: every view's essence, each tile opening its view ────────────────────────────────┐
-│Not drawn yet. What this view needs, and what this run holds of it:                                                   │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
+┌ process -- one process at a glance: pid 2758953, ran 2.84s ──────────────────────────────────────────────────────────┐
+│first suspect: ▶ sleep 96.9% -- the cpu tile (flame) has the detail                                                   │
+│one view's essence per tile: enter, or a click on the selected tile, opens it                                         │
+│┌ time → timebar ─────────────────────┐┏ cpu → flame ━━━━━━━━━━━━━━━━━━━━━━━━━┓┌ cost → ledger ──────────────────────┐│
+││▶ sleep 96.9%                        │┃_PyObject_MakeTpCall 21.7%            ┃│cpu 2.79s                            ││
+││░░░░░░░░░░░░░░░░░░░░░░░·             │┃on cpu: the hottest own code          ┃│rss peak 25.2MiB · 24.0k faults      ││
+││python3 (2758953), 2.84s wall        │┃off cpu: Py_RunMain › PyEval_EvalCode ┃│cpu: the program's own account       ││
+││                                     │┃                                      ┃│                                     ││
+││                                     │┃                                      ┃│                                     ││
+││                                     │┃                                      ┃│                                     ││
+││                                     │┃                                      ┃│                                     ││
+││                                     │┃                                      ┃│                                     ││
+││~low det degraded x3                 │┃29 late ~low det degraded x8          ┃│~low det degraded 30 late            ││
+│└─────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛└─────────────────────────────────────┘│
+│┌ request → request ──────────────────┐┌ latency → heatmap ───────────────────┐┌ threads → lanes ────────────────────┐│
+││no request declared                  ││max 524µs                             ││2 threads                            ││
+││net.request refused: cannot start col││▁█▅▂▂ ▂▂▁▁▁▁▂▁▂ ▂▁▂▁▁▂▂▂              ││█▂▂▂▂▃▁▅▁▂ ▁ ▂▂▂▂▂▁▁ ▂ ▃             ││
+││                                     ││net.socket: 86 measured, median 16.4µs││98 context switches                  ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││~low det degraded x2                  ││29 late ~low det degraded x2         ││
+│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
+│┌ wake → wake ────────────────────────┐┌ flows → flows ───────────────────────┐┌ gpu → lanes ────────────────────────┐│
+││thread 2758974 ×10                   ││net ↓1.76KiB ↑28.3MiB                 ││kernels not in this run              ││
+││33.3% of 30 wake-ups; 6 wakers       ││disk ↓0B ↑0B                          ││device memory peak 0B                ││
+││                                     ││↓ received or read · ↑ sent or written││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││                                     ││                                      ││                                     ││
+││29 late ~low det degraded            ││~low det degraded x2                  ││                                     ││
+│└─────────────────────────────────────┘└──────────────────────────────────────┘└─────────────────────────────────────┘│
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ hjkl move between tiles  enter open the tile's view

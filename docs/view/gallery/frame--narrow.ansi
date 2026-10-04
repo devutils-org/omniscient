@@ -1,20 +1,20 @@
 [0m[1momn top[0m │ fixture http-server │ 2.84s        [0m[35mview: snapshot[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatma[0m
-┌ process -- one process at a glance: every view's essence,┐[0m
-│[0m[3mNot drawn yet. What this view needs, and what this run hol[0m│[0m
-│                                                          │[0m
-│                                                          │[0m
-│                                                          │[0m
-│                                                          │[0m
-│                                                          │[0m
-│                                                          │[0m
-│                                                          │[0m
-│                                                          │[0m
-│                                                          │[0m
-│                                                          │[0m
-│                                                          │[0m
-│                                                          │[0m
-│                                                          │[0m
-│                                                          │[0m
+┌ process -- one process at a glance: pid 2758953, ran 2.84┐[0m
+│[0m[1mfirst suspect: [0m[1;2;37m▶ sleep 96.9%[0m -- the cpu tile (flame) has t│[0m
+│[0m[2mone view's essence per tile: enter, or a click on the sele[0m│[0m
+│┌[0m[1;7m time [0m[2m→ timebar [0m─┐[0m[37m┏[0m[1;37m cpu [0m[2;37m→ flame [0m[37m━━━━━┓[0m┌[0m[1m cost [0m[2m→ ledger [0m──┐│[0m
+││[0m[1;2;37m▶ sleep 96.9%[0m    │[0m[37m┃[0m[1;2;32m_PyObject_MakeTpCa[0m[37m┃[0m│[0m[2mcpu 2.79s[0m        ││[0m
+││[0m[37m░░░░░░░░░░░░░░░░░[0m│[0m[37m┃[0m[2mon cpu: the hottes[0m[37m┃[0m│[0m[2mrss peak 25.2MiB [0m││[0m
+│└─────────────────┘[0m[37m┗━━━━━━━━━━━━━━━━━━┛[0m└─────────────────┘│[0m
+│┌[0m[1m request [0m[2m→ reques[0m┐┌[0m[1m latency [0m[2m→ heatmap[0m┐┌[0m[1m threads [0m[2m→ lanes [0m┐│[0m
+││[0m[2mno request declar[0m││[0m[2mmax 524µs[0m         ││[0m[2m2 threads[0m        ││[0m
+││[0m[2mnet.request refus[0m││[0m[2;36m▁█▅▂▂ ▂▂▁▁▁▁▂▁▂ ▂▁[0m││[0m[2;32m█▂▂▂▂▃▁▅▁▂ ▁ ▂▂▂▂[0m││[0m
+││                 ││[0m[2mnet.socket: 86 mea[0m││[0m[2m98 context switch[0m││[0m
+│└─────────────────┘└──────────────────┘└─────────────────┘│[0m
+│┌[0m[1m wake [0m[2m→ wake [0m────┐┌[0m[1m flows [0m[2m→ flows [0m───┐┌[0m[1m gpu [0m[2m→ lanes [0m────┐│[0m
+││[0m[2mthread 2758974 ×1[0m││[0m[1;2;36mnet ↓1.76KiB ↑28.3[0m││[0m[2mkernels not in th[0m││[0m
+││[0m[2m33.3% of 30 wake-[0m││[0m[2;34mdisk ↓0B ↑0B[0m      ││[0m[2mdevice memory pea[0m││[0m
+│└─────────────────┘└──────────────────┘└─────────────────┘│[0m
 └──────────────────────────────────────────────────────────┘[0m
-[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help       [0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓ hj[0m
