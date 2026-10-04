@@ -1,9 +1,488 @@
 //! Parsers for the `perfsched` family's reference tools. Each turns a tool's
 //! output into the values a pair compares (BRIEF.md, "Decided before this
 //! wave").
+//!
+//! Keys are `<what>.<field>`: a syscall, a command name or a lock type, then
+//! the field. Times are always nanoseconds, whatever unit the tool printed,
+//! and a table that lists one name several times (one row per process) is
+//! summed into one key, so a pair compares a name rather than a pid.
 
-use crate::common::Parser;
+use crate::common::{Parser, Values};
+use std::collections::BTreeMap;
 
 pub fn parsers() -> Vec<Parser> {
-    Vec::new()
+    vec![
+        Parser {
+            name: "strace_c",
+            parse: strace_c,
+        },
+        Parser {
+            name: "strace_t",
+            parse: strace_t,
+        },
+        Parser {
+            name: "perf_trace_summary",
+            parse: perf_trace_summary,
+        },
+        Parser {
+            name: "perf_sched_latency",
+            parse: perf_sched_latency,
+        },
+        Parser {
+            name: "perf_sched_timehist_summary",
+            parse: perf_sched_timehist_summary,
+        },
+        Parser {
+            name: "perf_lock_contention",
+            parse: perf_lock_contention,
+        },
+    ]
+}
+
+/// Values keyed and summed in one place, emitted in key order.
+#[derive(Default)]
+struct Acc(BTreeMap<String, f64>);
+
+impl Acc {
+    fn add(&mut self, key: &str, field: &str, v: f64) {
+        *self.0.entry(format!("{key}.{field}")).or_insert(0.0) += v;
+    }
+    fn max(&mut self, key: &str, field: &str, v: f64) {
+        let e = self
+            .0
+            .entry(format!("{key}.{field}"))
+            .or_insert(f64::NEG_INFINITY);
+        *e = e.max(v);
+    }
+    fn get(&self, key: &str, field: &str) -> f64 {
+        self.0
+            .get(&format!("{key}.{field}"))
+            .copied()
+            .unwrap_or(0.0)
+    }
+    fn set(&mut self, key: &str, field: &str, v: f64) {
+        self.0.insert(format!("{key}.{field}"), v);
+    }
+    /// The names that carry `field`, to derive a second field from.
+    fn names_with(&self, field: &str) -> Vec<String> {
+        let suffix = format!(".{field}");
+        self.0
+            .keys()
+            .filter_map(|k| k.strip_suffix(&suffix).map(str::to_owned))
+            .collect()
+    }
+    /// `out = num / den` for every name, 0 where `den` is 0.
+    fn ratio(&mut self, num: &str, den: &str, out: &str) {
+        for n in self.names_with(den) {
+            let d = self.get(&n, den);
+            let r = if d > 0.0 { self.get(&n, num) / d } else { 0.0 };
+            self.set(&n, out, r);
+        }
+    }
+    fn into_values(self, what: &str) -> Result<Values, String> {
+        if self.0.is_empty() {
+            return Err(format!("no {what} rows in the tool's output"));
+        }
+        Ok(self.0.into_iter().collect())
+    }
+}
+
+fn num(s: &str) -> Result<f64, String> {
+    s.trim_end_matches('%')
+        .parse::<f64>()
+        .map_err(|e| format!("`{s}` is not a number: {e}"))
+}
+
+/// A duration printed as a value and its unit (`40.21 ms`, `812 ns`), in
+/// nanoseconds.
+fn duration_ns(value: &str, unit: &str) -> Result<f64, String> {
+    let scale = match unit {
+        "ns" => 1.0,
+        "us" => 1e3,
+        "ms" => 1e6,
+        "s" => 1e9,
+        u => return Err(format!("unknown time unit `{u}`")),
+    };
+    Ok(num(value)? * scale)
+}
+
+/// `strace -c` (and `-c -w`): the per-syscall table, on stderr, or in the
+/// file `-o` wrote and the runner hands over as stdout. Keys `<syscall>.
+/// {calls,errors,seconds,usecs_per_call}`, and `total.*` from the footer.
+/// With `-w` the seconds are wall time spent in the call; without it they
+/// are the system cpu time the call cost, which for a sleep is nearly
+/// nothing.
+fn strace_c(stdout: &str, stderr: &str) -> Result<Values, String> {
+    let text = if stderr.contains("% time") {
+        stderr
+    } else {
+        stdout
+    };
+    let mut acc = Acc::default();
+    let mut in_table = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("% time") {
+            in_table = true;
+            continue;
+        }
+        if !in_table || t.is_empty() || t.starts_with("---") {
+            continue;
+        }
+        let f: Vec<&str> = t.split_whitespace().collect();
+        // pct seconds usecs/call calls [errors] name
+        let (name, errors) = match f.len() {
+            5 => (f[4], 0.0),
+            6 => (f[5], num(f[4])?),
+            _ => return Err(format!("unexpected strace -c row: `{t}`")),
+        };
+        acc.add(name, "seconds", num(f[1])?);
+        acc.add(name, "usecs_per_call", num(f[2])?);
+        acc.add(name, "calls", num(f[3])?);
+        acc.add(name, "errors", errors);
+    }
+    acc.into_values("strace -c")
+}
+
+/// `strace -T` (with or without `-f`): one line per call ending in
+/// `<seconds>`, a call another thread's line split rejoined at its
+/// `<... name resumed>`. Keys `<syscall>.{calls,total_ns,mean_ns,max_ns}`.
+fn strace_t(stdout: &str, stderr: &str) -> Result<Values, String> {
+    let text = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    let mut acc = Acc::default();
+    for line in text.lines() {
+        let t = line.trim_end();
+        let Some(open) = t.rfind('<') else { continue };
+        if !t.ends_with('>') || t.contains("+++") {
+            continue;
+        }
+        let Ok(secs) = t[open + 1..t.len() - 1].parse::<f64>() else {
+            continue;
+        };
+        // Strip a `-f` pid prefix, then take the name before `(`, or the
+        // one a resumed line names.
+        let body = t
+            .split_once(' ')
+            .filter(|(pid, _)| pid.chars().all(|c| c.is_ascii_digit()))
+            .map_or(t, |(_, rest)| rest.trim_start());
+        let name = match body.strip_prefix("<... ") {
+            Some(r) => r.split_whitespace().next().unwrap_or(""),
+            None => body.split('(').next().unwrap_or(""),
+        };
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        let ns = secs * 1e9;
+        acc.add(name, "calls", 1.0);
+        acc.add(name, "total_ns", ns);
+        acc.max(name, "max_ns", ns);
+    }
+    acc.ratio("total_ns", "calls", "mean_ns");
+    acc.into_values("strace -T")
+}
+
+/// `perf trace -s` (or `--summary-only`): one table per process, summed by
+/// syscall across them. Keys `<syscall>.{calls,errors,total_ns,max_ns,
+/// mean_ns}`; `mean_ns` is recomputed from the sums, since perf's own `avg`
+/// is per process and printed to the microsecond.
+fn perf_trace_summary(stdout: &str, stderr: &str) -> Result<Values, String> {
+    let text = if stderr.contains("Summary of events") {
+        stderr
+    } else {
+        stdout
+    };
+    let mut acc = Acc::default();
+    let mut in_table = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("syscall") && t.contains("calls") {
+            in_table = true;
+            continue;
+        }
+        if t.is_empty() {
+            in_table = false;
+            continue;
+        }
+        if !in_table || t.starts_with('(') || t.starts_with("---") {
+            continue;
+        }
+        let f: Vec<&str> = t.split_whitespace().collect();
+        // syscall calls errors total min avg max stddev
+        if f.len() != 8 {
+            return Err(format!("unexpected perf trace -s row: `{t}`"));
+        }
+        let name = f[0];
+        acc.add(name, "calls", num(f[1])?);
+        acc.add(name, "errors", num(f[2])?);
+        acc.add(name, "total_ns", num(f[3])? * 1e6);
+        acc.max(name, "max_ns", num(f[6])? * 1e6);
+    }
+    acc.ratio("total_ns", "calls", "mean_ns");
+    acc.into_values("perf trace -s")
+}
+
+/// `perf sched latency`: one row per task, `comm:pid` (or `comm:(N)` when
+/// perf merged N of them). Keys `<comm>.{runtime_ns,switches,max_delay_ns,
+/// avg_delay_ns}` summed by command, the average weighted by the switches
+/// it is over, and `total.{runtime_ns,switches}` from the footer.
+fn perf_sched_latency(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let mut acc = Acc::default();
+    for line in stdout.lines() {
+        let cols: Vec<&str> = line.split('|').map(str::trim).collect();
+        if cols.len() < 3 || cols[0] == "Task" {
+            continue;
+        }
+        let runtime = cols[1]
+            .strip_suffix("ms")
+            .ok_or_else(|| format!("runtime without `ms`: `{line}`"))?
+            .trim();
+        let switches = num(cols[2])?;
+        if cols[0] == "TOTAL:" {
+            acc.set("total", "runtime_ns", num(runtime)? * 1e6);
+            acc.set("total", "switches", switches);
+            continue;
+        }
+        let comm = cols[0].rsplit_once(':').map_or(cols[0], |(comm, _)| comm);
+        let field = |i: usize, label: &str| -> Result<f64, String> {
+            let v = cols
+                .get(i)
+                .and_then(|c| c.strip_prefix(label))
+                .and_then(|c| c.trim().strip_suffix("ms"))
+                .ok_or_else(|| format!("no `{label}` column: `{line}`"))?;
+            Ok(num(v.trim())? * 1e6)
+        };
+        acc.add(comm, "runtime_ns", num(runtime)? * 1e6);
+        acc.add(comm, "switches", switches);
+        acc.add(comm, "delay_sum_ns", field(3, "avg:")? * switches);
+        acc.max(comm, "max_delay_ns", field(4, "max:")?);
+    }
+    acc.ratio("delay_sum_ns", "switches", "avg_delay_ns");
+    acc.0.retain(|k, _| !k.ends_with(".delay_sum_ns"));
+    acc.0.remove("total.avg_delay_ns");
+    acc.into_values("perf sched latency")
+}
+
+/// `perf sched timehist -s` (or `-S`): the "Runtime summary" table, one row
+/// per task as `comm[pid]` or `comm[tid/pid]`, summed by command. Keys
+/// `<comm>.{sched_in,run_ns,migrations}`, and `total.switches` from
+/// "Total number of context switches".
+fn perf_sched_timehist_summary(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let mut acc = Acc::default();
+    // Before the summary, in its header, in its rows, past it.
+    let mut state = 0;
+    for line in stdout.lines() {
+        let t = line.trim();
+        if let Some(n) = t.strip_prefix("Total number of context switches:") {
+            acc.set("total", "switches", num(n.trim())?);
+            continue;
+        }
+        match state {
+            0 if t.starts_with("Runtime summary") => state = 1,
+            1 if t.starts_with("---") => state = 2,
+            2 if t.is_empty() => state = 3,
+            2 => {
+                let f: Vec<&str> = t.split_whitespace().collect();
+                // The command, which may hold spaces, then eight numbers.
+                if f.len() < 9 {
+                    return Err(format!("unexpected timehist summary row: `{t}`"));
+                }
+                let nums = &f[f.len() - 8..];
+                let task = f[..f.len() - 8].join(" ");
+                let comm = task.rsplit_once('[').map_or(task.as_str(), |(c, _)| c);
+                acc.add(comm, "sched_in", num(nums[1])?);
+                acc.add(comm, "run_ns", num(nums[2])? * 1e6);
+                acc.add(comm, "migrations", num(nums[7])?);
+            }
+            _ => {}
+        }
+    }
+    acc.into_values("perf sched timehist -s")
+}
+
+/// `perf lock contention` (tracepoints or `-b`): one row per caller (or per
+/// lock with `-l`), its waits printed with their unit. Keys
+/// `<type>.{contended,wait_ns}` summed by lock type (`rwsem:W`,
+/// `spinlock`, ...), `total.{contended,wait_ns,max_wait_ns}` over every row.
+fn perf_lock_contention(stdout: &str, stderr: &str) -> Result<Values, String> {
+    let text = if stdout.contains("contended") {
+        stdout
+    } else {
+        stderr
+    };
+    let mut acc = Acc::default();
+    let mut in_table = false;
+    for line in text.lines() {
+        let t = line.trim();
+        // perf appends `=== output for debug ===` (`(BPF)` with `-b`) when
+        // it lost or could not pair events; its histogram has a
+        // `contended: N` line of its own, so the table ends there.
+        if t.starts_with("===") {
+            break;
+        }
+        if t.starts_with("contended") && t.contains("caller") {
+            in_table = true;
+            continue;
+        }
+        if !in_table || t.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = t.split_whitespace().collect();
+        // contended, total, max and avg each with a unit, type, caller
+        if f.len() < 8 {
+            return Err(format!("unexpected perf lock contention row: `{t}`"));
+        }
+        let contended = num(f[0])?;
+        let total = duration_ns(f[1], f[2])?;
+        let max = duration_ns(f[3], f[4])?;
+        let ty = f[7];
+        acc.add(ty, "contended", contended);
+        acc.add(ty, "wait_ns", total);
+        acc.add("total", "contended", contended);
+        acc.add("total", "wait_ns", total);
+        acc.max("total", "max_wait_ns", max);
+    }
+    acc.into_values("perf lock contention")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn capture(name: &str) -> String {
+        let path = format!(
+            "{}/tests/reference/captures/perfsched/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
+    fn value(v: &Values, key: &str) -> f64 {
+        v.iter()
+            .find(|(k, _)| k == key)
+            .unwrap_or_else(|| panic!("no `{key}` in {v:?}"))
+            .1
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() <= 1e-6 * b.abs().max(1.0)
+    }
+
+    #[test]
+    fn strace_c_reads_calls_errors_and_the_footer() {
+        // The workload: 5000 getppid, 20 sleeps of 10 ms.
+        let v = strace_c(&capture("strace-c.txt"), "").unwrap();
+        assert_eq!(value(&v, "getppid.calls"), 5000.0);
+        assert_eq!(value(&v, "clock_nanosleep.calls"), 20.0);
+        assert_eq!(value(&v, "total.calls"), 5375.0);
+        assert_eq!(value(&v, "total.errors"), 47.0);
+        // Without -w, a sleep costs the cpu almost nothing.
+        assert!(value(&v, "clock_nanosleep.usecs_per_call") < 1000.0);
+    }
+
+    #[test]
+    fn strace_c_w_reports_wall_time_in_the_call() {
+        let v = strace_c("", &capture("strace-c-w.txt")).unwrap();
+        assert_eq!(value(&v, "clock_nanosleep.calls"), 20.0);
+        let per_call = value(&v, "clock_nanosleep.usecs_per_call");
+        assert!((9_000.0..12_000.0).contains(&per_call), "{per_call}");
+    }
+
+    #[test]
+    fn strace_t_sums_per_call_durations() {
+        let v = strace_t("", &capture("strace-T.txt")).unwrap();
+        assert_eq!(value(&v, "getppid.calls"), 3.0);
+        assert_eq!(value(&v, "clock_nanosleep.calls"), 3.0);
+        assert!(close(value(&v, "clock_nanosleep.max_ns"), 10_052_000.0));
+        let mean = (7_398_000.0 + 10_052_000.0 + 10_021_000.0) / 3.0;
+        assert!(close(value(&v, "clock_nanosleep.mean_ns"), mean));
+        assert!(!v.iter().any(|(k, _)| k.starts_with("exited")));
+    }
+
+    #[test]
+    fn strace_t_rejoins_a_resumed_call() {
+        let out = "\
+101 clock_nanosleep(CLOCK_MONOTONIC, 0, {tv_sec=0, tv_nsec=10000000},  <unfinished ...>
+102 getppid()                       = 100 <0.000004>
+101 <... clock_nanosleep resumed>NULL) = 0 <0.010100>
+";
+        let v = strace_t("", out).unwrap();
+        assert_eq!(value(&v, "clock_nanosleep.calls"), 1.0);
+        assert!(close(value(&v, "clock_nanosleep.total_ns"), 10_100_000.0));
+        assert_eq!(value(&v, "getppid.calls"), 1.0);
+    }
+
+    #[test]
+    fn perf_trace_summary_reads_the_table() {
+        let v = perf_trace_summary("", &capture("perf-trace-s.txt")).unwrap();
+        assert_eq!(value(&v, "getppid.calls"), 5000.0);
+        assert_eq!(value(&v, "newfstatat.errors"), 28.0);
+        assert!(close(value(&v, "clock_nanosleep.total_ns"), 201_112_000.0));
+        assert!(close(value(&v, "clock_nanosleep.mean_ns"), 10_055_600.0));
+        assert!(close(value(&v, "clock_nanosleep.max_ns"), 10_138_000.0));
+    }
+
+    #[test]
+    fn perf_trace_summary_sums_processes() {
+        let one = "\n   syscall            calls  errors  total       min       avg       max       stddev\n   --------------- --------  ------ -------- --------- --------- ---------     ------\n   getppid              10      0     0.010     0.001     0.001     0.002      1.00%\n\n";
+        let v = perf_trace_summary(&format!(" Summary of events:\n{one}{one}"), "").unwrap();
+        assert_eq!(value(&v, "getppid.calls"), 20.0);
+    }
+
+    #[test]
+    fn perf_sched_latency_reads_tasks_and_total() {
+        let v = perf_sched_latency(&capture("perf-sched-latency.txt"), "").unwrap();
+        assert_eq!(value(&v, "python3.switches"), 23.0);
+        assert!(close(value(&v, "python3.runtime_ns"), 14_823_000.0));
+        assert!(close(value(&v, "python3.avg_delay_ns"), 18_000.0));
+        assert!(close(value(&v, "python3.max_delay_ns"), 102_000.0));
+        // A command with a colon in it keeps it; only the pid is cut.
+        assert_eq!(value(&v, "kworker/3:1.switches"), 4.0);
+        assert_eq!(value(&v, "total.switches"), 29.0);
+    }
+
+    #[test]
+    fn perf_sched_timehist_summary_reads_the_runtime_table() {
+        let v = perf_sched_timehist_summary(&capture("perf-sched-timehist-s.txt"), "").unwrap();
+        assert_eq!(value(&v, "python3.sched_in"), 23.0);
+        assert_eq!(value(&v, "python3.migrations"), 2.0);
+        assert!(close(value(&v, "python3.run_ns"), 14_823_000.0));
+        assert_eq!(value(&v, "kworker/3:1.sched_in"), 4.0);
+        assert_eq!(value(&v, "total.switches"), 29.0);
+        // "Terminated tasks" repeats a name; it is not a second row.
+        assert_eq!(value(&v, "perf.sched_in"), 2.0);
+    }
+
+    #[test]
+    fn perf_lock_contention_converts_units_and_sums_by_type() {
+        let v = perf_lock_contention(&capture("perf-lock-contention.txt"), "").unwrap();
+        assert_eq!(value(&v, "rwsem:W.contended"), 2161.0);
+        assert!(close(value(&v, "rwsem:W.wait_ns"), 70_080_000.0));
+        assert_eq!(value(&v, "total.contended"), 2202.0);
+        assert!(close(value(&v, "total.max_wait_ns"), 1_080_000.0));
+        assert!(close(value(&v, "spinlock.wait_ns"), 211_400.0 + 812.0));
+    }
+
+    #[test]
+    fn perf_lock_contention_stops_at_the_debug_block() {
+        // What perf prints after the table when some events were bad:
+        // tools/perf/builtin-lock.c, print_bad_events() and its BPF twin.
+        let text = capture("perf-lock-contention.txt")
+            + "\n=== output for debug ===\n\nbad: 3, total: 2205\nbad rate: 0.14 %\n\
+               histogram of events caused bad sequence\n    acquire: 0\n   acquired: 0\n\
+               \x20 contended: 3\n    release: 0\n\n=== output for debug (BPF) ===\n\
+               total: 2205, bad: 3, bad rate: 0.14 %\n  task: 0\n  stack: 3\n";
+        let v = perf_lock_contention(&text, "").unwrap();
+        assert_eq!(value(&v, "total.contended"), 2202.0);
+    }
+
+    #[test]
+    fn an_empty_output_is_an_error_not_zero() {
+        for p in parsers() {
+            assert!((p.parse)("", "").is_err(), "{}", p.name);
+        }
+    }
 }

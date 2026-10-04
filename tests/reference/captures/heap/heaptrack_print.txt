@@ -1,0 +1,12 @@
+reading file "/tmp/tmp.h2BjRDUX2K/ht.zst" - please wait, this might take some time...
+Debuggee command was: python3 tests/reference/workloads/heap/blocks.py 64 1048576 4 0.3
+finished reading file, now analyzing data:
+[... the per-site tables, 6896 lines, cut when captured ...]
+
+
+total runtime: 0.37s.
+calls to allocation functions: 3180 (8688/s)
+temporary memory allocations: 613 (1674/s)
+peak heap memory consumption: 68.98M
+peak RSS (including heaptrack overhead): 81.88M
+total memory leaked: 4.61M

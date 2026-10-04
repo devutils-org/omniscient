@@ -1,0 +1,13 @@
+[H[2J
+   PerfTop:       0 irqs/sec  kernel: 0.0%  exact:  0.0% lost: 0/0 drop: 0/0 [997Hz cpu/cycles/P],  (target_pid: 2947150)
+-------------------------------------------------------------------------------
+
+[H[2J
+   PerfTop:     842 irqs/sec  kernel: 0.6%  exact: 100.0% lost: 0/0 drop: 0/0 [997Hz cpu/cycles/P],  (target_pid: 2947150)
+-------------------------------------------------------------------------------
+
+    49.73%  perfrecord-hot  [.] hot_beta
+    29.54%  perfrecord-hot  [.] hot_gamma
+    20.31%  perfrecord-hot  [.] hot_alpha
+     0.06%  [kernel]        [k] propagate_entity_load_avg
+     0.06%  [kernel]        [k] srso_return_thunk

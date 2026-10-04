@@ -1,0 +1,6 @@
+ contended   total wait     max wait     avg wait         type   caller
+
+      1218     40.21 ms      1.08 ms     33.01 us     rwsem:W   __vm_munmap+0x8d
+       943     29.87 ms    902.44 us     31.68 us     rwsem:W   do_mmap+0x41a
+        37    211.40 us     19.20 us      5.71 us     spinlock   tlb_finish_mmu+0x62
+         4       812 ns       301 ns       203 ns     spinlock   __pte_offset_map_lock+0x81

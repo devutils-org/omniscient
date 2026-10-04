@@ -1,0 +1,18 @@
+top - 19:35:00 up 19:55,  1 user,  load average: 7.77, 16.69, 9.16
+Tasks: 1 total, 1 running, 0 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  4.9 us,  8.7 sy,  0.0 ni, 77.9 id,  8.0 wa,  0.2 hi,  0.2 si,  0.0 st 
+MiB Mem :  64211.0 total,  23891.5 free,   8676.2 used,  36322.2 buff/cache     
+MiB Swap:   8192.0 total,   6147.3 free,   2044.7 used.  55534.7 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+2937512 moha      20   0   83156  75360   6592 R  94.6   0.1   0:00.70 python3
+
+top - 19:35:01 up 19:55,  1 user,  load average: 7.77, 16.69, 9.16
+Tasks: 1 total, 1 running, 0 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s): 10.5 us,  5.4 sy,  0.2 ni, 76.6 id,  6.9 wa,  0.2 hi,  0.1 si,  0.0 st 
+MiB Mem :  64211.0 total,  23891.5 free,   8676.2 used,  36322.2 buff/cache     
+MiB Swap:   8192.0 total,   6147.3 free,   2044.7 used.  55534.7 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+2937512 moha      20   0   83156  75360   6592 R  99.9   0.1   0:01.70 python3
+

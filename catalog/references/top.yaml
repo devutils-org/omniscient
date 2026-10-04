@@ -2,4 +2,194 @@
 # established tool on the same workload and holds them to a declared
 # tolerance. Read by tests/reference.rs, never by omn itself. Schema:
 # BRIEF.md, "Decided before this wave".
-[]
+#
+# The workload, `hold.py MIB CPU_SECONDS LINGER`, maps and touches MIB
+# private anonymous mebibytes, says "ready", spins until its own cpu time
+# reaches CPU_SECONDS, says "done" and holds still LINGER seconds: its
+# footprint and its cpu total are fixed by its arguments, so two runs of it
+# agree to a fraction of a percent. The tools that need a pid run through
+# `onpid.py`, which launches the workload, waits for the line `--at` names
+# and runs the tool on its pid (`{pid}` in the tool's arguments). omn
+# launches its own run of the same workload: the pairs below are alternate
+# runs of a deterministic workload, not one run observed twice -- omn takes
+# no pid from another launcher's output, and the tools take no program.
+# Parsers: tests/reference/top.rs.
+
+- source: mem.rss
+  tool: top
+  use: "top -b -p PID, the RES column"
+  workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
+  omn: [trace, mem.rss, -m, poll, -e, summary, --format, json]
+  reference:
+    command: [python3, tests/reference/workloads/top/onpid.py, --at, done, top, -b, -n, "1", -p, "{pid}", --]
+    parse: top_batch_pid
+    requires: [top, python3]
+    privileged: false
+  compare:
+    key: res
+    omn: summary.max
+    tolerance: {rel: 0.01}
+    why: >-
+      top's RES is statm's resident pages, omn's the Rss of smaps_rollup:
+      the same pages counted two ways, read once the workload's 64 MiB are
+      touched and it spins in place. Alternate runs of a workload whose
+      footprint its arguments fix; measured 75584-75620 KiB (top) against
+      75616-75620 KiB (omn), 0.05 % apart.
+
+- source: cpu.oncpu_time
+  tool: top
+  use: "top -b -p PID, the TIME+ column"
+  workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
+  omn: [trace, cpu.oncpu_time, -m, poll, -e, summary, --format, json]
+  reference:
+    command: [python3, tests/reference/workloads/top/onpid.py, --at, done, top, -b, -n, "1", -p, "{pid}", --]
+    parse: top_batch_pid
+    requires: [top, python3]
+    privileged: false
+  compare:
+    key: time
+    # The summary of a per-poll delta carries no total (count * mean is
+    # one, not a field); the reap's exact cpu is what omn reports whole.
+    omn: lifetime.cpu_ns
+    tolerance: {abs: 30000000}
+    why: >-
+      The workload spins until its own cpu time reaches 2 s and top reads
+      TIME+ once it has, truncated to the hundredth; omn's is the reap's
+      wait4 total. Alternate runs; measured 1.99 s (top) against
+      2.002-2.007 s (omn): the tick truncation and the exit's own cpu.
+
+- source: mem.rss
+  tool: pmap
+  use: "pmap -x PID, the total RSS"
+  workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
+  omn: [trace, mem.rss, -m, poll, -e, summary, --format, json]
+  reference:
+    command: [python3, tests/reference/workloads/top/onpid.py, pmap, -x, "{pid}", --]
+    parse: pmap_x_total
+    requires: [pmap, python3]
+    privileged: false
+  compare:
+    key: ""
+    omn: summary.max
+    tolerance: {rel: 0.01}
+    why: >-
+      pmap sums each VMA's Rss from smaps, omn reads smaps_rollup's: the
+      same kernel walk, rolled up or not. Alternate runs; measured
+      75488-75496 KiB (pmap) against 75616-75620 KiB (omn), 0.17 % apart:
+      omn's max is taken while the workload spins, pmap's half a second in.
+
+- source: mem.rss
+  tool: pmap
+  use: "pmap -XX PID, the Rss total"
+  workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
+  omn: [trace, mem.rss, -m, poll, -e, summary, --format, json]
+  reference:
+    command: [python3, tests/reference/workloads/top/onpid.py, pmap, -XX, "{pid}", --]
+    parse: pmap_XX_total
+    requires: [pmap, python3]
+    privileged: false
+  compare:
+    key: rss
+    omn: summary.max
+    tolerance: {rel: 0.01}
+    why: >-
+      The same smaps fields, totalled by pmap and rolled up by the kernel
+      for omn. Alternate runs; measured 75476-75492 KiB against 75616-75620.
+
+- source: mem.pss
+  tool: pmap
+  use: "pmap -XX PID, the Pss total"
+  workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
+  omn: [trace, mem.pss, -m, poll, -e, summary, --format, json]
+  reference:
+    command: [python3, tests/reference/workloads/top/onpid.py, pmap, -XX, "{pid}", --]
+    parse: pmap_XX_total
+    requires: [pmap, python3]
+    privileged: false
+  compare:
+    key: pss
+    omn: summary.max
+    tolerance: {rel: 0.03}
+    why: >-
+      PSS divides each shared page by its mappers, so it depends on who
+      else maps the interpreter: under onpid.py a second python3 shares
+      libpython with the workload and lowers its PSS, under omn none does.
+      Alternate runs; measured 69782-70122 KiB (pmap) against 70805-70815
+      (omn), 1.0-1.5 % apart, all of it the launcher's sharing.
+
+- source: mem.uss
+  tool: pmap
+  use: "pmap -XX PID, Private_Clean + Private_Dirty (USS)"
+  workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
+  omn: [trace, mem.uss, -m, poll, -e, summary, --format, json]
+  reference:
+    command: [python3, tests/reference/workloads/top/onpid.py, pmap, -XX, "{pid}", --]
+    parse: pmap_XX_total
+    requires: [pmap, python3]
+    privileged: false
+  compare:
+    key: uss
+    omn: summary.max
+    tolerance: {rel: 0.01}
+    why: >-
+      The private pages are the workload's alone, whoever else maps its
+      libraries. Alternate runs; measured 68804-68808 KiB (pmap) against
+      68816-68820 (omn), 0.02 % apart.
+
+- source: mem.rss
+  tool: smem
+  use: "smem -P REGEX, the RSS column"
+  workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
+  omn: [trace, mem.rss, -m, poll, -e, summary, --format, json]
+  reference:
+    # The regex matches the workload's command line and neither onpid.py's
+    # (its first word after python3 is onpid.py) nor smem's own.
+    command: [python3, tests/reference/workloads/top/onpid.py, smem, -H, -c, "uss pss rss", -P, '^python3 \S*hold\.py', --]
+    parse: smem_uss_pss_rss
+    requires: [smem, python3]
+    privileged: false
+  compare:
+    key: rss
+    omn: summary.max
+    tolerance: {rel: 0.01}
+    why: "smem reads each process's smaps as pmap does; alternate runs, as the pmap pairs"
+
+- source: mem.pss
+  tool: smem
+  use: "smem -P REGEX, the PSS column"
+  workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
+  omn: [trace, mem.pss, -m, poll, -e, summary, --format, json]
+  reference:
+    command: [python3, tests/reference/workloads/top/onpid.py, smem, -H, -c, "uss pss rss", -P, '^python3 \S*hold\.py', --]
+    parse: smem_uss_pss_rss
+    requires: [smem, python3]
+    privileged: false
+  compare:
+    key: pss
+    omn: summary.max
+    tolerance: {rel: 0.03}
+    why: "as pmap's Pss: onpid.py's own python3 shares the interpreter and lowers the workload's PSS; alternate runs"
+
+- source: mem.uss
+  tool: smem
+  use: "smem -P REGEX, the USS column"
+  workload: [python3, tests/reference/workloads/top/hold.py, "64", "2", "1"]
+  omn: [trace, mem.uss, -m, poll, -e, summary, --format, json]
+  reference:
+    command: [python3, tests/reference/workloads/top/onpid.py, smem, -H, -c, "uss pss rss", -P, '^python3 \S*hold\.py', --]
+    parse: smem_uss_pss_rss
+    requires: [smem, python3]
+    privileged: false
+  compare:
+    key: uss
+    omn: summary.max
+    tolerance: {rel: 0.01}
+    why: "the private pages are the workload's alone; alternate runs, as the pmap pairs"
+
+
+# No pair yet for top's `%Cpu(s)` line against `cpu.util --system`: the
+# parser exists (`top_batch_cpus`, tested on a capture), but the machine is
+# the target, so two alternate seconds of it are two different workloads.
+# Measured under this wave's twelve streams: busy 0.60/0.67, 0.25/0.62 and
+# 0.26/0.18 (top/omn) -- 0.37 apart at worst. It needs the runner to run
+# both over the same seconds; filed in docs/fixes/w22-top.md.

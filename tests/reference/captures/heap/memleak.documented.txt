@@ -1,0 +1,10 @@
+using default object: libc.so.6
+using page size: 4096
+tracing kernel: false
+Tracing outstanding memory allocs...  Hit Ctrl-C to end
+[19:40:11] Top 100000 stacks with outstanding allocations:
+4194304 bytes in 4 allocations from stack
+	0 [<00007f3a1c2b4e55>] ffi_call_unix64+0x55
+	1 [<00007f3a1c2b1a20>] ffi_call_int+0x1d0
+411161 bytes in 48 allocations from stack
+	0 [<00007f3a1d0c1f3e>] _PyObject_Malloc+0x2e

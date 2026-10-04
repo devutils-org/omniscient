@@ -1,0 +1,1 @@
+energy_uj_before=65490000000 energy_uj_after=45123456 max_energy_range_uj=65532610987

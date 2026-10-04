@@ -2,4 +2,257 @@
 # established tool on the same workload and holds them to a declared
 # tolerance. Read by tests/reference.rs, never by omn itself. Schema:
 # BRIEF.md, "Decided before this wave".
-[]
+#
+# Fields this family adds, which a runner that does not know them ignores:
+#   compare.omn_jq   the exact jq expression over omn's JSON that
+#                    `compare.omn` names: the sum of the summary's series
+#                    (one series for a launched process, one per cpu with
+#                    --system, one per cgroup with --cgroup).
+#   same_run         `tool_wraps_omn`: omn takes no program (--system and
+#                    --cgroup refuse one) and observes for `-d`; the tool's
+#                    command is run with omn's own argv appended in place of
+#                    a workload, so both count the same seconds.
+#   setup            `cgroup_spin`: before the run, make a child cgroup of the
+#                    test's own (user-owned, no privilege), move a spinning
+#                    workload into it, and substitute its path for
+#                    `{cgroup}` (relative to /sys/fs/cgroup, as perf -G wants
+#                    it) and `{cgroup_abs}` (as omn --cgroup wants it).
+#                    `spin_pid`: start tests/reference/workloads/perfstat/spin.py
+#                    with a large count before the run, substitute its pid for
+#                    `{pid}`, and kill it after.
+#
+# The per-process pairs are alternate runs: perf stat and omn each launch the
+# workload. The workloads are sized by an iteration count, not by time, and
+# PYTHONHASHSEED is fixed, so what is counted depends on the argument and the
+# tolerance covers the run-to-run spread measured on the development machine
+# under a loaded wave (docs/replaces/perfstat.md).
+#
+# Until tests/reference.rs runs pairs, tests/reference/workloads/perfstat/run_pairs.py
+# runs these, reading the fields above as written here.
+
+- source: cpu.instructions
+  tool: perf stat
+  use: "perf stat -e instructions -- prog"
+  workload: [env, PYTHONHASHSEED=0, python3, -S, tests/reference/workloads/perfstat/spin.py, "3000000"]
+  omn: [trace, cpu.instructions, -m, count, -e, summary, --format, json]
+  reference:
+    command: [perf, stat, -x, ",", -e, instructions, --]
+    parse: perf_stat_csv
+    requires: [perf]
+    privileged: false
+  compare:
+    key: instructions
+    omn: summary.total
+    omn_jq: "[.results[0].outputs[0].series[].last] | add"
+    tolerance: {rel: 0.01}
+    why: "both read PERF_COUNT_HW_INSTRUCTIONS over the launched process and its children, multiplexing off; alternate runs of a count-sized workload, measured spread 0.003 %"
+
+- source: cpu.cycles
+  tool: perf stat
+  use: "perf stat -e cycles -- prog"
+  workload: [env, PYTHONHASHSEED=0, python3, -S, tests/reference/workloads/perfstat/spin.py, "3000000"]
+  omn: [trace, cpu.cycles, -m, count, -e, summary, --format, json]
+  reference:
+    command: [perf, stat, -x, ",", -e, cycles, --]
+    parse: perf_stat_csv
+    requires: [perf]
+    privileged: false
+  compare:
+    key: cycles
+    omn: summary.total
+    omn_jq: "[.results[0].outputs[0].series[].last] | add"
+    tolerance: {rel: 0.08}
+    why: "the same PMU counter, but cycles follow the clock: alternate runs on an unpinned governor under a loaded machine differ by up to 3 % measured; the tolerance is for the frequency, not for omn"
+
+- source: cpu.ipc
+  tool: perf stat
+  use: "perf stat -e cycles,instructions -- prog (the insn per cycle column)"
+  workload: [env, PYTHONHASHSEED=0, python3, -S, tests/reference/workloads/perfstat/spin.py, "3000000"]
+  omn: [trace, cpu.ipc, -m, count, -e, summary, --format, json]
+  reference:
+    command: [perf, stat, -x, ",", -e, "cycles,instructions", --]
+    parse: perf_stat_csv
+    requires: [perf]
+    privileged: false
+  compare:
+    key: ipc
+    omn: summary.total
+    omn_jq: "[.results[0].outputs[0].series[].last] | add"
+    tolerance: {rel: 0.08}
+    why: "both divide instructions by cycles read in one group; the cycles' frequency spread across alternate runs is the whole tolerance"
+
+- source: cpu.branch_misses
+  tool: perf stat
+  use: "perf stat -e branch-misses -- prog"
+  workload: [env, PYTHONHASHSEED=0, python3, -S, tests/reference/workloads/perfstat/branchy.py, "2000000"]
+  omn: [trace, cpu.branch_misses, -m, count, -e, summary, --format, json]
+  reference:
+    command: [perf, stat, -x, ",", -e, branch-misses, --]
+    parse: perf_stat_csv
+    requires: [perf]
+    privileged: false
+  compare:
+    key: branch-misses
+    omn: summary.total
+    omn_jq: "[.results[0].outputs[0].series[].last] | add"
+    tolerance: {rel: 0.04}
+    why: "the same PMU counter over a seeded random branch stream; alternate runs, measured spread under 1 % (the predictor's state is shared with whatever else ran on the core)"
+
+- source: cpu.cache_misses
+  tool: perf stat
+  use: "perf stat -e cache-misses -- prog"
+  workload: [env, PYTHONHASHSEED=0, python3, -S, tests/reference/workloads/perfstat/touch.py, "256", "4"]
+  omn: [trace, cpu.cache_misses, -m, count, -e, summary, --format, json]
+  reference:
+    command: [perf, stat, -x, ",", -e, cache-misses, --]
+    parse: perf_stat_csv
+    requires: [perf]
+    privileged: false
+  compare:
+    key: cache-misses
+    omn: summary.total
+    omn_jq: "[.results[0].outputs[0].series[].last] | add"
+    tolerance: {rel: 0.10}
+    why: "the same architectural counter, but the last-level cache is shared with eleven other streams: alternate runs measured within 2.5 %, and the cache's occupancy is not the workload's to fix"
+
+- source: mem.faults
+  tool: perf stat
+  use: "perf stat -e page-faults -- prog"
+  workload: [env, PYTHONHASHSEED=0, python3, -S, tests/reference/workloads/perfstat/touch.py, "256", "1"]
+  omn: [trace, mem.faults, -m, count, -e, summary, --format, json]
+  reference:
+    command: [perf, stat, -x, ",", -e, page-faults, --]
+    parse: perf_stat_csv
+    requires: [perf]
+    privileged: false
+  compare:
+    key: page-faults
+    omn: summary.total
+    omn_jq: "[.results[0].outputs[0].series[].last] | add"
+    tolerance: {rel: 0.03}
+    why: "both count PERF_COUNT_SW_PAGE_FAULTS; omn reads four to seven more than perf on every run (about 0.5 %), a fixed offset of where each opens the counter around the exec, not noise"
+
+- source: cpu.context_switches
+  tool: perf stat
+  use: "perf stat -e context-switches -- prog"
+  workload: [env, PYTHONHASHSEED=0, python3, -S, tests/reference/workloads/perfstat/yield.py, "2000"]
+  omn: [trace, cpu.context_switches, -m, count, -e, summary, --format, json]
+  reference:
+    command: [perf, stat, -x, ",", -e, context-switches, --]
+    parse: perf_stat_csv
+    requires: [perf]
+    privileged: false
+  compare:
+    key: context-switches
+    omn: summary.total
+    omn_jq: "[.results[0].outputs[0].series[].last] | add"
+    tolerance: {rel: 0.03}
+    why: "one voluntary switch per sleep, so the count follows the argument; involuntary switches from the machine's load add a handful, measured within 0.3 %"
+
+- source: cpu.migrations
+  tool: perf stat
+  use: "perf stat -e cpu-migrations -- prog"
+  workload: [env, PYTHONHASHSEED=0, python3, -S, tests/reference/workloads/perfstat/hop.py, "500"]
+  omn: [trace, cpu.migrations, -m, count, -e, summary, --format, json]
+  reference:
+    command: [perf, stat, -x, ",", -e, cpu-migrations, --]
+    parse: perf_stat_csv
+    requires: [perf]
+    privileged: false
+  compare:
+    key: cpu-migrations
+    omn: summary.total
+    omn_jq: "[.results[0].outputs[0].series[].last] | add"
+    tolerance: {rel: 0.05}
+    why: "one forced migration per affinity change; the scheduler's own balancing adds a few, measured within 1 %"
+
+- source: cpu.instructions
+  tool: perf stat
+  use: "perf stat -e task-clock -- prog (the msec task-clock line)"
+  workload: [env, PYTHONHASHSEED=0, python3, -S, tests/reference/workloads/perfstat/spin.py, "3000000"]
+  omn: [trace, cpu.instructions, -m, count, -e, summary, --format, json]
+  reference:
+    command: [perf, stat, -x, ",", -e, task-clock, --]
+    parse: perf_stat_csv
+    requires: [perf]
+    privileged: false
+  compare:
+    key: task-clock
+    omn: lifetime.cpu_ms
+    omn_jq: ".results[0].lifetime.cpu_ns / 1e6"
+    tolerance: {rel: 0.08}
+    why: "no source counts task-clock; every launched run carries the program's cpu time from the reap (wait4), in ns, which perf prints in msec; alternate runs, measured within 3 %"
+
+- source: cpu.cycles
+  tool: perf stat
+  use: "perf stat -a -e cycles -- sleep N (system-wide)"
+  workload: []
+  same_run: tool_wraps_omn
+  omn: [trace, cpu.cycles, --system, -d, 2s, -m, count, -e, summary, --format, json]
+  reference:
+    command: [perf, stat, -a, -x, ",", -e, cycles, --]
+    parse: perf_stat_csv
+    requires: [perf]
+    privileged: false
+  compare:
+    key: cycles
+    omn: summary.total
+    omn_jq: "[.results[0].outputs[0].series[].last] | add"
+    tolerance: {rel: 0.08}
+    why: "the same run: perf counts every cpu while omn observes them for 2 s, so perf's window is omn's plus omn's start and exit (measured 3 to 4 % more on a loaded machine); separate runs differed by 2.5x under the wave's load"
+
+- source: cpu.context_switches
+  tool: perf stat
+  use: "perf stat -a -e context-switches -- sleep N (system-wide)"
+  workload: []
+  same_run: tool_wraps_omn
+  omn: [trace, cpu.context_switches, --system, -d, 2s, -m, count, -e, summary, --format, json]
+  reference:
+    command: [perf, stat, -a, -x, ",", -e, context-switches, --]
+    parse: perf_stat_csv
+    requires: [perf]
+    privileged: false
+  compare:
+    key: context-switches
+    omn: summary.total
+    omn_jq: "[.results[0].outputs[0].series[].last] | add"
+    tolerance: {rel: 0.15}
+    why: "the same run, as for cycles: perf 2.5 to 5 % above by hand; switches are bursty, so the extra start and exit time can weigh more than for a steady counter"
+
+- source: cpu.instructions
+  tool: perf stat
+  use: "perf stat -a -G cgroup -e instructions -- sleep N (per cgroup)"
+  workload: []
+  same_run: tool_wraps_omn
+  setup: cgroup_spin
+  omn: [trace, cpu.instructions, --cgroup, "{cgroup_abs}", -d, 2s, -m, count, -e, summary, --format, json]
+  reference:
+    command: [perf, stat, -a, -x, ",", -e, instructions, -G, "{cgroup}", --]
+    parse: perf_stat_csv
+    requires: [perf]
+    privileged: false
+  compare:
+    key: instructions
+    omn: summary.total
+    omn_jq: "[.results[0].outputs[0].series[].last] | add"
+    tolerance: {rel: 0.06}
+    why: "the same run over a cgroup holding one spinning workload: perf's window is omn's plus omn's start and exit, measured 2.3 and 4 % more by hand"
+
+- source: cpu.instructions
+  tool: perf stat
+  use: "perf stat -p PID -e instructions (attach to a running process)"
+  workload: []
+  same_run: tool_wraps_omn
+  setup: spin_pid
+  omn: [trace, cpu.instructions, --pid, "{pid}", -d, 2s, -m, count, -e, summary, --format, json]
+  reference:
+    command: [perf, stat, -p, "{pid}", -x, ",", -e, "instructions,task-clock", --]
+    parse: perf_stat_csv
+    requires: [perf]
+    privileged: false
+  compare:
+    key: instructions.per_cpu_ns
+    omn: summary.total / overhead.observed_cpu_ns
+    omn_jq: "([.results[0].outputs[0].series[].last] | add) / .results[0].overhead.observed_cpu_ns"
+    tolerance: {rel: 0.03}
+    why: "the same run, but perf's window is omn's plus omn's start and exit, so the raw counts differ by the cpu time in between (5 to 23 % measured); per on-cpu nanosecond both agree within 1 % (omn 0.4 to 1 % higher on six runs out of six)"

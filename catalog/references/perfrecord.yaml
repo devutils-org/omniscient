@@ -2,4 +2,124 @@
 # established tool on the same workload and holds them to a declared
 # tolerance. Read by tests/reference.rs, never by omn itself. Schema:
 # BRIEF.md, "Decided before this wave".
-[]
+#
+# One field beyond the shared schema: `compare.omn_parse` names a parser in
+# tests/reference/perfrecord.rs that reads omn's JSON, because none of these
+# values sits at one JSON path -- a function's self share is its stacks'
+# leaves summed, a mean latency is a histogram's sum over its count, a cache
+# line's share is a top-k row over the total. `compare.omn` says where the
+# parser reads.
+#
+# Every pair here runs omn and the tool on alternate runs of the workload
+# (the runner launches each): perf record, perf mem and perf c2c launch
+# their workload and so does omn. Shares are compared, never counts.
+#
+# The C workloads are built once by build.sh into target/reference/ (`cc`).
+
+- source: cpu.profile
+  tool: perf record
+  use: "perf record -F 997 -- prog; perf report --no-children --sort dso,sym (the top functions, self)"
+  workload: [sh, tests/reference/workloads/perfrecord/build.sh, hot, "2"]
+  omn: [trace, cpu.profile, -m, sample@997hz, -e, stack, --format, json]
+  reference:
+    command: [sh, -c, 'T=$(mktemp) && trap "rm -f $T" EXIT && perf record -q -F 997 -o "$T" -- "$@" >/dev/null && perf report -i "$T" --stdio --no-children -g none --sort dso,sym', sh]
+    parse: perf_report_self
+    requires: [perf, cc]
+    privileged: false
+  compare:
+    key: hot_beta
+    omn: "results[0].stacks, leaves summed over results[0].outputs[stack].stacks"
+    omn_parse: omn_profile_self
+    tolerance: {abs: 0.05}
+    why: "hot_beta does half the work of every round by construction; perf samples cycles (period-weighted, frequency mode) and omn cpu-clock, on alternate runs, so each side moves by about 2 points under this machine's load"
+
+- source: cpu.profile
+  tool: perf record
+  use: "perf record -F 997 -- prog; perf report --no-children --sort dso,sym (the top functions, self)"
+  workload: [sh, tests/reference/workloads/perfrecord/build.sh, hot, "2"]
+  omn: [trace, cpu.profile, -m, sample@997hz, -e, stack, --format, json]
+  reference:
+    command: [sh, -c, 'T=$(mktemp) && trap "rm -f $T" EXIT && perf record -q -F 997 -o "$T" -- "$@" >/dev/null && perf report -i "$T" --stdio --no-children -g none --sort dso,sym', sh]
+    parse: perf_report_self
+    requires: [perf, cc]
+    privileged: false
+  compare:
+    key: hot_alpha
+    omn: "results[0].stacks, leaves summed over results[0].outputs[stack].stacks"
+    omn_parse: omn_profile_self
+    tolerance: {abs: 0.05}
+    why: "hot_alpha does a fifth of every round by construction; the smallest of the three shares, where a misattributed leaf would show first"
+
+- source: cpu.profile
+  tool: perf record
+  use: "perf record -- python3 prog; perf report --sort dso,sym on stripped libraries"
+  workload: [python3, tests/reference/workloads/perfrecord/split.py, "2"]
+  omn: [trace, cpu.profile, -m, sample@997hz, -e, stack, --format, json]
+  reference:
+    command: [sh, -c, 'T=$(mktemp) && trap "rm -f $T" EXIT && perf record -q -F 997 -o "$T" -- "$@" >/dev/null && perf report -i "$T" --stdio --no-children -g none --sort dso,sym', sh]
+    parse: perf_report_self
+    requires: [perf, python3]
+    privileged: false
+  compare:
+    key: libcrypto.so.3
+    omn: "results[0].stacks, leaves summed over results[0].outputs[stack].stacks"
+    omn_parse: omn_profile_self
+    tolerance: {abs: 0.05}
+    why: "60 % of the wall time hashes in libcrypto, whose internal functions are unnamed on both sides (a stripped library): each folds them into the object, so the share is the object's; alternate runs"
+
+- source: cpu.profile
+  tool: perf top
+  use: "perf top -p PID (the live top functions)"
+  workload: [sh, tests/reference/workloads/perfrecord/build.sh, hot, "2.5"]
+  omn: [trace, cpu.profile, -m, sample@997hz, -e, stack, --format, json]
+  reference:
+    # perf top --stdio reads its keys from stdin: a pipe that stays open keeps
+    # it from stopping at its menu. It attaches to the pid the shell started,
+    # which build.sh replaces by the program with exec, and is stopped with
+    # SIGINT once the program has run; its last screen is the profile.
+    command: [sh, -c, '"$@" & p=$!; sleep 5 | timeout -s INT 3 perf top --stdio -p $p -F 997 -d 2 -E 10 -s dso,sym --no-children 2>/dev/null; wait $p', sh]
+    parse: perf_top_self
+    requires: [perf, cc, timeout]
+    privileged: false
+  compare:
+    key: hot_beta
+    omn: "results[0].stacks, leaves summed over results[0].outputs[stack].stacks"
+    omn_parse: omn_profile_self
+    tolerance: {abs: 0.05}
+    why: "perf top's last screen is a profile of the window it ran, attached after launch; omn's is the whole run: the shares are the same by construction, the counts are not; alternate runs"
+
+- source: mem.latency
+  tool: perf mem
+  use: "perf mem record -- prog; perf mem report (the loads' latency, in cycles)"
+  workload: [sh, tests/reference/workloads/perfrecord/build.sh, chase, "2"]
+  omn: [trace, mem.latency, -m, sample@4000hz, -e, hist, --format, json]
+  reference:
+    # perf mem report prints the total weight and the sample count, not the
+    # mean over the timed loads; perf script prints each sample's weight.
+    command: [sh, -c, 'T=$(mktemp) && trap "rm -f $T" EXIT && perf mem record -q -o "$T" -- "$@" >/dev/null 2>&1 && perf script -i "$T" -F weight', sh]
+    parse: perf_script_weight_mean
+    requires: [perf, cc]
+    privileged: false
+  compare:
+    key: ""
+    omn: "results[0].outputs[hist].series[].sum / .count"
+    omn_parse: omn_hist_mean
+    tolerance: {rel: 0.10}
+    why: "both program the same IBS op unit at 4000 Hz and read the same DC miss latency field over a pointer chase through 64 MiB; alternate runs, and the cycles a miss costs move with the clock and the machine's load"
+
+- source: mem.sharing
+  tool: perf c2c
+  use: "perf c2c record -- prog; perf c2c report (the cache lines with the most HITMs)"
+  workload: [sh, tests/reference/workloads/perfrecord/build.sh, share, "2"]
+  omn: [trace, mem.sharing, -m, sample@4000hz, -e, topk, --format, json]
+  reference:
+    command: [sh, -c, 'T=$(mktemp) && trap "rm -f $T" EXIT && perf c2c record -q -o "$T" -- "$@" >/dev/null 2>&1 && perf c2c report -i "$T" --stdio 2>/dev/null', sh]
+    parse: perf_c2c_hitm_share
+    requires: [perf, cc]
+    privileged: false
+  compare:
+    key: top
+    omn: "results[0].outputs[topk].series[0].events / all events"
+    omn_parse: omn_topk_share
+    tolerance: {abs: 0.02}
+    why: "two threads write two counters in one static line, at a fixed address (built without PIE): both rank that line first and give it nearly every HITM; alternate runs. `top` is the first line whatever its address; the parsers also key each line by its address (0x4040c0 with this toolchain), which the captures show is the same on both sides"
