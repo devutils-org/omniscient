@@ -691,7 +691,9 @@ mod defect_hold {
                 }
             }
             if seen {
-                eprintln!("known defect: {source}: a leading event within half a period (defect 2)");
+                eprintln!(
+                    "known defect: {source}: a leading event within half a period (defect 2)"
+                );
             } else if failed.is_empty() {
                 failed.push(format!(
                     "{source}: no leading event in forty runs; defect 2 looks fixed, \
