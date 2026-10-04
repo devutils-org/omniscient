@@ -1889,9 +1889,8 @@ fn a_counted_window_ends_at_its_duration_and_not_at_the_next_read() {
 /// drains; the light one wakes briefly twenty times.
 ///
 /// What the property needs from the collector is its losses per ring
-/// (`Collector::losses_by_ring`), which `cpu.profile` -- stream P's file --
-/// does not report yet: until it does this says so, loudly, with the run's
-/// numbers.
+/// (`Collector::losses_by_ring`): the drops and the throttles of each, since
+/// the run's losses are placed per ring only when the rings account for both.
 #[test]
 fn a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed() {
     let busy = "i=0; while [ $i -lt 1500000 ]; do i=$((i+1)); done";
@@ -1928,70 +1927,85 @@ fn a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed() {
     let rings = result["by_ring"].as_array().cloned().unwrap_or_default();
     if rings.is_empty() {
         eprintln!(
-            "SKIP: `cpu.profile` does not report its losses per ring yet (filed for stream P, \
-             `Collector::losses_by_ring`), so its {dropped} dropped samples are the run's on \
-             every series"
+            "SKIP: no ring of this profile lost anything at 50 kHz on this machine (the run's \
+             losses: {}), so there is no loss to place",
+            result["losses"]
         );
         return;
     }
-    let lost_by_task: std::collections::BTreeMap<String, u64> = rings
+    // Each ring's account, by the series key its task's events carry.
+    let lost_by_task: std::collections::BTreeMap<String, (u64, u64)> = rings
         .iter()
         .filter_map(|ring| {
             let tid = ring["key"]["task"]["tid"]
                 .as_i64()
                 .or_else(|| ring["key"]["task"].as_i64())?;
-            Some((format!("task:{tid}"), ring["losses"]["dropped"].as_u64()?))
+            let losses = &ring["losses"];
+            Some((
+                format!("task:{tid}"),
+                (
+                    losses["dropped"].as_u64().unwrap_or(0),
+                    losses["throttled"].as_u64().unwrap_or(0),
+                ),
+            ))
         })
         .collect();
-    if dropped == 0 {
+    let throttled = result["losses"]["throttled"].as_u64().unwrap_or(0);
+    if dropped == 0 && throttled == 0 {
         eprintln!(
-            "SKIP: no ring overflowed at 50 kHz on this machine, so there is no loss to place: \
-             {lost_by_task:?}"
+            "SKIP: no ring overflowed and nothing was throttled at 50 kHz on this machine, so \
+             there is no loss to place: {lost_by_task:?}"
         );
         return;
     }
-    // A run the kernel throttled is placed per ring only when the rings say
-    // whose throttles they were (`emit.rs`, `placed`). `cpu.profile`'s rings
-    // carry their drops and not their throttles yet, so on a loaded machine,
-    // where the kernel throttles a 50 kHz sampler, every series is marked
-    // with the run's loss and this test fails. That is a gap in the tool, not
-    // in the machine, so it fails rather than skips, and says which it is.
-    // Filed for stream profile (`docs/fixes/w18-launcher.md`).
-    let throttled = result["losses"]["throttled"].as_u64().unwrap_or(0);
-    let throttled_by_ring: u64 = rings
-        .iter()
-        .map(|ring| ring["losses"]["throttled"].as_u64().unwrap_or(0))
-        .sum();
-    let why = if throttled > throttled_by_ring {
-        format!(
-            "; the kernel throttled this profile {throttled} times and its rings account for \
-             {throttled_by_ring} of them, so `emit.rs` could not place the loss per ring \
-             (`cpu.profile`'s `losses_by_ring` carries no throttles: filed for stream profile)"
-        )
-    } else {
-        String::new()
-    };
+    // A run is placed per ring only when the rings account for every loss it
+    // counted (`emit.rs`, `placed`): its drops and its throttles both. On a
+    // loaded machine the kernel throttles a 50 kHz sampler, so a profile whose
+    // rings carried their drops and not their throttles marked every series
+    // with the run's loss -- red in every run from the eighteenth wave to the
+    // twentieth. The sums are checked first, so that a mismatch says which
+    // account is short instead of failing on the first series.
+    let dropped_by_ring: u64 = lost_by_task.values().map(|(d, _)| d).sum();
+    let throttled_by_ring: u64 = lost_by_task.values().map(|(_, t)| t).sum();
+    assert_eq!(
+        (dropped_by_ring, throttled_by_ring),
+        (dropped, throttled),
+        "the rings account for (dropped, throttled) = ({dropped_by_ring}, \
+         {throttled_by_ring}) of the run's ({dropped}, {throttled}), so `emit.rs` cannot place \
+         the loss per ring: {rings:?}"
+    );
     let series = result["outputs"][0]["series"]
         .as_array()
         .expect("a ranking of tasks");
     let mut marked = 0;
     for one in series {
         let key = one["key"].as_str().expect("a key");
-        let lost = lost_by_task.get(key).copied().unwrap_or(0);
-        match one["short"]["dropped"].as_u64() {
-            Some(short) => {
-                assert_eq!(
-                    short, lost,
-                    "{key} is short by its own ring's loss: {one}{why}"
-                );
-                marked += 1;
-            }
-            None => assert_eq!(lost, 0, "{key} lost {lost} and is not marked: {one}"),
+        let (lost, throttles) = lost_by_task.get(key).copied().unwrap_or((0, 0));
+        let short = &one["short"];
+        if lost == 0 && throttles == 0 {
+            assert!(
+                short.is_null(),
+                "{key} lost nothing in its ring and is marked with another's loss: {one}"
+            );
+            continue;
         }
+        assert_eq!(
+            (
+                short["dropped"].as_u64().unwrap_or(0),
+                short["throttled"].as_u64().unwrap_or(0)
+            ),
+            (lost, throttles),
+            "{key} is short by its own ring's loss and by no other's: {one}"
+        );
+        marked += 1;
     }
+    // Every series is short by its own ring's account and a clean one is not
+    // marked; at least one series has to carry a loss for that to have said
+    // anything. Whether the light task's ring is clean depends on the
+    // machine's load (the kernel may throttle it too), so that is not asked.
     assert!(
-        marked > 0 && marked < series.len(),
-        "the loss lands on the task that overflowed and not on the other: {series:?}{why}"
+        marked > 0,
+        "the run lost ({dropped}, {throttled}) and no series carries it: {series:?}"
     );
 }
 
