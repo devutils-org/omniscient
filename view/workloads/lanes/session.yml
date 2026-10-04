@@ -1,0 +1,27 @@
+# The lanes view's sources, on its workload (`view/workloads/lanes/`).
+#
+#   omn -f view/workloads/lanes/session.yml
+name: lanes workload
+requests:
+  - label: switches
+    source: sched.switches
+    target: &workload
+      launch: [python3, view/workloads/lanes/workload.py]
+    mode: trace
+    emit: [raw]
+  - label: blocked
+    source: sched.offcpu
+    target: *workload
+    mode: trace
+    emit: [raw]
+  - label: wakeups
+    source: sched.wakeup
+    target: *workload
+    mode: trace
+    emit: [raw]
+  # Last, so that a machine with no device can run the rest without it.
+  - label: kernels
+    source: gpu.kernel
+    target: *workload
+    mode: trace
+    emit: [raw, summary]

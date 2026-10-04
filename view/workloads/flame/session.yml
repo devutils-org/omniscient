@@ -1,0 +1,19 @@
+# The flame view's sources, on its workload (`view/workloads/flame/`): the
+# interpreter under `-X perf`, so each Python function has a name.
+#
+#   omn -f view/workloads/flame/session.yml
+name: flame workload
+requests:
+  - label: profile
+    source: cpu.profile
+    target: &workload
+      launch: [python3, -X, perf, view/workloads/flame/workload.py]
+    mode: sample@997hz
+    emit: [stack]
+    stack: fp
+  - label: blocked
+    source: sched.offcpu
+    target: *workload
+    mode: trace
+    emit: [raw, stack]
+    stack: fp

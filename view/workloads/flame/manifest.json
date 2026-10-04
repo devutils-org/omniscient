@@ -1,0 +1,25 @@
+{
+  "view": "flame",
+  "about": "Functions of known weight on and off the cpu, across two named threads that run one after the other (two Python threads burning at once would wait on the interpreter lock, an off-cpu time nobody chose); the main thread waits for both in `Thread.join`. Each on-cpu function burns its share on its thread's own cpu clock in ten slices interleaved with the others, so no phase of the run favours one; each off-cpu function sleeps a known total in ten sleeps.",
+  "run": ["python3", "-X", "perf", "view/workloads/flame/workload.py"],
+  "symbols": "local",
+  "threads": [
+    {
+      "name": "hot",
+      "on_cpu": {"heavy": 0.80, "light": 0.20},
+      "off_cpu": {}
+    },
+    {
+      "name": "warm",
+      "on_cpu": {"medium": 0.40},
+      "off_cpu": {"nap": 0.60}
+    }
+  ],
+  "main": {"name": "flame-main", "off_cpu": {"Thread.join": "the run: the sum of every thread's on-cpu and off-cpu time"}},
+  "slices": 10,
+  "trust": {
+    "on_cpu": "exact to a few microseconds per slice on the thread's cpu clock; a profile sees it within its sampling error (about 1/sqrt(samples))",
+    "off_cpu": "each sleep is at least what was asked, longer by the scheduler's slack (tens of microseconds per sleep, more on a loaded machine)",
+    "names": "Python functions are named in a stack only under `-X perf` (CPython 3.12 or later), as `py::<function>:<file>` in the perf map the interpreter writes"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "view": "heatmap",
+  "about": "Latency regimes in known phases. The program asks a child process for one byte at a time over a loopback TCP connection, and the child answers each request after a pause the phase sets: fast, then slow, then fast again. Each `recv` waits as long as the pause, so the socket's read latency is the phase's.",
+  "run": [
+    "python3",
+    "view/workloads/heatmap/workload.py"
+  ],
+  "peer": "heatmap-peer",
+  "phases": [
+    {
+      "name": "fast",
+      "requests": 300,
+      "pause_ms": 1.5
+    },
+    {
+      "name": "slow",
+      "requests": 50,
+      "pause_ms": 12.0
+    },
+    {
+      "name": "fast-again",
+      "requests": 300,
+      "pause_ms": 1.5
+    }
+  ],
+  "tail_s": 0.3,
+  "trust": {
+    "count": "exact: one `recv` per request, of one byte",
+    "latency": "each `recv` waits at least the pause, longer by the peer's sleep slack and its wakeup: tens to hundreds of microseconds on an idle machine, milliseconds on a loaded one. The pauses are eight times apart, so the regimes are told apart at their geometric mean however the machine stretches the fast one; on an idle machine each also sits in one power-of-two bucket (1.5 ms in [1.05, 2.10) ms, 12 ms in [8.4, 16.8) ms)",
+    "phases": "the phases follow each other in this order; their boundaries are where the program's clock says, about 0.45 s, 0.6 s and 0.45 s of wall clock",
+    "tail_s": "after its last request the program idles `tail_s` before it exits, so that the socket source's last drain comes while the program is still there"
+  },
+  "not_exercised": {
+    "io.latency": "a block device's latency is the device's, not a figure a program can choose; the regimes here are the socket's",
+    "sched.runqlat": "a run-queue wait regime needs other tasks on the target's core, which the timebar workload makes for one phase",
+    "gpu.kernel": "the lanes workload launches a known number of kernels"
+  }
+}

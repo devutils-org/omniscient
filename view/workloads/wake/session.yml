@@ -1,0 +1,11 @@
+# The wake view's source, on its workload (`view/workloads/wake/`).
+#
+#   omn -f view/workloads/wake/session.yml
+name: wake workload
+requests:
+  - label: wakeups
+    source: sched.wakeup
+    target:
+      launch: [python3, view/workloads/wake/workload.py]
+    mode: trace
+    emit: [raw]

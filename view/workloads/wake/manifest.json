@@ -1,0 +1,36 @@
+{
+  "view": "wake",
+  "about": "A known chain of hand-offs: three processes in a ring of pipes pass a token around a known number of laps. Each hand-off is one wakeup, from the process that wrote to the one that was blocked reading, and nothing else in the program wakes anyone.",
+  "run": [
+    "python3",
+    "view/workloads/wake/workload.py"
+  ],
+  "ring": [
+    "relay-a",
+    "relay-b",
+    "relay-c"
+  ],
+  "laps": 300,
+  "hold_us": 200,
+  "edges": [
+    {
+      "waker": "relay-a",
+      "wakee": "relay-b",
+      "count": 300
+    },
+    {
+      "waker": "relay-b",
+      "wakee": "relay-c",
+      "count": 300
+    },
+    {
+      "waker": "relay-c",
+      "wakee": "relay-a",
+      "count": 300
+    }
+  ],
+  "trust": {
+    "count": "an upper bound, reached on an idle machine: one write to a pipe a blocked reader waits on is one wakeup of that reader, and each relay holds the token for `hold_us` on the cpu before passing it so that the next is asleep when the byte arrives. On a loaded machine a reader can still be runnable when the byte comes, and that hand-off wakes nobody: 266 of 300 were seen with nine test runs sharing the machine. The direction is exact: no edge goes the other way",
+    "chain": "the chain is a ring: a -> b -> c -> a, and no edge goes the other way"
+  }
+}

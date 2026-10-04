@@ -1,0 +1,35 @@
+# The timebar view's sources, on its workload (`view/workloads/timebar/`).
+#
+#   omn -f view/workloads/timebar/session.yml
+name: timebar workload
+requests:
+  - label: profile
+    source: cpu.profile
+    target: &workload
+      launch: [python3, -X, perf, view/workloads/timebar/workload.py]
+    mode: sample@997hz
+    emit: [stack]
+    stack: fp
+  - label: on-cpu
+    source: cpu.oncpu_time
+    target: *workload
+    mode: poll@250ms
+    emit: [timeline, summary]
+    keys: [task]
+  - label: blocked
+    source: sched.offcpu
+    target: *workload
+    mode: trace
+    emit: [raw]
+  - label: runqueue
+    source: sched.runqlat
+    target: *workload
+    mode: trace
+    emit: [raw, summary]
+    keys: [task]
+  - label: futex
+    source: sched.futex
+    target: *workload
+    mode: trace
+    emit: [raw, summary]
+    keys: [task]

@@ -1,0 +1,34 @@
+# The ledger view's sources this workload gives a known cost, on its workload
+# (`view/workloads/ledger/`), with `raw` asked of the two whose bytes a test
+# adds up per descriptor and per operation.
+#
+#   omn -f view/workloads/ledger/session.yml
+name: ledger workload
+requests:
+  - label: on-cpu
+    source: cpu.oncpu_time
+    target: &workload
+      launch: [python3, view/workloads/ledger/workload.py]
+    mode: poll@250ms
+    emit: [timeline, summary]
+    keys: [task]
+  - label: rss
+    source: mem.rss
+    target: *workload
+    mode: poll@250ms
+    emit: [timeline, summary]
+  - label: faults
+    source: mem.faults
+    target: *workload
+    mode: trace
+    emit: [summary]
+  - label: syscalls
+    source: io.syscall
+    target: *workload
+    mode: trace
+    emit: [raw, summary]
+  - label: socket
+    source: net.socket
+    target: *workload
+    mode: trace
+    emit: [raw, hist]

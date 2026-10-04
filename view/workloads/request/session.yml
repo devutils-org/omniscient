@@ -1,0 +1,36 @@
+# The request view's source, on its workload (`view/workloads/request/`).
+# The server is built first, by `tests/view_workloads.rs` or by hand:
+#
+#   mkdir -p target/omn-view-workloads/request
+#   cc -O0 -pthread -o target/omn-view-workloads/request/server examples/vertical/server.c
+#   omn -f view/workloads/request/session.yml
+#
+# The plan is `manifest.json`'s: none, lock_wait, block_io, net_rx, four
+# times over.
+name: request workload
+requests:
+  - label: requests
+    source: net.request
+    target:
+      launch:
+        - target/omn-view-workloads/request/server
+        - target/omn-view-workloads/request/data
+        - "0:0"
+        - "30:0"
+        - "0:32"
+        - "0:0:40"
+        - "0:0"
+        - "30:0"
+        - "0:32"
+        - "0:0:40"
+        - "0:0"
+        - "30:0"
+        - "0:32"
+        - "0:0:40"
+        - "0:0"
+        - "30:0"
+        - "0:32"
+        - "0:0:40"
+    mode: trace
+    emit: [raw, summary]
+    keys: [req]

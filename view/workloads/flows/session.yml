@@ -1,0 +1,27 @@
+# The flows view's sources, on its workload (`view/workloads/flows/`), with
+# `raw` asked of the two whose bytes a test adds up per descriptor.
+#
+#   omn -f view/workloads/flows/session.yml
+name: flows workload
+requests:
+  - label: socket
+    source: net.socket
+    target: &workload
+      launch: [python3, view/workloads/flows/workload.py]
+    mode: trace
+    emit: [raw, hist]
+  - label: syscalls
+    source: io.syscall
+    target: *workload
+    mode: trace
+    emit: [raw, summary, hist]
+  - label: network
+    source: net.bytes
+    target: {system: true}
+    mode: poll@250ms
+    emit: [timeline, summary]
+  - label: devices
+    source: io.bytes
+    target: {system: true}
+    mode: poll@250ms
+    emit: [timeline, summary]
