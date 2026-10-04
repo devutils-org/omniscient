@@ -173,6 +173,6 @@
     privileged: true
   compare:
     key: captured
-    omn_parse: omn_events
+    omn_parse: omn_captured
     tolerance: {rel: 0.01}
-    why: "both are AF_PACKET sockets on lo with a filter on the destination port, open over the same five seconds, the workload inside both"
+    why: "both are AF_PACKET sockets on lo with a filter on the destination port, open over the same five seconds, the workload inside both. lo hands a packet socket every frame twice, `outgoing` and `host`; omn keeps both and libpcap drops the outgoing copy on a loopback device, so omn_captured counts each frame on lo once (by hand, 2026-10-04: 3562 omn events against 1781 tcpdump packets, 3608 against 1804, exactly twice)"

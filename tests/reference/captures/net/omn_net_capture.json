@@ -1,0 +1,872 @@
+{
+  "results": [
+    {
+      "label": "net.capture",
+      "source": "net.capture",
+      "unit": "bytes",
+      "backend": "af_packet",
+      "outputs": [
+        {
+          "emit": "raw",
+          "events": [
+            {
+              "ts_ns": 2529972349596,
+              "ts_err_ns": 3565,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 74
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 74
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "outgoing"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 0
+            },
+            {
+              "ts_ns": 2529972355406,
+              "ts_err_ns": 3562,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 74
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 74
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "host"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 1
+            },
+            {
+              "ts_ns": 2529972381456,
+              "ts_err_ns": 3549,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 66
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 66
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "outgoing"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 4
+            },
+            {
+              "ts_ns": 2529972382626,
+              "ts_err_ns": 3548,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 66
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 66
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "host"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 5
+            },
+            {
+              "ts_ns": 2529972407177,
+              "ts_err_ns": 3536,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 70
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 70
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "outgoing"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 6
+            },
+            {
+              "ts_ns": 2529972408667,
+              "ts_err_ns": 3535,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 70
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 70
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "host"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 7
+            },
+            {
+              "ts_ns": 2529972448657,
+              "ts_err_ns": 3515,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 66
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 66
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "outgoing"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 12
+            },
+            {
+              "ts_ns": 2529972450067,
+              "ts_err_ns": 3515,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 66
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 66
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "host"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 13
+            },
+            {
+              "ts_ns": 2529973517663,
+              "ts_err_ns": 2981,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 70
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 70
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "outgoing"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 14
+            },
+            {
+              "ts_ns": 2529973519203,
+              "ts_err_ns": 2980,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 70
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 70
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "host"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 15
+            },
+            {
+              "ts_ns": 2529974602428,
+              "ts_err_ns": 2439,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 66
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 66
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "outgoing"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 18
+            },
+            {
+              "ts_ns": 2529974603658,
+              "ts_err_ns": 2438,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 66
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 66
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "host"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 19
+            },
+            {
+              "ts_ns": 2529974623269,
+              "ts_err_ns": 2428,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 66
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 66
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "outgoing"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 22
+            },
+            {
+              "ts_ns": 2529974630379,
+              "ts_err_ns": 2425,
+              "kind": "net.capture",
+              "keys": [
+                {
+                  "iface": {
+                    "netns": 4026531833,
+                    "index": 1,
+                    "name": "lo"
+                  }
+                }
+              ],
+              "attrs": [
+                {
+                  "name": "bytes",
+                  "value": 66
+                },
+                {
+                  "name": "captured_bytes",
+                  "value": 66
+                },
+                {
+                  "name": "iface",
+                  "value": "lo"
+                },
+                {
+                  "name": "direction",
+                  "value": "host"
+                },
+                {
+                  "name": "protocol",
+                  "value": "tcp"
+                },
+                {
+                  "name": "ip_version",
+                  "value": 4
+                },
+                {
+                  "name": "saddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "daddr",
+                  "value": "127.0.0.1"
+                },
+                {
+                  "name": "sport",
+                  "value": 53504
+                },
+                {
+                  "name": "dport",
+                  "value": 47312
+                }
+              ],
+              "collector_id": "net.capture/af_packet",
+              "seq": 23
+            }
+          ]
+        }
+      ],
+      "events_seen": 14,
+      "observed_ns": 3000015233,
+      "window": {
+        "run_opened_ns": 2529019252374,
+        "opened_ns": 2529019252374,
+        "closed_ns": 2532019267607,
+        "attached": true
+      },
+      "stopped_because": "the requested duration elapsed",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "filtered": {
+        "predicate": "dport == 47312",
+        "kept": 14,
+        "dropped": 10
+      },
+      "degradations": [
+        "the kernel copied at most 96 bytes of each frame, which is the headers: no payload entered this process, and `bytes` is still the length on the wire",
+        "frames are stamped by the kernel from CLOCK_REALTIME, so every timestamp here was converted into CLOCK_MONOTONIC and carries what that conversion could be off by in its ts_err_ns",
+        "the capture socket saw 24 frames and dropped 0"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 2752000,
+        "attributed_cpu_ns": 2752000,
+        "observed_cpu_ns": null,
+        "observed_from": "a network interface consumes no cpu time of its own, so there is nothing for an overhead to be a percentage of",
+        "wall_ns": 3015784996,
+        "measurement_ns": 11130,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel copies each packet into the capture ring in whichever context received or sent it, which for a local program is often its own",
+        "before_window_cpu_ns": 42224000,
+        "after_window_cpu_ns": 91000
+      },
+      "served_by": [
+        "af_packet"
+      ],
+      "value_attr": "bytes"
+    }
+  ]
+}

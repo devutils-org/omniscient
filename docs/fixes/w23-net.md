@@ -22,12 +22,14 @@ parser. The family's own harness (`mod runner`,
   `omn`'s output -- `omn_ip_link` (a counter series' increase, mean x count,
   in `ip -s link`'s keys: `rx_bytes`, `packets`, `errors`, ...), `omn_total`
   (every series summed: retransmits are one series per socket),
-  `omn_rtt` (a mean weighted by each series' polls), `omn_events` (raw
-  events counted, for tcpdump's `captured`). `ip_s_link_delta` also gives
+  `omn_rtt` (a mean weighted by each series' polls), `omn_captured` (raw
+  events counted as tcpdump counts them, each frame on `lo` once, for
+  tcpdump's `captured`; `omn_events` until the fix round, below). `ip_s_link_delta` also gives
   `errors` and `drops` (rx + tx) and `carrier`, `collisions` (tx), what
   `net.iface` counts. Each parser is unit-tested on a capture; the `omn`
-  ones on six real `omn` outputs captured today
-  (`tests/reference/captures/net/omn_*.json`).
+  ones on seven real `omn` outputs captured today
+  (`tests/reference/captures/net/omn_*.json`), `net.capture`'s among them
+  since the fix round.
 - The backlog pair reads `omn` by path, no parser:
   `results.0.outputs[emit=raw].events.*.attrs[name=overflows].value`.
 - `docs/replaces/net.md`: rows name the pairs by id, with the runner's
@@ -57,7 +59,8 @@ every 200 ms like `omn`'s poll, and that pair alone
 (`OMN_REFERENCE_PAIR=ss-ti-rtt`) then read 1154000 / 1233250 (6.4 %) and
 1202538 / 1162333 (3.5 %). The tolerance was not changed.
 
-Also shown: `cargo test --test reference net::` (10 parser tests pass);
+Also shown: `cargo test --test reference net::` (10 parser tests pass, 11
+after the fix round);
 `every_pair_is_well_formed` and `every_row_names_a_pair_or_why_none` name
 no net pair and no net row (both still red on other families);
 `families_are_whole` passes; `cargo clippy --workspace --all-targets -- -D
@@ -66,24 +69,26 @@ warnings` and `cargo fmt --check` clean.
 **Reasoned**: that the windows' slack (tens of milliseconds between omn's
 and the wrapper's first and last reads) stays inside the tolerances on a
 loaded machine; two runs were exact on every counter. `net.iface` agreeing
-at zero does not show a non-zero error count would agree. `omn_events` is
-tested on a real `net.backlog` raw output, not on `net.capture`'s, which
-this session cannot produce (`CAP_NET_RAW`).
+at zero does not show a non-zero error count would agree. That the runner
+would hold the tcpdump pair: it still skips there (below), and the
+agreement is shown by hand only.
 
 ## Each pair's outcome
 
 - holds: `ip-link-rx-bytes`, `ip-link-tx-bytes`, `ip-link-packets`,
   `ip-link-errors`, `nstat-listen-overflows`, `nstat-retrans-segs`,
   `ss-ti-rtt`.
-- skipped: `tcpdump-captured` -- `sudo -n` does not grant root (tcpdump
-  4.99.7 is installed). Beyond the sudo, omn's `net.capture` needs
-  `CAP_NET_RAW` (`make CAPTURE=1`).
+- skipped by the runner: `tcpdump-captured` -- the runner asks whether
+  `sudo -n` grants root, and it grants only the listed commands
+  (`/usr/bin/tcpdump` among them). Run by hand in the fix round, it agrees
+  exactly ("Review", below).
 - gaps, known defects: none.
 
 ## Not done, and why
 
-- The tcpdump pair has not run, and `tcpdump_count.stderr.txt` is still
-  the hand-written one: both need root (below).
+- The tcpdump pair has not run through the runner (its root check wants
+  `sudo -n` to grant everything; that is the runner's, not this stream's).
+  `tcpdump_count.stderr.txt` is now a real tally (fix round).
 - The runner's `lead_ms` (the tool started after omn) was not needed:
   started together and both measuring the same seconds, the windows match
   better than with a lead.
@@ -96,16 +101,49 @@ this session cannot produce (`CAP_NET_RAW`).
 
 ```console
 make CAPTURE=1      # CAP_NET_RAW on target/debug/omn for net.capture
-sudo -v             # by a person, in a terminal, so that sudo -n grants
+sudo -v             # by a person, in a terminal, so that sudo -n grants root
 OMN_REFERENCE_PAIR=tcpdump-captured cargo test --test reference pairs_net -- --nocapture
-# a real tally for the parser's capture, to replace the hand-written one:
-(sleep 1; python3 tests/reference/workloads/net/pingpong.py 47312 2 >/dev/null) &
-sudo -n python3 tests/reference/workloads/net/bracket.py 5 tcpdump -i lo \
-  -w /dev/null 'tcp dst port 47312' \
-  2> tests/reference/captures/net/tcpdump_count.stderr.txt
 ```
 
-Then move `tcpdump_count_reads_the_tally_on_stderr`'s numbers to it.
+The fix round ran the rest (the real tally, the `net.capture` output) with
+what `sudo -n` grants today.
+
+## Review
+
+The reviewer: `omn_events`, the `omn_parse` of `tcpdump-captured`, was
+tested only on `net.backlog`'s raw output, never on `net.capture`'s. Right,
+and fixing it found that the pair as written would have failed.
+
+- With `make CAPTURE=1` (the sudoers line now grants `cap_net_raw`), a
+  real `net.capture` raw output over a 2 ms pingpong is
+  `tests/reference/captures/net/omn_net_capture.json`: 14 events, equal to
+  its `events_seen` and its filter's `kept`, so nothing is capped or split.
+  A 2 s pingpong gave 3640 events, also equal to both (not kept: 5.7 MB).
+- But the 14 are 7 frames seen twice, `direction outgoing` and
+  `direction host`: lo hands a packet socket every frame twice
+  (`docs/open-findings.md`, "Loopback carries every frame twice"), omn keeps
+  both, and libpcap drops the outgoing copy on a loopback device. By hand,
+  the pair's own commands with `sudo -n tcpdump` (granted), 2026-10-04,
+  twice: omn 3562 events against tcpdump's 1781 packets captured, 3608
+  against 1804 -- exactly twice, where the compare's tolerance is 1 %.
+  tcpdump's own tally says the same: 3608 "received by filter", 1804
+  "captured".
+- So the parser is now `omn_captured`: it counts the raw events, except an
+  `outgoing` one on `lo`. Run 2's omn output counts 1804 that way, equal to
+  tcpdump's. Unit-tested on the new capture (14 events, 7 counted) and on
+  the backlog capture (no `direction`: 5 counted, as before).
+- `tcpdump_count.stderr.txt` is run 2's real stderr, replacing the
+  hand-written one.
+- Not shown: the runner holding the pair. Its root check skips it here
+  (`skipped: ... sudo -n does not grant root`), since sudo grants
+  `/usr/bin/tcpdump` and not everything. A check by command would run it;
+  that is the runner's code, outside this stream.
+
+Not an omn defect: the two frames are real and distinguishable by
+`direction`, which `net.capture` reports. It is a difference a tcpdump user
+replacing it would meet, and it is now in `docs/replaces/net.md`. That
+`--filter` cannot name `direction` (`net.capture` exposes iface, protocol,
+dport, daddr) is why the parser filters instead of omn.
 
 ## Decision lines
 
