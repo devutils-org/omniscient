@@ -1,0 +1,40 @@
+{
+  "results": [
+    {
+      "label": "gpu.kernel",
+      "source": "gpu.kernel",
+      "unit": "ns",
+      "backend": "vendor:cupti",
+      "outputs": [
+        {
+          "emit": "topk",
+          "k": 20,
+          "series": [
+            {
+              "key": "kernel=tiny",
+              "events": 5000,
+              "total": 6221828.0
+            }
+          ],
+          "rest": {
+            "series": 0,
+            "events": 0,
+            "total": -0.0
+          }
+        }
+      ],
+      "events_seen": 5000,
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "served_by": [
+        "vendor:cupti"
+      ],
+      "value_attr": "duration_ns"
+    }
+  ]
+}

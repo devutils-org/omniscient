@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "label": "gpu.api",
+      "source": "gpu.api",
+      "unit": "ns",
+      "backend": "preload",
+      "outputs": [
+        {
+          "emit": "topk",
+          "k": 20,
+          "series": [
+            {
+              "key": "api=cuMemcpyDtoH",
+              "events": 1,
+              "total": 1524678.0
+            },
+            {
+              "key": "api=cuMemcpyHtoD",
+              "events": 1,
+              "total": 1520311.0
+            },
+            {
+              "key": "api=cuCtxSynchronize",
+              "events": 1,
+              "total": 355120.0
+            },
+            {
+              "key": "api=cuMemAlloc",
+              "events": 3,
+              "total": 265002.0
+            },
+            {
+              "key": "api=cuLaunchKernel",
+              "events": 5,
+              "total": 31877.0
+            }
+          ],
+          "rest": {
+            "series": 0,
+            "events": 0,
+            "total": -0.0
+          }
+        }
+      ],
+      "events_seen": 11,
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "served_by": [
+        "preload"
+      ],
+      "value_attr": "duration_ns"
+    }
+  ]
+}
