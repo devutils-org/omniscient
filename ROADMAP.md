@@ -411,6 +411,11 @@ Now, and not before: we have three real join types to generalize from.
       the kernel tier is refused with the reason, since no match kind has a
       program (`docs/fixes/w18-engine.md`). No command applies a rule to a
       stored run yet. Left `[~]` for the kernel tier only.*
+      *Twentieth wave: `omn join -f <rules> <results>` applies every rule of a
+      session to a stored run, held field for field to the agent tier's
+      answer by the same test, and refuses a rule the run cannot answer with
+      exit 2 (`docs/fixes/w20-shared.md`). Left `[~]` for the kernel tier
+      only.*
 - [x] A load test proves there is no open-state leak over 1 h.
       *Audit, fourteenth wave: Not proven: no join-engine load test of any
       length exists. The open-state balance (`states_balance` in `src/join.rs`)
@@ -736,6 +741,11 @@ finally earns its place.
       (about 1.3 us a record) apart from the dilation, and `omn top` takes
       the view's own cpu out of the collectors'. Still asserted only in an
       ignored run. Left `[~]`.*
+      *Twentieth wave: a one-time cost is weighed apart from the rate
+      (`overhead.one_time_cpu_ns`, a symbol table loaded inside the window),
+      outside every check and inside what the tool spent, held by
+      `collect::tests::a_one_time_load_is_weighed_apart_from_the_rate_and_still_spent`.
+      The separation from the dilation is unchanged. Left `[~]`.*
 
 ---
 
@@ -769,6 +779,9 @@ truth -- kernel counts exact against the workload's own, durations held to a
 self-timing kernel, counter verdicts held to two workloads that disagree, the
 known hot loop first. The three left wait on hardware this machine lacks
 (`STATE.md`).*
+*Twentieth wave: 112 of 206 backends: `cpu.oncpu_time` through `bpf:raw_tp`
+on `sched_stat_runtime`, one row per thread, held exactly to each thread's
+`schedstat`.*
 
 ---
 
@@ -951,6 +964,10 @@ triage follows, and two ways run with different privileges are not compared
       triage follows one `cc1` of a job that is a chain of processes, filed);
       the server's listing is followed into its serving thread, and the
       compiles into `cc1`. Left `[~]` for `make-sqlite`.*
+      *Twentieth wave: the triage carries the rest of a job beside the child
+      it follows (`followed.job`), shown on a workload of three steps whose
+      kernel figures it adds up to; the case still decomposes one `cc1` and
+      lists its finding. Left `[~]`.*
 - [~] Every number a verdict cites agrees with the reference's own account,
       within that account's resolution.
       *Seventeenth wave, partly: within the stated slack for `sqlite3-stripped`
@@ -966,6 +983,11 @@ triage follows, and two ways run with different privileges are not compared
       own wait); still not for `make-sqlite` and `gcc-shell`'s contended
       compile (one `cc1` of the job's chain), nor the slow client (a thread
       blocked beside the main thread is not followed). Filed.*
+      *Twentieth wave: a thread blocked on a connection beside an otherwise
+      empty block is followed (`waiting`), shown on the triage's own Python
+      server; `http-server-stdlib`'s slow client, `make-sqlite` and
+      `gcc-shell` still list their findings, not re-run with it. Left
+      `[~]`.*
 - [~] Where the cause is out of the tool's sight (interpreted or JIT frames, a
       closed GPU), the verdict says so by name. No case ends with a confident
       wrong suspect.
@@ -982,6 +1004,11 @@ triage follows, and two ways run with different privileges are not compared
       names the main thread's `select` where the serving thread's send is the
       request's, and the tool's own eBPF frames (`bpf_trace_run2`) can be
       ranked as the hottest function. Filed.*
+      *Twentieth wave: a sample in an eBPF program is never ranked, counted
+      and said as the tool's own cost, held across every answer
+      `tests/triage.rs` gets; a lossy lower row that could overtake the
+      largest undecides the verdict rather than naming the run queue. Left:
+      the slow client in its case (above). Left `[~]`.*
 - [x] One case names a stripped distribution binary's functions from
       debuginfod, and says where each name came from.
       *Seventeenth wave, the agent's way: `sqlite3-stripped` through

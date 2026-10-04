@@ -1,11 +1,11 @@
-# The gallery: nine views, kept
+# The gallery: nine views kept, and `process`
 
 Every view of `omn top` was an experiment (`docs/briefs/wave-19-gpu-view.md`):
 built in the nineteenth wave, drawn on the same recorded runs, and kept or
 dropped on what it shows on screen. The user kept all nine on 2026-10-04,
 after using them; the twentieth wave linked them, made them clickable, added
-`process` (`docs/view/process.md`, its own stream's) and gave each a workload
-of known load. This page is where each is seen: one row per view, the
+a tenth, `process` (`docs/view/process.md`), which the user decided on and has
+not yet seen, and gave each a workload of known load. This page is where each is seen: one row per view, the
 snapshots worth opening first, how to see it live and replayed, its stream's
 verdict -- what it shows that nothing else does, and what it does not -- and
 the user's.
@@ -22,10 +22,10 @@ a click on what it drew), the view's own unit tests in
 
 ```console
 make                                                   # the capabilities, for a live run
-omn top --gallery tests/view_fixtures/http-server      # every view on one run: space steps, 1-9 jump
+omn top --gallery tests/view_fixtures/http-server      # every view on one run: space steps, 0-9 jump
 omn top --replay tests/view_fixtures/workload-wake --view wake   # one view on its own workload
 omn top --gallery tests/view_fixtures/sqlite-commits --headless --size 120x40   # every view as text
-omn top -- python3 cases/cpython-interpreter/hot.py    # live; 1-9 or tab between views, ? for help, q quits
+omn top -- python3 cases/cpython-interpreter/hot.py    # live, opens on process; 0-9 or tab between views, ? for help, q quits
 ```
 
 `omn top` needs a terminal: in a shell without one it is refused at once and
@@ -56,9 +56,11 @@ merged phase A, by `tests/view_fixtures/record.sh`, through `omn top
   ended), `many-requests` (three hundred, four causes in turn) and
   `system-wakeup` (every wakeup on the machine for a second).
 
-Two views keep a recording of their own here as well: `lanes-gpu/` (a host
-program feeding the GPU) and `flows-run/` (the file server, which
-`flows--file-server` is drawn on by the flows view's own test).
+Three views keep a recording of their own here as well: `lanes-gpu/` (a host
+program feeding the GPU), `flows-run/` (the file server, which
+`flows--file-server` is drawn on by the flows view's own test) and
+`process-run/` (the `process` workload under every view's needs, which
+`process--process-run` is drawn on).
 
 ## The views
 
@@ -72,7 +74,8 @@ program feeding the GPU) and `flows-run/` (the file server, which
 | 6 | **heatmap** -- latency over time (`docs/view/heatmap.md`) | `heatmap--workload-heatmap` (three phases, two regimes), `heatmap--sqlite-commits` (three regimes pulsing once per commit), `heatmap--sqlite-commits--zoom-x8`, `heatmap--http-server--sched.runqlat`, `heatmap--vertical-requests`, `heatmap--sqlite-commits--live-half-way`; `../drawings/heatmap--gpu-phases.txt` (a GPU run, hand-kept, not held by a test) | `omn top --view heatmap -- ./prog` (`s` steps the source) | `omn top --replay tests/view_fixtures/sqlite-commits --view heatmap` | It shows what no histogram and no mean timeline can -- that a latency's modes are separate events in time (sqlite's slow writes once per commit, a GPU program's phases, a server's first requests) and which one measurement the spike was -- but not why a band sits where it does, and for the kernel-bucketed sources its time is only as fine as their ~100 ms drain window. | yes (2026-10-04) |
 | 7 | **lanes** -- threads side by side (`docs/view/lanes.md`) | `lanes--workload-lanes` (three lanes in turn, twelve kernels), `lanes--gpu-feeder` (a host thread's block under the kernel it waited for, from `lanes-gpu/`), `lanes--gpu-feeder-zoom` (3.4 ms a cell), `lanes--http-server`, `lanes--sqlite-commits` | `omn top --view lanes -- python3 docs/view/gallery/lanes-gpu/workload.py` | `omn top --replay docs/view/gallery/lanes-gpu --view lanes` | Lanes shows what no other view does -- which thread waited for what, when, and who ended the wait, a host thread's block lined up under the kernel it waited for and the regime change of a pipeline read straight off the screen; it does not say what ran instead of a preempted thread, whether an awake thread was on a cpu or queued, or which thread launched a kernel, and at the whole run's zoom it shows shares, not instants. | yes (2026-10-04) |
 | 8 | **wake** -- who woke whom (`docs/view/wake.md`) | `wake--workload-wake` (the ring), `wake--system-wakeup`, `wake--http-server--main` (the handler holding the main thread's chain), `wake--http-server--handler`, `wake--http-server`, `wake--sqlite-commits` (54 % by hardirq) | `omn top --view wake -- ./prog` | `omn top --replay tests/view_fixtures/http-server --view wake` | It shows what no other view does -- who handed a thread each wakeup and how long every hand held it, e.g. the HTTP server's handler holding the main thread's chain 273 ms per listing and the poll timer waking it after 501 ms of quiet -- but not chains through threads outside the target, exact blocked time, or the sender behind a loopback softirq. | yes (2026-10-04) |
-| 9 | **flows** -- where the bytes went (`docs/view/flows.md`) | `flows--workload-flows`, `flows--file-serving`, `flows--file-server` (from `flows-run/`: every file's bytes exact, loopback 2.00x the socket, the page cache 0.13x), `flows--http-server`, `flows--sqlite-commits` (no bytes per file on the default request, said) | `omn top --view flows -- ./prog` (bytes per file need `io.fs`: `docs/view/flows.md`) | `omn top --replay docs/view/gallery/flows-run/data --view flows` | Flows is the only view that puts the target's own bytes and the machine's on one scale across the kernel layer between them, so the page cache's absorption (0.13x) and loopback's double count (2.00x) are seen as a change of height rather than computed; it does not say which socket used which interface or which file's bytes reached which device -- nothing measures those edges -- and on the default request it has no bytes per file at all. | yes (2026-10-04) |
+| 9 | **flows** -- where the bytes went (`docs/view/flows.md`) | `flows--workload-flows`, `flows--file-serving`, `flows--file-server` (from `flows-run/`: every file's bytes exact, loopback 2.00x the socket, the page cache 0.13x), `flows--http-server`, `flows--sqlite-commits` (no bytes per file on the default request, said) | `omn top --view flows -- ./prog` (bytes per file need `io.fs`: `docs/view/flows.md`) | `omn top --replay docs/view/gallery/flows-run/data --view flows` | Flows is the only view that puts the target's own bytes and the machine's on one scale across the kernel layer between them, so the page cache's absorption (0.13x) and loopback's double count (2.00x) are seen as a change of height rather than computed; it does not say which socket used which interface or which file's bytes reached which device -- since the twentieth wave the collectors measure both (`net.socket`'s `iface`, `io.fs`'s `blk_devs`) and the view does not draw them yet -- and its bytes per descriptor come from `io.syscall`'s `raw` rows, which only the recordings made since that need asks them carry (`flows--workload-flows`, `flows--file-serving`). | yes (2026-10-04) |
+| 0 | **process** -- one process at a glance (`docs/view/process.md`) | `process--process-run` (its own workload: `crunch` first, the socket's bytes exact), `process--vertical-requests` (`▶ lock 99.8%`, the slowest request's cause), `process--sqlite-commits`, `process--machine` (a run with no target, titled `pid 1`: the machine's account read as a process's, filed); `frame--help` and `frame--narrow` are drawn on it | `omn top -- ./prog` (the first screen with a target; `0` from any view) | `omn top --replay docs/view/gallery/process-run` | One screen for one process: a tile per view's essence -- the first suspect and its share, the hottest own code on and off cpu, the cost, the slowest request and why, the latency strip, the threads, the top waker, the bytes, the GPU -- each a number and a colour, the colour the suspect's state on the tile that explains it, each tile opening its view by key or click; its tiles read each source their own way rather than in the views' own words, and on its own workload it names `sleep` where the program held a lock 0.25 s (the timebar does not split a `sched.futex` summary out of sleep). | decided (2026-10-04); not yet seen on a terminal |
 
 ## The frame's own
 
@@ -86,14 +89,15 @@ parts every view shares (`docs/view/README.md`).
 - **The trust style**: a figure with losses, a time error or low determinism
   is dimmed, with its badge beside it; a refused source draws its reason where
   its panel would be. Most of the catalog's traced sources are `low`
-  determinism, so most figures on these screens are dimmed; lanes found the
-  rule tells no lane from another on a timeline, and a scale-aware rule is
-  open (`docs/open-findings.md`, the nineteenth wave, stream lanes).
+  determinism, so most figures on these screens are dimmed. Since the
+  twentieth wave a time error dims a figure only at a resolution it can move
+  (a tenth of a cell), which the lanes use: a ±295 ns error on 27 ms cells no
+  longer dims every lane.
 - **The cost corner**: the view's own cpu beside the collectors' and the
   target's, as shares of one cpu.
 - **The links and the mouse**: what is selected opens the view that explains
   it (a process in `system` opens its `ledger`, a ledger line `flame`, a
-  request `lanes` and `wake`); a click selects, a click on the selection goes
+  request `lanes` and `wake`, a `process` tile its view; `⌫` comes back); a click selects, a click on the selection goes
   in, a right click comes back. The `-click--` snapshots show each view's
   selection after a click; that a real terminal delivers those clicks is the
   look still owed.

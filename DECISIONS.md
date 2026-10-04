@@ -944,7 +944,7 @@ launched program, through the vendor's own library.
 | Nothing is wrapped | **`gpu.counters` reads CUPTI's range profiler from the injection library**; `vendor:ncu` left the chain. `ncu` and `nsys` may be second readers in a test, never what `omn` runs. Landed by profiler; `nsys` measured once by bench as a reference reader. | Boundary 4: a tool's output parsed is a tool wrapped. |
 | Lost records | **Counted and said**: CUPTI's drop count asked after every buffer, unsent batches and records returned unfinished counted, each with its reason, into the run's losses. A flush thread drains every 50 ms. Landed by cupti: with two 64 KiB buffers, 50 000 launches kept 41 263 and dropped 8 737, kept + dropped = launched exactly. | A tracer that drops silently undercounts the device's time. |
 | A GPU timestamp's error | **Measured by brackets** (monotonic, CUPTI, monotonic; the tightest of several) at the start, at each flush and at the end; the map is the line through the first and last, its error the widest half-bracket plus the furthest bracket from the line, at least 1 ns, and widened by the slope's error past the last bracket. *Amended by cupti: `ts_err_ns` is the conversion's error only* (below). | `CLOCK_MONOTONIC` is the one clock domain; a converted timestamp carries a non-zero, measured `ts_err_ns`. |
-| The device's clocks | **Reported, never changed**: every NVML run states each device's shader clock lock, application clocks, persistence mode and clock event reasons at its start and where they moved at its end, and `gpu.kernel`, `gpu.counters` and `gpu.profile` carry the same in their facts (`timing_clock_facts()`, wired at the merge). A lock is claimed only from evidence; a range in the driver's performance levels reads **"not shown locked"**, never "unlocked"; unknown is never locked. Landed by device. The run's environment does not carry it yet (`STATE.md`, "What remains"). | Locking needs root and does not survive a reboot; an unlocked clock makes a timing depend on what ran before it; and NVML has no reader for a `-lgc` lock, so "unlocked" would be a confident guess. |
+| The device's clocks | **Reported, never changed**: every NVML run states each device's shader clock lock, application clocks, persistence mode and clock event reasons at its start and where they moved at its end, and `gpu.kernel`, `gpu.counters` and `gpu.profile` carry the same in their facts (`timing_clock_facts()`, wired at the merge). A lock is claimed only from evidence; a range in the driver's performance levels reads **"not shown locked"**, never "unlocked"; unknown is never locked. Landed by device. *Since the twentieth wave the run's environment carries it too, when a `gpu` source is asked (gpu).* | Locking needs root and does not survive a reboot; an unlocked clock makes a timing depend on what ran before it; and NVML has no reader for a `-lgc` lock, so "unlocked" would be a confident guess. |
 | A counter's reproducibility | **Measured per kernel and per run**, never a fixed list: the interquartile spread over the median of the undisturbed launches, at 10 %, with a verdict per counter (`reproducible here`, `not dominated by this workload`, `measured once`, `disturbed on every launch`) and the outliers beside it. Landed by profiler: `dram__bytes_read.sum` reproducible on a 64 MiB copy and not dominated on a compute spin; instruction counts bit for bit on both. | A full-range spread let one disturbed launch turn a count that repeats bit for bit into one that does not. |
 | `gpu.profile` | **A new source: CUPTI's PC sampling in continuous mode**, aggregated per program counter and stall reason per drain, resolved to a source line from the modules the library keeps. Landed by profiler: the known hot loop's line held 95.9 % of the samples. | Where time goes inside a kernel, as `cpu.profile` says it on the cpu; continuous mode does not serialise the program's kernels. |
 | A GPU tracer's cost | **Against a negative control**: the injection library loaded by the driver and disarmed (`OMN_CUPTI_REPORT=0`), the control against bare reported apart. Landed by bench: the control inside the floor on every regime. | Without it the dynamic loader's cost is published as the tracer's. |
@@ -1028,7 +1028,115 @@ launched program, through the vendor's own library.
 | heatmap: what it draws | **`raw` events only**; a kernel-bucketed row at `total_ns / weight`, spread over its drain window as its collector stamps it; a whole-run kernel row not drawn; log2 rows, logarithmic density; a loss shaded only where the run can place it. | A view that drew `hist` at the end and events while live would change shape when the run ended; a point at a row's stamp claims a moment the kernel never measured. |
 | lanes: states | **Rebuilt from instants** (switch-out to wakeup is a block), `sched.offcpu`'s windowed rows only labelling them; a GPU lane lines up with host threads in time, never by attribution; the cursor opens on a wait for the GPU. | A windowed total spread over columns draws a precision the source does not have; `gpu.kernel` is keyed on the process. |
 | wake: chains | **Through each waker's latest wakeup before the one it issued, folded per thread into a tree**, two times per link (the waker's hold, the woken thread's quiet as an upper bound), stopping with its reason at an interrupt, a cycle, an unseen waker or the depth. | The waker's previous wakeup is the only link the source holds; an unseen waker on a launch target is the source's scope, not an origin. |
-| flows: the kernel layer | **A junction, never edges**: the target's bytes left, the machine's right, on one scale, the ratio drawn and said; a ribbon is a sum of call rows, never a multiplication. | No source ties a socket to an interface or a file's bytes to a device. |
+| flows: the kernel layer | **A junction, never edges**: the target's bytes left, the machine's right, on one scale, the ratio drawn and said; a ribbon is a sum of call rows, never a multiplication. | No source ties a socket to an interface or a file's bytes to a device. *Since the twentieth wave `net.socket` keys its route's interface and `io.fs` carries its block devices; the view does not draw those edges yet.* |
+
+---
+
+## Settled in the twentieth wave
+
+What was decided before the wave (`docs/briefs/wave-20-left.md`, "Decided
+before this wave") and what the fourteen streams settled, from the decision
+lines of their handoffs (`docs/fixes/w20-*.md`). The two decisions the brief
+asked to be proposed with numbers -- the budget's first check and a cost per
+regime -- are still open, below, with the numbers the streams measured.
+
+**Decided before the wave**, each landed by the stream named:
+
+| Decision | Choice | Reason |
+|---|---|---|
+| The nine views | **All kept** (the user, 2026-10-04, after using them); the gallery's `Keep?` column says "yes (2026-10-04)" on every row. Landed by record. | Each shows something no other view does (`docs/view/gallery/README.md`). |
+| The views are linked, and a process has a page | **What is selected opens the view that explains it, and back; a tenth view, `process`, is the first screen of a run with a target**, a tile per view's essence, a number and a colour each, each tile opening its view; `system` stays the first screen without one. Landed by view (the links, the history, the first-screen rule) and process (the tiles). *Not yet: a ledger line opening `timebar` (the ledger has no line of blocked time), and `process` first on a live `--pid` or launch (`src/main.rs`).* | One process at a glance, and every figure one key from its detail. |
+| The view is clickable | **A view reports the regions it drew; a click selects, a click on the selection goes in, the wheel scrolls or zooms, a right click comes back; mouse capture on by default, `M` turns it off; keys stay complete.** Landed by view, every view's regions, and record (a snapshot per view after a click). *Reasoned, not seen: a real terminal and tmux.* | The links make the mouse cheap; capture takes the terminal's own selection, so it must be one key away. |
+| Every view has a workload | **One program per view and one for `process`, each with a truth manifest** (`view/workloads/`); the sources held to it (`tests/view_workloads.rs`, workloads) and each view held to it on screen (`tests/view_truth.rs`, record); the recordings of these programs are fixtures beside the realistic ones. | Ground truth for a view, as for a source, and fixtures a re-recording redraws within their measurement (shown on a second recording). |
+| A field, not a sentence | **What a collector says that a program would read becomes a field of the result.** Landed for `sched.wakeup`'s names and interrupt, `net.socket`'s interface, `io.fs`'s block devices, `row_stamp` and the drains' drops. *Not yet for `net.request`'s counts, which wait on a slot in the result (below).* | A sentence a view parses breaks on a rewording. |
+| The comparison with the reference tools | **The next wave**, not this one. | One wave with nothing else pending. |
+| The open decisions | **Stay open unless a stream's measurement settles one.** Both were proposed with numbers; neither is settled (below). | A decision is taken on a measurement, not on a deadline. |
+
+**The GPU** (`docs/fixes/w20-gpu.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A target the tool killed | **The tool's failure, said as such, never only a lost read**: an injection library says when its exit path starts (`OP_EXITING`), and a death after that is reported in a `degraded:` line naming the source. For every injector, not only CUPTI. *The exit status is not yet non-zero: no channel from a collector to the run's outcome exists ("What remains").* | A crash the tool caused, read as the program's, is a silent wrong answer. |
+| Counters beside kernel times or PC sampling | **The request's refusal, exit 2, before the launch**, decided on the backends the resolver chose (`launch_refusals`); `omn validate` of such a session says valid, since it does not resolve. *Amends the nineteenth wave's "at attach, labelled the machine's".* | A rule about what serves the requests is decided once they are resolved; a pair served by another vendor is not refused. |
+| A refused target's reason | **In the catalog's `targets:` line** (`targets: {pid: "no: <reason>"}`), the loader refusing a `no` without a reason; until the loader reads it, the caveat search stays. *Amends the nineteenth wave's "from a caveat"; the change is the loader's ("What remains").* | The reason sits on the axis it explains and is data the loader can hold present; a reworded caveat today degrades a refusal to "declares no support" silently. |
+| A lighter CUPTI activity kind as a fallback | **None**: the other kernel record serialises the program's kernels. `omn`'s 1.4 to 1.8 us a record is its event model's copies and allocations, not CUPTI's. | A fallback that changes what is measured is not a degraded equivalent. |
+
+**The profile and the unwinder** (`docs/fixes/w20-rings.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A sampler's losses per ring | **Every loss the run counts for a ring, drops and throttles, reported on that ring.** | A placement that needs all of them is refused by the one missing: the runner test was red for two waves on the throttles alone. |
+| A test of shares or paths | **Samples at a period under its workload's shortest phase, or on a workload whose phase is decorrelated from the period.** | One sample per loop iteration aliases: 229 of 299 samples in one branch at the batch's own period. |
+
+**The triage** (`docs/fixes/w20-triage.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A limit's spelling | **The JSON spells it as the text does** (`cpu-queue`, `other-block`); the old spelling is still read. | Every reader had a normalization step. |
+| A sample in an eBPF program | **The tool's cost, never the program's hottest function**: set aside, counted and said. | A durability case named `bpf_trace_run2`. |
+| A thread blocked on a connection beside an empty block | **Followed (`waiting`)**, recognised by its stack's send and receive frames; an idle helper asleep beside it is not. | `http-server-stdlib`'s slow client: the request's wait is the serving thread's send, not the main thread's `select`. |
+| A job's wait | **Followed into one child, with the rest of the job beside it** (`followed.job`: every other busy task off the way); the job as one decomposition waits on `ppid`. | Without `ppid`, "the processes under it" can only mean every process off the way. |
+| A lossy lower row | **Undecides the verdict when it could overtake the largest at its source's loss rate** (without bound when the loss is throttling). | A lossy profile under load named the run queue for a spin. |
+
+**The budget and the run's account** (`docs/fixes/w20-budget.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A one-time cost the tool can name | **Weighed apart from the rate and said apart** (`overhead.one_time_cpu_ns`: a symbol table loaded inside the window), outside the percentage and every check, inside what the tool spent. *The first half of the open line below.* | A debuginfod profile's first check fell from 142-152 % to 45-51 %, its whole window from 36-39 % to 16-17 %. |
+| A launched program's stderr | **Can be a file of its own** (`OMN_PROGRAM_STDERR`), not passed on to the program; `run_session` always asks for it (`program_stderr`). A `--program-stderr` flag is to come. | An agent reads the program's account apart from `omn`'s lines. |
+| What a run leaves behind | **Nothing it launched**: `omn` is the subreaper of what it launches, and the end of every run -- a stop, or the program exiting on its own -- ends and counts what it adopted; a library caller is not and does not. A daemon meant to outlive the run is launched outside `omn`. | An orphan held `omn`'s stderr open and a run through `run_session` hung 71.7 s, unsaid. |
+| An adopted orphan's cpu | **In the launched program's denominator while it lives**, as the rest of its tree is. *Decided by the eighteenth wave's rule (the denominator is the process tree); the meter's change is to come.* | It is the program's work, and the budget weighs the program. |
+| A session refused at resolution | **Names every request it cannot resolve**, and exits with the first gap to fix (request, then build, then machine). | One refusal at a time is one run per refusal. |
+
+**The collectors** (`docs/fixes/w20-{sched,net,cpu,io}.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| An interrupt's wakeup | **Names the task it was served in (`served_in_tid`), never as the waker**, beside the context; `irq` or `softirq` from four programs on the interrupt tracepoints. Timer and IPI wakeups carry no number. | For a softirq served in `local_bh_enable` that task is the cause; for an interrupt that only landed on it, it is not -- the context says which. |
+| `sched.offcpu`'s stamp | **At the drain that closed its window, said in the caveat**; the blocks it adds up ended in `(ts_ns - window_ns, ts_ns]`. Open only if a join needs the first wait. | The views already read rows as ending at `ts_ns`. |
+| `net.socket`'s interface | **The route's, read at the call, in this namespace only**; a socket in another namespace carries none. | Another namespace's index would name some other interface here. |
+| A byte counter's direction | **An attribute today**, carried to the results by `raw` (`net.bytes`, `io.bytes`); how it becomes a series is open (below). | Re-keying a series breaks every reader of it. |
+| A collector's run-level counts | **Fields of the result**: a `Collector::fields` hook, default empty, copied into `Results::fields`. *To come; `net.request`'s `Undrawn` is ready to answer it.* | "A field, not a sentence". |
+| `cpu.oncpu_time` per thread | **Through `sched_stat_runtime`, not `sched_switch`**: the scheduler's own increments, credited every tick, so a thread never switched out is not invisible; exact against `schedstat` over a window whose edges find it blocked. `poll` only; `trace` (a slice an event) unbuilt until a view asks. | The `sched_switch` version read nothing for a pinned spinner. |
+| A filesystem's block devices | **An attribute (`blk_devs`), not a key**: a set, as `io.bytes` keys each device. | A btrfs spans several devices; nothing has a set-valued key. |
+
+**The shared layers** (`docs/fixes/w20-shared.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| An equivalent declares no cheaper band than what it stands in for | **Held by the catalog loader**, beside the other chain invariants. | A `--catalog <dir>` that broke it loaded; the test read only the embedded catalog. |
+| Which rules `omn join` applies | **Every rule in the file, whatever its `tier:`**; a `kernel` one is refused by `apply_stored`'s own check. | Over a stored run every rule is at the query tier, and its answer is the agent tier's (shown). |
+| A rule `omn join` cannot answer | **Refuses the whole command, exit 2, with the reason.** | An invalid combination is refused, never degraded silently. |
+| An ESRCH from a procfs footprint read | **Read once more while the process runs; the end only for a gone or zombie process.** | The ESRCH across an `execve` is not the process ending; `wss.rs` already read it so. |
+
+**The views** (`docs/fixes/w20-{view,workloads,record,process}.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Going in | **A click selects, a second click on the selection goes in; no double-click timer.** | crossterm reports no double click, and a timer would make the snapshot harness depend on time. |
+| The tenth view | **Reached by `0`, its tab labelled `0`**; `1` to `9` keep their views. | No habit and no test changed. |
+| `⌫` | **The frame's while there is a history, a view's otherwise** (the flame's zoom out, also on `u`). | Back is the link's other half. |
+| The process view's needs | **None of its own**: its tiles read what the other nine ask. | Adding it changed no live session. |
+| A time error's dimming | **Only at a resolution it can move** (a tenth of a cell); elsewhere a figure dims as before. | ±295 ns on 27 ms cells dimmed every lane alike. |
+| How a drained source stamps its rows | **Said by the collector (`row_stamp`), or nothing**: absent is not read as "at its own event". | A reader then falls back to what it knows. |
+| A drained collector's drops | **Placed at the drains that read them** (`drains: [{ts_ns, dropped}]`, summing to the run's); a polled collector's read once, at its stop. | A clone of every polled collector's losses each round for a count almost always zero. |
+| A view workload's parameters | **Read from its manifest**, the truth and the program's input at once. | One place to change a figure. |
+| Threads that must not wait for each other | **Run in turn, or in separate processes.** | Two Python threads burning at once wait on the interpreter's lock: 781 ms off the cpu nobody chose. |
+| A polled source in a workload | **Gets a lead and a tail** (0.3 s and 0.6 s at a 250 ms poll), declared in the manifest. | A poll's first read is its baseline, and a poll after the exit cannot read the target. |
+| An exact figure | **Held exactly unless the source counted a loss, then as a lower bound.** | A counted loss is said, and the figure is what is left. |
+| A view's truth | **Read off its screen**, not its model. | The screen is what the user reads; a rewording fails with a clear message. |
+| The workload recordings | **Fixtures like the others**: every view drawn on every workload (22 MB in the tree, `system-wakeup` cut to one second). | Each view on a load known in advance, beside the realistic ones. |
+| A machine run | **Claims no target**: a result metered on the cpus is the machine's account in the ledger and the cost corner. | A per-thread `cpu.oncpu_time` keyed every task, and the corner read "target 753 % cpu". |
+| A process tile's colour | **The suspect's state, on the tile that explains it; a tile with nothing to read is never marked.** | Never a threshold. |
+| A stack in a tile | **Charged to its two deepest frames of own code, caller first** (interpreter frames when present). | A shared helper does not hide whose work it was. |
+| A program that declares no request | **Not an error on the process screen**: the tile says it dim, with the refusal's reason. | Most programs declare none. |
+
+**The documents and the cases** (`docs/fixes/w20-docs.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| `CATALOG.md`'s Cost column | **The YAML's chain, written out**, in chain order; the YAML is the authority. A test reading the column is to come. | The column drifted after the eighteenth wave. |
+| The cases' budget check | **Gone rather than unchecked**; it comes back with a ceiling the case states if a budget is wanted. | A check that cannot pass is noise in every report. |
 
 ---
 
@@ -1055,19 +1163,42 @@ launched program, through the vendor's own library.
   profile and bench, filed to `src/collect/mod.rs`). The first check, 0.1 s
   into a launched run, weighs a one-time cost -- the first debuginfod symbol
   load, about 25 ms of a debug build; `bpf:fentry`'s 55 ms attach -- against
-  the few milliseconds a waiting target has burnt, and stops `cpu.profile` at
-  116 to 179 % where its rate is under 30 %. The candidates: no stop before
-  the target has burnt some multiple of the check interval, or a one-time
-  cost a collector reports weighed apart and said apart. Leaving it open
-  costs every budgeted run of a waiting program with `--symbols debuginfod`
-  its answer (`sqlite3-durability`'s agent way, whenever a budget is asked).
+  the few milliseconds a waiting target has burnt, and stopped `cpu.profile`
+  at 116 to 179 % where its rate is under 30 %. **Half landed in the
+  twentieth wave** (stream budget, `docs/fixes/w20-budget.md`): a one-time
+  load the tool can name is weighed apart from the rate
+  (`overhead.one_time_cpu_ns`, settled above), which brought a debuginfod
+  profile's first check from about 142-152 % to 45-51 %. It does not settle
+  it: the first 100 ms of a profile of a waiting program still carry 8 to 80
+  ms of other first-drain work against the 18 to 25 ms the program burnt, and
+  5 runs of 6 were stopped 0.1 s in, at 44.69 to 310.44 %, where the same
+  program's whole windows read 16 to 26 %. **Proposed**: no stop while the
+  collection is over its ceiling by less than 10 ms of the tool's cpu
+  (spent - ceiling x target < 10 ms). On the five stopped runs the excess was
+  7.3, 5.4 and about 4 ms (not stopped under the rule) and 10.9 and 75 ms
+  (stopped); a collector over its ceiling at its running rate passes 10 ms
+  within a second or two of a busy target. A slack in milliseconds rather
+  than a floor on the target's cpu, because a floor never stops anything on
+  a program that waits 99 % of the time; its cost is bounded, 10 ms of the
+  tool's cpu over budget once per run. Leaving it open costs every budgeted
+  run of a waiting program at 99 Hz its answer at the first check.
 
 - **A cost per regime, or a `cost_note`, in the catalog's schema** (nineteenth
   wave, bench). A band is a backend's worst regime, so `gpu.kernel` is
   `extreme` for its +67 % on a launch-bound program though it costs under
-  1 % on long kernels. Leaving it open costs every `--budget` under 20 % its
-  `gpu.kernel` on a program of long kernels, refused for a cost it would not
-  pay.
+  1 % on long kernels. **Proposed with numbers in the twentieth wave**
+  (stream gpu, `docs/fixes/w20-gpu.md`), from the bench's two tables:
+  `gpu.kernel` through `vendor:cupti` +64.5 % `launch`, +1.81 % `compute`,
+  +0.15 % `memory`; `gpu.api` through `preload` +10.5 / +2.75 / +0.01 %;
+  `gpu.counters` +282 934 / +351 / +1 841 % -- one backend's bands two orders
+  of magnitude apart by regime. The proposal: `cost` stays the worst regime's
+  band, the one the bench gates and the resolver ranks by, and a backend may
+  add `cost_by_regime: {launch: extreme, compute: med, memory: low}`, checked
+  by the bench row by row, read by the budget's first check and printed by
+  the run's cost line beside the measured figure. Leaving it open costs every
+  `--budget` under 20 % its `gpu.kernel` on a program of long kernels,
+  refused for a cost it would not pay, and the cost line saying `extreme`
+  where the measurement says `med`.
 - **Whether a range in the GPU's performance levels can be read as free
   clocks** (nineteenth wave, device, pending the `nvidia-smi -lgc` run in
   `STATE.md`, "Needs privilege"). NVML has no reader for a locked clock, so a
@@ -1075,6 +1206,23 @@ launched program, through the vendor's own library.
   every level, a range can say "unlocked" again; if not, the lock needs
   another source of evidence. Leaving it open costs every GPU timing on this
   board a hedge where it could state a fact.
+
+- **How a byte counter's direction becomes a series** (twentieth wave, io
+  and net). Settled above: the direction is an attribute, kept by `raw`. Two
+  proposals for a series per direction: a key, `KeyKind::Dir` (`dir:read`,
+  `dir:write`), produced by `io.bytes`, `io.iops`, `io.merges` and
+  `net.bytes` as one event per direction per poll, which gives every
+  aggregating emit the split (io); or an emit over an attribute, which
+  re-keys no collector and so moves no reader of today's series (net).
+  Leaving it open costs the views `raw` for a split they draw live and lose
+  in `results.json`'s aggregates.
+- **Whether the latency session asks `sched.wakeup`** (twentieth wave,
+  triage). A thread blocked on a connection beside the main thread's block is
+  recognised by its stack's send and receive frames; a C program's `send`
+  shows as an unnamed libc frame, so it is not. Who woke the main thread
+  answers who it waited on with no frame names, at the price of one more
+  source in the cheap pass. Leaving it open costs C servers whose libc frames
+  are unnamed their slow client.
 
 A new open line goes here with what it costs to leave it open, which is the
 habit that kept this section honest.

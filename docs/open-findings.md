@@ -10893,6 +10893,8 @@ stream". Landed at the merges: `mod kernel;` and its factory in
 
 ### To the coordinator (`src/validate.rs`): a refused target's reason
 
+**Answered in the twentieth wave, in part** (stream gpu): reviewed; the `targets: {pid: "no: <reason>"}` form is the better one and is settled (`DECISIONS.md`, "Settled in the twentieth wave"). The loader's change is refiled under the twentieth wave, stream gpu.
+
 The nine lines in `target_rejection_reason` quote the entry's caveat that
 names the flag and says "refused", before the generic "declares no support".
 Data-driven, and only `gpu.kernel`, `gpu.counters` and `gpu.profile` carry
@@ -10914,6 +10916,8 @@ facts.
 
 ### To the coordinator (`src/capabilities.rs`, `src/render.rs`): the clocks in the run's environment
 
+**Answered in the twentieth wave** (stream gpu): `Environment::gpu_clocks`, filled when a `gpu` source is asked, NVML opened once a run, `render.rs` printing each state's `fact()`.
+
 `Environment.gpus`, or a sibling `gpu_clocks`, filled from
 `collect::gpu::clock_states()` only when the request names a `gpu` source
 (`nvmlInit` costs 3-5 ms), and `render.rs` printing `ClockState::fact()`.
@@ -10921,6 +10925,8 @@ Until then the clock state is in each GPU source's facts and not in the
 resolved file.
 
 ### To the bench's owner and `CATALOG.md`: NVML's cost cells
+
+**Answered in the twentieth wave, in part** (stream docs): `CATALOG.md`'s Cost column is now the YAML's chain, the NVML rows included. Checking the bands against the per-call table is the bench's, still to do.
 
 The per-call table (`docs/scenarios/gpu.md`, "What can a poll get from the
 driver?") is what `gpu.freq` and `gpu.power`'s bands can be checked against;
@@ -10947,6 +10953,8 @@ gate, not released first) went through both merges' full runs.
 
 ### To the coordinator (`man/omn.1`, `GUIDE.md`): `omn top`
 
+**Answered in the twentieth wave** (stream view): `omn top` in the synopsis and the commands, a section THE VIEW, and `GUIDE.md`'s "`omn top`: the views".
+
 Neither the manual page nor the guide has `omn top` or its flags.
 
 ### Cross-cutting: a session of seventeen requests runs late
@@ -10959,6 +10967,8 @@ a view that wants dense series pays this. The late rounds are counted and
 said, never silent.
 
 ### To the coordinator (fixtures): a GPU recording
+
+**Answered in the twentieth wave** (stream record): `workload-lanes`, twelve `spin` kernels served by `vendor:cupti`, is a fixture every view draws.
 
 Every common fixture records `gpu.kernel` as refused (they predate its
 collector). One re-recording, alone on the device, gives lanes, heatmap and
@@ -10973,6 +10983,8 @@ another stream". Landed at the merge: its edits to `CATALOG.md` section 8,
 
 ### To the coordinator (`src/collect/mod.rs` or `src/validate.rs`): a combination refused as the request's
 
+**Answered in the twentieth wave** (stream gpu): `launch_refusals`, on the resolved backends, before the launch, exit 2.
+
 Counters beside `gpu.kernel` or `gpu.profile` on one launch are refused at
 attach, the only point where every reader's bit is known, and the runner
 labels an attach refusal as the machine's (`Whose::Machine`). The program
@@ -10982,6 +10994,8 @@ rule over the session's sources, so it is exit 2 and the request's.
 
 ### To the resolver's owner: no unwinding warning for `gpu.profile`
 
+**Answered in the twentieth wave** (stream gpu): `DEVICE_STACKS` and one condition in `check_stack`; a host profile in the same session is still warned.
+
 `--emit stack` on `gpu.profile` warns "no --stack given (or `auto`), so the
 resolver picks the best unwind mode", which means nothing for stacks built
 from program counters and lines. A catalog flag, or the warning restricted to
@@ -10989,11 +11003,15 @@ the `cpu` family's samplers.
 
 ### To device's files (`docs/scenarios/gpu.md`) and bench's (`docs/bench.md`): `vendor:ncu`
 
+**Answered in the twentieth wave, in part** (stream gpu): `docs/scenarios/gpu.md`'s two passages. `docs/bench.md` line 620 still names it (`STATE.md`, "What remains").
+
 `docs/scenarios/gpu.md` lines 425-428 and 517-522 still say `gpu.counters`
 has no collector and name `vendor:ncu`; `docs/bench.md` lines 617-618 too.
 `vendor:ncu` left the chain.
 
 ### To bench: `gpu.counters` and `gpu.profile` unmeasured
+
+**Twentieth wave**: `gpu.counters` was measured after the nineteenth wave's merge; `gpu.profile` is measurable now that its double free is fixed (stream gpu). The GPU bench is `STATE.md`, "Needs privilege", item 3.
 
 Their `cost:` lines (`extreme`, `med`) are placeholders, `pending` in the GPU
 record until the quiet run (`STATE.md`, "Needs privilege", item 3).
@@ -11006,6 +11024,8 @@ sequence after `backends` (`c6bd2b8`).
 
 ### To cupti's owner (`src/collect/gpu/kernel.rs`): the read path
 
+**Answered in the twentieth wave** (stream gpu): profiled, 1.4 to 1.8 us a record, most of it the event model's copies and allocations, not CUPTI's decoding; no lighter activity kind is a fallback (`DECISIONS.md`).
+
 `omn` spends about 1.3 us decoding a record in a release build (67 ms for
 53 000 records), as much as CUPTI spends on a launch inside the program:
 worth a profile. And the per-launch price is CUPTI's concurrent-kernel
@@ -11013,6 +11033,8 @@ activity: whether a lighter kind, or a sampling of launches, is worth a
 degraded fallback in the chain.
 
 ### To the coordinator (the catalog's schema): a cost per regime
+
+**Proposed with numbers in the twentieth wave** (stream gpu); still open (`DECISIONS.md`, "Open").
 
 Open in `DECISIONS.md`: a band is the worst regime, so `--budget` under 20 %
 refuses `gpu.kernel` on a program of long kernels, where it costs 1 %.
@@ -11024,6 +11046,8 @@ header's cell before the cost corner (`c6bd2b8`).
 
 ### To core (`src/emit.rs`, `view/src/model.rs`): where a timeline starts
 
+**Answered in the twentieth wave** (stream view): `Output::Timeline` carries `first_ts_ns`, and the system view uses it.
+
 A timeline's offsets are measured from its result's first event, and
 `results.json` does not say when that was; the system view infers it for the
 machine's pollers from the runner's polling discipline, and every view that
@@ -11033,12 +11057,16 @@ meaning what it meant), or offsets from `window.run_opened_ns`.
 
 ### To core (`docs/view/README.md`, fixtures): `raw` on three needs
 
+**Not answered in the twentieth wave**: the sources accept `raw` now, the system view's needs do not ask it (`STATE.md`, "What remains", item 5).
+
 `raw` added to the system view's `cpu.util`, `io.bytes` and `gpu.mem`, with
 the README rows `raw,timeline,summary`, then the fixtures re-recorded: about
 20 events a second, about 10 MB for a 10-minute run. It keeps the cpu by
 state, read apart from written and the GPU's memory size after a run ends.
 
 ### To the owners of `net.bytes`, `power.energy`, `gpu.engine_busy` and `cpu.oncpu_time`: accept `raw`
+
+**Answered in the twentieth wave** (streams net, cpu, gpu): all four accept `raw`.
 
 They refuse `raw`, so a finished run drops what only their events carry:
 rx and tx, the RAPL domains by name, a process's `comm`.
@@ -11050,10 +11078,14 @@ stream". Landed: the header's cell (`c6bd2b8`).
 
 ### To core (`view/src/app.rs`, `views.rs`): a view that takes text
 
+**Answered in the twentieth wave** (stream view): `View::takes_text`.
+
 `View::takes_text(&self) -> bool`, consulted before the frame's keys, so a
 search can hold `q`, `?`, digits and `f`; today `/sqlite3` jumps to view 3.
 
 ### To core (`tests/view_*.rs`): the restated diff held to the triage's
+
+**Answered in the twentieth wave** (stream view): `tests/view_model.rs` holds `views::flame::difference` to `triage::diff::diff`, both directions.
 
 A test, in the root crate which can link both, holding the flame view's diff
 to `src/triage/diff.rs` on the two cpython fixtures; or the arithmetic moved
@@ -11061,11 +11093,15 @@ into a crate both depend on.
 
 ### To core (`tests/view_fixtures/record.sh`): a CPython fixture with its perf map
 
+**Answered in the twentieth wave** (stream record): `cpython-hot` and `cpython-hot-heavier` recorded under `-X perf`.
+
 Recorded with `PYTHONPERFSUPPORT=1` and `--stack fp+leaf`, the perf map's
 names in the mirror, so the view charges to Python functions as the triage
 does.
 
 ### To core (`view/src/feed.rs`): `as_live_until` says what arrives empty
+
+**Answered in the twentieth wave** (stream view).
 
 A source the recording kept without `raw` arrives empty when replayed as
 live; `as_live_until` could add that degradation, so every view's live
@@ -11078,6 +11114,8 @@ stream".
 
 ### To core (`docs/view/README.md`, fixtures): `raw` on two needs
 
+**Answered in the twentieth wave, in part** (stream record): `io.syscall` asks `raw` and `workload-ledger` is recorded with it; `cpu.oncpu_time` does not yet.
+
 `raw` added to the ledger's `cpu.oncpu_time` (16-32 events a run) and
 `io.syscall` (7 to 364 kernel rows on the fixtures) needs, with their rows,
 then re-recorded: the user/system split and the bytes read and written on a
@@ -11085,10 +11123,14 @@ recording.
 
 ### To core (`view/src/snapshot.rs`): `--against` and a focus in the harness
 
+**Answered in the twentieth wave, in part** (stream view): `snapshot::draw_with`. The standard set does not use it yet; the ledger's two stay in `ledger.rs`.
+
 So views that compare or narrow are judged in the gallery's standard set,
 not from each view's own unit test.
 
 ### To core (`view/src/units.rs`): `approx`
+
+**Answered in the twentieth wave** (stream view).
 
 Three significant digits for a measured float (`208`, `53.6`, `7.19`);
 `units::count` prints `208.47`.
@@ -11106,12 +11148,16 @@ them. The README row could say so, or `Need` could gain an optional form
 
 ### To core (fixtures): `vertical-abandoned`, and many requests
 
+**Answered in the twentieth wave** (stream record): `vertical-abandoned` and `many-requests` (300 requests, four causes).
+
 A recording of `examples/vertical-abandoned.yml`, so the loss path is held on
 a real run rather than a rewritten one; and a vertical run with a few
 hundred requests of mixed causes, for the list's scrolling and the "apart"
 median on a population.
 
 ### To the coordinator (`src/bpf/request.rs`, `src/collect/net/request.rs`): three fields
+
+**Answered in the twentieth wave, in part** (stream net): the counts are a struct the notes are written from (`Undrawn`). The result's slot for them and the bytes and sleep start are refiled under the twentieth wave, stream net.
 
 The bytes received and sent per request; the start of its longest sleep (so
 the lock wait can be placed in time); and the never-ended, unborn and
@@ -11126,16 +11172,22 @@ which core now owns.
 
 ### To core (`tests/view_fixtures/record.sh`): `sqlite-latency` with its events
 
+**Not answered in the twentieth wave**: `sqlite-latency` is re-recorded from the dumped latency session as before (`STATE.md`, "What remains", item 5).
+
 `raw` appended to the `blocked` request of the dumped session before `omn
 top -f`, so the timebar splits `blocked` as `omn latency` does live, and
 `tests/view_timebar.rs` holds the split.
 
 ### To the sched family's owner (`catalog/sched.yaml`): `sched.wakeup`'s `comm`
 
+**Answered in the twentieth wave** (stream sched), and the finding withdrawn: `comm` was always the wakee's, read from the woken task; `comm: omn` was a launched program before its `exec`. `wakee_comm` and `waker_comm` now name both ends.
+
 Events keyed on the wakee carry the **waker's** `comm` (a wakeup of `sqlite3`
 reads `comm: omn`). A caveat, or the attribute named `waker_comm`.
 
 ### To the cpu family's owner: a per-thread `cpu.oncpu_time`
+
+**Answered in the twentieth wave** (stream cpu): `bpf:raw_tp` on `sched_stat_runtime`, one row per thread, exact against `schedstat`.
 
 The catalog declares `bpf:raw_tp` and `bpf:tp` for `cpu.oncpu_time`; the
 build has `fs:proc` only, which keys a process's total `task:<pid>` -- a key
@@ -11149,11 +11201,15 @@ stream". Landed: the header's cell (`c6bd2b8`).
 
 ### To the coordinator (the drain loops, `src/main.rs`): losses placed in time
 
+**Answered in the twentieth wave** (stream view): `Results.drains`, `[{ts_ns, dropped}]`. The heatmap does not shade them yet (`STATE.md`, "What remains", item 5).
+
 Each drain round's drop count with its timestamp, kept beside the result (a
 short `(ts_ns, dropped)` series in `losses`), so a loss is shaded where it
 happened; today every drop is shaded across the whole window.
 
 ### To core and the collectors: the value attribute and the stamp
+
+**Answered in the twentieth wave** (stream view): `value_attr` and `row_stamp` in `results.json`, ten drained collectors answering `row_stamp`.
 
 `results.json` carrying each result's value attribute (`value_attr`), and how
 a drained source stamps its rows (at the drain's close, or at the row's first
@@ -11161,6 +11217,8 @@ event). The heatmap keeps a table of both; a new drained source would miss
 it silently.
 
 ### To core (`docs/view/README.md`): `frame--gallery` and `frame--live`
+
+**Answered in the twentieth wave** (stream view): both drawn on `ledger`.
 
 Both draw the heatmap, so every heatmap change re-blesses two of core's
 snapshots: draw them on a view that changes less, or say in the README that a
@@ -11181,6 +11239,8 @@ lanes rows' `why` text (`c6bd2b8`); the header's cell (`c6bd2b8`).
 
 ### To core (fixtures): a GPU fixture every view draws
 
+**Answered in the twentieth wave** (stream record): `workload-lanes`. `lanes-gpu/` stays, drawn by the lanes view's own test.
+
 `docs/view/gallery/lanes-gpu/workload.py` recorded as `record.sh` records the
 others (`omn top --headless -d 20s -o "$here/gpu-feeder" -- python3
 "$root/docs/view/gallery/lanes-gpu/workload.py"`); then `lanes--gpu-feeder`
@@ -11188,16 +11248,22 @@ moves to the shared harness and the recording under the gallery can go.
 
 ### To core (`tests/view_model.rs`): the `why` column
 
+**Answered in the twentieth wave** (stream view): the README test checks each row whole.
+
 `the_readme_lists_what_each_view_needs` passed while lanes' strings differed
 from the table's; it could compare the `why` column too.
 
 ### To core (`view/src/trust.rs`): a scale-aware dimming
+
+**Answered in the twentieth wave** (stream view): `Trust::dims_at`, a time error dims at a tenth of a cell or more; the lanes use it.
 
 A time error far below the resolution a figure is drawn at (±295 ns on
 27 ms cells) dims it as one that is not; on lanes every lane is dimmed, so
 the dimming tells no lane from another. To decide.
 
 ### To the sched family's owner (`catalog/sched.yaml`): `sched.offcpu`'s stamp
+
+**Answered in the twentieth wave** (stream sched): the caveat says the drain, as the code stamps (`DECISIONS.md`).
 
 The caveat says a row is stamped at its window's first wait; the `bpf:raw_tp`
 collector stamps it at the drain (`ts_ns: closed_ns`), and the recordings
@@ -11210,11 +11276,15 @@ stream".
 
 ### To the sched family's owner (`sched.wakeup`): two fields
 
+**Answered in the twentieth wave** (stream sched): `irq` and `softirq`, `served_in_tid` and `served_in_comm`; timer and IPI wakeups carry no number.
+
 The irq number on a `hardirq` wakeup, and, on a `softirq` one served in a
 task's `local_bh_enable`, that task as `served_in_tid`. A want, not a defect:
 the view says today what it cannot name.
 
 ### To core (fixtures, optional): a system-scope recording
+
+**Answered in the twentieth wave** (stream record): `system-wakeup`, every wakeup on the machine for a second.
 
 A `sched.wakeup@system` request beside a launched server
 (`docs/fixes/w19-wake.md`, "Privileged runs wanted", the session as written),
@@ -11227,6 +11297,8 @@ stream".
 
 ### To core (`docs/view/README.md` and `flows.rs`'s `NEEDS`, together): `raw` on `io.syscall`
 
+**Answered in the twentieth wave** (stream record): the need and its row together, `workload-flows` re-recorded with it; bytes per file held exactly by `tests/view_truth.rs`.
+
 `emit: &["raw", "summary", "hist"]` in `NEEDS` and the row
 `| flows | io.syscall | trace | raw,summary,hist | target | bytes per descriptor |`
 in one commit (`tests/view_model.rs` holds them together), then re-recorded:
@@ -11234,10 +11306,14 @@ the default `omn top` gets bytes per descriptor.
 
 ### To core (fixtures, optional): the file server
 
+**Answered in the twentieth wave** (stream record): `file-serving`.
+
 `docs/view/gallery/flows-run/record.sh` adopted as a common fixture once the
 row above lands.
 
 ### To the net and io owners: the edges flows cannot draw
+
+**Answered in the twentieth wave, in part** (streams net and io): `net.socket` keys its route's interface, `io.fs` carries `blk_devs`; the direction split is open (`DECISIONS.md`), and the view does not draw the edges yet.
 
 `net.socket` carrying the interface index of its route; a filesystem's
 superblock device mapped to the block devices under it, so `io.fs` and
@@ -11288,6 +11364,9 @@ Each seen at the merges or in a handoff, passing when rerun alone once:
   (already in the tally) failed in most streams' runs at loads of 20 to 85.
 - Not flaky: `runner::a_profile_s_losses_land_...` (the gap, red in every
   stream's run and at both merges), and the stale matrix cell above.
+  *Twentieth wave: the gap is closed (stream rings, `bdef096`);
+  `scenario_mem::the_two_roads_...` and `page_faults::...sampled_in_user_mode...`
+  have bounds that hold (stream docs, `77d5205`).*
 
 ### How the wave ran
 
@@ -11326,6 +11405,8 @@ Run on 2026-10-04 at `a71d9cf`, alone on the machine and the device
 
 ### `gpu.profile` aborts a native CUDA program at its exit: a double free in `libomn_cupti.so`
 
+**Answered in the twentieth wave** (stream gpu): CUPTI's shared function names freed once, after the last drain; held by a native workload's test; a target killed by the library said as the tool's failure (its exit status refiled).
+
 `scripts/bench.sh gpu` could not measure `gpu.profile`: its trial run on the
 bench's own workload (`target/bench/gpu compute 50 200000`, built from
 `examples/bench/gpu.c`) ended with "the GPU workload wrote no report".
@@ -11354,6 +11435,8 @@ asserts the program's own exit status, would have caught it.
 
 ### `gpu.temp` through `vendor:nvml` over `low` on the compute-bound regime
 
+**Twentieth wave**: left `low` by stream gpu until the next GPU bench pastes its table (`STATE.md`, "Needs privilege", item 3).
+
 The second GPU table (`docs/bench.md`, "The second GPU table, after the
 nineteenth wave") measures +1.11 % on `compute` (gate 0.56 %) where the first
 measured +0.88 %, over `low`'s 1 %. Correcting it is a change to
@@ -11362,6 +11445,8 @@ not make, so the record still holds the first table. With the double free
 above fixed, the next GPU bench pastes its table in.
 
 ### The GPU bench takes about two hours, not fifteen minutes
+
+**Not answered in the twentieth wave**: the schedule's files had no owner; refiled under the twentieth wave, stream gpu.
 
 `gpu.counters` replays each kernel, +282 934 % on the launch-bound regime
 (2 830 times its time, over 20 repetitions after 2 warmups): `launch` alone
@@ -11408,3 +11493,350 @@ outside the program's intervals: either the intervals' edges or a reclaim
 landing on the cgroup after the program's last interval. For the mem
 family's owner: worth reading which edge the 64 pages sit on before adding
 it to the tally.
+
+### The `process` view claims a target on a machine run
+
+Read in the gallery's rows after the merge: `process--machine` (the
+`machine` fixture, no target) is titled "one process at a glance: pid 1",
+its cost tile "cpu 15.3s" and its threads tile "3121 threads" -- every task
+on the machine, now that `cpu.oncpu_time` on `bpf:raw_tp` keys each one. The
+record stream fixed the same claim in the ledger and the frame's corner
+(`app::metered_on_the_machine`); the `process` view does not read it. Owner:
+`view/src/views/process.rs`: on a result metered on the cpus, the tiles say
+the machine's account, or the view says there is no process to show, as the
+first-screen rule already does (`system` without a target).
+
+### For the flaky tally
+
+Each seen in a stream's run or at the merge, passing when rerun alone once
+unless said; none in a file the twentieth wave changed in behaviour, except
+where named:
+
+- `triage::a_program_cpu_bound_then_lock_bound_escalates_to_the_lock_layer_and_its_waits_match_its_own_clock`
+  (triage, view): "the lock layer was never attached", under load.
+- `triage::the_same_program_is_cpu_bound_for_latency_and_sleep_bound_for_the_tail`
+  (cpu): failed in the file and **again alone** ("no single state is
+  decisive", 217 ms the rows cannot speak for); already on the tally.
+- `triage::a_contended_mutex_is_what_the_workload_queues_for` (cpu),
+  `triage::an_escalating_run_holds_its_budget_...` (shared, 7.8 %),
+  `triage::a_cpu_bound_program_is_named_cpu_bound_for_latency` (view).
+- `scenario_net::every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`
+  (net: twice, **once alone**, "only 13 drops were reported"; rings: green
+  alone); already on the tally twice.
+- `scenario_sched::a_forced_switch_program_splits_the_switches_as_the_kernel_counts_them`
+  (the coordinator's `scenario_sched` rerun; `docs/flaky.md:393`).
+- `scenario_gpu::a_target_that_exits_before_the_duration_ends_the_run_and_names_it`
+  (gpu): a `gpu.mem --pid` window under load.
+- `unwind::fp_leaf_recovers_...` and `unwind::dwarf_counts_and_says_...`
+  (rings, load 11) and `unwind::dwarf_recovers_the_whole_tree_...` (rings'
+  review): the share tests' aliasing, cause named (`docs/fixes/w20-rings.md`),
+  the remedy a pseudo-random pad in the workload.
+- `recorder::two_bursts_write_exactly_two_documents_each_holding_its_burst`
+  (rings: 256 against 303).
+- `collect::tests::the_runner_closes_the_window` (budget: a 20 ms tick).
+- `perf::tests::an_ibs_sample_says_which_level_answered_the_load` (shared,
+  view twice).
+- `budget::the_extra_cpu_a_faster_poll_costs_...` (shared): tally entry 14,
+  failed alone once more and passed on a third run.
+- `cli::a_refusal_for_an_unwritten_backend_leads_with_the_one_passed_over`
+  (docs, while its repro loop ran the binary).
+- `dm_delay::a_device_delayed_from_outside_is_measured_with_the_delay_above_the_device`,
+  `view_workloads::lanes_schedule_is_the_manifests` (view).
+- `cases`' `gcc-shell/the-passes-o2-adds` on-cpu against `ftime` (rings,
+  view: 6.3 to 6.4 s against 7.4 to 7.6 s at load), and
+  `cpython-perf-map`'s on-cpu row 40.7 and 41.4 ms over `process_time`
+  against 35.9 and 40.1 ms allowed (docs: a time-based sample also counts the
+  interrupts on the task's cpu, which `getrusage` leaves out; reasoned).
+- `cross_compute::a_lossy_profile_marks_its_row_and_leaves_the_traced_rows_alone`
+  (view's review round, **red alone too**: 6 616 dropped on the row against
+  16 686 expected, 328 throttles); green in every coordinator run after the
+  rings stream's fix to it merged. Worth one look if it returns.
+- **Closed this wave**: `runner::a_profile_s_losses_land_...` (rings,
+  `bdef096`), `scenario_mem::the_two_roads_...` and
+  `page_faults::...sampled_in_user_mode...` (docs, `77d5205`),
+  `scenario_sched::a_workload_that_is_half_blocked_...` and
+  `view_workloads::system_panels_...` (merge regressions, `d661d67`).
+- **Not flaky, cause shown**: `scenario_runtime::a_probe_follows_every_thread_of_the_process`
+  -- a uprobe hit came out of the kernel carrying another thread's tid of the
+  same process (docs, on a second reproduction; one in 40 to 85 runs). The
+  test is right to fail; its owner next wave could detect it per thread.
+
+### How the wave ran
+
+- **Merged as each stream finished, reviewed while merged** (the brief's
+  speed-first rule): 25 merges, eleven of them a review's fixes, and three
+  regressions where streams met, all caught by the one full suite at the end
+  and fixed on `main` (`96b4741`, `d661d67`). None reached a second stream's
+  work: each was a test reading what another stream had just changed.
+- **Behaviour that crossed streams arrived without its readers**:
+  `cpu.oncpu_time` on `bpf:raw_tp` turned a process total into per-thread
+  series following children, and three test files outside the cpu stream
+  read the old shape (`view_workloads`, `scenario_sched`, the record's view
+  tests, which record fixed). A stream that changes what a source's series
+  mean should list its readers in the handoff.
+- **The scratchpad was shared again**: one stream read another's `check.log`
+  for its own (rings). A log directory per stream, said in the brief.
+- **Edits outside a stream's row** were made where a type changed under
+  them (`value_attr` in every `Results` literal; the `Command::Join` arm in
+  `src/main.rs`; the gpu refusal's call in `src/main.rs`), each said in its
+  handoff and kept at the merge.
+
+## Needs from another stream — the twentieth wave, stream gpu
+
+Stream gpu's handoff is `docs/fixes/w20-gpu.md`, "Needs from another stream".
+Landed at the merge: its edits to `src/validate.rs`, `src/main.rs`,
+`src/resolve.rs` and `src/capabilities.rs`.
+
+### To the collector layer (`src/collect/mod.rs`, `src/main.rs`): a target the tool killed exits non-zero
+
+A channel from a collector to the run's outcome (`fn failure(&self) ->
+Option<String>` on `Collector`, carried on `Collection`, read by `measure` to
+exit 1), so "the tool killed the program it measured" is not exit 0. The GPU
+collectors answer it from `counters::died_in_exit`'s condition.
+
+### To the catalog loader (`src/catalog.rs`): a refused target's reason in `targets:`
+
+`targets: {pid: "no: <reason>"}`, the loader refusing a `no` without a
+reason, and `validate.rs`'s `target_rejection_reason` reading it rather than
+searching caveats (`DECISIONS.md`, settled in the twentieth wave).
+
+### To the bench's schedule (`examples/bench/gpu.rs`, `tests/bench_gpu.rs`): a launch count per arm
+
+`gpu.counters` took 108 of 117 minutes on the launch-bound regime; fewer
+launches for a replaying arm brings the GPU step back to about fifteen
+minutes.
+
+### To `docs/bench.md` and `CATALOG.md`: `vendor:ncu`, `raw`
+
+`docs/bench.md` line 620 still names `vendor:ncu`; `CATALOG.md`'s
+`gpu.engine_busy` row gains `raw`.
+
+## Needs from another stream — the twentieth wave, stream rings
+
+Stream rings' handoff is `docs/fixes/w20-rings.md`. Landed with its branch:
+`tests/cross_compute.rs`'s per-ring reading.
+
+### To `docs/unwind.md`: the stripped build's second shape
+
+"The stripped build's second shape" still says it "reads as the workload or
+the window"; it is aliasing, and `c7c90c1` (`NAMED_PERIOD_NS`) removes it by
+construction. Off the flaky tally with it.
+
+## Needs from another stream — the twentieth wave, stream triage
+
+Stream triage's handoff is `docs/fixes/w20-triage.md`, section 6. Landed at
+the merge: the two cases' limit-spelling finding closed (`96b4741`).
+
+### To the profile's owner (`src/collect/cpu/profile.rs`): `pid` on every sample, and the late discovery
+
+`pid` beside the task on every `cpu.profile` sample, so a child only the
+profile saw is `child`, not `unplaced` (the triage reads it already); and a
+child found a tick late loses up to 14 % of its on-cpu row (43 ms of 300).
+
+### To the sched sources (`src/collect/sched/**`, `src/bpf/sched_*`): `ppid`
+
+On at least each task's first event, so a job's wait is followed into the
+chosen child's subtree rather than every process off the way.
+
+### To `docs/triage.md` and `docs/mcp.md`: `waiting`, `job`, the lossy undecided
+
+The latency section's new relation `waiting`, the `job` field, the lossy-row
+undecided reason, and the eBPF samples set aside; for a model, one sentence
+on `followed.relation: waiting` and `followed.job`.
+
+### To `tests/cases.rs`: the job's cpu, and the limit's spelling
+
+`make-sqlite` and `gcc-shell` reading `followed.job.on_cpu` beside the
+decomposed child's when holding the job's cpu; the reader's `_` to `-`
+normalization of `limit` can go.
+
+## Needs from another stream — the twentieth wave, stream budget
+
+Stream budget's handoff is `docs/fixes/w20-budget.md`. Landed: `docs/cases.md`,
+`tests/cases.rs` and `examples/mcp/approved/program.py` read
+`program_stderr` (stream docs); `OMN_PROGRAM_STDERR` under ENVIRONMENT in
+`man/omn.1` (stream shared); `one_time_cpu_ns` in the view's mirror (stream
+record).
+
+### To `src/cli.rs`, `src/collect/launch.rs` and `man/omn.1`: a `--program-stderr` flag
+
+The flag setting what the variable sets, and the man page's stop paragraph
+with the subreaper and `lifetime.adopted_ended`.
+
+### To `view/src/model.rs`: `lifetime.adopted_ended`
+
+If the mirror holds `Lifetime` field by field.
+
+### To `src/collect/task.rs`: the adopted orphans in the denominator
+
+Decided (`DECISIONS.md`, settled in the twentieth wave): a launched program's
+denominator takes in `omn`'s adopted children while they live.
+
+## Needs from another stream — the twentieth wave, stream sched
+
+Stream sched's handoff is `docs/fixes/w20-sched.md`, section 7.
+
+### To `docs/families/join.md`, `docs/scenarios/sched.md`: `sched.offcpu`'s stamp
+
+`docs/families/join.md:748` says `sched.offcpu` stamps a row when its first
+wait began; it stamps at the drain, so `stamped: start` on a join to it
+covers `[ts, ts + span]` where the blocks lie in `[ts - window_ns, ts]`. The
+scenarios file's line too.
+
+### To `CATALOG.md`: the sched section's new fields
+
+`sched.wakeup`'s `wakee_comm`, `waker_comm`, `served_in_tid`,
+`served_in_comm`, `irq` and `softirq`; `sched.lock` launchable; lock and
+futex following children.
+
+## Needs from another stream — the twentieth wave, stream net
+
+Stream net's handoff is `docs/fixes/w20-net.md`, "Needs from another stream"
+and "Review".
+
+### To `src/bpf/request.rs` (io's this wave): four fields for `net.request`
+
+Storage `S_RX_BYTES`, `S_TX_BYTES` and `S_HOLDER_SINCE`, record `rx_bytes`,
+`tx_bytes` and `holder_since_ns` (`RECORD_BYTES` 168 to 192,
+`STORAGE_BYTES` 144 to 168); then `birth_socket`/`end_socket` in
+`request_net.rs`, two attributes in `collect/net/request.rs`'s `event()`,
+and `with_socket`'s length. The io stream did not take it.
+
+### To `src/collect/mod.rs` and `src/emit.rs`: a collector's counts as fields
+
+`Collector::fields(&self) -> BTreeMap<String, u64>` (default empty), copied
+into `Results::fields` (skipped when empty); `net.request` returns
+`undrawn()`'s four counts, and the view's `Undrawn::of` reads them in place
+of the sentences (`DECISIONS.md`).
+
+### To the system view (`view/src/views/system.rs`, `docs/view/README.md`): `net.bytes` as `raw`
+
+The network row can keep in apart from out past the run's end;
+`docs/view/system.md`'s "the catalog refuses `raw` for four of these
+sources" drops `net.bytes`.
+
+### To `CATALOG.md`: `net.socket`'s interface, `net.bytes`' `raw`, and a `net.request` row
+
+## Needs from another stream — the twentieth wave, stream cpu
+
+### To `CATALOG.md`: `cpu.oncpu_time`'s row
+
+The `bpf:raw_tp` backend on `sched_stat_runtime`, poll only, per thread (the
+row still names `bpf:tp sched_switch`); `raw` on `cpu.oncpu_time` and
+`power.energy`.
+
+### To `docs/scenarios/cpu.md`: the `sched_switch` version's blind spot
+
+A thread never switched out read nothing for 400 ms: a finding the scenario
+caught before the commit.
+
+## Needs from another stream — the twentieth wave, stream io
+
+### To `src/request.rs`: a direction key
+
+Open (`DECISIONS.md`): `KeyKind::Dir`, or an emit over an attribute. Once a
+key exists, `diskstats.rs` emits two events per device per poll and
+`catalog/io.yaml` declares `dir`.
+
+### To the system and flows views: `io.bytes` as `raw`, and the file to device edge
+
+`io.bytes` as `raw` in system's needs; flows can draw a file's device by
+matching `io.fs`'s `blk_devs` against `io.bytes`' series keys, and
+`docs/view/flows.md`'s "It does not draw ... file -> device" can say so.
+
+## Needs from another stream — the twentieth wave, stream shared
+
+Stream shared's handoff is `docs/fixes/w20-shared.md`, "Review" and "Needs
+from another stream". Landed by net: `net_qdisc`'s namespace offset.
+
+### To `src/main.rs` (`assemble`): skip a query-tier rule, clone only what is read
+
+The eighteenth wave's diff (`docs/fixes/w18-engine.md`), repeated in the
+handoff, still applies; keep the `Command::Join` arm.
+
+### To `src/emit.rs`: a frame's `NamedBy`, and stack rows keyed by the request's keys
+
+### To `src/stack.rs` and `src/collect/sched/offcpu.rs`: the executable of each task
+
+One owner for both files, since the field has to agree.
+
+### To `tests/bench_bands.rs`: `cheaper_equivalents`
+
+The loader holds the rule now; the test's copy can go, or stay a second
+reader.
+
+## Needs from another stream — the twentieth wave, stream view
+
+Stream view's handoff is `docs/fixes/w20-view.md`. Landed at the merge: its
+edits to `tests/view_snapshots.rs`, `src/triage/latency.rs`,
+`tests/encoders.rs`, `src/collect/mod.rs`, ten collectors' `row_stamp` and
+`man/omn.1`.
+
+### To `src/main.rs` (`top_app`, `top_live`): `process` first, and the live results' fields
+
+`app.open("process")` on a live `--pid` or launched run when no `--view` is
+given; `value_attr`, `row_stamp` and `drains` set on the live
+`omn_view::model::Results` from the collection.
+
+### To the heatmap's owner: drops at their drains
+
+The loss strip shading a drop in the column of the drain that read it
+(`Results::drains`), not across the window.
+
+### To the ledger's owner: a line of blocked time
+
+So a ledger line opens `timebar`, as "Decided before this wave" asks.
+
+### To `tests/view_snapshots.rs`: `--against` and focus snapshots
+
+Each view's through `snapshot::draw_with`, the ledger's two moved from
+`ledger.rs`.
+
+## Needs from another stream — the twentieth wave, stream workloads
+
+### To the cpu family's owner: `cpu.oncpu_time` on `fs:proc`
+
+A launched program's children are not in it, and the cpu between the last
+poll and the exit is in no point (0.93 s measured for at least 1.0 s); a
+sentence in the caveat, and a closing read of the zombie's `/proc` entry if
+the runner can make one.
+
+### To the io family's owner: `io.bytes`' polled baseline
+
+Taken at the first tick, not at the release: twice in a dozen runs a
+workload's first writes were in no point (1.99 and 4.69 MB of 9 MiB). A
+counted run's early baseline would serve a polled run too.
+
+## Needs from another stream — the twentieth wave, stream record
+
+### To `examples/vertical/server.c`: `MAX_PLAN`
+
+Raised from 64, so `record.sh` needs no `sed` for `many-requests`.
+
+## Needs from another stream — the twentieth wave, stream process
+
+Stream process's handoff is `docs/fixes/w20-process.md`. The gallery row it
+asked of record is added by the coordinator.
+
+### To the ledger's and the flame's owners: public readings
+
+`ledger::cost_lines(data)` and `flame::hottest(data)`, so the tiles say what
+the views say.
+
+### To the timebar's owner: a lock out of sleep
+
+Whether a per-task `sched.futex` summary splits a lock out of sleep on the
+program's bar (the process workload's 0.25 s on a lock reads as sleep).
+
+## Needs from another stream — the twentieth wave, stream docs
+
+Stream docs' handoff is `docs/fixes/w20-docs.md`.
+
+### To `tests/cli.rs`: `CATALOG.md`'s Cost column held to the catalog
+
+A test reading each family table's Cost cell against the chain's tiers
+(`mem.cache_l1`/`.llc`/`.tlb` the one grouped row whose ids share no prefix).
+
+### To `docs/scenarios/proc.md` and `docs/families/proc.md`: `proc-not-built`'s exit
+
+Exit 3, or 1 where tracefs is root-only (lines 36, 161, 182).

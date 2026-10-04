@@ -29,8 +29,11 @@ profile's stacks are unwound by a mode chosen like a backend -- frame pointers,
 frame pointers with the leaf's caller recovered, or DWARF from a copied stack,
 by machine and target -- and served with user-only stacks at the kernel's
 default `perf_event_paranoid`. Since the nineteenth wave `omn top` draws all
-of it in a terminal, live or from a recording, through nine views the user is
-judging (`docs/view/gallery/README.md`).
+of it in a terminal, live or from a recording, through nine views the user
+kept after using them; since the twentieth wave they are linked, clickable,
+each held on screen to a workload whose load is known in advance, and a tenth,
+`process`, is the first screen of a run with a target
+(`docs/view/gallery/README.md`).
 
 **All four join match kinds now have a producer**, which took until the sixth
 wave. `scoped_eq` was the last, and it was the quarter of the engine that
@@ -48,20 +51,19 @@ The same pointer under two open timestamps, four milliseconds apart, is why the
 milliseconds, and a pointer alone would have credited one request's latency to
 another.
 
-**2545 tests passed** in the nineteenth wave's last full run (`cargo test
---workspace --no-fail-fast` after its second merge), 12 ignored, and 2546 after
-the merge's fix commit `c6bd2b8`, with two red: a matrix cell under
-`target/matrix/` swept before this wave added `gpu.profile`
-(`portability::every_cell_covers_the_whole_catalog`, a local build output the
-next sweep refreshes), and, as in the eighteenth wave, **one test red in every
-run since**:
+**2656 tests passed** in the twentieth wave's last full run (`cargo test
+--workspace --no-fail-fast` after its merges and the merge's first fix,
+`96b4741`), 4 failed, 13 ignored, across 64 binaries. Three of the four were
+merge regressions where two streams met, each red alone too and fixed after
+the run in `d661d67`; the fourth is `portability::every_cell_covers_the_whole_catalog`, a matrix cell
+under `target/matrix/` swept before the nineteenth wave added `gpu.profile` (a
+local build output the next sweep refreshes), which keeps `make check` red on
+this machine until the sweep. **The test that was red in every run since the
+eighteenth wave is green**:
 `runner::a_profile_s_losses_land_on_the_series_of_the_task_whose_ring_overflowed`,
-which fails every time on a machine loaded enough to throttle a 50 kHz
-profile, because `cpu.profile`'s `losses_by_ring` carries each ring's drops
-and none of its throttles. It is a gap in the tool, not a flake, red on the
-wave's base as well, and filed for the profile's owner (`docs/open-findings.md`,
-"the eighteenth wave"). The eighteenth wave's last full run had 2271 passed; the
-seventeenth wave's last `make check` was green, 2191 passed (`ae889f7`). The ignored are
+since `cpu.profile`'s `losses_by_ring` carries each ring's throttles beside its
+drops (`bdef096`). The nineteenth wave's last full run had 2545 passed;
+the eighteenth wave's, 2271; the seventeenth wave's last `make check` was green, 2191 passed (`ae889f7`). The ignored are
 the bench's measurements, which `scripts/bench.sh` runs on a quiet machine and the suite
 never does. Most of them are scenarios: a workload whose property the scenario
 chose, a session that measures it, and a check against that property.
@@ -113,11 +115,13 @@ wave.
 
 ```
 102 sources: 95 usable here, 0 unverified, 7 out of reach on this machine.
-99 of them have a collector, covering 111 of their 206 backends.
+99 of them have a collector, covering 112 of their 206 backends.
 ```
 
-(`target/debug/omn list` on `main` at `c6bd2b8`, after the nineteenth wave's
-merges, with `CAP_BPF` and `CAP_PERFMON` on the binary as `getcap` shows them,
+(`target/debug/omn list` on `main` at `95b8b45`, after the twentieth wave's
+merges, with the capabilities on the binary; the 112th backend is
+`cpu.oncpu_time` through `bpf:raw_tp`, exact per thread. At `c6bd2b8`, after
+the nineteenth wave's merges, with `CAP_BPF` and `CAP_PERFMON` on the binary as `getcap` shows them,
 at `perf_event_paranoid` -1. The three new are `gpu.kernel`, `gpu.counters`
 and the new `gpu.profile`, each through `vendor:cupti`. Before the wave: 101,
 92 usable, 96 with a collector and 108 of 205 backends, unchanged since the
@@ -131,7 +135,7 @@ Three different questions, deliberately kept apart.
 | Question | Answer | Meaning |
 |---|---|---|
 | What can this machine serve? | 95 | probed now, **through a backend this build collects**: the file is readable, the event opens, the tracepoint is there |
-| What can this build collect? | 99 sources, 111 backends | a collector is written and registered |
+| What can this build collect? | 99 sources, 112 backends | a collector is written and registered |
 | What is neither? | the rest | vocabulary: it resolves, it validates, and it says so |
 
 That `95` is with `CAP_BPF` and `CAP_PERFMON` on the binary, and it is why
@@ -229,6 +233,8 @@ known, not against what the code computed.
 | `mem.pressure`, `.swap`, `.thp`, `.cgroup`, `.numa`, `.wss` | procfs, sysfs, cgroup2 | per-node residency against a known allocation; PSI against the kernel's own stall counters |
 | `mem.cache_l1`, `.cache_llc`, `.cache_tlb` | `perf_event_open`, `PERF_TYPE_HW_CACHE` | a shuffled walk over 64 MiB against one over 4 KiB, and the descriptor packing checked field by field |
 | `cpu.oncpu_time`, `cpu.util` per core | procfs, per-cpu perf | a spin loop pinned to one core with `taskset`, started from outside the tool |
+| `cpu.oncpu_time` per thread | eBPF raw tracepoint on `sched_stat_runtime` | a shell blocked at both ends of the window: its rows sum to its own `schedstat` difference exactly (`assert_eq!`); a launched program's rows to its reaped cpu time within 47 to 68 us, what it ran before the gate |
+| the nine views of `omn top` | a recording of each view's own workload | each view drawn on its workload's recording reads the manifest's numbers off the screen, within each figure's trust (`tests/view_truth.rs`): the flame's weights, the timebar's split, the wake ring, bytes per file and per socket, the heatmap's regimes, the lanes' order and twelve kernels, each request's cause |
 | `net.capture` | `af_packet` with a `PACKET_MMAP` ring | a known number of frames of a known size over loopback |
 | `net.hwts` | netlink `ethtool` | whose clock a NIC would stamp with, and where it is |
 
@@ -262,14 +268,14 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 2 — catalog, resolver, CLI | **done**. 100 entries as data, machine introspection, a resolver that records why each backend was passed over, a validator that refuses before attaching. |
 | 3 — first collectors and transport | **done**. Ring buffers for perf and eBPF, loss accounting including throttling (per ring, since the fourteenth wave), a launch gate, unwinding by frame pointers, frame pointers and the leaf's caller, or DWARF (the fourteenth wave), and symbolization through the target's own maps, or debuginfod when asked. |
 | 4 — the vertical case | **done, except `dm-delay` in the server's own decomposition.** `dm-delay` is injected since the sixteenth wave and held at the I/O layers (`tests/dm_delay.rs`: 482.0 ms above the device for 24 I/Os of 20 ms), not yet a row of the vertical server's tree. One request decomposed boundary by boundary on a real server, the lock's holder and the block device named, and since the tenth wave the tree's two network rows: a client that pauses 30 ms mid-request puts 30.14 to 30.27 ms in `net_rx`, and a slow reader puts 32.8 to 33.8 ms in `net_tx`, both injected from the client without root. The rows sum to the client's latency within +0.06 % to +0.36 % (+3.1 % for the slow reader, whose last buffer the client reads after the server is done). The network rows print `IDENTITY` where they are `KEY`; the engine change is filed. |
-| 5 — generalizing the join engine | **done**, and a fifth kind since the eighth wave. The hour of joins ran to its end in the sixteenth wave (1500 rounds, nothing live, 0.7 MiB a round), `overlap` takes `enclosing:` for a drained row (and a stall row carries its last end since the seventeenth), and `iface` is joined by its namespace and its index there since the seventeenth wave. `interval`, `eq`, `scoped_eq` and `wakeup` each have a producer; `between` is the one three crossings asked for independently, and it is `TEMPORAL` by construction — a polled total's change credited to what moved with it, which the ladder must not call `KEY`. Beside the joins, a `decompose:` block with a signed residue that is never rounded away. Since the eighteenth wave a rule chooses its tier: `query` applies the same engine to a stored run's `raw` events (`join::apply_stored`), `kernel` is refused with the reason until a match kind has a program; no command applies a rule to a stored run yet. |
+| 5 — generalizing the join engine | **done**, and a fifth kind since the eighth wave. The hour of joins ran to its end in the sixteenth wave (1500 rounds, nothing live, 0.7 MiB a round), `overlap` takes `enclosing:` for a drained row (and a stall row carries its last end since the seventeenth), and `iface` is joined by its namespace and its index there since the seventeenth wave. `interval`, `eq`, `scoped_eq` and `wakeup` each have a producer; `between` is the one three crossings asked for independently, and it is `TEMPORAL` by construction — a polled total's change credited to what moved with it, which the ladder must not call `KEY`. Beside the joins, a `decompose:` block with a signed residue that is never rounded away. Since the eighteenth wave a rule chooses its tier: `query` applies the same engine to a stored run's `raw` events (`join::apply_stored`), `kernel` is refused with the reason until a match kind has a program; since the twentieth wave `omn join -f <rules> <results>` applies every rule of a session to a stored run. |
 | 6 — emit, aggregation, budget | **done but for one measurement**: the 2 M IOPS overhead of the in-kernel histogram. Run once before the seventeenth wave, it read 23.57 % (781 ns a request at 3.16 M IOPS); the wave gave the histogram its own program pair, whose cost is the coordinator's next `null_blk` run, and whether 1 % is the right criterion is open (`DECISIONS.md`). The eighteenth wave found why the program statistics read 0 runs (the block programs were closed at the stop, before the run read their account) and keeps them loaded until the close. Run after its merge: 11.54 %, 332 ns a request, of which the programs' own run time is most (298.5 ns a request with the statistics on, which add about 125); `tp_btf` is the next cut, and the criterion is still open. A kernel-built row's sum is its exact `total_ns` in every emit since the seventeenth wave. Since the sixteenth wave the budget's ladder steps from `trace` to `sample` on a collector that weighs its samples (`mem.faults` on `pmu:sw`), held to the task's own fault count across the move, and weighs the target in nanoseconds. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. And since the tenth wave, **hot attach**: a request carries a `window` inside the run, attached and detached while the rest keep running, and two sources attached for one phase each of a program count that phase within +0.17 % and nothing of the other. Three edges are filed with the files that own them: the join engine credits events after a detach to a stale state, the results document does not yet say where a window was, and a per-task counter attached late to a program that already has threads counts one of them. |
 | 7 — declarative configuration | **done**, every criterion: since the sixteenth wave's sweep every gap between two fresh matrix cells is explained by their resolved records. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
 | 8 — self-benchmark | **done**; the second table ran before the seventeenth wave (68 minutes, its test green, 46 pairs flagged over their declared band, worst `io.fsync` through `bpf:fentry` at 142 %), and since the eighteenth wave the bands are corrected to it: 43 `cost:` lines moved, two stand with their reason, the table is recorded in `docs/bench.md` and `tests/bench_bands.rs` fails when a band and its row disagree. A table re-measured after the wave's fixes is the next run. Since the nineteenth wave the GPU tracers have a table of their own, per regime and against a negative control (`gpu.kernel` `extreme` from +67 % launch-bound, `gpu.api` `high`), held by `tests/bench_gpu.rs`. The harness has every task the phase lists, and it has measured: 94 (source, backend) pairs alone on this machine, every workload admitted by a gate that judges what a median resolves and refuses a busy machine (`docs/bench.md`). The resolver's seven choices between served backends were confirmed. What the table corrects is the cost bands: an in-kernel collector's cost is in the target's dilation, not the tool's cpu (`proc.syscall`: 0.42 % against +296 %), and the preload shim cost an allocation-bound program about 150 times -- two system calls a record -- until it was moved onto a shared ring, which brought a record to about 70 ns. Finding 47 files each. |
-| 9 — breadth | nearly done; **99 of 102 sources, 111 of 206 backends**. The three without a collector wait on hardware this machine lacks; the vendor library (CUPTI) was the nineteenth wave's. |
+| 9 — breadth | nearly done; **99 of 102 sources, 112 of 206 backends** (the 112th since the twentieth wave: `cpu.oncpu_time` per thread through `bpf:raw_tp`). The three without a collector wait on hardware this machine lacks; the vendor library (CUPTI) was the nineteenth wave's. |
 | 10 — intelligence layer | **its first method is done by the engine**. TSA — where a thread's wall clock went — is what `examples/join-decompose-compute.yml` produces: three states, each row's kind and resolution, the program's life as the whole, and a residue inside its own resolution. Since the tenth wave the layer above it exists and calls the engine like any other user: the objective is required and refused when missing, `omn latency` names what dominates a run or its tail, `omn saturate` reads a queue by Little's law, and `omn diff` subtracts two profiles -- each checked against a workload whose limit the test chose. Since the eleventh wave **the escalation** closes it: a session's `escalate:` block attaches the layer the cheap pass names mid-run, detaches the rest and holds the budget; a program cpu-bound then lock-bound gets the lock layer 0.4 to 0.5 s after the switch (`docs/triage.md`). **Done.** Since the eighteenth wave `omn latency` follows a wait for a child into the child that ran during it and names the busiest other thread beside a block it ran in, asks `sched.mutex` only in a second pass, and takes `--symbols`. |
 | 11 — a model reads it | **done** (the twelfth wave): `omn-mcp`, an MCP server over stdio in the workspace, exposing the catalog, the runs a directory holds and this machine's sweep, as the documents themselves regrouped per request with what each is missing stated first. It probes nothing (the `omn` binary answers every machine question), and runs a session only when its operator allowed it, bounded, budgeted, and never one that launches a program (`docs/mcp.md`). What it filed: `omn list --format json` carrying the sweep, so the server stops parsing the text table. Since the fourteenth wave the use case runs end to end: an agent benchmarks a launched program through approved sessions and says what dominates its time, every number it is handed held to the run's files (`docs/mcp.md`, "The walk-through"). Since the eighteenth wave one privilege model: the capabilities are on `omn` alone and `omn-mcp` collects through it, shown on a `CAP_BPF` run; `run_session` takes an optional budget, says what a budget is a share of (`budget_against`) and hands back the program's stdout. |
-| 12 — programs nobody wrote for it | **started in the seventeenth wave**: a case is a directory (`cases/<name>/case.yml`, `docs/cases.md`), asked both ways by `tests/cases.rs`, `omn latency` and `omn-mcp`. Seven cases since the eighteenth wave brought `gcc-shell` back (`sqlite3-stripped`, `sqlite3-durability`, `cpython-interpreter`, `cpython-perf-map`, `http-server-stdlib`, `make-sqlite`, `gcc-shell`). The first suspect is the known cause, both ways, for every cause asked here, `make-sqlite`'s one-job cause in four runs of five; what still gets the cited numbers wrong (a job is a chain of processes, a thread that waits beside the main thread) is filed. Three of six exit criteria met (a seventh program is a directory, a stripped binary named from debuginfod both ways, and every case at paranoid 2: run after the merge, each cause answers as at -1 with the capabilities and skips both ways with the machine's reason without them, through the skip gate); `ROADMAP.md` says which are partly. |
+| 12 — programs nobody wrote for it | **started in the seventeenth wave**: a case is a directory (`cases/<name>/case.yml`, `docs/cases.md`), asked both ways by `tests/cases.rs`, `omn latency` and `omn-mcp`. Seven cases since the eighteenth wave brought `gcc-shell` back (`sqlite3-stripped`, `sqlite3-durability`, `cpython-interpreter`, `cpython-perf-map`, `http-server-stdlib`, `make-sqlite`, `gcc-shell`). The first suspect is the known cause, both ways, for every cause asked here, `make-sqlite`'s one-job cause in four runs of five; what still gets the cited numbers wrong (a job is a chain of processes, a thread that waits beside the main thread) is filed; since the twentieth wave the triage follows a thread blocked on a connection beside the block (`waiting`), carries the rest of a job (`followed.job`) and never names its own eBPF frames, shown on its own workloads and not yet on those cases. Three of six exit criteria met (a seventh program is a directory, a stripped binary named from debuginfod both ways, and every case at paranoid 2: run after the merge, each cause answers as at -1 with the capabilities and skips both ways with the machine's reason without them, through the skip gate); `ROADMAP.md` says which are partly. |
 
 ---
 
@@ -979,127 +985,286 @@ worktrees' `target/` removed. `omn list`: 95 usable here, 99 sources with a
 collector, 111 of 206 backends. The decisions are in `DECISIONS.md`,
 "Settled in the nineteenth wave", with two new open lines.
 
-**After the nineteenth wave, in order:**
+**The twentieth wave is merged**, all fourteen streams, and
+`docs/briefs/wave-20-left.md` keeps its brief: everything the list after the
+nineteenth wave held (its items 2 to 11) so that the next wave can compare
+`omn` with the reference tools on a tool with nothing else pending. Two
+phases; each stream merged `--no-ff` as soon as it was done and reviewed while
+merged, its review's fixes a second merge. Phase A, eleven streams: `df317ce`
+net (`7e1c2de`), `25b5618` io, `520d3f4` sched (`9417acd`), `978817a` triage,
+`03df991` cpu (`e654f86`), `db6ae54` gpu (`4470dcc`), `2a1d1cf` workloads
+(`92a8d72`), `25aca8d` budget (`29abbc4`), `23b1200` shared (`785a335`),
+`efc5b85` view (`ab4778d`), `777d6dd` rings (`dce14b9`). Phase B, three:
+`baf39f3` process (`17521b4`), `4f25509` record (`25632bd`), `e0550cc` docs.
+Then the merge's fixes, `96b4741` and `d661d67`. Each stream's handoff is
+`docs/fixes/w20-<stream>.md`:
 
-1. **The runs this wave left, alone** (each command in "Needs privilege"
-   below): the matrix swept (`make matrix`, about 70 minutes), which also
-   turns `portability::every_cell_covers_the_whole_catalog` green and checks
-   the sched fallbacks on kernels before 6.16 and the `member_offset` audit on
-   the other kernels; the GPU tests on a device nobody else uses
-   (`gpu_kernel`, `gpu_counters`, the install check); the GPU bench alone,
-   which measures `gpu.counters` and `gpu.profile` and replaces their
-   `pending` rows, and the backends table re-measured (two pairs fewer since
-   the GPU's left it, and the eighteenth wave's third table's six bands still
-   outside); the clock lock and persistence checks (`nvidia-smi -lgc`, `-pm`,
-   not in the sudoers file); and, from the eighteenth wave, the 3 ms
-   `null_blk` load, the cold file and the shim's saving.
-2. **The user's verdict on the nine views** (`docs/view/gallery/README.md`),
-   on a real terminal, live and replayed. What the views asked for is then
-   worth doing for the views kept, in one pass, because each changes the
-   fixtures and so every snapshot: the needs that add `raw` (`cpu.util`,
-   `io.bytes` and `gpu.mem` for system; `cpu.oncpu_time` and `io.syscall`
-   for ledger; `io.syscall` for flows; `sched.offcpu`'s events in
-   `sqlite-latency` for timebar), each with its README row, then **one
-   re-recording** with a GPU fixture all views draw (lanes' `workload.py`
-   or heatmap's phased run), the file server, a `vertical-abandoned` run, a
-   run with a few hundred requests, a CPython run with its perf map, and a
-   system-scope `sched.wakeup` run; and in the frame: a `View::takes_text`
-   hook (a search that can type `q`, `?`, digits, `f`), `--against` and a
-   focus in the snapshot harness, `units::approx`, `as_live_until` saying a
-   source kept without `raw` arrives empty, a test holding the flame view's
-   restated diff to `src/triage/diff.rs`, a `why`-column check in the README
-   test, `frame--gallery`/`frame--live` drawn on a view that changes less, a
-   scale-aware dimming rule (a ±295 ns error on 27 ms cells dims every lane),
-   and `results.json` carrying each timeline's `first_ts_ns`, each result's
-   value attribute, how a drained source stamps its rows, and each drain's
-   drop count with its time. `omn top` in `man/omn.1`, `GUIDE.md` and this
-   file's tables.
-3. **The GPU, what its streams left**: the counters-beside-kernel refusal
-   made the request's (exit 2, before launch; today an attach error labelled
-   the machine's); the resolver's unwinding warning not raised for
-   `gpu.profile`; the run's environment carrying `collect::gpu::clock_states()`
-   when a `gpu` source is asked, `render.rs` printing `ClockState::fact()`;
-   `kernel.rs`'s read path profiled (`omn` spends 1.3 us a record, as much as
-   CUPTI spends a launch) and whether a lighter activity kind is a fallback;
-   the open decision on a cost per regime; the review of `validate.rs`'s
-   `target_rejection_reason` against a `targets: {pid: "no: <reason>"}` form;
-   `docs/scenarios/gpu.md` (lines 425-428, 517-522) and `docs/bench.md`
-   (617-618) still naming `vendor:ncu`; `CATALOG.md`'s NVML cost cells. The
-   AMD and Intel kernel paths wait for a card in the machine.
-4. **`make check` green**: `cpu.profile`'s `losses_by_ring` carrying each
-   ring's throttles (per-ring counts from `src/perf.rs`, a shared layer), so
-   `runner::a_profile_s_losses_land_...` passes; it has been red in every run
-   since the eighteenth wave, on a quiet machine too.
-5. **The CI read back**: `gh run watch` on the pushed `c6bd2b8`, and
-   `.github/scripts/skip-gate.sh` over a red cell's `target/test.log`. What
-   only that run shows: every GPU test skipping with the machine's reason
-   (the runner has no GPU), `view/` linted by the workspace clippy, the
-   bpftool download and v7.7.0 dumping the azure kernel's BTF,
-   `cross_machine`'s memory-limit test past its cgroup, the swap children
-   under `memory.high`, the 128 MiB working set, `scenario_io`'s queue
-   through `io.inflight`'s two accounts, `encoders` #27, and `gcc-shell` in
-   the cell (filed for `.github/**`).
-6. **The triage, from what the re-asked cases found**
-   (`docs/fixes/w18-cases.md` section 3; `src/triage/latency.rs`): **a job is
-   a chain of processes** (`make-sqlite`, `gcc-shell`'s numbers); **a thread
-   that waits beside the main thread** (`http-server-stdlib`'s slow client);
-   the tool's own eBPF frames (`bpf_trace_run2`) never the named suspect; one
-   spelling of `cpu-queue` and `other-block`; `pid` on profile samples and
-   the late discovery; the lossy-profile verdict undecided under load.
-7. **The budget and the run's account**: a first check that stops a run on a
-   one-time cost (the open decision); the symbol table loaded lazily, and a
-   kernel frame not named per sample; the in-target meters read before the
-   stops; a session naming every request refused at resolution; the launched
-   program's own stderr; `run_session` saying the budget's stop; an orphan
-   that left the group before a stop.
-8. **The collectors the views found short** (no stream owned them):
-   `sched.wakeup`'s `comm` is the waker's on an event keyed on the wakee
-   (`waker_comm`, or a caveat), and an irq number and a `served_in_tid` on
-   its interrupt wakeups; `sched.offcpu`'s caveat says a row is stamped at its
-   first wait where the collector stamps it at the drain; a `bpf:raw_tp`
-   collector for `cpu.oncpu_time` (an exact per-thread on-cpu, where
-   `fs:proc` keys a process's total `task:<pid>`); `raw` accepted by
-   `net.bytes`, `power.energy`, `gpu.engine_busy` and `cpu.oncpu_time`;
-   `net.request`'s bytes per request, the start of its longest sleep, and its
-   never-ended, unborn and replaced counts as fields rather than sentences;
-   `net.socket` carrying its route's interface, a filesystem's superblock
-   device mapped to the block devices under it, and `io.bytes`/`net.bytes`
-   split by direction.
-9. **The shared layers and the files nobody owned** (the coordinator's):
-   `assemble` skipping a query-tier rule and cloning only
-   `join::sources_read`; `NamedBy` kept in `Results::stacks` and stack rows
-   keyed by the request's keys; `cheaper_equivalents` into the catalog
-   loader; `footprint.rs` reading again after an ESRCH; `tests/cross_machine.rs`'s
-   cgroup named per call; `net_qdisc`'s namespace offset through
-   `member_offset`; the executable of each task a result keys; an `omn join`
-   command over a stored run, with `tier:` in `man/omn.1`; the `cli` tests
-   leaking `/tmp/omn-cli-<pid>-no-shim` (154 MB each, a full `/tmp` quota
-   during this wave).
-10. **Documents that lag the code**: `docs/mcp.md` (the budget optional,
-    `program_stdout`, `budget_against`, the protocol test table, reading a
-    followed task's table, `raw` beside `stack`); `CATALOG.md`'s cost column
-    and its sched section; `examples/sched-round-trips.yml`'s and
-    `sched-half-blocked.yml`'s headers; `proc-not-built.yml` exiting 1 or 3;
-    `GUIDE.md`'s latency session; `docs/unwind.md`'s perf-map line; the bench
-    harness's `judge_band` reading a dilation within the workload's
-    resolution as zero; `tests/cases.rs`'s `MODEL_BUDGET` and `ask_mcp`
-    fallback.
-11. **Still open from earlier waves**: a known number of merges; one program
-    for both `io.latency` histograms (optional); `io.inflight`'s cause on
-    6.17; `sched.lock` and `sched.futex` following descendants; `unwind`'s
-    stripped-build second shape; a sweep from an installed tree; registered
-    extractors for the build's three accounts (optional); the flaky tally's
-    new entries (`docs/open-findings.md`, "The nineteenth wave, the
-    coordinator's").
-12. **Last: the same numbers as the reference tools.** Each source that has
-    an established counterpart run beside it on the same workload -- `perf
-    stat`, `perf record`, `perf sched`/`runqlat.bt`, `biolatency.bt` and
-    `fio`'s own completion latency, `perf trace -s`/`strace -c`, `ss`/`nstat`,
-    `nvidia-smi`, and now `nsys` for `gpu.kernel`'s counts and durations and
-    `ncu` for `gpu.counters`' instruction counts -- with a declared tolerance
-    per pair, the pair written as catalog data (a `reference:` field) and one
-    test reading every entry. A harness, not a wrapper: the tools are
-    witnesses in tests, never what `omn` runs on.
+- **gpu** (`w20-gpu.md`): **`gpu.profile` no longer aborts a native CUDA
+  program at exit** -- CUPTI shares one `functionName` across every record
+  of a function, later drains' included, and the library freed it after each
+  drain; the names are now freed once, after every context's last drain. A
+  target that dies inside `libomn_cupti.so` after its exit handler began (a
+  new `OP_EXITING` frame) is said as the tool's failure in a `degraded:` line,
+  not only a lost read; counters beside kernel times or PC sampling are
+  refused before the launch, exit 2, decided on the resolved backends; no
+  unwinding warning for `gpu.profile`; the run's environment carries the GPU
+  clock states when a `gpu` source is asked; `gpu.engine_busy` takes `raw`.
+  **Shown**: the abort 1 of 1 before and 0 of 3 after, the new native test
+  (`examples/bench/gpu.c` under the three inside sources) failing on the old
+  code; the refusal exiting 2 with the program never started; `kernel.rs`'s
+  read path profiled at 1.4 to 1.8 us a record, of which the event model's
+  copies and allocations (about twenty strings an event) are most, not
+  CUPTI's decoding. **Reasoned**: no lighter activity kind is a fallback (the
+  other kernel kind serialises the program's kernels). **Not done**: `omn`
+  still exits 0 when the tool killed its target (no channel from a collector
+  to the run's outcome); `gpu.temp`'s band waits on the next GPU bench; the
+  bench's schedule.
+- **rings** (`w20-rings.md`): **`cpu.profile`'s `losses_by_ring` carries each
+  ring's throttles beside its drops** (`src/perf.rs` splits them per ring as
+  it split the drops), so `emit.rs` places them and the runner test passes:
+  **shown** 6 of 6 at load 10 to 11, each series holding its own ring's
+  `(dropped, throttled)` -- the light task's ring is throttled too under load,
+  so the old "not on every series" assertion could not hold. `unwind`'s
+  stripped build's second shape is **aliasing**: one sample a 973 us batch
+  at a drifting phase put 229 of 299 samples in one branch at the batch's
+  period; sampled every 61 us, under the shortest branch, 10/30/40/20 % built
+  read 10/30/40/20 %. **Reasoned**: that aliasing is what the two field
+  sightings were. **Not done**: the share tests' weaker aliasing (a
+  pseudo-random pad in the workload).
+- **triage** (`w20-triage.md`): one spelling of a limit in the JSON
+  (`cpu-queue`, `other-block`; the old one still read); **the tool's own eBPF
+  frames never the named suspect** (samples under `bpf_trace_run*` and the
+  like set aside, counted and said as the tool's cost); **a thread blocked on
+  a connection beside an otherwise empty block is followed** (`waiting`,
+  recognised by its send/receive frames); a followed child carries **the rest
+  of the job** (`followed.job`); a lossy lower row that could overtake the
+  largest at its source's loss rate undecides the verdict. **Shown** on the
+  triage's own workloads (`workload job`, `serve.py`), 29 of 29 in
+  `tests/triage.rs`, no answer naming an eBPF frame. **Reasoned, and not
+  yet so on the cases**: `http-server-stdlib`'s slow client and
+  `make-sqlite`'s and `gcc-shell`'s job numbers still list their findings
+  (`cases/*/case.yml`), and `cases` passes with them listed. **Not done**: the
+  job as one decomposition (needs `ppid`); a C program's send through an
+  unnamed libc frame; the tail's verdict under the lossy rule.
+- **budget** (`w20-budget.md`): the symbol table `mmap`ed and read lazily
+  (**shown**: 203 to 217 ms of cpu to load the 192 MB debug `omn`, 79 to 81
+  after), kallsyms' usability decided once rather than per kernel frame (1.73
+  ms a frame before, at paranoid 2); the in-target meters read before the
+  stops; **a one-time load weighed apart from the rate**
+  (`overhead.one_time_cpu_ns`: a debuginfod profile's first check from 142-152
+  % down to 45-51 %); a session refused at resolution names every request;
+  the launched program's stderr a file of its own (`OMN_PROGRAM_STDERR`,
+  `program_stderr` in `run_session`) and `stopped_by_budget` in its answer;
+  `omn` the subreaper of what it launches, every orphan ended at the end of
+  every run (**shown**: a 71.7 s hang gone); `docs/mcp.md`. **Reasoned**: the
+  meters before the stops (a privileged run below), the one-time share with
+  several collectors. The first check is not settled by it (`DECISIONS.md`,
+  "Open").
+- **sched** (`w20-sched.md`): `sched.wakeup` names both ends (`wakee_comm`,
+  `waker_comm`) and an interrupt's wakeup its `irq` or `softirq` and the task
+  it was served in (`served_in_tid`, `served_in_comm`); `sched.offcpu`'s
+  caveat says it stamps at the drain, as it does; `sched.lock` and
+  `sched.futex` follow a process target's children; the two example headers.
+  **Shown**: 40 400 hard and 10 731 soft interrupt wakeups named over 79 959
+  `O_DIRECT` reads, and the test failing with the collector mutated; a
+  child's 500 ms futex wait, 0 events before and one after. **Found**:
+  `comm` was always the wakee's -- the nineteenth wave's timebar finding was
+  a launched program before its `exec`, withdrawn. **Reasoned**: timer and
+  IPI wakeups carry no `irq`; the four interrupt programs' cost is
+  unmeasured.
+- **net** (`w20-net.md`): `net.socket` keys its route's interface
+  (**shown**: every loopback row `iface == "lo"`), `net.bytes` takes `raw`
+  (rx and tx kept: **shown**, `bytes == rx + tx` over 8 MiB),
+  `net_qdisc`'s namespace through `member_offset`, and `net.request`'s
+  never-ended, unborn and replaced counts as a struct the notes are written
+  from. **Not done**: those counts as fields of the result (no slot in
+  `Results`, no hook in `Collector`), the bytes per request and the start of
+  the longest sleep (`src/bpf/request.rs`, io's, not done there), and
+  `net.bytes` as one series per direction. **Reasoned**: a socket in another
+  namespace carries no interface.
+- **cpu** (`w20-cpu.md`): **`cpu.oncpu_time` through `bpf:raw_tp` on
+  `sched_stat_runtime`**, one row per thread, the scheduler's own increments:
+  **shown** exactly equal to the thread's `schedstat` over a window whose
+  edges find it blocked. A first version on `sched_switch` read nothing for a
+  thread never switched out, caught by a scenario and replaced before the
+  commit. `raw` on `cpu.oncpu_time` and `power.energy`. A privileged binary
+  now reads one series per thread, and a launched program's children: the
+  merge's two test regressions below.
+- **io** (`w20-io.md`): `blk_devs` on `io.fs`, `io.fsync` and `io.pagecache`,
+  a filesystem's block devices as `io.bytes` keys them (**shown** on this
+  btrfs); `io.inflight`'s zero on 6.17 explained from the kernel's source
+  (a partition's in-flight count was never the disk's until 7.2;
+  **reasoned**, the CI's 6.17 runner is what shows it); merges measured, not
+  predictable from adjacent bios (16 reads, 2 requests, 1 merge, 3 of 3), so
+  no test holds a count; `raw` on `io.bytes` and `io.syscall` checked, already
+  served. **Not done**: a direction key, and `net.request`'s four storage
+  fields net asked for.
+- **shared** (`w20-shared.md`): `footprint.rs` reads again after an ESRCH
+  from a running process; the `cli` tests' `/tmp` leak closed; the
+  memory-limit test's cgroup named per call; an `equivalent` backend cheaper
+  than what it stands in for refused by the catalog loader; **`omn join -f
+  <rules> <results>`** over a stored run, with `tier:` in `man/omn.1`
+  (**shown** answering field for field what the agent tier did). **Not done,
+  routed**: `assemble`'s query-tier skip and `sources_read` (`src/main.rs`),
+  `NamedBy` in `Results::stacks` (`src/emit.rs`), the executable of each task.
+- **view** (`w20-view.md`): **the links** (a history, `⌫` and a right click
+  back), **the mouse** (each view's regions, a click selects and a second goes
+  in, the wheel, `M` to give the terminal its selection back, SGR through
+  tmux), `process` registered and the first screen of a run with a target;
+  `View::takes_text`, `draw_with`, `units::approx`, `as_live_until`'s
+  sentence, the flame's diff held to the triage's, the README's `why` column,
+  a scale-aware dimming; in `results.json` each timeline's `first_ts_ns`,
+  each result's `value_attr`, `row_stamp` and its drains' drops with their
+  times. **Reasoned**: the mouse in a real terminal and through tmux. **Not
+  done**: a ledger line of blocked time (so a ledger line cannot open
+  `timebar`), `process` first on a live `--pid` or launch, the live run's
+  `value_attr`, `row_stamp` and drains (`src/main.rs`).
+- **workloads** (`w20-workloads.md`): a program and a truth manifest per view
+  and for `process` (`view/workloads/`), Python reading its parameters from
+  its manifest, the request one the vertical server in C; 14 tests in
+  `tests/view_workloads.rs` holding each source to its manifest. **Shown**:
+  ten consecutive green runs under the other streams' load.
+- **record** (`w20-record.md`): **one re-recording**, 20 fixtures, 22 MB, in
+  2 min 37 s on a binary with its capabilities (`record.sh` refuses one
+  without); every snapshot redrawn and one per view after a click;
+  **`tests/view_truth.rs`, each view held on screen to its workload's
+  manifest**; a re-recording of the nine workloads shown drawing the same
+  screens. **Found and fixed**: a machine run claimed a target ("what task 1
+  and 3120 more cost", "target 753 % cpu"), and the view's mirror lacked
+  `one_time_cpu_ns`. **Not done**: `--against` and focus snapshots in the
+  standard set.
+- **process** (`w20-process.md`): the `process` view, nine tiles, each a
+  number and a colour and each opening its view; the colour is the suspect's
+  state on the tile that explains it, never a threshold; its recording
+  `docs/view/gallery/process-run/`. **Shown** against its manifest: `crunch`
+  first, the rss over the 32 MiB held, the socket bytes exact. **Reasoned**:
+  its suspect reads `sleep` where the workload holds a lock 0.25 s (the
+  timebar does not split a `sched.futex` summary out of sleep).
+- **docs** (`w20-docs.md`): `CATALOG.md`'s cost column written as the YAML's
+  chains (49 rows) and its sched section; `proc-not-built.yml` exits 3, or 1
+  where tracefs is root-only; `GUIDE.md`'s latency session; the perf map in
+  `docs/unwind.md`; `judge_band` reads a dilation within the workload's
+  resolution as zero; the cases ask with no budget and read the program's
+  account from `program_stderr`; two flaky bounds fixed (`scenario_mem`,
+  `page_faults`). **Found**: `scenario_runtime`'s thread counts are a uprobe
+  hit carrying another thread's tid, shown on a second reproduction, its
+  cause in the kernel reasoned.
+
+**At the merge** (`docs/open-findings.md`, "The twentieth wave, coordinator,
+after the merge"): three `make check` runs and one `--no-fail-fast`. The first
+`make check` stopped at `cases` (1665 passed): the triage's spelling fix met
+two cases still listing it as an open finding, which the test refuses
+(`96b4741`). The `--no-fail-fast` after the second, **2656 passed, 4 failed,
+13 ignored**: three merge regressions red alone too -- two tests read a
+launched program's `cpu.oncpu_time` as its own process, now that `bpf:raw_tp`
+follows its children one series per thread, and a heatmap test whose
+re-recorded fixture stamps the last drain past the run's end (`d661d67`) --
+and the stale matrix cells. The third `make check` (1732 passed) stopped at
+`cross_machine`'s memory-limit test (64 of 42 100 pages outside the program's
+intervals), green alone, filed; clippy and fmt then run by hand, clean.
+**`make check` stays red on this machine until the matrix is swept again.**
+Nothing pushed before this commit. `omn list`: 95 usable here, 99 sources with
+a collector, 112 of 206 backends. The decisions are in `DECISIONS.md`,
+"Settled in the twentieth wave".
+
+**After the twentieth wave, in order:**
+
+1. **The runs this wave and the last one left, alone** (each command in
+   "Needs privilege" below): the matrix swept (`make matrix`), which turns
+   `portability` and so `make check` green and shows `cpu.oncpu_time`'s
+   `fs:proc` fallback on a kernel before 6.8; the backends bench (deferred
+   since the nineteenth wave; `sched.wakeup`'s four interrupt programs and
+   `cpu.oncpu_time`'s new backend in it); the GPU bench, which can measure
+   `gpu.profile` now and decides `gpu.temp`'s band; the GPU tests alone; the
+   budget's meters before the stops under `bpf_stats_enabled`, and its first
+   check at paranoid 2; then one `make check`.
+2. **The user at a terminal**: the mouse in Ghostty and through tmux, the
+   `process` view and the links, live and replayed -- what every view stream
+   reasoned and none could see.
+3. **The CI read back**: `gh run watch` on the pushed `main`, and
+   `.github/scripts/skip-gate.sh` over a red cell's `target/test.log`; the
+   nineteenth wave's list for it stands (every GPU test skipping with the
+   machine's reason, `view/` linted, the azure kernel's BTF, `cross_machine`'s
+   cgroup, `scenario_io`'s two in-flight accounts on 6.17, `gcc-shell`), and
+   the footprint fix on the `stock` cell's chrome trace.
+4. **What the streams filed for one another**, by the file each lands in
+   (`docs/open-findings.md`, "Needs from another stream -- the twentieth
+   wave"):
+   - `src/collect/mod.rs` and `src/emit.rs`: a collector's run-level counts
+     as fields of the result (`Collector::fields`, `Results::fields`; then
+     `net.request`'s never-ended, unborn and replaced counts, and the request
+     view reads them in place of sentences), and a channel from a collector
+     to the run's outcome, so `omn` exits non-zero when the tool killed the
+     program it measured; stack rows keyed by the request's keys and a
+     frame's `NamedBy` kept in `Results::stacks`.
+   - `src/main.rs`: `assemble` skipping a query-tier rule and cloning only
+     `join::sources_read`; `process` first on a live `--pid` or launch; the
+     live run's `value_attr`, `row_stamp` and drains; a `--program-stderr`
+     flag (with `src/cli.rs`, `src/collect/launch.rs` and `man/omn.1`, which
+     gets the subreaper and `adopted_ended` in the same pass).
+   - `src/bpf/request.rs` with `src/collect/net/request.rs`: `net.request`'s
+     bytes per request and the start of its longest sleep.
+   - `src/catalog.rs`: a refused target's reason in the `targets:` line
+     (`DECISIONS.md`), read by `validate.rs`'s `target_rejection_reason`.
+   - The sched sources' events carrying `ppid`, and `cpu.profile`'s samples
+     `pid`, so a job is the followed child's subtree; the profile's late
+     discovery of a child (up to 14 % of a 300 ms child's cpu).
+   - `src/stack.rs` and `src/collect/sched/offcpu.rs`: the executable of each
+     task a result keys.
+   - `src/collect/task.rs`: a launched program's adopted orphans in its
+     denominator while they live (`DECISIONS.md`).
+5. **The views, after the user's look**: the `process` view titling a
+   machine run `pid 1` (`docs/open-findings.md`, the twentieth wave after the
+   merge); a ledger line of blocked time, so a
+   ledger line opens `timebar`; the heatmap's drops shaded at the drains that
+   read them; public readings of the ledger's cost lines and the flame's
+   hottest function, so the `process` tiles say what the views say; whether
+   the timebar splits a `sched.futex` summary out of sleep; `--against` and
+   focus snapshots in the standard set; the `raw` the system view's panels
+   could keep (`cpu.util`, `io.bytes`, `net.bytes`, `gpu.mem`) and the
+   ledger's `cpu.oncpu_time`, each with its README row, and `sqlite-latency`'s
+   `blocked` with its events; flows drawing the edges the collectors now
+   measure (`net.socket`'s `iface`, `io.fs`'s `blk_devs`); the fixtures not
+   yet re-recorded with `io.syscall`'s rows.
+6. **The triage and the cases**: the cases re-run alone with what the triage
+   landed (`make-sqlite` and `gcc-shell` reading `followed.job.on_cpu`,
+   `http-server-stdlib`'s slow client through `waiting`), each finding
+   dropped from its `case.yml` once it passes; a C server's connection wait
+   (the open line on `sched.wakeup` in the latency session); the tail's
+   verdict under the lossy-row rule; the loss bound read from the followed
+   task's own ring.
+7. **The smaller ones**: the unwind share tests' aliasing; the uprobe hit
+   carrying another thread's tid (`scenario_runtime`); a launch count per
+   arm in the GPU bench, so its step fits in about fifteen minutes again; a
+   test holding `CATALOG.md`'s cost column to the catalog, its `net.request`
+   row, and its rows for `sched.wakeup`'s new fields, `net.socket`'s
+   interface and the `raw` the families added; `docs/triage.md` (`waiting`,
+   `job`, the lossy undecided, the eBPF samples), `docs/families/join.md`
+   and `docs/scenarios/sched.md` on `sched.offcpu`'s drain stamp,
+   `docs/scenarios/proc.md` on `proc-not-built`'s exit, `docs/bench.md`'s
+   `vendor:ncu` lines; `examples/vertical/server.c`'s plan limit;
+   `tests/bench_bands.rs`'s copy of `cheaper_equivalents`; `io.bytes`'s
+   polled baseline taken at the release rather than the first tick, and
+   `cpu.oncpu_time`'s `fs:proc` caveat (a launched process alone, nothing
+   after the last poll); the `cross_machine` memory-limit pages outside the
+   intervals (the mem family's); a sweep from an installed tree; one program
+   for both `io.latency` histograms and the build's registered extractors
+   (both optional).
+8. **The next wave: `omn` against every tool it can replace.** The project
+   exists to unify them into one, so each is measured as a replacement:
+   `perf` (`stat`, `record`, `sched`, `lock`, `mem`, `trace`), `bpftrace` and
+   the bcc tools, `iostat`, `vmstat`, `mpstat`, `pidstat`, `sar`,
+   `top`/`htop`/`btop`, `smem`/`pmap`, `heaptrack`, `strace -c`,
+   `ss`/`nstat`, `tcpdump`, `turbostat`/`powertop`, `nvidia-smi`, `nsys` and
+   `ncu`. Per tool: the share of its common uses `omn` serves; the same
+   numbers on the same workload within a declared tolerance, the pair written
+   as catalog data (a `reference:` field) and one test reading every entry --
+   the tools are witnesses in tests, never what `omn` runs on; and the gaps
+   to close, each filed where it lands.
+
+   **Then, once `omn` is polished: a portability wave across distributions**
+   -- Debian, Fedora, Ubuntu, Gentoo, NixOS; x86_64 and aarch64; containers
+   -- measured on each rather than read from documentation.
 
 Below the milestones, and not scheduled:
 
@@ -1107,12 +1272,14 @@ Below the milestones, and not scheduled:
   A consumer of one more format, not a source: `DECISIONS.md` boundary 6 says
   why LTTng is a peer rather than a backend. Low priority; nothing depends on
   it and no measurement here is worse without it.
-- **Four decisions are open** (`DECISIONS.md`): the phase 6 criterion for
+- **Six decisions are open** (`DECISIONS.md`): the phase 6 criterion for
   the in-kernel histogram, pending what `tp_btf` leaves; what the budget's
-  first check may stop a run on (a one-time cost weighed against a few
-  milliseconds of target); since the nineteenth wave, a cost per regime in
-  the catalog's schema, and whether a range in the GPU's performance levels
-  can be read as free clocks, pending the `-lgc` run.
+  first check may stop a run on (its one-time half landed in the twentieth
+  wave, the 10 ms slack proposed with numbers); a cost per regime in the
+  catalog's schema (proposed with numbers); whether a range in the GPU's
+  performance levels can be read as free clocks, pending the `-lgc` run; and
+  since the twentieth wave, how a byte counter's direction becomes a series,
+  and whether the latency session asks `sched.wakeup`.
 - **An `lbr` collector** waits on a cpu with a branch call stack (Intel from
   Haswell) to be tested against, and **`sframe`** on a kernel that reads
   `.sframe` (none through 7.2).
@@ -1227,16 +1394,15 @@ commands below (`sysctl kernel.perf_event_paranoid` 2 and -1,
 machine-wide, so **the coordinator runs them alone**, never while streams
 build or test.
 
-### Still to run, after the nineteenth wave
+### Still to run, after the twentieth wave
 
-**Ran on 2026-10-04 at `a71d9cf`**: item 2 (green) and item 3's `gpu` step
-(`gpu.counters` measured, `gpu.profile` not: a double free); what they found
-is under "Ran after the nineteenth wave's merge" below. **Deferred to after
-the twentieth wave**, by the coordinator, because that wave changes the
-catalog and the collectors: item 1 (the matrix), item 3's `backends` step,
-and the full suite (`make check`). **Skipped**: item 4 (`nvidia-smi -lgc` and
-`-pm` need a password; `sudo -n` refused) and item 5 (the 3 ms `null_blk`
-line is still not in the sudoers file). Item 6 is the user's.
+Nothing privileged ran during or after the twentieth wave: the coordinator ran
+the full suite only. **Carried from the nineteenth wave**, deferred because
+this wave changed the catalog and the collectors: the matrix and the backends
+bench. **New**: the GPU bench again (`gpu.profile` can be measured since its
+double free is fixed), the budget's two runs, and the net stream's namespace
+run. Items 6 and 7 need a password (`sudo -n` refuses them); item 9 is the
+user's.
 
 In the order that changes the machine least between them. The GPU is one
 device: every GPU run below wants it to itself, so check first that nothing
@@ -1244,43 +1410,39 @@ holds it (`nvidia-smi --query-compute-apps=pid,process_name --format=csv`
 prints only its header), and run nothing that polls NVML beside it -- a
 poller makes the energy counter under-count for every reader of the board.
 
-1. **The matrix** (deferred to after the twentieth wave; alone, about 70 minutes; the cells under
-   `target/matrix/cells/` predate `gpu.profile`, which is what keeps
-   `make check` red besides the ring-loss gap):
+1. **The matrix** (alone, about 70 minutes; the cells under
+   `target/matrix/cells/` predate `gpu.profile`, which is all that keeps
+   `make check` red):
 
    ```console
    cd /home/moha/repos/omniscient && make matrix
    cargo test --test portability
+   make check
    ```
 
    Read the judges per cell, `every_cell_covers_the_whole_catalog` green, the
-   sched fallbacks on the kernels before 6.16, and the `member_offset` audit
-   on each kernel.
+   sched fallbacks on the kernels before 6.16, `cpu.oncpu_time` falling back
+   to `fs:proc` on a kernel before 6.8 (where `sched_stat_runtime` has three
+   arguments), and the `member_offset` audit on each kernel (`net_qdisc`'s
+   `possible_net_t` among them).
 
-2. **The GPU tests on a device nobody else uses** (cupti, profiler; no root;
-   **ran, green**, 2026-10-04):
+2. **The GPU tests on a device nobody else uses** (no root):
 
    ```console
    cd /home/moha/repos/omniscient && make
    nvidia-smi --query-compute-apps=pid,process_name --format=csv
-   cargo test --test gpu_kernel -- --nocapture
-   cargo test --test gpu_counters -- --nocapture
+   cargo test --test gpu_counters --test gpu_kernel -- --test-threads=1 --nocapture
    cargo test --test family_gpu --test scenario_gpu
-   make install-check && make dist-verify
    ```
 
-   Read: each self-timed kernel's difference from its own span (+1.0 to
-   +1.3 us with other tenants) and its placement inside the launch window;
-   `gpu_counters` with no `skipped:` line and no disturbed launch, so the
-   instruction verdict is asserted on every launch; the release script's new
-   lines for `libomn_cupti.so` on an extracted tree.
+   Read: `a_native_program_exits_on_its_own_under_every_inside_source` green
+   (the double free's test), and the counters-beside-kernel refusal run, not
+   skipped.
 
-3. **The bench, GPU and backends** (bench; alone on the machine and the
-   device, the release build and its capabilities, `scripts/bench.sh` needs
-   nothing typed; **about 117 minutes for `gpu`** since `gpu.counters` is
-   measured, 68 for `backends`; `gpu` ran on 2026-10-04 and must run again
-   once `gpu.profile`'s double free is fixed, `backends` is deferred to after
-   the twentieth wave):
+3. **The bench, GPU and backends** (alone on the machine and the device, the
+   release build and its capabilities; **about two hours for `gpu`** until a
+   replaying arm's launch-bound schedule is shortened, 68 minutes for
+   `backends`):
 
    ```console
    cd /home/moha/repos/omniscient && nvidia-smi --query-compute-apps=pid,process_name --format=csv
@@ -1289,14 +1451,64 @@ poller makes the energy counter under-count for every reader of the board.
    ```
 
    Then `target/bench/gpu-<stamp>/record.md` over the `gpu-bands` block of
-   `docs/bench.md` (`was`, `declared` and the verdicts set), the two
-   `pending` rows replaced by `gpu.counters` and `gpu.profile`'s measured
-   ones, and `cargo test --test bench_gpu`; the backends table into its
-   record, `cargo test --test bench_bands` naming every band outside (the
-   third table's six, filed in `docs/open-findings.md`, the eighteenth wave
-   after the merge).
+   `docs/bench.md`, `gpu.profile`'s `pending` row replaced by its measured
+   one and `gpu.temp`'s band moved to `med` if it reads over 1 % again, and
+   `cargo test --test bench_gpu`; the backends table into its record,
+   `cargo test --test bench_bands` naming every band outside -- the
+   eighteenth wave's six, `sched.wakeup`'s `med` now that four programs run on
+   every interrupt of the machine, and `cpu.oncpu_time` through `bpf:raw_tp`'s
+   `low`.
 
-4. **The device's clocks, set and put back** (device; root, **not in the
+4. **The budget's meters, and its first check at paranoid 2** (stream budget;
+   `sudo -n`, alone):
+
+   ```console
+   cd /home/moha/repos/omniscient && make
+   sudo -n /usr/bin/sysctl kernel.bpf_stats_enabled=1
+   cargo test --test budget what_an_ebpf_program_spends_inside_the_target -- --nocapture
+   target/debug/omn cpu.oncpu_time --system -m poll@100ms -e summary -d 10s
+   sudo -n /usr/bin/sysctl kernel.bpf_stats_enabled=0
+   sudo -n /usr/bin/sysctl kernel.perf_event_paranoid=2
+   target/debug/omn trace cpu.profile -e stack --stack fp --symbols debuginfod --budget 20% -d 3s -- python3 -c 'import time
+   for i in range(40):
+       s=0
+       for j in range(20000): s+=j
+       time.sleep(0.02)'
+   sudo -n /usr/bin/sysctl kernel.perf_event_paranoid=-1
+   ```
+
+   Read: `proc.syscall`'s programs, dropped in its `stop`, read before it
+   (`in_target_runs >= 2 * ops` with no budget); the in-target time of
+   `cpu.oncpu_time`'s program in its cost line; and the first check of a
+   profile whose kallsyms reads as zeroes (116 to 179 % before the wave), with
+   the one-time load said apart.
+
+5. **Alone, no privilege**: the cases and the view workloads, which measure
+   the machine's load.
+
+   ```console
+   cd /home/moha/repos/omniscient && make
+   cargo test --test cases -- --nocapture
+   cargo test --test view_workloads -- --nocapture
+   ```
+
+   Read: whether `http-server-stdlib`'s slow client and `make-sqlite`'s and
+   `gcc-shell`'s job findings now pass (the test refuses a listed finding that
+   passes, which says which to drop).
+
+6. **A socket in another namespace** (stream net; `ip netns` is **not in the
+   sudoers file**, so typed by the user):
+
+   ```console
+   sudo ip netns add omn-w20 && sudo ip netns exec omn-w20 ip link set lo up
+   # a TCP pair inside omn-w20, while from the host:
+   /home/moha/repos/omniscient/target/debug/omn net.socket --system --mode trace --emit raw --duration 2s --format json
+   sudo ip netns del omn-w20
+   ```
+
+   Expected: that pair's rows carry no `iface`; this namespace's still `lo`.
+
+7. **The device's clocks, set and put back** (device; root, **not in the
    sudoers file**, so typed by the user; each alone on the board):
 
    ```console
@@ -1319,7 +1531,7 @@ poller makes the energy counter under-count for every reader of the board.
    range may read as free again. Either way it closes the open line in
    `DECISIONS.md`.
 
-5. **From the eighteenth wave, still not run**: the known-latency device at
+8. **From the eighteenth wave, still not run**: the known-latency device at
    3 ms, once its line is in `/etc/sudoers.d/omniscient-privileged`
    (`/usr/bin/modprobe null_blk queue_mode=2 irqmode=2 completion_nsec=3000000 nr_devices=1 gb=1 bs=4096`),
    with the test's margin first widened by the timer's slack
@@ -1340,27 +1552,20 @@ poller makes the energy counter under-count for every reader of the board.
    `malloc`/`free` loop under a `sched.mutex`-only session, before and after
    `0a25793`, with the release shim.
 
-6. **Not privilege: the user at a terminal** -- the look every view stream
-   asked for and none could take (`docs/view/gallery/README.md` has a row per
-   view):
+9. **Not privilege: the user at a terminal** -- the mouse, the links and the
+   `process` view, which no stream could see (`docs/view/gallery/README.md`
+   has a row per view):
 
    ```console
    cd /home/moha/repos/omniscient && make
-   target/debug/omn top --gallery tests/view_fixtures/http-server     # space steps the views
-   target/debug/omn top --replay tests/view_fixtures/cpython-hot --against tests/view_fixtures/cpython-hot-heavier --view flame
-   target/debug/omn top --replay docs/view/gallery/lanes-gpu --view lanes
-   target/debug/omn top -- python3 cases/cpython-interpreter/hot.py   # live, 1-9 between views, q quits
-   target/debug/omn latency --objective latency --dump-session -- \
-       sqlite3 -init /tmp/commits.sql /tmp/commits.db .quit > /tmp/s.yml   # the timebar's session, live
-   target/debug/omn top -f /tmp/s.yml --view timebar
+   target/debug/omn top --replay tests/view_fixtures/http-server
+   #   click a tab, a process row in `system` twice, right click back, the wheel
+   #   on the heatmap; M, then select text with the mouse; again inside tmux,
+   #   with and without `set -g mouse on`
+   target/debug/omn top --replay docs/view/gallery/process-run   # a tile twice, right click
+   target/debug/omn top --gallery tests/view_fixtures/workload-lanes   # space steps the views, 0 is process
+   target/debug/omn top -- python3 -c 'import time; [sum(range(10**6)) or time.sleep(0.01) for _ in range(300)]'
    ```
-
-   (`/tmp/commits.sql` holds 40 `insert` lines and `/tmp/commits.db` a table
-   `t(x)`, `docs/fixes/w19-timebar.md`.)
-
-The re-recording of the view fixtures with a GPU workload is not on this list:
-it waits on the user's verdict and the needs it changes ("What remains",
-item 2). It wants the device alone too.
 
 ### What the earlier runs found
 
