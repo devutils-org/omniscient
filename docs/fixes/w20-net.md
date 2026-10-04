@@ -158,3 +158,32 @@ sudo -n ip netns del omn-w20
   above, failed again when rerun alone).
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.
   `cargo fmt --check`: clean.
+
+## Review
+
+The reviewer's one finding is a gap and not a defect. It names the two asks
+this stream did not deliver, `Undrawn` as fields of the result and
+`net.bytes` as one series per direction, and the namespace case that is
+only reasoned. After merging main (the io stream included) I checked
+again. Neither prerequisite has landed. `src/bpf/request.rs` still has
+`STORAGE_BYTES = 144` and `RECORD_BYTES = 168`, with no
+`S_RX_BYTES`/`S_HOLDER_SINCE`. `Collector` has no `fields()` hook, and
+`Results` has no run-level counts map. Both are in files other streams own,
+so I made no change in code this round. What is left goes to the coordinator:
+
+1. **Route to io**: the four `src/bpf/request.rs` fields, as specified under
+   "Needs from another stream". The follow-up in this stream's files is
+   `birth_socket`/`end_socket` in `request_net.rs`, two attributes in
+   `collect/net/request.rs`'s `event()`, and the length in `with_socket`.
+2. **Route to budget and view**: `Collector::fields()` plus `Results::fields`.
+   When they land, `net.request` returns `undrawn()`'s four counts from the
+   hook. That is a few lines, because the struct already exists and the
+   notes are written from it.
+3. **Settle the decision line** "`net.bytes` direction stays an attribute,
+   not a series". If DECISIONS.md takes the other side, the re-key is a
+   change in this family, but every `net.bytes` reader must move with it in
+   one commit.
+4. **The other-namespace case** stays reasoned until someone does the
+   privileged run under "Privileged runs wanted". That run needs
+   `CAP_SYS_ADMIN` to create a namespace, which this worktree's capability
+   step does not grant.
