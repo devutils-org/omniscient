@@ -166,3 +166,33 @@ Both findings were right, and both are fixed on the branch.
   The three runs after it were 8/8, and that test passed alone too, with no
   skip.
 
+
+### The suite, review round
+
+I ran `make check` once on `a4c4707` (main `777d6dd` merged in, plus this
+round's two test files; no source changed). It stopped at `cases`. Then I
+ran `cargo test --workspace --no-fail-fast` (load 8 to 12): **2628 passed,
+5 failed, 13 ignored**. None of the failures is in `tests/runner.rs` or
+`tests/cross_compute.rs`. Since this round touches no source, all five come
+from the merged main.
+
+- `scenario_net::every_datagram_sent_to_a_closed_port_...` and
+  `unwind::dwarf_recovers_the_whole_tree_...`: on the flaky tally, and each
+  passed alone on its one rerun.
+- `scenario_sched::a_workload_that_is_half_blocked_...`: on the tally, but
+  it failed alone too (28 % blocked: 174.6 ms against 444.9 ms on cpu).
+  Worth watching.
+- **`view_workloads::system_panels_carry_at_least_the_manifests_cost`, not
+  on any tally, red alone too**: "the program burns 1 s itself (its child
+  as much again, not its own); on the cpu 2.070 s". The panel seems to count
+  the child's cpu. It looks like the view stream's test meeting another
+  stream's merge. For the coordinator.
+- **`cases::every_case_names_its_known_cause_both_ways`**: seven
+  sub-failures. Four `cpython-*/mcp` sub-cases fail "the reference
+  `account`: no `key=value` number in 'note: --duration 3m applied to
+  every request ...'". Two `sqlite3-stripped/*/mcp` sub-cases fail with
+  "no `Run Time:` line". The seventh is `http-server-stdlib/a-cold-file/cli`,
+  where the first suspect is on-cpu. The mcp ones are all the same shape.
+  It looks like a reference parser reading the new session note. Not the
+  `gcc-shell` timing the tally knows. For the coordinator. I did not rerun
+  it: the binary takes minutes, and none of it is mine.
