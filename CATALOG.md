@@ -57,6 +57,11 @@ filter   predicate                  pushed into the kernel when possible, else u
 | `high` | 5-20 % |
 | `extreme` | > 20 %, with no bound above (a collector running inside the target: the preload shim, `proc.syscall`'s program; kernel replay) |
 
+A family table's Cost column lists the tiers its chain declares, in chain
+order and without repeats (`low / med`: the first backend is `low`, a fallback
+`med`); `catalog/*.yaml` holds each backend's, measured by the bench where a
+row has been measured.
+
 Cost is **throughput-dependent**: a tracepoint at 1 kHz is `low`, the same one at
 2 MHz is `high`. The resolver must be able to switch `trace` → in-kernel `hist`,
 or `trace` → `sample`, when the observed rate exceeds the budget.
@@ -247,17 +252,17 @@ never unless asked. Each frame says which of them named it (`elf`,
 
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
-| `cpu.cycles` | unhalted cycles | `pmu` (HW_CPU_CYCLES) | count, sample | all | free / low | medium |
-| `cpu.instructions` | retired instructions | `pmu` (HW_INSTRUCTIONS) | count, sample | all | free | **high** |
-| `cpu.ipc` | derived cycles/instr | — | count | all | free | medium |
-| `cpu.branch_misses` | mispredicted branches | `pmu` | count, sample | all | free | medium |
-| `cpu.cache_misses` | LLC misses | `pmu` (HW_CACHE_MISSES) | count, sample | all | free | low |
+| `cpu.cycles` | unhalted cycles | `pmu` (HW_CPU_CYCLES) | count, sample | all | low | medium |
+| `cpu.instructions` | retired instructions | `pmu` (HW_INSTRUCTIONS) | count, sample | all | low | **high** |
+| `cpu.ipc` | derived cycles/instr | — | count | all | low | medium |
+| `cpu.branch_misses` | mispredicted branches | `pmu` | count, sample | all | low | medium |
+| `cpu.cache_misses` | LLC misses | `pmu` (HW_CACHE_MISSES) | count, sample | all | low | low |
 | `cpu.topdown` | TMA: front-end / back-end / bad-spec / retiring | `pmu` (slots + topdown-*) | count | all | low | medium |
-| `cpu.profile` | on-CPU profile with stacks | `pmu:sw` (CPU_CLOCK) or `pmu` cycles + callchain | sample@freq | all | low-med | low |
+| `cpu.profile` | on-CPU profile with stacks | `pmu:sw` (CPU_CLOCK) or `pmu` cycles + callchain | sample@freq | all | low / med | low |
 | `cpu.oncpu_time` | effective CPU time | `bpf:tp` sched_switch · `fs:proc` · `fs:cgroup` cpu.stat | trace, poll | pid, cgroup, system | low / free | low |
-| `cpu.context_switches` | context switches | `pmu:sw` | count, sample | pid, cgroup, cpu | free | low |
-| `cpu.migrations` | cross-core migrations | `pmu:sw` (CPU_MIGRATIONS) | count | pid, cgroup | free | low |
-| `cpu.util` | utilization by state | `fs:proc` /proc/stat · `fs:cgroup` cpu.stat | poll | system, cpu, cgroup | free | low |
+| `cpu.context_switches` | context switches | `pmu:sw` | count, sample | pid, cgroup, cpu | low | low |
+| `cpu.migrations` | cross-core migrations | `pmu:sw` (CPU_MIGRATIONS) | count | pid, cgroup | low | low |
+| `cpu.util` | utilization by state | `fs:proc` /proc/stat · `fs:cgroup` cpu.stat | poll | system, cpu, cgroup | low / free | low |
 | `cpu.pressure` | PSI CPU stall | `fs:proc` /proc/pressure/cpu · cgroup cpu.pressure | poll | system, cgroup | free | low |
 | `cpu.throttle` | CFS cgroup throttling | `fs:cgroup` cpu.stat (nr_throttled) | poll | cgroup | free | medium |
 | `cpu.flow` | exhaustive control flow | `pmu:aux` intel_pt / cs_etm | trace | pid, cpu | high | high |
@@ -284,20 +289,20 @@ never unless asked. Each frame says which of them named it (`elf`,
 
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
-| `mem.rss` / `.pss` / `.uss` | resident footprint | `fs:proc` smaps_rollup → smaps | poll, snapshot | pid, cgroup | free | medium |
+| `mem.rss` / `.pss` / `.uss` | resident footprint | `fs:proc` smaps_rollup → smaps | poll, snapshot | pid, cgroup | med / free | medium |
 | `mem.cgroup` | cgroup accounting | `fs:cgroup` memory.current / .peak / .stat | poll | cgroup | free | medium |
-| `mem.faults` | minor/major page faults | `pmu:sw` PAGE_FAULTS_MIN/MAJ · `bpf:tp` | count, sample, trace | all | free / low | medium |
+| `mem.faults` | minor/major page faults | `pmu:sw` PAGE_FAULTS_MIN/MAJ · `bpf:tp` | count, sample, trace | all | low | medium |
 | `mem.page_alloc` | kernel page allocations | `bpf:tp` kmem:mm_page_alloc / mm_page_free | trace | system, cgroup | med | medium |
 | `mem.kmalloc` | slab allocations | `bpf:tp` kmem:kmalloc / kfree | trace | system | med | medium |
-| `mem.heap.alloc` | userspace allocations by site | `preload` → `bpf:uprobe` malloc/free · `bpf:usdt` | trace | pid | med / high | high |
-| `mem.heap.live` | live heap | `preload` (delta) · jemalloc/tcmalloc stats | poll | pid | low | high |
-| `mem.heap.retained` | **fragmentation**: retained / live | derived (`heap.live` vs `rss`) | poll | pid | low | high |
-| `mem.cache_l1` / `.llc` / `.tlb` | misses per level | `pmu` (L1-dcache-load-misses, LLC-*, dTLB-*) | count, sample | all | free | low |
+| `mem.heap.alloc` | userspace allocations by site | `preload` → `bpf:uprobe` malloc/free · `bpf:usdt` | trace | pid | extreme | high |
+| `mem.heap.live` | live heap | `preload` (delta) · jemalloc/tcmalloc stats | poll | pid | extreme / free | high |
+| `mem.heap.retained` | **fragmentation**: retained / live | derived (`heap.live` vs `rss`) | poll | pid | extreme | high |
+| `mem.cache_l1` / `.llc` / `.tlb` | misses per level | `pmu` (L1-dcache-load-misses, LLC-*, dTLB-*) | count, sample | all | low | low |
 | `mem.latency` | load latency | `pmu` PEBS load-latency · AMD IBS | sample | all | med | low |
 | `mem.sharing` | **false sharing** (HITM) | `pmu` PEBS HITM · IBS | sample | all | med | low |
 | `mem.bandwidth` | DRAM throughput | `pmu` uncore IMC · Intel RDT/MBM | count | **system only** (MBM: cgroup) | free | low |
 | `mem.numa` | access locality | `pmu` PEBS data-source · `fs:proc` numa_maps | sample, poll | all | med | low |
-| `mem.wss` | real working set | `fs:sys` DAMON · page_idle | poll | pid, cgroup, system | low | medium |
+| `mem.wss` | real working set | `fs:sys` DAMON · page_idle | poll | pid, cgroup, system | low / high | medium |
 | `mem.reclaim` | direct reclaim | `bpf:tp` vmscan:mm_vmscan_direct_reclaim_* | trace | system, cgroup | low | medium |
 | `mem.compaction` / `.thp` | defrag, huge pages | `bpf:tp` compaction:* · `fs:sys` | trace, poll | system | low | low |
 | `mem.swap` | swap in/out | `fs:proc` vmstat · `fs:cgroup` memory.swap.current | poll | system, cgroup | free | low |
@@ -326,19 +331,19 @@ never unless asked. Each frame says which of them named it (`elf`,
 
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
-| `io.latency` | submit → completion (device) | `bpf:tp` block_rq_issue/complete · `fs:tracefs` · `fs:proc` diskstats | trace, count | system, cgroup, pid* | low | low |
-| `io.queue` | insert → issue (software wait) | `bpf:tp` block_rq_insert/issue | trace | system, cgroup | low | low |
-| `io.bytes` / `.iops` | volume and throughput | `bpf:tp` · `fs:proc` diskstats · `fs:cgroup` io.stat | count, trace, poll | system, cgroup | free-low | low |
-| `io.size` | request size distribution | `bpf:tp` block_rq_issue | trace | system, cgroup | low | medium |
-| `io.merges` | request merges | `bpf:tp` block_rq_merge · diskstats | count | system | free | medium |
-| `io.inflight` | queue depth | `fs:proc` diskstats | poll | system | free | low |
-| `io.syscall` | latency as the application sees it | `bpf:tp` raw_syscalls · `bpf:fentry` vfs_read/write | trace | pid, cgroup | low-med | low |
-| `io.fs` | VFS/FS latency | `bpf:fentry` vfs_* · ext4/xfs/btrfs tracepoints | trace | pid, cgroup | low | low |
+| `io.latency` | submit → completion (device) | `bpf:tp` block_rq_issue/complete · `fs:tracefs` · `fs:proc` diskstats | trace, count | system, cgroup, pid* | med / free | low |
+| `io.queue` | insert → issue (software wait) | `bpf:tp` block_rq_insert/issue | trace | system, cgroup | med | low |
+| `io.bytes` / `.iops` | volume and throughput | `bpf:tp` · `fs:proc` diskstats · `fs:cgroup` io.stat | count, trace, poll | system, cgroup | low / free | low |
+| `io.size` | request size distribution | `bpf:tp` block_rq_issue | trace | system, cgroup | high | medium |
+| `io.merges` | request merges | `bpf:tp` block_rq_merge · diskstats | count | system | low / free | medium |
+| `io.inflight` | queue depth | `fs:proc` diskstats | poll | system | low | low |
+| `io.syscall` | latency as the application sees it | `bpf:tp` raw_syscalls · `bpf:fentry` vfs_read/write | trace | pid, cgroup | med | low |
+| `io.fs` | VFS/FS latency | `bpf:fentry` vfs_* · ext4/xfs/btrfs tracepoints | trace | pid, cgroup | high | low |
 | `io.pagecache` | page cache hit/miss | `bpf:tp` filemap:mm_filemap_add_to_page_cache + faults | trace | pid, system | med | low |
 | `io.readahead` | readahead effectiveness | `bpf:tp` readahead tracepoints | trace | system | low | low |
 | `io.writeback` | deferred writeback | `bpf:tp` writeback:* | trace | system, cgroup | low | low |
-| `io.fsync` | sync latency | `bpf:fentry` vfs_fsync · ext4_sync_file | trace | pid | low | low |
-| `io.pressure` | PSI I/O | `fs:proc` /proc/pressure/io | poll | system, cgroup | free | low |
+| `io.fsync` | sync latency | `bpf:fentry` vfs_fsync · ext4_sync_file | trace | pid | high | low |
+| `io.pressure` | PSI I/O | `fs:proc` /proc/pressure/io | poll | system, cgroup | low / free | low |
 
 **Caveats**
 
@@ -366,18 +371,18 @@ never unless asked. Each frame says which of them named it (`elf`,
 |---|---|---|---|---|---|---|
 | `net.tcp.connect` | connection setup latency | `bpf:fentry` tcp_v4/v6_connect | trace | pid, cgroup, system | low | low |
 | `net.tcp.lifetime` | duration + volume per connection | `bpf:tp` sock:inet_sock_set_state | trace | pid, cgroup | low | low |
-| `net.tcp.rtt` | RTT, cwnd, congestion state | `netlink` sock_diag · `bpf:fentry` on tcp_sock | poll, trace | pid, system | free-low | low |
+| `net.tcp.rtt` | RTT, cwnd, congestion state | `netlink` sock_diag · `bpf:fentry` on tcp_sock | poll, trace | pid, system | med | low |
 | `net.tcp.retransmit` | retransmissions | `bpf:tp` tcp:tcp_retransmit_skb | trace, count | system, pid | low | low |
 | `net.drops` | dropped packets (+ reason) | `bpf:tp` skb:kfree_skb (reason on recent kernels) | trace, count | system | low | medium |
-| `net.bytes` / `.packets` | volume | `fs:proc` /proc/net/dev · `netlink` · `bpf` socket | poll, count | system, pid, cgroup | free | low |
-| `net.socket` | socket read/write latency | `bpf:fentry` sock_sendmsg/recvmsg | trace | pid, cgroup | low | low |
-| `net.backlog` | accept/SYN queue drops | `fs:proc` netstat (LINUX_MIB) | poll | system | free | medium |
+| `net.bytes` / `.packets` | volume | `fs:proc` /proc/net/dev · `netlink` · `bpf` socket | poll, count | system, pid, cgroup | free / low | low |
+| `net.socket` | socket read/write latency | `bpf:fentry` sock_sendmsg/recvmsg | trace | pid, cgroup | low / med | low |
+| `net.backlog` | accept/SYN queue drops | `fs:proc` netstat (LINUX_MIB) | poll | system | low | medium |
 | `net.qdisc` | TX scheduling latency | `bpf:tp` qdisc:qdisc_dequeue | trace | system | low | low |
-| `net.softirq` | network processing time | `bpf:tp` irq:softirq_entry/exit | trace | cpu, system | low-med | low |
+| `net.softirq` | network processing time | `bpf:tp` irq:softirq_entry/exit | trace | cpu, system | med | low |
 | `net.hwts` | NIC hardware timestamps | `SO_TIMESTAMPING` + PHC (per packet, no collector yet) · `netlink:ethtool` + PTP clock (what an interface can stamp, how far its clock is from ours) | trace, poll, snapshot | pid (socket opt), iface, system | free | high |
 | `net.xdp` | in-driver counters | `bpf` XDP | count | iface | free | medium |
 | `net.capture` | raw packets | `af_packet` TPACKETv3 | trace | iface | high | high |
-| `net.iface` | errors, drops, pause frames | `netlink` ethtool -S | poll | iface | free | medium |
+| `net.iface` | errors, drops, pause frames | `netlink` ethtool -S | poll | iface | free / low | medium |
 
 **Caveats**
 
@@ -405,16 +410,16 @@ invisible to every CPU profiler.
 
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
-| `sched.runqlat` | run queue wait | `bpf:tp` sched_wakeup → sched_switch | trace | pid, cgroup, cpu | med | low |
-| `sched.offcpu` | blocked time + stack | `bpf:tp` sched_switch + callchain | trace | pid, cgroup | med-high | low |
-| `sched.wakeup` | **wakeup chain** (who unblocks whom) | `bpf:tp` sched_wakeup (waker context) | trace | pid, system | med | low |
-| `sched.switches` | context switches | `pmu:sw` · `bpf:raw_tp` sched_switch (count, reached first for a cgroup) · `bpf:tp` | count, trace | all | free-low | low |
-| `sched.migrations` | migrations | `bpf:tp` sched_migrate_task | trace, count | pid, cgroup | low | low |
-| `sched.lock` | kernel lock contention | `bpf:tp` lock:contention_begin/end (≥6.1) | trace | pid, system | med | low |
-| `sched.futex` | userspace futex wait | `bpf:tp` raw_syscalls (futex) | trace | pid | med | low |
-| `sched.mutex` | pthread contention | `preload` → `bpf:uprobe` pthread_mutex_* | trace | pid | med-high | low |
-| `sched.irq` | time in interrupt handlers | `bpf:tp` irq:irq_handler_entry/exit | trace | cpu, system | low-med | low |
-| `sched.numa_balance` | automatic NUMA migrations | `bpf:tp` sched:sched_stick_numa etc. | trace | system | low | low |
+| `sched.runqlat` | run queue wait | `bpf:raw_tp` · `bpf:tp` sched_switch, read from the task's `sched_info` | trace | all | med | low |
+| `sched.offcpu` | blocked time + stack | `bpf:tp:stacks` sched_switch + callchain · `bpf:raw_tp` · `bpf:tp` (no stack) | trace | pid, tid, cgroup, system | high / med | low |
+| `sched.wakeup` | **wakeup chain** (who unblocks whom) | `bpf:raw_tp` · `bpf:tp` sched_wakeup (waker context) | trace | pid, tid, cgroup, system | med | low |
+| `sched.switches` | context switches | `pmu:sw` · `bpf:raw_tp` sched_switch (count, reached first for a cgroup) · `bpf:tp` | count, trace | all | free / low | low |
+| `sched.migrations` | migrations | `bpf:raw_tp` · `bpf:tp` sched_migrate_task | trace, count | pid, cgroup, system | low | low |
+| `sched.lock` | kernel lock contention | `bpf:raw_tp` · `bpf:tp` lock:contention_begin/end (≥6.1) · `bpf:kprobe` | trace | pid, tid, cgroup, system | med / high | low |
+| `sched.futex` | userspace futex wait | `bpf:raw_tp` · `bpf:tp` raw_syscalls (futex) | trace | pid, tid, cgroup | high | low |
+| `sched.mutex` | pthread contention | `preload` · `bpf:usdt` · `bpf:uprobe` pthread_mutex_* | trace | pid, tid | extreme | low |
+| `sched.irq` | time in interrupt handlers | `bpf:raw_tp` · `bpf:tp` irq:irq_handler_entry/exit | trace, count | cpu, system | med | low |
+| `sched.numa_balance` | automatic NUMA migrations | `bpf:raw_tp` · `bpf:tp` sched:sched_stick_numa etc. | trace, count | system | low | low |
 
 **Caveats**
 
@@ -425,6 +430,18 @@ invisible to every CPU profiler.
   in-kernel aggregation (stack-id → counter) rather than a raw trace.
 - `lock:contention_*` is recent (≥ 6.1): fall back to futex + uprobes on older
   kernels.
+- A process target is followed into every process it starts (a descendants
+  map the fork tracepoint fills): `sched.offcpu`, `sched.runqlat`,
+  `sched.wakeup`, `sched.switches` through `bpf:raw_tp`, `sched.migrations`,
+  `sched.lock` and `sched.futex`. A row keyed by task is still that task's;
+  the run's totals include the children.
+- A run-queue wait (`sched.runqlat`, and `sched.offcpu`'s `queued_ns`) is the
+  kernel's own account, read from the task's `sched_info` at the switch that
+  ends it (`rq->clock` less the queue stamp), so a task's waits add up to
+  what its `schedstat` says. The tracepoints' account, wakeup to switch, is
+  beside it as `wake_to_run_ns`.
+- `catalog/sched.yaml` is the authority on each chain, its targets and its
+  caveats; this table is the summary.
 
 ---
 
@@ -433,9 +450,9 @@ invisible to every CPU profiler.
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
 | `power.energy` | pkg / cores / dram / gpu | `pmu` RAPL (power/energy-*/) | count, poll | **system / package** | free | medium |
-| `power.freq` | effective frequency | `bpf:tp` power:cpu_frequency · `fs:sys` scaling_cur_freq · MSR aperf/mperf | poll, trace | cpu, system | free | low |
-| `power.cstate` | idle state residency | `bpf:tp` power:cpu_idle · `fs:sys` | trace, poll | cpu | low | low |
-| `power.temp` | temperatures | `fs:sys` hwmon | poll | system | free | low |
+| `power.freq` | effective frequency | `bpf:tp` power:cpu_frequency · `fs:sys` scaling_cur_freq · MSR aperf/mperf | poll, trace | cpu, system | free / low | low |
+| `power.cstate` | idle state residency | `bpf:tp` power:cpu_idle · `fs:sys` | trace, poll | cpu | low / high | low |
+| `power.temp` | temperatures | `fs:sys` hwmon | poll | system | low | low |
 | `power.throttle` | thermal / PL1-PL2 throttling | `fs:sys` · MSR · `bpf:tp` thermal:* | poll, trace | system | free | medium |
 
 **Caveats**
@@ -454,12 +471,12 @@ invisible to every CPU profiler.
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
 | `gpu.job` | submit → fence (DRM job) | `bpf:tp` gpu_scheduler:drm_run_job / drm_sched_process_job | trace | system, pid | low | low |
-| `gpu.engine_busy` | per-engine occupancy | `pmu` i915/xe/amdgpu · `vendor:nvml` | count, poll | system | free-low | low |
-| `gpu.freq` / `.power` / `.temp` | hardware state | `pmu` · `fs:sys` · `vendor:nvml` | poll | system | free | low |
-| `gpu.mem` | VRAM allocated / used | `fs:sys` amdgpu · `vendor:nvml` | poll | system, pid | free | medium |
+| `gpu.engine_busy` | per-engine occupancy | `pmu` i915/xe/amdgpu · `vendor:nvml` | count, poll | system | free / med | low |
+| `gpu.freq` / `.power` / `.temp` | hardware state | `pmu` · `fs:sys` · `vendor:nvml` | poll | system | free / high / low | low |
+| `gpu.mem` | VRAM allocated / used | `fs:sys` amdgpu · `vendor:nvml` | poll | system, pid | free / med | medium |
 | `gpu.kernel` | GPU time per kernel | `vendor:cupti` (Activity) · `rocprof` · `l0` | trace | launch | extreme | medium |
 | `gpu.api` | host-side submission latency | `preload` cuLaunchKernel / vkQueueSubmit | trace | pid | high | low |
-| `gpu.counters` | counters inside a kernel, per launch, each with its verdict | `vendor:cupti` (range profiler, kernel replay) · `rocprofv3` | trace | launch | **extreme** | medium |
+| `gpu.counters` | counters inside a kernel, per launch, each with its verdict | `vendor:cupti` (range profiler, kernel replay) · `rocprofv3` | trace | launch | extreme | medium |
 | `gpu.profile` | where time goes inside a kernel: sampled PCs, source lines, stall reasons | `vendor:cupti` (PC sampling) | trace | launch | med | low |
 
 **Caveats**
@@ -496,10 +513,10 @@ invisible to every CPU profiler.
 
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
-| `proc.syscall` | per-syscall latency and count | `bpf:tp` raw_syscalls:sys_enter/sys_exit | trace, count | pid, cgroup, system | med-high | low |
-| `proc.exec` / `.exit` | process lifecycle | `bpf:tp` sched:sched_process_exec/exit | trace | system, cgroup | free | medium |
-| `proc.fd` | open descriptors vs limit | `fs:proc` | poll | pid | free | medium |
-| `proc.threads` | thread count | `fs:proc` | poll | pid | free | medium |
+| `proc.syscall` | per-syscall latency and count | `bpf:tp` raw_syscalls:sys_enter/sys_exit | trace, count | pid, cgroup, system | extreme | low |
+| `proc.exec` / `.exit` | process lifecycle | `bpf:tp` sched:sched_process_exec/exit | trace | system, cgroup | low | medium |
+| `proc.fd` | open descriptors vs limit | `fs:proc` | poll | pid | low | medium |
+| `proc.threads` | thread count | `fs:proc` | poll | pid | low | medium |
 | `proc.signals` | signals received | `bpf:tp` signal:* | trace | pid | low | medium |
 
 `proc.syscall` as a raw trace on a syscall-heavy workload is expensive

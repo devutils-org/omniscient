@@ -1260,18 +1260,33 @@ fn the_two_roads_to_a_footprint_arrive_at_the_same_number() {
         "no live process is 0 bytes resident: `statm` published {statm_low} B, which is a \
          departed process parsed as a measurement"
     );
-    assert_eq!(
-        statm_points, rollup_points,
-        "both roads watch one process over one window, so they end on the same reading: \
-         {statm_points} against {rollup_points}"
-    );
-    // And the mean the self-benchmark compares is no longer dragged by it: the
-    // two roads end on the same last reading of the same live process.
-    let apart = (statm_last - rollup_last).abs() / rollup_last;
+    // Both roads watch one process over one window, read one after the other
+    // on each tick. The process can exit between the two reads of the last
+    // tick -- more often on a loaded machine -- and then the road read second
+    // finds a zombie and, rightly, publishes nothing: one reading fewer, never
+    // more than one.
     assert!(
-        apart <= 0.01,
-        "the last reading of one process through two files: {statm_last} against {rollup_last}"
+        statm_points.abs_diff(rollup_points) <= 1,
+        "both roads watch one process over one window, so they end at most one reading \
+         apart: {statm_points} against {rollup_points}"
     );
+    // And the mean the self-benchmark compares is no longer dragged by it:
+    // where both ended on the same tick, they end on the same last reading of
+    // the same live process. One tick apart, the extra reading is of a
+    // process tearing down, and the zero check above is what holds it.
+    if statm_points == rollup_points {
+        let apart = (statm_last - rollup_last).abs() / rollup_last;
+        assert!(
+            apart <= 0.01,
+            "the last reading of one process through two files: {statm_last} against \
+             {rollup_last}"
+        );
+    } else {
+        eprintln!(
+            "the process ended between the two roads' reads of one tick: {statm_points} \
+             readings against {rollup_points}"
+        );
+    }
 }
 
 /// The machine's own files and cgroup2 are two routes to the same counters.

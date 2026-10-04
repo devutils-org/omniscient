@@ -55,7 +55,6 @@ Each answer is held to named checks:
 | `the-sentence-says-what-the-case-knows` | the verdict's sentence contains each of the case's `says` |
 | `both-ways-name-the-same-suspect` | the two answers name the same state, and the same leaf where the case names its known frame (`leaf`); unchecked, with both leaves, when the states agree and a leaf is an address. A cause that names no frame is about a state: the hottest leaf of a spread profile -- a kernel function at 5 % of the samples, the next at 3.5 % -- moves between two runs, and is not compared; whether each names one at all still is, so one way naming a function where the other names none fails |
 | `both-ways-run-with-the-same-privileges` | the person's `omn` and the binary `run_session` answered through are one file with the same capabilities, and every state both ways read came from the same source, of the same kind |
-| `the-agent-s-way-answers-within-a-model-s-budget` | `run_session` answers within the ceiling a model would give it. `run_session` no longer requires one (`docs/fixes/w18-mcp.md`), and a question asked with none is **unchecked**: its cost was held against no ceiling, so it is not a pass. Were one required again, the agent would ask at `100%` and the check would be made; a run that ceiling stopped fails it, and is asked again with an unbounded one -- once whatever the stopped run left behind is ended -- so the other checks still answer the person's question |
 | `the-verdict-s-json-spells-its-limit-as-the-text-does` | the person's JSON writes the verdict's `limit` as the text and the catalog spell it (`cpu-queue`, not `cpu_queue`). The other checks read the limit in the text's spelling, so this one alone holds the JSON's |
 
 A check is **ok**, **failed**, or **unchecked** with the reason (names that were
@@ -175,8 +174,9 @@ temporary directory, removed afterwards), `{case}` its directory in the tree,
 
 **`own_account`.** `stdout` means the program writes its account there; the
 harness launches it as `sh -c 'exec "$@" 1>&2' sh <target>`, so the account
-arrives on its stderr, which both ways read back (`omn`'s stderr, and
-`run_session`'s `said_by_omn`). The `exec` keeps the pid: the program's main
+arrives on its stderr, which both ways read back (`omn`'s stderr; and
+`run_session`'s `said_by_omn` followed by the whole of its `program_stderr`,
+where `run_session` puts the program's stderr apart from `omn`'s lines). The `exec` keeps the pid: the program's main
 thread is still the one the triage decomposes. Nothing about the program
 changes.
 

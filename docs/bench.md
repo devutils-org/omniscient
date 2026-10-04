@@ -802,13 +802,13 @@ it as within.
 **The rule a row is judged by.** A row's cost is the larger of two columns:
 the share of the target's cpu the tool reported, and the dilation the workload
 measured of itself, which is where an in-kernel collector's cost is
-(finding 47). That is `harness::judge_band`'s rule, with one change: **a
-dilation no larger than what the gate says the workload resolves reads as
-zero**, because the bench cannot tell it from zero. A negative dilation is
+(finding 47), and **a dilation no larger than what the gate says the
+workload resolves reads as zero**, because the bench cannot tell it from zero. A negative dilation is
 zero too. Without this, `mem.swap` through `fs:cgroup` -- a cgroup file read
 that cannot reach into the target's timed section -- was "over `free`" on
-+0.21 % of a workload that resolves 0.39 %. The harness's own column does not
-apply the floor yet (a request in `docs/fixes/w18-bench.md`).
++0.21 % of a workload that resolves 0.39 %. `harness::judge_band`, the
+table's own `band` column, applies the same floor since the twentieth wave,
+so the column and the record agree.
 
 **What was corrected, and what it says.**
 

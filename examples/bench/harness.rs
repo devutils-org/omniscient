@@ -1502,12 +1502,19 @@ impl Band {
 /// `measured` is how many repetitions completed; `losses` is always a count,
 /// so its column is there by construction and it is `measured` that says it
 /// was counted over something.
+///
+/// `resolution` is the workload's, as the gate measured it
+/// ([`Stats::resolution`], a fraction of its median): a dilation no larger is
+/// one the bench cannot tell from zero, and reads as zero, which is
+/// `tests/bench_bands.rs`'s rule over the same record. `None` holds every
+/// dilation as measured.
 pub fn judge_band(
     declared: omn::catalog::Cost,
     measured: usize,
     collector: Option<Stats>,
     percent: Option<Stats>,
     dilation: Option<Stats>,
+    resolution: Option<f64>,
 ) -> Band {
     if measured == 0 {
         return Band::Missing("no repetition completed, so no column is measured".into());
@@ -1519,11 +1526,20 @@ pub fn judge_band(
     }
     let share = percent.map(|stats| stats.median);
     let dilated = dilation.map(|stats| stats.median * 100.0);
-    let (cost, from) = match (share, dilated) {
-        (Some(share), Some(dilated)) if dilated > share => (dilated, "dilation"),
-        (Some(share), _) => (share, "share of the target's cpu"),
-        (None, Some(dilated)) => (dilated, "dilation"),
-        (None, None) => {
+    let resolves = resolution.map(|resolution| resolution * 100.0);
+    let counted = dilated.filter(|dilated| resolves.is_none_or(|resolves| *dilated > resolves));
+    let within = match (dilated, resolves) {
+        (Some(_), Some(resolves)) if counted.is_none() => Some(format!(
+            "dilation within the workload's {resolves:.2} % resolution, read as zero"
+        )),
+        _ => None,
+    };
+    let (cost, from) = match (share, counted, within) {
+        (Some(share), Some(dilated), _) if dilated > share => (dilated, "dilation".to_owned()),
+        (Some(share), _, _) => (share, "share of the target's cpu".to_owned()),
+        (None, Some(dilated), _) => (dilated, "dilation".to_owned()),
+        (None, None, Some(within)) => (0.0, within),
+        (None, None, None) => {
             return Band::Missing(
                 "neither a share of the target's cpu nor a dilation to hold to the band".into(),
             )

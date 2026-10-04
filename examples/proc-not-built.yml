@@ -1,6 +1,6 @@
 # The `proc` backends this build does not implement, pinned on purpose.
 #
-#   omn -f examples/proc-not-built.yml ; echo $?   # 3
+#   omn -f examples/proc-not-built.yml ; echo $?   # 3, or 1 (below)
 #
 # This session is valid. It validates, it resolves, it names a backend -- and
 # then it stops, because no collector is written for it. That is a third
@@ -28,8 +28,17 @@
 # `--backend force:` is what reaches it. That is a better demonstration than
 # the old one for a reason worth stating: `force:` bypasses the resolver
 # entirely, so the answer no longer depends on whether this machine can read
-# tracefs. It is 3 everywhere, which is what an exit code demonstrating "this
-# build does not have it" should be.
+# tracefs.
+#
+# Except that it does not, quite. The resolver is bypassed, but the pinned
+# backend's own requirements are still probed, and refused in the chain's
+# order: a missing requirement is the machine's answer (1) and comes before the
+# build's (3). So the file exits 3 on a machine where `bpf:tp`'s requirements
+# all probe available -- tracefs readable, CAP_BPF and CAP_PERFMON held -- and 1
+# where they do not: this project's own development machine, whose tracefs uid
+# 1000 cannot read, says 1 and names the unreadable tracefs for each of the
+# four. Both are honest; what the file shows depends on which one the machine
+# reaches first. `--no-resolve` writes the request down without asking.
 #
 # Every request is reported: the run stops at the first source it cannot serve,
 # so only the first is reached, and the other three are here so that the file

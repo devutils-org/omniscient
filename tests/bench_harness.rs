@@ -553,17 +553,52 @@ fn a_row_is_held_to_its_band_on_the_larger_of_its_share_and_its_dilation() {
     use omn::catalog::Cost;
     let cpu = stats(&[1e6, 1e6, 1e6]);
     assert!(matches!(
-        judge_band(Cost::Low, 3, cpu, stats(&[0.1, 0.1, 0.1]), stats(&[0.03, 0.03, 0.03])),
+        judge_band(Cost::Low, 3, cpu, stats(&[0.1, 0.1, 0.1]), stats(&[0.03, 0.03, 0.03]), None),
         Band::Over(why) if why.contains("dilation") && why.contains("3.00 %")
     ));
     assert!(matches!(
-        judge_band(Cost::Low, 3, cpu, stats(&[0.5, 0.5, 0.5]), stats(&[0.002, 0.002, 0.002])),
+        judge_band(Cost::Low, 3, cpu, stats(&[0.5, 0.5, 0.5]), stats(&[0.002, 0.002, 0.002]), None),
         Band::Within(why) if why.contains("share")
     ));
     // `extreme` has no bound to break.
     assert!(matches!(
-        judge_band(Cost::Extreme, 3, cpu, stats(&[900.0; 3]), None),
+        judge_band(Cost::Extreme, 3, cpu, stats(&[900.0; 3]), None, None),
         Band::Within(_)
+    ));
+}
+
+/// A dilation no larger than the workload's resolution is one the bench cannot
+/// tell from zero, and reads as zero, as `tests/bench_bands.rs` reads the
+/// record: a `free` row whose target ran 0.4 % slower on a workload that
+/// resolves 0.6 % is within its band, and the same dilation on one that
+/// resolves 0.2 % is over it. Above the resolution the larger column still
+/// decides.
+#[test]
+fn a_dilation_within_the_workloads_resolution_reads_as_zero() {
+    use omn::catalog::Cost;
+    let cpu = stats(&[1e6, 1e6, 1e6]);
+    let dilated = stats(&[0.004, 0.004, 0.004]);
+    assert!(matches!(
+        judge_band(Cost::Free, 3, cpu, None, dilated, Some(0.006)),
+        Band::Within(why) if why.contains("0.00 %") && why.contains("0.60 % resolution")
+    ));
+    assert!(matches!(
+        judge_band(Cost::Free, 3, cpu, None, dilated, Some(0.002)),
+        Band::Over(why) if why.contains("0.40 % (dilation)")
+    ));
+    assert!(matches!(
+        judge_band(Cost::Free, 3, cpu, None, dilated, None),
+        Band::Over(_)
+    ));
+    // Within the resolution the share alone decides, whichever is larger.
+    assert!(matches!(
+        judge_band(Cost::Low, 3, cpu, stats(&[0.2; 3]), stats(&[0.009; 3]), Some(0.01)),
+        Band::Within(why) if why.contains("0.20 % (share")
+    ));
+    // Above it the dilation still counts when it is the larger.
+    assert!(matches!(
+        judge_band(Cost::Low, 3, cpu, stats(&[0.2; 3]), stats(&[0.03; 3]), Some(0.01)),
+        Band::Over(why) if why.contains("3.00 % (dilation)")
     ));
 }
 
@@ -575,15 +610,15 @@ fn a_row_with_a_column_missing_is_refused_rather_than_judged() {
     use omn::catalog::Cost;
     let cpu = stats(&[1e6, 1e6]);
     assert!(matches!(
-        judge_band(Cost::Low, 0, None, None, None),
+        judge_band(Cost::Low, 0, None, None, None, None),
         Band::Missing(_)
     ));
     assert!(matches!(
-        judge_band(Cost::Low, 2, None, stats(&[0.5, 0.5]), None),
+        judge_band(Cost::Low, 2, None, stats(&[0.5, 0.5]), None, None),
         Band::Missing(why) if why.contains("collector cpu")
     ));
     assert!(matches!(
-        judge_band(Cost::Free, 2, cpu, None, None),
+        judge_band(Cost::Free, 2, cpu, None, None, None),
         Band::Missing(_)
     ));
 }

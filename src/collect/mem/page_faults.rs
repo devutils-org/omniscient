@@ -629,16 +629,13 @@ mod tests {
         let mut events = collector.sample(0).unwrap();
         events.extend(collector.stop());
         let base = block as u64;
-        let in_block: Vec<&Event> = events
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event.key(crate::request::KeyKind::Mem),
-                    Some(KeyValue::Mem { base: addr, .. })
-                        if (base..base + (PAGES * 4096) as u64).contains(addr)
-                )
-            })
-            .collect();
+        let (in_block, elsewhere): (Vec<&Event>, Vec<&Event>) = events.iter().partition(|event| {
+            matches!(
+                event.key(crate::request::KeyKind::Mem),
+                Some(KeyValue::Mem { base: addr, .. })
+                    if (base..base + (PAGES * 4096) as u64).contains(addr)
+            )
+        });
         // SAFETY: unmapping what was mapped above, after the last store.
         unsafe { libc::munmap(block, PAGES * 4096) };
         let weighed: u64 = in_block
@@ -650,13 +647,22 @@ mod tests {
             .sum();
         let said = format!(
             "{} samples in the block weigh {weighed} faults; the thread took {took} over the \
-             stores to {PAGES} pages",
-            in_block.len()
+             stores to {PAGES} pages; {} samples landed elsewhere",
+            in_block.len(),
+            elsewhere.len()
         );
         eprintln!("{said}");
         assert!(took >= PAGES as u64 / 2, "too few faults to judge: {said}");
+        // A sample is the fault that ended its period, and the period's other
+        // faults are wherever they were: a period that ended on a fault
+        // outside the block (this thread's stack, its code paged back in, a
+        // NUMA hinting fault -- more of them on a loaded machine) carries up
+        // to `PERIOD` of the block's faults that no sample in the block
+        // weighs. So the shortfall is bounded by those periods too, beside
+        // the one carried in and the one left unfinished.
+        let elsewhere = elsewhere.len() as u64;
         assert!(
-            weighed + 2 * PERIOD >= took && weighed <= took + 2 * PERIOD,
+            weighed + (2 + elsewhere) * PERIOD >= took && weighed <= took + 2 * PERIOD,
             "{said}"
         );
         assert!(

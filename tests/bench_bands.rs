@@ -12,9 +12,9 @@
 //! outside.
 //!
 //! The rule is `harness::judge_band`'s -- a row's cost is the larger of its
-//! share of the target's cpu and its dilation -- with one difference written
-//! in `docs/bench.md`: a dilation no larger than what the gate says the
-//! workload resolves cannot be told from zero, and reads as zero.
+//! share of the target's cpu and its dilation, and a dilation no larger than
+//! what the gate says the workload resolves cannot be told from zero, and
+//! reads as zero (`docs/bench.md`).
 //!
 //! One rule holds the bands the table did not measure: a backend declared
 //! `equivalent` declares no cheaper band than a backend above it in the chain
