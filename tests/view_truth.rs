@@ -402,7 +402,7 @@ fn ledger_carries_the_manifests_costs() {
 
 /// `system`: the program and its child each burn 1.0 s on the cpu, at once;
 /// the disk moves at least the 16 MiB fsynced, and loopback at least twice
-/// the 8 MiB sent over it (it counts a byte out and in).
+/// the 8 MiB sent over it (a byte counted out and in, a figure each).
 #[test]
 fn system_shows_the_programs_known_load() {
     let truth = manifest("system");
@@ -430,13 +430,20 @@ fn system_shows_the_programs_known_load() {
         .skip_while(|line| !line.contains("disk bytes moved"))
         .skip(1)
         .take_while(|line| !line.contains('├'))
-        .filter_map(|line| words(line).into_iter().find_map(bytes))
+        // `│259:0  ···██···  0B read  16.2MiB written`: every figure on a
+        // device's line, read and written alike.
+        .flat_map(|line| words(line).into_iter().filter_map(bytes))
         .sum();
     assert!(
         disk >= num(&truth["file"]["written"]),
         "disk {disk} B:\n{drawn}"
     );
-    let lo = first(&drawn, "│lo ", bytes);
+    // `│lo  ···██···  8.02MiB in  8.02MiB out`: one figure per direction.
+    let lo: f64 = drawn
+        .lines()
+        .filter(|line| line.starts_with("│lo "))
+        .flat_map(|line| words(line).into_iter().filter_map(bytes))
+        .sum();
     assert!(
         lo >= 2.0 * num(&truth["loopback"]["bytes"]),
         "loopback {lo} B:\n{drawn}"
@@ -541,4 +548,91 @@ fn request_draws_each_requests_cause() {
             other => panic!("a cause the test does not know: {other}"),
         }
     }
+}
+
+/// `process`: its workload's recording lives in the gallery
+/// (`docs/view/gallery/process-run/`, made by `record.sh process-run`). One
+/// line per resource, each read the way a user reads it: the cpu's peak at
+/// the one core `crunch` burns, the resident peak above the 32 MiB touched,
+/// the socket's bytes exact over the program's life, and the lock wait named
+/// on the time line.
+#[test]
+fn process_draws_each_line_as_its_workload_loaded_it() {
+    let truth = manifest("process");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/view/gallery/process-run");
+    let mut data = omn_view::model::Data::load(&path).expect("the process recording");
+    data.origin = "recording process-run".to_owned();
+    let mut app = App::new(data);
+    app.cost = Cost::Snapshot;
+    app.open("process")
+        .unwrap_or_else(|error| panic!("{error}"));
+    let drawn = text(&draw_app(&mut app, 160, 40));
+    let line = |name: &str| -> Vec<&str> {
+        drawn
+            .lines()
+            .map(str::trim_start)
+            .find(|line| line.starts_with(&format!("{name} ")))
+            .map(words)
+            .unwrap_or_else(|| panic!("no {name} line:\n{drawn}"))
+    };
+    let after = |words: &[&str], label: &str| -> String {
+        let at = words
+            .iter()
+            .position(|word| *word == label)
+            .unwrap_or_else(|| panic!("no `{label}` in {words:?}"));
+        words[at + 1].to_owned()
+    };
+
+    // The header's life: `process-main  pid 41207 · 3 threads · 2.32s · ...`.
+    let header = drawn
+        .lines()
+        .find(|line| line.contains(" pid ") && line.contains(" threads "))
+        .unwrap_or_else(|| panic!("no header:\n{drawn}"));
+    assert!(
+        header.contains(truth["thread"].as_str().unwrap()),
+        "{header}"
+    );
+    let life = words(header)
+        .into_iter()
+        .filter_map(seconds)
+        .next()
+        .unwrap_or_else(|| panic!("no life in {header}"));
+
+    // CPU: `crunch` holds one core; the peak poll sees most of it.
+    let cpu = line("CPU");
+    let peak: f64 = after(&cpu, "peak").parse().expect("cores");
+    assert!(
+        peak >= 0.8 * num(&truth["phases"][0]["cores"]),
+        "cpu peak {peak}:\n{drawn}"
+    );
+
+    // Memory: the 32 MiB touched page by page on top of the interpreter.
+    let memory = line("Memory");
+    let resident = bytes(&after(&memory, "peak")).expect("a size");
+    assert!(
+        resident >= num(&truth["memory"]["bytes"]),
+        "resident peak {resident}:\n{drawn}"
+    );
+
+    // Network: the rates over the life are the socket's bytes, to the
+    // rounding of three figures.
+    let network = line("Network");
+    let rate = |arrow: &str| -> f64 {
+        let word = after(&network, arrow);
+        bytes(word.trim_end_matches("/s")).expect("a rate") * life
+    };
+    for (arrow, key) in [("↓", "received"), ("↑", "sent")] {
+        let moved = rate(arrow);
+        let known = num(&truth["socket"][key]);
+        assert!(
+            (moved - known).abs() <= 0.02 * known,
+            "{key}: {moved} B drawn, {known} B moved:\n{drawn}"
+        );
+    }
+
+    // Time: the lock the holder sleeps under is a state of its own.
+    let time = line("Time");
+    let lock = percent(&after(&time, "lock")).expect("a share");
+    assert!(lock > 0.0, "lock {lock}:\n{drawn}");
 }
