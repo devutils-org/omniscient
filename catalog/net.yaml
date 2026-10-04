@@ -127,7 +127,7 @@
        targets: {system: native, pid: native, cgroup: native, container: native},
        filter_fields: [comm]}
   modes: [poll, count]
-  emits: [rate, timeline, summary, topk]
+  emits: [rate, timeline, summary, topk, raw]
   targets: {system: native, iface: native, pid: bpf_only, cgroup: bpf_only, container: bpf_only}
   keys: [iface, sock, task, cgroup]
   filter_fields: [iface, comm]
@@ -138,6 +138,9 @@
        nothing: a run shorter than one poll interval measures nothing."
     - "Loopback traffic is counted twice, once received and once transmitted,
        because it is both."
+    - "A series is an interface, and its `bytes` are both directions: each
+       event carries `rx` and `tx` beside them, which `raw` keeps to the end
+       of the run."
     - "Per-process attribution is not available from this file. It needs the
        eBPF backend, and the resolver will say so rather than dividing a
        machine-wide number."
@@ -178,8 +181,8 @@
   modes: [trace, count]
   emits: [hist, topk, raw, summary]
   targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, container: bpf_only, system: native}
-  keys: [sock, task]
-  filter_fields: [comm, bytes, dport, family, op]
+  keys: [sock, task, iface]
+  filter_fields: [comm, bytes, dport, family, op, iface]
   determinism: low
   caveats:
     - "Sends are timed for inet, inet6 and unix sockets only; receives for
@@ -188,6 +191,9 @@
        waited a second for its peer is one second here, and is not a slow
        network."
     - "An event is a histogram row, not a call: `count` says how many."
+    - "`iface` is the interface the socket's cached route leaves by, read at
+       the call. A unix socket, an unconnected datagram socket and a socket in
+       another network namespace carry none."
 
 - id: net.backlog
   family: net

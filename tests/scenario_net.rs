@@ -3954,6 +3954,22 @@ fn every_send_and_receive_is_found_on_the_socket_that_made_it() {
         .iter()
         .filter(|event| event.get("cookie").and_then(serde_json::Value::as_u64) == Some(client))
         .all(|event| fx_u64(event, "dport") == port && fx_u64(event, "family") == 2));
+    // And the interface its route leaves by: a connection to 127.0.0.1 is
+    // routed over loopback, and that is the key `net.bytes` carries for it.
+    for cookie in [client, server] {
+        let rows: Vec<_> = events
+            .iter()
+            .filter(|event| event.get("cookie").and_then(serde_json::Value::as_u64) == Some(cookie))
+            .collect();
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter().all(|event| fx_text(event, "iface") == "lo"),
+            "socket {cookie}'s rows name the interface {:?}",
+            rows.iter()
+                .map(|event| fx_text(event, "iface"))
+                .collect::<Vec<_>>()
+        );
+    }
 
     // The server's receives carry every byte the client sent: the stream the
     // server counted itself, and the closing byte its last receive took.

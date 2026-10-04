@@ -61,6 +61,10 @@ impl Prepared for Prepare {
                      because the syscalls inline the generic send path -- a send on any other \
                      family is not here, and neither are sendfile, splice or io_uring"
                         .to_owned(),
+                    "a row's `iface` is the interface the socket's cached route left by at the \
+                     call; a socket with no route (unix, an unconnected datagram socket) or in \
+                     another network namespace carries none"
+                        .to_owned(),
                 ],
             },
             self.mode,
@@ -70,7 +74,10 @@ impl Prepared for Prepare {
 }
 
 fn describe() -> Describe {
-    Box::new(|row: &Row| {
+    // An interface's name, asked for once per index a run sees rather than
+    // once per row.
+    let mut names: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+    Box::new(move |row: &Row| {
         let (family, dport) = family_and_port(row.aux);
         let mut attrs = vec![
             Attr::text(
@@ -87,14 +94,29 @@ fn describe() -> Describe {
             Attr::uint("dport", u64::from(dport)),
         ];
         let task = KeyValue::task(row.tid as i32);
+        // The interface the socket's route left by, when it had one in this
+        // namespace (`src/bpf/net_socket.rs`): the key `net.bytes` and
+        // `net.qdisc` carry, so a socket joins its interface.
+        let route = (row.dev != 0).then(|| {
+            let name = names
+                .entry(row.dev)
+                .or_insert_with(|| super::interfaces::name_of(row.dev).unwrap_or_default())
+                .clone();
+            attrs.push(Attr::text("iface", name.clone()));
+            KeyValue::iface(row.dev, name)
+        });
         if row.object == 0 {
             // No socket behind the call: it was released while the call ran.
             // A cookie of zero is not a cookie, and keying on it would join
             // every such call to every other.
-            return (vec![task], attrs);
+            return (std::iter::once(task).chain(route).collect(), attrs);
         }
         attrs.push(Attr::uint("cookie", row.object));
-        (vec![KeyValue::Sock { cookie: row.object }, task], attrs)
+        let keys = [KeyValue::Sock { cookie: row.object }, task]
+            .into_iter()
+            .chain(route)
+            .collect();
+        (keys, attrs)
     })
 }
 
@@ -121,13 +143,17 @@ mod tests {
     use super::*;
 
     fn row(object: u64) -> Row {
+        routed(object, 0)
+    }
+
+    fn routed(object: u64, dev: u32) -> Row {
         Row {
             tid: 9,
             tgid: 9,
             op: OP_SEND,
             bucket: 12,
             object,
-            dev: 0,
+            dev,
             aux: (2 << 16) | u32::from(8080u16.to_be()),
             count: 3,
             total_ns: 9000,
@@ -150,10 +176,33 @@ mod tests {
     }
 
     #[test]
+    fn a_routed_socket_carries_its_interface_and_an_unrouted_one_none() {
+        let mut describe = describe();
+        let (keys, attrs) = describe(&row(77));
+        assert!(keys.iter().all(|key| key.iface_name().is_none()));
+        assert!(attrs.iter().all(|attr| attr.name != "iface"));
+        // Index 1 is loopback on every Linux machine.
+        let (keys, attrs) = describe(&routed(77, 1));
+        assert_eq!(
+            keys[0].to_string(),
+            "sock:77",
+            "the socket stays the series"
+        );
+        let iface = keys
+            .iter()
+            .find_map(|key| key.iface_name())
+            .expect("an iface key");
+        assert_eq!(iface, "lo");
+        assert!(attrs
+            .iter()
+            .any(|attr| attr.name == "iface" && attr.value.to_string() == "lo"));
+    }
+
+    #[test]
     fn every_filter_field_the_catalog_declares_is_on_an_event() {
         let catalog = crate::catalog::Catalog::embedded().expect("the built-in catalog");
         let mut describe = describe();
-        let (_, attrs) = describe(&row(77));
+        let (_, attrs) = describe(&routed(77, 1));
         // `comm` and `bytes` are the shared collector's; the rest are this
         // source's own.
         let names: Vec<&str> = attrs
