@@ -152,18 +152,12 @@ open_findings:
       the main thread's, and a child's table has no `runnable` or `blocked`
       row at all, since `sched.runqlat` and `sched.offcpu` follow the
       launched process only
-  - check: the-sentence-claims-nothing-false
-    filed: >-
-      docs/fixes/w17-cases.md, "a polled lock is called not a lock", and
-      docs/fixes/w17-build.md, "a program is its main thread": a wait for a
-      child is called a timer, a pipe or a socket
   - check: the-person-s-way-says-where-names-came-from
     filed: >-
       docs/fixes/w17-cases.md, "the verdict drops where its names came from"
-  - check: the-agent-s-way-answers-within-a-model-s-budget
+  - check: both-ways-name-the-same-suspect
     filed: >-
-      docs/fixes/w17-cases.md, "a waiting program exceeds every budget", and
-      docs/fixes/w17-build.md, "a budget weighs the launched process alone":
-      the collectors' cpu is weighed against the main thread's few
-      milliseconds, not the children's seconds they also watched, and the
-      stop kills the main thread and leaves its children running
+      docs/fixes/w18-triage.md, section 7, "cases": the person's way now
+      follows make's `wait4` into the job that accounts for the most and
+      names its state, while the agent's way (`read_mcp` in tests/cases.rs)
+      still reads the main thread's table and names the `wait4`

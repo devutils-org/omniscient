@@ -167,10 +167,3 @@ open_findings:
       docs/fixes/w17-cases.md, "the verdict drops where its names came from",
       and here also docs/fixes/w17-python.md, "dynamic symbols only is not
       said": the profile itself has no such note to copy
-  - check: the-verdict-says-how-it-knows
-    filed: >-
-      docs/fixes/w17-python.md, "dynamic symbols only is not said":
-      `facts()` in src/stack.rs says where names came from only when a
-      module was named by debuginfod or a perf map or not at all, so a run
-      whose every module carries its dynamic symbols only -- the
-      interpreter's internal functions unnamed -- says nothing

@@ -179,9 +179,3 @@ open_findings:
     filed: >-
       docs/fixes/w17-cases.md, "a polled lock is called not a lock": the
       sentence says the sleep is on "something that is not a lock"
-  - check: the-agent-s-way-answers-within-a-model-s-budget
-    filed: >-
-      docs/fixes/w17-cases.md, "a waiting program exceeds every budget":
-      `run_session` requires a budget, a share of the target's own cpu, and
-      at 100 % the collectors' few milliseconds stop a run whose target
-      waits 1.5 s on a lock and burns one

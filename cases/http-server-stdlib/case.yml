@@ -211,13 +211,9 @@ open_findings:
     filed: >-
       docs/fixes/w17-cases.md, "the verdict drops where its names came from",
       and docs/fixes/w17-python.md, "dynamic symbols only is not said"
-  - check: the-verdict-says-how-it-knows
+  - check: both-ways-name-the-same-suspect
     filed: >-
-      docs/fixes/w17-python.md, "dynamic symbols only is not said":
-      `facts()` in src/stack.rs is silent when every module carries its
-      dynamic symbols only
-  - check: the-agent-s-way-answers-within-a-model-s-budget
-    filed: >-
-      docs/fixes/w17-python.md, "the triage's mutex source doubles a
-      threaded interpreter's time": `sched.mutex` through `preload` costs
-      more than the listing's own cpu, so `--budget 100%` stops the run
+      docs/fixes/w18-triage.md, section 7, "cases": the person's way now
+      follows the main thread's `select` into the serving thread and names
+      its on-cpu work, while the agent's way (`read_mcp` in tests/cases.rs)
+      still reads the main thread's table and names the block
