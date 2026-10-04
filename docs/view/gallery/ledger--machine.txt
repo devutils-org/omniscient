@@ -6,6 +6,7 @@ omn top │ fixture machine │ 20.0s                                 view: snap
 │  memory held     not in this run: mem.rss was not asked for                                                          │
 │  memory faulted  not in this run: mem.faults was not asked for                                                       │
 │  I/O syscalls    not in this run: io.syscall was not asked for                                                       │
+│  network         not in this run: net.socket was not asked for                                                       │
 │  retransmits     not in this run: net.tcp.retransmit@system was not asked for                                        │
 │  GPU memory      692MiB peak      of 692MiB on the device   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄     6.50ms                      │
 │  GPU time        not in this run: gpu.kernel was not asked for                                                       │
@@ -16,7 +17,6 @@ omn top │ fixture machine │ 20.0s                                 view: snap
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time was not served:                                                                                        │
 │no collector is written for `cpu.oncpu_time` on backend `bpf:raw_tp` yet                                              │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

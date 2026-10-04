@@ -6,6 +6,7 @@
 │  [0m[1mmemory held     [0m[2;3mnot in this run: mem.rss was not asked for[0m                                                          │[0m
 │  [0m[1mmemory faulted  [0m[2;3mnot in this run: mem.faults was not asked for[0m                                                       │[0m
 │  [0m[1mI/O syscalls    [0m[2;3mnot in this run: io.syscall was not asked for[0m                                                       │[0m
+│  [0m[1mnetwork         [0m[2;3mnot in this run: net.socket was not asked for[0m                                                       │[0m
 │  [0m[1mretransmits     [0m[2;3mnot in this run: net.tcp.retransmit@system was not asked for[0m                                        │[0m
 │  [0m[1mGPU memory      [0m692MiB peak      [0m[2mof 692MiB on the device[0m   [0m[32m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄[0m [0m[35m    6.50ms[0m                      │[0m
 │  [0m[1mGPU time        [0m[2;3mnot in this run: gpu.kernel was not asked for[0m                                                       │[0m
@@ -16,7 +17,6 @@
 │[0m[2;32m cpu time -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────────[0m│[0m
 │[0m[31mcpu.oncpu_time was not served:[0m                                                                                        │[0m
 │no collector is written for `cpu.oncpu_time` on backend `bpf:raw_tp` yet                                              │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

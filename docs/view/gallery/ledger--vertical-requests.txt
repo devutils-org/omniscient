@@ -6,6 +6,7 @@ omn top │ fixture vertical-requests │ 408ms                       view: snap
 │  memory held     not in this run: mem.rss was not asked for                                                          │
 │  memory faulted  not in this run: mem.faults was not asked for                                                       │
 │  I/O syscalls    not in this run: io.syscall was not asked for                                                       │
+│  network         not in this run: net.socket was not asked for                                                       │
 │  retransmits     not in this run: net.tcp.retransmit@system was not asked for                                        │
 │  GPU memory      not in this run: gpu.mem was not asked for                                                          │
 │  GPU time        not in this run: gpu.kernel was not asked for                                                       │
@@ -18,7 +19,6 @@ omn top │ fixture vertical-requests │ 408ms                       view: snap
 │cpu.oncpu_time -- cpu time, per thread                                                                                │
 │This run did not ask for it. `omn top` live asks for every line of the sheet; a recording made by another session     │
 │holds what that session asked.                                                                                        │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

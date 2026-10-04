@@ -8,15 +8,16 @@ omn top │ fixture cpython-hot │ 3.89s                             view: snap
 │    machine busy        4.55s  ██████████   84.9%                                                                     │
 │  memory held     17.4MiB peak     17.5MiB peak ×1.00        ▁▁▁▂▂▂▃▃▃▄▄▄▅▅▅▆▆▆▇▇▇▇██      924µs                      │
 │  memory faulted  3.04k faults     3.06k faults ×1.00        a total only                ≥1.55ms  40 late             │
-│  I/O syscalls    82 calls         82 calls ×0.96            256ns ▂▂█▂▂▂ 16.4µs         ≥34.6ms  ~low det degraded x2│
+│  I/O syscalls    82 calls         170µs inside ×0.96        256ns ▂▂█▂▂▂ 16.4µs         ≥34.6ms  ~low det degraded x2│
 │    bytes read and written: on the raw rows only, which this run did not keep                                         │
+│  network         0B moved         0B moved ×1.00            no socket call              ≥33.4ms  ~low det degraded x2│
 │  retransmits     0 sent again     0 sent again ×1.00        a total only                 ≥230µs  5 late ~low det     │
 │  GPU memory      0B peak          0B peak ×1.00             ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁     1.15ms                      │
 │  GPU time        refused: no collector is written for `gpu.kernel` on backend `vendor:cupti` yet                     │
 │  energy          208J machine     441J machine ×2.12        ▇▇▇▇▇██▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇    ≥42.3µs                      │
 │    ≈ the target's       177J  an estimate, not a measurement: its share of the machine's busy cpu, 3.86s of 4.55s    │
 │                                                                                                                      │
-│  to know all of this: ≥38.6ms of omn's cpu, ≥1.00% of what the target spent                                          │
+│  to know all of this: ≥72.1ms of omn's cpu, ≥1.87% of what the target spent                                          │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via fs:proc -- cpu time, per thread                                                                    │
@@ -30,7 +31,6 @@ omn top │ fixture cpython-hot │ 3.89s                             view: snap
 │in microseconds once it was reaped)                                                                                   │
 │· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│
 │own account's                                                                                                         │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

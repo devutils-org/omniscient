@@ -8,21 +8,23 @@ omn top │ fixture http-server │ 2.84s                             view: snap
 │    machine busy        3.91s  █████████    71.4%                                                                     │
 │  memory held     25.2MiB peak     +12.0MiB from 13.2MiB     ▁▁▁▁████████████████████     2.04ms                      │
 │  memory faulted  24.0k faults     8.45k/s                   a total only                ≥18.4ms  30 late             │
-│    task 2758974        16.3k  ████████     68.0%                                                                     │
+│    2758974 Thread…     16.3k  ████████     68.0%                                                                     │
 │    task 2758953        3.87k  ██           16.1%                                                                     │
 │    task 2758972        3.78k  ██           15.7%                                                                     │
 │    task 2758973           43  ▏            0.18%                                                                     │
 │  I/O syscalls    401 calls        2.68ms inside them        256ns █▇▆▆▂▂▃▃▁ 131µs       ≥58.3ms  ~low det degraded x2│
 │    task 2758953       2.61ms  ████████████ 97.3%                                                                     │
-│    task 2758974       71.5µs  ▏            2.67%                                                                     │
+│    2758974 Thread…    71.5µs  ▏            2.67%                                                                     │
 │    bytes read and written: on the raw rows only, which this run did not keep                                         │
+│  network         28.3MiB moved    28.3MiB out, 1.76KiB in   ▁ ▅▅▅▅▅▅▅▅█▅█ █ ▅▅▅▅▅▅ █    ≥55.2ms  ~low det degraded x2│
+│    176 socket calls                                                                                                  │
 │  retransmits     0 sent again     machine-wide              a total only                 ≥367µs  12 late ~low det    │
 │  GPU memory      0B peak          of 692MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁     1.95ms                      │
 │  GPU time        refused: no collector is written for `gpu.kernel` on backend `vendor:cupti` yet                     │
 │  energy          152J machine     53.6W on average          ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇████     ≥75.0µs                      │
 │    ≈ the target's       109J  an estimate, not a measurement: its share of the machine's busy cpu, 2.79s of 3.91s    │
 │                                                                                                                      │
-│  to know all of this: ≥81.3ms of omn's cpu, ≥2.91% of what the target spent                                          │
+│  to know all of this: ≥137ms of omn's cpu, ≥4.89% of what the target spent                                           │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via fs:proc -- cpu time, per thread                                                                    │
@@ -34,7 +36,5 @@ omn top │ fixture http-server │ 2.84s                             view: snap
 │· own account: the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks  │
 │where it could not be read, of 2758953 and of every process it started while they ran, and getrusage(RUSAGE_CHILDREN) │
 │in microseconds once it was reaped)                                                                                   │
-│· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│
-│own account's                                                                                                         │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line

@@ -68,6 +68,15 @@ pub const NEEDS: &[Need] = &[
         why: "bytes read and written, and their latency as the program saw it",
     },
     Need {
+        source: "net.socket",
+        mode: "trace",
+        emit: &["raw", "hist"],
+        keys: &[],
+        stack: None,
+        scope: Scope::Target,
+        why: "network volume: bytes sent and received through the target's sockets",
+    },
+    Need {
         source: "net.tcp.retransmit",
         mode: "trace",
         emit: &["summary"],
@@ -227,6 +236,12 @@ const ITEMS: &[ItemSpec] = &[
         goto: Some("flows"),
     },
     ItemSpec {
+        resource: "network",
+        label: "net.socket",
+        source: "net.socket",
+        goto: Some("flows"),
+    },
+    ItemSpec {
         resource: "retransmits",
         label: "net.tcp.retransmit@system",
         source: "net.tcp.retransmit",
@@ -268,6 +283,8 @@ struct Sheet {
     live: bool,
     /// No target: the run watched the machine.
     machine_run: bool,
+    /// Nothing yet says whether the run has a target.
+    undecided: bool,
     focus: Focus,
 }
 
@@ -288,8 +305,11 @@ enum State {
 struct Served {
     /// The figure itself, short.
     amount: String,
-    /// The one number the amount is, for a comparison of two runs.
+    /// The one number compared between two runs.
     value: f64,
+    /// How the comparison prints `value`, where the amount is another
+    /// number; `None` when the amount is `value` itself.
+    compared_as: Option<String>,
     /// The rate, a share, or what the figure is a part of.
     rate: Vec<Span<'static>>,
     /// The line's shape over the run: a sparkline, a histogram, or a word.
@@ -298,6 +318,9 @@ struct Served {
     /// is unknown; `None` while live.
     cost: Option<(u64, bool)>,
     trust: Trust,
+    /// Nothing of the focused task: the cost and the trust are the whole
+    /// result's, not the task's, so they are not drawn beside the `--`.
+    blank: bool,
     /// Lines under it: per task, the split, the estimate.
     subs: Vec<Line<'static>>,
     /// The detail pane when the line is selected.
@@ -789,7 +812,12 @@ impl Sheet {
                 .filter(|cpu| *cpu > 0)
                 .max()
         };
-        let machine_run = tasks.is_empty() && observed(false) == observed(true);
+        // A run on the machine has no task, and its own account is the
+        // machine's. Neither account known -- a live run before its end, no
+        // task-keyed event yet -- says nothing either way.
+        let undecided = tasks.is_empty() && observed(false).is_none();
+        let machine_run =
+            tasks.is_empty() && observed(false).is_some() && observed(false) == observed(true);
         let context = Context {
             data,
             focus,
@@ -827,6 +855,7 @@ impl Sheet {
             },
             live: data.live.is_some(),
             machine_run,
+            undecided,
             focus: focus.clone(),
             tasks,
         }
@@ -900,6 +929,7 @@ impl Context<'_> {
             "mem.rss" => self.held(results, style),
             "mem.faults" => self.faults(results, style),
             "io.syscall" => self.syscalls(results, style),
+            "net.socket" => self.network(results, style),
             "net.tcp.retransmit@system" => self.retransmits(results),
             "gpu.mem" => self.gpu_memory(results, style),
             "gpu.kernel" => self.gpu_time(results, style),
@@ -912,6 +942,7 @@ impl Context<'_> {
             served.amount = "--".to_owned();
             served.rate.clear();
             served.graph = Graph::Words("");
+            served.blank = true;
             served.subs = vec![aside(format!(
                 "nothing of {} in this result: its series are keyed {}",
                 self.focus.describe(),
@@ -1037,6 +1068,8 @@ impl Context<'_> {
                 .unwrap_or_default(),
             graph: self.spark(results, "ns", Shape::Delta, true, Scale::Zero),
             cost: None,
+            compared_as: None,
+            blank: false,
             trust: Trust::clean(),
             subs,
             detail,
@@ -1046,7 +1079,17 @@ impl Context<'_> {
     /// A level: memory held, on the host or on the device.
     fn held(&self, results: &[&Results], style: Style) -> Served {
         let stats = stats(results, "bytes", true, self.focus);
-        let peak: f64 = stats.values().map(|stat| stat.max).fold(0.0, |a, b| a + b);
+        // Several series peak at different times: their sum's peak is read
+        // over time, never the sum of each one's own peak.
+        let series = points(self.data, results, "bytes", true, self.focus);
+        let (peak, summed_maxima) = if stats.len() > 1 && series.iter().any(|s| !s.is_empty()) {
+            (peak_of_levels(&series), false)
+        } else {
+            (
+                stats.values().map(|stat| stat.max).fold(0.0, |a, b| a + b),
+                stats.len() > 1,
+            )
+        };
         let first: f64 = stats
             .values()
             .map(|stat| stat.first.unwrap_or(stat.min))
@@ -1072,11 +1115,18 @@ impl Context<'_> {
             rate,
             graph: self.spark(results, "bytes", Shape::Level, true, Scale::Span),
             cost: None,
+            compared_as: None,
+            blank: false,
             trust: Trust::clean(),
             subs: per_task(&stats, |stat| stat.max, units::bytes, self.tasks, style, 4),
             detail: vec![Line::from(format!(
-                "· the peak is the highest level read; it went from {} at the first read to {} \
-                 at the last",
+                "· the peak is {}; it went from {} at the first read to {} at the last",
+                if summed_maxima {
+                    "at most the sum of each series' own highest level, which no series over \
+                     time was kept to narrow"
+                } else {
+                    "the highest level read"
+                },
                 units::bytes(first),
                 units::bytes(last)
             ))],
@@ -1107,6 +1157,8 @@ impl Context<'_> {
                 Graph::Words("a total only")
             },
             cost: None,
+            compared_as: None,
+            blank: false,
             trust: Trust::clean(),
             subs: per_task(&stats, |stat| stat.sum, units::count, self.tasks, style, 4),
             detail: vec![Line::from(
@@ -1162,46 +1214,168 @@ impl Context<'_> {
             3,
         );
         // The bytes are on each row, never on the aggregates.
-        let (mut read, mut written, mut rows) = (0.0, 0.0, 0);
+        let (mut read, mut written, mut neither, mut rows) = (0.0, 0.0, 0.0, 0);
         for one in results {
             for event in one.events() {
                 if !keeps(&event_key(&event.keys), self.focus) {
                     continue;
                 }
                 let bytes = event.number("bytes").unwrap_or(0.0);
+                // `vfs.rs` says "unknown" for an op it does not recognise:
+                // those bytes went one way or the other, and neither figure
+                // may claim them.
                 match event.attr("op").and_then(|op| op.as_str()) {
                     Some("write") => written += bytes,
-                    _ => read += bytes,
+                    Some("read") => read += bytes,
+                    _ => neither += bytes,
                 }
                 rows += 1;
             }
         }
         if rows > 0 {
+            let mut text = format!("read, {} written", units::bytes(written));
+            if neither > 0.0 {
+                text.push_str(&format!(
+                    ", {} by calls of no known direction",
+                    units::bytes(neither)
+                ));
+            }
             subs.push(note_line(
                 "bytes",
                 Span::styled(format!("{:>9}", units::bytes(read)), style),
-                Span::styled(format!("read, {} written", units::bytes(written)), style),
+                Span::styled(text, style),
             ));
         } else {
             subs.push(aside(
                 "bytes read and written: on the raw rows only, which this run did not keep".into(),
             ));
         }
+        let span = match &graph {
+            Graph::Hist(_, low, high) => format!(
+                ": {} to {}",
+                units::duration(*low as f64),
+                units::duration(*high as f64)
+            ),
+            _ => String::new(),
+        };
         Served {
             amount: format!("{} calls", units::count(calls)),
+            // Two runs are compared on the time inside the calls, the cost;
+            // the comparison says so rather than print it beside the calls.
             value: inside,
+            compared_as: Some(format!("{} inside", units::duration(inside))),
             rate: vec![Span::styled(
                 format!("{} inside them", units::duration(inside)),
                 style,
             )],
             graph,
             cost: None,
+            blank: false,
             trust: Trust::clean(),
             subs,
-            detail: vec![Line::from(
+            detail: vec![Line::from(format!(
                 "· the time inside them is exact, each kernel row carrying its sum; the \
-                 distribution's buckets are log2-wide, from the shortest call to the longest",
+                 distribution's buckets are log2-wide, from the shortest call to the longest{span}"
+            ))],
+        }
+    }
+
+    /// The bytes through the target's sockets. Each `net.socket` row stands
+    /// for every call of one bucket, and its `bytes` is already their sum:
+    /// never weighted again.
+    fn network(&self, results: &[&Results], style: Style) -> Served {
+        let kept = results.iter().any(|one| one.output("raw").is_some());
+        let opened = self.data.opened_ns();
+        let (mut sent, mut received, mut neither, mut calls) = (0.0, 0.0, 0.0, 0.0);
+        let mut by_key: BTreeMap<String, Stat> = BTreeMap::new();
+        let mut series: BTreeMap<String, Vec<(u64, f64)>> = BTreeMap::new();
+        for one in results {
+            for event in one.events() {
+                let key = event_key(&event.keys);
+                if !keeps(&key, self.focus) {
+                    continue;
+                }
+                let bytes = event.number("bytes").unwrap_or(0.0);
+                match event.attr("op").and_then(|op| op.as_str()) {
+                    Some("send") => sent += bytes,
+                    Some("recv") => received += bytes,
+                    _ => neither += bytes,
+                }
+                calls += event
+                    .number("count")
+                    .or(event.number("weight"))
+                    .unwrap_or(1.0);
+                by_key.entry(key.clone()).or_default().sum += bytes;
+                series
+                    .entry(key)
+                    .or_default()
+                    .push((event.ts_ns.saturating_sub(opened), bytes));
+            }
+        }
+        let total = sent + received + neither;
+        let detail = vec![
+            Line::from(
+                "· receives are timed at sock_recvmsg for every family; sends for inet, inet6 \
+                 and unix sockets only, and neither sendfile, splice nor io_uring is here",
+            ),
+            Line::from(
+                "· the bytes are summed over the calls that returned a count; a receive's \
+                 time includes its wait for the peer, so the volume is the line, not the time",
+            ),
+        ];
+        if !kept {
+            return Served {
+                amount: "--".to_owned(),
+                value: 0.0,
+                compared_as: None,
+                rate: Vec::new(),
+                graph: Graph::Words(""),
+                cost: None,
+                blank: false,
+                trust: Trust::clean(),
+                subs: vec![aside(
+                    "bytes sent and received: on the raw rows only, which this run did not keep"
+                        .into(),
+                )],
+                detail,
+            };
+        }
+        let series: Vec<Vec<(u64, f64)>> = series.into_values().collect();
+        Served {
+            amount: format!("{} moved", units::bytes(total)),
+            value: total,
+            compared_as: None,
+            rate: vec![Span::styled(
+                format!("{} out, {} in", units::bytes(sent), units::bytes(received)),
+                style,
             )],
+            graph: if series.is_empty() {
+                Graph::Words("no socket call")
+            } else {
+                Graph::Spark(
+                    bins(&series, self.wall_ns, GRAPH_CELLS, Shape::Occurrence),
+                    Scale::Zero,
+                )
+            },
+            cost: None,
+            blank: false,
+            trust: Trust::clean(),
+            subs: {
+                let mut subs =
+                    per_task(&by_key, |stat| stat.sum, units::bytes, self.tasks, style, 3);
+                if calls > 0.0 {
+                    let mut text = format!("{} socket calls", units::count(calls));
+                    if neither > 0.0 {
+                        text.push_str(&format!(
+                            "; {} by calls of no known direction",
+                            units::bytes(neither)
+                        ));
+                    }
+                    subs.push(aside(text));
+                }
+                subs
+            },
+            detail,
         }
     }
 
@@ -1228,6 +1402,8 @@ impl Context<'_> {
                 Graph::Words("a total only")
             },
             cost: None,
+            compared_as: None,
+            blank: false,
             trust: Trust::clean(),
             subs: Vec::new(),
             detail: vec![Line::from(
@@ -1297,6 +1473,8 @@ impl Context<'_> {
             )],
             graph: self.spark(results, "duration_ns", Shape::Occurrence, true, Scale::Zero),
             cost: None,
+            compared_as: None,
+            blank: false,
             trust: Trust::clean(),
             subs,
             detail: Vec::new(),
@@ -1353,11 +1531,37 @@ impl Context<'_> {
                 .unwrap_or_default(),
             graph: self.spark(results, "joules", Shape::Delta, false, Scale::Zero),
             cost: None,
+            compared_as: None,
+            blank: false,
             trust: Trust::clean(),
             subs,
             detail,
         }
     }
+}
+
+/// The highest sum of several levels, each held from its point until its
+/// next: the peak of what they held together.
+fn peak_of_levels(series: &[Vec<(u64, f64)>]) -> f64 {
+    let mut changes: Vec<(u64, usize, f64)> = series
+        .iter()
+        .enumerate()
+        .flat_map(|(index, points)| points.iter().map(move |(at, value)| (*at, index, *value)))
+        .collect();
+    changes.sort_by_key(|(at, _, _)| *at);
+    let mut held = vec![0.0; series.len()];
+    let mut peak: f64 = 0.0;
+    let mut at = 0;
+    while at < changes.len() {
+        // Every change at one instant before the sum is read.
+        let now = changes[at].0;
+        while at < changes.len() && changes[at].0 == now {
+            held[changes[at].1] = changes[at].2;
+            at += 1;
+        }
+        peak = peak.max(held.iter().sum());
+    }
+    peak
 }
 
 /// Whether any series or event of these results is the focus's.
@@ -1566,6 +1770,7 @@ fn title_of(sheet: &Sheet) -> String {
     let who = match (sheet.focus.tid.or(sheet.focus.pid), sheet.tasks.as_slice()) {
         (Some(tid), _) => named(tid),
         (None, _) if sheet.machine_run => "the machine".to_owned(),
+        (None, _) if sheet.undecided => "the target or the machine".to_owned(),
         (None, tasks) => match tasks {
             [(tid, Some(comm))] => format!("{comm} (task {tid})"),
             [(tid, None)] => format!("task {tid}"),
@@ -1664,13 +1869,17 @@ fn item_line(
                 graph_spans(&served.graph, columns.graph, style),
                 columns.graph,
             ));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                format!("{:>w$}", cost_text(served.cost), w = columns.cost - 1),
-                Style::new().fg(palette::COST),
-            ));
-            spans.push(Span::raw("  "));
-            spans.extend(served.trust.badges());
+            // Nothing of the focused task: what the whole result cost and how
+            // far it is trusted are not this task's, so they are not drawn.
+            if !served.blank {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    format!("{:>w$}", cost_text(served.cost), w = columns.cost - 1),
+                    Style::new().fg(palette::COST),
+                ));
+                spans.push(Span::raw("  "));
+                spans.extend(served.trust.badges());
+            }
         }
     }
     Line::from(spans)
@@ -1691,7 +1900,10 @@ fn compared(this: &Served, theirs: &Served) -> Vec<Span<'static>> {
         style = style.fg(colour);
     }
     vec![
-        Span::styled(format!("{} ", theirs.amount), theirs.trust.style()),
+        Span::styled(
+            format!("{} ", theirs.compared_as.as_ref().unwrap_or(&theirs.amount)),
+            theirs.trust.style(),
+        ),
         Span::styled(
             if ratio.is_finite() {
                 format!("×{ratio:.2}")
@@ -1726,23 +1938,37 @@ fn graph_spans(graph: &Graph, width: usize, style: Style) -> Vec<Span<'static>> 
         Graph::Hist(counts, low, high) => {
             let low_text = units::duration(*low as f64);
             let high_text = units::duration(*high as f64);
-            let room = width
-                .saturating_sub(low_text.chars().count() + high_text.chars().count() + 2)
-                .max(1);
-            let shown: Vec<Option<f64>> = counts
-                .iter()
-                .take(room)
-                .map(|count| Some(*count as f64))
-                .collect();
-            let bars: String = sparkline(&shown, Scale::Zero)
+            let labels = low_text.chars().count() + high_text.chars().count() + 2;
+            // Adjacent buckets added together until every one of them fits,
+            // so a tail is never cut off; the bounds beside the bars while
+            // they leave a few cells for them, else the bars alone (the
+            // detail names the bounds).
+            let labelled = width >= labels + counts.len().min(6);
+            let room = if labelled {
+                width - labels
+            } else {
+                width.max(1)
+            };
+            let shown: Vec<u64> = if counts.len() <= room {
+                counts.clone()
+            } else {
+                let per = counts.len().div_ceil(room);
+                counts.chunks(per).map(|chunk| chunk.iter().sum()).collect()
+            };
+            let values: Vec<Option<f64>> = shown.iter().map(|count| Some(*count as f64)).collect();
+            let bars: String = sparkline(&values, Scale::Zero)
                 .chars()
-                .zip(counts)
+                .zip(&shown)
                 .map(|(bar, count)| if *count == 0 { ' ' } else { bar })
                 .collect();
+            let bars = Span::styled(bars, style.fg(palette::ACCENT));
+            if !labelled {
+                return vec![bars];
+            }
             let quiet = Style::new().add_modifier(Modifier::DIM);
             vec![
                 Span::styled(format!("{low_text} "), quiet),
-                Span::styled(bars, style.fg(palette::ACCENT)),
+                bars,
                 Span::styled(format!(" {high_text}"), quiet),
             ]
         }
@@ -1793,16 +2019,21 @@ fn cost_lines(sheet: &Sheet) -> Vec<Line<'static>> {
                     style,
                 ));
             }
+            let mut lines = vec![Line::from(spans)];
             if unknown {
-                return vec![
-                    Line::from(spans),
-                    aside(
-                        "a lower bound: some collectors' time inside the target is not timed here; each \
-                         line's detail says which"
-                            .into(),
-                    ),
-                ];
+                lines.push(aside(
+                    "a lower bound: some collectors' time inside the target is not timed here; each \
+                     line's detail says which"
+                        .into(),
+                ));
             }
+            if !sheet.focus.is_empty() {
+                lines.push(aside(format!(
+                    "the whole run's, not {}'s: a collector's time is not split per task",
+                    sheet.focus.describe()
+                )));
+            }
+            return lines;
         }
     }
     vec![Line::from(spans)]
@@ -1914,13 +2145,226 @@ mod tests {
                 ..Focus::default()
             },
         );
-        let all = line(&whole, "memory faulted").value;
-        let one = line(&narrowed, "memory faulted").value;
-        assert!(one > 0.0 && one < all, "{one} of {all}");
-        assert_eq!(
-            line(&whole, "energy").value,
-            line(&narrowed, "energy").value
+        // Every per-task line counts no more of the task than of the whole,
+        // or says it holds nothing of it.
+        for resource in [
+            "cpu time",
+            "memory held",
+            "memory faulted",
+            "I/O syscalls",
+            "network",
+            "GPU memory",
+        ] {
+            let all = line(&whole, resource);
+            let one = line(&narrowed, resource);
+            if one.blank {
+                assert_eq!(one.amount, "--", "{resource}");
+                assert!(words(&one.subs).contains("nothing of"), "{resource}");
+                continue;
+            }
+            assert!(
+                one.value <= all.value,
+                "{resource}: {} of {}",
+                one.value,
+                all.value
+            );
+        }
+        // Where the task did hold some, its share is drawn, not a zero; and
+        // where others held some too, it is less than the whole.
+        for resource in ["memory faulted", "I/O syscalls", "network"] {
+            let one = line(&narrowed, resource);
+            assert!(!one.blank && one.value > 0.0, "{resource}: {}", one.value);
+        }
+        for resource in ["memory faulted", "I/O syscalls"] {
+            let (all, one) = (line(&whole, resource), line(&narrowed, resource));
+            assert!(
+                one.value < all.value,
+                "{resource}: {} of {}",
+                one.value,
+                all.value
+            );
+        }
+        // The process-keyed sources (`fs:proc`) carry the process alone:
+        // nothing of one of its threads, said rather than drawn as a zero.
+        for resource in ["cpu time", "memory held", "GPU memory"] {
+            assert!(line(&narrowed, resource).blank, "{resource}");
+        }
+        // The machine's lines stay the machine's.
+        for resource in ["retransmits", "energy"] {
+            assert_eq!(
+                line(&whole, resource).value,
+                line(&narrowed, resource).value
+            );
+        }
+    }
+
+    /// A line with nothing of the focused task draws neither the whole
+    /// result's cost nor its trust beside its `--`, and the sheet's total
+    /// says it is the whole run's.
+    #[test]
+    fn a_line_without_the_focus_claims_no_cost() {
+        let data = fixture("http-server");
+        let tasks = tasks_of(&data);
+        let focus = Focus {
+            tid: Some(tasks[tasks.len() - 1].0),
+            ..Focus::default()
+        };
+        let sheet = Sheet::of(&data, &focus);
+        let (index, item) = sheet
+            .items
+            .iter()
+            .enumerate()
+            .find(|(_, item)| matches!(&item.state, State::Served(s) if s.blank))
+            .expect("a line with nothing of the task");
+        let columns = Columns::for_width(118);
+        let drawn = words(&[item_line(item, None, &columns, false)]);
+        let cost = cost_text(match &item.state {
+            State::Served(served) => served.cost,
+            _ => unreachable!(),
+        });
+        assert!(!drawn.contains(&cost), "{index}: {drawn}");
+        assert!(words(&cost_lines(&sheet)).contains("not split per task"));
+    }
+
+    /// Two runs' I/O lines are compared on the time inside the calls, and
+    /// the comparison prints that time, not the calls beside its ratio.
+    #[test]
+    fn the_comparison_prints_the_figure_its_ratio_is_of() {
+        let light = sheet("cpython-hot");
+        let heavy = sheet("cpython-hot-heavier");
+        let (this, theirs) = (line(&light, "I/O syscalls"), line(&heavy, "I/O syscalls"));
+        let text = words(&[Line::from(compared(this, theirs))]);
+        let ratio = format!("×{:.2}", theirs.value / this.value);
+        assert!(text.contains(&ratio), "{text}");
+        assert!(text.contains("inside"), "{text}");
+        assert!(!text.contains("calls"), "{text}");
+    }
+
+    /// The network line is the bytes the socket rows carry, each row's
+    /// already summed over its calls, split by direction.
+    #[test]
+    fn network_volume_is_the_rows_bytes() {
+        let data = fixture("http-server");
+        let results = data.first("net.socket").unwrap();
+        let (mut sent, mut received) = (0.0, 0.0);
+        for event in results.events() {
+            let bytes = event.number("bytes").unwrap();
+            match event.attr("op").and_then(|op| op.as_str()) {
+                Some("send") => sent += bytes,
+                _ => received += bytes,
+            }
+        }
+        let sheet = self::sheet("http-server");
+        let network = line(&sheet, "network");
+        assert_eq!(network.value, sent + received);
+        assert!(sent > 0.0 && received > 0.0, "{sent} {received}");
+        let rate = words(&[Line::from(network.rate.clone())]);
+        assert!(
+            rate.contains(&format!("{} out", units::bytes(sent))),
+            "{rate}"
         );
+        // A program with no socket says so rather than draw a zero shape.
+        let quiet = self::sheet("cpython-hot");
+        assert!(matches!(
+            line(&quiet, "network").graph,
+            Graph::Words("no socket call")
+        ));
+    }
+
+    /// Levels held together peak at the highest sum at any one time, not at
+    /// the sum of each one's own peak.
+    #[test]
+    fn levels_peak_together_not_each() {
+        let one = vec![(0, 10.0), (10, 1.0)];
+        let other = vec![(0, 1.0), (10, 10.0)];
+        assert_eq!(peak_of_levels(&[one, other]), 11.0);
+        assert_eq!(peak_of_levels(&[vec![(0, 3.0), (5, 7.0)]]), 7.0);
+    }
+
+    /// A narrow column draws every bucket of the distribution, added
+    /// together, rather than cutting its tail.
+    #[test]
+    fn a_narrow_distribution_keeps_its_tail() {
+        let mut counts = vec![0; 20];
+        counts[0] = 5;
+        counts[19] = 1;
+        let graph = Graph::Hist(counts, 512, 512 << 20);
+        for width in [8, 12, 24] {
+            let text = words(&[Line::from(graph_spans(&graph, width, Style::new()))]);
+            let bars: String = text.chars().filter(|c| ('▁'..='█').contains(c)).collect();
+            assert_eq!(bars.chars().count(), 2, "{width}: {text:?}");
+            assert!(!text.contains('…'), "{width}: {text:?}");
+            assert!(text.chars().count() <= width, "{width}: {text:?}");
+        }
+    }
+
+    /// An unrecognised syscall op adds to neither read nor written.
+    #[test]
+    fn bytes_of_no_known_direction_are_neither_read_nor_written() {
+        let row = |op: &str, bytes| {
+            event(
+                1,
+                7,
+                vec![
+                    ("lat_ns", AttrValue::Uint(1024)),
+                    ("count", AttrValue::Uint(1)),
+                    ("bytes", AttrValue::Uint(bytes)),
+                    ("op", AttrValue::Text(op.into())),
+                ],
+            )
+        };
+        let data = Data {
+            run: Run {
+                results: vec![Results {
+                    label: "io.syscall".into(),
+                    source: "io.syscall".into(),
+                    outputs: vec![Output::Raw {
+                        events: vec![row("read", 100), row("unknown", 30)],
+                    }],
+                    ..Results::default()
+                }],
+                ..Run::default()
+            },
+            live: Some(Live {
+                opened_ns: 0,
+                now_ns: 10,
+            }),
+            ..Data::default()
+        };
+        let sheet = Sheet::of(&data, &Focus::default());
+        let text = words(&line(&sheet, "I/O syscalls").subs);
+        assert!(text.contains("100B"), "{text}");
+        assert!(
+            text.contains("30B by calls of no known direction"),
+            "{text}"
+        );
+    }
+
+    /// A live run with no task yet and no account says neither "the
+    /// machine" nor a task.
+    #[test]
+    fn a_live_run_without_tasks_does_not_claim_the_machine() {
+        let data = Data {
+            run: Run {
+                results: vec![Results {
+                    label: "mem.rss".into(),
+                    source: "mem.rss".into(),
+                    outputs: vec![Output::Raw { events: Vec::new() }],
+                    ..Results::default()
+                }],
+                ..Run::default()
+            },
+            live: Some(Live {
+                opened_ns: 0,
+                now_ns: 10,
+            }),
+            ..Data::default()
+        };
+        let sheet = Sheet::of(&data, &Focus::default());
+        assert!(!sheet.machine_run);
+        let title = title_of(&sheet);
+        assert!(title.contains("the target or the machine"), "{title}");
+        assert!(title_of(&self::sheet("machine")).contains("the machine cost"));
     }
 
     /// A refused source is said on its own line, in the refusal's words.

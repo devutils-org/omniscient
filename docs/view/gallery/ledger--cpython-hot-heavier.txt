@@ -10,13 +10,14 @@ omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snap
 │  memory faulted  3.06k faults     385/s                     a total only                ≥1.73ms  80 late             │
 │  I/O syscalls    82 calls         170µs inside them         256ns ▂▂█▂▁▂ 16.4µs         ≥71.6ms  ~low det degraded x2│
 │    bytes read and written: on the raw rows only, which this run did not keep                                         │
+│  network         0B moved         0B out, 0B in             no socket call              ≥66.4ms  ~low det degraded x2│
 │  retransmits     0 sent again     machine-wide              a total only                 ≥436µs  20 late ~low det    │
 │  GPU memory      0B peak          of 692MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁     2.19ms                      │
 │  GPU time        refused: no collector is written for `gpu.kernel` on backend `vendor:cupti` yet                     │
 │  energy          441J machine     55.6W on average          ▇▇▇▇▇▇▇▇▇▇▇▇▇██▇███▇▇▇██    ≥75.4µs                      │
 │    ≈ the target's       345J  an estimate, not a measurement: its share of the machine's busy cpu, 7.85s of 10.0s    │
 │                                                                                                                      │
-│  to know all of this: ≥77.9ms of omn's cpu, ≥0.99% of what the target spent                                          │
+│  to know all of this: ≥144ms of omn's cpu, ≥1.84% of what the target spent                                           │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via fs:proc -- cpu time, per thread                                                                    │
@@ -30,7 +31,6 @@ omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snap
 │in microseconds once it was reaped)                                                                                   │
 │· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│
 │own account's                                                                                                         │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

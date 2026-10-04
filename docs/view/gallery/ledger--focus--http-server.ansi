@@ -1,23 +1,26 @@
 [0m[1momn top[0m │ fixture http-server │ 2.84s │ [0m[32mfocus: tid 2758974[0m        [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥16.1%[0m[35m │ target 92.0% cpu[0m [0m
  1 system  2 flame [0m[1;7m 3 ledger [0m 4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows                                 [0m
-┌ ledger -- [0m[1mwhat task 2758974 cost over 2.84s of wall-clock[0m ───────────────────────────────────────────────────────────┐[0m
+┌ ledger -- [0m[1mwhat Thread-1 (proce (task 2758974) cost over 2.84s of wall-clock[0m ─────────────────────────────────────────┐[0m
 │[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
-│  [0m[1mcpu time        [0m[2m--[0m                                                                  [0m[35m     166µs[0m  [0m[36m~low det[0m [0m[33mdegraded[0m   │[0m
+│  [0m[1mcpu time        [0m[2m--[0m                                                                                                  │[0m
 │[0m[2;3m    nothing of tid 2758974 in this result: its series are keyed task:2758953[0m                                          │[0m
-│  [0m[1mmemory held     [0m--                                                                  [0m[35m    2.04ms[0m                      │[0m
+│  [0m[1mmemory held     [0m--                                                                                                  │[0m
 │[0m[2;3m    nothing of tid 2758974 in this result: its series are keyed task:2758953[0m                                          │[0m
 │  [0m[1mmemory faulted  [0m16.3k faults     5.74k/s                   [0m[2;3ma total only[0m             [0m[35m   ≥18.4ms[0m  [0m[33m30 late[0m             │[0m
 │[0m[1;32m▸ I/O syscalls    [0m[2m26 calls[0m         [0m[2m71.5µs inside them[0m        [0m[2m2.05µs [0m[2;32m█[0m[2m 4.10µs[0m          [0m[35m   ≥58.3ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
 │[0m[2;3m    bytes read and written: on the raw rows only, which this run did not keep[0m                                         │[0m
+│  [0m[1mnetwork         [0m[2m28.3MiB moved[0m    [0m[2m28.3MiB out, 1.76KiB in[0m   [0m[2;32m▁ ▅▅▅▅▅▅▅▅█▅█ █ ▅▅▅▅▅▅ █[0m [0m[35m   ≥55.2ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
+│[0m[2;3m    176 socket calls[0m                                                                                                  │[0m
 │  [0m[1mretransmits     [0m[2m0 sent again[0m     [0m[3mmachine-wide[0m              [0m[2;3ma total only[0m             [0m[35m    ≥367µs[0m  [0m[33m12 late[0m [0m[36m~low det[0m    │[0m
-│  [0m[1mGPU memory      [0m--                                                                  [0m[35m    1.95ms[0m                      │[0m
+│  [0m[1mGPU memory      [0m--                                                                                                  │[0m
 │[0m[2;3m    nothing of tid 2758974 in this result: its series are keyed task:2758953[0m                                          │[0m
 │  [0m[1mGPU time        [0m[31mrefused: no collector is written for `gpu.kernel` on backend `vendor:cupti` yet[0m                     │[0m
 │  [0m[1menergy          [0m152J machine     53.6W on average          [0m[32m▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇████ [0m [0m[35m   ≥75.0µs[0m                      │[0m
 │[0m[2;3m    no estimate for one task: the own account it would be charged by is the whole target's[0m                            │[0m
 │                                                                                                                      │[0m
-│[0m[1m  to know all of this[0m[35m: ≥81.3ms of omn's cpu, ≥2.91% of what the target spent[0m                                          │[0m
+│[0m[1m  to know all of this[0m[35m: ≥137ms of omn's cpu, ≥4.89% of what the target spent[0m                                           │[0m
 │[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
+│[0m[2;3m    the whole run's, not tid 2758974's: a collector's time is not split per task[0m                                      │[0m
 │[0m[2;32m I/O syscalls -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────[0m│[0m
 │[0m[1mio.syscall via bpf:fentry[0m -- bytes read and written, and their latency as the program saw it                          │[0m
 │· the source is not reproducible between two runs of the same workload                                                │[0m
@@ -29,10 +32,7 @@
 │[0m[35mrun: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl[0m       │[0m
 │[0m[35mkernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable[0m                 │[0m
 │· the time inside them is exact, each kernel row carrying its sum; the distribution's buckets are log2-wide, from the │[0m
-│shortest call to the longest                                                                                          │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
+│shortest call to the longest: 2.05µs to 4.10µs                                                                        │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

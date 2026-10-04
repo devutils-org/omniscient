@@ -10,13 +10,14 @@ omn top │ fixture sqlite-commits │ 4.97s                          view: snap
 │  memory faulted  219 faults       44/s                      a total only                 ≥198µs  51 late             │
 │  I/O syscalls    537 calls        3.98ms inside them        512ns ▁▂▄█▄▂ 32.8µs         ≥52.1ms  ~low det degraded x2│
 │    bytes read and written: on the raw rows only, which this run did not keep                                         │
+│  network         0B moved         0B out, 0B in             no socket call              ≥53.5ms  ~low det degraded x2│
 │  retransmits     0 sent again     machine-wide              a total only                 ≥176µs  46 late ~low det    │
 │  GPU memory      0B peak          of 692MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁      908µs                      │
 │  GPU time        refused: no collector is written for `gpu.kernel` on backend `vendor:cupti` yet                     │
 │  energy          342J machine     68.8W on average          ▅▆▆▆▆▆▆▇▇█████████▇▇▇▇▇▇    ≥33.9µs                      │
 │    ≈ the target's       123J  an estimate, not a measurement: its share of the machine's busy cpu, 4.52s of 12.6s    │
 │                                                                                                                      │
-│  to know all of this: ≥53.8ms of omn's cpu, ≥1.19% of what the target spent                                          │
+│  to know all of this: ≥107ms of omn's cpu, ≥2.37% of what the target spent                                           │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time via fs:proc -- cpu time, per thread                                                                    │
@@ -30,7 +31,6 @@ omn top │ fixture sqlite-commits │ 4.97s                          view: snap
 │in microseconds once it was reaped)                                                                                   │
 │· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│
 │own account's                                                                                                         │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

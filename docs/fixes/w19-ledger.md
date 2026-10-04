@@ -9,7 +9,8 @@ snapshots under `docs/view/gallery/ledger--*`, and `docs/view/ledger.md`.
 ## What landed
 
 - **`view/src/views/ledger.rs`**, replacing the stub. One line per resource
-  -- cpu time, memory held, memory faulted, I/O syscalls, retransmits, GPU
+  -- cpu time, memory held, memory faulted, I/O syscalls, network (added in
+  the review round), retransmits, GPU
   memory, GPU time, energy -- in six columns: amount, rate, a shape over the
   run (sparkline, or the syscalls' log2 latency distribution), what knowing
   the line cost `omn` (its collectors' `attributed_cpu_ns` plus
@@ -139,6 +140,64 @@ OMN_VIEW_BLESS=1 cargo test -p omn-view --lib ledger
 - **coordinator**: the fixtures re-recorded after cupti's merge, so
   `gpu.kernel` is served on one of them and the GPU time line is drawn on
   real data (a GPU workload fixture: `tests/gpu_workload.py`).
+
+## Review
+
+One fix round, after an adversarial review. Every finding was taken; none
+was judged wrong.
+
+- **defect -- the `--against` ratio of the I/O line was of another number
+  than the one beside it.** The line compares the time inside the calls
+  (`value`), but printed the second run's call count next to the ratio
+  (`82 calls ×0.96`). `Served` now carries `compared_as`, the figure the
+  comparison prints where the amount is another number: the I/O line reads
+  `170µs inside ×0.96`. The time stays the compared figure because it is
+  what the calls cost. Held by `the_comparison_prints_the_figure_its_ratio_is_of`;
+  the snapshot `ledger--against--cpython-hot-heavier` and
+  `docs/view/ledger.md` re-said.
+- **gap -- network volume was dropped without a word.** A **network** line
+  now sits before retransmits: the bytes sent and received through the
+  target's sockets, from `net.socket`'s rows (each row's `bytes` already
+  summed over its calls, so never weighted again), per task, with the
+  number of socket calls and a sparkline of bytes over the run; `enter`
+  opens `flows`. The need is `net.socket` `trace` `raw,hist` `target`, the
+  same request flows and heatmap make, so the fixtures already hold it and
+  one collector serves the three views; its row is added to
+  `docs/view/README.md`'s table (the ledger's own row, which
+  `tests/view_model.rs` holds to the code). On `http-server`: 28.3 MiB out,
+  1.76 KiB in, 176 calls, one thread. Held by `network_volume_is_the_rows_bytes`.
+  The sheet's total cost grows by that collector's cpu (on `cpython-hot`
+  ≥38.6 ms became ≥72.1 ms: a socket collector that watched no socket).
+- **nit -- the focus test checked less than its name.** It now walks every
+  per-task line (cpu, memory held, faulted, I/O, network, GPU memory): each
+  is no more than the whole or says it holds nothing of the task; faults and
+  I/O are strictly less; cpu, memory held and GPU memory are the `--` of a
+  process-keyed source; retransmits and energy unchanged.
+- **nit -- bytes of an `op` "unknown" were counted as read.** They are now
+  said apart ("by calls of no known direction") and added to neither; the
+  network line does the same for an op neither `send` nor `recv`. Held by
+  `bytes_of_no_known_direction_are_neither_read_nor_written`.
+- **nit -- the peak of several series was the sum of their maxima.** It is
+  now the highest of their sum at any one time (`peak_of_levels`, held by
+  `levels_peak_together_not_each`); with a summary and no series over time,
+  the sum of maxima is kept and the detail calls it "at most".
+- **nit -- a live run with no task and no account was titled "the
+  machine".** `machine_run` now needs the target's account to be known and
+  equal to the machine's; with neither known the title says "the target or
+  the machine". Held by `a_live_run_without_tasks_does_not_claim_the_machine`.
+- **nit -- a narrow column cut the latency distribution.** Adjacent log2
+  buckets are now added together until every bucket fits; the bounds stay
+  beside the bars while that leaves room, else the bars are drawn alone and
+  the detail names the bounds (it now always does). Held by
+  `a_narrow_distribution_keeps_its_tail` at 8, 12 and 24 cells.
+- **nit -- a `--` line under a focus drew the whole result's cost and
+  trust.** It draws neither now, and the sheet's total, under a focus, adds
+  that it is the whole run's: a collector's time is not split per task.
+  Held by `a_line_without_the_focus_claims_no_cost`; the snapshot
+  `ledger--focus--http-server` re-blessed (its title also names the thread,
+  `Thread-1 (proce`, from the socket rows' `comm`, truncated by the kernel).
+
+Every ledger snapshot was re-blessed for the network line.
 
 ## The last check
 

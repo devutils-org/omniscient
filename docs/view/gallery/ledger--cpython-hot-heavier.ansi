@@ -10,13 +10,14 @@
 │  [0m[1mmemory faulted  [0m3.06k faults     385/s                     [0m[2;3ma total only[0m             [0m[35m   ≥1.73ms[0m  [0m[33m80 late[0m             │[0m
 │  [0m[1mI/O syscalls    [0m[2m82 calls[0m         [0m[2m170µs inside them[0m         [0m[2m256ns [0m[2;32m▂▂█▂▁▂[0m[2m 16.4µs[0m      [0m[35m   ≥71.6ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
 │[0m[2;3m    bytes read and written: on the raw rows only, which this run did not keep[0m                                         │[0m
+│  [0m[1mnetwork         [0m[2m0B moved[0m         [0m[2m0B out, 0B in[0m             [0m[2;3mno socket call[0m           [0m[35m   ≥66.4ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
 │  [0m[1mretransmits     [0m[2m0 sent again[0m     [0m[3mmachine-wide[0m              [0m[2;3ma total only[0m             [0m[35m    ≥436µs[0m  [0m[33m20 late[0m [0m[36m~low det[0m    │[0m
 │  [0m[1mGPU memory      [0m0B peak          [0m[2mof 692MiB on the device[0m   [0m[32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m [0m[35m    2.19ms[0m                      │[0m
 │  [0m[1mGPU time        [0m[31mrefused: no collector is written for `gpu.kernel` on backend `vendor:cupti` yet[0m                     │[0m
 │  [0m[1menergy          [0m441J machine     55.6W on average          [0m[32m▇▇▇▇▇▇▇▇▇▇▇▇▇██▇███▇▇▇██[0m [0m[35m   ≥75.4µs[0m                      │[0m
 │    ≈ the target's  [0m[3m     345J[0m  [0m[2;3man estimate, not a measurement: its share of the machine's busy cpu, 7.85s of 10.0s[0m    │[0m
 │                                                                                                                      │[0m
-│[0m[1m  to know all of this[0m[35m: ≥77.9ms of omn's cpu, ≥0.99% of what the target spent[0m                                          │[0m
+│[0m[1m  to know all of this[0m[35m: ≥144ms of omn's cpu, ≥1.84% of what the target spent[0m                                           │[0m
 │[0m[2;3m    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which[0m           │[0m
 │[0m[2;32m cpu time -- ↑/↓ another line [0m[2m────────────────────────────────────────────────────────────────────────────────────────[0m│[0m
 │[0m[1mcpu.oncpu_time via fs:proc[0m -- cpu time, per thread                                                                    │[0m
@@ -30,7 +31,6 @@
 │in microseconds once it was reaped)                                                                                   │[0m
 │· machine busy: every cpu's time not idle (/proc/stat) over the same run, whoever spent it; the share beside it is the│[0m
 │own account's                                                                                                         │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

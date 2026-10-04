@@ -6,6 +6,7 @@
 │  [0m[1mmemory held     [0m[2;3mnot in this run: mem.rss was not asked for[0m                                                          │[0m
 │  [0m[1mmemory faulted  [0m[2;3mnot in this run: mem.faults was not asked for[0m                                                       │[0m
 │  [0m[1mI/O syscalls    [0m[2;3mnot in this run: io.syscall was not asked for[0m                                                       │[0m
+│  [0m[1mnetwork         [0m[2;3mnot in this run: net.socket was not asked for[0m                                                       │[0m
 │  [0m[1mretransmits     [0m[2;3mnot in this run: net.tcp.retransmit@system was not asked for[0m                                        │[0m
 │  [0m[1mGPU memory      [0m[2;3mnot in this run: gpu.mem was not asked for[0m                                                          │[0m
 │  [0m[1mGPU time        [0m[2;3mnot in this run: gpu.kernel was not asked for[0m                                                       │[0m
@@ -18,7 +19,6 @@
 │cpu.oncpu_time -- cpu time, per thread                                                                                │[0m
 │This run did not ask for it. `omn top` live asks for every line of the sheet; a recording made by another session     │[0m
 │holds what that session asked.                                                                                        │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
