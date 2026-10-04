@@ -3038,6 +3038,10 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
             )
         })
         .collect();
+    // A collector that broke the program it measured fails the live run as it
+    // fails `measure`'s, once the screen is given back and everything else is
+    // said and written.
+    let failures = failures(&collections);
     let assembled = assemble(catalog, &running, &ladder, &resolutions, collections).and_then(
         |(run, costs, served_by)| {
             let value = serde_json::to_value(&run)?;
@@ -3107,7 +3111,7 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
             directory.display()
         );
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(outcome(&failures))
 }
 
 /// Hands what the runner holds to the drawing thread, between rounds.

@@ -148,10 +148,12 @@ own: `cargo clippy --workspace --all-targets -- -D warnings` and
 - **`omn latency --runs N` with `--program-stderr`**: each launch truncates
   the file, so it holds the last run's stderr. Said nowhere yet; the triage
   driver is not this stream's.
-- **Helpers `omn` starts mid-run** (`nvidia-smi` in `gpu/nvml.rs` and
-  `gpu/mod.rs`, `curl` in `unwind.rs`): under the new meter they are
-  counted as the program's while they live and, once reaped, in the
-  children account. Short and rare against a program's run; not measured.
+- **The failure channel in triage** (`src/triage/engine.rs` runs
+  `run_all_within` and reads no `failure`): no playbook asks a GPU inside
+  reader today, so nothing reaches it yet. Filed to triage's owner below.
+- **A helper's orphan**: a process a helper leaves behind when it exits is
+  reparented to `omn` and is then weighed (and ended) as the program's.
+  Neither `curl` nor a container runtime's `inspect` leaves one.
 
 ## Privileged runs wanted
 
@@ -213,6 +215,74 @@ once, the whole request's window 46 us short of 750 ms; passed alone. If it
 recurs, the floor can be the duration less a poll (`>= 730_000_000`), since
 the window opens after the attach and the deadline counts from before it.
 
+### To triage's owner (`src/triage/**`): the failure channel
+
+`engine.rs` could read `failure` from its collections as `main.rs`'s
+`failures` does, and fail the triage the same way, once a playbook asks a
+source whose collector can break its program.
+
+### To views or process (`tests/view_live.rs`): the gallery and `process`
+
+`a_gallery_prints_every_view` fails on `main` at `2ba6626`, before this
+round's commits (checked with them stashed): the gallery at `100x20` does
+not show `process`. Not this stream's. Beside it, in the same run,
+`tests/view_workloads.rs::each_session_asks_its_views_sources_or_says_why_not`
+fails reading files alone (the ledger view needs `sched.offcpu`, which its
+workload's session does not ask and its manifest does not excuse): this
+round touches no view, session or manifest.
+
 ### To triage's owner (`src/triage/**`): `--program-stderr` and `--runs`
 
 Whether `omn latency --runs N` should write `FILE.<n>` per run, or append.
+
+## Review
+
+Two findings, both fixed.
+
+- **`top_live` read no failure** (`ce5cde2`, `src/main.rs`). Right: the
+  process view draws `gpu.*`, and `omn top -- <cuda program>` whose program
+  the injection library killed exited 0 with only the `degraded:` line.
+  `top_live` now takes `failures(&collections)` before `assemble` consumes
+  them and ends with `outcome(&failures)`, after the screen is given back,
+  the costs are said and `--out` is written: `error: <sentence>` per
+  failure, exit 1. **Reasoned**, not shown end to end: no collector can be
+  made to break its program here without a GPU; `outcome` is the function
+  `a_collector_that_broke_its_program_fails_the_run_once` holds, and
+  `tests/view_live.rs`'s headless runs still exit 0 (4 of 5 pass; the fifth
+  is the gallery's, failing on `main` before this round, above).
+- **The meter counted `omn`'s own helpers as the program's** (`c1ba7ba`,
+  `src/collect/{launch,task,mod}.rs`, `src/unwind.rs`, `src/request.rs`).
+  Right, and it fails in the tool's favour. The handoff named `nvidia-smi`
+  too; it is wrong there: `nvidia-smi` is run only by tests. The helpers
+  `omn` runs outside its tests are `curl` (debuginfod, up to 60 s) and a
+  container runtime's `inspect`. Both now go through
+  `launch::helper_output`, which runs a command as `Command::output` does
+  and:
+  - lists the helper while it runs (`helpers_running`), so the meter's walk
+    (`task::descendants_cpu(me, except)`) leaves it and its children out,
+    and so does `end_adopted`, which would otherwise stop and kill a
+    `curl` still running when a run ends, as an orphan;
+  - once it has exited, reads its whole usage with `waitid(WEXITED |
+    WNOWAIT)` -- the zombie's `rusage`, the amount the reap is about to add
+    to the children account -- adds it to `helpers_spent_ns`, then reaps.
+    The meter reads the children account first and the set-aside second,
+    so a helper reaped between the two reads weighs the program short by
+    it, never long (and the high water keeps the earlier, larger reading).
+  - The non-adopting meter's fallback, the children account once the
+    program is reaped, takes the set-aside out too.
+  **Shown**: `a_helper_s_cpu_is_set_aside_from_the_children_account` (a
+  helper burning 200 ms: the set-aside grows by at least that, the children
+  account by at least the set-aside, and stdout and stderr come back as
+  `output()` gives them) and
+  `a_process_left_out_of_the_descendants_cpu_takes_its_own_children_with_it`
+  (a shell left out takes the python child burning 300 ms under it: 0 ns).
+  Neither skipped here. **Not shown**: a run with a live `curl` mid-run;
+  no test makes `omn` fetch from a debuginfod server.
+
+The suite for this round, after `make` (capabilities granted):
+`cargo test --workspace --no-fail-fast` at `c1ba7ba`, 2674 passed, 13
+ignored, 3 failed -- the gallery's and the workloads' tests above, both on
+`main` already, and `join_engine`'s
+`another_namespaces_lo_is_not_credited_to_this_ones`, in the tally, which
+passed rerun alone once. `cargo clippy --workspace --all-targets -- -D
+warnings` and `cargo fmt --check` clean.

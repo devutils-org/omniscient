@@ -222,11 +222,9 @@ pub fn find_container(name: &str) -> Result<Container, String> {
     };
     let mut said = Vec::new();
     for runtime in &runtimes {
-        let output = match std::process::Command::new(runtime)
-            .args(["inspect", "--format", "{{.State.Pid}}", name])
-            .stdin(std::process::Stdio::null())
-            .output()
-        {
+        let mut inspect = std::process::Command::new(runtime);
+        inspect.args(["inspect", "--format", "{{.State.Pid}}", name]);
+        let output = match crate::collect::helper_output(&mut inspect) {
             Ok(output) => output,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
