@@ -465,6 +465,11 @@ pub struct StackCount {
     pub stack: u64,
     pub events: u64,
     pub total: f64,
+    /// The series the row counts, when the request asked for keys
+    /// (`--keys task`): one row per series and stack, so one stack id can
+    /// appear on several rows. Absent without keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series: Option<String>,
 }
 
 /// What a distribution built from a lossy run is missing, as `omn` says it.
