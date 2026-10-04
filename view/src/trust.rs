@@ -49,6 +49,62 @@ pub mod palette {
     pub const ACCENT: Color = Color::Green;
 }
 
+/// How full a resource is, as a colour: the gradient `system` and `process`
+/// draw usage in.
+///
+/// A resource's sparkline, bar and figure take its share of the capacity
+/// that exists -- cores, memory or a cgroup's limit, a device's busy time, a
+/// link's speed, the GPU's engines and VRAM -- green when it is free, through
+/// yellow, to red when it is full. That share is a measured fraction of a
+/// known bound, not a threshold someone chose, so the steps are even. A
+/// resource with no known capacity (energy, bytes on a device of unknown
+/// speed) is drawn in [`usage::NEUTRAL`] and its section says why.
+///
+/// The ramp is six steps of the 256-colour cube chosen to read on a dark and
+/// on a light background alike: no step is near-white or near-black.
+pub mod usage {
+    use ratatui::style::{Color, Style};
+
+    /// Free to full, in even steps of the share.
+    pub const RAMP: [Color; 6] = [
+        Color::Indexed(34),  // #00af00
+        Color::Indexed(106), // #87af00
+        Color::Indexed(178), // #d7af00
+        Color::Indexed(208), // #ff8700
+        Color::Indexed(202), // #ff5f00
+        Color::Indexed(160), // #d70000
+    ];
+
+    /// What a resource with no known capacity is drawn in.
+    pub const NEUTRAL: Color = Color::Indexed(67); // #5f87af
+
+    /// The colour of `fraction` of a capacity: `0` is free, `1` full. A
+    /// share past the capacity (a burst over a cgroup's limit) is full; one
+    /// that is not a number has no colour of its own.
+    pub fn colour(fraction: f64) -> Color {
+        if !fraction.is_finite() {
+            return NEUTRAL;
+        }
+        let steps = RAMP.len();
+        let index = (fraction.clamp(0.0, 1.0) * steps as f64) as usize;
+        RAMP[index.min(steps - 1)]
+    }
+
+    /// The colour of `value` against `capacity`, or [`NEUTRAL`] when the
+    /// capacity is not known.
+    pub fn of(value: f64, capacity: Option<f64>) -> Color {
+        match capacity {
+            Some(capacity) if capacity > 0.0 && capacity.is_finite() => colour(value / capacity),
+            _ => NEUTRAL,
+        }
+    }
+
+    /// [`of`] as a style.
+    pub fn style(value: f64, capacity: Option<f64>) -> Style {
+        Style::new().fg(of(value, capacity))
+    }
+}
+
 /// One reason a figure is not to be taken at face value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mark {
@@ -300,6 +356,19 @@ impl Trust {
         }
     }
 
+    /// The style of a figure drawn in a hue of its own (a usage colour):
+    /// the hue is kept whatever the trust, so honest data never greys the
+    /// screen out, and a figure that must not be read at face value is
+    /// underlined instead of dimmed, its badge beside it saying why.
+    pub fn hued(&self, colour: Color) -> Style {
+        let style = Style::new().fg(colour);
+        if self.dims() {
+            style.add_modifier(Modifier::UNDERLINED)
+        } else {
+            style
+        }
+    }
+
     /// The badges, separated by a space, for beside the figure.
     pub fn badges(&self) -> Vec<Span<'static>> {
         let mut spans = Vec::new();
@@ -322,6 +391,17 @@ impl Trust {
 /// badges after it.
 pub fn figure(text: impl Into<String>, trust: &Trust) -> Line<'static> {
     let mut spans = vec![Span::styled(text.into(), trust.style())];
+    let badges = trust.badges();
+    if !badges.is_empty() {
+        spans.push(Span::raw(" "));
+        spans.extend(badges);
+    }
+    Line::from(spans)
+}
+
+/// A figure in a hue of its own ([`Trust::hued`]) with its badges after it.
+pub fn figure_hued(text: impl Into<String>, trust: &Trust, colour: Color) -> Line<'static> {
+    let mut spans = vec![Span::styled(text.into(), trust.hued(colour))];
     let badges = trust.badges();
     if !badges.is_empty() {
         spans.push(Span::raw(" "));
@@ -406,6 +486,43 @@ pub fn difference_colour(ratio: f64) -> Option<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_runs_from_green_to_red_by_the_share_of_capacity() {
+        assert_eq!(usage::colour(0.0), usage::RAMP[0]);
+        assert_eq!(usage::colour(1.0), usage::RAMP[5]);
+        assert_eq!(usage::colour(2.5), usage::RAMP[5], "past the limit is full");
+        assert_eq!(usage::colour(0.5), usage::RAMP[3]);
+        let mut last = 0;
+        for step in 0..=100 {
+            let colour = usage::colour(f64::from(step) / 100.0);
+            let index = usage::RAMP.iter().position(|c| *c == colour).unwrap();
+            assert!(index >= last, "the ramp never steps back");
+            last = index;
+        }
+        assert_eq!(usage::of(3.0, None), usage::NEUTRAL);
+        assert_eq!(usage::of(3.0, Some(0.0)), usage::NEUTRAL);
+        assert_eq!(usage::of(f64::NAN, Some(1.0)), usage::NEUTRAL);
+        assert_eq!(usage::of(4.0, Some(4.0)), usage::RAMP[5]);
+    }
+
+    #[test]
+    fn a_hued_figure_keeps_its_hue_under_a_loss() {
+        let lossy = Trust {
+            marks: vec![Mark::Lost {
+                missing: 3,
+                fraction: None,
+            }],
+        };
+        let style = lossy.hued(usage::RAMP[4]);
+        assert_eq!(style.fg, Some(usage::RAMP[4]));
+        assert!(!style.add_modifier.contains(Modifier::DIM));
+        assert!(style.add_modifier.contains(Modifier::UNDERLINED));
+        let line = figure_hued("3.2 GB", &lossy, usage::RAMP[4]);
+        assert!(line.spans.len() > 1, "the badge rides beside it");
+        let clean = Trust::clean().hued(usage::RAMP[0]);
+        assert!(clean.add_modifier.is_empty());
+    }
 
     #[test]
     fn a_time_error_dims_only_at_a_scale_it_can_move() {
