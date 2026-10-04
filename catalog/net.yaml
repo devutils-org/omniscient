@@ -453,3 +453,11 @@
        what the server had queued at `request__done` -- which on loopback is
        its arrival in the peer's receive queue. What the client then takes to
        read it is the client's, and in no row."
+    - "`rx_bytes` is what the server read off the socket from the request's
+       first byte to its end (`copied_seq` at the first byte's arrival and at
+       the end), and `tx_bytes` what it queued on it from the birth to the end
+       (`write_seq`), so a response still queued at the end is counted whole.
+       Each is absent, not zero, when its start was not seen; both wrap past
+       4 GiB in one request. `holder_since_ns` is when the longest sleep began.
+       The run's counts by name -- `never_ended`, `unborn`, `replaced`,
+       `filtered_out` -- are the result's `fields`, the numbers its notes say."
