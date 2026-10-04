@@ -1643,20 +1643,21 @@ filed to stream top as a possible one-sided bias. The decisions are in
      on the MCP way, `sqlite3-durability`'s commits); the smaller ones (the
      unwind share tests' aliasing, the uprobe's tid, `DEVICE_STACKS` as data,
      a sweep from an installed tree).
-2. **What the user grants, so the 20 skipped pairs run.** Everything else is
+2. **What the user grants, so the 17 skipped pairs run.** Everything else is
    installed and granted now: smem, ethtool, sysstat, heaptrack, the bcc
    tools, tcpdump, powertop, fio, perf, nvidia-smi, nsys and ncu run here;
-   `make CAPTURE=1` puts `CAP_NET_RAW` on `omn`; the NVIDIA driver is loaded.
-   What still skips, every one on `sudo -n` not granting root:
-   - bpftrace's ten pairs (bpftrace needs root);
-   - perfsched's six `perf` pairs: tracefs is mode 755 now, but each event's
-     `id` and `enable` are `-rw-r----- root`, and `perf trace -s` and
-     `perf lock contention -b` load BPF skeletons (EPERM);
-   - power's `energy-rapl-files` (`energy_uj` is root's) and
-     `freq-cpupower-mperf` (`/dev/cpu/*/msr`, and the `msr` module);
-   - heap's `memleak-outstanding` (root);
-   - net's `tcpdump-captured`: sudo grants `/usr/bin/tcpdump` alone, and the
-     runner asks whether `sudo -n` grants everything (item 1, the runner).
+   `make CAPTURE=1` puts `CAP_NET_RAW` on `omn`; the NVIDIA driver is loaded;
+   `/etc/sudoers.d/omniscient-witnesses` grants `bpftrace`, the bcc tools,
+   `tcpdump`, `turbostat` and `perf` without a password. The runner now asks
+   sudo per tool and skips on `sudo: a password is required`. Run so after
+   the merge: perfsched 4 held, 3 skipped, 2 failed (`perf-trace-count`, the
+   witness losing calls; `perf-lock-contention`, a hundredfold apart --
+   `docs/open-findings.md`, "the privileged pairs"); power 5/2; heap 8/1;
+   net 7/1; bpftrace 0/10. What still skips is a pair wrapping its tool in
+   `sh` or `timeout` (bpftrace's ten, perfsched's three `perf sched`, power's
+   two, `memleak`, `tcpdump`): `sudo -n sh` is refused, and granting `sh`
+   is granting root. The fix is the families' and the runner's (`sudo -n`
+   inside the wrapper, in front of the tool alone), not a grant.
 
    ```console
    cd /home/moha/repos/omniscient && make && make CAPTURE=1

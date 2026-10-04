@@ -29,7 +29,7 @@ Each pair prints one line per outcome, and each family ends on its tally:
 
 ```text
 reference perfstat cpu.instructions / perf stat: same numbers: results[...].mean: omn 253012345 vs perf stat 252987654, off by +24691.0000 where 5059753.0800 is allowed
-skipped: reference bpftrace vfs.ops / vfsstat: `sudo -n` does not grant root here, and this tool needs it
+skipped: reference bpftrace vfs.ops / vfsstat: `sudo -n` does not grant root here for `bpftrace`, and this tool needs it
 gap: reference perfstat cpu.topdown / perf stat: omn has no top-down level 2
 known defect: reference sysstat cpu.util / vmstat: open-findings 61: ...
     cpu.util (...): omn 41.2 vs vmstat 50.0, off by -8.8000 where 2.5000 is allowed -- ...
@@ -236,7 +236,7 @@ or not. `known_defect` and `gap` do not go together.
 | a binary in `requires` is not installed | `` `<binary>` is not installed here `` |
 | a `requires_setting` file's value is past its bound | `` `<file>` is <value> here, and this pair needs it at most <bound> `` (or `at least`) |
 | a `requires_setting` file cannot be read | `` `<file>` cannot be read here (<error>), and this pair needs it `` |
-| `privileged: true` and `sudo -n true` fails | `` `sudo -n` does not grant root here `` |
+| `privileged: true` and `sudo -n -l <tool>` fails (the tool itself is asked, since a sudoers file may grant the witnesses one by one) | `` `sudo -n` does not grant root here for `<tool>` `` |
 | the tool exits non-zero with a refusal on stderr (`perf_event_paranoid`, `Permission denied`, `Operation not permitted`, `must be run as root`, `requires root`, or the pair's `refused_when`) | `` `<tool>` was refused on this machine ``, quoting those lines |
 | `omn` exits 1 (this machine cannot serve it) | `omn cannot run this here`, quoting `omn`'s stderr |
 | `omn_launches_tool` and the kernel cannot tell how the tool exited (before Linux 6.15) | `` the exit status of `<tool>` launched by omn cannot be seen here ``, quoting why |

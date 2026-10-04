@@ -12744,3 +12744,45 @@ Above, "The twenty-third wave, coordinator, after the merge".
 `omn trace --pid P -d D` stopping once every target has gone; a total in
 `cpu.oncpu_time`'s summary (the twenty-second wave's gap 1), which is why a
 parser divides.
+
+## The twenty-third wave, coordinator, the privileged pairs
+
+Run after the merge with `/etc/sudoers.d/omniscient-witnesses` granting
+`bpftrace`, the bcc tools, `tcpdump`, `turbostat` and `perf` without a password,
+`/sys/kernel/tracing` at 755, RAPL readable and `make CAPTURE=1`.
+
+### To the runner (`tests/reference/runner.rs`): `sudo -n true` is not the question
+
+The runner skipped every privileged pair on `sudo -n true` failing, which a
+sudoers file granting the witnesses one by one never satisfies. It now asks
+`sudo -n -l <tool>`, and a run refused with `sudo: a password is required`
+skips quoting it. `sudo -l` cannot tell a rule that needs a password from one
+that does not, so the run's refusal is what decides.
+
+### To the families (bpftrace, perfsched, power, heap, net): a privileged pair wraps its tool in `sh`
+
+Of the 20 privileged pairs, 17 run `sudo -n sh ...` or `sudo -n timeout ...`
+(`under.sh`, `perf sched record` then `latency`, `rapl_window.sh`,
+`cpu1_ticks.sh`, `memleak` and `tcpdump` under `sh -c`). A sudoers line that
+grants the tool cannot grant them short of granting `sh`, which is root. They
+skip with the refusal quoted. For them to run: the wrapper unprivileged, and
+`sudo -n` inside it in front of the tool alone (a `$SUDO` the runner exports
+when `privileged: true`), and the pre-check reading `sudo -n -l`'s `NOPASSWD`
+entries for that tool's path.
+
+### `perfsched` `perf-trace-count`: `perf trace -s` loses calls, `omn` does not
+
+`omn` counts the workload's 5000 `getppid` calls exactly on every run; `perf
+trace -s` reported 4634 and 4934 on two runs. The witness drops events (its
+ring), so the pair's 0 tolerance fails on the witness. Wanted: the workload's
+own count as the ground truth beside `perf trace`, or `perf trace`'s lost
+count read and the pair skipping when it is non-zero.
+
+### `perfsched` `perf-lock-contention`: a hundredfold apart
+
+`omn` `sched.lock` counted 9156 and 10474 contentions on the churn workload,
+`perf lock contention -b` 978189 and 1012310 on alternate runs. Not a
+tolerance: either the two count different things (every `contention_begin`
+in the system, or spins `omn` folds) or `sched.lock` misses most of them. For
+the sched family's owner: one run with both, `perf lock contention -a` against
+`-p`, and `omn`'s losses read.

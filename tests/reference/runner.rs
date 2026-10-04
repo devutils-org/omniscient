@@ -608,11 +608,14 @@ pub fn run_pair(pair: &Pair, parsers: &[Parser], omn: &Path) -> Outcome {
             return outcome;
         }
     }
-    if pair.reference.privileged && !sudo_grants() {
-        return Outcome::Skip(
-            "`sudo -n` does not grant root here, and this tool needs it".into(),
-            vec![],
-        );
+    if pair.reference.privileged {
+        let tool = pair.reference.command.first().map_or("", String::as_str);
+        if !sudo_grants(tool) {
+            return Outcome::Skip(
+                format!("`sudo -n` does not grant root here for `{tool}`, and this tool needs it"),
+                vec![],
+            );
+        }
     }
     let Some(parser) = parsers.iter().find(|p| p.name == pair.reference.parse) else {
         return Outcome::Fail(format!("no parser `{}`", pair.reference.parse));
@@ -962,6 +965,9 @@ const REFUSALS: &[&str] = &[
     "Operation not permitted",
     "must be run as root",
     "requires root",
+    // `sudo -n` refusing a command the sudoers file does not grant without a
+    // password: `sudo -l` cannot tell, since it lists rules that need one too.
+    "sudo: a password is required",
 ];
 
 /// The tool's stderr lines that say the machine refused it.
@@ -1017,16 +1023,23 @@ fn tail(text: &str, n: usize) -> Vec<String> {
     lines[lines.len().saturating_sub(n)..].to_vec()
 }
 
-fn sudo_grants() -> bool {
-    static GRANTS: OnceLock<bool> = OnceLock::new();
-    *GRANTS.get_or_init(|| {
-        Command::new("sudo")
-            .args(["-n", "true"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+/// Whether `sudo` may run `tool` at all: asked of that command (`sudo -l
+/// <tool>`), because a sudoers file may grant the witnesses one by one and
+/// nothing else, in which case `sudo -n true` fails. A rule that needs a
+/// password passes here too; the run's refusal (`REFUSALS`) skips it then.
+fn sudo_grants(tool: &str) -> bool {
+    static GRANTS: OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
+        OnceLock::new();
+    let mut grants = GRANTS.get_or_init(Default::default).lock().unwrap();
+    *grants.entry(tool.to_string()).or_insert_with(|| {
+        !tool.is_empty()
+            && Command::new("sudo")
+                .args(["-n", "-l", tool])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
     })
 }
 
