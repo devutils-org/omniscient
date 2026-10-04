@@ -751,7 +751,7 @@ fn compare(pair: &Pair, parsers: &[Parser], omn: &[OmnOutput], tool_values: &[Va
         // One parse of omn's output per run, shared by every key.
         let parsed: Vec<Result<Values, String>> = match &c.omn_parse {
             Some(name) => {
-                let Some(p) = parsers.iter().find(|p| &p.name == name) else {
+                let Some(p) = parsers.iter().find(|p| p.name == name) else {
                     errors.push(format!("no parser `{name}`"));
                     continue;
                 };
