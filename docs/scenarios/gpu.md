@@ -425,9 +425,15 @@ pid would be the worst bug this tool could have.
 `gpu.api` and `gpu.counters`. `gpu.kernel` reads `HERE = yes` in the listing —
 `libcupti.so` loads on this machine — so nothing about the hardware is wrong and
 the message has to say that: it names the backend it would have needed
-(`vendor:cupti`, `preload`, `vendor:ncu`) and says the request is valid. The
-other two read `?`, which is a requirement no probe covers and is not the same
-as `no`.
+(`vendor:cupti`, `preload`, and then `vendor:ncu`) and says the request is
+valid. The other two read `?`, which is a requirement no probe covers and is
+not the same as `no`.
+
+*Since then* (the nineteenth wave): all three have collectors -- `gpu.kernel`
+and `gpu.counters` through `vendor:cupti`, `gpu.api` through `preload` -- and
+`vendor:ncu` left every chain: `ncu` replays a kernel from outside the process
+and is an independent reader for the tests and the comparison, not a backend.
+This section records what the refusal said when it was written.
 
 **Exit 1, no viable backend — this machine cannot serve it.** `gpu.job`, and
 this one is wrong: see the defect list. The *message* is right, and is checked:
@@ -515,7 +521,9 @@ that run and the figure moved at 1.1 s. The collector records the uncertainty
 and no output can show it — that is the first defect below.
 
 **`gpu.job`, `gpu.kernel`, `gpu.api` and `gpu.counters`, at all.** The first has
-no backend on NVIDIA and the other three have no collector in this build.
+no backend on NVIDIA and the other three had no collector in this build when
+this was written (they have since: `vendor:cupti` and `preload`, and
+`vendor:ncu` is no longer in any chain).
 `examples/gpu-job-latency.yml` is kept and kept running so that a machine with
 `amdgpu`, `i915` or `xe` measures it; here the scenario is the refusal.
 

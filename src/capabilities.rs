@@ -205,6 +205,16 @@ pub struct Environment {
     /// driver, and neither of those is visible in any other field here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gpus: Vec<GpuDevice>,
+    /// The NVIDIA devices' clock states -- shader clock lock, application
+    /// clocks, persistence, event reasons -- read when a `gpu` source is
+    /// resolved and only then (NVML costs 3 to 5 ms to open): a GPU duration
+    /// depends on the clock it ran at, and two runs are comparable only if
+    /// this says the same. Never set by `omn`, only read.
+    ///
+    /// Empty for a run that asked no `gpu` source, and in files written
+    /// before it existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gpu_clocks: Vec<crate::collect::gpu::ClockState>,
     /// The hardware prefetchers, **captured and never controlled**.
     ///
     /// Turning them off is a real lever for isolating a memory effect, and it
@@ -753,6 +763,7 @@ impl Capabilities {
             tracefs: tracefs_access(),
             mitigations: mitigations(),
             gpus: gpus(),
+            gpu_clocks: Vec::new(),
             prefetchers: Some(prefetchers()),
             privileges: privileges(),
             virtualization: std::fs::read_to_string("/proc/cpuinfo")

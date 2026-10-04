@@ -802,7 +802,10 @@ fn build(
             .map(|predicate| placement(backend, entry, predicate)),
         degradations,
         unverified,
-        environment: capabilities.environment().clone(),
+        environment: crate::collect::gpu::with_clock_states(
+            &entry.family,
+            capabilities.environment().clone(),
+        ),
         stack,
     })
 }

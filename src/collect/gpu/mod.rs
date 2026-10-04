@@ -22,6 +22,13 @@ use serde::{Deserialize, Serialize};
 use super::Factory;
 use crate::capabilities::Probe;
 
+pub use counters::launch_refusals;
+
+/// The sources whose stacks are the device's -- kernel, source line, stall
+/// reason -- and never a host stack: nothing is unwound, so `--stack` has no
+/// mode to pick and the resolver's unwinding warning has nothing to say.
+pub const DEVICE_STACKS: &[&str] = &["gpu.profile"];
+
 /// The collectors this family provides.
 ///
 /// The sysfs backends of these same sources -- `fs:sys:amdgpu`, `fs:sys:i915`
@@ -416,6 +423,27 @@ impl ClockState {
             self.device, self.device_name
         ))
     }
+}
+
+/// The environment a request of `family` is resolved with: a `gpu`
+/// request's carries the devices' clock states, read once a run, or says in
+/// `not_captured` why they could not be read. Any other family's is as it was.
+pub fn with_clock_states(
+    family: &str,
+    mut environment: crate::capabilities::Environment,
+) -> crate::capabilities::Environment {
+    if family != "gpu" {
+        return environment;
+    }
+    static STATES: std::sync::OnceLock<Result<Vec<ClockState>, String>> =
+        std::sync::OnceLock::new();
+    match STATES.get_or_init(clock_states) {
+        Ok(states) => environment.gpu_clocks = states.clone(),
+        Err(reason) => environment
+            .not_captured
+            .push(format!("the GPU clock states: {reason}")),
+    }
+    environment
 }
 
 /// The clock state of every NVIDIA device on this machine, for a collector

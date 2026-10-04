@@ -380,13 +380,13 @@ fn counters_beside_kernel_times_or_pc_sampling_are_refused() {
         .unwrap();
         let output = omn(&["-f", session.to_str().unwrap()], &[]);
         let complaint = stderr(&output);
-        if ready().is_err() {
-            // No device or no CUPTI: the resolver refuses first, which is
-            // the machine's answer and still a refusal.
-            assert!(!output.status.success(), "{complaint}");
-            continue;
-        }
-        assert!(!output.status.success(), "{complaint}");
+        // The request's error, before anything is resolved or launched:
+        // exit 2 on every machine, with or without a device.
+        assert_eq!(output.status.code(), Some(2), "{complaint}");
+        assert!(
+            !complaint.contains("cannot start collecting"),
+            "{complaint}"
+        );
         assert!(
             complaint.contains(&format!("gpu.counters cannot be asked with {other}")),
             "{complaint}"
@@ -647,4 +647,91 @@ fn a_profile_and_kernel_times_share_one_launch() {
     let inside = &results[1];
     assert!(inside["events_seen"].as_u64().unwrap() > 0, "{inside:#}");
     assert_eq!(inside["losses"]["undecoded"], 0, "{:#}", inside["losses"]);
+}
+
+/// `examples/bench/gpu.c`, built natively against `libcuda.so.1`: a program
+/// that exits by `main`'s return and libc's exit handlers, the road the
+/// Python workloads do not take. `Err` is the machine's: no compiler, or no
+/// driver library to link.
+fn native_workload() -> Result<PathBuf, String> {
+    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let path = scratch("native-gpu").with_extension("bin");
+            let built = Command::new("cc")
+                .args(["-O2", "-o"])
+                .arg(&path)
+                .arg(PathBuf::from(ROOT).join("examples/bench/gpu.c"))
+                .arg("-l:libcuda.so.1")
+                .output()
+                .map_err(|error| format!("no C compiler for the native workload: {error}"))?;
+            if !built.status.success() {
+                return Err(format!(
+                    "the native GPU workload did not link (no -l:libcuda.so.1 here): {}",
+                    String::from_utf8_lossy(&built.stderr)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                ));
+            }
+            Ok(path)
+        })
+        .clone()
+}
+
+/// The nineteenth wave's abort: `gpu.profile` freed CUPTI's shared function
+/// names after each drain, and the teardown's drain at exit freed them again
+/// -- `free(): double free detected`, SIGABRT, in the program's exit
+/// handlers, 2 of 2 on a native program. Held here by the program's own exit
+/// status, on the road the Python workloads do not take, and by its report,
+/// which its last exit handler writes after the library's. The default
+/// warm-up (500 ms of spin kernels) is kept: it is what makes a function
+/// come back in more than one drain, and with 50 ms the old code passed.
+#[test]
+fn a_native_program_exits_on_its_own_under_every_inside_source() {
+    ready_or_skip!();
+    let binary = match native_workload() {
+        Ok(binary) => binary,
+        Err(reason) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+    };
+    let _device = device();
+    for source in ["gpu.profile", "gpu.counters", "gpu.kernel"] {
+        let report = scratch(&format!("native-{source}"));
+        let _ = std::fs::remove_file(&report);
+        let output = omn(
+            &[
+                "trace",
+                source,
+                "--emit",
+                "raw",
+                "--format",
+                "json",
+                "--",
+                binary.to_str().unwrap(),
+                "compute",
+                "20",
+                "200000",
+            ],
+            &[("BENCH_REPORT", report.to_str().unwrap())],
+        );
+        assert!(output.status.success(), "{source}: {}", stderr(&output));
+        let document: Value = serde_json::from_slice(&output.stdout).expect("json results");
+        let result = &document["results"][0];
+        assert_eq!(
+            result["stopped_because"], "the launched program exited with exit status 0",
+            "{source} ended the program it measured: {:#}",
+            result
+        );
+        assert_eq!(
+            result["losses"]["failed_reads"], 0,
+            "{source}: {:#}",
+            result["losses"]
+        );
+        let written = std::fs::read_to_string(&report)
+            .unwrap_or_else(|error| panic!("{source}: the program wrote no report: {error}"));
+        assert!(written.contains("\"kernels\":20"), "{source}: {written}");
+    }
 }

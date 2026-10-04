@@ -286,6 +286,12 @@ extern "C" fn at_exit() {
     let Some(cupti) = CUPTI.get() else {
         return;
     };
+    // Said and sent before the teardown, so that a death inside it is
+    // known for the library's, not mistaken for the program's.
+    with_channel(|channel| {
+        channel.frame(wire::OP_EXITING, &[]);
+        channel.send();
+    });
     let armed = ARMED.load(Ordering::SeqCst);
     // What was learnt inside kernels first: tearing it down is CUDA work
     // that must run while the program's contexts are still there.

@@ -174,6 +174,20 @@ pub fn validate_session(catalog: &Catalog, session: &Session) -> Result<Report, 
         }
     }
 
+    // Requests that share one launch and cannot share it: the request's
+    // error, before anything runs, rather than an attach failure.
+    for (index, reason) in crate::collect::gpu::launch_refusals(&session.requests) {
+        let request = &session.requests[index];
+        let mut rejection = Rejection::new(reason);
+        rejection.request = Some(
+            request
+                .label
+                .clone()
+                .unwrap_or_else(|| format!("{} #{}", request.source, index + 1)),
+        );
+        rejections.push(rejection);
+    }
+
     check_joins(catalog, session, &mut rejections, &mut report);
 
     if rejections.is_empty() {
@@ -760,6 +774,7 @@ fn check_stack(
             .emit
             .iter()
             .any(|emit| emit.kind() == EmitKind::Stack)
+            && !crate::collect::gpu::DEVICE_STACKS.contains(&request.source.as_str())
         {
             report.push("no --stack given (or `auto`), so the resolver picks the best unwind mode this machine and this target serve, and says why it passed over the others");
         }

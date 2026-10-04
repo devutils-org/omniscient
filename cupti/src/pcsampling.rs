@@ -234,6 +234,7 @@ static STATE: Mutex<State> = Mutex::new(State {
     contexts: Vec::new(),
     modules: None,
     lines: None,
+    names: std::collections::BTreeSet::new(),
 });
 
 /// Program counters already resolved: (crc, function, offset) to the file
@@ -247,6 +248,12 @@ struct State {
     /// Every module loaded, by the CRC CUPTI tags its program counters with.
     modules: Option<HashMap<u64, Vec<u8>>>,
     lines: Option<Lines>,
+    /// Every function name CUPTI handed over, freed once, at [`finish`]:
+    /// CUPTI shares one name across every record of a function, the next
+    /// drains' included, so a name freed after one drain comes back in the
+    /// next one dangling, and freeing it again is a double free (the
+    /// nineteenth wave's abort at exit).
+    names: std::collections::BTreeSet<usize>,
 }
 
 /// One buffer CUPTI fills: the block, its program counters, and the stall
@@ -649,12 +656,13 @@ fn drain_one(api: &Api, state: &mut State, ctx: usize) {
         contexts,
         modules,
         lines,
+        names,
         ..
     } = state;
     let Some(context) = contexts.iter_mut().find(|c| c.ctx == ctx && c.active) else {
         return;
     };
-    drain(api, context, modules, lines);
+    drain(api, context, modules, lines, names);
 }
 
 fn drain(
@@ -662,6 +670,7 @@ fn drain(
     context: &mut Context,
     modules: &Option<HashMap<u64, Vec<u8>>>,
     lines: &mut Option<Lines>,
+    names: &mut std::collections::BTreeSet<usize>,
 ) {
     context.since_drain = 0;
     for _ in 0..ASKS {
@@ -688,7 +697,7 @@ fn drain(
             return;
         }
         let taken = context.drained.data.total_num_pcs;
-        report(api, context, false, modules, lines);
+        report(api, context, false, modules, lines, names);
         if taken == 0 && context.drained.data.remaining_num_pcs == 0 {
             return;
         }
@@ -703,6 +712,7 @@ fn report(
     configured: bool,
     modules: &Option<HashMap<u64, Vec<u8>>>,
     lines: &mut Option<Lines>,
+    names: &mut std::collections::BTreeSet<usize>,
 ) {
     let now = crate::monotonic_ns();
     let buffer = if configured {
@@ -729,7 +739,6 @@ fn report(
         launches: context.launches,
     };
     let mut rows = Vec::new();
-    let mut names = std::collections::BTreeSet::new();
     for pc in &buffer.pcs[..taken] {
         let function = if pc.function_name.is_null() {
             b"?".to_vec()
@@ -756,13 +765,6 @@ fn report(
         if !pc.function_name.is_null() {
             names.insert(pc.function_name as usize);
         }
-    }
-    // CUPTI allocates a function's name with `malloc` and leaves it to the
-    // caller -- once per function, shared by every program counter in it:
-    // freed after the last of them is read, and once.
-    for name in names {
-        // SAFETY: a pointer CUPTI handed over in this drain, freed once.
-        unsafe { libc::free(name as *mut c_void) };
     }
     context.last_drain_ns = now;
     crate::with_channel(|channel| {
@@ -860,12 +862,13 @@ fn tear_down_one(api: &Api, state: &mut State, ctx: usize) {
         contexts,
         modules,
         lines,
+        names,
         ..
     } = state;
     let Some(context) = contexts.iter_mut().find(|c| c.ctx == ctx && c.active) else {
         return;
     };
-    drain(api, context, modules, lines);
+    drain(api, context, modules, lines, names);
     context.active = false;
     context.configured.reset(context.reasons);
     let mut disable = ContextParams {
@@ -878,7 +881,7 @@ fn tear_down_one(api: &Api, state: &mut State, ctx: usize) {
         return;
     }
     if context.configured.data.total_num_pcs > 0 {
-        report(api, context, true, modules, lines);
+        report(api, context, true, modules, lines, names);
     }
     if context.configured.data.remaining_num_pcs > 0 {
         lost(
@@ -897,6 +900,15 @@ pub fn finish() {
     let contexts: Vec<usize> = state.contexts.iter().map(|context| context.ctx).collect();
     for ctx in contexts {
         tear_down_one(api, &mut state, ctx);
+    }
+    // CUPTI allocates a function's name with `malloc` and leaves it to the
+    // caller once every record is read -- every drain's: one name is shared
+    // by every program counter of the function, in this drain and the next.
+    // So the names are freed here, after the last drain of every context,
+    // each once.
+    for name in std::mem::take(&mut state.names) {
+        // SAFETY: a pointer CUPTI handed over, freed once, after its last use.
+        unsafe { libc::free(name as *mut c_void) };
     }
     crate::send_now();
 }

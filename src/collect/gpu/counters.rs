@@ -48,7 +48,7 @@ use std::rc::Rc;
 use super::kernel::{find_library, wire, KernelPrepared, Socket};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
-use crate::request::Target;
+use crate::request::{Request, Target};
 
 /// The widest spread, interquartile range over median across a kernel's
 /// launches, at which a counter is called reproducible here; and the band
@@ -142,28 +142,83 @@ impl InsidePrepared {
     /// Why this reader cannot be attached beside what else the launch asks
     /// of the library, if it cannot.
     fn refusal(&self, report: u32) -> Option<String> {
-        let source = self.kind.source();
-        match self.kind {
-            Inside::Counters if report & wire::REPORT_ACTIVITY != 0 => Some(format!(
-                "{source} cannot be asked with gpu.kernel in one run: its kernel replay runs \
-                 every launch several times, serialised, with CUPTI's save and restore between \
-                 the runs, so the times gpu.kernel took would be those of replayed kernels \
-                 rather than of the program's. Ask for each in a run of its own"
-            )),
-            _ if report & wire::REPORT_COUNTERS != 0 && report & wire::REPORT_PC_SAMPLING != 0 => {
-                Some(format!(
-                    "{source} cannot be asked with {} in one run: CUPTI's range profiler and \
-                     its PC sampling cannot both run in one process. Ask for each in a run of \
-                     its own",
-                    match self.kind {
-                        Inside::Counters => "gpu.profile",
-                        Inside::Profile => "gpu.counters",
-                    }
-                ))
-            }
-            _ => None,
+        refusal(self.kind, report)
+    }
+}
+
+/// Why `kind` cannot read a launch whose library is asked for `report`, if
+/// it cannot: one rule, applied before the launch to a session's requests
+/// ([`launch_refusals`]) and again at attach, to whatever reached it.
+fn refusal(kind: Inside, report: u32) -> Option<String> {
+    let source = kind.source();
+    match kind {
+        Inside::Counters if report & wire::REPORT_ACTIVITY != 0 => Some(format!(
+            "{source} cannot be asked with gpu.kernel in one run: its kernel replay runs \
+             every launch several times, serialised, with CUPTI's save and restore between \
+             the runs, so the times gpu.kernel took would be those of replayed kernels \
+             rather than of the program's. Ask for each in a run of its own"
+        )),
+        _ if report & wire::REPORT_COUNTERS != 0 && report & wire::REPORT_PC_SAMPLING != 0 => {
+            Some(format!(
+                "{source} cannot be asked with {} in one run: CUPTI's range profiler and \
+                 its PC sampling cannot both run in one process. Ask for each in a run of \
+                 its own",
+                match kind {
+                    Inside::Counters => "gpu.profile",
+                    Inside::Profile => "gpu.counters",
+                }
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// What a request asks of the injection library, when it is one of its
+/// readers and nothing pins it to another backend.
+fn library_bit(request: &Request) -> Option<u32> {
+    if request
+        .backend
+        .as_ref()
+        .is_some_and(|backend| !backend.as_str().contains("vendor:cupti"))
+    {
+        return None;
+    }
+    match request.source.as_str() {
+        "gpu.kernel" => Some(wire::REPORT_ACTIVITY),
+        "gpu.counters" => Some(wire::REPORT_COUNTERS),
+        "gpu.profile" => Some(wire::REPORT_PC_SAMPLING),
+        _ => None,
+    }
+}
+
+/// The session's requests that cannot share their launch with the others,
+/// by index, each with the reason: refused before anything is launched, as
+/// the request's error, rather than at attach as the machine's. Requests
+/// share a launch when they launch the same command line.
+pub fn launch_refusals(requests: &[Request]) -> Vec<(usize, String)> {
+    let mut refused = Vec::new();
+    for (index, request) in requests.iter().enumerate() {
+        let kind = match request.source.as_str() {
+            "gpu.counters" => Inside::Counters,
+            "gpu.profile" => Inside::Profile,
+            _ => continue,
+        };
+        if library_bit(request).is_none() {
+            continue;
+        }
+        let Target::Launch(argv) = &request.target else {
+            continue;
+        };
+        let report = requests
+            .iter()
+            .filter(|other| matches!(&other.target, Target::Launch(theirs) if theirs == argv))
+            .filter_map(library_bit)
+            .fold(0, |report, bit| report | bit);
+        if let Some(reason) = refusal(kind, report) {
+            refused.push((index, reason));
         }
     }
+    refused
 }
 
 impl Prepared for InsidePrepared {
@@ -209,12 +264,25 @@ impl Prepared for InsidePrepared {
     }
 }
 
+/// What a run says of a process that died inside the injection library's
+/// exit handler: the tool ended the program, and the program's exit status
+/// is the tool's doing, not the program's.
+pub(super) fn died_in_exit(pid: u32, source: &str) -> String {
+    format!(
+        "pid {pid} died inside omn's injection library (libomn_cupti.so), in its exit handler, \
+         after the program's own work had finished: {source} killed the program it measured, \
+         so the program's exit status is the tool's failure, not the program's"
+    )
+}
+
 /// What one process said about itself, for an inside reader.
 #[derive(Debug, Default)]
 pub(super) struct Sender {
     pub names: BTreeMap<u32, String>,
     pub hello: bool,
     pub ended: bool,
+    /// The library's exit handler started ([`wire::OP_EXITING`]).
+    pub exiting: bool,
     /// Inside records the library could not send, as last reported.
     unsent: u64,
     /// The process's `proc` key, read once, while it runs: at the end of the
@@ -300,6 +368,7 @@ impl Common {
                     .get_or_insert_with(|| KeyValue::proc_of(pid as i32));
             }
             wire::OP_END => sender.ended = true,
+            wire::OP_EXITING => sender.exiting = true,
             wire::OP_NAME if payload.len() >= 4 => {
                 let id = read.u32();
                 let raw = String::from_utf8_lossy(&payload[4..])
@@ -500,17 +569,26 @@ impl Common {
     }
 
     /// At the end: a process that said hello and never said it had finished
-    /// lost what it had not sent.
+    /// lost what it had not sent; one that died inside the library's exit
+    /// handler was ended by the tool, which is a failure, not a lost read.
     pub fn unfinished(&mut self) {
         let source = self.kind.source();
         for (pid, sender) in &self.senders {
             if sender.hello && !sender.ended {
                 self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "pid {pid} never said it had finished: it was killed, or exited without \
-                     running its exit handlers, so what {source} had not yet read back from \
-                     CUPTI is missing and was not counted"
-                ));
+                if sender.exiting {
+                    self.errors.push(died_in_exit(*pid, source));
+                    self.losses.note(format!(
+                        "pid {pid} died inside omn's injection library as it exited, so what \
+                         {source} had not yet read back from CUPTI is missing and was not counted"
+                    ));
+                } else {
+                    self.losses.note(format!(
+                        "pid {pid} never said it had finished: it was killed, or exited without \
+                         running its exit handlers, so what {source} had not yet read back from \
+                         CUPTI is missing and was not counted"
+                    ));
+                }
             }
         }
     }
@@ -1165,6 +1243,64 @@ pub(super) mod tests {
         let notes = collector.notes().join("\n");
         assert!(notes.contains("gpu.counters: mine"), "{notes}");
         assert!(!notes.contains("not mine"), "{notes}");
+    }
+
+    /// A process that died after the library's exit handler started, before
+    /// its end, was killed by the tool: the run says so as a failure, beside
+    /// the lost read, and a death without that frame stays a lost read.
+    #[test]
+    fn a_death_inside_the_library_s_exit_handler_is_the_tool_s_failure() {
+        for exiting in [true, false] {
+            let (write, socket, reader) = pair(Inside::Profile);
+            let mut collector = CountersCollector::new(socket, reader, 5);
+            let mut frames = vec![(wire::OP_HELLO, vec![0; 24])];
+            if exiting {
+                frames.push((wire::OP_EXITING, Vec::new()));
+            }
+            send(write, 5, &frames);
+            collector.sample(0).unwrap();
+            collector.stop();
+            assert_eq!(collector.losses().failed_reads, 1);
+            assert_eq!(collector.losses().undecoded, 0);
+            let notes = collector.notes().join("\n");
+            assert_eq!(
+                notes.contains("killed the program it measured"),
+                exiting,
+                "{notes}"
+            );
+        }
+    }
+
+    /// The same rule, before the launch: a request that shares its launch
+    /// with one it cannot is refused by index, and requests on different
+    /// command lines, or pinned to another backend, are left alone.
+    #[test]
+    fn a_session_s_requests_are_refused_before_their_shared_launch() {
+        let session = |requests: &str| -> crate::request::Session {
+            crate::format::InputFormat::Yaml
+                .parse(&format!("requests:\n{requests}"))
+                .expect("session should parse")
+        };
+        let request = |source: &str, argv: &str| {
+            format!("  - {{source: {source}, target: {{launch: [{argv}]}}, mode: trace, emit: [raw]}}\n")
+        };
+        let both = session(&(request("gpu.counters", "a") + &request("gpu.kernel", "a")));
+        let refused = launch_refusals(&both.requests);
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].0, 0);
+        assert!(refused[0].1.contains("with gpu.kernel"), "{}", refused[0].1);
+
+        let inside = session(&(request("gpu.profile", "a") + &request("gpu.counters", "a")));
+        let indexes: Vec<usize> = launch_refusals(&inside.requests)
+            .iter()
+            .map(|(index, _)| *index)
+            .collect();
+        assert_eq!(indexes, [0, 1]);
+
+        let apart = session(&(request("gpu.counters", "a") + &request("gpu.kernel", "b")));
+        assert!(launch_refusals(&apart.requests).is_empty());
+        let profile = session(&(request("gpu.profile", "a") + &request("gpu.kernel", "a")));
+        assert!(launch_refusals(&profile.requests).is_empty());
     }
 
     /// Counters replay kernels: refused beside gpu.kernel, and beside PC
