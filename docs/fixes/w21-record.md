@@ -21,9 +21,8 @@ Shown, on the final recordings:
 
 - `cargo test --test view_truth`: 11 passed (the new process test included).
 - `cargo test --test view_snapshots`: 17 passed.
-- `cargo test -p omn-view`: 195 passed, **1 failed**:
-  `views::process::tests::the_lines_find_what_the_workload_did` -- see
-  "Not done".
+- `cargo test -p omn-view`: 196 passed (195 and 1 failed before the fix
+  round; see "Review").
 - `cargo test --test view_workloads` (live, with the capabilities): 14
   passed, after the ledger manifest excused `sched.offcpu`
   (`each_session_asks_its_views_sources_or_says_why_not` failed before it).
@@ -38,11 +37,26 @@ Shown, on the final recordings:
   `PyObject_Size` (`twice_the_work_moves_everything_absolutely_and_little_in_shape`).
   Both re-recorded once, and all of those pass without a change to a test.
 - **The Disk shortfall is not a fluke**: `process-run` recorded twice gave
-  the same 4136960 bytes of 4194304. A machine-wide `io.latency` trace (one
-  more run of the workload, `target: system`, raw) showed why: 31 of the
-  file's 32 128 KiB `WS` requests carry `process-main`, the 32nd
-  `kworker/3:1H` (the block layer's kblockd work item dispatching it), with
-  no loss counted.
+  the same 4136960 bytes of 4194304. The recording's own `io.latency` rows
+  (all `process-main`, on the one two-device btrfs of `/home`,
+  `nvme0n1p6`+`nvme0n1p9`, nodesize 16 KiB) reconcile it to the byte:
+
+  | rows | bytes |
+  |---|---|
+  | 31 `WS` of 131072, the file's data | 4063232 |
+  | 4 `WSM` of 16384, tree nodes the fsync commits | 65536 |
+  | 2 `WFSM` of 4096, the superblock, one per device | 8192 |
+  | **total** | **4136960** |
+
+  4194304 - 131072 + 65536 + 8192 = 4136960. The 31 data requests sit on
+  contiguous sectors 1834608104..1834616296 in steps of 256, except for one
+  hole of exactly 256 sectors at 1834611944: one data request of the file is
+  missing, nothing else. The recording also says `5 block_rq_complete events
+  had no opening` (a completion whose issue was not in the process's
+  context). A machine-wide `io.latency` trace of one more run (`target:
+  system`, raw, before the fix round) showed the missing request carrying
+  `kworker/3:1H`, kblockd's work item dispatching it; that run, not this
+  recording, is the evidence for *who* dispatched it.
 
 Reasoned, not shown: that `system-wakeup` at 246 KB against 2.2 MB before is
 a quieter machine (fewer wakeups in its one second), not a lost source; its
@@ -50,12 +64,6 @@ losses are zero and its snapshots draw.
 
 ## Not done, and why
 
-- **`views::process::tests::the_lines_find_what_the_workload_did` stays
-  red.** It holds the Disk line to at least the file's 4 MiB; the line shows
-  the process's own block requests, and one of 32 is charged to a kernel
-  worker (above). The test states a property the collector does not give;
-  which side moves is for collectors and process (requests below). Not
-  papered over here.
 - **`--against` and focus snapshots in the standard set** (the views
   stream's request, w20 and w21): not done for time.
 
@@ -120,14 +128,38 @@ All test-only, all caused by the re-recording, in `21577fd`:
 - **collectors (`src/collect/io/**`, `io.latency`)**: a block request
   dispatched from kblockd's work item is charged to the `kworker`, not to
   the task that submitted the bio, so a target's Disk bytes fall short by
-  whole requests with no loss said. Charge the request to the bio's
+  whole requests with no loss said (on `process-run`: one 128 KiB request
+  of 32, the hole in the file's sectors reconciled above; the 72 KiB of
+  metadata is the process's own and correctly counted). Charge the request to the bio's
   submitter (the `block_bio_queue`/`block_getrq` task) or count the
   requests handed to a worker as a loss of attribution.
-- **process (`view/src/views/process.rs`)**: until then,
-  `the_lines_find_what_the_workload_did`'s Disk bound either names the
-  worker's share as a known shortfall or reads the run's machine-wide
-  device bytes; it fails on both recordings made here.
+- **process (`view/src/views/process.rs`)**: the Disk bound of
+  `the_lines_find_what_the_workload_did` now names the worker's share (see
+  "Review"); tighten it back to the file's bytes once collectors charge the
+  request to its submitter.
 - **views**: `--against` and focus snapshots through `snapshot::draw_with`,
   still open.
 - **coordinator**: merge this branch last, as one; nothing to re-bless after
   it unless a view moved since `ed9140c`.
+
+## Review
+
+The fix round, after the merge of `main` at `acb1daf`.
+
+- **The red `the_lines_find_what_the_workload_did`: fixed, not tallied.**
+  The Disk bound read "at least the file's 4 MiB", a property the collector
+  does not give. It now holds the line to the file less at most four 128 KiB
+  requests a worker dispatched, and at most the file plus 1 MiB of metadata;
+  the comment says why and points here. `cargo test -p omn-view`: 196
+  passed. Tightening it back is the collectors request below.
+- **The kworker explanation did not add up: right.** 31 x 131072 is
+  4063232, 73728 short of what the recording shows, and the handoff never
+  said where those bytes came from. They are the filesystem's metadata the
+  fsync commits -- four 16 KiB btrfs tree nodes (`WSM`) and the superblock
+  written to each of the filesystem's two devices (`WFSM`, 4 KiB each) --
+  and the table under "Shown" now reconciles the recording to the byte. The
+  claim is also split into what each piece of evidence shows: the recording
+  itself shows one data request missing (a hole of exactly one request in
+  the file's sectors); that a `kworker` dispatched it is shown only by the
+  earlier machine-wide trace of another run. The gallery README's process
+  row and the collectors request say the same now.
