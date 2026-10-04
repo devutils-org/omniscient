@@ -68,11 +68,13 @@ pub enum Command {
     Diff(DiffArgs),
     /// An interactive view of everything omn measures, live or from a recording.
     Top(Box<TopArgs>),
+    /// Apply join rules to a stored run: the query tier, after the run.
+    Join(JoinArgs),
 }
 
 /// The subcommand names, used to tell `omn io.latency` from `omn list`.
-pub const SUBCOMMANDS: [&str; 9] = [
-    "trace", "list", "formats", "validate", "latency", "saturate", "diff", "top", "help",
+pub const SUBCOMMANDS: [&str; 10] = [
+    "trace", "list", "formats", "validate", "latency", "saturate", "diff", "top", "join", "help",
 ];
 
 #[derive(Debug, Args)]
@@ -441,6 +443,101 @@ pub struct DiffArgs {
     /// How many functions each table lists.
     #[arg(long, value_name = "N", default_value_t = 12)]
     pub top: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct JoinArgs {
+    /// The rules: a session file's `joins:`, a list of rules, or one rule, in
+    /// YAML or JSON. Every rule is applied, whatever its `tier:` says, because
+    /// over a stored run every rule is at the query tier.
+    #[arg(short = 'f', long = "file", value_name = "RULES")]
+    pub rules: PathBuf,
+
+    /// The stored run: its results.json, or the `-o DIR` it was written to.
+    /// Each side of a rule has to have been stored with `raw`.
+    #[arg(value_name = "RESULTS")]
+    pub results: PathBuf,
+
+    /// Output format: text, or a document format (json, yaml, toml), whose
+    /// `joins` are a run's own.
+    #[arg(long, value_name = "FORMAT", default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+}
+
+/// The rules of `omn join -f`, in any of the three shapes the flag accepts.
+fn join_rules(text: &str, origin: &str) -> Result<Vec<crate::join::Rule>, ParseError> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Shape {
+        Session { joins: Vec<crate::join::Rule> },
+        Many(Vec<crate::join::Rule>),
+        One(Box<crate::join::Rule>),
+    }
+    if text.trim().is_empty() {
+        return Err(ParseError::new(format!("{origin} holds no join rule")));
+    }
+    let shape: Shape = serde_norway::from_str(text).map_err(|error| {
+        ParseError::new(format!(
+            "{origin} holds neither a session's `joins:`, a list of rules nor one rule: {error}"
+        ))
+    })?;
+    let rules = match shape {
+        Shape::Session { joins } => joins,
+        Shape::Many(rules) => rules,
+        Shape::One(rule) => vec![*rule],
+    };
+    if rules.is_empty() {
+        return Err(ParseError::new(format!("{origin} holds no join rule")));
+    }
+    Ok(rules)
+}
+
+/// `omn join`: every rule of `args.rules` applied to the stored run
+/// `args.results` with [`crate::join::apply_stored`], encoded as a run
+/// encodes its joins. A rule a stored run cannot answer -- a side with no
+/// result, or one stored without `raw` -- refuses the command with the reason,
+/// rather than printing the rules it could answer and dropping the others.
+pub fn join(args: &JoinArgs) -> Result<String, ParseError> {
+    let read = |path: &std::path::Path| {
+        std::fs::read_to_string(path)
+            .map_err(|error| ParseError::new(format!("cannot read {}: {error}", path.display())))
+    };
+    let rules = join_rules(&read(&args.rules)?, &args.rules.display().to_string())?;
+    let results_path = if args.results.is_dir() {
+        args.results.join("results.json")
+    } else {
+        args.results.clone()
+    };
+    let run: crate::encode::RunOutput =
+        serde_json::from_str(&read(&results_path)?).map_err(|error| {
+            ParseError::new(format!(
+                "{} is not a run's results, which `omn join` reads from a run written with \
+                 `--format json`: {error}",
+                results_path.display()
+            ))
+        })?;
+    let mut joins = Vec::new();
+    for rule in &rules {
+        let correlation = crate::join::apply_stored(rule, &run.results)
+            .map_err(|error| ParseError::new(format!("{}: {error}", results_path.display())))?;
+        joins.push(correlation);
+    }
+    match args.format {
+        format if format != OutputFormat::Text && format.renders_documents() => {
+            #[derive(serde::Serialize)]
+            struct Joins<'a> {
+                joins: &'a [crate::join::Correlation],
+            }
+            format.serialize_document(&Joins { joins: &joins })
+        }
+        format => {
+            let mut out = String::new();
+            for correlation in &joins {
+                out.push_str(&crate::encode::correlation(format, correlation)?);
+            }
+            Ok(out)
+        }
+    }
 }
 
 /// What the CLI decided on the user's behalf, because the catalog left one
