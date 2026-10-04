@@ -8,9 +8,9 @@
  [0m[1;2mNetwork [0m                           [0m[2mno socket bytes   0 retrans (machine)[0m                                               [0m
  [0m[1;2mGPU     [0m                           [0m[2mno kernel launched   VRAM 0B[0m                                                        [0m
  [0m[1mEnergy  [0m[34m▇▇▇▇█████████████████▂[0m     [0m[1;34m31.2 W      [0m   avg 123 W   the machine's, not apportioned                           [0m
- [0m[1mTime    [0m[35m▚[0m[31m▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞[0m   [0m[31mlock 95.1%[0m   [0m[35mrun queue 2.49%[0m   [0m[32mon cpu 2.13%[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m [0m[33m2 late[0m            [0m
+ [0m[1mTime    [0m[32m█[0m[35m▚[0m[31m▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞[0m[37m░░░░[0m   [0m[31mlock 77.1%[0m   [0m[37msleep 18.1%[0m   [0m[35mrun queue 2.49%[0m   [0m[32mon cpu 2.13%[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m [0m[33m2 la[0m
 [0m[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
-[0m[1m▶ suspect: [0m[1;31mlock (blocked: sleeping, on a futex)  95.1%[0m                                              [0m[2mEnter/click → detail[0m
+[0m[1m▶ suspect: [0m[1;31mlock (blocked: sleeping, on a futex)  77.1%[0m                                              [0m[2mEnter/click → detail[0m
                                                                                                                         [0m
 [0m[2mCPU in one hue: the machine's cores are not in the recording[0m                                                            [0m
 [0m[2mMemory in one hue: the machine's memory is not in the recording[0m                                                         [0m

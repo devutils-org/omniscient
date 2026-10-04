@@ -8,7 +8,7 @@
  [0m[1mNetwork [0m[34m▁▆▅█▅▇▇▄▅▇▆▃▇▇▆▆▄▇▅▆▅▇▄▂[0m   [0m[1;34m↓ 558B/s    [0m   ↑ 8.76MiB/s   0 retrans (machine)  [0m[33m1 late[0m [0m[36m~low det[0m [0m[33mdegraded x3[0m       [0m
  [0m[1;2mGPU     [0m                           [0m[2mno kernel launched   VRAM 0B[0m                                                        [0m
  [0m[1mEnergy  [0m[34m▅▇▆▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇████[0m   [0m[1;34m143 W       [0m   avg 115 W   the machine's, not apportioned                           [0m
- [0m[1mTime    [0m[32m█[0m[37m░░░░░░░░░░░░░░░░░░░░░░░[0m   [0m[37msleep 96.7%[0m   [0m[32mon cpu 2.45%[0m   [0m[35mrun queue 0.01%[0m   [0m[34mI/O 0.00%[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m [0m[33m2 lat[0m
+ [0m[1mTime    [0m[32m█[0m[37m░░░░░░░░░░░░░░░░░░░░░░░[0m   [0m[37msleep 96.7%[0m   [0m[32mon cpu 2.45%[0m   [0m[31mlock 0.01%[0m   [0m[35mrun queue 0.01%[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m [0m[33m2 la[0m
 [0m[2m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
 [0m[1m▶ suspect: [0m[1;37msleep (blocked: sleeping)  96.7%[0m                                                         [0m[2mEnter/click → detail[0m
                                                                                                                         [0m

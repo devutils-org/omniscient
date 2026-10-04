@@ -141,20 +141,15 @@ target/debug/omn top --view system                                              
 ## Needs from another stream
 
 - **record**: `tests/view_truth.rs`'s
-  `timebar_splits_the_workers_wall_clock_as_its_phases` asserts the old
-  rule (`blocked: sleeping` = sleep + lock, 0.776 to 1.04 s); it now draws
-  0.477 s. Hold the sleep to `phase("sleeping")` and the lock line
-  (`blocked: sleeping, on a futex`) to `phase("futex")`.
+  `timebar_splits_the_workers_wall_clock_as_its_phases` asserted the old
+  rule; landed here in the fix round (see "Review").
 - **record**: I re-blessed the gallery files my own changes redrew
   (`OMN_VIEW_BLESS=1` on `tests/view_snapshots.rs` and the ledger and
   timebar gallery tests), so the merge is green; the re-recording replaces
   them. Add `--against` and focus snapshots to the standard set through
   `snapshot::draw_with`.
-- **process**: `view/src/views/process.rs`'s
-  `snapshot_on_the_process_workload` and `tests/view_snapshots.rs`'s
-  `process` differ (the suspect's share moves, `sleep 51.5 %` to `40.9 %`,
-  because the lock is now split out). I left `docs/view/gallery/process*`
-  untouched: the new view redraws them. Use `trust::usage` and
+- **process**: the `process` gallery files were re-blessed here in the fix
+  round (see "Review"). Use `trust::usage` and
   `Trust::hued` for the lines, `ledger::reading` and `flame::hottest` for
   the figures, and the ledger's `blocked time` line for the Time line.
 - **data**: `Results::fields` is mirrored as a map of name to JSON value;
@@ -162,6 +157,30 @@ target/debug/omn top --view system                                              
   say so.
 - **collectors**: `net.socket`'s `iface` for the socket -> interface edge;
   a link's speed would give the network row a capacity.
+
+## Review
+
+The reviewer was right: on main after both merges, `view_truth`'s timebar
+test, `views::process::tests::snapshot_on_the_process_workload`, and
+`view_snapshots`' `process` and `frame_help` were red, all four from the
+futex split. Rather than leave them to the record and process requests, the
+fix round lands them on this branch, so merging it turns main green on its
+own:
+
+- `tests/view_truth.rs` (record's file): the worker's `░ blocked:
+  sleeping` is held to `phase("sleeping")` and the new `blocked: sleeping,
+  on a futex` line to `phase("futex")`, each 0.97x to 1.3x; the futex(2)
+  line keeps its check. Passes on `workload-timebar`.
+- `docs/view/gallery/process--*` and `frame--help` re-blessed
+  (`OMN_VIEW_BLESS=1`) after merging main, so they are the process stream's
+  merged view drawn with the split: a `lock` share on the Time line (10.5 %
+  on `process-run`, 10.3 % on `workload-request`, 1.00 % on
+  `many-requests`) and the sleep share less it. Only the Time line and the
+  suspect's share changed in each.
+
+After the fix round: `cargo test --test view_truth` 10/10,
+`--test view_snapshots` 17/17, `-p omn-view --lib process` 11/11; clippy
+and fmt clean.
 
 ## The suite
 

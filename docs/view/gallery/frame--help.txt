@@ -8,7 +8,7 @@ omn top │ fixture http-server │ 3.24s                             view: snap
  Network ▁▆▅│Keys                                                                                          │ed x3
  GPU        │  q          quit                                                                             │
  Energy  ▅▇▆│  ←/→ tab    view                                                                             │
- Time    █░░│  1-9        jump                                                                             │ded x2 2 lat
+ Time    █░░│  1-9        jump                                                                             │aded x2 2 la
 ────────────│  f          clear focus                                                                      │────────────
 ▶ suspect: s│  ?          help                                                                             │ick → detail
             │  0          the tenth view                                                                   │

@@ -8,7 +8,7 @@ omn top │ fixture http-server │ 3.24s                             view: snap
  Network ▁▆▅█▅▇▇▄▅▇▆▃▇▇▆▆▄▇▅▆▅▇▄▂   ↓ 558B/s       ↑ 8.76MiB/s   0 retrans (machine)  1 late ~low det degraded x3
  GPU                                no kernel launched   VRAM 0B
  Energy  ▅▇▆▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇████   143 W          avg 115 W   the machine's, not apportioned
- Time    █░░░░░░░░░░░░░░░░░░░░░░░   sleep 96.7%   on cpu 2.45%   run queue 0.01%   I/O 0.00%  ~low det degraded x2 2 lat
+ Time    █░░░░░░░░░░░░░░░░░░░░░░░   sleep 96.7%   on cpu 2.45%   lock 0.01%   run queue 0.01%  ~low det degraded x2 2 la
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ▶ suspect: sleep (blocked: sleeping)  96.7%                                                         Enter/click → detail
 
