@@ -1,0 +1,10 @@
+
+Per-node process memory usage (in MBs) for PID 2923966 (bash)
+                           Node 0           Total
+                  --------------- ---------------
+Huge                         0.00            0.00
+Heap                         0.36            0.36
+Stack                        0.03            0.03
+Private                      3.85            3.85
+----------------  --------------- ---------------
+Total                        4.23            4.23
