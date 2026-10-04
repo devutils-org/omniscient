@@ -1,25 +1,25 @@
 omn top │ fixture sqlite-latency │ 284ms                          view: snapshot │ collectors ≥4.79% │ target 9.78% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows
-┌ ledger -- what a process costs, across every resource omn measures ──────────────────────────────────────────────────┐
-│Not drawn yet. What this view needs, and what this run holds of it:                                                   │
+┌ ledger -- what the target cost over 284ms of wall-clock ─────────────────────────────────────────────────────────────┐
+│  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
+│▸ cpu time        not in this run: cpu.oncpu_time was not asked for                                                   │
+│  memory held     not in this run: mem.rss was not asked for                                                          │
+│  memory faulted  not in this run: mem.faults was not asked for                                                       │
+│  I/O syscalls    not in this run: io.syscall was not asked for                                                       │
+│  retransmits     not in this run: net.tcp.retransmit@system was not asked for                                        │
+│  GPU memory      not in this run: gpu.mem was not asked for                                                          │
+│  GPU time        not in this run: gpu.kernel was not asked for                                                       │
+│  energy          not in this run: power.energy@system was not asked for                                              │
 │                                                                                                                      │
-│cpu.oncpu_time           not in this run                                                                              │
-│                         cpu time, per thread                                                                         │
-│mem.rss                  not in this run                                                                              │
-│                         memory held                                                                                  │
-│mem.faults               not in this run                                                                              │
-│                         memory faulted in                                                                            │
-│io.syscall               not in this run                                                                              │
-│                         bytes read and written, and their latency as the program saw it                              │
-│net.tcp.retransmit@system not in this run                                                                             │
-│                         retransmissions, the machine's: a retransmission is sent from a timer, so the collector      │
-│cannot give it to a process                                                                                           │
-│gpu.mem                  not in this run                                                                              │
-│                         GPU memory held                                                                              │
-│gpu.kernel               not in this run                                                                              │
-│                         GPU time per kernel                                                                          │
-│power.energy@system      not in this run                                                                              │
-│                         energy, where it can be attributed                                                           │
+│  to know all of this: nothing was measured                                                                           │
+│                                                                                                                      │
+│    This run asked for none of the sheet's sources: another session made it; `omn top -- prog` asks for all of them.  │
+│ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
+│cpu.oncpu_time -- cpu time, per thread                                                                                │
+│This run did not ask for it. `omn top` live asks for every line of the sheet; a recording made by another session     │
+│holds what that session asked.                                                                                        │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -37,4 +37,4 @@ omn top │ fixture sqlite-latency │ 284ms                          view: snap
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-q quit  ←/→ tab view  1-9 jump  f clear focus  ? help
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ line  t next task  enter the view behind the line
