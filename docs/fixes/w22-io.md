@@ -39,7 +39,7 @@ no pair ran through it):
   as a pair; pair 1 is the same execution).
 
 Reasoned, not run: pairs 5 to 7 (`iostat` missing; they skip on
-`requires: [iostat]`), and every tolerance's behaviour under the wave's load.
+`requires: [iostat, fio]`), and every tolerance's behaviour under the wave's load.
 The `iostat` parser is tested only on the hand-written capture.
 
 ## Tests
@@ -50,6 +50,12 @@ has no pairs to run on `main` yet). `cargo test --test cli`: 28 passed.
 `cargo fmt --check`: clean. A system upgrade (pacman, 19:36-19:37) left
 `rustc` unable to load `libLLVM.so.22.1` for a few minutes mid-stream; the
 checks above were rerun after it completed, on rust 1.99.0.
+
+Fix round, after merging `main` (9d367ef), touching only the YAML and this
+handoff: `cargo test --test reference` 23 passed (every family's parser
+tests; still no runner), `cargo test --test cli` 28 passed, clippy and
+`cargo fmt --check` clean. The YAML was also loaded with a YAML parser:
+seven pairs.
 
 ## Not done, and why
 
@@ -102,9 +108,11 @@ and replace `tests/reference/captures/io/iostat-dx.json` with
 
 ## Decision lines
 
-- io pairs that need the whole machine run **alongside**, with a tolerance
-  that only ever allows omn more (other readers add); the same-process pairs
-  are held to the same execution, omn launching fio.
+- io pairs that need the whole machine run **alongside**, with a band sized
+  for the other readers of the machine (which only add); the band is the
+  schema's symmetric `{rel: N}`, so it also passes omn that far *below* the
+  tool, until a one-sided tolerance exists. The same-process pairs are held
+  to the same execution, omn launching fio.
 - The fio workload runs with `thread` until gap 1 is closed, and says why in
   the job file.
 - The workload file lives under `target/`, never `/tmp` (tmpfs here).
@@ -120,5 +128,46 @@ and replace `tests/reference/captures/io/iostat-dx.json` with
   spelling `<emit>[<key glob>].<field>` with count/total summed and mean
   weighted by count over the matching series. If the runner settles another
   spelling, the seven pairs are mechanical to rewrite.
+- **reference**: a one-sided tolerance, e.g. `{rel: 0.05, side: omn_above}`
+  (omn may exceed the tool by the band, never fall short) and its mirror
+  `omn_below`. Pairs 3 and 4 want `omn_above` (other readers only add;
+  omn short of fio is lost requests), pair 2 wants `omn_below` (omn's span
+  is inside fio's clat). Until then the three bands are symmetric and their
+  `why` says so; the field is not written into the pairs now, because a
+  runner that parses `tolerance` strictly would refuse it and one that
+  ignores it would claim a check it does not make.
 - **sysstat**: `iostat` is shared with that stream's row; if it writes its
   own `iostat` parser, one of the two should go. Mine is `iostat_json`.
+
+## Review
+
+The fix round answered the three findings of the wave's review.
+
+1. **The tolerances are symmetric, the text said one-sided.** Fixed in the
+   text: the `why` of pairs 2, 3 and 4 and the decision line now say the
+   band is `{rel: N}` either way and which side it would wrongly pass; the
+   YAML header says the same for every pair. The one-sided tolerance is
+   asked of stream reference under "Needs from another stream", with the
+   side each pair wants. Not added to the pairs themselves, for the reason
+   given there.
+2. **Pairs 5 to 7 run fio as their workload and required only `iostat`.**
+   Fixed: `requires: [iostat, fio]`, so a machine with sysstat and without
+   fio skips with the missing binary rather than failing the workload.
+3. **Every pair depends on runner fields not on `main`.** Right, and not
+   fixable in this stream: after merging `main` (9d367ef) there is still no
+   runner in `tests/reference.rs` -- it lists the parsers and runs none.
+   Nothing here can make the pairs produce a value without it. What the
+   merge of stream reference must do, one of:
+   - honour `same_run: omn_launches_tool` / `alongside`, `duration`,
+     `start_after` and the `<emit>[<glob>].<field>` path as specified in the
+     YAML header and under "Needs from another stream"; or
+   - if it settles another spelling, rewrite the seven pairs to it (they are
+     mechanical); or
+   - if it can do neither this wave, mark the io pairs pending rather than
+     run them under fields it ignores: pairs 1-2 would then run fio with
+     `--output=/dev/stderr` and no `--program-stderr` file, and pairs 3-4
+     with an empty workload and the job file in the tool command, and
+     neither yields a comparable value. A pair that runs and compares
+     nothing must fail loudly, not pass.
+   None of the seven pairs has run through a runner; "Shown vs reasoned"
+   already says so and still does.
