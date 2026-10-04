@@ -188,6 +188,27 @@ struct NetCounts {
     orphan_drains: u64,
 }
 
+/// The requests the run counted and could put in no event, as numbers: what
+/// the run's notes say in sentences, for a program to read without parsing
+/// them. The sentences are written from this, so the two cannot disagree.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Undrawn {
+    /// Born and not ended when the run stopped: no total, so no event.
+    pub never_ended: u64,
+    /// The first few of those, as `(request key, serving thread)`.
+    pub never_ended_named: Vec<(String, u32)>,
+    /// `request__done` on a thread that carried no request.
+    pub unborn: u64,
+    /// `request__start` on a thread still carrying one, which was replaced
+    /// and is among `never_ended`.
+    pub replaced: u64,
+    /// Ended, and removed by the request's filter after the drain.
+    pub filtered_out: u64,
+}
+
+/// How many never-ended requests `Undrawn` names, and the notes print.
+const NAMED: usize = 5;
+
 /// The network rows of one request, when its probes named a socket.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct NetRows {
@@ -453,6 +474,22 @@ impl RequestCollector {
 }
 
 impl RequestCollector {
+    /// The requests this run counted and put in no event, as numbers.
+    pub fn undrawn(&self) -> Undrawn {
+        Undrawn {
+            never_ended: self.open.len() as u64,
+            never_ended_named: self
+                .open
+                .iter()
+                .take(NAMED)
+                .map(|(id, (tid, _))| (request_key(*id), *tid))
+                .collect(),
+            unborn: self.counts.unborn,
+            replaced: self.counts.restarted,
+            filtered_out: self.filtered_out,
+        }
+    }
+
     /// Whether the socket programs are attached.
     fn attached(&self) -> bool {
         match &self.program {
@@ -601,40 +638,40 @@ impl Collector for RequestCollector {
             self.ended,
             self.object.display(),
         )];
-        if !self.open.is_empty() {
-            let named: Vec<String> = self
-                .open
+        let undrawn = self.undrawn();
+        if undrawn.never_ended > 0 {
+            let named: Vec<String> = undrawn
+                .never_ended_named
                 .iter()
-                .take(5)
-                .map(|(id, (tid, _))| format!("req:{} in task {tid}", request_key(*id)))
+                .map(|(id, tid)| format!("req:{id} in task {tid}"))
                 .collect();
             notes.push(format!(
                 "{} request{} never ended in the run ({}{}); a request with no end has no total \
                  and is in no event",
-                self.open.len(),
-                if self.open.len() == 1 { "" } else { "s" },
+                undrawn.never_ended,
+                if undrawn.never_ended == 1 { "" } else { "s" },
                 named.join(", "),
-                if self.open.len() > named.len() {
+                if undrawn.never_ended > named.len() as u64 {
                     ", ..."
                 } else {
                     ""
                 },
             ));
         }
-        if self.counts.unborn > 0 {
+        if undrawn.unborn > 0 {
             notes.push(format!(
                 "{} `{DONE}` hit{} a task carrying no request: begun before the probes \
                  attached, or never declared at `{START}`",
-                self.counts.unborn,
-                if self.counts.unborn == 1 { "" } else { "s" },
+                undrawn.unborn,
+                if undrawn.unborn == 1 { "" } else { "s" },
             ));
         }
-        if self.counts.restarted > 0 {
+        if undrawn.replaced > 0 {
             notes.push(format!(
                 "{} `{START}` hit{} a task still carrying a request that never ended; the old one \
                  was replaced and is among those that never ended",
-                self.counts.restarted,
-                if self.counts.restarted == 1 { "" } else { "s" },
+                undrawn.replaced,
+                if undrawn.replaced == 1 { "" } else { "s" },
             ));
         }
         if self.mismatched > 0 {
@@ -660,11 +697,11 @@ impl Collector for RequestCollector {
                 if self.anomalies == 1 { "its" } else { "their" },
             ));
         }
-        if self.filtered_out > 0 {
+        if undrawn.filtered_out > 0 {
             notes.push(format!(
                 "the filter removed {} requests, here over the drained records rather than in \
                  the kernel",
-                self.filtered_out
+                undrawn.filtered_out
             ));
         }
         notes.extend(self.socket_notes());
@@ -707,6 +744,8 @@ mod tests {
     }
 
     const DECLARED: u32 = 1;
+    /// `src/bpf/request.rs`'s flag on a birth record.
+    const BORN: u32 = 1;
     const RX_UNSEEN: u32 = 4;
     const TX_PENDING: u32 = 8;
     const DRAIN: u32 = 4;
@@ -813,6 +852,37 @@ mod tests {
             event.attr("declared").map(ToString::to_string),
             Some("beef".to_owned())
         );
+    }
+
+    /// The requests in no event are counted as numbers, and the sentences the
+    /// run prints are written from the same numbers.
+    #[test]
+    fn what_is_in_no_event_is_counted_as_numbers_and_said_from_them() {
+        let mut collector = collector();
+        let mut events = Vec::new();
+        let mut births = Vec::new();
+        for id in 1..=7u64 {
+            let mut birth = record(BORN);
+            birth.id = id;
+            birth.tid = 100 + id as u32;
+            births.push(birth);
+        }
+        let mut ended = record(0);
+        ended.id = 7;
+        births.push(ended);
+        collector.absorb(births, &mut events, 0);
+        collector.counts.unborn = 2;
+        collector.counts.restarted = 1;
+        let undrawn = collector.undrawn();
+        assert_eq!(undrawn.never_ended, 6);
+        assert_eq!(undrawn.never_ended_named.len(), NAMED);
+        assert_eq!(undrawn.never_ended_named[0], ("1".to_owned(), 101));
+        assert_eq!((undrawn.unborn, undrawn.replaced), (2, 1));
+        let notes = collector.notes();
+        let said = |prefix: &str| notes.iter().any(|note| note.starts_with(prefix));
+        assert!(said("6 requests never ended in the run (req:1 in task 101"));
+        assert!(said(&format!("2 `{DONE}` hits a task carrying no request")));
+        assert!(said(&format!("1 `{START}` hit a task still carrying")));
     }
 
     /// Every filter field the catalog declares is on the event.
