@@ -92,6 +92,28 @@ rings'. None of the fifteen reads a file this branch changed except
 `join_engine`'s, whose failing test is a decomposition this branch does not
 touch and passes alone.
 
+The review round, on `main` at `29abbc4` merged in (this branch's diff to
+`main` is the handoff and nine lines of `man/omn.1`), after `make` (the
+capabilities granted), load average 10 to 14: `cargo test --test cli` 27
+passed, `cargo fmt --check` and clippy clean, `groff -man -ww` silent. One
+`make check`: stopped on `budget::the_extra_cpu_a_faster_poll_costs_...`
+(flaky tally 14; failed alone once more, passed on a third run). `cargo test
+--workspace --no-fail-fast` then: 58 binaries green, 5 failures, each rerun
+alone once. `triage::an_escalating_run_holds_its_budget_...` (7.8 % against
+its budget) passes alone. Four fail again, none in a file this branch
+touches, all `main`'s as merged:
+
+- `cases::every_case_names_its_known_cause_both_ways`: the MCP case reads a
+  `key=value` number from `said_by_omn`, which holds `omn`'s lines only since
+  budget's `program_stderr` -- the request budget filed to docs
+  (`tests/cases.rs`).
+- `runner::a_profile_s_losses_land_on_the_series_...`: 77295 against 76224,
+  the known red of `STATE.md` item 4 (rings').
+- `scenario_sched::a_workload_that_is_half_blocked_measures_as_half_blocked`:
+  29 % blocked against a half; sched's.
+- `view_workloads::system_panels_carry_at_least_the_manifests_cost`: 2.086 s
+  on the cpu for a program of 1 s; workloads'.
+
 ## Privileged runs wanted
 
 None of this branch needs one beyond `make` (which granted the capabilities
