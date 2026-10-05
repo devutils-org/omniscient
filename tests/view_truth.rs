@@ -294,7 +294,10 @@ fn flows_draws_the_sockets_bytes_exactly() {
 fn flows_ties_the_socket_to_the_loopback() {
     let drawn = screen("flows", &[], 200, 50);
     let tied: Vec<&str> = drawn.lines().filter(|line| line.contains("◂ ")).collect();
-    let sockets: Vec<&&str> = tied.iter().filter(|line| line.contains(" socket")).collect();
+    let sockets: Vec<&&str> = tied
+        .iter()
+        .filter(|line| line.contains(" socket"))
+        .collect();
     assert_eq!(sockets.len(), 1, "one interface tied:\n{drawn}");
     let after_bar = sockets[0].rsplit('┃').next().expect("the sink column");
     assert!(
@@ -594,7 +597,10 @@ fn request_draws_each_requests_bytes_as_its_server_wrote_them() {
         let keys = vec![KeyCode::Down; index];
         let drawn = screen("request", &keys, 160, 60);
         let id = format!("a{:03x}", index + 1);
-        assert!(drawn.contains(&format!("── {id} ")), "{id} not selected:\n{drawn}");
+        assert!(
+            drawn.contains(&format!("── {id} ")),
+            "{id} not selected:\n{drawn}"
+        );
         let read: f64 = in_line(&drawn, " read · ", bytes);
         let queued: f64 = first(&drawn, " read · ", bytes);
         assert_eq!(read, request as f64, "{id}: read\n{drawn}");

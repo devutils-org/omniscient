@@ -1218,7 +1218,7 @@ impl Lanes {
             let two = active(lane)
                 && (lanes[..index].iter().filter(|lane| active(lane)).count() as u16) < tall;
             let height = if two { 2 * depth } else { 1 };
-            if row + height - 1 >= y + lane_rows {
+            if row + height > y + lane_rows {
                 break;
             }
             let (name, trust, mut label_style) = match lane {

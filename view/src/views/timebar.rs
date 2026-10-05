@@ -2180,10 +2180,7 @@ impl View for Timebar {
             // The rows above the labelled one: the same bar, its words left
             // to the row that carries the thread's name.
             for _ in 1..thickness {
-                let mut above = vec![
-                    Span::raw(" ".repeat(LABEL)),
-                    Span::styled("│", dim()),
-                ];
+                let mut above = vec![Span::raw(" ".repeat(LABEL)), Span::styled("│", dim())];
                 above.extend(bar_spans(one, scale, bar_w, false));
                 lines.push(Line::from(above));
             }

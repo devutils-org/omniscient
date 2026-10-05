@@ -1931,8 +1931,8 @@ fn draw_sheet(
         .map(|line| line.width().max(1).div_ceil(usize::from(inner.width)))
         .sum::<usize>()
         + 1;
-    let tall = 1 + sheet.items.len() + served + subs + below + detail_rows
-        <= usize::from(inner.height);
+    let tall =
+        1 + sheet.items.len() + served + subs + below + detail_rows <= usize::from(inner.height);
     let rows = if tall { 2 } else { 1 };
     let mut lines: Vec<Line<'static>> = vec![header_line(&columns, against.is_some())];
     for (index, item) in sheet.items.iter().enumerate() {
@@ -1946,7 +1946,10 @@ fn draw_sheet(
         };
         if y < inner.y + inner.height {
             let height = served_rows.min(inner.y + inner.height - y);
-            regions.push(Region::new(Rect::new(inner.x, y, inner.width, height), index));
+            regions.push(Region::new(
+                Rect::new(inner.x, y, inner.width, height),
+                index,
+            ));
         }
         let other = against.and_then(|other| other.items.get(index));
         if served_rows == 2 {
@@ -2186,10 +2189,7 @@ fn upper_line(item: &Item, columns: &Columns) -> Line<'static> {
     let offset = 2 + columns.resource + columns.amount + columns.rate;
     Line::from(vec![
         Span::raw(" ".repeat(offset)),
-        Span::styled(
-            rows[0].clone(),
-            served.trust.style().fg(palette::ACCENT),
-        ),
+        Span::styled(rows[0].clone(), served.trust.style().fg(palette::ACCENT)),
     ])
 }
 

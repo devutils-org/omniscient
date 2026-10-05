@@ -21,7 +21,8 @@ use omn_view::trust::usage;
 /// Backgrounds a terminal is commonly given: pure black and a dark grey,
 /// pure white and a warm light one.
 const DARK: [(&str, (u8, u8, u8)); 2] = [("black", (0, 0, 0)), ("dark", (0x1e, 0x1e, 0x1e))];
-const LIGHT: [(&str, (u8, u8, u8)); 2] = [("white", (255, 255, 255)), ("light", (0xfd, 0xf6, 0xe3))];
+const LIGHT: [(&str, (u8, u8, u8)); 2] =
+    [("white", (255, 255, 255)), ("light", (0xfd, 0xf6, 0xe3))];
 
 /// WCAG 2's floor for a graphical object against its background.
 const FLOOR: f64 = 3.0;
@@ -171,7 +172,10 @@ fn the_ramp_drawn_on_each_background() {
                 buffer.set_string(
                     x,
                     1,
-                    format!("{:<12}", format!("{index} {:.2}", contrast(rgb(*index), background))),
+                    format!(
+                        "{:<12}",
+                        format!("{index} {:.2}", contrast(rgb(*index), background))
+                    ),
                     style,
                 );
             }
