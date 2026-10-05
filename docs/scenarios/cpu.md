@@ -85,6 +85,15 @@ Both requests carry `keys: [task]`. This is the pair phase two's P2 starts from.
 
 ### How much cpu did this program really get?
 
+`counted_oncpu_time_is_task_clock_and_agrees_with_the_reap` ·
+`task_clock_counts_the_cpu_time_the_thread_ran`
+
+`cpu.oncpu_time -m count` is `perf stat`'s task-clock, through `pmu:sw`: one
+total over the program and the children it starts. It agrees with the
+thread's own `CLOCK_THREAD_CPUTIME_ID` to under 1 % of a 200 ms spin, and with
+the reap's `cpu_ns` in the same run to 0.4 to 3 % (716.6 against 696.8 ms,
+485.8 against 483.8 ms, 390.0 against 382.7 ms with two children).
+
 `a_sleeping_program_consumes_no_cpu_and_a_burning_one_consumes_what_it_burned` ·
 `a_program_that_blocks_after_working_is_credited_only_with_the_work`
 
@@ -138,6 +147,19 @@ error: one run observes one target, but this session asks for `cpu 23` and
 Worth knowing before phase two tries to join a per-core series to a per-process
 one.
 
+### What was the machine doing, state by state?
+
+`the_windows_split_is_the_ticks_between_the_first_read_and_the_last`
+
+`top`'s and `mpstat`'s `us`/`sy`/`wa`/`st` over the run: `cpu.util` puts the
+window's ticks per state in the results' `fields` (`user_ticks`,
+`system_ticks`, `iowait_ticks`, `steal_ticks`, ..., `ticks`; prefixed
+`cpu<N>.` per core) and the shares in a note, from the baseline and the last
+read -- exact, where a mean of per-tick shares weighs a short tick like a long
+one. Alongside `mpstat 4 1` over the same four seconds: user 32.5 % against
+32.90, system 9.0 against 9.27, iowait 7.4 against 7.39; and 41.5 / 5.3 / 7.1
+against 41.39 / 5.28 / 7.06.
+
 ### Is the machine busy, or oversubscribed?
 
 `examples/cpu-saturation.yml` ·
@@ -156,6 +178,25 @@ to be far lower. On an idle machine that is a stall share of 0.000 against
 window before this scenario loaded it — which happens when seven other streams
 are running their suites — it says so and stops, because its own load cannot
 then be told from somebody else's.
+
+### Where does a counter's event happen?
+
+`a_counting_source_samples_on_its_own_counter` ·
+`a_cycles_profile_samples_one_period_of_cycles_at_a_time` ·
+`branches_match_a_loop_with_one_branch_per_iteration`
+
+Every counting source of the family samples on its own counter: `cpu.cycles
+-m sample@997hz -e stack` is `perf record`'s default, and `cpu.branch_misses`
+sampled is `perf record -e branch-misses`. Cycles sample at a fixed period,
+the cpu's highest frequency over the rate, so the samples times the period are
+the cycles a counter beside them counted (held to 10 %); the others sample in
+the kernel's frequency mode, each sample weighing one, and say so. On the
+perfrecord `hot` workload a cycles profile read `hot_beta` 0.495, `hot_gamma`
+0.291, `hot_alpha` 0.200 against `perf record -e cycles`' 0.483, 0.306, 0.206.
+
+`cpu.branches` counts retired branches, against a loop that retires one per
+iteration (`known_loop`), within 1 %; through the binary 250.42 M on a C loop
+of 2.5 branches per iteration over 1e8, where `perf stat` read 250.47 M.
 
 ### How many times was the program taken off the cpu?
 
@@ -257,7 +298,10 @@ holds the output to the workload's own clock; it is ignored until those places
 read `Entry::backend_unit` (`docs/open-findings.md`, the sixteenth wave, stream
 cpu), and passes here with `--ignored` once `src/main.rs`'s does.
 
-Seven backends are declared and not built: `cpu.profile pmu`,
+Seven backends are declared and not built: `cpu.profile pmu` (a cycles
+profile is `cpu.cycles -m sample -e stack` since the twenty-fourth wave; this
+row stays unbuilt because a `cpu.profile` sample is read as a period of
+on-cpu time by `omn latency` and `omn diff`),
 `cpu.oncpu_time bpf:tp`, `cpu.oncpu_time fs:cgroup`, `cpu.util fs:cgroup`,
 `cpu.pressure fs:cgroup`, `cpu.flow pmu:aux:intel_pt`, `cpu.flow
 pmu:aux:cs_etm`. Each has to exit 3 and name both halves of what is missing,
@@ -918,6 +962,28 @@ a program has to do.
 
 The mildest of the ten, and listed because a harness is the reader this format
 has.
+
+### 11. A poll's first share covers a few milliseconds
+
+> **Fixed** (the twenty-fourth wave, stream cpu): a poll's first read is its
+> baseline and produces no event, as `mem.pressure` and `io.pressure` already
+> did. Asserted by `the_first_read_of_a_poll_is_a_baseline_and_emits_nothing`
+> in `util.rs` and `pressure.rs`, and through the binary by the reference
+> suite's `defect_hold`, which now reports the defect gone.
+
+`cpu.util` and `cpu.pressure` took their baseline in `start`, and the runner
+samples immediately after it: the first event was a share of a few
+microseconds to a few milliseconds (seen 0.0 and 0.5), and it entered the
+summary's `min` and `mean` beside the full windows -- `-d 4s` on a 22 % busy
+machine read a mean of 0.155 against 0.19 over the four real windows
+(`docs/fixes/w22-sysstat.md`, defect 2). Forty runs each at `poll@50ms` for
+175 ms now give four events every time, the first 50.2 to 50.5 ms after the
+window opens; before, the hold test found the leading event within forty.
+
+`cpu.pressure` was rewritten onto the shared PSI reader in the same change,
+and names its attributes as its siblings do -- `stall_ratio`, `stalled_ns`,
+`interval_ns`, `full_stall_ratio`, `some_avg10` -- where it said `some`,
+`avg10`, `total_us` (gap 3 of the same handoff).
 
 ---
 
