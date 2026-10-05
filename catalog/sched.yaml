@@ -397,3 +397,17 @@
   keys: [task]
   filter_fields: [comm, pid, node]
   determinism: low
+
+# The family's default: what `omn trace sched -- PROGRAM` composes, per cost
+# band. See docs/lazy.md.
+- default:
+    family: sched
+    question: "How often is the program switched out, and how long is it off a cpu?"
+    low:
+      - {source: sched.switches, mode: count, emit: [summary], label: "context switches"}
+    med:
+      - {source: sched.switches, mode: count, emit: [summary], label: "context switches"}
+      - {source: sched.offcpu, mode: trace, emit: [hist, summary], label: "time off cpu"}
+    high:
+      - {source: sched.switches, mode: count, emit: [summary], label: "context switches"}
+      - {source: sched.offcpu, mode: trace, emit: [hist, stack], label: "time off cpu, and where"}

@@ -774,7 +774,21 @@ fn every_axis_this_family_declares_is_served_or_refused_by_name() {
             for emit in &entry.emits {
                 let mode = mode_argument(*mode);
                 let emit = emit.as_str();
-                let attempt = run(&[&source, "--system", "-m", mode, "-e", emit, "-d", "200ms"]);
+                // A source of a process (`power.wakeups`) is asked about this
+                // test's own process; the rest about the machine.
+                let own = std::process::id().to_string();
+                let target: [&str; 2] = if entry
+                    .supported_targets()
+                    .contains(&omn::request::TargetKind::System)
+                {
+                    ["--system", ""]
+                } else {
+                    ["--pid", &own]
+                };
+                let mut args = vec![source.as_str()];
+                args.extend(target.iter().filter(|arg| !arg.is_empty()));
+                args.extend(["-m", mode, "-e", emit, "-d", "200ms"]);
+                let attempt = run(&args);
                 let out = stdout(&attempt);
                 let message = stderr(&attempt);
                 let answer = match attempt.status.code() {
@@ -2124,4 +2138,204 @@ fn the_raw_events_of_a_run_are_the_readings_its_timeline_is_drawn_from() {
         (raw_total - timeline_total).abs() <= 1e-9 * raw_total.max(1.0),
         "the raw events hold {raw_total} J and the timeline drawn from them {timeline_total} J"
     );
+}
+
+/// `power.freq`'s busy share, through each backend this machine serves, against
+/// a load whose shape the test chose: a spin loop pinned to the last core, in
+/// C0 for the whole window. And the window is what is measured: a poll of one
+/// second over one second is one reading per core, taken at the close, not a
+/// second one at window open describing the machine before the load.
+///
+/// Shown against turbostat on this machine (`docs/scenarios/power.md`): Busy%
+/// 100.00 / 100.00 for the pinned core, Bzy_MHz 4084 / 4084 through `pmu`, and
+/// 50.2 / 50.9 % for a core held at half duty through `fs:sys`.
+#[test]
+fn a_core_held_busy_reads_busy_through_every_road_and_once_per_interval() {
+    if cores() < 2 || !have_taskset() {
+        eprintln!("skipped: needs two cores and `taskset` to pin a load");
+        return;
+    }
+    if !usable("power.freq") {
+        eprintln!("skipped: no backend of `power.freq` is usable here");
+        return;
+    }
+    let core = (cores() - 1).to_string();
+    let _alone = alone();
+    let mut checked = 0;
+    for backend in ["pmu", "fs:sys"] {
+        if lacks_here("power.freq", backend).is_some() {
+            eprintln!(
+                "skipped `{backend}`: {:?}",
+                missing_here("power.freq", backend)
+            );
+            continue;
+        }
+        let mut spin = Command::new("taskset")
+            .args(["-c", &core, "sh", "-c", "while :; do :; done"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("taskset runs");
+        let forced = format!("force:{backend}");
+        let output = run(&[
+            "power.freq",
+            "--cpu",
+            &core,
+            "-m",
+            "poll@1s",
+            "-d",
+            "1s",
+            "-e",
+            "raw",
+            "--backend",
+            &forced,
+        ]);
+        let _ = spin.kill();
+        let _ = spin.wait();
+        assert!(output.status.success(), "{}", stderr(&output));
+        let out = stdout(&output);
+        let readings: Vec<&str> = out
+            .lines()
+            .filter(|line| line.contains(&format!("cpu:{core} ")))
+            .collect();
+        assert_eq!(
+            readings.len(),
+            1,
+            "a one-second poll over one second is one reading, at the close, through \
+             `{backend}`: {out}"
+        );
+        let busy: f64 = field(readings[0], "busy=")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("`{backend}` carries a busy share: {out}"));
+        let idle: f64 = field(readings[0], "idle=").unwrap().parse().unwrap();
+        assert!(
+            busy >= 0.9,
+            "a core held by a spin loop read {busy} busy through `{backend}`: {out}"
+        );
+        assert!(
+            (busy + idle - 1.0).abs() < 1e-9,
+            "busy and idle share the window"
+        );
+        let hz: f64 = field(readings[0], "hz=").unwrap().parse().unwrap();
+        let avg: f64 = field(readings[0], "avg_hz=").unwrap().parse().unwrap();
+        assert!(
+            avg <= hz * 1.001 && avg >= hz * busy * 0.95,
+            "avg_hz {avg} is the busy frequency {hz} spread over the window"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "neither road of `power.freq` is open here");
+}
+
+/// The core energy domain, where the part counts it per core (AMD's
+/// `power_core` unit): one counter per core the unit lists, summed, and less
+/// than the package that contains those cores. Asked for by `--keys domain`,
+/// which gives each domain its own series; unkeyed, the package alone is read,
+/// because the domains nest and one series across them double-counts.
+///
+/// Shown against `perf stat -a -e power_core/energy-core/` over the same two
+/// seconds on this machine: 226.89 J against 227.77 J, and the package 276.77
+/// against 277.31 J (`docs/scenarios/power.md`).
+#[test]
+fn the_core_domain_is_every_cores_counter_summed_and_less_than_its_package() {
+    let mask = Path::new("/sys/bus/event_source/devices/power_core/cpumask");
+    let Ok(mask) = std::fs::read_to_string(mask) else {
+        eprintln!("skipped: this part publishes no per-core energy unit");
+        return;
+    };
+    let Some(cores) = omn::capabilities::parse_cpu_list(mask.trim()) else {
+        panic!("the kernel's cpumask `{mask}` does not parse");
+    };
+    if !usable("power.energy") || lacks_here("power.energy", "pmu").is_some() {
+        eprintln!("skipped: `power.energy` through `pmu` is not open here");
+        return;
+    }
+    let output = run(&[
+        "power.energy",
+        "--system",
+        "-m",
+        "count",
+        "-d",
+        "1s",
+        "-e",
+        "raw",
+        "-k",
+        "domain",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    let joules = |domain: &str| -> Option<(f64, usize)> {
+        let line = out
+            .lines()
+            .find(|line| line.contains(&format!("domain={domain} ")))?;
+        Some((
+            field(line, "joules=")?.parse().ok()?,
+            field(line, "counters=")?.parse().ok()?,
+        ))
+    };
+    let (package, _) = joules("package").unwrap_or_else(|| panic!("a package domain: {out}"));
+    let (core_joules, counters) =
+        joules("cores").unwrap_or_else(|| panic!("a cores domain: {out}"));
+    assert_eq!(
+        counters,
+        cores.len(),
+        "one counter per core the unit lists: {out}"
+    );
+    assert!(
+        core_joules > 0.0 && core_joules < package,
+        "the cores ({core_joules} J) sit inside their package ({package} J): {out}"
+    );
+}
+
+/// `power.wakeups` against a program whose wakeups the test chose: 300 sleeps
+/// of 2 ms on one thread. Each sleep ends in one wakeup, so the rate cannot
+/// exceed 500 a second, and the count over the run cannot exceed 300 by more
+/// than the interpreter's own start-up sleeps -- nor fall far below it, beyond
+/// the last partial interval the exit cuts short.
+///
+/// Measured here: 482 of 500 sleeps of 2 ms counted, 485 a second, where one
+/// sleep plus the loop's overhead is 2.06 ms (`docs/scenarios/power.md`).
+#[test]
+fn a_program_that_sleeps_three_hundred_times_wakes_three_hundred_times() {
+    let python = Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !python {
+        eprintln!("skipped: no python3 to run the sleeping program");
+        return;
+    }
+    let output = run(&[
+        "power.wakeups",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "raw",
+        "--",
+        "python3",
+        "-c",
+        "import time\nfor _ in range(300): time.sleep(0.002)",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    let events: Vec<&str> = out
+        .lines()
+        .filter(|line| line.contains("wakeups="))
+        .collect();
+    assert!(!events.is_empty(), "no interval measured: {out}");
+    let total: f64 = events
+        .iter()
+        .filter_map(|line| field(line, "wakeups=")?.parse::<f64>().ok())
+        .sum();
+    assert!(
+        (150.0..=340.0).contains(&total),
+        "300 sleeps were counted as {total} wakeups: {out}"
+    );
+    for line in &events {
+        let rate: f64 = field(line, "per_second=").unwrap().parse().unwrap();
+        assert!(
+            rate <= 520.0,
+            "a thread sleeping 2 ms at a time cannot wake {rate} times a second: {line}"
+        );
+    }
 }
