@@ -1217,10 +1217,19 @@ pub enum KeyKind {
     /// `results.json` keeps the split the views draw live
     /// (`DECISIONS.md`, the twenty-first wave).
     Dir,
+    /// `func:<name>`, the function a sample's leaf frame is in: what `perf
+    /// report` sorts by first, the self share (perfrecord 3).
+    ///
+    /// No collector attaches it. The emit layer reads it off the stack each
+    /// event carries, from the run's stack table, so it needs a source whose
+    /// events have stacks; an event without one is `func:?`. A frame with no
+    /// name is its object and offset, `libc.so.6+0x27781`, so unnamed code
+    /// is one row per address rather than one row for all of it.
+    Func,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 14] = [
+    pub const ALL: [KeyKind; 15] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -1235,7 +1244,14 @@ impl KeyKind {
         KeyKind::Cpu,
         KeyKind::Node,
         KeyKind::Dir,
+        KeyKind::Func,
     ];
+
+    /// The keys no collector attaches and the emit layer derives from what
+    /// an event carries: `func`, from its stack.
+    pub fn derived(self) -> bool {
+        matches!(self, KeyKind::Func)
+    }
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -1253,6 +1269,7 @@ impl KeyKind {
             KeyKind::Cpu => "cpu",
             KeyKind::Node => "node",
             KeyKind::Dir => "dir",
+            KeyKind::Func => "func",
         }
     }
 }

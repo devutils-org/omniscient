@@ -258,6 +258,12 @@ impl SeriesKey {
         let parts: Vec<String> = axes
             .iter()
             .map(|axis| {
+                if axis.derived() {
+                    return event.attr(axis.as_str()).map_or_else(
+                        || format!("{}:?", axis.as_str()),
+                        |value| format!("{}:{value}", axis.as_str()),
+                    );
+                }
                 event
                     .keys
                     .iter()
@@ -972,6 +978,10 @@ pub fn aggregate(
     // Per series, when the collector read one ring per key and every loss it
     // counted belongs to one of them: then a series keyed by that key is short
     // by its own ring's losses and by nothing else ([`Shortfalls`]).
+    let mut collection = collection;
+    if request.keys.contains(&KeyKind::Func) {
+        derive_func(&mut collection);
+    }
     let shorts = Shortfalls::of(&collection, &request.keys);
     let short = shorts.run.clone();
 
@@ -1147,6 +1157,30 @@ pub fn aggregate(
         fields: collection.fields,
         provenance,
     })
+}
+
+/// Puts `func`, the leaf frame of each event's stack, on the event, for a
+/// request keyed on it ([`KeyKind::Func`]): the stack table is the
+/// collector's when it interned one, and the frames on the events otherwise.
+/// Frames are stored root first, so the leaf is the last.
+fn derive_func(collection: &mut Collection) {
+    let scanned = stack_table(&collection.events);
+    for event in &mut collection.events {
+        let Some(id) = stack_id(event) else { continue };
+        let Some(leaf) = collection
+            .stacks
+            .get(&id)
+            .or_else(|| scanned.get(&id))
+            .and_then(|frames| frames.last())
+        else {
+            continue;
+        };
+        let name = KeyKind::Func.as_str();
+        event.attrs.retain(|attr| attr.name != name);
+        event
+            .attrs
+            .push(crate::event::Attr::text(name, leaf.clone()));
+    }
 }
 
 /// Says how many events carried no `by`, for an `@<attr>` emit that holds
@@ -3151,6 +3185,51 @@ mod tests {
             panic!("a ranking");
         };
         assert!(rest.total.is_sign_positive(), "{rest:?}");
+    }
+
+    /// `--keys func` (perfrecord 3): each event's series is the leaf frame of
+    /// its stack, from the collector's table or the frames it carries, and
+    /// an event with no stack is `func:?`.
+    #[test]
+    fn a_function_key_is_the_leaf_frame_of_the_stack() {
+        let sampled = |id: u64, frames: Option<&str>| {
+            let mut one = event(id, 7, 1);
+            one.attrs.push(Attr::uint(STACK_ID_ATTR, id));
+            if let Some(frames) = frames {
+                one.attrs.push(Attr::text(STACK_ATTR, frames));
+            }
+            one
+        };
+        let events = vec![
+            sampled(1, Some("main;heavy")),
+            sampled(1, None),
+            sampled(1, None),
+            sampled(2, None),
+            sampled(3, Some("main;libc.so.6+0x27781")),
+            event(9, 7, 1),
+        ];
+        let mut collection = quiet(events, 1_000);
+        collection
+            .stacks
+            .insert(2, vec!["main".to_owned(), "light".to_owned()]);
+        let resolved = rss_request(vec![Emit::TopK { k: 10, by: None }], vec![KeyKind::Func]);
+        let results = aggregate(&resolved, collection, Unit::Count, "bytes").unwrap();
+        let Output::TopK { series, .. } = &results.outputs[0] else {
+            panic!("a ranking");
+        };
+        let rows: Vec<(String, f64)> = series
+            .iter()
+            .map(|one| (one.key.to_string(), one.total))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("func:heavy".into(), 3.0),
+                ("func:?".into(), 1.0),
+                ("func:libc.so.6+0x27781".into(), 1.0),
+                ("func:light".into(), 1.0),
+            ]
+        );
     }
 
     /// A poll regrouped by fewer keys than its events carry adds the readings

@@ -1388,7 +1388,18 @@ fn text(results: &Results) -> String {
                 }
                 // A ranking that does not say what it left out reads as a
                 // statement about everything.
-                if rest.is_empty() {
+                let counted_nothing = rest.is_empty()
+                    && series.len() == 1
+                    && series[0].events == 0
+                    && series[0].unmeasured == 0
+                    && series[0].total == 0.0;
+                if counted_nothing {
+                    let _ = writeln!(
+                        out,
+                        "    nothing was counted over the window: the one row is the target's, \
+                         at zero, rather than no row"
+                    );
+                } else if rest.is_empty() {
                     let _ = writeln!(out, "    nothing was left out: that is every series");
                 } else {
                     let _ = writeln!(
