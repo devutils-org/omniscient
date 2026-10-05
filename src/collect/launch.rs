@@ -647,7 +647,11 @@ fn find_program(program: &str, path: Option<&std::ffi::OsStr>) -> std::path::Pat
     let path = path.map_or(&b"/bin:/usr/bin"[..], OsStrExt::as_bytes);
     for directory in path.split(|byte| *byte == b':') {
         // An empty entry is the current directory, as the shell reads it.
-        let directory = if directory.is_empty() { b"." } else { directory };
+        let directory = if directory.is_empty() {
+            b"."
+        } else {
+            directory
+        };
         let candidate = std::path::Path::new(std::ffi::OsStr::from_bytes(directory)).join(program);
         let Ok(c_candidate) = CString::new(candidate.as_os_str().as_bytes()) else {
             continue;
@@ -825,6 +829,84 @@ fn gated_with(
     })
 }
 
+/// Processes a run watches and did not start: a `--pid` target, whose exit
+/// ends the run the way a launched program's does, and the way `perf stat -p`
+/// ends when its process does.
+///
+/// Watched through a pidfd each, which becomes readable when its process
+/// exits and does not need the process to be this one's child. A pid the
+/// kernel will not give a pidfd for -- gone already, or a kernel below 5.3 --
+/// is not watched, and the run then ends at its duration as it did.
+pub struct Exits {
+    watched: Vec<(i32, RawFd)>,
+}
+
+impl Exits {
+    /// Watches each of `pids` that is running now.
+    pub fn of(pids: &[i32]) -> Exits {
+        let watched = pids
+            .iter()
+            .filter_map(|pid| {
+                // SAFETY: `pidfd_open` on a pid, which takes no pointer.
+                let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, *pid, 0) } as RawFd;
+                (fd >= 0).then(|| {
+                    // SAFETY: marking a descriptor this process just opened.
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+                    (*pid, fd)
+                })
+            })
+            .collect();
+        Exits { watched }
+    }
+
+    /// Whether every pid asked for is watched: a run whose end is these
+    /// exits needs all of them, or one it cannot see would never end it.
+    pub fn watches_all(&self, pids: &[i32]) -> bool {
+        !self.watched.is_empty() && self.watched.len() == pids.len()
+    }
+
+    /// The pids watched that have exited, and the one descriptor a run can
+    /// sleep on when it watches one process alone. With several, the first
+    /// to exit would stay readable and wake the run on every round, so the
+    /// run's own cadence is what notices.
+    pub fn wake_fd(&self) -> Option<RawFd> {
+        match self.watched.as_slice() {
+            [(_, fd)] => Some(*fd),
+            _ => None,
+        }
+    }
+
+    /// Why the run ends, once every watched process has exited.
+    pub fn all_exited(&self) -> Option<String> {
+        if self.watched.is_empty() {
+            return None;
+        }
+        let gone = self.watched.iter().all(|(_, fd)| {
+            let mut watched = libc::pollfd {
+                fd: *fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one pollfd this frame owns, without waiting.
+            let ready = unsafe { libc::poll(&mut watched, 1, 0) };
+            ready > 0 && watched.revents & libc::POLLIN != 0
+        });
+        gone.then(|| match self.watched.as_slice() {
+            [(pid, _)] => format!("pid {pid} exited"),
+            several => format!("the {} pids watched exited", several.len()),
+        })
+    }
+}
+
+impl Drop for Exits {
+    fn drop(&mut self) {
+        for (_, fd) in &self.watched {
+            // SAFETY: closing a descriptor this value owns, once.
+            unsafe { libc::close(*fd) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -914,8 +996,11 @@ mod tests {
     /// whether the program succeeded without waiting on it.
     #[test]
     fn the_lifetime_carries_the_exit_code_or_the_signal() {
-        let mut child =
-            gated(&["sh".to_owned(), "-c".to_owned(), "exit 3".to_owned()], &[]).expect("fork");
+        let mut child = gated(
+            &["sh".to_owned(), "-c".to_owned(), "exit 3".to_owned()],
+            &[],
+        )
+        .expect("fork");
         ended_by_itself(&mut child);
         child.end_orphans();
         let life = child.lifetime().expect("a lifetime");

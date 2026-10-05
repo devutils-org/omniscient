@@ -2168,3 +2168,216 @@ fn the_catalog_document_s_cost_column_is_the_catalog_s_chain() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     assert!(checked >= 80, "only {checked} rows read: the tables moved");
 }
+
+/// The JSON document a run printed, or `None` with the reason when this
+/// machine cannot serve the request at all (exit 1), which is a skip.
+fn served_json(output: &Output) -> Option<serde_json::Value> {
+    if output.status.code() == Some(EXIT_UNAVAILABLE) {
+        eprintln!("skipped: {}", stderr(output));
+        return None;
+    }
+    assert!(output.status.success(), "{}", stderr(output));
+    Some(serde_json::from_slice(&output.stdout).expect("a JSON document"))
+}
+
+/// `--system -- prog`: the machine measured for the program's life, as `perf
+/// stat -a -- prog` measures it, two sources over that one window, and the
+/// program's exit code in the results.
+#[test]
+fn a_machine_target_beside_a_program_is_measured_for_the_program_s_life() {
+    let output = run(&[
+        "trace",
+        "cpu.util,power.freq",
+        "--system",
+        "-m",
+        "poll@50ms",
+        "-e",
+        "summary",
+        "--format",
+        "json",
+        "--",
+        "sh",
+        "-c",
+        "sleep 0.4; exit 3",
+    ]);
+    let Some(document) = served_json(&output) else {
+        return;
+    };
+    let results = document["results"].as_array().expect("results");
+    assert_eq!(results.len(), 2, "one result per source, one window");
+    let windows: Vec<u64> = results
+        .iter()
+        .map(|result| result["observed_ns"].as_u64().expect("a window"))
+        .collect();
+    for result in results {
+        assert!(
+            result["stopped_because"]
+                .as_str()
+                .is_some_and(|why| why.contains("launched program exited")),
+            "{result}"
+        );
+        assert_eq!(result["lifetime"]["exit_code"], 3, "{result}");
+        let observed = result["observed_ns"].as_u64().unwrap();
+        assert!(
+            (350_000_000..2_000_000_000).contains(&observed),
+            "the window is the program's 400 ms life: {observed} ns"
+        );
+    }
+    assert_eq!(windows[0], windows[1], "the two sources share one window");
+}
+
+/// The bounded run is a session's `launch`, so the dump is a runnable file,
+/// and a request launching a program beside it is refused: one program.
+#[test]
+fn a_session_s_launch_is_written_down_and_a_second_program_is_refused() {
+    let dumped = run(&[
+        "trace",
+        "cpu.util",
+        "--system",
+        "-m",
+        "poll@50ms",
+        "-e",
+        "summary",
+        "--dump-request",
+        "--no-resolve",
+        "--format",
+        "yaml",
+        "--",
+        "sleep",
+        "1",
+    ]);
+    assert!(dumped.status.success(), "{}", stderr(&dumped));
+    let text = stdout(&dumped);
+    assert!(
+        text.contains("launch:") && text.contains("target: system"),
+        "{text}"
+    );
+
+    let both = "requests:\n\
+                \x20 - source: cpu.util\n\
+                \x20   target: system\n\
+                \x20   mode: poll@50ms\n\
+                \x20   emit: [summary]\n\
+                \x20 - source: cpu.oncpu_time\n\
+                \x20   target: {launch: [sleep, '1']}\n\
+                \x20   mode: poll@50ms\n\
+                \x20   emit: [summary]\n\
+                launch: [sleep, '1']\n";
+    let refused = run_with_stdin(&["trace", "-f", "-", "--input-format", "yaml"], both);
+    assert_eq!(
+        refused.status.code(),
+        Some(EXIT_REJECTED),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("a run launches one program"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+/// `--pid` without `-d` lasts until the process exits, as `perf stat -p`
+/// does, and with a `-d` longer than its life it ends there too.
+#[test]
+fn a_pid_target_ends_when_its_process_exits() {
+    for duration in [None, Some("30s")] {
+        let mut sleeper = Command::new("sleep").arg("0.6").spawn().expect("sleep");
+        let pid = sleeper.id().to_string();
+        let mut args = vec![
+            "trace",
+            "cpu.oncpu_time",
+            "--pid",
+            &pid,
+            "-m",
+            "poll@100ms",
+            "-e",
+            "summary",
+            "--backend",
+            "force:fs:proc",
+            "--format",
+            "json",
+        ];
+        if let Some(duration) = duration {
+            args.extend(["-d", duration]);
+        }
+        let started = std::time::Instant::now();
+        let output = run(&args);
+        let took = started.elapsed();
+        let _ = sleeper.wait();
+        let Some(document) = served_json(&output) else {
+            return;
+        };
+        let why = document["results"][0]["stopped_because"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "{duration:?}: ended at the exit, not at the duration: {took:?}, {why}"
+        );
+        assert!(why.contains("exited") || why.contains("went away"), "{why}");
+    }
+}
+
+/// `-r N`: N runs, one launch each, and each summary value's spread across
+/// them; a repetition with no summary to spread is refused before it runs.
+#[test]
+fn a_repeated_run_reports_each_value_s_spread_across_the_runs() {
+    let output = run(&[
+        "trace",
+        "cpu.oncpu_time",
+        "-m",
+        "poll@50ms",
+        "-e",
+        "summary",
+        "--backend",
+        "force:fs:proc",
+        "-r",
+        "3",
+        "--format",
+        "json",
+        "--",
+        "sh",
+        "-c",
+        "sleep 0.1",
+    ]);
+    let Some(document) = served_json(&output) else {
+        return;
+    };
+    assert_eq!(document["repeat"], 3);
+    assert_eq!(document["runs"].as_array().map(Vec::len), Some(3));
+    let spread = document["spread"].as_array().expect("a spread");
+    let mean = spread
+        .iter()
+        .find(|one| one["field"] == "mean")
+        .expect("the mean's spread");
+    assert_eq!(mean["runs"], 3, "{mean}");
+    assert_eq!(mean["key"], "task:#1", "a launched pid is numbered: {mean}");
+
+    let refused = run(&[
+        "trace",
+        "cpu.oncpu_time",
+        "-m",
+        "poll@50ms",
+        "-e",
+        "raw",
+        "--backend",
+        "force:fs:proc",
+        "-r",
+        "3",
+        "--",
+        "true",
+    ]);
+    assert_eq!(
+        refused.status.code(),
+        Some(EXIT_REJECTED),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("-e summary"),
+        "{}",
+        stderr(&refused)
+    );
+}
