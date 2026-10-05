@@ -1623,7 +1623,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("omn-provenance-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Another process's map under the same name: what a reused pid leaves.
-        std::fs::write(dir.join("perf-4242.map"), "7f0000001000 b py::other:/tmp/x.py\n").unwrap();
+        std::fs::write(
+            dir.join("perf-4242.map"),
+            "7f0000001000 b py::other:/tmp/x.py\n",
+        )
+        .unwrap();
         let results = [profiled(serde_json::json!([]))];
         let names = PerfMapNames::of_run_in(&results, &dir);
         assert!(names.named("py::score:/tmp/hot.py"));
@@ -1631,7 +1635,10 @@ mod tests {
         assert!(!names.named("py::other:/tmp/x.py"), "{names:?}");
         assert!(!names.named("_PyEval_EvalFrameDefault"));
         assert!(!names.read_back);
-        assert_eq!(names.read, [dir.join("perf-4242.map").display().to_string()]);
+        assert_eq!(
+            names.read,
+            [dir.join("perf-4242.map").display().to_string()]
+        );
         assert!(names.said().unwrap().contains("innermost frame"));
         // The map named by the results' own `perf_maps` is the one said.
         let named = [profiled(serde_json::json!([
@@ -1683,7 +1690,10 @@ mod tests {
         ];
         let names = PerfMapNames::of_run_in(&other, &dir);
         assert_eq!(names.rewritten, [path]);
-        assert!(names.said().unwrap().contains("modified after"), "{names:?}");
+        assert!(
+            names.said().unwrap().contains("modified after"),
+            "{names:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

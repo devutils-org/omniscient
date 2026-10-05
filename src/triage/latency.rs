@@ -564,7 +564,7 @@ pub struct Answer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub second_pass: Option<String>,
     /// What the collectors said they broke in the program, each sentence
-    /// once, over every run of both passes ([`engine::Run::failures`]). Not
+    /// once, over every run of both passes ([`engine::Ran::failures`]). Not
     /// empty, the verdict is read off a program the tool broke: the text
     /// says so, and `omn -f`'s exit 1 is wanted beside it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -842,13 +842,13 @@ fn run_all(
         // Kept whether or not the run could be read: a launch that failed
         // is the one whose stderr says why.
         launches.ran()?;
-        let run = run?;
-        for failure in &run.failures {
-            if !failures.contains(failure) {
-                failures.push(failure.clone());
+        let ran = run?;
+        for failure in ran.failures {
+            if !failures.contains(&failure) {
+                failures.push(failure);
             }
         }
-        runs.push(read(&run, &ask.target)?);
+        runs.push(read(&ran.run, &ask.target)?);
     }
     Ok((runs, failures))
 }
@@ -878,7 +878,11 @@ impl Launches {
         let file = std::env::var_os(crate::collect::PROGRAM_STDERR_VARIABLE)
             .filter(|path| !path.is_empty())
             .map(std::path::PathBuf::from);
-        Self::to(matches!(target, Target::Launch(_)).then_some(file).flatten())
+        Self::to(
+            matches!(target, Target::Launch(_))
+                .then_some(file)
+                .flatten(),
+        )
     }
 
     /// The launches of an answer whose program writes its stderr to `file`.
@@ -3173,7 +3177,6 @@ mod tests {
             warnings: Vec::new(),
             caveats: Vec::new(),
             costs: Vec::new(),
-            failures: Vec::new(),
         }
     }
 
@@ -3509,7 +3512,10 @@ mod tests {
         assert!((job.on_cpu - 25.0 * MS).abs() < 1.0, "{job:?}");
         let mut text = String::new();
         write_reading(&mut text, &reading, "", "");
-        assert!(text.contains("under process 150, the child's parent"), "{text}");
+        assert!(
+            text.contains("under process 150, the child's parent"),
+            "{text}"
+        );
 
         // Without `ppid`, every busy task off the way, as before.
         let unparented = vec![

@@ -1150,7 +1150,10 @@ fn read_mcp(
                 })
                 .map(|other| {
                     let key = other["key"].as_str().unwrap_or("");
-                    (other, on_connection.blocked.get(key).copied().unwrap_or(0.0))
+                    (
+                        other,
+                        on_connection.blocked.get(key).copied().unwrap_or(0.0),
+                    )
                 })
                 .filter(|(_, amount)| *amount >= RAN_IN_IT * block)
                 .max_by(|a, b| a.1.total_cmp(&b.1))
@@ -1173,7 +1176,11 @@ fn read_mcp(
                     .flatten()
                     .filter_map(|row| row["resolution"].as_f64())
                     .sum();
-                (next, (amount, resolution), "beside, blocked on a connection:")
+                (
+                    next,
+                    (amount, resolution),
+                    "beside, blocked on a connection:",
+                )
             }
         };
         beside = ran.is_none();
@@ -3046,10 +3053,19 @@ fn the_agent_s_reading_names_a_thread_blocked_on_a_connection_beside_the_block()
         }
     });
     let answer = read_mcp(&answer_doc, &["python3".to_owned()], None).unwrap();
-    assert_eq!(answer.task.as_deref(), Some("task:11"), "{:?}", answer.followed);
+    assert_eq!(
+        answer.task.as_deref(),
+        Some("task:11"),
+        "{:?}",
+        answer.followed
+    );
     assert_eq!(answer.state, "blocked");
     assert_eq!(answer.whole, (1.36e9, 2e5), "its whole is its own rows");
-    assert!(answer.followed[0].contains("beside"), "{:?}", answer.followed);
+    assert!(
+        answer.followed[0].contains("beside"),
+        "{:?}",
+        answer.followed
+    );
     assert!(answer.job.is_empty(), "{:?}", answer.job);
     assert_eq!(
         answer.leaf.as_deref(),
@@ -3060,10 +3076,10 @@ fn the_agent_s_reading_names_a_thread_blocked_on_a_connection_beside_the_block()
     // A thread of another process blocked on a connection is not the
     // program's wait.
     let mut elsewhere = answer_doc.clone();
-    elsewhere["read_back"]["requests"][0]["result"]["outputs"][0]["events"][1]["attrs"][0]["value"] =
-        json!(20);
-    elsewhere["read_back"]["requests"][0]["result"]["outputs"][0]["events"][2]["attrs"][0]["value"] =
-        json!(20);
+    elsewhere["read_back"]["requests"][0]["result"]["outputs"][0]["events"][1]["attrs"][0]
+        ["value"] = json!(20);
+    elsewhere["read_back"]["requests"][0]["result"]["outputs"][0]["events"][2]["attrs"][0]
+        ["value"] = json!(20);
     let answer = read_mcp(&elsewhere, &[], None).unwrap();
     assert_eq!(answer.task.as_deref(), Some("task:10"));
 }

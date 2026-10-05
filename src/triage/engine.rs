@@ -66,11 +66,19 @@ pub struct Run {
     pub caveats: Vec<String>,
     /// What each request cost the target, in the order of `served`.
     pub costs: Vec<Cost>,
+}
+
+/// One session, run, and what its collectors said they broke.
+///
+/// Beside [`Run`] rather than in it, so a caller cannot read the run without
+/// being handed them: `omn -f` writes its results and exits 1 with these, and
+/// a triage answer carries them the same way, so a verdict read off a broken
+/// program is never mistaken for a clean one.
+#[derive(Debug, Clone)]
+pub struct Ran {
+    pub run: Run,
     /// What the collectors said they broke in the program they measured
-    /// ([`collect::Collection::failure`]), each sentence once: `omn -f`
-    /// writes its results and exits 1 with these, and a triage answer
-    /// carries them the same way, so a verdict read off a broken program is
-    /// never mistaken for a clean one.
+    /// ([`collect::Collection::failure`]), each sentence once.
     pub failures: Vec<String>,
 }
 
@@ -186,7 +194,8 @@ fn label_of(request: &Request) -> String {
         .unwrap_or_else(|| request.source.to_string())
 }
 
-/// Validates, resolves and runs `session`, and reads what it produced.
+/// Validates, resolves and runs `session`, and reads what it produced, with
+/// what its collectors said they broke.
 ///
 /// The run is held to no budget: a triage run pays for the sources its method
 /// needs, and what they cost is measured and carried on every result as it is
@@ -195,7 +204,7 @@ pub fn run(
     catalog: &Catalog,
     capabilities: &Capabilities,
     session: &Session,
-) -> Result<Run, Failure> {
+) -> Result<Ran, Failure> {
     let report = validate::validate_session(catalog, session).map_err(|rejections| {
         Failure::request(
             rejections
@@ -284,13 +293,15 @@ pub fn run(
         ));
     }
 
-    Ok(Run {
-        output,
-        events,
-        served: resolved,
-        warnings: report.warnings().map(str::to_owned).collect(),
-        caveats: report.caveats().map(str::to_owned).collect(),
-        costs,
+    Ok(Ran {
+        run: Run {
+            output,
+            events,
+            served: resolved,
+            warnings: report.warnings().map(str::to_owned).collect(),
+            caveats: report.caveats().map(str::to_owned).collect(),
+            costs,
+        },
         failures,
     })
 }
