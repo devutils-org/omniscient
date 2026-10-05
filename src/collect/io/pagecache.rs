@@ -122,6 +122,7 @@ pub struct PageCacheCollector {
     /// The program's counters are cumulative, so what is new is the difference.
     dropped: u64,
     skipped: u64,
+    unfollowed: u64,
     unnamed: u64,
     untracked: u64,
     continued: u64,
@@ -162,6 +163,7 @@ impl PageCacheCollector {
             losses: Losses::default(),
             dropped: 0,
             skipped: 0,
+            unfollowed: 0,
             unnamed: 0,
             untracked: 0,
             continued: 0,
@@ -298,6 +300,18 @@ impl PageCacheCollector {
                  lower bound",
             );
             self.skipped = skipped;
+        }
+        let unfollowed = program.unfollowed();
+        if unfollowed > self.unfollowed {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so {} lookups and fills are in no row and every \
+                 total here is a lower bound",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "its" } else { "their" },
+            ));
+            self.unfollowed = unfollowed;
         }
         self.unnamed = program.unnamed();
         self.continued = program.continued();
