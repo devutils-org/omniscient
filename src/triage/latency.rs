@@ -478,6 +478,19 @@ pub struct Job {
     pub on_cpu: f64,
     /// Their time runnable and waiting for a cpu, added up; what was read.
     pub runnable: f64,
+    /// With [`Job::under`], the busy tasks off the way whose parentage the
+    /// run did not say far enough to place them under that process or
+    /// beside it (their own events carried no `ppid`, or an ancestor's did
+    /// not), busiest first: neither counted in the job nor dropped from it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unplaced: Vec<String>,
+    /// Their time on a cpu, added up.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unplaced_on_cpu: f64,
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
 }
 
 impl Reading {
@@ -734,6 +747,17 @@ fn write_reading(out: &mut String, run: &Reading, title: &str, indent: &str) {
                 span(job.runnable),
                 job.tasks.join(", ")
             );
+            if !job.unplaced.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "{indent}  and {} busy task(s) off the way the run did not place under \
+                     it or beside it, their parent unknown, not counted in the job: on a cpu \
+                     {} ({})",
+                    job.unplaced.len(),
+                    span(job.unplaced_on_cpu),
+                    job.unplaced.join(", ")
+                );
+            }
         }
     }
 }
@@ -1944,30 +1968,42 @@ impl Tasks<'_> {
     /// When the run says whose parent each process is (`ppid`), only the
     /// processes under the chosen child's parent -- the driver the wait
     /// named (`gcc` above `cc1` and `as`), itself included -- are the job;
-    /// otherwise every busy task off the way, which may be more.
+    /// otherwise every busy task off the way, which may be more. A busy task
+    /// whose parentage the run did not say far enough to decide is neither
+    /// counted nor dropped: it is kept apart as [`Job::unplaced`].
     fn job(&self, chosen: &str) -> Option<Job> {
         let under = self
             .pid_of
             .get(chosen)
             .and_then(|pid| self.parent_of.get(pid))
             .copied();
-        let mut busy_tasks: Vec<(&Breakdown, f64)> = self
-            .tables
-            .iter()
-            .filter(|table| table.key != chosen && !self.seen.contains(&table.key))
-            .filter(|table| {
-                self.pid_of.get(&table.key).is_some_and(|pid| {
-                    !self.processes.contains(pid)
-                        && under.is_none_or(|under| self.descends(*pid, under))
-                })
-            })
-            .map(|table| (table, busy(table)))
-            .filter(|(_, busy)| *busy > 0.0)
-            .collect();
-        if busy_tasks.is_empty() {
+        let mut busy_tasks: Vec<(&Breakdown, f64)> = Vec::new();
+        let mut unplaced: Vec<(&Breakdown, f64)> = Vec::new();
+        for table in self.tables {
+            if table.key == chosen || self.seen.contains(&table.key) {
+                continue;
+            }
+            let Some(pid) = self.pid_of.get(&table.key) else {
+                continue;
+            };
+            if self.processes.contains(pid) {
+                continue;
+            }
+            let amount = busy(table);
+            if amount <= 0.0 {
+                continue;
+            }
+            match under.map(|under| self.descends(*pid, under)) {
+                None | Some(Some(true)) => busy_tasks.push((table, amount)),
+                Some(Some(false)) => {}
+                Some(None) => unplaced.push((table, amount)),
+            }
+        }
+        if busy_tasks.is_empty() && unplaced.is_empty() {
             return None;
         }
         busy_tasks.sort_by(|a, b| b.1.total_cmp(&a.1));
+        unplaced.sort_by(|a, b| b.1.total_cmp(&a.1));
         Some(Job {
             under,
             tasks: busy_tasks
@@ -1982,22 +2018,37 @@ impl Tasks<'_> {
                 .iter()
                 .map(|(table, _)| row_amount(table, RUNNABLE))
                 .sum(),
+            unplaced: unplaced
+                .iter()
+                .map(|(table, _)| table.key.clone())
+                .collect(),
+            unplaced_on_cpu: unplaced
+                .iter()
+                .map(|(table, _)| row_amount(table, ON_CPU))
+                .sum(),
         })
     }
 
     /// Whether process `pid` is `root` or under it, by the parents the run
-    /// said.
-    fn descends(&self, mut pid: u64, root: u64) -> bool {
+    /// said: yes when the parents lead to `root`; no when they lead to one
+    /// of the program's own processes on the way (which are above `root`)
+    /// or loop; unknown when they stop short, at a process whose parent no
+    /// event said -- unknown, never "not under".
+    fn descends(&self, mut pid: u64, root: u64) -> Option<bool> {
         for _ in 0..64 {
             if pid == root {
-                return true;
+                return Some(true);
+            }
+            if self.processes.contains(&pid) {
+                return Some(false);
             }
             match self.parent_of.get(&pid) {
                 Some(parent) if *parent != pid => pid = *parent,
-                _ => return false,
+                Some(_) => return Some(false),
+                None => return None,
             }
         }
-        false
+        Some(false)
     }
 
     /// The busiest task no source placed in a process, not already read.
@@ -3515,6 +3566,32 @@ mod tests {
         write_reading(&mut text, &reading, "", "");
         assert!(
             text.contains("under process 150, the child's parent"),
+            "{text}"
+        );
+
+        assert!(job.unplaced.is_empty(), "{job:?}");
+
+        // A busy process whose own events carry no `ppid`, beside parented
+        // ones: neither in the job nor dropped, kept apart and said.
+        let partial = vec![
+            main_thread_asleep(300.0 * MS),
+            parented(200, 200, 150),
+            parented(210, 210, 150),
+            parented(150, 150, 100),
+            placing(300, 300),
+        ];
+        let reading = read_launched(&run_of(tables(), partial, false));
+        let job = reading.followed.as_deref().unwrap().job.clone().unwrap();
+        assert_eq!(job.under, Some(150));
+        assert_eq!(job.tasks, ["task:210", "task:150"]);
+        assert_eq!(job.unplaced, ["task:300"]);
+        assert!((job.unplaced_on_cpu - 90.0 * MS).abs() < 1.0, "{job:?}");
+        let json = serde_json::to_value(&reading).unwrap();
+        assert_eq!(json["followed"]["job"]["unplaced"][0], "task:300");
+        let mut text = String::new();
+        write_reading(&mut text, &reading, "", "");
+        assert!(
+            text.contains("1 busy task(s) off the way the run did not place"),
             "{text}"
         );
 
