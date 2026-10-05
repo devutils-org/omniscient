@@ -259,8 +259,8 @@ pub enum ResolveError {
     /// between the request and it, and a `--backend force:` hint is given
     /// only for one this build collects and this machine can run.
     #[error(
-        "`{source_id}` is filtered on `{field}`, which the selected backend `{backend}` does not \
-         carry:\n  {}",
+        "`{source_id}` reads `{field}`, in its filter or an `@{field}` emit, which the selected \
+         backend `{backend}` does not carry:\n  {}",
         .elsewhere.as_ref().map_or_else(
             || format!("no backend of `{source_id}` carries it"),
             |elsewhere| elsewhere.to_string(),
@@ -974,11 +974,23 @@ fn check_filter_fields(
     request: &Request,
     capabilities: &Capabilities,
 ) -> Result<(), ResolveError> {
-    let Some(filter) = &request.filter else {
-        return Ok(());
-    };
+    // A ranking, a summary or a histogram per attribute reads a field the
+    // way a filter does: over one the backend never fills, every event is
+    // `<attr>=?`, one row holding the whole run.
+    let mut fields: Vec<&str> = request
+        .filter
+        .as_ref()
+        .map(|filter| filter.fields().into_iter().collect())
+        .unwrap_or_default();
+    fields.extend(
+        request
+            .emit
+            .iter()
+            .filter_map(|emit| emit.by())
+            .map(|by| by.as_str()),
+    );
     let carried = entry.backend_filter_fields(backend);
-    for field in filter.fields() {
+    for field in fields {
         if carried.iter().any(|known| known == field)
             || !entry.filter_fields.iter().any(|known| known == field)
         {
@@ -2091,6 +2103,42 @@ mod tests {
             }
             other => panic!("no backend declares a pid with stack: {other:?}"),
         }
+    }
+
+    /// perfrecord 1: a filter, and a ranking or summary per attribute, over
+    /// a field the resolved backend never fills is refused before the run,
+    /// from the backend's own field list, not counted after it.
+    #[test]
+    fn an_attribute_emit_over_a_field_the_backend_never_fills_is_refused() {
+        let embedded = Catalog::embedded().unwrap();
+        let mut entry = embedded
+            .get(&"cpu.profile".parse().unwrap())
+            .unwrap()
+            .clone();
+        for backend in &mut entry.backends {
+            if backend.id == "pmu:sw" {
+                backend.filter_fields = Some(vec!["cpu".to_owned()]);
+            }
+        }
+        let catalog = Catalog::from_entries(vec![entry]).unwrap();
+        let mut request = fixture("cpu.profile", Target::System);
+        request.mode = "sample@997hz".parse().unwrap();
+        request.backend = Some("force:pmu:sw".parse().unwrap());
+        for emit in ["topk:5@comm", "summary@comm", "hist@comm"] {
+            request.emit = vec![emit.parse().unwrap()];
+            match resolve(&catalog, &Capabilities::detect(), &request) {
+                Err(ResolveError::FilterFieldNotCarried { field, backend, .. }) => {
+                    assert_eq!((field.as_str(), backend.as_str()), ("comm", "pmu:sw"));
+                }
+                Err(ResolveError::NoViableBackend { .. }) => {} // no perf here
+                other => panic!("`{emit}` over comm must be refused: {other:?}"),
+            }
+        }
+        request.emit = vec!["topk:5@cpu".parse().unwrap()];
+        assert!(!matches!(
+            resolve(&catalog, &Capabilities::detect(), &request),
+            Err(ResolveError::FilterFieldNotCarried { .. })
+        ));
     }
 
     fn backend_of<'a>(catalog: &'a Catalog, source: &str, id: &str) -> (&'a Entry, &'a Backend) {
