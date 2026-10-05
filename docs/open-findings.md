@@ -12909,3 +12909,88 @@ dilation stays under 1 % outside launch (+54 %). The NVML pollers are within
 their bands here (0.65 to 10.9 % of the target's cpu), against 25 to 36 % in
 the backends bench, whose `compute` workload gives the target less cpu to be
 a share of.
+
+## The twenty-fourth wave, coordinator, after the merge
+
+Run alone at `a5f0acb`, 2026-10-05, every stream merged, load under 0.3 at
+the start. `make check` red in the lib tests (1694 passed, 2 failed); the
+`--no-fail-fast` run 3048 passed, 13 failed, 15 ignored; the reference pairs
+alone, one family after another (`--test-threads=1`), 168 passed, 3 failed.
+Three merge regressions fixed on main, all documents and data:
+`a2ce567` (`CATALOG.md`'s Cost column for `mem.numa` and `mem.swap`,
+stream mem's new backends), `6f3c25a` (`docs/view/README.md`'s table of
+needs and the system workload's session, stream top's `system` view asking
+`proc.tasks` and keying disk and network by `dir`), `367ad20` (`pidstat-w`'s
+`known_defect` removed, stream sched's counted-rate fix). What follows is
+what a merge fix could not settle.
+
+### `portability::every_cell_covers_the_whole_catalog`: the cells predate this wave's sources
+
+Red on every full run, as in the nineteenth and twenty-third waves: the cells
+under `target/matrix/cells/` lack the wave's new sources (`cpu.branches`,
+`gpu.mem_freq`, `gpu.throttle`, `io.util`, `io.vfs`, `mem.oom`,
+`mem.system`, `net.snmp`, `net.sockets`, `net.tcp.accept`,
+`power.wakeups`, `proc.calls`, `proc.tasks`, `sched.interrupts`,
+`sched.runqueue`, `sched.slices`). Not a code regression; the end-of-wave
+matrix sweep refreshes them.
+
+### Open: `cpu.cycles.system` cannot hold on a quiet machine, and `omn trace` now parses the catalog twice
+
+Red in both runs and alone (omn 0.72e9 against `perf stat -a` 1.18e9 cycles,
+-39 % where -8 % is allowed). The pair's band is omn's start and exit inside
+perf's window, and on an idle 24-cpu machine those are most of the
+difference: the machine idles at 0.4 to 0.9e9 cycles in 2 s, and omn's own
+cpu outside its window is about 0.1 s. The band held in the twenty-third
+wave's runs only under load. Shown on the twenty-third wave's last commit
+(`ab640ec`), built aside: the same pair by hand reads -20 to -24 % there,
+so the verdict is not this wave's.
+
+What is this wave's: `omn trace cpu.cycles --system -d 1ms` costs 86 ms of
+user cpu in the debug build against 37 ms at `ab640ec`. A profile puts 45 %
+of it in `emit::values_add_up` (stream emit, `0ef3be1`), whose `OnceLock`
+parses the embedded catalog a second time at the first emit, after the run
+already parsed it once. Raised against `src/emit.rs` and the catalog loader
+(shared layers): `values_add_up` should be given the run's catalog, or the
+embedded one should be parsed once per process for every caller. The pair
+itself wants a band that does not depend on the machine's idle rate (omn's
+own measured cpu outside its window as slack, or a busy workload beside it).
+
+### Open: `perf-trace-count` refused on every run by perf's own losses
+
+Stream reference's `c9d188f` made `perf_trace_summary` refuse a run whose
+`perf trace -s` reported lost events. On this machine it reports them every
+run: 313 lost in the quiet family run, 31 alone. The refusal counts as a
+failure, so the pair is red whenever perf loses events, which is perf's
+shortfall and not omn's (the exact count is `strace-c-count`'s, which held).
+For the runner's owner: a reference tool that says it lost events should
+skip, naming them, as a refused tool does, rather than fail.
+
+### For the flaky tally
+
+Each red once in a full run and passing when rerun alone once:
+
+- `collect::cpu::counters::tests::task_clock_counts_the_cpu_time_the_thread_ran`
+  (new this wave, stream cpu), in `make check`: 202 286 660 ns counted
+  against 200 001 300 on the thread's clock, 1.1 % where 1 % is allowed.
+- `collect::mem::footprint::tests::the_rollup_agrees_with_the_per_mapping_walk`
+  (filed once in the seventeenth wave, and in stream run's handoff this wave), in `make
+  check`.
+- `scenario_gpu::a_target_that_exits_before_the_duration_ends_the_run_and_names_it`:
+  a window of 0.79 s for a one-second sleep.
+- `scenario_power::the_two_roads_to_rapl_agree_where_both_are_open`: 52.3 W
+  through perf, 37.5 W through powercap.
+- `scenario_sched::a_forced_switch_program_splits_the_switches_as_the_kernel_counts_them`:
+  99 voluntary switches for 100 sleeps.
+- `unwind::user_only_stacks_carry_no_kernel_frame_and_leave_the_system_calls_out`:
+  the workload measured 38 ms user against 65 ms system.
+- `cross_io::a_thread_target_on_the_scheduler_half_keeps_that_threads_events`,
+  in the second `make check` after the merge fixes: *"sched.offcpu --tid
+  keeps the thread's own events, and no more than --pid keeps of it"*. That
+  `make check` stopped at it; the lib tests and every target before
+  `cross_io` were green, and the targets after it had run green or been
+  rerun alone in the `--no-fail-fast` run, which the fixes (documents and
+  data only) do not touch.
+- Reference pairs red only in the workspace run, held in the quiet family
+  run: `perf-sched-timehist-sched-in` (178 against 103), `runqlat`
+  (8192 against 4000 us), `fio-bytes` (other readers, above only),
+  `psi-cpu-some` (0.292 against 0.340).
