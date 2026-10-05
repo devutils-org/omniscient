@@ -1392,6 +1392,50 @@ fn a_poll_faster_than_the_driver_answers_counts_every_late_tick_and_says_so() {
     );
 }
 
+/// Defect 11, fixed. A `gpu.temp` poll costs its program its readings, a
+/// tenth of a millisecond each, and not the clock state read beside them:
+/// the end-of-run clock event reasons (17 to 32 ms of cpu on a board without
+/// persistence mode) were read inside the window and made a two-read run on
+/// a 150 ms program cost 36 to 45 ms, 22 to 27 % against its `low` band. They
+/// are read after the window now, and that cpu is still reported, after it.
+#[test]
+fn a_temperature_poll_costs_its_program_its_readings_not_the_clock_state() {
+    if let Err(reason) = device() {
+        return eprintln!("skipped: {reason}");
+    }
+    let _together = shared();
+    let output = omn(&[
+        "gpu.temp",
+        "--mode",
+        "poll@100ms",
+        "--emit",
+        "summary",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        "import time\nt = time.process_time()\nwhile time.process_time() - t < 0.15: pass",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let run: Value = serde_json::from_str(&stdout(&output)).expect("json results");
+    let overhead = &run["results"][0]["overhead"];
+    let inside = overhead["collector_cpu_ns"].as_u64().expect("the cost is read");
+    assert!(
+        inside < 15_000_000,
+        "two or three temperature readings cost the program {:.1} ms of cpu: {overhead}",
+        inside as f64 / 1e6
+    );
+    // Not hidden: the end-of-run read is in the account after the window.
+    assert!(
+        overhead["after_window_cpu_ns"].as_u64().unwrap_or(0) > 0,
+        "{overhead}"
+    );
+    // And the clock state still reaches the run.
+    let notes = run["results"][0]["notes"].to_string();
+    assert!(notes.contains("clock event reasons"), "{notes}");
+}
+
 /// The same source at a sane interval keeps up, which is what makes the
 /// previous test a measurement rather than a collector that always complains.
 ///

@@ -889,6 +889,33 @@ Test: `a_held_read_is_counted_and_said_and_a_prompt_one_is_not` (unit), and
 `a_driver_averaged_figure_carries_its_uncertainty` now holds the clock's
 error to its read's span.
 
+### 11. Every NVML poller cost 25 to 36 % of its program, mostly one read at the end -- **fixed**
+
+The backends bench (`docs/open-findings.md`) put every `vendor:nvml` poller at
+25 to 36 % of the target's cpu, `gpu.temp` among them against `low`. A
+reading is cheap: `nvmlDeviceGetTemperature` 0.1 ms of cpu, the memory info
+0.3 ms, a clock 2.5 ms, the power draw or the energy counter 9 ms each, on an
+idle board without persistence mode. What cost the window was the clock state
+read again in `stop`, to say whether a thermal or power limit was reached
+during the run: `nvmlDeviceGetCurrentClocksEventReasons` alone takes 17 to
+32 ms of cpu, the performance levels 8 to 12 ms. `omn trace gpu.temp -m
+poll@100ms -e summary` on a 150 ms cpu burn spent 36 to 45 ms (22 to 27 %).
+
+The end state is now the event reasons alone (the lock state, the
+application clocks and persistence do not move without someone setting
+them), read when the run's facts are asked, after the window closes. The
+same command spends 1.3 to 3.5 ms (0.75 to 2.15 %), and the read is in the
+run's `after_window_cpu_ns` (17.5 ms on one run), not hidden. The end line
+still appears when the reasons moved (`gpu_idle` at the start, `none` at the
+end of a CUDA program).
+
+What is left of the pollers' cost is their reads: `gpu.freq` reads three
+clocks (about 7 ms of cpu a reading on an idle board, 3 ms on a busy one),
+`gpu.power` the energy and the draw (17 ms a reading). Their `high` bands are
+those reads.
+
+Test: `a_temperature_poll_costs_its_program_its_readings_not_the_clock_state`.
+
 ## Cost of running these
 
 The suite is 23 tests and takes about **12.3 s** wall, which is slow next to the

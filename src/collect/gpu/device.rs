@@ -205,10 +205,19 @@ pub struct NvmlCollector {
     /// device-wide metrics it only sets the window; for `gpu.mem` it decides
     /// whether the figure is a process's or the device's.
     pid: Option<i32>,
-    /// Each device's clock state, read before the observed program runs and
-    /// again when the run stops. Read, never set: see [`ClockState`].
+    /// Each device's clock state, read before the observed program runs, and
+    /// its clock event reasons again once the run's window has closed. Read,
+    /// never set: see [`ClockState`].
+    ///
+    /// The end is read when the facts are asked, after the window, not in
+    /// `stop`: the reasons are the dearest read NVML has here (17 to 32 ms of
+    /// cpu on a board without persistence mode), and inside the window they
+    /// were most of what a two-read `gpu.temp` run cost its program -- 36 to
+    /// 45 ms against 0.1 ms a reading (`docs/scenarios/gpu.md`, defect 11).
+    /// Only the reasons are read again: the lock state, the application
+    /// clocks and persistence do not move without someone setting them.
     clocks_at_start: Vec<ClockState>,
-    clocks_at_end: Vec<ClockState>,
+    clocks_at_end: std::sync::OnceLock<Vec<ClockState>>,
     /// How many readings found the driver's figure where the previous one
     /// left it. See [`Refresh`].
     refresh: Refresh,
@@ -474,7 +483,7 @@ impl NvmlCollector {
             driver,
             pid,
             clocks_at_start: Vec::new(),
-            clocks_at_end: Vec::new(),
+            clocks_at_end: std::sync::OnceLock::new(),
             refresh: Refresh::default(),
             occupancy_seen_us: Vec::new(),
             counter_check: CounterCheck::default(),
@@ -795,9 +804,6 @@ impl Collector for NvmlCollector {
     /// to be last: the run stops the moment its target does, and the occupancy
     /// at that moment belongs to the series.
     fn stop(&mut self) -> Vec<Event> {
-        // The clocks as the observed program left them: a thermal or power
-        // limit reached during the run shows here and not at the start.
-        self.clocks_at_end = self.clock_states();
         if self.mode != Mode::Count {
             return Vec::new();
         }
@@ -850,7 +856,10 @@ impl Collector for NvmlCollector {
     /// collector reads the clocks and changes nothing.
     fn facts(&self) -> Vec<String> {
         let mut facts: Vec<String> = self.clocks_at_start.iter().map(ClockState::fact).collect();
-        for end in &self.clocks_at_end {
+        // The clocks as the observed program left them: a thermal or power
+        // limit reached during the run shows here and not at the start.
+        let ends = self.clocks_at_end.get_or_init(|| self.end_states());
+        for end in ends {
             let start = self
                 .clocks_at_start
                 .iter()
@@ -864,6 +873,23 @@ impl Collector for NvmlCollector {
 }
 
 impl NvmlCollector {
+    /// Each started device's state with its event reasons read again; the
+    /// rest of the state as the start found it.
+    fn end_states(&self) -> Vec<ClockState> {
+        self.clocks_at_start
+            .iter()
+            .filter_map(|start| {
+                let device = self
+                    .devices
+                    .iter()
+                    .find(|device| device.uuid == start.device_uuid)?;
+                let mut end = start.clone();
+                end.event_reasons = ClockState::event_reasons(&self.nvml, device.handle);
+                Some(end)
+            })
+            .collect()
+    }
+
     fn clock_states(&self) -> Vec<ClockState> {
         self.devices
             .iter()
