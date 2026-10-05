@@ -292,6 +292,10 @@
        mapping's page faults call none of these functions."
     - "A process target and the processes it starts are followed from the
        fork, as `io.latency` follows them."
+    - "One sync is one count: `fsync(2)` is counted at `do_fsync`, and a
+       `vfs_fsync_range` the same thread reaches inside it -- on a kernel
+       that did not inline it there -- is not counted again. `msync` and the
+       in-kernel callers are counted at `vfs_fsync_range`."
 
 - id: io.syscall
   family: io

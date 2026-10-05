@@ -51,6 +51,7 @@ pub struct VfsCount {
     losses: Losses,
     missed: u64,
     unfollowed: u64,
+    unguarded: u64,
     filtered_out: u64,
 }
 
@@ -67,6 +68,7 @@ impl VfsCount {
             losses: Losses::default(),
             missed: 0,
             unfollowed: 0,
+            unguarded: 0,
             filtered_out: 0,
         }
     }
@@ -152,6 +154,23 @@ impl VfsCount {
                 if unfollowed == 1 { "its" } else { "their" },
             ));
             self.unfollowed = unfollowed;
+        }
+        let unguarded = program.unguarded();
+        if unguarded > self.unguarded {
+            self.losses.note(format!(
+                "{unguarded} `do_fsync` call{} could not mark {} thread, the map of threads \
+                 inside a sync being full, so on a kernel that does not inline \
+                 `vfs_fsync_range` into `do_fsync` {} counted under both and `calls` is an \
+                 upper bound",
+                if unguarded == 1 { "" } else { "s" },
+                if unguarded == 1 { "its" } else { "their" },
+                if unguarded == 1 {
+                    "that sync is"
+                } else {
+                    "those syncs are"
+                },
+            ));
+            self.unguarded = unguarded;
         }
     }
 }

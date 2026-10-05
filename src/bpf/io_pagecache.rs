@@ -750,6 +750,14 @@ impl PageCacheProgram {
                 .map_or(0, super::sched_common::Descendants::skipped)
     }
 
+    /// Processes the target started that the map of its descendants had no
+    /// room for: their page-cache traffic is in no row.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants
+            .as_ref()
+            .map_or(0, super::sched_common::Descendants::missed)
+    }
+
     pub fn capacity(&self) -> u32 {
         MAX_ROWS
     }

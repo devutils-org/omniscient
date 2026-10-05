@@ -4780,6 +4780,71 @@ fn a_file_read_cold_fills_every_page_and_read_warm_fills_none() {
     );
 }
 
+/// The parent forks and waits; the child goes on to `READ_WHOLE`.
+const FORK_THEN: &str = r#"
+import os, sys
+if os.fork() != 0:
+    _, status = os.wait()
+    sys.exit(os.waitstatus_to_exitcode(status))
+"#;
+
+/// A launched program's forked child is followed by `io.pagecache` and
+/// `io.readahead`: a parent that reads nothing and a child that reads a 4 MiB
+/// file cold is that file's pages filled, all of them.
+///
+/// Before the programs followed the target's descendants they compared the
+/// reader with the launched process alone, so this run counted no page of the
+/// file. The reference is `mincore(2)` in the child, as for the read above.
+#[test]
+fn the_page_cache_fills_of_a_forked_child_are_counted() {
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    let path = synced_file("pagecache-forked.bin", 4 << 20);
+    let workload = script(
+        "pagecache-forked.py",
+        &format!("{RESIDENT}{FORK_THEN}{READ_WHOLE}"),
+    );
+    let (dev, _) = mounted_device(&path);
+    for source in ["io.pagecache", "io.readahead"] {
+        let account_path = scratch("pagecache-forked.json");
+        let _ = std::fs::remove_file(&account_path);
+        let output = run_on_launch(
+            "pagecache-forked",
+            &[("cache", source, "count", "raw")],
+            &[
+                "python3",
+                workload.to_str().expect("a path"),
+                path.to_str().expect("a path"),
+                "cold",
+                account_path.to_str().expect("a path"),
+            ],
+        );
+        assert!(output.status.success(), "{source}: {}", stderr(&output));
+        let did = account(&account_path);
+        let pages = did["pages"].as_u64().expect("pages");
+        let before = did["resident_before"].as_u64().expect("resident pages");
+        let file = (dev, did["ino"].as_u64().expect("an inode"));
+        let document = json(&output);
+        let value = if source == "io.pagecache" {
+            "misses"
+        } else {
+            "ahead"
+        };
+        let (_, _, filled, _, _) = page_counts(result(&document, "cache"), file, value);
+        let lost = losses(result(&document, "cache"));
+        assert_eq!(
+            filled,
+            pages - before,
+            "{source}: the forked child read the file with {before} of its {pages} pages \
+             resident, so it filled {}; the run counted {filled} and lost {lost}: the \
+             launched program's child is not followed",
+            pages - before
+        );
+    }
+}
+
 /// The first 4 MiB of a cold 64 MiB file, read sequentially, and 256 random
 /// pages of another, both in one run.
 ///
@@ -6507,6 +6572,78 @@ os.waitpid(child, 0)
         "{WRITES} writes from a forked child, {calls} counted, {dropped} reported lost"
     );
     assert_eq!(events[0]["vfs_write"].as_u64(), Some(calls));
+}
+
+/// `io.vfs` counts a sync once, whichever functions the kernel routes it
+/// through: twenty `fsync`s and three `msync`s are twenty `do_fsync`s and three
+/// `vfs_fsync_range`s. On this machine `fsync(2)` never reaches the range
+/// function, which the compiler inlined into `do_fsync`; on a kernel that did
+/// not, it reaches both, and the mark `do_fsync` leaves on its thread is what
+/// keeps the second count out. Either way an `msync`, which passes no
+/// `do_fsync`, is counted where it arrives.
+#[test]
+fn io_vfs_counts_each_sync_once() {
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = lacks_here("io.vfs", "bpf:fentry") {
+        eprintln!("skipped: {reason:?}");
+        return;
+    }
+    let path = synced_file("io-vfs-syncs.bin", 1 << 16);
+    let workload = script(
+        "io-vfs-syncs.py",
+        r#"
+import mmap, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+for _ in range(20):
+    os.pwrite(fd, b"x", 0)
+    os.fsync(fd)
+mapping = mmap.mmap(fd, 4096)
+for index in range(3):
+    mapping[index] = 0x79
+    mapping.flush()
+mapping.close()
+os.close(fd)
+"#,
+    );
+    let output = run(&[
+        "io.vfs",
+        "-m",
+        "count",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        workload.to_str().expect("a path"),
+        path.to_str().expect("a path"),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document = json(&output);
+    let result = result(&document, "io.vfs");
+    let events = raw_events(result);
+    assert_eq!(events.len(), 1, "one counted event: {events:?}");
+    // The kernel's skipped runs are counted machine-wide, and under load a
+    // few are reported: each is a call that may be one of these, so a count
+    // short by at most what was reported is not a defect; one over is.
+    let dropped = losses(result)["dropped"].as_u64().unwrap_or(0);
+    let Some(by_descriptor) = events[0]["do_fsync"].as_u64() else {
+        eprintln!("skipped: this kernel has no `do_fsync` to count: {events:?}");
+        return;
+    };
+    let ranged = events[0]["vfs_fsync_range"].as_u64().unwrap_or(0);
+    assert!(
+        by_descriptor <= 20 && by_descriptor + dropped >= 20,
+        "twenty fsyncs, {by_descriptor} counted at `do_fsync`, {dropped} reported lost"
+    );
+    assert!(
+        ranged <= 3 && ranged + dropped >= 3,
+        "three msyncs and twenty fsyncs, and `vfs_fsync_range` counted {ranged} with \
+         {dropped} reported lost: an fsync counted twice, or an msync not at all"
+    );
 }
 
 /// `io.fsync` follows the launched program's forked children: a parent that
