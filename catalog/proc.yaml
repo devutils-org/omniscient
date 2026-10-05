@@ -42,7 +42,7 @@
   modes: [trace]
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only}
-  keys: [task]
+  keys: [task, comm]
   filter_fields: [comm, filename]
   determinism: medium
 
@@ -56,7 +56,7 @@
   modes: [trace]
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only}
-  keys: [task]
+  keys: [task, comm]
   filter_fields: [comm, code, group_dead]
   determinism: medium
   caveats:
@@ -155,6 +155,11 @@
   modes: [trace, count]
   emits: [raw, topk, rate, summary]
   targets: {pid: bpf_only, system: native, cgroup: bpf_only}
-  keys: [task]
-  filter_fields: [comm, sig, pid]
+  keys: [task, comm]
+  filter_fields: [comm, sig, pid, sender_comm, sender_pid]
   determinism: medium
+  caveats:
+    - "`comm` is the task the signal is for; `sender_pid`, `sender_tid` and
+       `sender_comm` are the task that was running when it was generated, which
+       is the sender for a `kill` and whatever was interrupted for a signal the
+       kernel raised itself (a timer, a fault, a dying child)."

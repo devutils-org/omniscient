@@ -120,9 +120,16 @@ pub struct Signal {
     /// count of generated signals is not a count of delivered ones, and this is
     /// the field that says which this row is.
     pub result: i32,
+    /// The name of the task that was running when the signal was generated:
+    /// the sender `killsnoop` names (the twenty-second wave's bpftrace gap
+    /// 6), evidence in the same sense `sender_tid` is.
+    pub(crate) sender_comm: [u8; COMM_BYTES],
 }
 
-const SIGNAL_BYTES: usize = 48;
+const SIGNAL_BYTES: usize = 64;
+
+/// `bpf_get_current_comm(buf, size)`, which `insn::helper` does not name.
+const GET_CURRENT_COMM: i32 = 16;
 
 /// A name the kernel holds as a fixed-width, NUL-padded array.
 fn text(bytes: &[u8]) -> String {
@@ -234,12 +241,19 @@ impl Signal {
         text(&self.comm)
     }
 
+    /// The name of the task that raised it.
+    pub fn sender_comm(&self) -> String {
+        text(&self.sender_comm)
+    }
+
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < SIGNAL_BYTES {
             return None;
         }
         let mut comm = [0u8; COMM_BYTES];
         comm.copy_from_slice(&bytes[24..40]);
+        let mut sender_comm = [0u8; COMM_BYTES];
+        sender_comm.copy_from_slice(&bytes[48..64]);
         Some(Self {
             ts_ns: long(bytes, 0),
             target_tid: word(bytes, 8),
@@ -249,6 +263,7 @@ impl Signal {
             comm,
             sig: word(bytes, 40) as i32,
             result: word(bytes, 44) as i32,
+            sender_comm,
         })
     }
 }
@@ -288,7 +303,7 @@ const EXIT_FILTER: i16 = EXIT_EVENT - 24;
 /// does not pass `group_dead`.
 const EXIT_SCRATCH: i16 = EXIT_EVENT - 32;
 
-const SIG_EVENT: i16 = -48;
+const SIG_EVENT: i16 = -64;
 const SIG_TARGET_TID: i16 = SIG_EVENT + 8;
 const SIG_TARGET_TGID: i16 = SIG_EVENT + 12;
 const SIG_SENDER_TID: i16 = SIG_EVENT + 16;
@@ -296,6 +311,7 @@ const SIG_SENDER_TGID: i16 = SIG_EVENT + 20;
 const SIG_COMM: i16 = SIG_EVENT + 24;
 const SIG_NUMBER: i16 = SIG_EVENT + 40;
 const SIG_RESULT: i16 = SIG_EVENT + 44;
+const SIG_SENDER_COMM: i16 = SIG_EVENT + 48;
 const SIG_DROP_KEY: i16 = SIG_EVENT - 8;
 const SIG_FILTER: i16 = SIG_EVENT - 24;
 
@@ -562,6 +578,10 @@ fn signal_instructions(
     program.push(Insn::stx(BPF_W, R10, SIG_SENDER_TID, 0));
     program.push(Insn::rsh64_imm(0, 32));
     program.push(Insn::stx(BPF_W, R10, SIG_SENDER_TGID, 0));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, SIG_SENDER_COMM as i32));
+    program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
+    program.push(Insn::call(GET_CURRENT_COMM));
 
     // The first argument is the signal number, the fifth the kernel's own
     // verdict on what happened to it.
@@ -879,6 +899,11 @@ mod tests {
             (SIG_COMM, offset_of!(Signal, comm), "signal.comm"),
             (SIG_NUMBER, offset_of!(Signal, sig), "signal.sig"),
             (SIG_RESULT, offset_of!(Signal, result), "signal.result"),
+            (
+                SIG_SENDER_COMM,
+                offset_of!(Signal, sender_comm),
+                "signal.sender_comm",
+            ),
         ] {
             assert_eq!(
                 (stack - SIG_EVENT) as usize,

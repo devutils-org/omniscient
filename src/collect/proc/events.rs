@@ -256,7 +256,7 @@ impl ExecCollector {
                     ts_ns: exec.ts_ns,
                     ts_err_ns: 0,
                     kind: "proc.exec".to_owned(),
-                    keys: vec![KeyValue::task(exec.tid as i32)],
+                    keys: vec![KeyValue::task(exec.tid as i32), KeyValue::comm(exec.comm())],
                     attrs: exec_attributes(&exec, &filename),
                     collector_id: id.clone(),
                     seq: index,
@@ -440,7 +440,7 @@ impl ExitCollector {
                     ts_ns: exit.ts_ns,
                     ts_err_ns: 0,
                     kind: "proc.exit".to_owned(),
-                    keys: vec![KeyValue::task(exit.tid as i32)],
+                    keys: vec![KeyValue::task(exit.tid as i32), KeyValue::comm(exit.comm())],
                     attrs: exit_attributes(&exit),
                     collector_id: id.clone(),
                     seq: index,
@@ -658,7 +658,10 @@ impl SignalCollector {
                     ts_ns: signal.ts_ns,
                     ts_err_ns: 0,
                     kind: "proc.signals".to_owned(),
-                    keys: vec![KeyValue::task(signal.target_tid as i32)],
+                    keys: vec![
+                        KeyValue::task(signal.target_tid as i32),
+                        KeyValue::comm(signal.comm()),
+                    ],
                     attrs: signal_attributes(&signal),
                     collector_id: id.clone(),
                     seq: index,
@@ -700,7 +703,10 @@ impl SignalCollector {
                 ts_ns: row.last_ts_ns,
                 ts_err_ns: 0,
                 kind: "proc.signals".to_owned(),
-                keys: vec![KeyValue::task(*tid as i32)],
+                keys: vec![
+                    KeyValue::task(*tid as i32),
+                    KeyValue::comm(row.comm.clone()),
+                ],
                 attrs: vec![
                     Attr::uint("count", row.generated),
                     Attr::uint("delivered", row.delivered),
@@ -732,6 +738,7 @@ fn signal_attributes(signal: &Signal) -> Vec<Attr> {
         Attr::uint("pid", u64::from(signal.target_tgid)),
         Attr::uint("sender_tid", u64::from(signal.sender_tid)),
         Attr::uint("sender_pid", u64::from(signal.sender_tgid)),
+        Attr::text("sender_comm", signal.sender_comm()),
         // The kernel's own verdict. A generated signal that was already pending
         // is not delivered twice, so a count of these events is a count of
         // signals raised rather than of signals a handler will see.
@@ -910,6 +917,7 @@ mod tests {
             comm: padded("sleep"),
             sig: 10,
             result: 0,
+            sender_comm: padded("kill"),
         }
     }
 
