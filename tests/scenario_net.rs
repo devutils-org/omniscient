@@ -4799,3 +4799,31 @@ fn a_requests_bytes_are_what_its_client_sent_and_its_worker_wrote() {
         assert_eq!(fields[name], 0, "`{name}` in {fields}");
     }
 }
+
+/// The reviewer's repro: `net.sockets --pid 1` as an unprivileged user used
+/// to print "0 events ... no loss" and exit 0, an unknown inventory reported
+/// as an empty one. It is refused now, with the reason and what to ask for.
+#[test]
+fn the_sockets_of_a_process_whose_descriptors_are_unreadable_are_refused_not_empty() {
+    match std::fs::read_dir("/proc/1/fd") {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+        _ => {
+            eprintln!("skipped: this user can read pid 1's descriptors");
+            return;
+        }
+    }
+    let output = omn(&[
+        "net.sockets",
+        "--pid",
+        "1",
+        "--mode",
+        "snapshot",
+        "-e",
+        "raw",
+    ]);
+    assert_ne!(code(&output), 0, "{}", stdout(&output));
+    let said = stderr(&output);
+    assert!(said.contains("/proc/1/fd"), "{said}");
+    assert!(said.contains("--system"), "{said}");
+    assert!(!stdout(&output).contains("no loss"), "{}", stdout(&output));
+}

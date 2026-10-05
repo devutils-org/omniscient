@@ -98,13 +98,34 @@ fn owners(only: Option<i32>) -> Owners {
     owners
 }
 
+/// Why one process's sockets cannot be listed.
+fn unreadable(pid: i32, error: &std::io::Error) -> String {
+    format!(
+        "cannot read /proc/{pid}/fd ({error}): process {pid} is another user's, and its \
+         descriptors do not open without CAP_SYS_PTRACE, so which sockets it holds is unknown; \
+         run as its user, or use --system, where its sockets are listed with their `uid` and \
+         no `pid`"
+    )
+}
+
 pub struct Prepare;
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         let only = match target {
             Target::System => None,
-            Target::Pid(pids) if pids.len() == 1 => Some(pids[0]),
+            Target::Pid(pids) if pids.len() == 1 => {
+                let pid = pids[0];
+                // Which sockets a process holds is read off its descriptors:
+                // where they cannot be read, the answer is unknown, and an
+                // empty inventory would say "none".
+                if let Err(error) = std::fs::read_dir(format!("/proc/{pid}/fd")) {
+                    if error.kind() == std::io::ErrorKind::PermissionDenied {
+                        return Err(unreadable(pid, &error));
+                    }
+                }
+                Some(pid)
+            }
             other => {
                 return Err(format!(
                     "the socket inventory is read machine-wide or for one process, and a {} \
@@ -222,6 +243,15 @@ impl Collector for SocketsCollector {
             }
         }
         let owners = owners(self.only);
+        if let (Some(pid), true) = (self.only, owners.unreadable > 0) {
+            // Readable at attach and not now: a setuid exec, most likely.
+            // Every socket it holds would be filtered out, which is not "it
+            // holds none".
+            let error = std::fs::read_dir(format!("/proc/{pid}/fd"))
+                .err()
+                .unwrap_or_else(|| std::io::Error::other("unreadable a moment ago"));
+            return Err(SampleError::Transient(unreadable(pid, &error)));
+        }
         let ts_ns = monotonic_ns();
         let mut events = Vec::new();
         for (protocol, socket) in &dumped {
@@ -254,6 +284,42 @@ impl Collector for SocketsCollector {
 mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream, UdpSocket};
+
+    /// Another user's process is refused with the reason at attach, and one
+    /// that cannot be read at a sample is a failed read: in neither case an
+    /// empty inventory, which would say it holds no socket.
+    #[test]
+    fn a_process_whose_descriptors_cannot_be_read_is_not_an_empty_inventory() {
+        match std::fs::read_dir("/proc/1/fd") {
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+            _ => {
+                eprintln!("skipped: this process can read pid 1's descriptors");
+                return;
+            }
+        }
+        let Err(refusal) = Box::new(Prepare).attach(&Target::Pid(vec![1])) else {
+            panic!("an unreadable process must be refused");
+        };
+        assert!(refusal.contains("/proc/1/fd"), "{refusal}");
+        assert!(refusal.contains("unknown"), "{refusal}");
+
+        let mut collector = SocketsCollector {
+            id: CollectorId::new("net.sockets/netlink"),
+            only: Some(1),
+            diag: None,
+            losses: Losses::default(),
+            unowned_note: None,
+        };
+        if collector.start().is_err() {
+            eprintln!("skipped: this machine refuses NETLINK_SOCK_DIAG");
+            return;
+        }
+        match collector.sample(0) {
+            Err(SampleError::Transient(reason)) => assert!(reason.contains("unknown"), "{reason}"),
+            Ok(events) => panic!("{} events and no failed read", events.len()),
+            Err(SampleError::TargetGone(reason)) => panic!("pid 1 is not gone: {reason}"),
+        }
+    }
 
     fn find(events: &[Event], what: impl Fn(&Event) -> bool) -> Option<&Event> {
         events.iter().find(|event| what(event))

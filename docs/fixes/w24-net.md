@@ -47,7 +47,10 @@ capabilities (and `make CAPTURE=1` for the capture):
 `stop` (the window opening after `start` is the runner's documented order; I
 did not time attach and detach apart). That `missed` and `mcast` agree when
 non-zero (every interface here reads zero). That the lifetime owner is right
-on a timer- or reset-driven close: there `attributed` is `at_close` by design.
+on a timer- or reset-driven close: there `attributed` is `at_close` by design,
+and since the review round such a record is a counted loss under a process
+target rather than placed by the task it interrupted (unit-tested on
+synthetic records; no reset-driven close was produced under `--pid` here).
 
 **Tests run**: `cargo test --lib collect::net` 117, `--lib net_` 59 (the bpf
 programs), `--lib drops`/`accept` 18/19; `--test family_net` 13 (the two eBPF
@@ -129,3 +132,36 @@ drops had no `NO_SOCKET` at all while `Udp: NoPorts` moved.
   `net.sockets`, `net.tcp.accept`; `net.tcp.lifetime`'s targets (`pid`,
   `launch`); `dir` on `net.packets`; `net.iface`'s `mcast`/`missed`;
   `net.drops`' `stack` emit; `net.capture`'s new filter fields.
+
+## Review
+
+Both findings were right; both are fixed in the review round.
+
+1. **`net.sockets --pid` on an unreadable process** (defect). `attach`
+   now refuses a `--pid` whose `/proc/<pid>/fd` answers `EACCES`, with the
+   reason and the way out (`--system`, where its sockets carry `uid` and no
+   `pid`); a process that becomes unreadable after attach (a setuid exec) is
+   a `SampleError::Transient`, so a failed read in `Losses`, never an empty
+   inventory. Shown: `omn net.sockets --pid 1 --mode snapshot -e raw` as an
+   unprivileged user now exits 1 with "cannot read /proc/1/fd (Permission
+   denied) ... which sockets it holds is unknown". The catalog caveat says so.
+   Tests: `sockets::tests::a_process_whose_descriptors_cannot_be_read_is_not_an_empty_inventory`
+   (attach refusal and the sample path, both run here) and
+   `scenario_net::the_sockets_of_a_process_whose_descriptors_are_unreadable_are_refused_not_empty`
+   (the reviewer's repro through the binary).
+2. **`net.tcp.lifetime` `at_close` records under a process target** (gap).
+   `LifetimeCollector::in_target` places a connection only by an `owner`
+   pid; an `at_close` one under `--pid`/launch is counted in `unowned`, in
+   `Losses::dropped` with a note, and in the run's notes -- never kept because
+   the interrupted task was the target, nor counted `outside` because it was
+   not. Machine-wide nothing changes. Test:
+   `lifetime::tests::an_unowned_connection_under_a_process_target_is_a_loss_not_a_placement`
+   (synthetic records: one at_close with the target's pid, one with a
+   stranger's, both lost, `outside` 0; an owned one placed by its pid). The
+   catalog caveat says so, and its drain interval is corrected to 20 ms (it
+   said 10).
+
+Tests of the round: `cargo test --lib collect::net` 119; `--test
+scenario_net` 42; `--test family_net` 13; `--test catalog_model` 19;
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`
+clean.
