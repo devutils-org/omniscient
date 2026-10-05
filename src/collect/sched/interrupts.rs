@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use crate::clock::monotonic_ns;
-use crate::collect::{Collector, Prepared, SampleError};
+use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
 
@@ -124,6 +124,8 @@ impl Prepared for Prepare {
             counting: self.0 == Mode::Count,
             cpus,
             previous: None,
+            losses: Losses::default(),
+            wraps: 0,
         }))
     }
 }
@@ -134,6 +136,38 @@ pub struct InterruptsCollector {
     cpus: Option<Vec<u32>>,
     /// The last read and when it was taken.
     previous: Option<(u64, Counts)>,
+    losses: Losses,
+    /// Per-cpu counters that wrapped past 2^32 in a window, and were counted
+    /// across the wrap.
+    wraps: u64,
+}
+
+/// How far a per-cpu counter moved from `before` to `now`, and whether that is
+/// across a wrap.
+///
+/// The kernel keeps these counts in an `unsigned int` (`kstat_irqs_cpu`,
+/// `kstat_softirqs_cpu`, the arch's `irq_stat`) and prints them as such, so a
+/// count that went backwards from the upper half of that range wrapped: `LOC`
+/// at 1 kHz does after about fifty days, a busy queue's line within hours.
+/// Anything else that went backwards was reset (a line freed and taken again
+/// under the same name), and counts from zero: what it counted before the
+/// reset is not known.
+fn moved(before: u64, now: u64) -> (u64, Moved) {
+    const RANGE: u64 = 1 << 32;
+    if now >= before {
+        (now - before, Moved::Forward)
+    } else if (RANGE / 2..RANGE).contains(&before) {
+        (now + RANGE - before, Moved::Wrapped)
+    } else {
+        (now, Moved::Reset)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Moved {
+    Forward,
+    Wrapped,
+    Reset,
 }
 
 impl InterruptsCollector {
@@ -149,10 +183,23 @@ impl InterruptsCollector {
                 continue;
             }
             // A line that appeared in the window (a device bound) counts
-            // from zero; one whose counter went backwards was reassigned, and
-            // its difference is no count.
-            let moved =
-                value.saturating_sub(before.get(&(line.clone(), *cpu)).copied().unwrap_or(0));
+            // from zero.
+            let (moved, how) = moved(
+                before.get(&(line.clone(), *cpu)).copied().unwrap_or(0),
+                *value,
+            );
+            match how {
+                Moved::Forward => {}
+                Moved::Wrapped => self.wraps += 1,
+                Moved::Reset => {
+                    self.losses.failed_reads += 1;
+                    self.losses.note(
+                        "a per-cpu interrupt counter went backwards without wrapping, the \
+                         line reset under the same name: its window counts from the reset, \
+                         and what it counted before is lost",
+                    );
+                }
+            }
             if moved == 0 {
                 continue;
             }
@@ -216,18 +263,37 @@ impl Collector for InterruptsCollector {
         }
         match read() {
             Ok(counts) => self.window(counts, monotonic_ns(), 0),
-            Err(_) => Vec::new(),
+            Err(error) => {
+                self.losses.failed_reads += 1;
+                self.losses.note(format!(
+                    "the closing read of the interrupt counters failed, so the window has no \
+                     count: {error:?}"
+                ));
+                Vec::new()
+            }
         }
     }
 
+    fn losses(&self) -> Losses {
+        self.losses.clone()
+    }
+
     fn facts(&self) -> Vec<String> {
-        vec![
+        let mut facts = vec![
             "a row is one interrupt line (`kind` hard, `line` its number or its \
              `/proc/interrupts` label such as `LOC`) or one softirq vector (`kind` soft) on \
              one cpu, counted between two reads of the files; a row that did not move is not \
              reported, and `ERR` and `MIS`, which are not per cpu, are left out"
                 .to_owned(),
-        ]
+        ];
+        if self.wraps > 0 {
+            facts.push(format!(
+                "{} per-cpu counters wrapped past 2^32 within a window, the width the kernel \
+                 keeps them in, and were counted across the wrap",
+                self.wraps
+            ));
+        }
+        facts
     }
 }
 
@@ -272,6 +338,8 @@ mod tests {
             counting: false,
             cpus: Some(vec![1]),
             previous: Some((1_000, before)),
+            losses: Losses::default(),
+            wraps: 0,
         };
         let later = HARD_TEXT.replace("482318     452034", "482318     452134");
         let mut after = Counts::new();
@@ -286,5 +354,53 @@ mod tests {
             events[0].attr("window_ns").and_then(|v| v.as_f64()),
             Some(2_000.0)
         );
+    }
+
+    /// A counter that wrapped past 2^32 is counted across the wrap, and one
+    /// that went backwards otherwise is counted from its reset, as a loss.
+    #[test]
+    fn a_wrap_is_counted_and_a_reset_is_a_loss() {
+        assert_eq!(moved(10, 25), (15, Moved::Forward));
+        assert_eq!(moved(u64::from(u32::MAX) - 4, 10), (15, Moved::Wrapped));
+        assert_eq!(moved(1_000, 7), (7, Moved::Reset));
+        let line = Line {
+            soft: false,
+            label: "LOC".to_owned(),
+            name: "LOC".to_owned(),
+        };
+        let counts = |loc: u64, nvme: u64| {
+            let mut counts = Counts::new();
+            counts.insert((line.clone(), 0), loc);
+            let nvme_line = Line {
+                label: "68".to_owned(),
+                name: "nvme0q0".to_owned(),
+                ..line.clone()
+            };
+            counts.insert((nvme_line, 0), nvme);
+            counts
+        };
+        let mut collector = InterruptsCollector {
+            id: CollectorId::new("sched.interrupts/fs:proc"),
+            counting: false,
+            cpus: None,
+            previous: Some((0, counts(u64::from(u32::MAX) - 99, 5_000))),
+            losses: Losses::default(),
+            wraps: 0,
+        };
+        let events = collector.window(counts(100, 40), 1_000, 0);
+        let count_of = |label: &str| {
+            events
+                .iter()
+                .find(|event| event.attr("line").map(ToString::to_string).as_deref() == Some(label))
+                .and_then(|event| event.attr("count").and_then(|v| v.as_f64()))
+        };
+        assert_eq!(count_of("LOC"), Some(200.0));
+        assert_eq!(count_of("68"), Some(40.0));
+        assert_eq!(collector.wraps, 1);
+        assert_eq!(collector.losses().failed_reads, 1);
+        assert!(collector
+            .facts()
+            .iter()
+            .any(|fact| fact.contains("wrapped")));
     }
 }
