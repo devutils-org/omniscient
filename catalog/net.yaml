@@ -134,8 +134,10 @@
   determinism: low
   caveats:
     - "The file holds counters that only grow, so a run reports the increment
-       between two reads. The first read of a run is a baseline and produces
-       nothing: a run shorter than one poll interval measures nothing."
+       between two reads. The baseline is read before the observed program
+       starts, so its first bytes are in the first interval; the runner's
+       first tick, microseconds after it, is passed over rather than reported
+       as an interval of its own."
     - "Loopback traffic is counted twice, once received and once transmitted,
        because it is both."
     - "A series is an interface, and its `bytes` are both directions: each
@@ -153,17 +155,24 @@
   summary: "Packet counts"
   unit: count
   backends:
-    - {id: "fs:proc", requires: ["/proc/net/dev"], cost: free}
-    - {id: "netlink", requires: ["rtnetlink"], cost: free, equivalent: true}
+    - {id: "fs:proc", requires: ["/proc/net/dev"], cost: free, keys: [iface, dir]}
+    - {id: "netlink", requires: ["rtnetlink"], cost: free, equivalent: true, keys: [iface]}
   modes: [poll, count]
   emits: [rate, timeline, summary]
   targets: {system: native, iface: native}
-  keys: [iface]
+  keys: [iface, dir]
   filter_fields: [iface]
   determinism: low
   caveats:
-    - "Counters that only grow: a run reports the increment between two reads,
-       and its first read is a baseline that produces nothing."
+    - "Counters that only grow: a run reports the increment between two reads.
+       The baseline is read before the observed program starts, and the
+       runner's first tick, microseconds after it, is passed over rather than
+       reported as an interval."
+    - "A series is an interface, and its `packets` are both directions, with
+       `rx` and `tx` beside them. Keyed on `dir` (`--keys iface,dir`), each
+       interface's increase is two events, `dir:rx` and `dir:tx`, one series
+       per direction, as `ip -s link` reports them; `fs:proc` alone splits
+       it."
 
 
 - id: net.socket

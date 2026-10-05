@@ -60,8 +60,12 @@ pub fn factories() -> Vec<Factory> {
                 .contains(&crate::request::KeyKind::Dir);
             Ok(Box::new(dev::Prepare(dev::Counted::Bytes, by_direction)))
         }),
-        Factory::new("net.packets", "fs:proc", |_| {
-            Ok(Box::new(dev::Prepare(dev::Counted::Packets, false)))
+        Factory::new("net.packets", "fs:proc", |resolved| {
+            let by_direction = resolved
+                .request
+                .keys
+                .contains(&crate::request::KeyKind::Dir);
+            Ok(Box::new(dev::Prepare(dev::Counted::Packets, by_direction)))
         }),
         Factory::new("net.tcp.rtt", "netlink", |_| Ok(Box::new(tcp_rtt::Prepare))),
         // Both of these read counters, and both declare `snapshot`. The mode
