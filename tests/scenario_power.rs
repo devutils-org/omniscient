@@ -774,7 +774,21 @@ fn every_axis_this_family_declares_is_served_or_refused_by_name() {
             for emit in &entry.emits {
                 let mode = mode_argument(*mode);
                 let emit = emit.as_str();
-                let attempt = run(&[&source, "--system", "-m", mode, "-e", emit, "-d", "200ms"]);
+                // A source of a process (`power.wakeups`) is asked about this
+                // test's own process; the rest about the machine.
+                let own = std::process::id().to_string();
+                let target: [&str; 2] = if entry
+                    .supported_targets()
+                    .contains(&omn::request::TargetKind::System)
+                {
+                    ["--system", ""]
+                } else {
+                    ["--pid", &own]
+                };
+                let mut args = vec![source.as_str()];
+                args.extend(target.iter().filter(|arg| !arg.is_empty()));
+                args.extend(["-m", mode, "-e", emit, "-d", "200ms"]);
+                let attempt = run(&args);
                 let out = stdout(&attempt);
                 let message = stderr(&attempt);
                 let answer = match attempt.status.code() {
@@ -2271,4 +2285,57 @@ fn the_core_domain_is_every_cores_counter_summed_and_less_than_its_package() {
         core_joules > 0.0 && core_joules < package,
         "the cores ({core_joules} J) sit inside their package ({package} J): {out}"
     );
+}
+
+/// `power.wakeups` against a program whose wakeups the test chose: 300 sleeps
+/// of 2 ms on one thread. Each sleep ends in one wakeup, so the rate cannot
+/// exceed 500 a second, and the count over the run cannot exceed 300 by more
+/// than the interpreter's own start-up sleeps -- nor fall far below it, beyond
+/// the last partial interval the exit cuts short.
+///
+/// Measured here: 482 of 500 sleeps of 2 ms counted, 485 a second, where one
+/// sleep plus the loop's overhead is 2.06 ms (`docs/scenarios/power.md`).
+#[test]
+fn a_program_that_sleeps_three_hundred_times_wakes_three_hundred_times() {
+    let python = Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !python {
+        eprintln!("skipped: no python3 to run the sleeping program");
+        return;
+    }
+    let output = run(&[
+        "power.wakeups",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "raw",
+        "--",
+        "python3",
+        "-c",
+        "import time\nfor _ in range(300): time.sleep(0.002)",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    let events: Vec<&str> = out
+        .lines()
+        .filter(|line| line.contains("wakeups="))
+        .collect();
+    assert!(!events.is_empty(), "no interval measured: {out}");
+    let total: f64 = events
+        .iter()
+        .filter_map(|line| field(line, "wakeups=")?.parse::<f64>().ok())
+        .sum();
+    assert!(
+        (150.0..=340.0).contains(&total),
+        "300 sleeps were counted as {total} wakeups: {out}"
+    );
+    for line in &events {
+        let rate: f64 = field(line, "per_second=").unwrap().parse().unwrap();
+        assert!(
+            rate <= 520.0,
+            "a thread sleeping 2 ms at a time cannot wake {rate} times a second: {line}"
+        );
+    }
 }

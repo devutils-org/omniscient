@@ -21,6 +21,7 @@ mod freq_pmu;
 mod sysfs;
 mod temp;
 mod throttle;
+mod wakeups;
 
 use super::Factory;
 
@@ -54,6 +55,9 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("power.throttle", "fs:sys", |resolved| {
             Ok(Box::new(throttle::Prepare::new(resolved.request.mode)?))
+        }),
+        Factory::new("power.wakeups", "fs:proc", |resolved| {
+            Ok(Box::new(wakeups::Prepare::new(resolved.request.mode)?))
         }),
     ]
 }

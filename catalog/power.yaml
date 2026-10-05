@@ -163,3 +163,24 @@
        AMD parts, on ARM and in most virtual machines, and its absence is not
        evidence that nothing throttled: it means throttling cannot be seen this
        way here. The backend refuses rather than reporting zeroes."
+
+- id: power.wakeups
+  family: power
+  summary: "How often a process's threads wake up (powertop's wakeups per process)"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/[pid]/status"], cost: low}
+  modes: [poll]
+  emits: [timeline, raw, summary]
+  targets: {pid: native, launch: native}
+  keys: [proc]
+  filter_fields: [pid]
+  determinism: medium
+  caveats:
+    - "A wakeup is counted as the end of a voluntary sleep: the kernel counts, per
+       thread, the times it gave up the cpu of its own accord, and each such
+       sleep ends in one wakeup. A thread that exits between two reads takes its
+       last interval with it; it is counted as dropped, not as zero."
+    - "These are the process's own wakeups, not the cpu wakeups it causes in
+       other tasks: a timer it arms that wakes someone else is theirs. Every
+       wakeup on the machine, with who woke whom, is `sched.wakeup`."
