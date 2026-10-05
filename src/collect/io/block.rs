@@ -554,6 +554,16 @@ impl BlockCollector {
             );
             self.skipped = skipped;
         }
+        let unfollowed = program.unfollowed();
+        if unfollowed > 0 {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so {} requests are in no event",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "its" } else { "their" },
+            ));
+        }
         self.unpaired = program.unpaired();
     }
 }
@@ -756,8 +766,8 @@ impl Collector for BlockCollector {
         // number somebody will otherwise try to explain.
         if self.submitter != Submitter::Any {
             notes.push(
-                "a process target sees the requests submitted in its own context, which is \
-                 reads; a write leaves through writeback in a kworker minutes later and carries \
+                "a process target sees the requests submitted in its own context or in that of \
+                 a process it started, which is reads; a write leaves through writeback in a kworker minutes later and carries \
                  no submitter at all, so it is absent here rather than counted as zero"
                     .to_owned(),
             );

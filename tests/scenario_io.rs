@@ -6347,3 +6347,100 @@ fn a_file_event_names_the_block_devices_its_filesystem_is_on() {
     }
     let _ = std::fs::remove_file(&target);
 }
+
+// ---------------------------------------------------------------------------
+// The launched program's descendants
+
+/// Forks, and runs `DIRECT_READS` in the child alone: the parent submits
+/// nothing, the way `fio` without `thread` forks its job and waits.
+const FORKED_DIRECT_READS: &str = r#"
+import os, sys
+reads = sys.argv[1]
+child = os.fork()
+if child == 0:
+    sys.argv = [reads] + sys.argv[2:]
+    exec(compile(open(reads).read(), reads, "exec"))
+    os._exit(0)
+_, status = os.waitpid(child, 0)
+sys.exit(os.waitstatus_to_exitcode(status))
+"#;
+
+/// A launched program's forked child is followed: its reads are the run's.
+///
+/// `omn trace io.latency -- fio <job>` without `thread` reported 0 requests
+/// for 28 807 reads fio completed, and "29678 block_rq_complete events had no
+/// opening", because the programs compared the submitter with the launched
+/// process alone (`docs/scenarios/io.md`, defect 27). Here the launched
+/// process forks and the child makes every read, so a filter on the launched
+/// process alone keeps none of them; the child's are counted one for one,
+/// under the child's pid.
+#[test]
+fn a_launched_programs_forked_child_is_followed() {
+    if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = lacks_here("io.latency", "bpf:raw_tp") {
+        eprintln!("skipped: {reason:?}");
+        return;
+    }
+    const READS: usize = 1024;
+    let path = direct_read_file("io-forked-reads.bin", READS);
+    let reads = script("io-forked-reads.py", DIRECT_READS);
+    let forks = script("io-forked-parent.py", FORKED_DIRECT_READS);
+    let account_path = scratch("io-forked-reads.json");
+    let _ = std::fs::remove_file(&account_path);
+    let output = run(&[
+        "io.latency",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        forks.to_str().expect("a path"),
+        reads.to_str().expect("a path"),
+        path.to_str().expect("a path"),
+        &READS.to_string(),
+        account_path.to_str().expect("a path"),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let did = account(&account_path);
+    if let Some(error) = did["refused"].as_str() {
+        eprintln!("skipped: {} refuses O_DIRECT ({error})", path.display());
+        return;
+    }
+    if did["resident"].as_u64() != Some(0) {
+        eprintln!("skipped: the file stayed in the page cache: {did}");
+        return;
+    }
+    let child = did["pid"].as_u64().expect("the child's pid");
+    let document = json(&output);
+    let result = result(&document, "io.latency");
+    let found = raw_events(result)
+        .into_iter()
+        .filter(|attrs| attrs["pid"].as_u64() == Some(child))
+        .filter(|attrs| {
+            attrs["rwbs"]
+                .as_str()
+                .is_some_and(|rwbs| rwbs.starts_with('R'))
+        })
+        .count();
+    let dropped = losses(result)["dropped"].as_u64().unwrap_or(0) as usize;
+    assert!(
+        found <= READS,
+        "{found} requests from the child for {READS} reads: something is counted twice"
+    );
+    assert!(
+        found + dropped >= READS,
+        "the child made {READS} direct reads and the run kept {found} of its requests, \
+         reporting {dropped} lost: the launched program's child is not followed. {}",
+        stderr(&output)
+    );
+}

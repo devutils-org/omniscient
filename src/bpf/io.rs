@@ -75,6 +75,7 @@ use super::insn::{self, helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters, Hash};
 use super::request::read_request_id;
 use super::ring::{ring_bytes, RingBuffer};
+use super::sched_common::Descendants;
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 
 /// Which two moments a program set measures between.
@@ -140,6 +141,56 @@ impl Submitter {
             Submitter::Any => None,
             Submitter::Process(tgid) => Some((base + VAL_TGID, tgid)),
             Submitter::Thread(tid) => Some((base + VAL_TID, tid)),
+        }
+    }
+}
+
+/// What a program keeps: the submitter, and for a process the map of the
+/// processes it started since (or had under it at) the attach.
+///
+/// A launched `fio` forks its job, and the job submits every read: compared
+/// with the launched process alone, `io.latency` reported 0 requests for
+/// 28 807 reads (`docs/scenarios/io.md`, defect 27). The root is compared as a
+/// constant first, so a program that starts nothing costs its own requests no
+/// lookup; any other thread group is looked up in the map
+/// [`super::sched_common::Descendants`] keeps from `sched_process_fork`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Kept {
+    submitter: Submitter,
+    descendants: Option<i32>,
+}
+
+impl Kept {
+    #[cfg(test)]
+    fn only(submitter: Submitter) -> Self {
+        Self {
+            submitter,
+            descendants: None,
+        }
+    }
+
+    /// Falls through when the submitter whose ids sit in the entry laid out at
+    /// `base` is one this run keeps, and jumps to `skip` when it is not.
+    /// Clobbers `r0` to `r5`. `kept` is the label the root's comparison jumps
+    /// to past the lookup, one per call site.
+    fn push(self, program: &mut Program, base: i16, skip: &'static str, kept: &'static str) {
+        let Some((slot, wanted)) = self.submitter.comparison(base) else {
+            return;
+        };
+        program.push(Insn::ldx(BPF_W, 1, R10, slot));
+        match (self.submitter, self.descendants) {
+            (Submitter::Process(_), Some(map)) => {
+                program.jump_to(kept, Insn::jeq_imm(1, wanted as i32, 0));
+                program.extend(Insn::load_map_fd(1, map));
+                program.push(Insn::mov64_reg(2, R10));
+                program.push(Insn::add64_imm(2, slot as i32));
+                program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+                program.jump_to(skip, Insn::jeq_imm(0, 0, 0));
+                program.label(kept);
+            }
+            _ => {
+                program.jump_to(skip, Insn::jne_imm(1, wanted as i32, 0));
+            }
         }
     }
 }
@@ -465,7 +516,7 @@ fn check_signature(btf: &Btf, tracepoint: &str, accepted: &[&[&str]]) -> Result<
 fn open_instructions(
     btf: &Btf,
     stage: Stage,
-    submitter: Submitter,
+    kept: Kept,
     inflight_fd: i32,
     counters_fd: i32,
     storage_fd: Option<i32>,
@@ -495,10 +546,7 @@ fn open_instructions(
     // A run observes one process. The thread group is known before the program
     // loads and never changes, so the comparison is written into the
     // instruction stream rather than looked up in a map.
-    if let Some((slot, wanted)) = submitter.comparison(ENTRY_VALUE) {
-        program.push(Insn::ldx(BPF_W, 1, R10, slot));
-        program.jump_to("done", Insn::jne_imm(1, wanted as i32, 0));
-    }
+    kept.push(&mut program, ENTRY_VALUE, "done", "open_kept");
 
     // `bpf_get_current_comm` writes all sixteen bytes or zeroes them, so the
     // entry carries no stack left over from whatever ran before.
@@ -548,7 +596,7 @@ fn open_instructions(
 fn close_instructions(
     btf: &Btf,
     stage: Stage,
-    submitter: Submitter,
+    kept: Kept,
     inflight_fd: i32,
     ring_fd: i32,
     counters_fd: i32,
@@ -696,10 +744,7 @@ fn close_instructions(
 
         // The record's own tid and tgid sit where an entry's would, so the
         // comparison is the same one the open program makes.
-        if let Some((slot, wanted)) = submitter.comparison(EV_TID - VAL_TID) {
-            program.push(Insn::ldx(BPF_W, 1, R10, slot));
-            program.jump_to("done", Insn::jne_imm(1, wanted as i32, 0));
-        }
+        kept.push(&mut program, EV_TID - VAL_TID, "done", "close_kept");
     }
 
     // A stage with no open has only this moment to fall back on; a paired one
@@ -739,10 +784,7 @@ fn close_instructions(
             if let Some(fd) = storage_fd {
                 read_request_id(&mut program, fd, EV_REQ, "direct_req");
             }
-            if let Some((slot, wanted)) = submitter.comparison(EV_TID - VAL_TID) {
-                program.push(Insn::ldx(BPF_W, 1, R10, slot));
-                program.jump_to("done", Insn::jne_imm(1, wanted as i32, 0));
-            }
+            kept.push(&mut program, EV_TID - VAL_TID, "done", "direct_kept");
             // No interval: the record is already cleared, so `delta_ns` is
             // zero and the flag says the zero is an absence rather than a
             // measurement of no time.
@@ -782,7 +824,7 @@ fn close_instructions(
 fn histogram_open_instructions(
     btf: &Btf,
     stage: Stage,
-    submitter: Submitter,
+    kept: Kept,
     inflight_fd: i32,
     counters_fd: i32,
 ) -> Result<Vec<Insn>, String> {
@@ -797,13 +839,12 @@ fn histogram_open_instructions(
 
     // The filter reads the task where the ring path's entry would hold it, so
     // the comparison is the same one, against the same slot.
-    if let Some((slot, wanted)) = submitter.comparison(ENTRY_VALUE) {
+    if kept.submitter != Submitter::Any {
         program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
         program.push(Insn::stx(BPF_W, R10, ENTRY_VALUE + VAL_TID, 0));
         program.push(Insn::rsh64_imm(0, 32));
         program.push(Insn::stx(BPF_W, R10, ENTRY_VALUE + VAL_TGID, 0));
-        program.push(Insn::ldx(BPF_W, 1, R10, slot));
-        program.jump_to("done", Insn::jne_imm(1, wanted as i32, 0));
+        kept.push(&mut program, ENTRY_VALUE, "done", "hist_kept");
     }
 
     program.push(Insn::call(helper::KTIME_GET_NS));
@@ -1063,6 +1104,8 @@ pub struct BlockProgram {
     /// `blk_status_t`: 5.15's `block_rq_complete(request *, int, unsigned
     /// int)`. Both are zero on success and neither is the other's number.
     pub status_is_errno: bool,
+    /// The processes a process target started, followed from the fork.
+    descendants: Option<Descendants>,
 }
 
 impl BlockProgram {
@@ -1089,6 +1132,16 @@ impl BlockProgram {
         histogram: bool,
     ) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
+        // A process is followed into the processes it starts: attached before
+        // the block programs, so a fork between the two is in the map.
+        let descendants = match submitter {
+            Submitter::Process(root) => Some(Descendants::follow(root)?),
+            _ => None,
+        };
+        let kept = Kept {
+            submitter,
+            descendants: descendants.as_ref().map(Descendants::map_fd),
+        };
         // A histogram run writes no record, and keeps the smallest ring the
         // kernel makes so the drain has one to find empty.
         let bytes = ring_bytes(if histogram { 0 } else { requested_ring_bytes });
@@ -1153,7 +1206,7 @@ impl BlockProgram {
             None => close_instructions(
                 btf,
                 stage,
-                submitter,
+                kept,
                 inflight_fd,
                 ring_map.as_raw_fd(),
                 counters.as_raw_fd(),
@@ -1177,7 +1230,7 @@ impl BlockProgram {
                     histogram_open_instructions(
                         btf,
                         stage,
-                        submitter,
+                        kept,
                         inflight_fd,
                         counters.as_raw_fd(),
                     )?
@@ -1185,7 +1238,7 @@ impl BlockProgram {
                     open_instructions(
                         btf,
                         stage,
-                        submitter,
+                        kept,
                         inflight_fd,
                         counters.as_raw_fd(),
                         storage_fd,
@@ -1218,7 +1271,14 @@ impl BlockProgram {
             histogram,
             no_request_identity,
             status_is_errno,
+            descendants,
         })
+    }
+
+    /// Processes the target started that no program here followed, because
+    /// the map of them was full.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants.as_ref().map_or(0, Descendants::missed)
     }
 
     /// Hands every complete record to `handle`, and counts the records that
@@ -1329,7 +1389,7 @@ impl BlockProgram {
             self.open_program
                 .iter()
                 .chain(std::iter::once(&self.close_program)),
-        )
+        ) + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 
     /// Closing events with no opening this run recorded.
@@ -1560,16 +1620,16 @@ mod tests {
         for stage in [Stage::Queue, Stage::Latency, Stage::Size] {
             let mut programs =
                 vec![
-                    close_instructions(btf, stage, Submitter::Any, 3, 4, 5, Some(6))
+                    close_instructions(btf, stage, Kept::only(Submitter::Any), 3, 4, 5, Some(6))
                         .unwrap_or_else(|reason| panic!("{stage:?} close: {reason}")),
                 ];
             if stage.opens_at().is_some() {
                 programs.push(
-                    open_instructions(btf, stage, Submitter::Any, 3, 5, Some(6))
+                    open_instructions(btf, stage, Kept::only(Submitter::Any), 3, 5, Some(6))
                         .unwrap_or_else(|reason| panic!("{stage:?} open: {reason}")),
                 );
                 programs.push(
-                    histogram_open_instructions(btf, stage, Submitter::Any, 3, 5)
+                    histogram_open_instructions(btf, stage, Kept::only(Submitter::Any), 3, 5)
                         .unwrap_or_else(|reason| panic!("{stage:?} histogram open: {reason}")),
                 );
                 programs.push(
@@ -1599,8 +1659,9 @@ mod tests {
     fn the_published_record_is_exactly_the_size_of_the_struct() {
         let Some(btf) = kernel_btf() else { return };
         for stage in [Stage::Queue, Stage::Latency, Stage::Size] {
-            let program = close_instructions(btf, stage, Submitter::Any, 3, 4, 5, Some(6))
-                .expect("a program");
+            let program =
+                close_instructions(btf, stage, Kept::only(Submitter::Any), 3, 4, 5, Some(6))
+                    .expect("a program");
             let output_at = program
                 .iter()
                 .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -1621,8 +1682,16 @@ mod tests {
     #[test]
     fn the_whole_record_is_cleared_before_any_of_it_is_filled() {
         let Some(btf) = kernel_btf() else { return };
-        let program = close_instructions(btf, Stage::Latency, Submitter::Any, 3, 4, 5, Some(6))
-            .expect("a program");
+        let program = close_instructions(
+            btf,
+            Stage::Latency,
+            Kept::only(Submitter::Any),
+            3,
+            4,
+            5,
+            Some(6),
+        )
+        .expect("a program");
         let cleared: Vec<i16> = program
             .iter()
             .take_while(|insn| insn.code != 0x85 || insn.imm != helper::GET_SMP_PROCESSOR_ID)
@@ -1645,20 +1714,79 @@ mod tests {
     #[test]
     fn the_filter_is_present_only_when_a_process_was_named() {
         let Some(btf) = kernel_btf() else { return };
-        let machine_wide = open_instructions(btf, Stage::Latency, Submitter::Any, 3, 5, Some(6))
-            .expect("a program");
+        let machine_wide = open_instructions(
+            btf,
+            Stage::Latency,
+            Kept::only(Submitter::Any),
+            3,
+            5,
+            Some(6),
+        )
+        .expect("a program");
         assert!(
             !machine_wide.iter().any(|insn| insn.imm == 4242),
             "a machine-wide program compares against no process"
         );
-        let filtered =
-            open_instructions(btf, Stage::Latency, Submitter::Process(4242), 3, 5, Some(6))
-                .expect("a program");
+        let filtered = open_instructions(
+            btf,
+            Stage::Latency,
+            Kept::only(Submitter::Process(4242)),
+            3,
+            5,
+            Some(6),
+        )
+        .expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             1,
             "one comparison, against the thread group of the submitting task"
         );
+    }
+
+    /// A process with the processes it started compares the root as a
+    /// constant and looks every other thread group up in the map, at every
+    /// site that filters: the open, the unpaired close, and the histogram's
+    /// open. A launched `fio` forks its job, and only the job submits.
+    #[test]
+    fn a_followed_process_keeps_its_descendants_through_the_map() {
+        let Some(btf) = kernel_btf() else { return };
+        let kept = Kept {
+            submitter: Submitter::Process(4242),
+            descendants: Some(9),
+        };
+        let lookups = |program: &[Insn]| {
+            helpers_called(program)
+                .iter()
+                .filter(|helper| **helper == helper::MAP_LOOKUP_ELEM)
+                .count()
+        };
+        let open = open_instructions(btf, Stage::Latency, kept, 3, 5, Some(6)).expect("open");
+        let open_alone = open_instructions(
+            btf,
+            Stage::Latency,
+            Kept::only(kept.submitter),
+            3,
+            5,
+            Some(6),
+        )
+        .expect("open");
+        assert_eq!(open.iter().filter(|insn| insn.imm == 4242).count(), 1);
+        assert_eq!(lookups(&open), lookups(&open_alone) + 1, "one lookup more");
+        let size = close_instructions(btf, Stage::Size, kept, -1, 4, 5, Some(6)).expect("size");
+        assert_eq!(size.iter().filter(|insn| insn.imm == 4242).count(), 1);
+        let hist = histogram_open_instructions(btf, Stage::Latency, kept, 3, 5).expect("hist");
+        let hist_alone =
+            histogram_open_instructions(btf, Stage::Latency, Kept::only(kept.submitter), 3, 5)
+                .expect("hist");
+        assert_eq!(lookups(&hist), lookups(&hist_alone) + 1);
+        // A thread is never widened to its process's children.
+        let thread = Kept {
+            submitter: Submitter::Thread(4242),
+            descendants: Some(9),
+        };
+        let open_thread =
+            open_instructions(btf, Stage::Latency, thread, 3, 5, Some(6)).expect("open");
+        assert_eq!(lookups(&open_thread), lookups(&open_alone));
     }
 
     /// The close program reuses the open program's comparison by pointing it
@@ -1693,7 +1821,7 @@ mod tests {
         let filtered = close_instructions(
             btf,
             Stage::Size,
-            Submitter::Process(4242),
+            Kept::only(Submitter::Process(4242)),
             -1,
             4,
             5,
@@ -1754,8 +1882,9 @@ mod tests {
     #[test]
     fn the_histogram_programs_hot_paths_call_only_what_a_row_needs() {
         let Some(btf) = kernel_btf() else { return };
-        let open = histogram_open_instructions(btf, Stage::Latency, Submitter::Any, 3, 5)
-            .expect("a program");
+        let open =
+            histogram_open_instructions(btf, Stage::Latency, Kept::only(Submitter::Any), 3, 5)
+                .expect("a program");
         let open_helpers = helpers_called(&open);
         for absent in [
             helper::GET_CURRENT_COMM,
@@ -1778,9 +1907,14 @@ mod tests {
                 helper::MAP_LOOKUP_ELEM,
             ]
         );
-        let filtered =
-            histogram_open_instructions(btf, Stage::Latency, Submitter::Process(4242), 3, 5)
-                .expect("a program");
+        let filtered = histogram_open_instructions(
+            btf,
+            Stage::Latency,
+            Kept::only(Submitter::Process(4242)),
+            3,
+            5,
+        )
+        .expect("a program");
         assert_eq!(
             filtered.iter().filter(|insn| insn.imm == 4242).count(),
             1,
@@ -1865,16 +1999,40 @@ mod tests {
         // `r1 -= r9`, the one subtraction in any of these programs.
         let subtracts = |program: &[Insn]| program.iter().any(|insn| insn.code == 0x1f);
         assert!(subtracts(
-            &close_instructions(btf, Stage::Latency, Submitter::Any, 3, 4, 5, Some(6))
-                .expect("a program")
+            &close_instructions(
+                btf,
+                Stage::Latency,
+                Kept::only(Submitter::Any),
+                3,
+                4,
+                5,
+                Some(6)
+            )
+            .expect("a program")
         ));
         assert!(subtracts(
-            &close_instructions(btf, Stage::Queue, Submitter::Any, 3, 4, 5, Some(6))
-                .expect("a program")
+            &close_instructions(
+                btf,
+                Stage::Queue,
+                Kept::only(Submitter::Any),
+                3,
+                4,
+                5,
+                Some(6)
+            )
+            .expect("a program")
         ));
         assert!(!subtracts(
-            &close_instructions(btf, Stage::Size, Submitter::Any, -1, 4, 5, Some(6))
-                .expect("a program")
+            &close_instructions(
+                btf,
+                Stage::Size,
+                Kept::only(Submitter::Any),
+                -1,
+                4,
+                5,
+                Some(6)
+            )
+            .expect("a program")
         ));
     }
 
@@ -1902,21 +2060,47 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         let reads = |program: &[Insn]| helpers_called(program).contains(&GET_CURRENT_TASK_BTF);
 
-        let issue = open_instructions(btf, Stage::Latency, Submitter::Any, 3, 5, Some(6)).unwrap();
+        let issue = open_instructions(
+            btf,
+            Stage::Latency,
+            Kept::only(Submitter::Any),
+            3,
+            5,
+            Some(6),
+        )
+        .unwrap();
         assert!(reads(&issue), "the issue runs in the submitter's context");
-        let complete =
-            close_instructions(btf, Stage::Latency, Submitter::Any, 3, 4, 5, Some(6)).unwrap();
+        let complete = close_instructions(
+            btf,
+            Stage::Latency,
+            Kept::only(Submitter::Any),
+            3,
+            4,
+            5,
+            Some(6),
+        )
+        .unwrap();
         assert!(
             !reads(&complete),
             "the completion runs in whoever's context it interrupted"
         );
 
         // Where the issue itself closes, it reads it directly.
-        let size = close_instructions(btf, Stage::Size, Submitter::Any, -1, 4, 5, Some(6)).unwrap();
+        let size = close_instructions(
+            btf,
+            Stage::Size,
+            Kept::only(Submitter::Any),
+            -1,
+            4,
+            5,
+            Some(6),
+        )
+        .unwrap();
         assert!(reads(&size));
 
         // No map, no read, and the entry's slot is still written.
-        let bare = open_instructions(btf, Stage::Latency, Submitter::Any, 3, 5, None).unwrap();
+        let bare =
+            open_instructions(btf, Stage::Latency, Kept::only(Submitter::Any), 3, 5, None).unwrap();
         assert!(!reads(&bare));
         assert!(bare
             .iter()
