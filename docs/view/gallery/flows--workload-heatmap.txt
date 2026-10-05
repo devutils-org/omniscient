@@ -17,7 +17,7 @@ omn top │ fixture workload-heatmap │ 1.97s                        view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃ wlan0       783B  ▄▄   █ │
-│sockets 1.27KiB -> interfaces 136KiB = 107.27x · 5 interfaces idle · lo counts a byte twice; sockets are not tied to i│
+│sockets 1.27KiB -> interfaces 136KiB = 107.27x · 5 interfaces idle · lo counts a byte twice; a socket is tied to the i│
 │ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
 │         thread             descriptor                                         cache         device, the machine's    │
 │        python3 ┃█████████┃ fd 3          █        ←1.63MiB            ┃█████████┃█████████┃ 259:0    2.48MiB   █     │

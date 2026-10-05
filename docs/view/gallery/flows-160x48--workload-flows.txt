@@ -4,7 +4,7 @@ omn top │ fixture workload-flows │ 993ms                                    
 │pid 2621407 over 993ms   4.00MiB sent, 1.00MiB received   9.00MiB written, 9.63MiB read   █ out █ in █ the machine's                                          │
 │ network · net.socket bpf:fentry ~low det degraded x3 · net.bytes fs:proc ~low det degraded ──────────────────────────────────────────────────────────────────│
 │         thread                   socket                                                         stack               interface, the machine's                 │
-│     flows-main ┃███████████████┃▶inet :41506      █     ↑4.00MiB ↓1.00MiB         ┃███████████████┃███████████████┃ lo         10.0MiB   █                   │
+│     flows-main ┃███████████████┃▶inet :41506      █     ↑4.00MiB ↓1.00MiB         ┃███████████████┃███████████████┃ lo         10.0MiB   █      ◂ 1 socket   │
 │    tid 2621407 ┃███████████████┃  5.03MiB/s, 84 calls, 19.2µs each                ┃███████████████┃███████████████┃                                          │
 │                ┃███████████████┃                                                  ┃███████████████┃███████████████┃                                          │
 │                ┃███████████████┃                                                  ┃███████████████┃███████████████┃                                          │
@@ -21,7 +21,7 @@ omn top │ fixture workload-flows │ 993ms                                    
 │                                                                                                   ┃███████████████┃                                          │
 │                                                                                                   ┃███████████████┃                                          │
 │                                                                                                   ┃███████████████┃ wlan0         192B      █                │
-│sockets 5.00MiB -> interfaces 10.0MiB = 2.01x · 5 interfaces idle · lo counts a byte twice; sockets are not tied to interfaces                                │
+│sockets 5.00MiB -> interfaces 10.0MiB = 2.01x · 5 interfaces idle · lo counts a byte twice; a socket is tied to the interface its route left by               │
 │ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────────────────────────────────────────────│
 │         thread                   descriptor                                                     cache               device, the machine's                    │
 │     flows-main ┃███████████████┃ fd 40            █     →8.00MiB ←8.00MiB         ┃███████████████┃███████████████┃ 259:0      9.27MiB   █                   │

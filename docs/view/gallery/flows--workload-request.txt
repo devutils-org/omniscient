@@ -17,7 +17,7 @@ omn top │ fixture workload-request │ 1.14s                        view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃ wlan0       760B ██ █  █ │
-│sockets 3.45KiB -> interfaces 21.8KiB = 6.30x · 5 interfaces idle · lo counts a byte twice; sockets are not tied to in│
+│sockets 3.45KiB -> interfaces 21.8KiB = 6.30x · 5 interfaces idle · lo counts a byte twice; a socket is tied to the in│
 │ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
 │         thread             descriptor                                         cache         device, the machine's    │
 │         server ┃█████████┃ fd 3          █▁▁ ▁  ▁ →2.00MiB ←1.04KiB   ┃█████████┃█████████┃ 259:0    3.33MiB █▁   ▁▁ │

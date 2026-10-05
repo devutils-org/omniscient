@@ -287,6 +287,22 @@ fn flows_draws_the_sockets_bytes_exactly() {
     );
 }
 
+/// `flows`: the workload's one socket is a loopback connection
+/// (`127.0.0.1`), so its route leaves by `lo`: the interface drawn tied to
+/// it, and to no other.
+#[test]
+fn flows_ties_the_socket_to_the_loopback() {
+    let drawn = screen("flows", &[], 200, 50);
+    let tied: Vec<&str> = drawn.lines().filter(|line| line.contains("◂ ")).collect();
+    let sockets: Vec<&&str> = tied.iter().filter(|line| line.contains(" socket")).collect();
+    assert_eq!(sockets.len(), 1, "one interface tied:\n{drawn}");
+    let after_bar = sockets[0].rsplit('┃').next().expect("the sink column");
+    assert!(
+        after_bar.trim_start().starts_with("lo ") && after_bar.contains("◂ 1 socket"),
+        "{after_bar}\n{drawn}"
+    );
+}
+
 /// `flows`: each file's bytes are exact, each way, on the descriptor the
 /// manifest says it was opened on (`io.syscall`'s rows are per descriptor).
 #[test]
