@@ -13,9 +13,13 @@
 │                                                                                                                      │[0m
 │[0m[1;32m── a003 · 23.6ms from its first byte in to its last byte out · thread 2619020 [0m[2m────────────────────────────────────────[0m│[0m
 │[0m[2m            ┊0            ┊5.00ms       ┊10.0ms       ┊15.0ms       ┊20.0ms   [0m                                        │[0m
+│            [0m[36m░[0m                                                                                                         │[0m
 │[0m[36m  net in    ░[0m                                                                   19.0µs before start                   │[0m
+│            [0m[32m█[0m[33m▓[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m[34m▄▄▄▄▄▄▄[0m                                        │[0m
 │[0m[1m  serving   [0m[32m█[0m[33m▓[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m[34m▄▄▄▄▄▄▄[0m  23.5ms from start to done             │[0m
+│                                                                     [0m[2;34m▄▄▄▄▄▄▄▄▄[0m                                        │[0m
 │[0m[34m  on device [0m                                                         [0m[2;34m▄▄▄▄▄▄▄▄▄[0m[2m  32 block requests, 128KiB[0m             │[0m
+│                                                                                                                      │[0m
 │[0m[96m  net out   [0m                                                                  [0m[2m  gone when done[0m                        │[0m
 │[0m[2;3m  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order[0m                 │[0m
 │                                                                                                                      │[0m
@@ -30,10 +34,6 @@
 │                                                                    [0m[1mlock/sleep [0mlongest 20.2ms, woken by tid 2619021   │[0m
 │                                                                                                                      │[0m
 │[0m[1m  what sets it apart from the other 4 requests: [0m[35m▀ [0m[31mlock/sleep +20.2ms[0m[2m (theirs 0ns) · [0m[34m▄ [0m[31mdisk +2.55ms[0m[2m (theirs 0ns)[0m       │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m

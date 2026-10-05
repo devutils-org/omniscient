@@ -1077,9 +1077,13 @@ impl Columns {
     fn for_width(width: u16) -> Columns {
         let task_width = 15;
         let sink_width = 24.min(width / 5);
-        let ribbon = (width / 12).clamp(4, 10);
+        // Past the 118 cells of a 120-column terminal the ribbons and the
+        // objects' column take the extra width, so the diagram spans the
+        // terminal rather than leaving its right half to the sinks' labels.
+        let extra = width.saturating_sub(118);
+        let ribbon = (width / 12).clamp(4, 10) + extra / 7;
         let fixed = task_width + 1 + 1 + ribbon + 1 + 1 + ribbon + 1 + ribbon + 2 + sink_width;
-        let object_width = width.saturating_sub(fixed).clamp(12, 44);
+        let object_width = width.saturating_sub(fixed).clamp(12, 44 + extra / 6);
         let task_bar = task_width + 1;
         let object_bar = task_bar + 1 + ribbon;
         let object_label = object_bar + 1;

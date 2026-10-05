@@ -13,9 +13,13 @@ omn top │ fixture vertical-requests │ 413ms                       view: snap
 │                                                                                                                      │
 │── a004 · 30.3ms from its first byte in to its last byte out · thread 2619020 ────────────────────────────────────────│
 │            ┊0                   ┊10.0ms               ┊20.0ms                                                        │
+│            ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░                                        │
 │  net in    ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  30.3ms before start                   │
+│                                                                             █                                        │
 │  serving                                                                    █  25.9µs from start to done             │
+│                                                                                                                      │
 │  on device                                                                     no block request                      │
+│                                                                                                                      │
 │  net out                                                                       gone when done                        │
 │  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order                 │
 │                                                                                                                      │
@@ -30,10 +34,6 @@ omn top │ fixture vertical-requests │ 413ms                       view: snap
 │                                                                                                                      │
 │                                                                                                                      │
 │  what sets it apart from the other 4 requests: ░ net in +30.3ms (theirs 18.9µs)                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

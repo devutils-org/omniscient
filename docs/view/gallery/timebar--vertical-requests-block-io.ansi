@@ -8,8 +8,14 @@
 │   dev nvme0n1p6, on 64 of its 64 event(s)                                                                            │[0m
 │ [0m[2m  decisive: ahead of the next state (0ns) and of what no row read (0ns) -- omn latency's rule, on the run's decompo…[0m │[0m
 │                                                                                                                      │[0m
+│                       [0m[2m│[0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[2m   ┤[0m                               │[0m
+│                       [0m[2m│[0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[2m   ┤[0m                               │[0m
 │ [0m[1;32m▸ req:a002            [0m[2m├[0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[1;2;7;34m I/O 94.4% [0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[2m   ┤   9.07ms [0m[1;34m ▶ I/O 94.4%       [0m  │[0m
+│                       [0m[2m│[0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[2m   ┤[0m                                                                            │[0m
+│                       [0m[2m│[0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[2m   ┤[0m                                                                            │[0m
 │   req:a003            [0m[2m├[0m[2;34m▓[0m[1;2;7;34m I/O 82.1% [0m[2;34m▓▓[0m[2m   ┤[0m                                             [0m[2m   2.55ms [0m[1;34m ▶ I/O 82.1%       [0m  │[0m
+│                       [0m[2m│┤[0m                                                                                             │[0m
+│                       [0m[2m│┤[0m                                                                                             │[0m
 │   req:a001            [0m[2m├┤[0m                                                              [0m[2m      0ns  ≈ no single state [0m  │[0m
 │ [0m[2m                     0 ──────────────────────────┼ 4.53ms ───────────────────────────┤ 9.07ms                       [0m │[0m
 │                        [0m[34m▓[0m I/O                                                                                         │[0m
@@ -22,12 +28,6 @@
 │                                                                                                                      │[0m
 │ [0m[2mTrust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it[0m  │[0m
 │ [0m[2m  gives up (3).[0m                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

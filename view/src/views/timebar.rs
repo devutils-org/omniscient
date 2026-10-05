@@ -1544,7 +1544,7 @@ fn segments(bar: &Bar, dims: bool) -> Vec<Segment> {
 
 /// The bar itself, `width` cells and its end mark, on a scale of `scale`
 /// nanoseconds to the width.
-fn bar_spans(bar: &Bar, scale: f64, width: usize) -> Vec<Span<'static>> {
+fn bar_spans(bar: &Bar, scale: f64, width: usize, labelled: bool) -> Vec<Span<'static>> {
     let segments = segments(bar, bar.trust.dims());
     let amounts: Vec<f64> = segments.iter().map(|segment| segment.amount).collect();
     let cells = allocate(&amounts, scale, width);
@@ -1557,7 +1557,7 @@ fn bar_spans(bar: &Bar, scale: f64, width: usize) -> Vec<Span<'static>> {
         used += cells;
         let fill = |n: usize| segment.glyph.to_string().repeat(n);
         match &segment.label {
-            Some(label) if cells >= label.chars().count() + 4 => {
+            Some(label) if labelled && cells >= label.chars().count() + 4 => {
                 let text = format!(" {label} ");
                 let inside = text.chars().count();
                 let before = (cells - inside) / 2;
@@ -1638,6 +1638,9 @@ const COLUMNS: [usize; 6] = [36, 15, 15, 7, 9, 6];
 
 /// The label column before each bar.
 const LABEL: usize = 22;
+
+/// The most rows a bar is drawn on, when the terminal is tall enough.
+const BAR_ROWS: usize = 5;
 
 /// The view's state: which way of splitting the run, which bar, which scale.
 #[derive(Debug, Default)]
@@ -2145,11 +2148,18 @@ impl View for Timebar {
             .max(visible.len().min(4))
             .max(1);
         let first = (self.selected + 1).saturating_sub(room);
+        // A tall terminal draws each bar thicker, up to five rows, rather
+        // than leaving the rows under the table empty: what the screen has
+        // over the lines it draws, shared among the bars.
+        let shown_bars = visible.len().saturating_sub(first).min(room).max(1);
+        let drawn = lines.len() + shown_bars + fold_line + below + 1 + wrapped.len();
+        let thickness = (1 + height.saturating_sub(drawn) / shown_bars).min(BAR_ROWS);
         for (shown, &index) in visible.iter().enumerate().skip(first).take(room) {
             let y = inner.y + lines.len() as u16;
             if y < inner.y + inner.height {
+                let rows = (thickness as u16).min(inner.y + inner.height - y);
                 self.regions
-                    .push(Region::new(Rect::new(inner.x, y, inner.width, 1), shown));
+                    .push(Region::new(Rect::new(inner.x, y, inner.width, rows), shown));
             }
             let one = &sheet.bars[index];
             let picked = shown == self.selected;
@@ -2164,7 +2174,17 @@ impl View for Timebar {
                 Span::styled("├", dim()),
             ];
             let scale = if self.own_scale { one.extent() } else { common };
-            spans.extend(bar_spans(one, scale, bar_w));
+            // The rows above the labelled one: the same bar, its words left
+            // to the row that carries the thread's name.
+            for _ in 1..thickness {
+                let mut above = vec![
+                    Span::raw(" ".repeat(LABEL)),
+                    Span::styled("│", dim()),
+                ];
+                above.extend(bar_spans(one, scale, bar_w, false));
+                lines.push(Line::from(above));
+            }
+            spans.extend(bar_spans(one, scale, bar_w, true));
             let whole = one.whole.map_or("?".to_owned(), units::duration);
             spans.push(Span::styled(format!("{whole:>9} "), one.trust.style()));
             let (suspect, suspect_style) = one.suspect_short();

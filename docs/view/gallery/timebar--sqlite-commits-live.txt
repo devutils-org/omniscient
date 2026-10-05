@@ -8,6 +8,8 @@ omn top │ fixture sqlite-commits │ 2.55s live                        view: s
 │   could still be overtaken                                                                                           │
 │                                                                                                                      │
 │                                                                                                                      │
+│                       │▓▓▓▓▓·························································┤                               │
+│                       │▓▓▓▓▓·························································┤                               │
 │ ▸ 2618623 sqlite3     ├▓▓▓▓▓······················· not read ························┤    2.55s  ≈ no single state   │
 │                      0 ───────────────────────────┼ 1.28s ───────────────────────────┤ 2.55s                         │
 │                        ▚ run queue   ▓ I/O   · not read                                                              │
@@ -25,8 +27,6 @@ omn top │ fixture sqlite-commits │ 2.55s live                        view: s
 │   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │
 │ Trust: the source is not reproducible between two runs of the same workload; the run is still going: losses, cost    │
 │   and stack names are known at its end; served by a fallback that says what it gives up (3).                         │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

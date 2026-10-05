@@ -1097,9 +1097,25 @@ fn draw_detail(
         .get(&request.id)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
+    // The two columns are as tall as the taller needs, the share column's
+    // wrapped lines counted at its width, so a narrow terminal pushes the
+    // line under them down rather than cutting the share column's last lines.
+    let share_width = area.width.saturating_sub(WHERE_WIDTH + 2).max(1);
+    let share = share_lines(request, blocks, gathered, data, trust, block_trust);
+    let share_rows: usize = share
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(usize::from(share_width)))
+        .sum();
+    // Never fewer than nine: the where table and a row of air under it.
+    let where_rows = STATES.len() + 3;
+    let rows = share_rows.max(where_rows) as u16;
+    // What a tall terminal leaves under the tables thickens the waterfall's
+    // four rows, up to three rows each, rather than standing empty.
+    let spare = area.height.saturating_sub(1 + WATERFALL + 1 + rows + 2);
+    let thickness = 1 + (spare / WATERFALL_ROWS).min(THICKEST - 1);
     let [title, waterfall, _, tables] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(6),
+        Constraint::Length(WATERFALL + WATERFALL_ROWS * (thickness - 1)),
         Constraint::Length(1),
         Constraint::Min(0),
     ])
@@ -1128,29 +1144,18 @@ fn draw_detail(
         ])),
         title,
     );
+    let lines = waterfall_lines(
+        request,
+        blocks,
+        gathered,
+        waterfall.width,
+        trust,
+        block_trust,
+    );
     frame.render_widget(
-        Paragraph::new(waterfall_lines(
-            request,
-            blocks,
-            gathered,
-            waterfall.width,
-            trust,
-            block_trust,
-        )),
+        Paragraph::new(thickened(lines, usize::from(thickness))),
         waterfall,
     );
-    // The two columns are as tall as the taller needs, the share column's
-    // wrapped lines counted at its width, so a narrow terminal pushes the
-    // line under them down rather than cutting the share column's last lines.
-    let share_width = tables.width.saturating_sub(WHERE_WIDTH + 2).max(1);
-    let share = share_lines(request, blocks, gathered, data, trust, block_trust);
-    let share_rows: usize = share
-        .iter()
-        .map(|line| line.width().max(1).div_ceil(usize::from(share_width)))
-        .sum();
-    // Never fewer than nine: the where table and a row of air under it.
-    let where_rows = STATES.len() + 3;
-    let rows = share_rows.max(where_rows) as u16;
     let [columns, _, apart] = Layout::vertical([
         Constraint::Length(rows),
         Constraint::Length(1),
@@ -1171,6 +1176,35 @@ fn draw_detail(
         left,
     );
     frame.render_widget(Paragraph::new(share).wrap(Wrap { trim: false }), right);
+}
+
+/// The waterfall's rows: its axis, its four rows and the line under them.
+const WATERFALL: u16 = 6;
+/// The rows of the waterfall that are bars.
+const WATERFALL_ROWS: u16 = 4;
+/// The most rows a waterfall bar is drawn on.
+const THICKEST: u16 = 3;
+
+/// The waterfall with each of its four bars drawn on `thickness` rows: the
+/// rows above a bar repeat its cells, its label and its note left to the
+/// row that names it.
+fn thickened(lines: Vec<Line<'static>>, thickness: usize) -> Vec<Line<'static>> {
+    if thickness <= 1 {
+        return lines;
+    }
+    let mut out = Vec::new();
+    for (index, line) in lines.into_iter().enumerate() {
+        if (1..=usize::from(WATERFALL_ROWS)).contains(&index) && line.spans.len() > 2 {
+            let mut bare = line.spans.clone();
+            bare.pop();
+            bare[0] = Span::raw(" ".repeat(bare[0].width()));
+            for _ in 1..thickness {
+                out.push(Line::from(bare.clone()));
+            }
+        }
+        out.push(line);
+    }
+    out
 }
 
 /// The step of a time axis of `span` nanoseconds: 1, 2 or 5 times a power of

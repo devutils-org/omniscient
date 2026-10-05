@@ -13,9 +13,13 @@ omn top │ fixture vertical-requests │ 413ms                       view: snap
 │                                                                                                                      │
 │── a002 · 10.3ms from its first byte in to its last byte out · thread 2619020 ────────────────────────────────────────│
 │            ┊0          ┊2.00ms      ┊4.00ms      ┊6.00ms      ┊8.00ms                                                │
+│            ░                                                                                                         │
 │  net in    ░                                                                   17.5µs before start                   │
+│            ██████▓▓▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄                                        │
 │  serving   ██████▓▓▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  10.2ms from start to done             │
+│             ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄                                        │
 │  on device  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  64 block requests, 268KiB             │
+│                                                                                                                      │
 │  net out                                                                       gone when done                        │
 │  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order                 │
 │                                                                                                                      │
@@ -30,10 +34,6 @@ omn top │ fixture vertical-requests │ 413ms                       view: snap
 │                                                                                                                      │
 │                                                                                                                      │
 │  what sets it apart from the other 4 requests: ▄ disk +9.07ms (theirs 0ns) · █ on cpu +730µs (theirs 149µs)          │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

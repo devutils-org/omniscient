@@ -2,7 +2,7 @@
  1 system  2 flame [0m[1;7m 3 ledger [0m 4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ ledger -- [0m[1mwhat Thread-1 (proce (task 2618479) cost over 2.85s of wall-clock[0m ─────────────────────────────────────────┐[0m
 │[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
-│  [0m[1mcpu time        [0m[2m2.72s on cpu[0m     [0m[2m95.5% of one cpu[0m          [0m[2;32m▆▆▇██████▇▇█████████████[0m [0m[35m   ≥45.7ms[0m  [0m[36m~low det[0m            │[0m
+│  [0m[1mcpu time        [0m[2m2.72s on cpu[0m     [0m[2m95.5% of one cpu[0m          [0m[2;32m▆▆███████▇██████████████[0m [0m[35m   ≥45.7ms[0m  [0m[36m~low det[0m            │[0m
 │[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
 │  [0m[1mblocked time    [0m[2m8.86ms[0m           [0m[2m0.00 threads[0m              [0m[2;32m ▂▁  ▁   ▁   ▁   ▁    ▁█[0m [0m[35m   ≥83.1ms[0m  [0m[36m~low det[0m [0m[33mdegraded[0m   │[0m
 │  [0m[1mmemory held     [0m--                                                                                                  │[0m
@@ -10,14 +10,14 @@
 │  [0m[1mmemory faulted  [0m16.3k faults     5.73k/s                   [0m[2;3ma total only[0m             [0m[35m   ≥24.0ms[0m  [0m[33m32 late[0m             │[0m
 │[0m[1;32m▸ I/O syscalls    [0m[2m26 calls[0m         [0m[2m65.7µs inside them[0m        [0m[2m1.02µs [0m[2;32m▃█[0m[2m 4.10µs[0m         [0m[35m   ≥70.5ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
 │    bytes           [0m[2m       1B[0m  [0m[2mread, 1.56KiB written[0m                                                                  │[0m
-│  [0m[1mnetwork         [0m[2m28.3MiB moved[0m    [0m[2m28.3MiB out, 1.76KiB in[0m   [0m[2;32m ▁▅▅▅▅▅▅ █▅▅▅▅▅ ▅▅▅▅▅▅▅▅[0m [0m[35m   ≥73.2ms[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m│[0m
+│  [0m[1mnetwork         [0m[2m28.3MiB moved[0m    [0m[2m28.3MiB out, 1.76KiB in[0m   [0m[2;32m ████ █████████ ████████[0m [0m[35m   ≥73.2ms[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m│[0m
 │[0m[2;3m    176 socket calls[0m                                                                                                  │[0m
 │  [0m[1mretransmits     [0m[2m0 sent again[0m     [0m[3mmachine-wide[0m              [0m[2;3ma total only[0m             [0m[35m    ≥478µs[0m  [0m[33m9 late[0m [0m[36m~low det[0m     │[0m
 │  [0m[1mGPU memory      [0m--                                                                                                  │[0m
 │[0m[2;3m    nothing of tid 2618479 in this result: its series are keyed task:2618476[0m                                          │[0m
 │  [0m[1mGPU time        [0m--                                                                                                  │[0m
 │[0m[2;3m    nothing of tid 2618479 in this result: its series are keyed [0m                                                      │[0m
-│  [0m[1menergy          [0m152J machine     53.3W on average          [0m[32m▇▇▇▇▇▇▇▇▇▇▇████▇▇▇▇▇▇▇▇ [0m [0m[35m   ≥94.2µs[0m                      │[0m
+│  [0m[1menergy          [0m152J machine     53.3W on average          [0m[32m▇▇▇▇▇▇▇▇▇▇█████▇▇▇▇▇▇▇  [0m [0m[35m   ≥94.2µs[0m                      │[0m
 │[0m[2;3m    no estimate for one task: the own account it would be charged by is the whole target's[0m                            │[0m
 │                                                                                                                      │[0m
 │[0m[1m  to know all of this[0m[35m: ≥303ms of omn's cpu, ≥10.6% of what the target spent[0m                                           │[0m

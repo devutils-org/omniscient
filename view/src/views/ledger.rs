@@ -616,6 +616,45 @@ fn bins(series: &[Vec<(u64, f64)>], span: u64, width: usize, shape: Shape) -> Ve
 /// Eight heights of a cell.
 const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
+/// A sparkline `rows` high, its rows from the top: a column of blocks per
+/// cell, blank where nothing was measured; the bottom row is
+/// `sparkline`'s, the rows above carry what overflows it.
+fn sparkline_rows(values: &[Option<f64>], scale: Scale, rows: usize) -> Vec<String> {
+    let rows = rows.max(1);
+    let measured = values.iter().flatten().copied();
+    let high = measured.clone().fold(f64::MIN, f64::max);
+    let low = match scale {
+        Scale::Zero => 0.0,
+        Scale::Span => measured.fold(f64::MAX, f64::min),
+    };
+    let eighths: Vec<Option<usize>> = values
+        .iter()
+        .map(|value| match value {
+            None => None,
+            Some(_) if high <= low => Some(if high > 0.0 { 4 } else { 1 }),
+            Some(value) => {
+                let top = 8 * rows - 1;
+                Some(((value - low) / (high - low) * top as f64).round() as usize + 1)
+            }
+        })
+        .collect();
+    (0..rows)
+        .rev()
+        .map(|row| {
+            eighths
+                .iter()
+                .map(|eighths| match eighths {
+                    None => ' ',
+                    Some(eighths) => match eighths.saturating_sub(8 * row).min(8) {
+                        0 => ' ',
+                        cell => BLOCKS[cell - 1],
+                    },
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// A sparkline: a block per cell, blank where nothing was measured.
 fn sparkline(values: &[Option<f64>], scale: Scale) -> String {
     let measured = values.iter().flatten().copied();
@@ -1001,8 +1040,9 @@ struct Context<'a> {
 }
 
 /// How many cells a line's sparkline is computed on: the graph column at its
-/// widest; it is resampled to the column when drawn narrower.
-const GRAPH_CELLS: usize = 28;
+/// widest, on a terminal 240 cells wide; it is resampled to the column when
+/// drawn narrower, so the graph grows with the terminal.
+const GRAPH_CELLS: usize = 150;
 
 impl Context<'_> {
     fn line(&self, spec: &'static ItemSpec, results: &[&Results]) -> Served {
@@ -1827,7 +1867,8 @@ impl Columns {
         let (resource, amount, cost) = (16, 17, 11);
         let rate = if width >= 110 { 26 } else { 20 };
         let rest = width.saturating_sub(2 + resource + amount + rate + cost);
-        // The graph takes what the badges leave, up to its cells.
+        // The graph takes what the badges leave, up to its cells: on a wide
+        // terminal the line's history is drawn wider, not left in a corner.
         let graph = rest.saturating_sub(22).clamp(8.min(rest), GRAPH_CELLS);
         Columns {
             resource,
@@ -1858,15 +1899,49 @@ fn draw_sheet(
         return regions;
     }
     let columns = Columns::for_width(usize::from(inner.width));
+    // On a tall terminal every line's history is drawn two rows high, when
+    // the rows it takes still leave the detail pane what it holds.
+    let served = sheet
+        .items
+        .iter()
+        .filter(|item| matches!(item.state, State::Served(_)))
+        .count();
+    let subs: usize = sheet
+        .items
+        .iter()
+        .map(|item| match &item.state {
+            State::Served(served) => served.subs.len(),
+            _ => 0,
+        })
+        .sum();
+    let below = 1 + cost_lines(sheet).len() + 2;
+    let detail_rows: usize = detail_lines(sheet, selected)
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(usize::from(inner.width)))
+        .sum::<usize>()
+        + 1;
+    let tall = 1 + sheet.items.len() + served + subs + below + detail_rows
+        <= usize::from(inner.height);
+    let rows = if tall { 2 } else { 1 };
     let mut lines: Vec<Line<'static>> = vec![header_line(&columns, against.is_some())];
     for (index, item) in sheet.items.iter().enumerate() {
-        // Each line is one row: the sheet does not wrap.
+        // Each line is one row, two on a tall terminal: the sheet does not
+        // wrap.
         let y = inner.y + lines.len() as u16;
+        let served_rows = if tall && matches!(item.state, State::Served(_)) {
+            2
+        } else {
+            1
+        };
         if y < inner.y + inner.height {
-            regions.push(Region::new(Rect::new(inner.x, y, inner.width, 1), index));
+            let height = served_rows.min(inner.y + inner.height - y);
+            regions.push(Region::new(Rect::new(inner.x, y, inner.width, height), index));
         }
         let other = against.and_then(|other| other.items.get(index));
-        lines.push(item_line(item, other, &columns, index == selected));
+        if served_rows == 2 {
+            lines.push(upper_line(item, &columns));
+        }
+        lines.push(item_line(item, other, &columns, index == selected, rows));
         if let State::Served(served) = &item.state {
             lines.extend(served.subs.iter().cloned());
         }
@@ -1964,6 +2039,7 @@ fn item_line(
     other: Option<&Item>,
     columns: &Columns,
     selected: bool,
+    rows: usize,
 ) -> Line<'static> {
     let (marker, resource_style) = if selected {
         (
@@ -2016,7 +2092,7 @@ fn item_line(
             };
             spans.extend(fit(rate, columns.rate));
             spans.extend(fit(
-                graph_spans(&served.graph, columns.graph, style),
+                graph_spans_rows(&served.graph, columns.graph, style, rows),
                 columns.graph,
             ));
             // Nothing of the focused task: what the whole result cost and how
@@ -2065,25 +2141,56 @@ fn compared(this: &Served, theirs: &Served) -> Vec<Span<'static>> {
     ]
 }
 
-fn graph_spans(graph: &Graph, width: usize, style: Style) -> Vec<Span<'static>> {
+/// A line's values resampled to the column where it is narrower than the
+/// cells, each cell at its peak.
+fn resample(values: &[Option<f64>], width: usize) -> Vec<Option<f64>> {
+    if values.len() > width && width > 0 {
+        (0..width)
+            .map(|cell| {
+                let from = cell * values.len() / width;
+                let to = ((cell + 1) * values.len() / width).max(from + 1);
+                values[from..to].iter().flatten().copied().reduce(f64::max)
+            })
+            .collect()
+    } else {
+        values.to_vec()
+    }
+}
+
+/// The row above a line on a tall terminal: the top half of its sparkline,
+/// under the graph column, drawn two rows high; a line with no sparkline
+/// has an empty row.
+fn upper_line(item: &Item, columns: &Columns) -> Line<'static> {
+    let State::Served(served) = &item.state else {
+        return Line::default();
+    };
+    let Graph::Spark(values, scale) = &served.graph else {
+        return Line::default();
+    };
+    if served.blank {
+        return Line::default();
+    }
+    let values = resample(values, columns.graph);
+    let rows = sparkline_rows(&values, *scale, 2);
+    let offset = 2 + columns.resource + columns.amount + columns.rate;
+    Line::from(vec![
+        Span::raw(" ".repeat(offset)),
+        Span::styled(
+            rows[0].clone(),
+            served.trust.style().fg(palette::ACCENT),
+        ),
+    ])
+}
+
+/// `graph_spans` for a graph drawn `rows` high: its bottom row.
+fn graph_spans_rows(graph: &Graph, width: usize, style: Style, rows: usize) -> Vec<Span<'static>> {
     match graph {
         Graph::Spark(values, scale) => {
-            // Resampled to the column where it is narrower than the cells.
-            let values: Vec<Option<f64>> = if values.len() > width && width > 0 {
-                (0..width)
-                    .map(|cell| {
-                        let from = cell * values.len() / width;
-                        let to = ((cell + 1) * values.len() / width).max(from + 1);
-                        values[from..to].iter().flatten().copied().reduce(f64::max)
-                    })
-                    .collect()
-            } else {
-                values.clone()
-            };
-            vec![Span::styled(
-                sparkline(&values, *scale),
-                style.fg(palette::ACCENT),
-            )]
+            let values = resample(values, width);
+            let bottom = sparkline_rows(&values, *scale, rows)
+                .pop()
+                .unwrap_or_default();
+            vec![Span::styled(bottom, style.fg(palette::ACCENT))]
         }
         Graph::Hist(counts, low, high) => {
             let low_text = units::duration(*low as f64);
@@ -2400,7 +2507,7 @@ mod tests {
             .find(|(_, item)| matches!(&item.state, State::Served(s) if s.blank))
             .expect("a line with nothing of the task");
         let columns = Columns::for_width(118);
-        let drawn = words(&[item_line(item, None, &columns, false)]);
+        let drawn = words(&[item_line(item, None, &columns, false, 1)]);
         let cost = cost_text(match &item.state {
             State::Served(served) => served.cost,
             _ => unreachable!(),
@@ -2473,7 +2580,7 @@ mod tests {
         counts[19] = 1;
         let graph = Graph::Hist(counts, 512, 512 << 20);
         for width in [8, 12, 24] {
-            let text = words(&[Line::from(graph_spans(&graph, width, Style::new()))]);
+            let text = words(&[Line::from(graph_spans_rows(&graph, width, Style::new(), 1))]);
             let bars: String = text.chars().filter(|c| ('▁'..='█').contains(c)).collect();
             assert_eq!(bars.chars().count(), 2, "{width}: {text:?}");
             assert!(!text.contains('…'), "{width}: {text:?}");

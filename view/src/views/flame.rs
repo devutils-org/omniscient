@@ -2264,7 +2264,11 @@ impl Flame {
         } else {
             said_lines.len() + 1
         };
-        let entries = height.saturating_sub(1 + caveat_rows).min(12);
+        // As many as the pane has rows for, and their bars as wide as a
+        // fifth of it: a tall or wide terminal lists more and draws them
+        // larger, rather than leaving the pane's foot empty.
+        let entries = height.saturating_sub(1 + caveat_rows);
+        let bar_cells = (width / 5).clamp(12, 40);
         match &tree.compare {
             None => {
                 lines.push(Line::from(vec![
@@ -2296,14 +2300,17 @@ impl Flame {
                         format!("{:>6} ", units::percent(100.0 * value / total)),
                         style,
                     )];
-                    let bar = trust::error_bar(value, value, high, max, 12);
+                    let bar = trust::error_bar(value, value, high, max, bar_cells as u16);
                     spans.extend(
                         bar.spans
                             .into_iter()
                             .map(|span| span.patch_style(Style::new().fg(palette_for(pane)))),
                     );
                     spans.push(Span::styled(
-                        format!(" {}", fit(&display_name(name), width.saturating_sub(20))),
+                        format!(
+                            " {}",
+                            fit(&display_name(name), width.saturating_sub(8 + bar_cells))
+                        ),
                         style,
                     ));
                     lines.push(Line::from(spans));
