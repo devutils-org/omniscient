@@ -76,7 +76,8 @@
     omn: results.0.outputs[emit=summary].series[key=system].mean
     tolerance: {rel: 0.05}
     why: "energy_uj is the powercap view of the same package counter omn opens through
-          perf, read on each side of the same 2 s of load; root-only, so through sudo -n"
+          perf, read on each side of the same 2 s of load; root-only on some kernels
+          (cat's Permission denied then skips as refused), readable by everyone here"
 
 - id: freq-turbostat
   source: power.freq
