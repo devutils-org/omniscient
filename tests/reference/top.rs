@@ -59,9 +59,10 @@ const TICK_NS: f64 = 10_000_000.0;
 /// A read less than one tick after the window opened is left out: it is
 /// `omn`'s first poll, taken at once after the baseline read, and its share
 /// is a few ticks over a fraction of a millisecond -- 0, 0.5 or 1 -- which a
-/// summary's mean then weighs like a whole second (the defect is filed with
-/// stream cpu, `docs/fixes/w24-reference.md`). Every other read covers one
-/// poll interval, so their plain mean is the share over their span.
+/// summary's mean then weighs like a whole second. Stream cpu fixed it in
+/// the twenty-fourth wave (`c13eb51`), so on today's `omn` nothing is left
+/// out; the capture below is from before the fix. Every other read covers
+/// one poll interval, so their plain mean is the share over their span.
 fn omn_cpu_util_polls(stdout: &str, _stderr: &str) -> Result<Values, String> {
     let doc: Value =
         serde_json::from_str(stdout).map_err(|e| format!("omn's output is not JSON: {e}"))?;

@@ -123,9 +123,10 @@
       share of a few ticks over a fraction of a millisecond (0 on a quiet
       machine, 0.5 or 1 on a busy one) that a summary weighs like a whole
       second among two. omn_cpu_util_polls reads the raw polls and leaves out
-      the one less than a tick after the window opened (filed with stream
-      cpu, docs/fixes/w24-reference.md); once cpu.util no longer emits it,
-      the parser leaves out nothing.
+      a read less than a tick after the window opened; stream cpu fixed the
+      poll in the same wave (its first sample is the baseline, c13eb51), so
+      the parser now leaves out nothing, and guards the pair if the read
+      comes back.
 
 - id: pmap-x-rss
   source: mem.rss

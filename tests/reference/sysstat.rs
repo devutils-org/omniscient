@@ -403,21 +403,15 @@ fn raw_events(json: &serde_json::Value) -> Result<&Vec<serde_json::Value>, Strin
 }
 
 /// `omn <source> --system -m poll@1s -e raw --format json`: each numeric
-/// attribute's mean over the raw events, keyed by its name. A leading event
-/// stamped less than half a period after the window opened covers a few ms,
-/// not a period (defect 2 of `docs/fixes/w22-sysstat.md`, held by
-/// `poll_leading_event_is_held_as_a_known_defect`), and is left out: with
-/// equal windows, the mean of the shares is the share of the whole, which is
-/// what the tools print.
+/// attribute's mean over the raw events, keyed by its name. With equal
+/// windows, the mean of the shares is the share of the whole, which is what
+/// the tools print. Every event covers a period: the leading event of a few
+/// ms (defect 2 of `docs/fixes/w22-sysstat.md`) was fixed in the
+/// twenty-fourth wave, and `no_poll_source_emits_a_leading_event` holds it.
 fn raw_means(stdout: &str) -> Result<Values, String> {
     let json: serde_json::Value =
         serde_json::from_str(stdout).map_err(|e| format!("omn's JSON: {e}"))?;
-    let (opened, stamps) = window_and_stamps(&json)?;
-    let skip = match stamps[..] {
-        [t0, t1, ..] if t0 - opened < (t1 - t0) / 2.0 => 1,
-        _ => 0,
-    };
-    let events = &raw_events(&json)?[skip..];
+    let events = raw_events(&json)?;
     let mut sums: Vec<(String, f64, usize)> = Vec::new();
     for event in events {
         for attr in event["attrs"].as_array().into_iter().flatten() {
@@ -479,11 +473,7 @@ fn omn_psi(stdout: &str, _stderr: &str) -> Result<Values, String> {
     let means = raw_means(stdout)?;
     Ok(renamed(
         &means,
-        &[
-            ("some", "some"),
-            ("stall_ratio", "some"),
-            ("full_stall_ratio", "full"),
-        ],
+        &[("stall_ratio", "some"), ("full_stall_ratio", "full")],
     ))
 }
 
@@ -597,11 +587,11 @@ mod tests {
     }
 
     #[test]
-    fn omn_cpu_util_leaves_out_the_few_ms_leading_event() {
-        // The capture's first event is stamped 225 us after the window opened,
-        // with busy 0.0; the two after it cover a second each.
+    fn omn_cpu_util_means_every_event() {
+        // Recaptured 2026-10-05, after stream cpu's fix of defect 2: the
+        // first event is a period in (+1.0005 s), the second +2.0004 s.
         let v = omn_cpu_util(&capture("omn-cpu-util-raw.json"), "").unwrap();
-        let want = (0.11041926110419262 + 0.04447215295095595) / 2.0;
+        let want = (0.6661122661122661 + 0.7128589263420724) / 2.0;
         assert!(close(get(&v, "busy"), want));
         assert!(close(get(&v, "all"), want));
     }
@@ -614,11 +604,13 @@ mod tests {
     }
 
     #[test]
-    fn omn_psi_reads_both_namings() {
+    fn omn_psi_reads_the_psi_readers_names() {
+        // cpu.pressure recaptured 2026-10-05: it says `stall_ratio` and
+        // `full_stall_ratio` like io.pressure since the twenty-fourth wave.
         let cpu = omn_psi(&capture("omn-cpu-pressure-raw.json"), "").unwrap();
-        let want = (0.014840426914747037 + 0.006944784760677956) / 2.0;
+        let want = (0.0086121411222452 + 0.01599125056407298) / 2.0;
         assert!(close(get(&cpu, "some"), want));
-        assert!(!cpu.iter().any(|(k, _)| k == "full"), "{cpu:?}");
+        assert!(close(get(&cpu, "full"), 0.0));
         let io = omn_psi(&capture("omn-io-pressure-raw.json"), "").unwrap();
         assert!(close(
             get(&io, "some"),
@@ -672,42 +664,23 @@ mod defect_hold {
         })
     }
 
+    /// Defect 2, fixed in the twenty-fourth wave (stream cpu, `c13eb51`): a
+    /// polled source's first event was a share over the few ms between its
+    /// baseline and the first sample. None of the four may bring it back.
     #[test]
-    fn poll_leading_event_is_held_as_a_known_defect() {
+    fn no_poll_source_emits_a_leading_event() {
         let mut failed = Vec::new();
-        for source in ["cpu.util", "cpu.pressure"] {
-            let mut seen = false;
-            for _ in 0..40 {
-                match leading_event(source) {
-                    Ok(Some(true)) => {
-                        seen = true;
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        failed.push(e);
-                        break;
-                    }
-                }
-            }
-            if seen {
-                eprintln!(
-                    "known defect: {source}: a leading event within half a period (defect 2)"
-                );
-            } else if failed.is_empty() {
-                failed.push(format!(
-                    "{source}: no leading event in forty runs; defect 2 looks fixed, \
-                     drop raw_means' skip and this test"
-                ));
-            }
-        }
-        for source in ["mem.pressure", "io.pressure"] {
-            for _ in 0..5 {
+        for (source, runs) in [
+            ("cpu.util", 10),
+            ("cpu.pressure", 10),
+            ("mem.pressure", 5),
+            ("io.pressure", 5),
+        ] {
+            for _ in 0..runs {
                 match leading_event(source) {
                     Ok(Some(true)) => {
                         failed.push(format!(
-                            "{source}: a leading event within half a period; defect 2 \
-                             has spread to it"
+                            "{source}: a leading event within half a period (defect 2)"
                         ));
                         break;
                     }
