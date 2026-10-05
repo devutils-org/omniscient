@@ -1717,6 +1717,14 @@ pub struct Session {
     /// its end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<Recording>,
+    /// A program the run launches, lasts as long as, and that no request
+    /// targets: the window of a machine, a core, a cgroup or a pid measured
+    /// for the program's life, as `perf stat -a -- prog` and `turbostat prog`
+    /// measure. Empty is a run bounded by its duration or by a request's
+    /// own launch; a request whose target is a launch beside it is refused,
+    /// since the program is launched once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch: Vec<String>,
 }
 
 /// A session's recording: the trigger, and the three bounds that make a run
@@ -1794,6 +1802,7 @@ impl Session {
             decompose: Vec::new(),
             escalate: None,
             record: None,
+            launch: Vec::new(),
         }
     }
 

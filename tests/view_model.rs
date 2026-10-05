@@ -273,6 +273,8 @@ fn the_lifetime_mirror_keeps_every_field() {
         cpu_ns: Some(1_234),
         left_running: 1,
         adopted_ended: 3,
+        exit_code: None,
+        signal: None,
     };
     let value = serde_json::to_value(written).unwrap();
     let results = omn_view::model::Results {
