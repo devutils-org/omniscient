@@ -26,6 +26,12 @@
        this reads is the tool's: the shim's record ring -- 65 536 slots of 48
        bytes -- is mapped into the target and becomes resident as records are
        written, so a program that allocates a lot carries all of it."
+    - "Each event carries what `top` shows beside RES: `virt_bytes` (VIRT,
+       the whole address space, most of it never touched) and `shared_bytes`
+       (SHR, resident pages backed by a file or by shared memory, which other
+       processes may count too), from statm; and over smaps_rollup the
+       swapped, transparently huge and locked parts as `swap_bytes`,
+       `anon_huge_bytes` and `locked_bytes`."
 
 - id: mem.pss
   family: mem
