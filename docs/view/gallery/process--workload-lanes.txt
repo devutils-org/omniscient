@@ -2,13 +2,34 @@ omn top │ fixture workload-lanes │ 2.24s                          view: snap
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  lanes-main  pid 2621955 · 12 threads · 2.23s · omn costs ≥9.70% cpu
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- CPU     ▅██▇▇▇▇▇▇▇▇▇▇▇▇▇▆▅▅▃▃▃▃▃   0.267 cores    avg 0.791   peak 1.09  ~low det
- Memory  ▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂████     131MiB         +53.1MiB/s   peak 131MiB
- Disk                               no block request of the process
- Network ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▃▄▆▇▇█▁   ↓ 0B/s         ↑ 778B/s   0 retrans (machine)  ~low det degraded x3
- GPU     ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃████▅▁   0.00%          avg 20.0%   VRAM 170MiB  9 late ±276ns
- Energy  ▆██▇▇▇▇▇▇▆▆▆▆▇██▆▆▆▅▅▅▅▅   41.6 W         avg 54.6 W   the machine's, not apportioned
- Time    █▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞·   lock 92.6%   on cpu 1.19%   run queue 0.00%  ~low det degraded x3
+ CPU      ███▆▄▄▄▅▅▅▅▅▅▅▅▄▄▄▃▂▃▃▂              0.267 cores    avg 0.791   peak 1.09   hottest __tls_get_addr 7.64%  ~low
+          ███████████████████████
+          ███████████████████████▆▆▆▁
+         ▇███████████████████████████▂▂▂▂▂▂▂
+         ███████████████████████████████████
+ Memory                             █████      131MiB         +53.1MiB/s   peak 131MiB
+                                    █████
+                                    █████
+                                    █████
+         ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄████████
+ Disk                                          no block request of the process
+ Network                                 █     ↓ 0B/s         ↑ 778B/s   0 retrans (machine)  ~low det degraded x3
+                                      ▂ ▅█
+                                    ▄▇████
+                                   ▂██████▂
+         ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▆▇▆▇████████▁
+ GPU                               ████▇█▆     0.00%          avg 20.0%   VRAM 170MiB  9 late ±276ns
+                                   ███████
+                                   ███████
+                                   ███████
+         ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃███████▁▁
+ Energy   ███▄▁▁▁▄▄▄▃       ▁▅▅▅▂              41.6 W         avg 54.6 W   the machine's, not apportioned
+          ███████████▇▇▇▇▇▇▇█████▅▅▅▁
+         ▄███████████████████████████▅▅▅▆███
+         ███████████████████████████████████
+         ███████████████████████████████████
+ Time    ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞··   lock 92.6%   on cpu 1.19%   run queue 0.00%  ~low det degraded x3
+         ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞··
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ▶ suspect: lock (blocked: sleeping, on a futex)  92.6%                                              Enter/click → detail
 
@@ -16,25 +37,4 @@ CPU in one hue: the machine's cores are not in the recording
 Memory in one hue: the machine's memory is not in the recording
 Network in one hue: a link's speed is not known
 Energy in one hue: energy has no capacity
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ jk move between lines  enter open the line's page

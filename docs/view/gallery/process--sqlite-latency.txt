@@ -2,16 +2,16 @@ omn top │ fixture sqlite-latency │ 288ms                          view: snap
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  the target  289ms · omn costs ≥3.93% cpu
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- CPU                                not asked: needs cpu.oncpu_time
- Memory                             not asked: needs mem.rss
- Disk                               not asked: needs io.latency
- Network                            not asked: needs net.socket
- GPU                                not asked: needs gpu.kernel or gpu.mem
- Energy                             not asked: needs power.energy
- Time    ███▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓   blocked 84.8%   on cpu 13.4%   run queue 1.73%  3 late ~low det degraded x5
+ CPU                                           not asked: needs cpu.oncpu_time
+ Memory                                        not asked: needs mem.rss
+ Disk                                          not asked: needs io.latency
+ Network                                       not asked: needs net.socket
+ GPU                                           not asked: needs gpu.kernel or gpu.mem
+ Energy                                        not asked: needs power.energy
+ Time    █████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓   blocked 84.8%   on cpu 13.4%   run queue 1.73%  3 late ~low det degraded
+         █████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ▶ suspect: blocked  85.7%                                                                           Enter/click → detail
-
 
 
 
