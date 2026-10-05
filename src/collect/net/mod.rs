@@ -1,5 +1,6 @@
 //! Collectors for the `net` family.
 
+mod accept;
 mod afpacket;
 mod backlog;
 mod capture;
@@ -18,7 +19,9 @@ mod procfs;
 mod qdisc;
 mod request;
 mod retransmit;
+mod snmp;
 mod socket;
+mod sockets;
 mod softirq;
 mod softirqs;
 mod tcp_rtt;
@@ -60,8 +63,12 @@ pub fn factories() -> Vec<Factory> {
                 .contains(&crate::request::KeyKind::Dir);
             Ok(Box::new(dev::Prepare(dev::Counted::Bytes, by_direction)))
         }),
-        Factory::new("net.packets", "fs:proc", |_| {
-            Ok(Box::new(dev::Prepare(dev::Counted::Packets, false)))
+        Factory::new("net.packets", "fs:proc", |resolved| {
+            let by_direction = resolved
+                .request
+                .keys
+                .contains(&crate::request::KeyKind::Dir);
+            Ok(Box::new(dev::Prepare(dev::Counted::Packets, by_direction)))
         }),
         Factory::new("net.tcp.rtt", "netlink", |_| Ok(Box::new(tcp_rtt::Prepare))),
         // Both of these read counters, and both declare `snapshot`. The mode
@@ -73,6 +80,10 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("net.backlog", "fs:proc", |resolved| {
             Ok(Box::new(backlog::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("net.sockets", "netlink", |_| Ok(Box::new(sockets::Prepare))),
+        Factory::new("net.snmp", "fs:proc", |resolved| {
+            Ok(Box::new(snmp::Prepare(resolved.request.mode)))
         }),
         Factory::new("net.tcp.lifetime", "bpf:raw_tp", |resolved| {
             Ok(Box::new(lifetime::Prepare {
@@ -96,6 +107,7 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(drops::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
             }))
         }),
         Factory::new("net.softirq", "bpf:raw_tp", |resolved| {
@@ -110,6 +122,13 @@ pub fn factories() -> Vec<Factory> {
         // The handshake, over fentry: opened by the caller, closed by softirq.
         Factory::new("net.tcp.connect", "bpf:fentry", |resolved| {
             Ok(Box::new(connect::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        // The other end of a handshake: the server taking it off its queue.
+        Factory::new("net.tcp.accept", "bpf:fentry", |resolved| {
+            Ok(Box::new(accept::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
             }))
