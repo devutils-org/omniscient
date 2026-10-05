@@ -11,6 +11,7 @@ mod page_faults;
 mod pressure;
 mod stall;
 mod swap;
+mod system;
 #[cfg(test)]
 mod testing;
 mod thp;
@@ -133,6 +134,12 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("mem.numa", "fs:proc", |resolved| {
             Ok(Box::new(numa::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("mem.system", "fs:proc", |resolved| {
+            Ok(Box::new(system::Prepare::new(resolved.request.mode)?))
+        }),
+        Factory::new("mem.numa", "fs:sys", |resolved| {
+            Ok(Box::new(system::NodePrepare::new(resolved.request.mode)?))
         }),
         Factory::new("mem.wss", "fs:proc:clear_refs", |resolved| {
             Ok(Box::new(wss::Prepare::new(resolved.request.mode)?))

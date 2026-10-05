@@ -378,6 +378,9 @@
     - {id: "fs:proc", requires: ["/proc/[pid]/numa_maps"], cost: med,
        targets: {pid: native, tid: native, launch: native}, filter_fields: [comm, node],
        degraded: "page placement, not accesses: a page on the wrong node that is never touched costs nothing, and this cannot tell the two apart"}
+    - {id: "fs:sys", requires: ["/sys/devices/system/node/node0/numastat"], cost: free,
+       targets: {system: native}, filter_fields: [node],
+       degraded: "allocations, not accesses, and the machine's rather than anyone's: each page is counted once, on the node it came from, as a hit when that was the node asked for and a miss when it was not"}
   modes: [sample, poll]
   emits: [topk, hist, raw, summary, timeline]
   targets: {system: native, cgroup: native, pid: native, cpu: native, launch: native, container: native}
@@ -390,6 +393,27 @@
        work from node 1, and one number would hide exactly that."
     - "numa_maps counts each mapping in its own page size, so a transparently
        promoted region is counted in 2 MiB pages and not in 4 KiB ones."
+
+- id: mem.system
+  family: mem
+  summary: "The machine's memory: used, available, cache, slab, swap (what free prints)"
+  unit: bytes
+  backends:
+    - {id: "fs:proc", requires: ["/proc/meminfo"], cost: free}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native}
+  keys: []
+  filter_fields: []
+  determinism: low
+  caveats:
+    - "Used is total minus available, as free computes it since procps 4:
+       available is the kernel's estimate of what a new program could get
+       without swapping, cache and reclaimable slab included. Total minus free
+       would call every cached page used."
+    - "The slab is the machine's total, split into its reclaimable and
+       unreclaimable halves; the split per cache that slabtop prints is in
+       /proc/slabinfo, which only root can read."
 
 - id: mem.wss
   family: mem
