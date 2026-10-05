@@ -33,8 +33,11 @@ use super::insn::{
     count_drop, helper, read_field, Insn, Program, Subject, TaskFields, Whose, BPF_DW, BPF_W, R10,
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
-use super::sched_common::{push_followed_filter, Descendants, Followed};
-use super::syscall;
+use super::ring::{ring_bytes, RingBuffer};
+use super::sched_common::{
+    push_followed_filter, push_last_queued, push_rq_clock, Descendants, Followed, KernelClock,
+};
+use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 
 /// Arguments of `sched_switch`, in the raw tracepoint's context: one 64-bit
 /// slot each, in the order the kernel declares them.
@@ -225,8 +228,16 @@ fn instructions(
     Ok(instructions)
 }
 
-/// A loaded, attached switch-counting program and the map it fills.
-pub struct SwitchCountProgram {
+/// A loaded, attached `sched_switch` program: the one that counts and the
+/// map it fills, or the one that streams each switch (`load_stream`).
+pub struct SwitchCountProgram(Loaded);
+
+enum Loaded {
+    Counting(Counting),
+    Stream(SwitchStreamProgram),
+}
+
+struct Counting {
     /// The processes a process target started, followed in the kernel.
     descendants: Option<Descendants>,
     rows: Rows,
@@ -239,14 +250,52 @@ impl SwitchCountProgram {
     /// Runs the kernel skipped because this program was already running on
     /// that cpu; see `MigrationProgram::skipped`.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.program])
-            + self.descendants.as_ref().map_or(0, Descendants::skipped)
+        match &self.0 {
+            Loaded::Counting(counting) => {
+                crate::bpf::attach::fentry::skipped([&counting.program])
+                    + counting
+                        .descendants
+                        .as_ref()
+                        .map_or(0, Descendants::skipped)
+            }
+            Loaded::Stream(stream) => stream.skipped(),
+        }
     }
 
     /// Processes the target started that no program here followed, because
     /// the map of them was full.
     pub fn unfollowed(&self) -> u64 {
-        self.descendants.as_ref().map_or(0, Descendants::missed)
+        match &self.0 {
+            Loaded::Counting(counting) => {
+                counting.descendants.as_ref().map_or(0, Descendants::missed)
+            }
+            Loaded::Stream(stream) => stream.unfollowed(),
+        }
+    }
+
+    /// The per-switch program instead of the counting one: a ring record per
+    /// switch either end of which is the target's.
+    pub fn load_stream(whose: Whose, ring_bytes: usize) -> Result<Self, String> {
+        SwitchStreamProgram::load(whose, ring_bytes).map(|stream| Self(Loaded::Stream(stream)))
+    }
+
+    /// Hands every switch the per-switch program published to `handle`;
+    /// nothing for the counting program.
+    pub fn drain_switches(&mut self, handle: impl FnMut(Switch), undecoded: &mut u64) {
+        if let Loaded::Stream(stream) = &mut self.0 {
+            stream.drain(handle, undecoded);
+        }
+    }
+
+    /// The parents of the processes the target started.
+    pub fn parents(&self) -> Vec<(u32, u32)> {
+        match &self.0 {
+            Loaded::Counting(counting) => counting
+                .descendants
+                .as_ref()
+                .map_or_else(Vec::new, Descendants::parents),
+            Loaded::Stream(stream) => stream.parents(),
+        }
     }
 
     pub fn load(whose: Whose) -> Result<Self, String> {
@@ -282,18 +331,21 @@ impl SwitchCountProgram {
         let link = syscall::raw_tracepoint_open("sched_switch", program.as_raw_fd())
             .map_err(|error| format!("cannot attach to the `sched_switch` tracepoint: {error}"))?;
 
-        Ok(Self {
+        Ok(Self(Loaded::Counting(Counting {
             descendants,
             rows,
             drops,
             program,
             _link: link,
-        })
+        })))
     }
 
     /// Takes every row the kernel has counted since the last drain.
     pub fn drain(&self) -> Result<(Vec<SwitchCount>, super::DrainLosses), String> {
-        let drained = self
+        let Loaded::Counting(counting) = &self.0 else {
+            return Ok((Vec::new(), super::DrainLosses::default()));
+        };
+        let drained = counting
             .rows
             .drain()
             .map_err(|error| format!("cannot read the switch counts: {error}"))?;
@@ -311,15 +363,375 @@ impl SwitchCountProgram {
         Ok((rows, losses))
     }
 
-    /// Switches the program could not count because the map was full.
+    /// Switches the program could not count because the map was full, or
+    /// publish because the ring was.
+    pub fn dropped(&self) -> u64 {
+        match &self.0 {
+            Loaded::Counting(counting) => counting.drops.read(DROP_ROWS),
+            Loaded::Stream(stream) => stream.dropped(),
+        }
+    }
+}
+
+/// One context switch, as the per-switch program writes it and userspace
+/// reads it: `sched.slices`' raw material.
+///
+/// `repr(C)` on both sides of the ring is the contract: the program writes
+/// these fields at these offsets and `from_bytes` reads them back.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Switch {
+    /// `bpf_ktime_get_ns`, `CLOCK_MONOTONIC`.
+    pub ts_ns: u64,
+    pub cpu: u32,
+    pub prev_tid: u32,
+    pub prev_pid: u32,
+    pub next_tid: u32,
+    pub next_pid: u32,
+    /// The state the task leaving the cpu was in, as the tracepoint gives it:
+    /// zero is `TASK_RUNNING`, a preemption or a yield.
+    pub prev_state: u32,
+    /// The tracepoint's `preempt` flag.
+    pub preempt: u32,
+    /// Which end the target is: 1 the task coming in, 2 the task leaving.
+    pub matched: u32,
+    /// How long the task leaving ran, by the run queue's clock:
+    /// `rq->clock - sched_info.last_arrival`, or 0 with no stamp.
+    pub run_ns: u64,
+    /// How long the task coming in waited on the queue, by the same clock:
+    /// `rq->clock - sched_info.last_queued`, or 0 with no stamp.
+    pub queue_ns: u64,
+    prev_comm: [u8; 16],
+    next_comm: [u8; 16],
+}
+
+const SWITCH_BYTES: usize = 88;
+
+impl Switch {
+    pub fn prev_comm(&self) -> String {
+        super::sched_common::text_of(&self.prev_comm)
+    }
+
+    pub fn next_comm(&self) -> String {
+        super::sched_common::text_of(&self.next_comm)
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < SWITCH_BYTES {
+            return None;
+        }
+        let word = |at: usize| u32::from_ne_bytes(bytes[at..at + 4].try_into().expect("4"));
+        let long = |at: usize| u64::from_ne_bytes(bytes[at..at + 8].try_into().expect("8"));
+        let mut prev_comm = [0u8; 16];
+        prev_comm.copy_from_slice(&bytes[56..72]);
+        let mut next_comm = [0u8; 16];
+        next_comm.copy_from_slice(&bytes[72..88]);
+        Some(Self {
+            ts_ns: long(0),
+            cpu: word(8),
+            prev_tid: word(12),
+            prev_pid: word(16),
+            next_tid: word(20),
+            next_pid: word(24),
+            prev_state: word(28),
+            preempt: word(32),
+            matched: word(36),
+            run_ns: long(40),
+            queue_ns: long(48),
+            prev_comm,
+            next_comm,
+        })
+    }
+}
+
+/// Where the per-switch program keeps the record on its stack.
+const SW_EVENT: i16 = -(SWITCH_BYTES as i16);
+const SW_CPU: i16 = SW_EVENT + 8;
+const SW_PREV_TID: i16 = SW_EVENT + 12;
+const SW_PREV_PID: i16 = SW_EVENT + 16;
+const SW_NEXT_TID: i16 = SW_EVENT + 20;
+const SW_NEXT_PID: i16 = SW_EVENT + 24;
+const SW_STATE: i16 = SW_EVENT + 28;
+const SW_PREEMPT: i16 = SW_EVENT + 32;
+const SW_MATCHED: i16 = SW_EVENT + 36;
+const SW_RUN: i16 = SW_EVENT + 40;
+const SW_QUEUE: i16 = SW_EVENT + 48;
+const SW_PREV_COMM: i16 = SW_EVENT + 56;
+const SW_NEXT_COMM: i16 = SW_EVENT + 72;
+const SW_NOW: i16 = SW_EVENT - 8;
+const SW_STAMP: i16 = SW_NOW - 8;
+const SW_CLOCK_SCRATCH: i16 = SW_STAMP - 8;
+const SW_DROP_KEY: i16 = SW_CLOCK_SCRATCH - 8;
+const SW_FILTER_SCRATCH: i16 = SW_DROP_KEY - 16;
+const ARG_NEXT: i16 = 16;
+
+/// The per-switch program: one ring record per switch either end of which
+/// the target is, with the leaving task's run and the coming task's queue
+/// wait by the kernel's own `sched_info` stamps, read where
+/// `sched_info_switch` reads them a few instructions later.
+fn stream_instructions(
+    btf: &Btf,
+    followed: Followed,
+    ring_fd: i32,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let whose = followed.whose;
+    let signature = btf.tracepoint_signature("sched_switch")?;
+    if signature != SIGNATURE {
+        return Err(format!(
+            "this kernel declares `sched_switch({})`, and the per-switch program is written for \
+             `sched_switch({})`",
+            signature.join(", "),
+            SIGNATURE.join(", "),
+        ));
+    }
+    let pid_offset = btf.member_offset("task_struct", "pid")?;
+    let tgid_offset = btf.member_offset("task_struct", "tgid")?;
+    let comm_offset = btf.member_offset("task_struct", "comm")?;
+    let last_arrival = btf.member_offset("task_struct", "sched_info")?
+        + btf.member_offset("sched_info", "last_arrival")?;
+    let clock = KernelClock::locate(btf)?;
+    let fields = TaskFields::locate(btf, whose)?;
+
+    let mut program = Program::new();
+    // r6 the context, r7 the task leaving, r8 the task coming in.
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::ldx(BPF_DW, 7, 6, ARG_PREV));
+    program.push(Insn::ldx(BPF_DW, 8, 6, ARG_NEXT));
+
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, SW_EVENT, 0));
+    program.push(Insn::call(helper::GET_SMP_PROCESSOR_ID));
+    program.push(Insn::stx(BPF_W, R10, SW_CPU, 0));
+    program.push(Insn::ldx(BPF_DW, 1, 6, ARG_PREEMPT));
+    program.push(Insn::stx(BPF_W, R10, SW_PREEMPT, 1));
+    program.push(Insn::ldx(BPF_DW, 1, 6, ARG_PREV_STATE));
+    program.push(Insn::stx(BPF_W, R10, SW_STATE, 1));
+    for slot in [SW_RUN, SW_QUEUE] {
+        program.push(Insn::st_imm(BPF_DW, R10, slot, 0));
+    }
+    for (into, size, task, offset) in [
+        (SW_PREV_TID, 4, 7, pid_offset),
+        (SW_PREV_PID, 4, 7, tgid_offset),
+        (SW_PREV_COMM, 16, 7, comm_offset),
+        (SW_NEXT_TID, 4, 8, pid_offset),
+        (SW_NEXT_PID, 4, 8, tgid_offset),
+        (SW_NEXT_COMM, 16, 8, comm_offset),
+    ] {
+        program.push(Insn::mov64_reg(1, R10));
+        program.push(Insn::add64_imm(1, into as i32));
+        program.push(Insn::mov64_imm(2, size));
+        program.push(Insn::mov64_reg(3, task));
+        program.push(Insn::add64_imm(3, offset));
+        program.push(Insn::call(helper::PROBE_READ_KERNEL));
+    }
+
+    // Which end is the target's, both asked: a switch between two of its
+    // own tasks is both ends of one slice.
+    if whose == Whose::Any {
+        program.push(Insn::st_imm(BPF_W, R10, SW_MATCHED, 3));
+    } else {
+        program.push(Insn::st_imm(BPF_W, R10, SW_MATCHED, 0));
+        push_followed_filter(
+            &mut program,
+            &fields,
+            &followed,
+            Subject::with_ids(8, SW_NEXT_TID, SW_NEXT_PID),
+            tgid_offset,
+            SW_FILTER_SCRATCH,
+            "next_not_followed",
+            "next_kept",
+        );
+        program.push(Insn::st_imm(BPF_W, R10, SW_MATCHED, 1));
+        program.label("next_not_followed");
+        push_followed_filter(
+            &mut program,
+            &fields,
+            &followed,
+            Subject::with_ids(7, SW_PREV_TID, SW_PREV_PID),
+            tgid_offset,
+            SW_FILTER_SCRATCH,
+            "prev_not_followed",
+            "prev_kept",
+        );
+        program.push(Insn::ldx(BPF_W, 1, R10, SW_MATCHED));
+        program.push(Insn::or64_imm(1, 2));
+        program.push(Insn::stx(BPF_W, R10, SW_MATCHED, 1));
+        program.label("prev_not_followed");
+        program.push(Insn::ldx(BPF_W, 1, R10, SW_MATCHED));
+        program.jump_to("done", Insn::jeq_imm(1, 0, 0));
+    }
+
+    // The run queue's clock, and each end's stamp against it. A stamp of
+    // zero, or one ahead of the clock, is no stamp, and its field stays 0.
+    // Reached through a task's `se.cfs_rq`, which the idle task has none of:
+    // the task coming in first, since a switch out of idle is the common case
+    // of a wakeup, and the task leaving when the one coming in is idle.
+    push_rq_clock(
+        &mut program,
+        &clock,
+        8,
+        SW_CLOCK_SCRATCH,
+        SW_NOW,
+        "clock_by_prev",
+    );
+    program.jump_to("have_clock", Insn::ja());
+    program.label("clock_by_prev");
+    push_rq_clock(&mut program, &clock, 7, SW_CLOCK_SCRATCH, SW_NOW, "emit");
+    program.label("have_clock");
+    program.push(Insn::st_imm(BPF_DW, R10, SW_STAMP, 0));
+    read_field(&mut program, SW_STAMP, 8, 7, last_arrival);
+    for (into, next) in [(SW_RUN, "queued"), (SW_QUEUE, "emit")] {
+        if into == SW_QUEUE {
+            push_last_queued(&mut program, &clock, 8, SW_STAMP);
+        }
+        program.push(Insn::ldx(BPF_DW, 1, R10, SW_NOW));
+        program.push(Insn::ldx(BPF_DW, 2, R10, SW_STAMP));
+        program.jump_to(next, Insn::jeq_imm(2, 0, 0));
+        program.jump_to(next, Insn::jgt_reg(2, 1, 0));
+        program.push(Insn::sub64_reg(1, 2));
+        program.push(Insn::stx(BPF_DW, R10, into, 1));
+        if into == SW_RUN {
+            program.label("queued");
+        }
+    }
+
+    program.label("emit");
+    program.extend(Insn::load_map_fd(1, ring_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, SW_EVENT as i32));
+    program.push(Insn::mov64_imm(3, SWITCH_BYTES as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::RINGBUF_OUTPUT));
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    // A full ring: the switch is gone, and counted.
+    count_drop(&mut program, drops_fd, SW_DROP_KEY, DROP_ROWS, "done");
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
+/// A loaded, attached per-switch program and the ring it writes.
+struct SwitchStreamProgram {
+    descendants: Option<Descendants>,
+    ring: RingBuffer,
+    drops: Counters,
+    program: OwnedFd,
+    _link: OwnedFd,
+}
+
+impl SwitchStreamProgram {
+    pub fn load(whose: Whose, requested_ring_bytes: usize) -> Result<Self, String> {
+        let btf = super::kernel_btf()?;
+        let bytes = ring_bytes(requested_ring_bytes);
+        let ring_map =
+            syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_switches")
+                .map_err(|error| map_failure("switch ring buffer", error))?;
+        let drops = Counters::create(1, "omn_sws_drop")
+            .map_err(|error| map_failure("switch stream drop counter", error))?;
+        let descendants = match whose {
+            Whose::Process(root) => Some(Descendants::follow(root)?),
+            _ => None,
+        };
+        let followed = descendants
+            .as_ref()
+            .map_or(Followed::only(whose), |descendants| {
+                descendants.followed(whose)
+            });
+        let instructions =
+            stream_instructions(btf, followed, ring_map.as_raw_fd(), drops.as_raw_fd())?;
+        let program = syscall::prog_load(
+            syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+            &instructions,
+            "omn_switch_str",
+            LICENSE,
+        )
+        .map_err(|error| {
+            if error.is_permission() {
+                super::permission_advice("loading a raw tracepoint program")
+            } else {
+                format!("the kernel refused the per-switch program: {error}")
+            }
+        })?;
+        let link = syscall::raw_tracepoint_open("sched_switch", program.as_raw_fd())
+            .map_err(|error| format!("cannot attach to the `sched_switch` tracepoint: {error}"))?;
+        let ring = RingBuffer::map(ring_map, bytes)
+            .map_err(|error| format!("cannot map the switch ring buffer: {error}"))?;
+        Ok(Self {
+            descendants,
+            ring,
+            drops,
+            program,
+            _link: link,
+        })
+    }
+
+    /// Hands every complete record to `handle`, and counts the ones of the
+    /// wrong size rather than reinterpreting them.
+    pub fn drain(&mut self, mut handle: impl FnMut(Switch), undecoded: &mut u64) {
+        self.ring.drain(|bytes| match Switch::from_bytes(bytes) {
+            Some(switch) => handle(switch),
+            None => *undecoded += 1,
+        });
+    }
+
+    /// Switches the program could not publish because the ring was full.
     pub fn dropped(&self) -> u64 {
         self.drops.read(DROP_ROWS)
+    }
+
+    /// Runs the kernel skipped; see `SwitchCountProgram::skipped`.
+    pub fn skipped(&self) -> u64 {
+        crate::bpf::attach::fentry::skipped([&self.program])
+            + self.descendants.as_ref().map_or(0, Descendants::skipped)
+    }
+
+    /// Processes the target started that no program here followed.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants.as_ref().map_or(0, Descendants::missed)
+    }
+
+    /// The parents of the processes the target started.
+    pub fn parents(&self) -> Vec<(u32, u32)> {
+        self.descendants
+            .as_ref()
+            .map_or_else(Vec::new, Descendants::parents)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The program writes the record at stack offsets and `from_bytes`
+    /// reads it at struct offsets; nothing else connects the two.
+    #[test]
+    fn the_switch_record_matches_what_the_program_writes() {
+        use std::mem::offset_of;
+        assert_eq!(std::mem::size_of::<Switch>(), SWITCH_BYTES);
+        for (stack, field) in [
+            (SW_CPU, offset_of!(Switch, cpu)),
+            (SW_PREV_TID, offset_of!(Switch, prev_tid)),
+            (SW_PREV_PID, offset_of!(Switch, prev_pid)),
+            (SW_NEXT_TID, offset_of!(Switch, next_tid)),
+            (SW_NEXT_PID, offset_of!(Switch, next_pid)),
+            (SW_STATE, offset_of!(Switch, prev_state)),
+            (SW_PREEMPT, offset_of!(Switch, preempt)),
+            (SW_MATCHED, offset_of!(Switch, matched)),
+            (SW_RUN, offset_of!(Switch, run_ns)),
+            (SW_QUEUE, offset_of!(Switch, queue_ns)),
+            (SW_PREV_COMM, offset_of!(Switch, prev_comm)),
+            (SW_NEXT_COMM, offset_of!(Switch, next_comm)),
+        ] {
+            assert_eq!((stack - SW_EVENT) as usize, field);
+        }
+        assert!(Switch::from_bytes(&[0u8; 16]).is_none());
+    }
 
     fn kernel_btf() -> Option<Btf> {
         match Btf::from_kernel() {

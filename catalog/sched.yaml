@@ -406,6 +406,35 @@
        field yet: the filter reads it as the source's own kind; `line` and
        `name` tell the halves apart."
 
+- id: sched.slices
+  family: sched
+  summary: "One event per time slice on a cpu: its run, queue wait and time off"
+  unit: ns
+  backends:
+    # One ring record per switch either end of which is the target's, the
+    # leaving task's run and the coming task's queue wait read from the
+    # kernel's own `sched_info` stamps: `perf sched timehist`'s line.
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"], cost: high}
+  modes: [trace]
+  emits: [hist, topk, raw, summary]
+  targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
+  keys: [task, cpu]
+  filter_fields: [comm, pid, cpu, state, next_comm, run_ns, queue_ns, off_ns]
+  determinism: low
+  caveats:
+    - "An event is one slice of one task on one cpu, stamped where it left the
+       cpu: `run_ns` how long it ran (the kernel's `rq->clock - last_arrival`),
+       `queue_ns` how long it waited on the run queue before it ran, `off_ns`
+       how long it was off the cpu before it was queued, `state` how it left
+       (`preempted`, `sleeping`, `uninterruptible`), and `next_comm` who took
+       the cpu. A slice that began before the run carries no `queue_ns` or
+       `off_ns`. `queue_ns` is the kernel's `rq->clock - last_queued`, as
+       `schedstat` counts it: a task woken onto an idle cpu reads 0 there, where
+       the scheduler did not move its clock between the wakeup and the switch,
+       and `perf sched timehist`'s `sch delay`, timed between the tracepoints,
+       reads a few microseconds. It costs a ring record per switch of the target, which on a
+       machine-wide run is every switch of the machine."
+
 - id: sched.runqueue
   family: sched
   summary: "Runnable and blocked tasks, and the load averages"

@@ -2100,3 +2100,68 @@ fn a_launched_shells_children_name_it_as_their_parent() {
         }
     }
 }
+
+/// `sched.slices` against two things it did not compute: the slices' runs
+/// add up to the cpu the kernel charged the program at its reap, and a
+/// thread that spins for a wall-clock interval is runnable for all of it, so
+/// its runs and its queue waits add up to that interval.
+#[test]
+fn time_slices_add_up_to_the_cpu_and_the_runnable_time() {
+    let threads = 4 * std::thread::available_parallelism().map_or(4, |n| n.get());
+    let Some(spin) = compiled(
+        "spin_wall",
+        &format!(
+            "#include <pthread.h>\n#include <time.h>\n\
+             static long ns(void){{struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);\
+             return t.tv_sec*1000000000L+t.tv_nsec;}}\n\
+             static void *s(void *a){{long t0=ns();while(ns()-t0<300000000L);return a;}}\n\
+             int main(void){{pthread_t t[{threads}];for(int i=0;i<{threads};i++)\
+             pthread_create(&t[i],0,s,0);for(int i=0;i<{threads};i++)pthread_join(t[i],0);\
+             return 0;}}\n"
+        ),
+        &["-O2", "-pthread"],
+    ) else {
+        eprintln!("skipped: no C compiler");
+        return;
+    };
+    let output = run(&[
+        "trace",
+        "sched.slices",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        spin.to_str().expect("a path"),
+    ]);
+    let text = String::from_utf8_lossy(&output.stderr).into_owned();
+    if refused_for_capabilities(&text) || !output.status.success() {
+        eprintln!("skipped: sched.slices was not served: {text}");
+        return;
+    }
+    let results: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    let cpu_ns = results["results"][0]["lifetime"]["cpu_ns"]
+        .as_u64()
+        .expect("the program's cpu at its reap");
+    let events = raw_events(&output);
+    let run: u64 = events.iter().filter_map(|e| e["run_ns"].as_u64()).sum();
+    // The main thread's own slices and the first slice of each thread are
+    // in it too; the reap's cpu is in ticks of the scheduler's accounting.
+    assert!(
+        run * 10 >= cpu_ns * 9 && run * 10 <= cpu_ns * 11,
+        "the slices ran {run} ns, and the kernel charged {cpu_ns} ns"
+    );
+    let spinners: Vec<_> = events
+        .iter()
+        .filter(|e| e["comm"] == "spin_wall" && e.get("queue_ns").is_some())
+        .collect();
+    let runnable: u64 = spinners
+        .iter()
+        .map(|e| e["run_ns"].as_u64().unwrap_or(0) + e["queue_ns"].as_u64().unwrap_or(0))
+        .sum();
+    let wanted = threads as u64 * 300_000_000;
+    assert!(
+        runnable * 10 >= wanted * 7,
+        "{threads} threads spinning 300 ms were runnable {runnable} ns of {wanted}"
+    );
+}

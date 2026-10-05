@@ -28,6 +28,7 @@ mod numa_balance;
 mod offcpu;
 mod runqlat;
 mod runqueue;
+mod slices;
 mod switch_count;
 mod switches;
 mod wakeup;
@@ -216,6 +217,12 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("sched.interrupts", "fs:proc", |resolved| {
             Ok(Box::new(interrupts::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("sched.slices", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(slices::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
         }),
         Factory::new("sched.runqueue", "fs:proc", |_| {
             Ok(Box::new(runqueue::Prepare))
