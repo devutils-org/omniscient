@@ -484,6 +484,11 @@ impl Collector for DropCollector {
             ));
         }
 
+        notes.push(
+            "`reason` is the running kernel's own name for its `enum skb_drop_reason` value, \
+             read from its BTF, and `reason_code` the number beside it"
+                .to_owned(),
+        );
         if self.filtered_out > 0 || self.filtered_in > 0 {
             notes.push(format!(
                 "the filter kept {} drops and removed {}; it ran here, over the drained records, \
@@ -609,11 +614,10 @@ mod tests {
         );
     }
 
-    /// The run says the reason is a number and why, because a reader who sees
-    /// `reason 4` and no name will otherwise go looking for the name in this
-    /// tool rather than in the kernel's headers.
+    /// The run says whose name the reason is: the kernel's, from its BTF, so a
+    /// reader looks for it in the kernel's headers rather than in this tool.
     #[test]
-    fn the_run_says_the_reason_is_the_kernels_own_number() {
+    fn the_run_says_the_reason_is_the_kernels_own_name() {
         let collector = DropCollector::new(Mode::Trace, None);
         let notes = collector.notes().join(" ");
         assert!(notes.contains("skb_drop_reason"), "{notes}");
