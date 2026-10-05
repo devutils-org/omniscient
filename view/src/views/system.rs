@@ -570,6 +570,10 @@ const DIRS: &[(&str, &str)] = &[
     ("tx", "out"),
 ];
 
+/// A device's directions being folded: its name, and each instant's point
+/// per part.
+type Folded = (Option<String>, BTreeMap<u64, Vec<Point>>);
+
 /// Series split by a `dir` key folded back into one per device, each
 /// direction one of its parts: a recording that kept only its timeline says
 /// read apart from written as its events would. Series with no `dir` part
@@ -587,7 +591,7 @@ fn fold_dirs(tracks: Vec<Track>, reading: &Reading) -> Vec<Track> {
     let names: Vec<&'static str> = reading.parts.iter().map(|(name, _)| *name).collect();
     let mut kept = Vec::new();
     // By the key without its direction: each part's points by instant.
-    let mut folded: BTreeMap<String, (Option<String>, BTreeMap<u64, Vec<Point>>)> = BTreeMap::new();
+    let mut folded: BTreeMap<String, Folded> = BTreeMap::new();
     for track in tracks {
         let parts = key_parts(&track.key);
         let Some(dir) = parts.iter().find_map(|part| part.strip_prefix("dir:")) else {
@@ -2294,6 +2298,7 @@ fn processes(data: &Data, sort: Sort) -> Procs {
         }
         columns.push((col, Trust::joined(data, held.iter().copied())));
     }
+    machine_tasks(data, &mut rows, &mut columns);
     let span_ns = Axis::of(data).span_ns as f64;
     for row in rows.values_mut() {
         if let Some(cpu_ns) = row.cells.get(&Col::CpuTime).copied() {
@@ -2319,6 +2324,100 @@ fn processes(data: &Data, sort: Sort) -> Procs {
         columns,
         refused,
     }
+}
+
+/// The source that lists the machine's processes, `top`'s and `ps`'s table:
+/// one event per process each poll, with its name, its share of one cpu
+/// since the poll before, its cpu time and its resident size.
+const TASKS: &str = "proc.tasks";
+
+/// The machine's processes, from [`TASKS`], into the list: each its name,
+/// its cpu over the run as a sparkline and a total, and its resident size
+/// at the last poll. Its columns join the ones the run's other sources fill,
+/// on the same rows: a process's id is the same whichever source read it.
+fn machine_tasks(
+    data: &Data,
+    rows: &mut BTreeMap<(i32, bool), Proc>,
+    columns: &mut Vec<(Col, Trust)>,
+) {
+    let held: Vec<&Results> = data.of_source(TASKS).collect();
+    if held.is_empty() {
+        return;
+    }
+    let opened = data.opened_ns();
+    // Per task, in the order read: each poll's share and when it was.
+    let mut polls: BTreeMap<(i32, bool), Vec<&Event>> = BTreeMap::new();
+    for results in &held {
+        for event in results.events() {
+            let Some(tid) = event
+                .tid()
+                .or_else(|| event.number("tid").map(|tid| tid as i32))
+            else {
+                continue;
+            };
+            let process = event.number("pid").is_none_or(|pid| pid as i32 == tid);
+            polls.entry((tid, process)).or_default().push(event);
+        }
+    }
+    for ((tid, process), events) in polls {
+        let row = row_of(rows, tid, process);
+        let last = events.last().expect("a task is listed by its events");
+        if let Some(name) = last.attr("comm").and_then(|value| value.as_str()) {
+            row.name = Some(name.to_owned());
+        }
+        if let Some(rss) = last.number("rss_bytes") {
+            row.cells.insert(Col::Rss, rss);
+        }
+        // What it ran within the run: each poll's share over its interval;
+        // a first reading is over the task's life, which is the run's only
+        // when the task started inside it.
+        let mut cpu_ns = 0.0;
+        let mut points = Vec::new();
+        for event in &events {
+            let busy = event.number("busy").unwrap_or(0.0);
+            let since_start = event
+                .attr("since")
+                .and_then(|value| value.as_str())
+                .is_some_and(|since| since == "start");
+            let at_ns = event.ts_ns.saturating_sub(opened);
+            if since_start {
+                let started = event
+                    .ts_ns
+                    .saturating_sub(event.number("age_ns").unwrap_or(f64::MAX) as u64);
+                if started >= opened {
+                    cpu_ns += event.number("cpu_ns").unwrap_or(0.0);
+                }
+                // A share over a whole life is not this instant's.
+                continue;
+            }
+            let over = event.number("over_ns").unwrap_or(0.0);
+            cpu_ns += busy * over;
+            points.push(Point {
+                at_ns,
+                read: busy * over,
+                // Drawn as the cpu's other sources are, in nanoseconds of
+                // cpu per second.
+                shown: busy * 1e9,
+            });
+        }
+        row.cells.entry(Col::CpuTime).or_insert(cpu_ns);
+        if row.cpu.is_none() && !points.is_empty() {
+            row.cpu = Some(Track {
+                key: format!("task:{tid}"),
+                points,
+                name: row.name.clone(),
+                ..Track::default()
+            });
+        }
+    }
+    let trust = Trust::joined(data, held.iter().copied());
+    for col in [Col::Cpu, Col::Spark, Col::CpuTime, Col::Rss] {
+        match columns.iter_mut().find(|(held, _)| *held == col) {
+            Some((_, joined)) => joined.merge(trust.clone()),
+            None => columns.push((col, trust.clone())),
+        }
+    }
+    columns.sort_by_key(|(col, _)| *col);
 }
 
 /// A column's cell, in its unit.
@@ -3288,6 +3387,125 @@ mod tests {
         // faulted more.
         let order = |procs: &Procs| procs.rows.iter().map(Proc::key).collect::<Vec<_>>();
         assert_ne!(order(&by_cpu), order(&by_faults));
+    }
+
+    /// The machine's processes, as `proc.tasks` lists them each poll: one
+    /// row each, by name, sorted, with its cpu over the run and its
+    /// resident size; a task first seen at the run's opening counts only
+    /// what it ran inside the run.
+    #[test]
+    fn the_machine_s_processes_are_listed_from_proc_tasks() {
+        let tick = 1_000_000_000u64;
+        // The run opens at 10 s; poll n is at 10 + n s.
+        let opened = 10 * tick;
+        let task = |n: u64, pid: i32, comm: &str, busy: f64, since: &str, age: u64, rss: u64| {
+            event(
+                opened + n * tick,
+                vec![Key::Task { tid: pid }],
+                &[
+                    ("busy", AttrValue::Float(busy)),
+                    ("since", AttrValue::Text(since.into())),
+                    ("over_ns", AttrValue::Uint(tick)),
+                    ("pid", AttrValue::Uint(pid as u64)),
+                    ("tid", AttrValue::Uint(pid as u64)),
+                    ("comm", AttrValue::Text(comm.into())),
+                    ("cpu_ns", AttrValue::Uint(5 * tick)),
+                    ("age_ns", AttrValue::Uint(age)),
+                    ("rss_bytes", AttrValue::Uint(rss)),
+                ],
+            )
+        };
+        let mut events = Vec::new();
+        // `old` ran 5 s before the run; it spins one core, then half.
+        events.push(task(0, 10, "old", 0.9, "start", 100 * tick, 1 << 20));
+        events.push(task(1, 10, "old", 1.0, "poll", 0, 1 << 20));
+        events.push(task(2, 10, "old", 0.5, "poll", 0, 2 << 20));
+        // `young` is born half a second into the run and has run 0.25 s
+        // when first seen.
+        let mut first = task(1, 20, "young", 0.5, "start", tick / 2, 4 << 20);
+        first.attrs.retain(|attr| attr.name != "cpu_ns");
+        first.attrs.push(Attr {
+            name: "cpu_ns".into(),
+            value: AttrValue::Uint(tick / 4),
+        });
+        events.push(first);
+        events.push(task(2, 20, "young", 0.25, "poll", 0, 4 << 20));
+        let results = Results {
+            label: "proc.tasks@system".into(),
+            source: "proc.tasks".into(),
+            backend: "fs:proc".into(),
+            outputs: vec![Output::Raw { events }],
+            ..Results::default()
+        };
+        let mut data = data_of(vec![results], 2 * tick);
+        data.live = Some(Live {
+            opened_ns: opened,
+            now_ns: opened + 2 * tick,
+        });
+        let procs = processes(&data, Sort::Cpu);
+        let names: Vec<&str> = procs
+            .rows
+            .iter()
+            .map(|row| row.name.as_deref().unwrap_or("-"))
+            .collect();
+        assert_eq!(names, ["old", "young"]);
+        let old = &procs.rows[0];
+        assert!(old.process);
+        assert_eq!(old.cells[&Col::CpuTime], 1.5e9, "two polls, not its life");
+        assert_eq!(old.cells[&Col::Rss], (2 << 20) as f64, "the last poll's");
+        assert_eq!(old.cpu.as_ref().unwrap().points.len(), 2);
+        let young = &procs.rows[1];
+        assert_eq!(young.cells[&Col::CpuTime], 0.25e9 + 0.25e9, "born inside");
+        assert!(procs.columns.iter().any(|(col, _)| *col == Col::Spark));
+        let by_memory = processes(&data, Sort::Memory);
+        assert_eq!(by_memory.rows[0].name.as_deref(), Some("young"));
+        let drawn = screen(data);
+        assert!(drawn.contains("old "), "{drawn}");
+        assert!(drawn.contains("every task measured"), "{drawn}");
+    }
+
+    /// A timeline split by `dir` is one row per device, read apart from
+    /// written; a discard is not in the bytes, as `/proc/diskstats`' own
+    /// total does not hold it.
+    #[test]
+    fn a_timeline_split_by_dir_is_one_row_per_device_its_parts_apart() {
+        use crate::model::{Point as Reading, Series};
+        let series = |dir: &str, value: f64| Series {
+            key: format!("dev:259+0 dir:{dir}"),
+            points: (0..4)
+                .map(|n| Reading {
+                    offset_ns: n * 250_000_000,
+                    value,
+                })
+                .collect(),
+        };
+        let results = Results {
+            label: "io.bytes@system".into(),
+            source: "io.bytes".into(),
+            backend: "fs:proc".into(),
+            outputs: vec![Output::Timeline {
+                series: vec![
+                    series("read", 1000.0),
+                    series("write", 3000.0),
+                    series("discard", 50_000.0),
+                ],
+                first_ts_ns: None,
+            }],
+            ..Results::default()
+        };
+        let data = data_of(vec![results.clone()], 1_000_000_000);
+        let all = tracks(&data, &results);
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert_eq!(all[0].key, "dev:259+0");
+        assert_eq!(all[0].total(), 16_000.0);
+        assert_eq!(
+            all[0].part_totals(),
+            vec![("read", 4000.0), ("written", 12_000.0)]
+        );
+        assert_eq!(device_name(&all[0].key), "259:0");
+        assert_eq!(key_parts("task:7 cpu:2"), ["task:7", "cpu:2"]);
+        assert_eq!(task_of("cpu:2 task:7"), Some(7));
+        assert_eq!(key_parts("package 1"), ["package 1"]);
     }
 
     fn event(ts_ns: u64, keys: Vec<Key>, attrs: &[(&str, AttrValue)]) -> Event {

@@ -274,10 +274,7 @@ impl Row {
                             // A zero still shows its baseline, as one row does.
                             let filled = ((height * eighths).round() as usize).max(1);
                             let here = filled.saturating_sub(floor).min(8);
-                            Span::styled(
-                                EIGHTHS[here].to_string(),
-                                Style::new().fg(*hue),
-                            )
+                            Span::styled(EIGHTHS[here].to_string(), Style::new().fg(*hue))
                         }
                     })
                     .collect()
@@ -337,19 +334,20 @@ impl View for Process {
         };
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut regions = Vec::new();
-        let mut place = |lines: &mut Vec<Line<'static>>, drawn: Vec<Line<'static>>, id: Option<usize>| {
-            let row = lines.len() as u16;
-            if let Some(id) = id {
-                if row < area.height {
-                    let height = (drawn.len() as u16).min(area.height - row);
-                    regions.push(Region::new(
-                        Rect::new(area.x, area.y + row, area.width, height),
-                        id,
-                    ));
+        let mut place =
+            |lines: &mut Vec<Line<'static>>, drawn: Vec<Line<'static>>, id: Option<usize>| {
+                let row = lines.len() as u16;
+                if let Some(id) = id {
+                    if row < area.height {
+                        let height = (drawn.len() as u16).min(area.height - row);
+                        regions.push(Region::new(
+                            Rect::new(area.x, area.y + row, area.width, height),
+                            id,
+                        ));
+                    }
                 }
-            }
-            lines.extend(drawn);
-        };
+                lines.extend(drawn);
+            };
 
         let mut header = screen.header.clone();
         if selected == 0 {
@@ -1849,7 +1847,9 @@ mod tests {
         };
         let memory = row(&screen, "Memory");
         assert!(
-            memory.text.contains(&format!("peak {}", units::bytes(value))),
+            memory
+                .text
+                .contains(&format!("peak {}", units::bytes(value))),
             "{} against the ledger's {value}",
             memory.text
         );
