@@ -731,3 +731,56 @@ on the other two waits on the same helper the cgroup *target* does, so it is
 worth keeping in the entry only if the entry is meant to describe what a future
 build would emit — and `CATALOG.md` says the opposite, that a declaration is a
 promise the build keeps.
+
+### 10. `proc.syscall`'s `comm` was the name its window's first call saw
+
+Found by the twenty-second wave's bpftrace pair (gap 1), **fixed in the
+twenty-fourth**. The kernel's row for a `(task, syscall, bucket)` was created
+at the window's first call and stored the task's name then, once; every later
+call of that window was counted under it. A task that renamed itself
+(`prctl(PR_SET_NAME)`) kept its old name on every call it had already made
+once in the window, and `comm == "<new name>"` dropped them: 500 opens after a
+rename counted 1. The name is now part of the row's key, read on every call,
+so a rename starts new rows. Held by
+`a_task_that_renames_itself_is_counted_under_each_name_with_its_errors`: 300
+failing opens under `python3`, the rename, then 300 opens and 300 failing
+ones, read 600 calls and 300 errors under the new name, exactly.
+
+## What the twenty-fourth wave added
+
+Every number below was read on this machine against something independent of
+`omn`.
+
+- **`proc.syscall` keyed `syscall` and `comm`, with `errors`.** Every row
+  carries `task`, `syscall` and `comm` keys, so `-k syscall` is one run's
+  `strace -c` table and `-k comm` the bpftrace tools' per-name one; each row
+  counts the calls that returned an errno (`errors`, `strace -c`'s column).
+  The workload above, keyed `comm,syscall`: `comm:omnref-open syscall:openat
+  n=1000` (its 500 opens and 500 failures) and `comm:python3 syscall:openat
+  n=548`; `errors` summed over `-e raw` rows: 500 and 506 (the 500 chosen
+  failures and six of python's import probes). No aggregating emit sums
+  `errors` yet; it is per row.
+- **`proc.calls`, one record per call** (`src/bpf/proc_calls.rs`): when it
+  began, `lat_ns`, `ret`, `errno`, the task and its name, and `openat`'s
+  `path` and `fd`. Against `strace -f -e trace=openat` on the same workload:
+  648 opens and 406 ENOENT both ways. Held by
+  `every_open_is_one_record_with_its_path_its_errno_and_its_descriptor`.
+- **`proc.tasks`, the machine's processes or every thread of one**, on
+  `fs:proc` (`/proc/<pid>/stat`, `statm` for the resident set). `busy` is the
+  share of one cpu since the previous poll, `top`'s `%CPU` over a hundred. A C
+  workload of three spinning threads and one napping read 0.973-1.000 per
+  spinner and 0.000 for the napper; the same process at `--system` read 2.979
+  where `top -b` read 298.4 %. `statm`, not `stat`'s field, is read for the
+  resident set: one small process read 642 pages there and 568 in `stat`,
+  and `top` shows `statm`'s. Held by the three `proc.tasks` tests of
+  `tests/family_proc.rs` (the thread count exactly, a spinning against a
+  waiting thread, a process this test started found once by `--system`).
+- **`proc.exec` per launch**: each exec carries its parent (`ppid`, read in
+  the kernel), and on a pid or launched target the run keeps the program's
+  execs and its descendants'. A script of five `echo`s, a subshell and a
+  pipeline read its ten execs, three runs of three, beside a loop of
+  `/bin/true` that added none. Held by
+  `a_launched_programs_execs_are_its_tree_and_nothing_beside_it`.
+- **`proc.signals`' sender**: `sender_comm` beside `sender_pid`, and `comm` as
+  a key on `proc.exec`, `proc.exit` and `proc.signals`. Three kills of a
+  `sleep` read `sender_comm` `kill` and the kill's pid.

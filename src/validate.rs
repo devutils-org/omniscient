@@ -728,7 +728,9 @@ fn check_filter(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection
     }
 }
 
-/// A ranking by an attribute (`topk:N@<attr>`) names one the entry declares.
+/// A ranking by an attribute (`topk:N@<attr>`), and a summary or histogram
+/// per attribute (`summary@<attr>`, `hist@<attr>`), names one the entry
+/// declares.
 ///
 /// `filter_fields` is the catalog's one list of attribute names an event of the
 /// source carries, which is what the filter check reads too. An attribute no
@@ -737,8 +739,13 @@ fn check_filter(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection
 /// anything, refused with the names it could have used.
 fn check_ranking(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection>) {
     for emit in &request.emit {
-        let Emit::TopK { by: Some(by), .. } = emit else {
+        let Some(by) = emit.by() else {
             continue;
+        };
+        let verb = if emit.kind() == EmitKind::TopK {
+            "ranks"
+        } else {
+            "groups"
         };
         let field = by.as_str();
         if entry.filter_fields.iter().any(|known| known == field) {
@@ -759,7 +766,7 @@ fn check_ranking(entry: &Entry, request: &Request, rejections: &mut Vec<Rejectio
         };
         rejections.push(Rejection::with_hint(
             format!(
-                "`{emit}` ranks `{}` by `{field}`, an attribute it does not declare{}",
+                "`{emit}` {verb} `{}` by `{field}`, an attribute it does not declare{}",
                 entry.id,
                 DidYouMean(suggestion)
             ),

@@ -62,6 +62,10 @@ impl LiveCollector {
                 let mut attrs = vec![
                     Attr::uint("bytes", self.live.bytes()),
                     Attr::uint("allocations", self.live.count() as u64),
+                    // The high-water mark over every call so far, which a poll
+                    // misses when the peak is shorter than its period.
+                    Attr::uint("peak_bytes", self.live.peak_bytes()),
+                    Attr::uint("peak_allocations", self.live.peak_count() as u64),
                     // Frees of blocks allocated before the shim could report
                     // them: they are not in the total, and saying how many
                     // there were is how a reader knows whether that matters

@@ -17,6 +17,14 @@ pub struct LiveSet {
     /// reporting for anything allocated inside its own hooks -- the dynamic
     /// loader's bootstrap, mostly -- and those blocks are freed normally later.
     untracked_frees: u64,
+    /// The most that was live at once, in bytes and in blocks, over every
+    /// record applied. Exact where a poll is not: every call is a record, so a
+    /// peak shorter than any poll period is still a state this set was in.
+    peak_bytes: u64,
+    peak_count: usize,
+    /// When each live block was allocated, for the lifetime its free closes.
+    /// Filled only through [`LiveSet::allocated_at`].
+    born: HashMap<u64, u64>,
 }
 
 impl LiveSet {
@@ -28,12 +36,38 @@ impl LiveSet {
             self.bytes = self.bytes.saturating_sub(previous);
         }
         self.bytes += size;
+        self.peak_bytes = self.peak_bytes.max(self.bytes);
+        self.peak_count = self.peak_count.max(self.sizes.len());
         (ptr, ptr.saturating_add(size))
+    }
+
+    /// The same, remembering when, so that the free can say how long the
+    /// block lived.
+    pub fn allocated_at(&mut self, ptr: u64, size: u64, ts_ns: u64) -> (u64, u64) {
+        self.born.insert(ptr, ts_ns);
+        self.allocated(ptr, size)
+    }
+
+    /// Records a free at `ts_ns`, answering the range it gave back and how
+    /// long the block lived, when its allocation was seen with a time.
+    pub fn freed_at(&mut self, ptr: u64, ts_ns: u64) -> Option<((u64, u64), Option<u64>)> {
+        let born = self.born.remove(&ptr);
+        let range = self.freed(ptr)?;
+        Some((range, born.map(|born| ts_ns.saturating_sub(born))))
+    }
+
+    pub fn peak_bytes(&self) -> u64 {
+        self.peak_bytes
+    }
+
+    pub fn peak_count(&self) -> usize {
+        self.peak_count
     }
 
     /// Records a free, returning the range it gave back when the allocation is
     /// one this set knows the size of.
     pub fn freed(&mut self, ptr: u64) -> Option<(u64, u64)> {
+        self.born.remove(&ptr);
         match self.sizes.remove(&ptr) {
             Some(size) => {
                 self.bytes = self.bytes.saturating_sub(size);
@@ -215,6 +249,22 @@ impl FreedRanges {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_peak_is_the_most_ever_live_even_after_it_is_freed() {
+        let mut live = LiveSet::default();
+        live.allocated_at(0x1000, 100, 10);
+        live.allocated_at(0x2000, 300, 20);
+        let (_, lifetime) = live.freed_at(0x1000, 50).expect("known");
+        assert_eq!(lifetime, Some(40));
+        live.allocated(0x3000, 50);
+        assert_eq!(live.bytes(), 350);
+        assert_eq!(live.peak_bytes(), 400);
+        assert_eq!(live.peak_count(), 2);
+        let (_, lifetime) = live.freed_at(0x3000, 60).expect("known");
+        assert_eq!(lifetime, None, "allocated without a time");
+        assert!(live.freed_at(0x9000, 70).is_none());
+    }
 
     #[test]
     fn freeing_an_allocation_gives_back_the_range_it_covered() {

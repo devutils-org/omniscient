@@ -1170,6 +1170,81 @@ page-faults:u,page-faults:k`).
 
 ---
 
+## What the comparison found (the twenty-fourth wave)
+
+The comparison against the tools `omn` replaces (`docs/fixes/w22-*.md`,
+`docs/fixes/w23-*.md`) left this family one defect and a list of gaps. Each
+number below was read on the development machine (a Ryzen 9 3900X, family
+17h, one node) against something `omn` did not compute.
+
+### D17 — `mem.latency` delivered about 70 % of the rate asked and said nothing — **fixed**
+
+`perf mem` and `omn trace mem.latency -m sample@4000hz` over the same pointer
+chase disagreed by 10 % on the mean, and the twenty-third wave found the two
+had tagged different numbers of ops. The cause is the unit, not the decoding:
+`omn` asks it to count dispatched ops (`cnt_ctl`) and to drop the kernel's own
+accesses after tagging (`swfilt`), and in frequency mode the kernel settles
+short of the rate with those two bits. `perf record -F 4000` with the same
+format terms showed it alone:
+
+| `perf record -e` | tagged a second |
+|---|---|
+| `ibs_op//` (what `perf mem` asks for) | 4 000 |
+| `ibs_op/swfilt=1/u` | 3 760 |
+| `ibs_op/cnt_ctl=1/` | 3 285 |
+| `ibs_op/cnt_ctl=1,swfilt=1/u` (what `omn` asks for) | 2 640 |
+
+The run now reads how long the followed tasks ran (each thread's
+`schedstat`; a cpu's busy time in `/proc/stat`; a cgroup's `cpu.stat`) and
+says the rate it delivered: *"IBS delivered 6586 tagged ops over the 2.46 s
+the followed threads ran: 2677 a second, 67 % of the 4000 Hz asked"*, and
+why when short. The clock read 2.32 s and 2.48 s where the runner's own
+`observed_cpu_ns` read 2.319 s and 2.483 s; at its 100 ms read interval it
+reads 1 to 3 % short of it, so the rate it prints is that much high.
+
+The `peer` half of the finding was not a defect. `perf script -F data_src`
+decodes the same words `omn` reads as `peer` to *"core, same node Any cache
+hit"* (`0x81629808842`, `0x81649808842`; pinned in `ibs.rs`), and their share
+of timed loads moved from 3.5 % to 16 % from run to run under both tools,
+with what else held the L3. The pair's means differ because `perf mem`
+counts cycles between tags and `omn` counts ops: a different mix of loads.
+
+### What landed beside it
+
+- **`mem.system`** (sysstat 4, 6): `/proc/meminfo` as `free` prints it.
+  `used_bytes` is total minus available; `buff_cache_bytes`, the slab split,
+  swap and the commit figures ride on the event. Against `free -b` the moment
+  after: total and buff/cache to the byte, used within 4 MB on a busy machine.
+  The per-cache split of `slabtop` needs `/proc/slabinfo` (root): not here.
+- **`mem.numa --system`** (sysstat 7): `numastat`'s allocation counters per
+  node, as deltas per poll, through a new `fs:sys` backend. Reasoned only: on
+  a one-node machine with fifteen other streams allocating, no workload of
+  known shape stands out of 50 000 pages a half-second.
+- **`mem.oom`**: kills, for the machine (`/proc/vmstat`) or one cgroup
+  (`memory.events`, with `oom` and `max`). A child that touched 128 MiB under
+  a 32 MiB `memory.max` with no swap ended on SIGKILL and the count read one
+  kill. No victim: that is `oom:mark_victim`, not built.
+- **A process's own swap-ins** (bpftrace 5): `mem.swap --backend
+  force:perf:kprobe`, a counting kprobe on `swap_read_folio` on the
+  program's threads. A Python process thrashing alone in a systemd scope
+  under `MemoryHigh=32M`: 275 898 reads counted in omn's 3 s, 346 333 pages
+  in the scope's `pswpin` over the 3.4 s around it; per second 133 040,
+  115 872, 122 829 against the scope's 134 438, 120 358, 122 331.
+- **VIRT and SHR on `mem.rss`** (top 3, 4): `virt_bytes`, `shared_bytes`
+  from `statm`, and over the rollup `swap_bytes`, `anon_huge_bytes`,
+  `locked_bytes`; each equal to `status`' `VmSize`, `RssFile + RssShmem`,
+  `VmSwap` for a sleeping child.
+- **The heap's high-water mark, live blocks and lifetimes** (heap 3, 5, 6):
+  64 MiB held for 2 ms read 0 bytes at every `poll@100ms` point, and
+  `peak_bytes` 67 108 864 in 64 `peak_allocations`; frees carry
+  `lifetime_ns`.
+- **`mem.sharing`'s per-line detail** (perfrecord 6): offsets, instructions,
+  loads and stores per contested line. On the false-sharing workload, line
+  `0x4040c0`, offsets `+0 +8`, one instruction, no stores: what `perf c2c
+  report`'s Pareto table read (`0x0`, `0x8`, `0x401230`, no store refs).
+- **`mem.faults`' few early faults** (perfstat 6): a caveat. `/bin/true`
+  read 60-62 against `perf stat`'s 57-58.
+
 ## What this leaves for the coordinator
 
 Three things that are not `mem`'s to fix and that this stream found:

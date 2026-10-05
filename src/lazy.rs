@@ -56,12 +56,20 @@ pub fn parse_band(text: &str) -> Result<Cost, String> {
 /// A word with no dot where a source is expected is taken for a family; one
 /// that is not a family is refused by [`compose`], naming the families and
 /// what a source looks like, so a source misspelt without its dot is told
-/// both. Expects the arguments after the implicit `trace` was inserted.
+/// both. Where a source is expected is the first positional of `trace`,
+/// wherever it stands: `omn trace --pid 1 -d 1s cpu` names a family as much
+/// as `omn trace cpu --pid 1 -d 1s` does, so the flags before it, and the
+/// values they take, are skipped the way the parser would. Expects the
+/// arguments after the implicit `trace` was inserted.
 pub fn spell_family(mut args: Vec<OsString>) -> Vec<OsString> {
-    let is_trace = args.get(1).and_then(|arg| arg.to_str()) == Some("trace");
-    let family = args
-        .get(2)
-        .and_then(|arg| arg.to_str())
+    if args.get(1).and_then(|arg| arg.to_str()) != Some("trace") {
+        return args;
+    }
+    let Some(at) = first_positional(&args) else {
+        return args;
+    };
+    let family = args[at]
+        .to_str()
         .filter(|word| {
             !word.is_empty()
                 && word
@@ -70,10 +78,59 @@ pub fn spell_family(mut args: Vec<OsString>) -> Vec<OsString> {
                 && word != &"help"
         })
         .map(str::to_owned);
-    if let (true, Some(family)) = (is_trace, family) {
-        args.splice(2..3, [OsString::from(FAMILY_FLAG), OsString::from(family)]);
+    if let Some(family) = family {
+        args.splice(
+            at..at + 1,
+            [OsString::from(FAMILY_FLAG), OsString::from(family)],
+        );
     }
     args
+}
+
+/// The index of the first positional word after `omn trace`, skipping the
+/// flags before it and the values they take, as the parser of `trace` reads
+/// them; `None` when `--` or the end comes first, or a flag is not one
+/// `trace` knows (the parser then refuses it, which says more than a guess).
+fn first_positional(args: &[OsString]) -> Option<usize> {
+    use clap::CommandFactory;
+    let mut command = crate::cli::Cli::command();
+    command.build();
+    let trace = command.find_subcommand("trace")?;
+    let takes_value = |arg: &clap::Arg| arg.get_action().takes_values();
+    let mut at = 2;
+    while let Some(word) = args.get(at) {
+        let word = word.to_str()?;
+        if word == "--" {
+            return None;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            if !long.contains('=') {
+                let arg = trace.get_arguments().find(|arg| {
+                    arg.get_long() == Some(long)
+                        || arg.get_all_aliases().is_some_and(|all| all.contains(&long))
+                })?;
+                if takes_value(arg) {
+                    at += 1;
+                }
+            }
+        } else if let Some(shorts) = word.strip_prefix('-').filter(|rest| !rest.is_empty()) {
+            for (i, short) in shorts.char_indices() {
+                let arg = trace
+                    .get_arguments()
+                    .find(|arg| arg.get_short() == Some(short))?;
+                if takes_value(arg) {
+                    if i + short.len_utf8() == shorts.len() {
+                        at += 1;
+                    }
+                    break;
+                }
+            }
+        } else {
+            return Some(at);
+        }
+        at += 1;
+    }
+    None
 }
 
 /// Why `--cost` cannot mean anything on this command line, when it cannot:
@@ -442,11 +499,21 @@ mod tests {
             spell_family(os(&["omn", "trace", "cpu", "--", "true"])),
             os(&["omn", "trace", "--family", "cpu", "--", "true"])
         );
+        assert_eq!(
+            spell_family(os(&["omn", "trace", "--pid", "1", "-d", "1s", "cpu"])),
+            os(&["omn", "trace", "--pid", "1", "-d", "1s", "--family", "cpu"])
+        );
+        assert_eq!(
+            spell_family(os(&["omn", "trace", "--pid=1", "-d1s", "--system", "mem"])),
+            os(&["omn", "trace", "--pid=1", "-d1s", "--system", "--family", "mem"])
+        );
         for unchanged in [
             &["omn", "trace", "cpu.profile", "--pid", "1"][..],
             &["omn", "trace", "-f", "x.yml"],
             &["omn", "list", "cpu"],
             &["omn", "trace", "help"],
+            &["omn", "trace", "--pid", "1", "cpu.profile"],
+            &["omn", "trace", "-d", "1s", "--", "cpu"],
         ] {
             assert_eq!(spell_family(os(unchanged)), os(unchanged));
         }

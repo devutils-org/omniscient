@@ -11,8 +11,8 @@
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, system: native}
-  keys: [task]
-  filter_fields: [comm, syscall, pid]
+  keys: [task, syscall, comm]
+  filter_fields: [comm, syscall, pid, errors]
   determinism: low
   caveats:
     - "An event is one bucket of one window, and it is stamped at the moment the
@@ -23,6 +23,43 @@
        was."
     - "raw_syscalls fires on everything: aggregate in the kernel, or filter by
        syscall number inside the eBPF program."
+    - "Every row carries its task, its syscall and the task's name when the call
+       returned, so `-k syscall` is one run's `strace -c` table and `-k comm`
+       the bpftrace tools' per-name one. A task that renames itself
+       (`prctl(PR_SET_NAME)`) is counted under each name for the calls it made
+       with it."
+    - "`errors` on each row is how many of its calls returned an errno (a value
+       in `[-4095, -1]`), `strace -c`'s `errors` column. It is per row (`-e
+       raw`); no aggregating emit sums it yet."
+
+- id: proc.calls
+  family: proc
+  summary: "One record per syscall: when, how long, what it returned, and openat's path"
+  unit: ns
+  backends:
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "kernel>=5.8"], cost: extreme,
+       filter_in_program: [syscall]}
+  modes: [trace]
+  emits: [raw, timeline, hist, summary, topk]
+  targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, system: native}
+  keys: [task, syscall, comm]
+  filter_fields: [comm, syscall, pid, tid, ret, errno, error, path, fd, lat_ns]
+  determinism: low
+  caveats:
+    - "Each call that returns is one event, stamped where it began: `lat_ns`, the
+       raw `ret`, `errno` (the error a return in `[-4095, -1]` carries, zero
+       otherwise), `error`, the task, its name and the syscall -- the line
+       `strace -T` and `perf trace` print. `openat` also carries `path`, read out
+       of the caller's memory when the call returns, up to 127 bytes, and `fd`
+       when it succeeded: `opensnoop`'s line. `proc.syscall` is the cheap
+       aggregate of the same calls."
+    - "Every call is a ring write, so a target making hundreds of thousands of
+       calls a second fills the ring and the program counts what it could not
+       publish. A predicate naming one syscall (`syscall == \"openat\"`) is
+       pushed into the program, which then records nothing else."
+    - "A call the run never saw begin -- the thread was already inside it at the
+       attach -- is in no record, and one still running at the end is said, not
+       recorded."
 
 - id: proc.exec
   family: proc
@@ -33,10 +70,19 @@
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exec", "bpf"], cost: low, equivalent: true}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
-  targets: {system: native, cgroup: bpf_only}
-  keys: [task]
-  filter_fields: [comm, filename]
+  targets: {system: native, cgroup: bpf_only, pid: native, launch: native}
+  keys: [task, comm]
+  filter_fields: [comm, filename, pid, ppid]
   determinism: medium
+  caveats:
+    - "On a process or a launched program, the execs of it and of its
+       descendants: the program reports the machine's, each with its parent
+       (`ppid`, read in the kernel at the exec), and the run keeps those whose
+       parent is the process or a descendant it has seen. A descendant that
+       forked without exec'ing (a subshell) is found by walking `/proc`'s
+       parents at the drain, so one that had already exited by then is not,
+       and its child's execs are not kept."
+
 
 - id: proc.exit
   family: proc
@@ -48,7 +94,7 @@
   modes: [trace]
   emits: [raw, timeline, topk, summary]
   targets: {system: native, cgroup: bpf_only}
-  keys: [task]
+  keys: [task, comm]
   filter_fields: [comm, code, group_dead]
   determinism: medium
   caveats:
@@ -105,6 +151,38 @@
        workers will see fewer than it started."
 
 
+- id: proc.tasks
+  family: proc
+  summary: "The machine's processes, or every thread of one, as top and ps list them"
+  unit: ratio
+  backends:
+    - {id: "fs:proc", requires: ["/proc/[pid]/stat"], cost: low}
+  modes: [poll, snapshot]
+  emits: [raw, timeline, summary]
+  targets: {system: native, pid: native, tid: native, launch: native}
+  keys: [task, comm]
+  filter_fields: [comm, pid, tid, ppid, state, uid, threads, rss_bytes, busy]
+  determinism: low
+  caveats:
+    - "One event per process of the machine (`--system`), or per thread of a
+       process (`--pid`, a launched program), each poll; every event of a poll
+       carries the poll's one timestamp. Each carries `pid`, `tid`, `ppid`,
+       `comm`, `state`, `uid`, `threads`, `rss_bytes` (from `statm`, as `top` reads it), `vsz_bytes`, `cpu_ns`,
+       `utime_ns`, `stime_ns`, `nice`, `priority`, `minflt`, `majflt`, `cpu` (the
+       one it last ran on) and `age_ns`."
+    - "The value, `busy`, is the share of one cpu the task ran over the interval
+       since the previous poll: `top`'s `%CPU` over a hundred, so a process of
+       four spinning threads reads 4. A task first seen in a poll has no
+       previous reading and its share is over its whole life instead, `ps`'s
+       `%CPU`; `since` on the event says which (`poll` or `start`)."
+    - "`utime` and `stime` count clock ticks (10 ms on most kernels), so a share
+       is good to one tick over its interval: one per cent of a one-second poll.
+       A task that lived between two polls is in neither."
+    - "A process's line is its threads' sum; a thread's is its own. A process
+       that leaves between the listing and its read is in no event and is not a
+       loss: it is not on the machine any more."
+
+
 - id: proc.signals
   family: proc
   summary: "Signals delivered"
@@ -115,9 +193,14 @@
   modes: [trace, count]
   emits: [raw, topk, rate, summary]
   targets: {pid: bpf_only, system: native, cgroup: bpf_only}
-  keys: [task]
-  filter_fields: [comm, sig, pid]
+  keys: [task, comm]
+  filter_fields: [comm, sig, pid, sender_comm, sender_pid]
   determinism: medium
+  caveats:
+    - "`comm` is the task the signal is for; `sender_pid`, `sender_tid` and
+       `sender_comm` are the task that was running when it was generated, which
+       is the sender for a `kill` and whatever was interrupted for a signal the
+       kernel raised itself (a timer, a fault, a dying child)."
 
 # The family's default: what `omn trace proc -- PROGRAM` composes. One band:
 # `proc.syscall` declares `extreme`, beyond any band. See docs/lazy.md.

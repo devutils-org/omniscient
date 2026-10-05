@@ -228,3 +228,37 @@ None. Everything above ran with what `make` grants (`CAP_BPF`,
   `-r/--repeat`, a program beside a target, a session's `launch:`, several
   sources, `--pid` ending at its exit, exit 1's three last lines, and
   `lifetime.exit_code`/`signal`.
+
+## Review
+
+Two findings, both fixed. Only `src/main.rs` and `src/repeat.rs` (this
+stream's new file) moved.
+
+- **Defect: `-r N` in text never said a run's losses.** Each run's
+  `run i of N:` line on stderr is now followed by what that run lost, the
+  way a single run says it: per request, `no loss: ...` or the `LOSS:` line
+  with all five (six with eviction) counted kinds, each reason, and each
+  degradation (`repeat::losses`). This holds in every format, since it is
+  stderr. The text spread also ends with `LOSS in run 2 of 3: ...` when any
+  run lost anything (`repeat::lossy`), so a mean with a lossy run in it does
+  not read as clean. Shown: `omn trace cpu.instructions -m count -e summary
+  -r 3 -- /bin/true` now prints `` `cpu.instructions`: no loss: every read
+  succeeded and no tick ran late`` under each of the three run lines. The
+  lossy path is shown by the unit test
+  `repeat::tests::a_run_that_lost_says_so_and_the_spread_names_it`, not by a
+  live run: no run on this machine was lossy on demand.
+- **Gap: run k > 1 refused at collect said "the machine refused the run;
+  nothing was measured".** Now it says `the k-1 run(s) before it measured`,
+  plus `and wrote theirs to <dir>/run-<i>` under `-o`, and `no spread was
+  taken`. The last line is `exit 1: the run failed after it started, before
+  writing its results`, with exit 1 whichever gap the refusal names,
+  because the session already ran. `exit_for(Whose::Machine)` also consults
+  `RUN_STARTED` now, the same way `main`'s error path already did. A
+  machine refusal after a run started is a failed run, so the three-sentence
+  set stays closed. Reasoned, not shown: making a second run refuse after a
+  first one succeeds needs the machine to change between the two runs.
+
+Tests: `cargo test --bin omn` (10 of 10), `cargo test --test cli` (33 of
+33; `a_refusal_for_an_unwritten_backend_leads_with_the_one_passed_over`
+went red once, in the run right after `make` relinked, and passed alone on
+its rerun), clippy and fmt clean.

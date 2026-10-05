@@ -1152,6 +1152,7 @@ fn distribution(losses: Losses) -> Results {
                     max: 64.0 * MIB,
                     mean: sum / records as f64,
                     last: 64.0 * MIB,
+                    total: Some(sum),
                     short,
                 }],
             },
