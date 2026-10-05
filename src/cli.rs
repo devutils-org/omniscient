@@ -115,9 +115,28 @@ pub const SUBCOMMANDS: [&str; 10] = [
 
 #[derive(Debug, Args)]
 pub struct TraceArgs {
-    /// Source to measure, as <family>.<metric>, for instance io.latency.
-    #[arg(value_name = "SOURCE", required_unless_present = "file")]
-    pub source: Option<SourceId>,
+    /// Source to measure, as <family>.<metric>, for instance io.latency; or a
+    /// family alone (cpu, mem, io, ...), whose default composes the rest.
+    /// Several sources, separated by spaces or commas, are measured over one
+    /// window and one launch, each with the same target and axes: what `perf
+    /// stat -e a,b -- prog` asks, and a session file of one request each.
+    #[arg(
+        value_name = "SOURCE|FAMILY",
+        required_unless_present_any = ["file", "family"],
+        value_delimiter = ','
+    )]
+    pub source: Vec<SourceId>,
+
+    /// The family a bare word named where a source is expected, carried
+    /// here by `omn::lazy::spell_family`: `omn trace cpu` is `omn trace
+    /// --family cpu`, and the parser keeps its positional for a source.
+    #[arg(long, hide = true, value_name = "FAMILY", conflicts_with_all = ["source", "file"])]
+    pub family: Option<String>,
+
+    /// Beside a family: the cost band of its default to compose, low, med or
+    /// high (the cheapest it has, when absent).
+    #[arg(long, value_name = "BAND", value_parser = crate::lazy::parse_band)]
+    pub cost: Option<crate::catalog::Cost>,
 
     /// Read the session from a file, or from standard input with `-`.
     #[arg(short = 'f', long, value_name = "PATH", conflicts_with = "source")]
@@ -168,14 +187,18 @@ pub struct TraceArgs {
     #[arg(long, group = "target", conflicts_with = "file")]
     pub system: bool,
 
-    /// Program to launch and follow, after `--`.
-    #[arg(
-        last = true,
-        value_name = "PROGRAM",
-        group = "target",
-        conflicts_with = "file"
-    )]
+    /// Program to launch, after `--`. Alone, it is the target, followed
+    /// with its tree. Beside another target -- `--system`, `--cpu`,
+    /// `--cgroup`, `--iface`, `--pid` -- it is the window: that target is
+    /// measured for as long as the program runs, as `perf stat -a -- prog`
+    /// and `turbostat prog` measure.
+    #[arg(last = true, value_name = "PROGRAM", conflicts_with = "file")]
     pub program: Vec<String>,
+
+    /// Run the request this many times, one after another, and report each
+    /// value's mean and spread across the runs, as `perf stat -r N` does.
+    #[arg(short = 'r', long, value_name = "N", conflicts_with = "until")]
+    pub repeat: Option<u32>,
 
     /// How to observe: count, sample@997hz, trace, poll@100ms, snapshot.
     #[arg(short = 'm', long, value_name = "MODE", conflicts_with = "file")]
@@ -600,13 +623,71 @@ impl Defaulted {
 
 /// Turns command line arguments into the same session a file would produce.
 pub fn to_session(args: &TraceArgs, catalog: &Catalog) -> Result<(Session, Defaulted), ParseError> {
-    let source = args
-        .source
-        .clone()
-        .ok_or_else(|| ParseError::new("no source given"))?;
-    let entry = catalog.get(&source);
+    if args.source.is_empty() {
+        return Err(ParseError::new("no source given"));
+    }
+    if args.source.len() > 1 && args.label.is_some() {
+        return Err(ParseError::new(format!(
+            "--label names one request, and this command line asks for {}: write a session \
+             file to name each",
+            args.source.len()
+        )));
+    }
     let mut defaulted = Defaulted::default();
+    let mut requests = Vec::with_capacity(args.source.len());
+    for source in &args.source {
+        if requests
+            .iter()
+            .any(|request: &Request| &request.source == source)
+        {
+            return Err(ParseError::new(format!(
+                "`{source}` is asked for twice on one command line, and its two results \
+                 would be the same request's"
+            )));
+        }
+        requests.push(request_for(source, args, catalog, &mut defaulted)?);
+    }
+    let mut requests = requests.into_iter();
+    let mut session = Session::single(
+        requests.next().expect("one source at least"),
+        args.format,
+        args.out.clone(),
+    );
+    session.requests.extend(requests);
+    // A program beside another target is the run's window, not its target.
+    if target_given(args) && !args.program.is_empty() {
+        session.launch.clone_from(&args.program);
+    }
+    // `--window on <layer>` parses, because the two surfaces share one
+    // parser; it cannot mean anything on one request, which has no cheap
+    // pass beside it to decide from, and is refused here in the words a
+    // session file gets.
+    session.check_escalation()?;
+    // A recording on the command line is a session's `record:` block on its
+    // one request, refused in the same words.
+    if let Some(trigger) = &args.until {
+        session.record = Some(crate::request::Recording {
+            trigger: Some(trigger.clone()),
+            on: None,
+            retain: args.retain,
+            after: args.after,
+            documents: args.documents,
+        });
+        session.check_recording()?;
+    }
+    Ok((session, defaulted))
+}
 
+/// One source's request, with every axis the command line gave, and the
+/// ones it did not given where the catalog leaves no choice.
+fn request_for(
+    source: &SourceId,
+    args: &TraceArgs,
+    catalog: &Catalog,
+    defaulted: &mut Defaulted,
+) -> Result<Request, ParseError> {
+    let source = source.clone();
+    let entry = catalog.get(&source);
     let target = match target_from(args) {
         Some(target) => target,
         None => {
@@ -689,7 +770,7 @@ pub fn to_session(args: &TraceArgs, catalog: &Catalog) -> Result<(Session, Defau
         }
     };
 
-    let request = Request {
+    Ok(Request {
         source,
         target,
         mode,
@@ -703,31 +784,23 @@ pub fn to_session(args: &TraceArgs, catalog: &Catalog) -> Result<(Session, Defau
         backend: args.backend.clone(),
         label: args.label.clone(),
         window: args.window,
-    };
-
-    let mut session = Session::single(request, args.format, args.out.clone());
-    // `--window on <layer>` parses, because the two surfaces share one
-    // parser; it cannot mean anything on one request, which has no cheap
-    // pass beside it to decide from, and is refused here in the words a
-    // session file gets.
-    session.check_escalation()?;
-    // A recording on the command line is a session's `record:` block on its
-    // one request, refused in the same words.
-    if let Some(trigger) = &args.until {
-        session.record = Some(crate::request::Recording {
-            trigger: Some(trigger.clone()),
-            on: None,
-            retain: args.retain,
-            after: args.after,
-            documents: args.documents,
-        });
-        session.check_recording()?;
-    }
-    Ok((session, defaulted))
+    })
 }
 
-fn target_from(args: &TraceArgs) -> Option<Target> {
-    if !args.program.is_empty() {
+/// Whether a target flag was given, beside which a program is the window.
+fn target_given(args: &TraceArgs) -> bool {
+    !args.pid.is_empty()
+        || !args.tid.is_empty()
+        || args.cgroup.is_some()
+        || args.cpu.is_some()
+        || args.iface.is_some()
+        || args.container.is_some()
+        || args.system
+}
+
+/// The target the flags name, if any.
+pub fn target_from(args: &TraceArgs) -> Option<Target> {
+    if !args.program.is_empty() && !target_given(args) {
         return Some(Target::Launch(args.program.clone()));
     }
     if !args.pid.is_empty() {

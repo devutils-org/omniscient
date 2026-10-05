@@ -14,12 +14,13 @@
     # counter is root-only on current kernels -- so requiring the directory
     # would let the resolver promise a measurement that the collector then
     # cannot take.
-    - {id: "fs:sys", requires: ["/sys/class/powercap/intel-rapl:0/energy_uj"], cost: free,
-       degraded: "polled: a spike between two reads is averaged into the interval that contains it"}
+    - {id: "fs:sys", requires: ["/sys/class/powercap/intel-rapl:0/energy_uj"], cost: free, keys: [],
+       degraded: "polled: a spike between two reads is averaged into the interval that contains it;
+                  the top-level domains are summed into one series, with no domain key"}
   modes: [count, poll]
   emits: [summary, rate, timeline, raw]
   targets: {system: native}
-  keys: []
+  keys: [domain]
   filter_fields: [domain]
   determinism: medium
   caveats:
@@ -30,9 +31,12 @@
     - "What one tick is worth is read from the kernel, not assumed: RAPL counts
        in units of 2^-32 joules. A collector that assumed microjoules would be
        wrong by ten orders of magnitude."
-    - "A part with several domains -- package, cores, dram -- reports one event
-       per domain per tick, and they share one series because there is no key
-       for a package. Read the `domain` attribute until that key exists."
+    - "The domains nest -- the cores are inside their package -- so one series
+       across them counts the same joules twice. Unkeyed, the package alone is
+       read; `--keys domain` reads every domain the part publishes (package,
+       cores, dram), one series each. AMD counts core energy per core
+       (`power_core`): the `cores` domain is every core's counter summed, and
+       `counters` says how many."
     - "RAPL is per package: --pid is invalid. Per-process attribution is a derived
        estimate (share of cycles) and must be labelled as such."
     - "`energy_uj` is readable only by root on current kernels: the counter was
@@ -53,11 +57,16 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_frequency", "kernel>=5.8"], cost: free}
     - {id: "bpf:tp", requires: ["tracepoint:power:cpu_frequency", "bpf"], cost: free, equivalent: true}
+    # APERF, MPERF and the TSC as perf events of the kernel's `msr` unit, which
+    # an ordinary user may open where /dev/cpu/*/msr is root's. Every number
+    # covers the interval, an idle cpu's included: preferred over sysfs.
+    - {id: "pmu", requires: ["pmu:msr/aperf/", "pmu:msr/mperf/", "pmu:msr/tsc/"], cost: low, equivalent: true}
     - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/cpufreq"], cost: low,
        degraded: "which frequency sysfs gives depends on the driver: cpuinfo_avg_freq is the
-                  effective one, scaling_cur_freq may be the requested one. Every event names the
-                  file it read and whether that is effective or requested"}
-    - {id: "pmu", requires: ["msr:aperf", "msr:mperf"], cost: low, equivalent: true}
+                  effective one over the last scheduler tick, not the interval, and a setpoint on
+                  an idle cpu; scaling_cur_freq may be the requested one. Every event names the
+                  file it read and whether that is effective, requested or a setpoint; busy and
+                  idle are /proc/stat's shares, avg_hz busy times hz"}
   modes: [poll, trace]
   emits: [timeline, hist, raw, summary]
   targets: {system: native, cpu: native}
@@ -154,3 +163,35 @@
        AMD parts, on ARM and in most virtual machines, and its absence is not
        evidence that nothing throttled: it means throttling cannot be seen this
        way here. The backend refuses rather than reporting zeroes."
+
+- id: power.wakeups
+  family: power
+  summary: "How often a process's threads wake up (powertop's wakeups per process)"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/[pid]/status"], cost: low}
+  modes: [poll]
+  emits: [timeline, raw, summary]
+  targets: {pid: native, launch: native}
+  keys: [proc]
+  filter_fields: [pid]
+  determinism: medium
+  caveats:
+    - "A wakeup is counted as the end of a voluntary sleep: the kernel counts, per
+       thread, the times it gave up the cpu of its own accord, and each such
+       sleep ends in one wakeup. A thread that exits between two reads takes its
+       last interval with it; it is counted as dropped, not as zero."
+    - "These are the process's own wakeups, not the cpu wakeups it causes in
+       other tasks: a timer it arms that wakes someone else is theirs. Every
+       wakeup on the machine, with who woke whom, is `sched.wakeup`."
+
+# The family's default: what `omn trace power --system -d 5s` composes.
+# Every power source reads the whole machine, so this default reads it too,
+# and is run on the machine (`--system` and a duration), not on a program.
+# See docs/lazy.md.
+- default:
+    family: power
+    question: "How much energy does the machine draw, and at what clock?"
+    low:
+      - {source: power.energy, mode: count, emit: [summary], target: system, label: "energy"}
+      - {source: power.freq, mode: "poll@100ms", emit: [summary], target: system, label: "frequency"}

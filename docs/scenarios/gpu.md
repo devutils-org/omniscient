@@ -842,6 +842,80 @@ count at all rather than a guess.
 
 Test: `an_occupancy_repeat_is_a_driver_sample_seen_twice_not_a_value_seen_twice`.
 
+### 9. `gpu.mem` read the launched pid alone, 0 under a wrapper -- **fixed**
+
+Found by the comparison against nvidia-smi (`docs/fixes/w22-gpu.md`, gap 1).
+A CUDA program under a wrapper is the launched process's child, and the
+driver's process list names the child. `omn trace gpu.mem -m poll@50ms -e raw
+-- sh -c 'python3 tests/gpu_workload.py arena 268435456 400 700; :'` read
+`[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]` MiB (every third point) for a tree holding
+412 MiB.
+
+The process figure is now the tree's: the observed process and every
+descendant it has at each reading (`task::with_descendants`, walked once per
+reading for all devices), summed from the driver's list; a `processes`
+attribute says how many of the tree hold any. The same command reads `[0,
+20, 156, 156, 412, 412, 412, 412, 412, 0]` MiB, `processes` 1, the same as
+the unwrapped workload's `[0, 10, 156, 156, 156, 412, ...]`.
+
+Test: `a_program_under_a_wrapper_holds_the_video_memory_its_child_allocated`
+(the 256 MiB step, to the byte, under `sh -c`).
+
+### 10. `gpu.freq`'s two lost records in the GPU bench were the driver's wait -- **said, not fixable here**
+
+The GPU bench (`docs/open-findings.md`, "The GPU bench rerun alone") counted
+2 of 191 `gpu.freq` records lost on the launch regime, twice. They were
+`late_ticks`, not drops nor a closing read after the reap (the record's
+`losses_by_kind`: `late_ticks: 2`, everything else 0).
+
+Why, measured: one NVML call every 10 ms beside `sleep 1.3` answered in 1 to
+17 ms; beside the bench's `gpu launches 50000` (placed as the bench places it,
+`BENCH_CPUS=20,21,22,23`), the first call of a round took 60 to 80 ms once or
+twice per run, at the context's creation and teardown. A 100 ms poll whose
+read waits 80 ms behind one already late outruns its tick. Under that
+placement 4 of 30 runs had one late tick, worst read 101 to 112 ms.
+
+Nothing the collector does makes the driver answer sooner. What changed:
+every NVML event's `ts_err_ns` is now the span its read took (it was 0 for
+everything but the occupancy), and a run whose reads waited longer than
+25 ms says how many, the worst, and why -- "the driver made 2 of 10 reads
+wait longer than 25 ms (worst 106.1 ms); NVML holds a read while a CUDA
+context is created or destroyed on the device ...". All four late runs of
+the thirty carried it. The bench's classing of a late tick as a lost record
+is the bench's (`examples/bench/gpu.rs`, `lossy`), filed in
+`docs/fixes/w24-gpu.md`.
+
+Test: `a_held_read_is_counted_and_said_and_a_prompt_one_is_not` (unit), and
+`a_driver_averaged_figure_carries_its_uncertainty` now holds the clock's
+error to its read's span.
+
+### 11. Every NVML poller cost 25 to 36 % of its program, mostly one read at the end -- **fixed**
+
+The backends bench (`docs/open-findings.md`) put every `vendor:nvml` poller at
+25 to 36 % of the target's cpu, `gpu.temp` among them against `low`. A
+reading is cheap: `nvmlDeviceGetTemperature` 0.1 ms of cpu, the memory info
+0.3 ms, a clock 2.5 ms, the power draw or the energy counter 9 ms each, on an
+idle board without persistence mode. What cost the window was the clock state
+read again in `stop`, to say whether a thermal or power limit was reached
+during the run: `nvmlDeviceGetCurrentClocksEventReasons` alone takes 17 to
+32 ms of cpu, the performance levels 8 to 12 ms. `omn trace gpu.temp -m
+poll@100ms -e summary` on a 150 ms cpu burn spent 36 to 45 ms (22 to 27 %).
+
+The end state is now the event reasons alone (the lock state, the
+application clocks and persistence do not move without someone setting
+them), read when the run's facts are asked, after the window closes. The
+same command spends 1.3 to 3.5 ms (0.75 to 2.15 %), and the read is in the
+run's `after_window_cpu_ns` (17.5 ms on one run), not hidden. The end line
+still appears when the reasons moved (`gpu_idle` at the start, `none` at the
+end of a CUDA program).
+
+What is left of the pollers' cost is their reads: `gpu.freq` reads three
+clocks (about 7 ms of cpu a reading on an idle board, 3 ms on a busy one),
+`gpu.power` the energy and the draw (17 ms a reading). Their `high` bands are
+those reads.
+
+Test: `a_temperature_poll_costs_its_program_its_readings_not_the_clock_state`.
+
 ## Cost of running these
 
 The suite is 23 tests and takes about **12.3 s** wall, which is slow next to the
@@ -933,3 +1007,55 @@ reading one needs a variable-offset read of the record that this eBPF layer
 does not have. On every driver with a DRM scheduler those threads are named
 after the ring they serve, so the string is right for the wrong reason, and
 every run says so in its own notes rather than leaving it here.
+
+## The twenty-fourth wave: the memory clock and the held clocks as values
+
+Two NVML sources the comparison against `nvidia-smi dmon` asked for
+(`docs/fixes/w22-gpu.md`, gaps 7 and 9).
+
+**`gpu.mem_freq`**, the memory clock as its own series (`dmon`'s `mclk`).
+`gpu.freq` keeps carrying it as `memory_hz` beside the shader clock, which no
+emit aggregates. Shown: idle the board reads 405 MHz (`nvidia-smi
+--query-gpu=clocks.mem` the same); during `gpu_workload.py kernel 2500` the
+series read 6869 to 7069 MHz, mean 6906 MHz, and `nvidia-smi dmon -s c`
+beside it printed 7069, 6869, 6869. Test:
+`the_memory_clock_is_a_series_that_a_kernel_lifts_and_the_maximum_bounds`.
+
+**`gpu.throttle`**, the share of the time the clocks were held, per reason,
+from the driver's counters of held time (`NVML_FI_DEV_PERF_POLICY_*` and
+`..._CLOCKS_EVENT_REASON_*`, one `nvmlDeviceGetFieldValues` call a reading,
+1.8 to 6.7 ms of cpu). The value is the largest share among the limiting
+reasons (power cap, thermal, sync boost, board limit, reliability, the
+slowdowns); low utilisation and running below the application or base
+clocks ride as attributes, not limits. Shown, `--mode count`: `sleep 1.5`
+gives `low_utilization_ratio` 1.0 and every limit 0; a 1.5 s kernel in a
+2.09 s window gives 0.19 (the context's creation and teardown are the rest);
+`nvidia-smi dmon -s v` printed `pviol` 0 and `tviol` 0 beside a 2 s idle
+poll whose summary was 0. **Not shown**: a non-zero limit share. Provoking
+one needs a lowered power limit or a clock lock, which are root and the
+user's. Test:
+`the_held_clocks_share_separates_an_idle_board_from_a_running_kernel`.
+
+**Not added: PCIe throughput.** `nvmlDeviceGetPcieThroughput` answers in
+KB/s over a 20 ms window (shown: during a host-to-device copy loop measured
+by the workload at 11.34 GB/s, `dmon -s t` printed 11697 to 12046 MB/s rx
+and NVML itself 10.0 to 11.2 GB/s rx, the protocol's bytes beside the
+payload), and the catalog has no rate unit to declare it in: a `bytes` series
+of a rate would be summed by `rate` and `stack` as if it were a quantity. The
+cumulative counters (`NVML_FI_DEV_PCIE_COUNT_RX_BYTES`, `..._TX_BYTES`) are
+32 bits here and wrap every 0.36 s at that rate, below any poll that is not
+itself a cost. **Not added: ECC.** `nvmlDeviceGetTotalEccErrors` answers
+"not supported" on this board (a consumer one); nothing here can be shown.
+
+**The launched tree's engine share** (`docs/fixes/w22-gpu.md`, gap 8,
+`nvidia-smi pmon`'s `sm` and `mem`). On a launch, every `gpu.engine_busy`
+NVML reading carries `process_ratio`, `process_memory_ratio` and `processes`:
+the tree's processes' newest per-process samples
+(`nvmlDeviceGetProcessUtilization`, the last 1.5 s), summed. Attributes: the
+series stays the device's occupancy. Shown: `sh -c 'python3
+tests/gpu_workload.py kernel 2500; :'` read 0, 0, 0.47, 0.47, 0.73, 0.99, 0
+with `processes` 1 while non-zero; `nvidia-smi pmon -s u` beside it printed
+47 and 73 for the child. As a value of its own (a series of the tree's
+share) it needs a request to name its value attribute, filed in
+`docs/fixes/w24-gpu.md`. Test:
+`a_launched_tree_s_engine_share_rides_beside_the_device_s`.

@@ -201,3 +201,12 @@
        `sender_comm` are the task that was running when it was generated, which
        is the sender for a `kill` and whatever was interrupted for a signal the
        kernel raised itself (a timer, a fault, a dying child)."
+
+# The family's default: what `omn trace proc -- PROGRAM` composes. One band:
+# `proc.syscall` declares `extreme`, beyond any band. See docs/lazy.md.
+- default:
+    family: proc
+    question: "How many threads and open files does the program hold?"
+    low:
+      - {source: proc.threads, mode: "poll@100ms", emit: [timeline, summary], label: "threads"}
+      - {source: proc.fd, mode: "poll@100ms", emit: [summary], label: "open files"}

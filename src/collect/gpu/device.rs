@@ -53,6 +53,8 @@ pub enum Metric {
     Temp,
     Mem,
     EngineBusy,
+    MemFreq,
+    Throttle,
 }
 
 impl Metric {
@@ -64,6 +66,8 @@ impl Metric {
             Metric::Temp => "gpu.temp",
             Metric::Mem => "gpu.mem",
             Metric::EngineBusy => "gpu.engine_busy",
+            Metric::MemFreq => "gpu.mem_freq",
+            Metric::Throttle => "gpu.throttle",
         }
     }
 
@@ -74,7 +78,7 @@ impl Metric {
         match self {
             Metric::Power => Some("energy counter"),
             Metric::EngineBusy => Some("occupancy"),
-            Metric::Freq | Metric::Temp | Metric::Mem => None,
+            Metric::Freq | Metric::Temp | Metric::Mem | Metric::MemFreq | Metric::Throttle => None,
         }
     }
 
@@ -105,6 +109,8 @@ impl Metric {
             Metric::Temp => "celsius",
             Metric::Mem => "bytes",
             Metric::EngineBusy => "ratio",
+            Metric::MemFreq => "hz",
+            Metric::Throttle => "ratio",
         }
     }
 }
@@ -144,6 +150,49 @@ fn occupancy_fingerprint(
     }
 }
 
+/// The clock-limiting counters `gpu.throttle` reads, by NVML field id, under
+/// the attribute each one's share is reported as, and whether it limits the
+/// clocks (`true`) or only says why they idle (`false`). Each is the time, in
+/// ns since the driver loaded, the clocks were held for that reason
+/// (`NVML_FI_DEV_PERF_POLICY_*`, `NVML_FI_DEV_CLOCKS_EVENT_REASON_*`); what
+/// `nvidia-smi dmon -s v` prints as `pviol` and `tviol` are the first two.
+const THROTTLE_FIELDS: [(u32, &str, bool); 11] = [
+    (74, "power_cap_ratio", true),
+    (75, "thermal_ratio", true),
+    (76, "sync_boost_ratio", true),
+    (77, "board_limit_ratio", true),
+    (79, "reliability_ratio", true),
+    (269, "sw_thermal_slowdown_ratio", true),
+    (270, "hw_thermal_slowdown_ratio", true),
+    (271, "hw_power_brake_ratio", true),
+    (78, "low_utilization_ratio", false),
+    (80, "below_application_clocks_ratio", false),
+    (81, "below_base_clocks_ratio", false),
+];
+
+/// One reading of every throttle counter of one device: each field's value
+/// and driver timestamp, or `None` where the device does not have it.
+#[derive(Debug, Clone, Default)]
+struct ThrottleRead {
+    fields: Vec<Option<super::nvml::Field>>,
+}
+
+/// The share of the time between two readings a counter of held-clock time
+/// grew by, from the driver's own timestamps of the two reads. `None` when
+/// either reading lacks it or no time passed.
+///
+/// A share above 1 is the driver's two clocks (the counter's and the
+/// timestamp's) disagreeing by a few percent over a short interval, measured
+/// up to 1.5 % at 50 ms; it is reported as 1, the most a share can be.
+fn held_share(before: &super::nvml::Field, after: &super::nvml::Field) -> Option<f64> {
+    let span_ns = after.timestamp_us.checked_sub(before.timestamp_us)? as f64 * 1000.0;
+    if span_ns <= 0.0 {
+        return None;
+    }
+    let held_ns = after.value.checked_sub(before.value)? as f64;
+    Some((held_ns / span_ns).min(1.0))
+}
+
 /// Holds the choice of metric and the mode until the target exists.
 pub struct Prepare {
     metric: Metric,
@@ -165,6 +214,11 @@ impl Prepared for Prepare {
             .map(|collector| Box::new(collector) as Box<dyn Collector>)
     }
 }
+
+/// How far back a reading asks the driver for per-process engine samples, in
+/// its microseconds: it takes one about every second, so a second and a half
+/// always holds the newest one of a process still on the device.
+const PROCESS_SAMPLES_US: u64 = 1_500_000;
 
 /// The sequence number of the reading that closes a counted window.
 const CLOSING: u64 = u64::MAX / 2;
@@ -205,10 +259,19 @@ pub struct NvmlCollector {
     /// device-wide metrics it only sets the window; for `gpu.mem` it decides
     /// whether the figure is a process's or the device's.
     pid: Option<i32>,
-    /// Each device's clock state, read before the observed program runs and
-    /// again when the run stops. Read, never set: see [`ClockState`].
+    /// Each device's clock state, read before the observed program runs, and
+    /// its clock event reasons again once the run's window has closed. Read,
+    /// never set: see [`ClockState`].
+    ///
+    /// The end is read when the facts are asked, after the window, not in
+    /// `stop`: the reasons are the dearest read NVML has here (17 to 32 ms of
+    /// cpu on a board without persistence mode), and inside the window they
+    /// were most of what a two-read `gpu.temp` run cost its program -- 36 to
+    /// 45 ms against 0.1 ms a reading (`docs/scenarios/gpu.md`, defect 11).
+    /// Only the reasons are read again: the lock state, the application
+    /// clocks and persistence do not move without someone setting them.
     clocks_at_start: Vec<ClockState>,
-    clocks_at_end: Vec<ClockState>,
+    clocks_at_end: std::sync::OnceLock<Vec<ClockState>>,
     /// How many readings found the driver's figure where the previous one
     /// left it. See [`Refresh`].
     refresh: Refresh,
@@ -218,6 +281,61 @@ pub struct NvmlCollector {
     /// The energy counter held against the draw read beside it. See
     /// [`CounterCheck`].
     counter_check: CounterCheck,
+    /// The reads the driver made wait. See [`HeldReads`].
+    held: HeldReads,
+    /// Per device, the throttle counters at the previous reading (or at the
+    /// start, before the first): what `gpu.throttle`'s shares are taken over.
+    throttle_base: Vec<ThrottleRead>,
+}
+
+/// **NVML makes a read wait while a CUDA context is created or destroyed on
+/// the device.** Measured on the board this was written on
+/// (`docs/scenarios/gpu.md`, defect 10): one NVML call every 10 ms beside
+/// `sleep` answered in 1 to 17 ms; beside the GPU bench's launch-bound
+/// program, the first call of a round took 60 to 80 ms once or twice per run,
+/// at the context's creation and teardown. A 100 ms poll whose read waits
+/// that long behind a late one outruns its tick, which the run counts as a
+/// late tick -- the two "lost records" of `gpu.freq` in the GPU bench.
+///
+/// Nothing here can make the driver answer sooner. What the collector does is
+/// say it: every event's `ts_err_ns` is the span its read took, and a run
+/// whose reads were held says how many, how long, and why.
+#[derive(Debug, Default)]
+struct HeldReads {
+    reads: u64,
+    held: u64,
+    worst_ns: u64,
+}
+
+impl HeldReads {
+    /// A read longer than this was made to wait: an idle board answers the
+    /// slowest call this collector makes (the power draw) in under 10 ms, and
+    /// the longest seen beside a program that does not touch the device was
+    /// 17 ms.
+    const HELD_NS: u64 = 25_000_000;
+
+    fn record(&mut self, read_ns: u64) {
+        self.reads += 1;
+        if read_ns > Self::HELD_NS {
+            self.held += 1;
+            self.worst_ns = self.worst_ns.max(read_ns);
+        }
+    }
+
+    fn note(&self) -> Option<String> {
+        (self.held > 0).then(|| {
+            format!(
+                "vendor:nvml: the driver made {} of {} reads wait longer than {} ms (worst {:.1} \
+                 ms); NVML holds a read while a CUDA context is created or destroyed on the \
+                 device, so a late tick beside this is the driver's wait rather than this \
+                 collector's work, and each event's ts_err_ns is how long its read took",
+                self.held,
+                self.reads,
+                Self::HELD_NS / 1_000_000,
+                self.worst_ns as f64 / 1e6
+            )
+        })
+    }
 }
 
 /// **Reading the energy counter often makes it under-count.** Measured on the
@@ -422,10 +540,12 @@ impl NvmlCollector {
             driver,
             pid,
             clocks_at_start: Vec::new(),
-            clocks_at_end: Vec::new(),
+            clocks_at_end: std::sync::OnceLock::new(),
             refresh: Refresh::default(),
             occupancy_seen_us: Vec::new(),
             counter_check: CounterCheck::default(),
+            held: HeldReads::default(),
+            throttle_base: Vec::new(),
         })
     }
 
@@ -460,6 +580,66 @@ impl NvmlCollector {
         Ok((attrs, 0))
     }
 
+    fn mem_freq(&self, device: &Device) -> Result<(Vec<Attr>, u32), NvmlError> {
+        let memory = self.nvml.memory_clock_mhz(device.handle)?;
+        let mut attrs = self.device_attrs(device, "device");
+        attrs.push(Attr::uint("hz", mhz_to_hz(memory)));
+        Ok((attrs, 0))
+    }
+
+    fn throttle_read(&self, device: &Device) -> Result<ThrottleRead, NvmlError> {
+        let ids: Vec<u32> = THROTTLE_FIELDS.iter().map(|(id, _, _)| *id).collect();
+        let fields = self.nvml.fields(device.handle, &ids)?;
+        Ok(ThrottleRead {
+            fields: fields.into_iter().map(Result::ok).collect(),
+        })
+    }
+
+    /// The share of the time since `base` each reason held the clocks, and
+    /// as the value the largest share among the reasons that limit them: a
+    /// lower bound on the time the clocks were held by any limit (the
+    /// reasons can overlap, and NVML gives no union), and the figure itself
+    /// whenever a single limit is in play, which is the usual case.
+    fn throttle(
+        &self,
+        device: &Device,
+        base: &ThrottleRead,
+    ) -> Result<(Vec<Attr>, u32, ThrottleRead), NvmlError> {
+        let now = self.throttle_read(device)?;
+        let mut attrs = self.device_attrs(device, "device");
+        let mut limit: Option<f64> = None;
+        let mut window_us: Option<i64> = None;
+        for (index, (_, name, limits)) in THROTTLE_FIELDS.iter().enumerate() {
+            let (Some(Some(before)), Some(Some(after))) =
+                (base.fields.get(index), now.fields.get(index))
+            else {
+                continue;
+            };
+            let Some(share) = held_share(before, after) else {
+                continue;
+            };
+            window_us.get_or_insert(after.timestamp_us - before.timestamp_us);
+            if *limits {
+                limit = Some(limit.map_or(share, |held: f64| held.max(share)));
+            }
+            attrs.push(float(name, share));
+        }
+        let Some(ratio) = limit else {
+            return Err(NvmlError {
+                code: -1,
+                message: format!(
+                    "{} gave no clock-limit counter twice with time between the reads",
+                    device.name
+                ),
+            });
+        };
+        attrs.push(float("ratio", ratio));
+        if let Some(window_us) = window_us {
+            attrs.push(Attr::uint("window_ns", (window_us.max(0) as u64) * 1000));
+        }
+        Ok((attrs, 0, now))
+    }
+
     fn power(&self, device: &Device) -> Result<(Vec<Attr>, u32), NvmlError> {
         let millijoules = self
             .nvml
@@ -491,7 +671,7 @@ impl NvmlCollector {
         Ok((attrs, 0))
     }
 
-    fn engine_busy(&self, device: &Device) -> Result<(Vec<Attr>, u32), NvmlError> {
+    fn engine_busy(&self, device: &Device, tree: &[i32]) -> Result<(Vec<Attr>, u32), NvmlError> {
         let utilization = self.nvml.utilization(device.handle)?;
         let mut attrs = self.device_attrs(device, "device");
         attrs.push(float("ratio", utilization.gpu as f64 / 100.0));
@@ -500,11 +680,56 @@ impl NvmlCollector {
         // is: the whole device. The i915 and amdgpu PMUs do have one, and their
         // events will say which engine they came from.
         attrs.push(Attr::text("engine", "device"));
+        if self.pid.is_some() {
+            attrs.extend(self.process_busy(device, tree));
+        }
         Ok((attrs, UTILIZATION_WINDOW_NS))
     }
 
-    /// VRAM held: by the process this run observes, or by the device when the
-    /// run observes no process.
+    /// The observed process tree's share of the engines, beside the device's,
+    /// what `nvidia-smi pmon` prints as `sm` and `mem`: the sum over the
+    /// tree's processes of each one's newest per-process sample, from the
+    /// driver's last second and a half (it samples about once a second).
+    /// Attributes, not the series: the device's occupancy stays the value, so
+    /// a process target does not change what the series means. Nothing when
+    /// the driver keeps no per-process samples; zeros, with `processes: 0`,
+    /// when it keeps some and none is the tree's.
+    fn process_busy(&self, device: &Device, tree: &[i32]) -> Vec<Attr> {
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_micros() as u64);
+        let Ok(samples) = self
+            .nvml
+            .process_utilization(device.handle, now_us.saturating_sub(PROCESS_SAMPLES_US))
+        else {
+            return Vec::new();
+        };
+        let mine: Vec<_> = samples
+            .iter()
+            .filter(|sample| tree.contains(&(sample.pid as i32)))
+            .collect();
+        let sum = |pick: fn(&super::nvml::ProcessUtilization) -> u32| -> f64 {
+            // Folded from +0.0: an empty `sum` of floats is -0.0.
+            mine.iter()
+                .fold(0.0, |total, sample| total + f64::from(pick(sample)))
+                / 100.0
+        };
+        vec![
+            float("process_ratio", sum(|sample| sample.sm).min(1.0)),
+            float("process_memory_ratio", sum(|sample| sample.memory).min(1.0)),
+            Attr::uint("processes", mine.len() as u64),
+        ]
+    }
+
+    /// VRAM held: by the process tree this run observes, or by the device when
+    /// the run observes no process.
+    ///
+    /// The tree, not the process alone: a launched program is often a wrapper
+    /// (`sh`, `python -m`, a launcher script) whose CUDA work happens in a
+    /// child, and the driver lists the child. Reading the launched pid alone
+    /// gave 0 for a tree holding 412 MiB (`docs/scenarios/gpu.md`, defect 9).
+    /// `tree` is the observed process and every descendant it has at this
+    /// reading, walked once per reading for every device.
     ///
     /// The two never share a series. A process figure and a device figure are
     /// both bytes of VRAM and mean entirely different things, so the target
@@ -513,21 +738,29 @@ impl NvmlCollector {
     /// A process absent from the driver's list holds nothing, which is reported
     /// as zero: an empty series and a series of zeros say different things
     /// about a run, and only one of them is true here.
-    fn mem(&self, device: &Device) -> Result<(Vec<Attr>, u32), NvmlError> {
+    fn mem(&self, device: &Device, tree: &[i32]) -> Result<(Vec<Attr>, u32), NvmlError> {
         let memory = self.nvml.memory(device.handle)?;
-        let Some(pid) = self.pid else {
+        if self.pid.is_none() {
             let mut attrs = self.device_attrs(device, "device");
             attrs.push(Attr::uint("bytes", memory.used));
             attrs.push(Attr::uint("device_total_bytes", memory.total));
             return Ok((attrs, 0));
-        };
+        }
 
         let processes = self.nvml.processes(device.handle)?;
         let mut held = 0u64;
         let mut kinds: Vec<&'static str> = Vec::new();
+        let mut holders: Vec<i32> = Vec::new();
         for (kind, process) in processes {
-            if process.pid as i32 != pid {
+            let pid = process.pid as i32;
+            if !tree.contains(&pid) {
                 continue;
+            }
+            // A process listed twice, as compute and as graphics, holds one
+            // arena the driver reports under each kind: counted per entry, as
+            // the driver lists it, and as one holder.
+            if !holders.contains(&pid) {
+                holders.push(pid);
             }
             held = held.saturating_add(process.used_gpu_memory);
             let kind = kind.as_str();
@@ -546,6 +779,10 @@ impl NvmlCollector {
                 kinds.join("+")
             },
         ));
+        // How many processes of the tree the figure is the sum of: 1 for a
+        // program that is its own CUDA process, more for one that forks
+        // workers, 0 for a tree that holds nothing yet.
+        attrs.push(Attr::uint("processes", holders.len() as u64));
         attrs.push(Attr::uint("device_used_bytes", memory.used));
         attrs.push(Attr::uint("device_total_bytes", memory.total));
         Ok((attrs, 0))
@@ -564,6 +801,33 @@ impl Collector for NvmlCollector {
     fn start(&mut self) -> Result<(), String> {
         // The clocks as the observed program will find them, before it runs.
         self.clocks_at_start = self.clock_states();
+        if self.metric == Metric::Throttle {
+            // The first share is over the time since this reading, as every
+            // later one is over the time since the one before it.
+            let mut bases = Vec::with_capacity(self.devices.len());
+            for device in &self.devices {
+                let base = self.throttle_read(device).map_err(|error| {
+                    format!(
+                        "cannot read the clock-limit counters of {}: {error}",
+                        device.name
+                    )
+                })?;
+                if !base.fields.iter().any(Option::is_some) {
+                    return Err(format!(
+                        "{} has none of the clock-limit counters NVML defines (fields {}):                          this driver or board does not keep them",
+                        device.name,
+                        THROTTLE_FIELDS
+                            .iter()
+                            .map(|(id, _, _)| id.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                bases.push(base);
+            }
+            self.throttle_base = bases;
+            return Ok(());
+        }
         if self.metric != Metric::Power {
             return Ok(());
         }
@@ -614,7 +878,12 @@ impl Collector for NvmlCollector {
         // Energy is the exception: a counted window of it is one reading, at
         // the end, of the energy since the baseline -- a reading a second
         // would be a running total, and `rate` sums what it is given.
-        if self.mode == Mode::Count && self.metric == Metric::Power && seq != CLOSING {
+        // So is a counted window of held-clock time: one share, over the
+        // whole window, at its close.
+        if self.mode == Mode::Count
+            && matches!(self.metric, Metric::Power | Metric::Throttle)
+            && seq != CLOSING
+        {
             return Ok(Vec::new());
         }
         if self.mode == Mode::Count {
@@ -628,14 +897,36 @@ impl Collector for NvmlCollector {
             self.last_read_ns = Some(now_ns);
         }
 
+        // The observed process tree, walked once for every device's reading.
+        let tree: Vec<i32> = match (self.metric, self.pid) {
+            (Metric::Mem | Metric::EngineBusy, Some(pid)) => {
+                crate::collect::task::with_descendants(&[pid])
+            }
+            _ => Vec::new(),
+        };
         let mut events = Vec::with_capacity(self.devices.len());
         for (offset, device) in self.devices.iter().enumerate() {
+            let read_started_ns = monotonic_ns();
             let read = match self.metric {
                 Metric::Freq => self.freq(device),
                 Metric::Power => self.power(device),
                 Metric::Temp => self.temp(device),
-                Metric::Mem => self.mem(device),
-                Metric::EngineBusy => self.engine_busy(device),
+                Metric::Mem => self.mem(device, &tree),
+                Metric::EngineBusy => self.engine_busy(device, &tree),
+                Metric::MemFreq => self.mem_freq(device),
+                Metric::Throttle => {
+                    let base = self.throttle_base.get(offset).cloned().unwrap_or_default();
+                    self.throttle(device, &base).map(|(attrs, err, now)| {
+                        // A poll's next share is over the time since this
+                        // reading; a counted window's stays over the whole.
+                        if self.mode != Mode::Count {
+                            if let Some(slot) = self.throttle_base.get_mut(offset) {
+                                *slot = now;
+                            }
+                        }
+                        (attrs, err)
+                    })
+                }
             };
             let (attrs, ts_err_ns) = match read {
                 Ok(read) => read,
@@ -656,6 +947,13 @@ impl Collector for NvmlCollector {
             // Taken after the read, so it bounds it: the value existed at or
             // before this instant.
             let ts_ns = monotonic_ns();
+            // And the read's start bounds it from below: the driver's figure
+            // is from somewhere in between, so that span is the timestamp's
+            // error. It is a few milliseconds, except while the driver makes
+            // the read wait (see [`HeldReads`]).
+            let read_ns = ts_ns.saturating_sub(read_started_ns);
+            self.held.record(read_ns);
+            let ts_err_ns = ts_err_ns.max(u32::try_from(read_ns).unwrap_or(u32::MAX));
             let mut attrs = attrs;
             if self.metric == Metric::Power {
                 self.counter_check
@@ -710,9 +1008,6 @@ impl Collector for NvmlCollector {
     /// to be last: the run stops the moment its target does, and the occupancy
     /// at that moment belongs to the series.
     fn stop(&mut self) -> Vec<Event> {
-        // The clocks as the observed program left them: a thermal or power
-        // limit reached during the run shows here and not at the start.
-        self.clocks_at_end = self.clock_states();
         if self.mode != Mode::Count {
             return Vec::new();
         }
@@ -747,6 +1042,7 @@ impl Collector for NvmlCollector {
         if let (Metric::Power, Mode::Poll { interval }) = (self.metric, self.mode) {
             notes.extend(self.counter_check.notes(interval.as_nanos()));
         }
+        notes.extend(self.held.note());
         if self.metric != Metric::EngineBusy {
             return notes;
         }
@@ -764,7 +1060,10 @@ impl Collector for NvmlCollector {
     /// collector reads the clocks and changes nothing.
     fn facts(&self) -> Vec<String> {
         let mut facts: Vec<String> = self.clocks_at_start.iter().map(ClockState::fact).collect();
-        for end in &self.clocks_at_end {
+        // The clocks as the observed program left them: a thermal or power
+        // limit reached during the run shows here and not at the start.
+        let ends = self.clocks_at_end.get_or_init(|| self.end_states());
+        for end in ends {
             let start = self
                 .clocks_at_start
                 .iter()
@@ -778,6 +1077,23 @@ impl Collector for NvmlCollector {
 }
 
 impl NvmlCollector {
+    /// Each started device's state with its event reasons read again; the
+    /// rest of the state as the start found it.
+    fn end_states(&self) -> Vec<ClockState> {
+        self.clocks_at_start
+            .iter()
+            .filter_map(|start| {
+                let device = self
+                    .devices
+                    .iter()
+                    .find(|device| device.uuid == start.device_uuid)?;
+                let mut end = start.clone();
+                end.event_reasons = ClockState::event_reasons(&self.nvml, device.handle);
+                Some(end)
+            })
+            .collect()
+    }
+
     fn clock_states(&self) -> Vec<ClockState> {
         self.devices
             .iter()
@@ -840,6 +1156,23 @@ mod tests {
 
     // One lock for the whole test binary: see `energy_counter_lock` and `CounterCheck`.
     use crate::collect::gpu::energy_counter_lock as energy_lock;
+
+    /// A read the driver held is counted and said, with the worst; a run of
+    /// prompt reads says nothing.
+    #[test]
+    fn a_held_read_is_counted_and_said_and_a_prompt_one_is_not() {
+        let mut held = HeldReads::default();
+        for read_ns in [2_000_000, 9_000_000, 17_000_000] {
+            held.record(read_ns);
+        }
+        assert_eq!(held.note(), None);
+        held.record(78_500_000);
+        held.record(31_000_000);
+        let note = held.note().expect("two reads were held");
+        assert!(note.contains("2 of 5 reads"), "{note}");
+        assert!(note.contains("worst 78.5 ms"), "{note}");
+        assert!(note.contains("CUDA context"), "{note}");
+    }
 
     /// Builds a collector for this process, or explains why this machine
     /// cannot run the test. Most machines have no NVIDIA device and must skip
@@ -1239,10 +1572,20 @@ mod tests {
             assert!((0.0..=1.0).contains(&ratio), "{ratio} is not a ratio");
         }
 
-        // The clock, read at the call, is not averaged and says so.
+        // The clock, read at the call, is not averaged: its error is the span
+        // of its own read, bounded by the time the whole sample took, and far
+        // under the averaging window.
         let Some(mut clocks) = collector(Metric::Freq) else {
             return;
         };
-        assert_eq!(clocks.sample(0).unwrap()[0].ts_err_ns, 0);
+        let before = monotonic_ns();
+        let event = clocks.sample(0).unwrap().remove(0);
+        let spent = monotonic_ns() - before;
+        assert!(
+            u64::from(event.ts_err_ns) <= spent,
+            "{} ns of error for a read inside {spent} ns",
+            event.ts_err_ns
+        );
+        assert!(u64::from(event.ts_err_ns) < u64::from(UTILIZATION_WINDOW_NS));
     }
 }
