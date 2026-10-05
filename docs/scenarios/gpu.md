@@ -842,6 +842,53 @@ count at all rather than a guess.
 
 Test: `an_occupancy_repeat_is_a_driver_sample_seen_twice_not_a_value_seen_twice`.
 
+### 9. `gpu.mem` read the launched pid alone, 0 under a wrapper -- **fixed**
+
+Found by the comparison against nvidia-smi (`docs/fixes/w22-gpu.md`, gap 1).
+A CUDA program under a wrapper is the launched process's child, and the
+driver's process list names the child. `omn trace gpu.mem -m poll@50ms -e raw
+-- sh -c 'python3 tests/gpu_workload.py arena 268435456 400 700; :'` read
+`[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]` MiB (every third point) for a tree holding
+412 MiB.
+
+The process figure is now the tree's: the observed process and every
+descendant it has at each reading (`task::with_descendants`, walked once per
+reading for all devices), summed from the driver's list; a `processes`
+attribute says how many of the tree hold any. The same command reads `[0,
+20, 156, 156, 412, 412, 412, 412, 412, 0]` MiB, `processes` 1, the same as
+the unwrapped workload's `[0, 10, 156, 156, 156, 412, ...]`.
+
+Test: `a_program_under_a_wrapper_holds_the_video_memory_its_child_allocated`
+(the 256 MiB step, to the byte, under `sh -c`).
+
+### 10. `gpu.freq`'s two lost records in the GPU bench were the driver's wait -- **said, not fixable here**
+
+The GPU bench (`docs/open-findings.md`, "The GPU bench rerun alone") counted
+2 of 191 `gpu.freq` records lost on the launch regime, twice. They were
+`late_ticks`, not drops nor a closing read after the reap (the record's
+`losses_by_kind`: `late_ticks: 2`, everything else 0).
+
+Why, measured: one NVML call every 10 ms beside `sleep 1.3` answered in 1 to
+17 ms; beside the bench's `gpu launches 50000` (placed as the bench places it,
+`BENCH_CPUS=20,21,22,23`), the first call of a round took 60 to 80 ms once or
+twice per run, at the context's creation and teardown. A 100 ms poll whose
+read waits 80 ms behind one already late outruns its tick. Under that
+placement 4 of 30 runs had one late tick, worst read 101 to 112 ms.
+
+Nothing the collector does makes the driver answer sooner. What changed:
+every NVML event's `ts_err_ns` is now the span its read took (it was 0 for
+everything but the occupancy), and a run whose reads waited longer than
+25 ms says how many, the worst, and why -- "the driver made 2 of 10 reads
+wait longer than 25 ms (worst 106.1 ms); NVML holds a read while a CUDA
+context is created or destroyed on the device ...". All four late runs of
+the thirty carried it. The bench's classing of a late tick as a lost record
+is the bench's (`examples/bench/gpu.rs`, `lossy`), filed in
+`docs/fixes/w24-gpu.md`.
+
+Test: `a_held_read_is_counted_and_said_and_a_prompt_one_is_not` (unit), and
+`a_driver_averaged_figure_carries_its_uncertainty` now holds the clock's
+error to its read's span.
+
 ## Cost of running these
 
 The suite is 23 tests and takes about **12.3 s** wall, which is slow next to the

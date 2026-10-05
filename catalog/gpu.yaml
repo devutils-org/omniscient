@@ -182,9 +182,11 @@
   filter_fields: [device, scope]
   determinism: medium
   caveats:
-    - "With a process target the figure is that process's own VRAM, from the
-       driver's process list, and the device totals ride along as separate
-       attributes. The two are never mixed into one series."
+    - "With a process target the figure is that process tree's VRAM: the
+       process and every descendant it has at each reading, summed from the
+       driver's process list, so a CUDA program under a wrapper is found;
+       `processes` says how many of the tree hold any. The device totals ride
+       along as separate attributes. The two are never mixed into one series."
     - "VRAM held is not VRAM used. A CUDA context reserves an arena the way an
        allocator does, and what the kernels touch inside it is invisible here."
     - "A process that holds no VRAM reports zero rather than nothing: an absent

@@ -955,6 +955,54 @@ fn a_process_holds_exactly_the_video_memory_it_allocated() {
     }
 }
 
+/// Defect 9, fixed. A CUDA program under a wrapper -- here a shell that does
+/// not `exec` it -- is a child of the launched process, and the driver lists
+/// the child. `gpu.mem` read the launched pid alone and reported 0 for a tree
+/// holding 412 MiB. It sums the tree now, so the same 256 MiB step the
+/// unwrapped workload shows is found under the wrapper, by one process.
+#[test]
+fn a_program_under_a_wrapper_holds_the_video_memory_its_child_allocated() {
+    if let Err(reason) = device_and_workload() {
+        return eprintln!("skipped: {reason}");
+    }
+    let _alone = exclusive();
+    let wrapped = format!("python3 tests/gpu_workload.py arena {ARENA_BYTES} 400 700; :");
+    let output = omn(&[
+        "gpu.mem",
+        "--mode",
+        "poll@50ms",
+        "--emit",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "sh",
+        "-c",
+        &wrapped,
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let run: Value = serde_json::from_str(&stdout(&output)).expect("json results");
+    let events = events(&run["results"][0], "raw");
+    let held: Vec<i64> = events
+        .iter()
+        .map(|event| attr(event, "bytes").as_i64().expect("bytes is an integer"))
+        .collect();
+    let rise = last_rise(&held).unwrap_or_else(|| {
+        panic!("the wrapped workload allocates, so the series rises: {held:?}")
+    });
+    assert_eq!(
+        held[rise] - held[rise - 1],
+        ARENA_BYTES,
+        "the child allocated {ARENA_BYTES} bytes and the wrapper's series rose by {}: {held:?}",
+        held[rise] - held[rise - 1]
+    );
+    assert_eq!(
+        attr(&events[rise], "processes"),
+        1,
+        "one process of the tree holds the memory: the child, not the shell"
+    );
+}
+
 /// A program that never opens a context holds no video memory, and the run says
 /// zero rather than saying nothing. "Nothing was measured" and "the measurement
 /// is zero" are different claims about a run and a reader cannot tell them

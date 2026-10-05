@@ -218,6 +218,58 @@ pub struct NvmlCollector {
     /// The energy counter held against the draw read beside it. See
     /// [`CounterCheck`].
     counter_check: CounterCheck,
+    /// The reads the driver made wait. See [`HeldReads`].
+    held: HeldReads,
+}
+
+/// **NVML makes a read wait while a CUDA context is created or destroyed on
+/// the device.** Measured on the board this was written on
+/// (`docs/scenarios/gpu.md`, defect 10): one NVML call every 10 ms beside
+/// `sleep` answered in 1 to 17 ms; beside the GPU bench's launch-bound
+/// program, the first call of a round took 60 to 80 ms once or twice per run,
+/// at the context's creation and teardown. A 100 ms poll whose read waits
+/// that long behind a late one outruns its tick, which the run counts as a
+/// late tick -- the two "lost records" of `gpu.freq` in the GPU bench.
+///
+/// Nothing here can make the driver answer sooner. What the collector does is
+/// say it: every event's `ts_err_ns` is the span its read took, and a run
+/// whose reads were held says how many, how long, and why.
+#[derive(Debug, Default)]
+struct HeldReads {
+    reads: u64,
+    held: u64,
+    worst_ns: u64,
+}
+
+impl HeldReads {
+    /// A read longer than this was made to wait: an idle board answers the
+    /// slowest call this collector makes (the power draw) in under 10 ms, and
+    /// the longest seen beside a program that does not touch the device was
+    /// 17 ms.
+    const HELD_NS: u64 = 25_000_000;
+
+    fn record(&mut self, read_ns: u64) {
+        self.reads += 1;
+        if read_ns > Self::HELD_NS {
+            self.held += 1;
+            self.worst_ns = self.worst_ns.max(read_ns);
+        }
+    }
+
+    fn note(&self) -> Option<String> {
+        (self.held > 0).then(|| {
+            format!(
+                "vendor:nvml: the driver made {} of {} reads wait longer than {} ms (worst {:.1} \
+                 ms); NVML holds a read while a CUDA context is created or destroyed on the \
+                 device, so a late tick beside this is the driver's wait rather than this \
+                 collector's work, and each event's ts_err_ns is how long its read took",
+                self.held,
+                self.reads,
+                Self::HELD_NS / 1_000_000,
+                self.worst_ns as f64 / 1e6
+            )
+        })
+    }
 }
 
 /// **Reading the energy counter often makes it under-count.** Measured on the
@@ -426,6 +478,7 @@ impl NvmlCollector {
             refresh: Refresh::default(),
             occupancy_seen_us: Vec::new(),
             counter_check: CounterCheck::default(),
+            held: HeldReads::default(),
         })
     }
 
@@ -503,8 +556,15 @@ impl NvmlCollector {
         Ok((attrs, UTILIZATION_WINDOW_NS))
     }
 
-    /// VRAM held: by the process this run observes, or by the device when the
-    /// run observes no process.
+    /// VRAM held: by the process tree this run observes, or by the device when
+    /// the run observes no process.
+    ///
+    /// The tree, not the process alone: a launched program is often a wrapper
+    /// (`sh`, `python -m`, a launcher script) whose CUDA work happens in a
+    /// child, and the driver lists the child. Reading the launched pid alone
+    /// gave 0 for a tree holding 412 MiB (`docs/scenarios/gpu.md`, defect 9).
+    /// `tree` is the observed process and every descendant it has at this
+    /// reading, walked once per reading for every device.
     ///
     /// The two never share a series. A process figure and a device figure are
     /// both bytes of VRAM and mean entirely different things, so the target
@@ -513,21 +573,29 @@ impl NvmlCollector {
     /// A process absent from the driver's list holds nothing, which is reported
     /// as zero: an empty series and a series of zeros say different things
     /// about a run, and only one of them is true here.
-    fn mem(&self, device: &Device) -> Result<(Vec<Attr>, u32), NvmlError> {
+    fn mem(&self, device: &Device, tree: &[i32]) -> Result<(Vec<Attr>, u32), NvmlError> {
         let memory = self.nvml.memory(device.handle)?;
-        let Some(pid) = self.pid else {
+        if self.pid.is_none() {
             let mut attrs = self.device_attrs(device, "device");
             attrs.push(Attr::uint("bytes", memory.used));
             attrs.push(Attr::uint("device_total_bytes", memory.total));
             return Ok((attrs, 0));
-        };
+        }
 
         let processes = self.nvml.processes(device.handle)?;
         let mut held = 0u64;
         let mut kinds: Vec<&'static str> = Vec::new();
+        let mut holders: Vec<i32> = Vec::new();
         for (kind, process) in processes {
-            if process.pid as i32 != pid {
+            let pid = process.pid as i32;
+            if !tree.contains(&pid) {
                 continue;
+            }
+            // A process listed twice, as compute and as graphics, holds one
+            // arena the driver reports under each kind: counted per entry, as
+            // the driver lists it, and as one holder.
+            if !holders.contains(&pid) {
+                holders.push(pid);
             }
             held = held.saturating_add(process.used_gpu_memory);
             let kind = kind.as_str();
@@ -546,6 +614,10 @@ impl NvmlCollector {
                 kinds.join("+")
             },
         ));
+        // How many processes of the tree the figure is the sum of: 1 for a
+        // program that is its own CUDA process, more for one that forks
+        // workers, 0 for a tree that holds nothing yet.
+        attrs.push(Attr::uint("processes", holders.len() as u64));
         attrs.push(Attr::uint("device_used_bytes", memory.used));
         attrs.push(Attr::uint("device_total_bytes", memory.total));
         Ok((attrs, 0))
@@ -628,13 +700,19 @@ impl Collector for NvmlCollector {
             self.last_read_ns = Some(now_ns);
         }
 
+        // The observed process tree, walked once for every device's reading.
+        let tree: Vec<i32> = match (self.metric, self.pid) {
+            (Metric::Mem, Some(pid)) => crate::collect::task::with_descendants(&[pid]),
+            _ => Vec::new(),
+        };
         let mut events = Vec::with_capacity(self.devices.len());
         for (offset, device) in self.devices.iter().enumerate() {
+            let read_started_ns = monotonic_ns();
             let read = match self.metric {
                 Metric::Freq => self.freq(device),
                 Metric::Power => self.power(device),
                 Metric::Temp => self.temp(device),
-                Metric::Mem => self.mem(device),
+                Metric::Mem => self.mem(device, &tree),
                 Metric::EngineBusy => self.engine_busy(device),
             };
             let (attrs, ts_err_ns) = match read {
@@ -656,6 +734,13 @@ impl Collector for NvmlCollector {
             // Taken after the read, so it bounds it: the value existed at or
             // before this instant.
             let ts_ns = monotonic_ns();
+            // And the read's start bounds it from below: the driver's figure
+            // is from somewhere in between, so that span is the timestamp's
+            // error. It is a few milliseconds, except while the driver makes
+            // the read wait (see [`HeldReads`]).
+            let read_ns = ts_ns.saturating_sub(read_started_ns);
+            self.held.record(read_ns);
+            let ts_err_ns = ts_err_ns.max(u32::try_from(read_ns).unwrap_or(u32::MAX));
             let mut attrs = attrs;
             if self.metric == Metric::Power {
                 self.counter_check
@@ -747,6 +832,7 @@ impl Collector for NvmlCollector {
         if let (Metric::Power, Mode::Poll { interval }) = (self.metric, self.mode) {
             notes.extend(self.counter_check.notes(interval.as_nanos()));
         }
+        notes.extend(self.held.note());
         if self.metric != Metric::EngineBusy {
             return notes;
         }
@@ -840,6 +926,23 @@ mod tests {
 
     // One lock for the whole test binary: see `energy_counter_lock` and `CounterCheck`.
     use crate::collect::gpu::energy_counter_lock as energy_lock;
+
+    /// A read the driver held is counted and said, with the worst; a run of
+    /// prompt reads says nothing.
+    #[test]
+    fn a_held_read_is_counted_and_said_and_a_prompt_one_is_not() {
+        let mut held = HeldReads::default();
+        for read_ns in [2_000_000, 9_000_000, 17_000_000] {
+            held.record(read_ns);
+        }
+        assert_eq!(held.note(), None);
+        held.record(78_500_000);
+        held.record(31_000_000);
+        let note = held.note().expect("two reads were held");
+        assert!(note.contains("2 of 5 reads"), "{note}");
+        assert!(note.contains("worst 78.5 ms"), "{note}");
+        assert!(note.contains("CUDA context"), "{note}");
+    }
 
     /// Builds a collector for this process, or explains why this machine
     /// cannot run the test. Most machines have no NVIDIA device and must skip
@@ -1239,10 +1342,20 @@ mod tests {
             assert!((0.0..=1.0).contains(&ratio), "{ratio} is not a ratio");
         }
 
-        // The clock, read at the call, is not averaged and says so.
+        // The clock, read at the call, is not averaged: its error is the span
+        // of its own read, bounded by the time the whole sample took, and far
+        // under the averaging window.
         let Some(mut clocks) = collector(Metric::Freq) else {
             return;
         };
-        assert_eq!(clocks.sample(0).unwrap()[0].ts_err_ns, 0);
+        let before = monotonic_ns();
+        let event = clocks.sample(0).unwrap().remove(0);
+        let spent = monotonic_ns() - before;
+        assert!(
+            u64::from(event.ts_err_ns) <= spent,
+            "{} ns of error for a read inside {spent} ns",
+            event.ts_err_ns
+        );
+        assert!(u64::from(event.ts_err_ns) < u64::from(UTILIZATION_WINDOW_NS));
     }
 }
