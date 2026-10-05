@@ -197,6 +197,15 @@ pub struct PrepareExec {
 impl Prepared for PrepareExec {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         trace_only(self.mode, "proc.exec", "an exec")?;
+        // A process, or the program a run launched: the execs of it and of
+        // its descendants, which the program on the machine reports and this
+        // collector keeps by parentage (`Tree`).
+        if let Target::Pid(_) = target {
+            let root = target.first_pid().expect("a pid target names a pid") as u32;
+            let mut collector = ExecCollector::new(self.filter);
+            collector.tree = Some(Tree::rooted_at(root));
+            return Ok(Box::new(collector));
+        }
         let whose = machine_or_cgroup(target, "proc.exec")?;
         Ok(Box::new(ExecCollector::new(self.filter).within(whose)))
     }
@@ -213,6 +222,95 @@ pub struct ExecCollector {
     /// Execs whose path could not be read out of the kernel at all.
     unnamed: u64,
     predicate: Predicate,
+    /// A process and its descendants, for a `pid` or launched target.
+    tree: Option<Tree>,
+    /// The last drain's execs the tree did not take, looked at once more.
+    undecided: Vec<Exec>,
+    /// Set for the drain at `stop`, after which nothing is looked at again.
+    last_drain: bool,
+}
+
+/// A process and every process descended from it that this run has seen.
+///
+/// An exec carries its parent's thread group, read in the kernel at the exec.
+/// A process is in the tree when it is the root, when its parent is, or when
+/// a walk up `/proc/<pid>/stat`'s parents from its parent reaches the tree --
+/// the case of a fork that did not exec (a subshell) before its child did.
+/// That walk is read at the drain, so a forked parent that never exec'd and
+/// had already exited by then is not found, and its child's exec is not
+/// kept; the catalog says so.
+#[derive(Debug, Clone)]
+pub struct Tree {
+    members: std::collections::HashSet<u32>,
+}
+
+impl Tree {
+    pub fn rooted_at(root: u32) -> Self {
+        Self {
+            members: std::iter::once(root).collect(),
+        }
+    }
+
+    /// Which of a batch of execs, `(pid, ppid)` in the order they happened,
+    /// are the tree's. In order first, walking `/proc` for a parent it has
+    /// not seen; then again until nothing changes, for a child whose parent's
+    /// own exec came after it (a subshell that forked a command and then
+    /// exec'd its last one).
+    pub fn select(&mut self, execs: &[(u32, u32)]) -> Vec<bool> {
+        let mut kept: Vec<bool> = execs
+            .iter()
+            .map(|(pid, ppid)| self.admits(*pid, *ppid))
+            .collect();
+        loop {
+            let mut changed = false;
+            for (at, (pid, ppid)) in execs.iter().enumerate() {
+                if !kept[at] && self.members.contains(ppid) {
+                    self.members.insert(*pid);
+                    kept[at] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return kept;
+            }
+        }
+    }
+
+    /// Whether an exec of `pid`, whose parent is `ppid`, is the tree's, and
+    /// takes it in when it is.
+    pub fn admits(&mut self, pid: u32, ppid: u32) -> bool {
+        if self.members.contains(&pid) || self.members.contains(&ppid) {
+            self.members.insert(pid);
+            return true;
+        }
+        let mut walked = Vec::new();
+        let mut at = ppid;
+        // Bounded: a chain of parents is short, and pid 1 is everyone's end.
+        for _ in 0..64 {
+            if at <= 1 {
+                return false;
+            }
+            if self.members.contains(&at) {
+                self.members.extend(walked);
+                self.members.insert(ppid);
+                self.members.insert(pid);
+                return true;
+            }
+            walked.push(at);
+            let Some(parent) = parent_of(at) else {
+                return false;
+            };
+            at = parent;
+        }
+        false
+    }
+}
+
+/// The parent of a live process, from `/proc/<pid>/stat`.
+fn parent_of(pid: u32) -> Option<u32> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = text.rsplit_once(')')?;
+    rest.split_whitespace().nth(1)?.parse().ok()
 }
 
 impl ExecCollector {
@@ -230,6 +328,9 @@ impl ExecCollector {
             truncated: 0,
             unnamed: 0,
             predicate: Predicate::new(filter),
+            tree: None,
+            undecided: Vec::new(),
+            last_drain: false,
         }
     }
 
@@ -242,32 +343,48 @@ impl ExecCollector {
         let mut undecoded = 0;
         let mut truncated = 0;
         let mut unnamed = 0;
-        let predicate = &mut self.predicate;
-        program.drain(
-            |exec: Exec| {
-                if exec.filename_truncated() {
-                    truncated += 1;
+        let mut drained = Vec::new();
+        program.drain(|exec: Exec| drained.push(exec), &mut undecoded);
+        if let Some(tree) = self.tree.as_mut() {
+            // The previous drain's execs that were not the tree's are looked
+            // at once more, and only once: a parent's own exec may arrive in
+            // the drain after its child's.
+            let mut batch = std::mem::take(&mut self.undecided);
+            let carried = batch.len();
+            batch.append(&mut drained);
+            let pairs: Vec<(u32, u32)> = batch.iter().map(|exec| (exec.tgid, exec.ppid)).collect();
+            let kept = tree.select(&pairs);
+            for (at, (exec, kept)) in batch.into_iter().zip(kept).enumerate() {
+                if kept {
+                    drained.push(exec);
+                } else if at >= carried && !self.last_drain {
+                    self.undecided.push(exec);
                 }
-                let filename = exec.filename();
-                if filename.is_empty() {
-                    unnamed += 1;
-                }
-                let event = Event {
-                    ts_ns: exec.ts_ns,
-                    ts_err_ns: 0,
-                    kind: "proc.exec".to_owned(),
-                    keys: vec![KeyValue::task(exec.tid as i32), KeyValue::comm(exec.comm())],
-                    attrs: exec_attributes(&exec, &filename),
-                    collector_id: id.clone(),
-                    seq: index,
-                };
-                if predicate.keeps(&event) {
-                    events.push(event);
-                    index += 1;
-                }
-            },
-            &mut undecoded,
-        );
+            }
+            drained.sort_by_key(|exec| exec.ts_ns);
+        }
+        for exec in drained {
+            if exec.filename_truncated() {
+                truncated += 1;
+            }
+            let filename = exec.filename();
+            if filename.is_empty() {
+                unnamed += 1;
+            }
+            let event = Event {
+                ts_ns: exec.ts_ns,
+                ts_err_ns: 0,
+                kind: "proc.exec".to_owned(),
+                keys: vec![KeyValue::task(exec.tid as i32), KeyValue::comm(exec.comm())],
+                attrs: exec_attributes(&exec, &filename),
+                collector_id: id.clone(),
+                seq: index,
+            };
+            if self.predicate.keeps(&event) {
+                events.push(event);
+                index += 1;
+            }
+        }
         self.truncated += truncated;
         self.unnamed += unnamed;
         self.inner.note_undecoded(undecoded, "exec");
@@ -290,6 +407,7 @@ fn exec_attributes(exec: &Exec, filename: &str) -> Vec<Attr> {
         Attr::uint("count", 1),
         Attr::uint("tid", u64::from(exec.tid)),
         Attr::uint("pid", u64::from(exec.tgid)),
+        Attr::uint("ppid", u64::from(exec.ppid)),
         // The thread id the task had before this exec. For the ordinary
         // fork-then-exec it is the same as `tid`; it differs when a thread
         // other than the group leader execs and replaces the whole group, which
@@ -332,6 +450,7 @@ impl Collector for ExecCollector {
 
     fn stop(&mut self) -> Vec<Event> {
         let mut trailing = Vec::new();
+        self.last_drain = true;
         self.drain_into(&mut trailing, u64::MAX / 2);
         if let Some(program) = self.program.as_ref() {
             let dropped = program.dropped();
@@ -904,7 +1023,21 @@ mod tests {
             cpu: 3,
             comm: padded("true"),
             filename: padded("/bin/true"),
+            ppid: 1,
+            pad: 0,
         }
+    }
+
+    /// A child whose parent's own exec comes after it in the batch is the
+    /// tree's (a subshell that forked a command, then exec'd its last one);
+    /// an exec of an unrelated parent is not.
+    #[test]
+    fn a_tree_takes_descendants_in_any_order_and_nothing_else() {
+        let mut tree = Tree::rooted_at(100);
+        // 100 execs; 102 is the child of 101, which execs after it; 900 is a
+        // process whose parent is pid 1's and not ours.
+        let kept = tree.select(&[(100, 50), (102, 101), (101, 100), (900, 1), (103, 102)]);
+        assert_eq!(kept, vec![true, true, true, false, true]);
     }
 
     fn a_signal() -> Signal {
@@ -993,19 +1126,26 @@ mod tests {
         assert_eq!(exec.comm(), "true");
     }
 
-    /// `proc.exec` and `proc.exit` watch the machine or a cgroup, and a
-    /// process target is refused by name rather than quietly widened.
+    /// `proc.exit` watches the machine or a cgroup, and a process target is
+    /// refused by name rather than quietly widened; `proc.exec` takes a
+    /// process, as its tree (the twenty-fourth wave).
     #[test]
     fn a_process_target_is_refused_and_a_cgroup_is_taken() {
-        let Err(error) = Box::new(PrepareExec {
+        let Err(error) = Box::new(PrepareExit {
             mode: Mode::Trace,
             filter: None,
         })
         .attach(&Target::Pid(vec![1])) else {
-            panic!("`proc.exec` does not watch one process");
+            panic!("`proc.exit` does not watch one process");
         };
         assert!(error.contains("pid"), "{error}");
         assert!(error.contains("--system"), "{error}");
+        assert!(Box::new(PrepareExec {
+            mode: Mode::Trace,
+            filter: None,
+        })
+        .attach(&Target::Pid(vec![1]))
+        .is_ok());
 
         // The hierarchy's root is a cgroup every machine with cgroup2 has.
         if std::path::Path::new("/sys/fs/cgroup/cgroup.procs").exists() {

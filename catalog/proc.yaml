@@ -41,10 +41,19 @@
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_process_exec", "bpf"], cost: low, equivalent: true}
   modes: [trace]
   emits: [raw, timeline, topk, summary]
-  targets: {system: native, cgroup: bpf_only}
+  targets: {system: native, cgroup: bpf_only, pid: native, launch: native}
   keys: [task, comm]
-  filter_fields: [comm, filename]
+  filter_fields: [comm, filename, pid, ppid]
   determinism: medium
+  caveats:
+    - "On a process or a launched program, the execs of it and of its
+       descendants: the program reports the machine's, each with its parent
+       (`ppid`, read in the kernel at the exec), and the run keeps those whose
+       parent is the process or a descendant it has seen. A descendant that
+       forked without exec'ing (a subshell) is found by walking `/proc`'s
+       parents at the drain, so one that had already exited by then is not,
+       and its child's execs are not kept."
+
 
 - id: proc.exit
   family: proc

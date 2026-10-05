@@ -73,9 +73,14 @@ pub struct Exec {
     pub cpu: u32,
     pub(crate) comm: [u8; COMM_BYTES],
     pub(crate) filename: [u8; PATH_BYTES],
+    /// The parent's thread group, `task_struct.real_parent->tgid` at the
+    /// exec: what lets a launched run follow its program's descendants
+    /// (`execsnoop`'s `PPID`, the twenty-second wave's bpftrace gap 3).
+    pub ppid: u32,
+    pub(crate) pad: u32,
 }
 
-const EXEC_BYTES: usize = 104;
+const EXEC_BYTES: usize = 112;
 
 /// One task leaving, as the program writes it.
 #[repr(C)]
@@ -185,6 +190,8 @@ impl Exec {
             cpu: word(bytes, 20),
             comm,
             filename,
+            ppid: word(bytes, 104),
+            pad: 0,
         })
     }
 }
@@ -275,13 +282,15 @@ impl Signal {
 // below crosses the two, because nothing else connects them and a field written
 // where the struct does not read it is a plausible number rather than an error.
 
-const EXEC_EVENT: i16 = -112;
+const EXEC_EVENT: i16 = -120;
 const EXEC_TID: i16 = EXEC_EVENT + 8;
 const EXEC_TGID: i16 = EXEC_EVENT + 12;
 const EXEC_OLD_PID: i16 = EXEC_EVENT + 16;
 const EXEC_CPU: i16 = EXEC_EVENT + 20;
 const EXEC_COMM: i16 = EXEC_EVENT + 24;
 const EXEC_FILENAME: i16 = EXEC_EVENT + 40;
+const EXEC_PPID: i16 = EXEC_EVENT + 104;
+const EXEC_PAD: i16 = EXEC_EVENT + 108;
 /// Scratch, below the record: the `char *` read out of the `linux_binprm`
 /// before the string behind it is read.
 const EXEC_PATH_PTR: i16 = EXEC_EVENT - 8;
@@ -377,6 +386,7 @@ fn exec_instructions(
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
     let comm_offset = btf.member_offset("task_struct", "comm")?;
     let filename_offset = btf.member_offset("linux_binprm", "filename")?;
+    let parent_offset = btf.member_offset("task_struct", "real_parent")?;
 
     let mut program = Program::new();
     // r6 keeps the context, r7 the task and r8 the `linux_binprm`. All three
@@ -407,6 +417,15 @@ fn exec_instructions(
         "done",
     );
     read_field(&mut program, EXEC_COMM, COMM_BYTES as i32, 7, comm_offset);
+
+    // The parent's thread group, two reads: the pointer, then its `tgid`. The
+    // pointer goes through the path's slot, which is written again below. A
+    // read that fails leaves the zero stored first.
+    program.push(Insn::st_imm(BPF_W, R10, EXEC_PPID, 0));
+    program.push(Insn::st_imm(BPF_W, R10, EXEC_PAD, 0));
+    read_field(&mut program, EXEC_PATH_PTR, 8, 7, parent_offset);
+    program.push(Insn::ldx(BPF_DW, 9, R10, EXEC_PATH_PTR));
+    read_field(&mut program, EXEC_PPID, 4, 9, tgid_offset);
 
     // The path is two reads: the `char *` out of the `linux_binprm`, and then
     // the string it points at. The second is a `_str` read rather than a fixed
@@ -849,6 +868,8 @@ mod tests {
             (EXEC_CPU, offset_of!(Exec, cpu), "exec.cpu"),
             (EXEC_COMM, offset_of!(Exec, comm), "exec.comm"),
             (EXEC_FILENAME, offset_of!(Exec, filename), "exec.filename"),
+            (EXEC_PPID, offset_of!(Exec, ppid), "exec.ppid"),
+            (EXEC_PAD, offset_of!(Exec, pad), "exec.pad"),
         ] {
             assert_eq!(
                 (stack - EXEC_EVENT) as usize,
@@ -958,6 +979,8 @@ mod tests {
             cpu: 0,
             comm: [0; COMM_BYTES],
             filename,
+            ppid: 1,
+            pad: 0,
         };
         assert!(full.filename_truncated());
         assert_eq!(full.filename().len(), PATH_BYTES);
@@ -1081,9 +1104,10 @@ mod tests {
                 .iter()
                 .filter(|id| **id == helper::PROBE_READ_KERNEL)
                 .count(),
-            4,
-            "one fixed read per field taken out of the task -- tid, tgid, comm -- and one for \
-             the path pointer out of the binprm"
+            6,
+            "one fixed read per field taken out of the task -- tid, tgid, comm -- two for the \
+             parent's tgid (the pointer, then the field), and one for the path pointer out of \
+             the binprm"
         );
     }
 

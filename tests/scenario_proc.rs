@@ -2274,9 +2274,9 @@ fn the_combinations_these_sources_do_not_have_are_refused_with_the_reason() {
         stderr(&output)
     );
 
-    // A pid is not a target these two have: an exec is the moment a pid stops
-    // being one program and starts being another.
-    let output = omn(&["proc.exec", "--pid", "1", "--emit", "raw", "-d", "50ms"]);
+    // A pid is not a target `proc.exit` has. (`proc.exec` takes one since the
+    // twenty-fourth wave, as the process and its descendants.)
+    let output = omn(&["proc.exit", "--pid", "1", "--emit", "raw", "-d", "50ms"]);
     assert_eq!(
         output.status.code(),
         Some(EXIT_REJECTED),
@@ -2906,4 +2906,58 @@ fn a_task_that_renames_itself_is_counted_under_each_name_with_its_errors() {
             "a row of another syscall: {keys}"
         );
     }
+}
+
+/// `proc.exec` on a launched program is the program's execs and its
+/// descendants', and nothing else on the machine (the twenty-second wave's
+/// bpftrace gap 3: per launch, not only `--system`).
+///
+/// Ground truth is the script's own shape: the shell itself, five `echo`s, a
+/// subshell whose first `true` is forked and whose last is exec'd in place
+/// (so the forked child's exec comes before its parent's), and a two-command
+/// pipeline -- ten execs. A loop of `/bin/true` beside it, outside the tree,
+/// must add none.
+#[test]
+fn a_launched_programs_execs_are_its_tree_and_nothing_beside_it() {
+    let script = std::env::temp_dir().join(format!("omn-exec-tree-{}.sh", std::process::id()));
+    std::fs::write(
+        &script,
+        "for i in 1 2 3 4 5; do /bin/echo x >/dev/null; done\n\
+         ( /bin/true; /bin/true )\n\
+         /bin/true | /bin/cat >/dev/null\n",
+    )
+    .expect("a script");
+    let mut beside = Command::new("sh")
+        .args(["-c", "while :; do /bin/true; sleep 0.02; done"])
+        .spawn()
+        .expect("a loop beside");
+    let output = omn(&[
+        "proc.exec",
+        "--emit",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "sh",
+        script.to_str().unwrap(),
+    ]);
+    beside.kill().ok();
+    beside.wait().ok();
+    std::fs::remove_file(&script).ok();
+    if skipped_without_bpf(&output) || machine_cannot_trace(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let doc = document(&output);
+    let rows = events(&doc["results"][0]);
+    let mut names: Vec<String> = rows
+        .iter()
+        .filter_map(|row| attr_text(row, "comm"))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["cat", "echo", "echo", "echo", "echo", "echo", "sh", "true", "true", "true"],
+        "the script's ten execs, and none of the loop beside it"
+    );
 }
