@@ -7,9 +7,10 @@
 //!
 //! That has a consequence worth stating rather than hiding: the first read of a
 //! run produces no event. It establishes the baseline, and a baseline is not a
-//! measurement of anything. A run shorter than one poll interval therefore
-//! measures nothing, and says so, instead of reporting the traffic since boot
-//! as though it had just happened.
+//! measurement of anything. It is taken at `start`, before the observed program
+//! is released, so the program's first bytes are in the first interval rather
+//! than before a baseline; the traffic since boot is never reported as though
+//! it had just happened.
 
 use std::collections::BTreeMap;
 
@@ -80,6 +81,7 @@ impl Prepared for Prepare {
             by_direction: self.1,
             only,
             previous: BTreeMap::new(),
+            pass_first_tick: false,
             losses: Losses::default(),
         }))
     }
@@ -94,6 +96,11 @@ pub struct DevCollector {
     only: Option<String>,
     /// Last value seen per interface, for the delta.
     previous: BTreeMap<String, (u64, u64)>,
+    /// The first tick after a baseline taken at `start`, which the runner
+    /// takes as soon as the program is released: its interval would be
+    /// microseconds long, so it is passed over and the next tick measures
+    /// from the baseline.
+    pass_first_tick: bool,
     losses: Losses,
 }
 
@@ -160,7 +167,33 @@ impl Collector for DevCollector {
         self.counted.value_attr()
     }
 
+    /// The baseline, taken before the observed program is released, so what
+    /// it sends from its first instruction is in the first interval rather
+    /// than before a baseline taken at the first tick (`io.bytes` does the
+    /// same, `docs/open-findings.md`, "`io.bytes`' polled baseline").
+    ///
+    /// The first tick then produces no event and moves nothing: its interval
+    /// since this read is the few microseconds since the release, and the
+    /// bytes in it are in the next interval rather than lost.
+    fn start(&mut self) -> Result<(), String> {
+        let lines = match self.read() {
+            Ok(lines) => lines,
+            // An interface that is not there yet is the first tick's to say.
+            Err(SampleError::TargetGone(_)) => return Ok(()),
+            Err(error) => return Err(format!("cannot read {PATH}: {error:?}")),
+        };
+        for line in lines {
+            self.previous
+                .insert(line.name, (line.received, line.transmitted));
+        }
+        self.pass_first_tick = !self.previous.is_empty();
+        Ok(())
+    }
+
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+        if std::mem::take(&mut self.pass_first_tick) {
+            return Ok(Vec::new());
+        }
         let lines = self.read()?;
         let ts_ns = monotonic_ns();
         let mut events = Vec::new();
@@ -285,6 +318,57 @@ mod tests {
             })
             .collect();
         assert_eq!(directions, ["dir:rx", "dir:tx"]);
+    }
+
+    /// Pushes `bytes` through loopback, end to end, and returns once the
+    /// peer has read them all.
+    fn push_over_loopback(bytes: usize) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let reader = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let mut sink = Vec::new();
+            peer.read_to_end(&mut sink).unwrap();
+            sink.len()
+        });
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream.write_all(&vec![7u8; bytes]).unwrap();
+        drop(stream);
+        assert_eq!(reader.join().unwrap(), bytes);
+    }
+
+    /// The baseline is taken at `start`, before the program is released, so
+    /// what it sends before the runner's first tick is in the first
+    /// interval. Ground truth: a known volume pushed between the two; the
+    /// first tick passes over and the second has at least that volume on
+    /// `lo`, in each direction.
+    #[test]
+    fn what_moves_before_the_first_tick_is_measured_from_the_start() {
+        const VOLUME: usize = 4 << 20;
+        let mut collector = Box::new(Prepare(Counted::Bytes, false))
+            .attach(&Target::Iface("lo".to_owned()))
+            .expect("loopback is readable");
+        collector.start().expect("the baseline is readable");
+        push_over_loopback(VOLUME);
+        assert!(
+            collector.sample(0).unwrap().is_empty(),
+            "the first tick, microseconds after the release, is no interval"
+        );
+        let events = collector.sample(1).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        for direction in ["rx", "tx"] {
+            let moved: u64 = events[0]
+                .attr(direction)
+                .unwrap()
+                .to_string()
+                .parse()
+                .unwrap();
+            assert!(
+                moved >= VOLUME as u64,
+                "{direction}: {moved} bytes, {VOLUME} pushed before the first tick"
+            );
+        }
     }
 
     #[test]

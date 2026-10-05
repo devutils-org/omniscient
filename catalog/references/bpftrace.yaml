@@ -103,7 +103,7 @@
   tool: execsnoop.bt
   use: "execsnoop.bt: every program executed"
   workload: [sh, tests/reference/workloads/bpftrace/execs.sh, "20"]
-  omn: [trace, proc.exec, --system, -d, 6s, -m, trace, -e, summary, --filter, 'comm == "true"', --format, json]
+  omn: [trace, proc.exec, --system, -d, 6s, -m, trace, -e, summary, --filter, 'filename == "/bin/true"', --format, json]
   run: alongside
   settle_ms: 2000
   reference:
@@ -116,7 +116,7 @@
     key: "argv0:/bin/true"
     omn: results.0.outputs[emit=summary].series.*.count
     tolerance: {abs: 0}
-    why: "one run, both observers system-wide over the same seconds: the workload executes /bin/true exactly 20 times; anything else on the machine running `true` by that path would show on both sides"
+    why: "one run, both observers system-wide over the same seconds: the workload executes /bin/true exactly 20 times, by that path: omn filters on the filename the exec was given, execsnoop keys by argv0, the same string here, so the `true` other programs run through PATH (/usr/bin/true, 171 against 93 when omn filtered on comm under the twenty-fourth wave's load) is on neither side; something else running /bin/true by that path would show on both"
 
 - id: bitesize
   source: io.size
@@ -177,19 +177,21 @@
   tool: runqlat.bt
   use: "runqlat.bt: run queue latency histogram"
   workload: [tests/reference/workloads/bpftrace/omnref, tests/reference/workloads/bpftrace/act.py, spin, "2"]
-  omn: [trace, sched.runqlat, -m, trace, -e, "hist:log2", --filter, 'comm == "omnref"', --format, json]
+  # --system beside the program (twenty-fourth wave, stream run): the
+  # machine's waits for as long as the program runs, as runqlat.bt -c sees.
+  omn: [trace, sched.runqlat, --system, -m, trace, -e, "hist:log2", --format, json]
+  runs: 3
   reference:
     command: [sh, tests/reference/workloads/bpftrace/under.sh, /usr/share/bpftrace/tools/runqlat.bt, --]
     parse: bpftrace_hist_usecs
     requires: [bpftrace]
     privileged: true
     sudo: bpftrace
-  gap: "runqlat.bt is system-wide over the program's run, and omn has no machine-wide target bounded by a launched program (--system beside -- prog, STATE.md item 1): its histogram is the program's alone. Under the twenty-third wave's load the workload's waits dominated the machine's and the medians agreed; on a quiet machine they do not (omn 2097152 ns for the workload's two busy children per cpu, runqlat.bt 128000 ns for the machine, log2 buckets 21 and 16). The pair runs once omn can watch the machine for as long as a program runs"
   compare:
     key: "@usecs/p50"
     omn_parse: omn_hist_usecs
     tolerance: {log2_buckets: 1}
-    why: "two busy children per CPU for two seconds: their waits dominate runqlat's system-wide histogram and are all of omn's; a median on two log2 grids a factor 1000/1024 apart (the header), one bucket being the grids' offset"
+    why: "both the machine's run queue waits for as long as the workload runs (two busy children per cpu for two seconds), separate runs: runqlat.bt launched by bpftrace -c, omn by --system beside the program; a median on two log2 grids a factor 1000/1024 apart (the header), one bucket being the grids' offset. Separate runs of a machine-wide histogram move with the machine's load, so the medians of three runs are compared: one run each read 16384 against 1024000 ns once under the twenty-fourth wave's load, and held twice. The twenty-third wave's gap was omn reading the program's waits alone (2097152 ns against the machine's 128000 on a quiet machine)"
 
 - id: tcpconnect
   source: net.tcp.connect

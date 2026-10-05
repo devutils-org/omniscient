@@ -18,6 +18,7 @@
 //! uncontended acquisitions that never reach a futex.
 
 mod futex;
+mod interrupts;
 mod irq;
 mod lock;
 mod migrations;
@@ -26,6 +27,8 @@ mod mutex_usdt;
 mod numa_balance;
 mod offcpu;
 mod runqlat;
+mod runqueue;
+mod slices;
 mod switch_count;
 mod switches;
 mod wakeup;
@@ -33,6 +36,67 @@ mod wakeup;
 use super::Factory;
 use crate::bpf::Whose;
 use crate::request::Target;
+
+/// Whether an event passes the filter with `kind` naming what the row says
+/// it is -- a hard or soft interrupt, a spin or a mutex wait -- rather than
+/// the source.
+///
+/// The filter layer reads a field named `kind` as the event's own kind
+/// before it looks at the attributes, so `kind == "hard"` on `sched.irq`
+/// selected nothing while every row carried `kind` = `hard`
+/// (`docs/fixes/w22-bpftrace.md`, gap 2). The predicate is asked of the row
+/// with its kind set to the attribute for the length of the question.
+pub(crate) fn matches_as(
+    predicate: &crate::filter::FilterExpr,
+    event: &crate::event::Event,
+    kind: &str,
+) -> bool {
+    let mut asked = event.clone();
+    kind.clone_into(&mut asked.kind);
+    crate::filter::matches(predicate, &asked)
+}
+
+/// Each process's parent, for the `ppid` the family's rows carry.
+///
+/// A launched or named process's descendants are told by the kernel: the
+/// fork program writes each child's parent as it is born, and keeps it until
+/// a drain has read it after the child is gone (`bpf::Descendants::parents`).
+/// Any other process is looked up once in `/proc/<tgid>/stat`, which a process
+/// already gone does not answer: such a row has no `ppid` rather than a
+/// wrong one.
+#[derive(Debug, Default)]
+pub(crate) struct Parents {
+    known: std::collections::BTreeMap<u32, Option<u32>>,
+}
+
+impl Parents {
+    /// Takes what the kernel said, which wins over an earlier `/proc` read.
+    pub(crate) fn absorb(&mut self, pairs: impl IntoIterator<Item = (u32, u32)>) {
+        for (tgid, parent) in pairs {
+            self.known.insert(tgid, Some(parent));
+        }
+    }
+
+    /// The parent of `tgid`, if it is known or still in `/proc`.
+    pub(crate) fn of(&mut self, tgid: u32) -> Option<u32> {
+        if tgid == 0 {
+            return None;
+        }
+        *self.known.entry(tgid).or_insert_with(|| proc_parent(tgid))
+    }
+}
+
+/// The fourth field of `/proc/<tgid>/stat`, read past the `comm` in
+/// parentheses, which may itself hold spaces and parentheses.
+fn proc_parent(tgid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{tgid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
 
 /// Whose tasks one of this family's programs narrows to, or the refusal.
 ///
@@ -170,6 +234,18 @@ pub fn factories() -> Vec<Factory> {
                 emits: resolved.request.emit.clone(),
             }))
         }),
+        Factory::new("sched.interrupts", "fs:proc", |resolved| {
+            Ok(Box::new(interrupts::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("sched.slices", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(slices::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("sched.runqueue", "fs:proc", |_| {
+            Ok(Box::new(runqueue::Prepare))
+        }),
         Factory::new("sched.switches", "bpf:raw_tp", |resolved| {
             Ok(Box::new(switch_count::Prepare {
                 mode: resolved.request.mode,
@@ -188,7 +264,10 @@ pub fn factories() -> Vec<Factory> {
                 )?),
                 mode => Box::new(switches::Prepare(mode)),
             };
-            Ok(Box::new(KernelModeCounted(prepared)))
+            Ok(Box::new(KernelModeCounted {
+                inner: prepared,
+                wall_window: resolved.request.mode == crate::request::Mode::Count,
+            }))
         }),
     ]
 }
@@ -201,36 +280,120 @@ pub fn factories() -> Vec<Factory> {
 /// that has it), and this one is the machine's -- a paranoia level, or a
 /// capability the binary does not carry. At the attach nothing of the target
 /// has run yet: a launched program is still held at its gate.
-struct KernelModeCounted(Box<dyn super::Prepared>);
+struct KernelModeCounted {
+    inner: Box<dyn super::Prepared>,
+    /// Whether a task target's counted window is reported over the wall
+    /// clock rather than the counter's enabled time ([`WallWindow`]).
+    wall_window: bool,
+}
 
 impl super::Prepared for KernelModeCounted {
     fn launch_environment(&self) -> Vec<(String, String)> {
-        self.0.launch_environment()
+        self.inner.launch_environment()
     }
 
     fn share_launch(&mut self, earlier: &mut dyn super::Prepared) -> bool {
-        self.0.share_launch(earlier)
+        self.inner.share_launch(earlier)
     }
 
     fn shareable(&mut self) -> Option<&mut dyn std::any::Any> {
-        self.0.shareable()
+        self.inner.shareable()
     }
 
     fn requires_launch(&self) -> Option<&'static str> {
-        self.0.requires_launch()
+        self.inner.requires_launch()
     }
 
     fn follows_only_later_threads(&self) -> Option<&'static str> {
-        self.0.follows_only_later_threads()
+        self.inner.follows_only_later_threads()
     }
 
     fn inside(&self) -> Option<Box<dyn super::InsideAccount>> {
-        self.0.inside()
+        self.inner.inside()
     }
 
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn super::Collector>, String> {
         kernel_mode_counted()?;
-        self.0.attach(target)
+        let follows_tasks = !matches!(target, Target::System | Target::Cpu(_));
+        let collector = self.inner.attach(target)?;
+        Ok(if self.wall_window && follows_tasks {
+            Box::new(WallWindow(collector))
+        } else {
+            collector
+        })
+    }
+}
+
+/// A counted `sched.switches` over a task, whose rate is per second of the
+/// run rather than per second the task was on a cpu.
+///
+/// A per-task counter's enabled time advances only while the task is on a
+/// cpu, and the results layer divides a counted series by `enabled_ns` when
+/// every event carries one. For cycles that is the right denominator; for
+/// switches it is not: a task that sleeps 1000 times in a second is on a cpu
+/// for a few milliseconds, and `pidstat -w`'s 1000/s came out as 60 000/s
+/// (`docs/fixes/w22-sysstat.md`, defect 1). The time is kept, renamed
+/// `oncpu_ns`, which is what it is; the rate falls back to the run's window.
+struct WallWindow(Box<dyn super::Collector>);
+
+impl WallWindow {
+    fn rename(mut events: Vec<crate::event::Event>) -> Vec<crate::event::Event> {
+        for event in &mut events {
+            for attr in &mut event.attrs {
+                if attr.name == "enabled_ns" {
+                    attr.name = "oncpu_ns".to_owned();
+                }
+            }
+        }
+        events
+    }
+}
+
+impl super::Collector for WallWindow {
+    fn id(&self) -> &crate::event::CollectorId {
+        self.0.id()
+    }
+    fn value_attr(&self) -> &'static str {
+        self.0.value_attr()
+    }
+    fn start(&mut self) -> Result<(), String> {
+        self.0.start()
+    }
+    fn sample(&mut self, seq: u64) -> Result<Vec<crate::event::Event>, super::SampleError> {
+        self.0.sample(seq).map(Self::rename)
+    }
+    fn stop(&mut self) -> Vec<crate::event::Event> {
+        Self::rename(self.0.stop())
+    }
+    fn tick(&self) -> Option<std::time::Duration> {
+        self.0.tick()
+    }
+    fn losses(&self) -> super::Losses {
+        self.0.losses()
+    }
+    fn losses_by_ring(&self) -> Vec<super::RingLoss> {
+        self.0.losses_by_ring()
+    }
+    fn facts(&self) -> Vec<String> {
+        self.0.facts()
+    }
+    fn row_stamp(&self) -> Option<super::RowStamp> {
+        self.0.row_stamp()
+    }
+    fn failure(&self) -> Option<String> {
+        self.0.failure()
+    }
+    fn fields(&self) -> crate::emit::Fields {
+        self.0.fields()
+    }
+    fn provenance(&self) -> crate::stack::Provenance {
+        self.0.provenance()
+    }
+    fn stacks(&self) -> std::collections::BTreeMap<u64, Vec<String>> {
+        self.0.stacks()
+    }
+    fn notes(&self) -> Vec<String> {
+        self.0.notes()
     }
 }
 

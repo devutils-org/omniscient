@@ -30,8 +30,17 @@ impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         let whose = match target {
             Target::System => Whose::Machine,
-            Target::Pid(_) | Target::Tid(_) => {
+            Target::Pid(_) => {
                 Whose::ThreadsOf(target.first_pid().expect("a pid target names a pid"))
+            }
+            Target::Tid(_) => {
+                let tid = target.first_pid().expect("a tid target names a tid");
+                // `/proc/<tid>/task` is served for any thread and lists its
+                // whole thread group, so the thread is read on its own, under
+                // the process the kernel says it belongs to.
+                let pid = thread_group(tid)
+                    .ok_or_else(|| format!("`proc.tasks`: thread {tid} is not on this machine"))?;
+                Whose::Thread { pid, tid }
             }
             other => {
                 return Err(format!(
@@ -62,6 +71,19 @@ enum Whose {
     Machine,
     /// Every thread of one process, one event each.
     ThreadsOf(i32),
+    /// One thread, under the process it belongs to.
+    Thread { pid: i32, tid: i32 },
+}
+
+/// The process a thread belongs to: the `Tgid:` line of its `status`.
+fn thread_group(tid: i32) -> Option<i32> {
+    std::fs::read_to_string(format!("/proc/{tid}/status"))
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("Tgid:"))?
+        .trim()
+        .parse()
+        .ok()
 }
 
 pub struct TasksCollector {
@@ -209,6 +231,15 @@ impl TasksCollector {
                     .map(|tid| (pid, tid, format!("/proc/{pid}/task/{tid}").into()))
                     .collect())
             }
+            Whose::Thread { pid, tid } => {
+                let dir: std::path::PathBuf = format!("/proc/{pid}/task/{tid}").into();
+                if !dir.exists() {
+                    return Err(SampleError::TargetGone(format!(
+                        "thread {tid} of process {pid} exited"
+                    )));
+                }
+                Ok(vec![(pid, tid, dir)])
+            }
         }
     }
 }
@@ -223,11 +254,17 @@ impl Collector for TasksCollector {
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        if let Whose::ThreadsOf(pid) = self.whose {
+        let process = match self.whose {
+            Whose::Machine => None,
+            Whose::ThreadsOf(pid) => Some((pid, true)),
+            // A thread is never launched, so there is no exec to wait for.
+            Whose::Thread { pid, .. } => Some((pid, false)),
+        };
+        if let Some((pid, launched)) = process {
             // The two traps `proc.threads` has, for the reasons
             // `lifecycle` gives: a launched target read before its exec is
             // this tool, and one read after its exit is a zombie.
-            if self.first_read && lifecycle::wait_for_exec(pid).is_none() {
+            if launched && self.first_read && lifecycle::wait_for_exec(pid).is_none() {
                 self.losses.note(format!(
                     "process {pid} was still running this tool's own image when the run began, \
                      and did not reach its `execve` in time; this reading may describe the tool \
@@ -441,6 +478,36 @@ mod tests {
         for field in &entry.filter_fields {
             assert!(mine.attr(field).is_some(), "`{field}` is not on the events");
         }
+    }
+
+    #[test]
+    fn a_thread_target_is_that_thread_alone_under_its_process() {
+        // A second thread, kept alive until the poll is done: the kernel
+        // serves `/proc/<tid>/task` with the whole group, which is what a
+        // `--tid` run once listed, every thread labelled with the tid.
+        let (tid_tx, tid_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            tid_tx.send(unsafe { libc::gettid() }).unwrap();
+            let _ = done_rx.recv();
+        });
+        let tid = tid_rx.recv().unwrap();
+        let mut collector = Box::new(Prepare).attach(&Target::Tid(vec![tid])).unwrap();
+        let events = collector.sample(0).unwrap();
+        done_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(events.len(), 1, "one thread, one event: {events:?}");
+        let number = |name: &str| events[0].attr(name).and_then(|v| v.as_f64());
+        assert_eq!(number("tid"), Some(tid as f64));
+        assert_eq!(number("pid"), Some(std::process::id() as f64));
+    }
+
+    #[test]
+    fn a_thread_that_is_not_there_is_refused() {
+        let Err(error) = Box::new(Prepare).attach(&Target::Tid(vec![i32::MAX])) else {
+            panic!("no such thread");
+        };
+        assert!(error.contains("not on this machine"), "{error}");
     }
 
     #[test]

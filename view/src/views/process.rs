@@ -28,9 +28,10 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::timebar::{self, Class, Verdict};
+use super::{flame, ledger};
 use super::{Action, Ctx, Focus, Need, Region, View};
 use crate::model::{Data, Event, Output, Results};
-use crate::trust::{palette, Trust};
+use crate::trust::{palette, usage, Trust};
 use crate::units;
 
 /// The lines read what the other views already ask for: the process view
@@ -52,23 +53,20 @@ const LABEL: usize = 9;
 /// A sparkline's eight heights; a cell nothing was read in is a blank.
 const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// The hue of a resource whose capacity is not known: neither free nor
-/// full. The views stream's palette in `trust.rs` takes it over.
-const NEUTRAL: Color = Color::Blue;
+/// A taller sparkline's row: empty, then one to eight eighths filled.
+const EIGHTHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// Usage, by how full the resource is: green while it is free, yellow past
-/// half, red past four fifths. A measured fraction of a known bound, read in
-/// three steps a sixteen-colour terminal shows apart; the views stream's
-/// gradient in `trust.rs` takes it over.
-pub fn usage(fraction: f64) -> Color {
-    if fraction >= 0.8 {
-        Color::Red
-    } else if fraction >= 0.5 {
-        Color::Yellow
-    } else {
-        Color::Green
-    }
-}
+/// The hue of a resource whose capacity is not known: neither free nor
+/// full, the one every view draws such a resource in.
+const NEUTRAL: Color = usage::NEUTRAL;
+
+/// The most a line's figures are given before its sparkline takes the rest
+/// of the width: a refusal's sentence longer than this is cut, not let push
+/// every sparkline back to its narrowest.
+const FIGURES: usize = 72;
+
+/// The most terminal rows one line's sparkline is drawn over.
+const TALLEST: usize = 12;
 
 #[derive(Default)]
 pub struct Process {
@@ -105,11 +103,19 @@ pub struct Row {
     /// Something was read: false when the line's sources are refused or not
     /// asked, or held nothing.
     pub held: bool,
+    /// The sparkline's width, in cells.
+    pub cells: usize,
+    /// Each cell's height against the line's peak, and its hue: what a
+    /// sparkline taller than one row is drawn from. Empty for a line drawn
+    /// as a bar of parts (the time).
+    pub heights: Vec<Option<(f64, Color)>>,
 }
 
 impl Row {
-    fn new(name: &'static str, view: &'static str, focus: &Focus) -> Row {
+    fn new(name: &'static str, view: &'static str, focus: &Focus, cells: usize) -> Row {
         Row {
+            cells,
+            heights: Vec::new(),
             name,
             view,
             focus: focus.clone(),
@@ -129,7 +135,7 @@ impl Row {
     /// with what it needs.
     fn absent(mut self, data: &Data, sources: &[&str]) -> Row {
         self.held = false;
-        self.graph = vec![Span::raw(" ".repeat(SPARK))];
+        self.graph = vec![Span::raw(" ".repeat(self.cells))];
         let refusal = data
             .refused
             .iter()
@@ -172,7 +178,7 @@ impl Row {
     /// A line whose sources are there and hold nothing to draw.
     fn empty(mut self, said: String) -> Row {
         self.held = false;
-        self.graph = vec![Span::raw(" ".repeat(SPARK))];
+        self.graph = vec![Span::raw(" ".repeat(self.cells))];
         self.text = said;
         self.figures = vec![dim_span(self.text.clone())];
         self
@@ -208,7 +214,7 @@ impl Row {
     /// is known, the neutral hue otherwise.
     fn hue(&self, fill: Option<f64>) -> Color {
         match (self.neutral, fill) {
-            (None, Some(fill)) => usage(fill),
+            (None, Some(fill)) => usage::colour(fill),
             _ => NEUTRAL,
         }
     }
@@ -217,26 +223,63 @@ impl Row {
     /// by its own share of the capacity.
     fn spark(mut self, values: Vec<Option<f64>>, capacity: Option<f64>) -> Row {
         let top = values.iter().flatten().copied().fold(0.0, f64::max);
-        self.graph = values
+        self.heights = values
             .iter()
-            .map(|value| match value {
-                None => Span::raw(" "),
-                Some(value) => {
-                    let level = if top > 0.0 {
-                        ((value / top) * (BLOCKS.len() - 1) as f64).round() as usize
-                    } else {
-                        0
-                    };
+            .map(|value| {
+                value.map(|value| {
+                    let height = if top > 0.0 { value / top } else { 0.0 };
                     let fill = capacity.filter(|cap| *cap > 0.0).map(|cap| value / cap);
+                    (height, self.hue(fill))
+                })
+            })
+            .collect();
+        self.graph = self
+            .heights
+            .iter()
+            .map(|cell| match cell {
+                None => Span::raw(" "),
+                Some((height, hue)) => {
+                    let level = (height * (BLOCKS.len() - 1) as f64).round() as usize;
                     Span::styled(
                         BLOCKS[level.min(BLOCKS.len() - 1)].to_string(),
-                        Style::new().fg(self.hue(fill)),
+                        Style::new().fg(*hue),
                     )
                 }
             })
             .collect();
         self.values = values;
         self
+    }
+
+    /// The sparkline over `rows` terminal rows, the top one first: each
+    /// cell's height in eighths of the whole, its hue kept. One row is the
+    /// line as drawn by [`Row::spark`]; a line drawn as a bar of parts
+    /// repeats its bar.
+    fn graph_lines(&self, rows: usize) -> Vec<Vec<Span<'static>>> {
+        if rows <= 1 {
+            return vec![self.graph.clone()];
+        }
+        if self.heights.is_empty() {
+            return vec![self.graph.clone(); rows];
+        }
+        let eighths = (rows * 8) as f64;
+        (0..rows)
+            .map(|line| {
+                let floor = (rows - 1 - line) * 8;
+                self.heights
+                    .iter()
+                    .map(|cell| match cell {
+                        None => Span::raw(" "),
+                        Some((height, hue)) => {
+                            // A zero still shows its baseline, as one row does.
+                            let filled = ((height * eighths).round() as usize).max(1);
+                            let here = filled.saturating_sub(floor).min(8);
+                            Span::styled(EIGHTHS[here].to_string(), Style::new().fg(*hue))
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
     }
 }
 
@@ -254,26 +297,57 @@ impl View for Process {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>, area: Rect, ctx: &Ctx<'_>) {
-        let screen = screen(ctx);
+        let width = area.width as usize;
+        let screen = screen_for(ctx, width);
         let count = screen.rows.len() + 2;
         let selected = self.selected.unwrap_or(1).min(count - 1);
         self.selected = Some(selected);
         self.regions.clear();
-        let width = area.width as usize;
+        // The header, two rules, the suspect, a blank and the notes are a
+        // row each; the resources share the rest, so the screen is filled
+        // top to bottom rather than drawn in its corner.
+        // A line with a sparkline grows; one with nothing drawn (a refusal,
+        // a GPU no kernel ran on) keeps one row, and the time's bar two.
+        let timed = screen
+            .rows
+            .iter()
+            .any(|row| row.held && row.heights.is_empty() && row.name == "Time");
+        let fixed = 5 + screen.notes.len() + usize::from(timed);
+        let spare = usize::from(area.height)
+            .saturating_sub(fixed)
+            .saturating_sub(screen.rows.len());
+        let growing = screen
+            .rows
+            .iter()
+            .filter(|row| !row.heights.is_empty())
+            .count()
+            .max(1);
+        let grown = (spare / growing).min(TALLEST - 1);
+        let tall = |row: &Row| {
+            if !row.heights.is_empty() {
+                1 + grown
+            } else if row.held && row.name == "Time" {
+                1 + grown.min(1)
+            } else {
+                1
+            }
+        };
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut regions = Vec::new();
-        let mut place = |lines: &mut Vec<Line<'static>>, line: Line<'static>, id: Option<usize>| {
-            let row = lines.len() as u16;
-            if let Some(id) = id {
-                if row < area.height {
-                    regions.push(Region::new(
-                        Rect::new(area.x, area.y + row, area.width, 1),
-                        id,
-                    ));
+        let mut place =
+            |lines: &mut Vec<Line<'static>>, drawn: Vec<Line<'static>>, id: Option<usize>| {
+                let row = lines.len() as u16;
+                if let Some(id) = id {
+                    if row < area.height {
+                        let height = (drawn.len() as u16).min(area.height - row);
+                        regions.push(Region::new(
+                            Rect::new(area.x, area.y + row, area.width, height),
+                            id,
+                        ));
+                    }
                 }
-            }
-            lines.push(line);
-        };
+                lines.extend(drawn);
+            };
 
         let mut header = screen.header.clone();
         if selected == 0 {
@@ -281,16 +355,16 @@ impl View for Process {
                 span.style = span.style.add_modifier(Modifier::REVERSED);
             }
         }
-        place(&mut lines, Line::from(header), Some(0));
-        place(&mut lines, rule(width), None);
+        place(&mut lines, vec![Line::from(header)], Some(0));
+        place(&mut lines, vec![rule(width)], None);
         for (index, row) in screen.rows.iter().enumerate() {
             place(
                 &mut lines,
-                draw_row(row, selected == index + 1),
+                draw_row(row, selected == index + 1, tall(row)),
                 Some(index + 1),
             );
         }
-        place(&mut lines, rule(width), None);
+        place(&mut lines, vec![rule(width)], None);
         let mut suspect = screen.suspect.clone();
         if selected == count - 1 {
             if let Some(first) = suspect.first_mut() {
@@ -304,10 +378,10 @@ impl View for Process {
             suspect.push(Span::raw(" ".repeat(width - used - hint_width)));
             suspect.push(dim_span(hint.to_owned()));
         }
-        place(&mut lines, Line::from(suspect), Some(count - 1));
-        place(&mut lines, Line::default(), None);
+        place(&mut lines, vec![Line::from(suspect)], Some(count - 1));
+        place(&mut lines, vec![Line::default()], None);
         for note in &screen.notes {
-            place(&mut lines, dim(note.clone()), None);
+            place(&mut lines, vec![dim(note.clone())], None);
         }
         self.regions = regions;
         frame.render_widget(Paragraph::new(lines), area);
@@ -383,9 +457,33 @@ pub struct Screen {
 
 /// The screen for this run.
 pub fn screen(ctx: &Ctx<'_>) -> Screen {
+    screen_at(ctx, SPARK)
+}
+
+/// The screen for a terminal `width` columns wide: the sparklines take every
+/// column the figures leave, and never fewer than [`SPARK`] cells.
+pub fn screen_for(ctx: &Ctx<'_>, width: usize) -> Screen {
+    let narrow = screen_at(ctx, SPARK);
+    let figures = narrow
+        .rows
+        .iter()
+        .map(|row| row.figures.iter().map(Span::width).sum::<usize>())
+        .max()
+        .unwrap_or(0)
+        .min(FIGURES);
+    // ` label` + the sparkline + `   ` + the figures, and a column spare.
+    let cells = width.saturating_sub(LABEL + 3 + figures + 1);
+    if cells <= SPARK {
+        return narrow;
+    }
+    screen_at(ctx, cells)
+}
+
+/// The screen with its sparklines `cells` cells wide.
+pub fn screen_at(ctx: &Ctx<'_>, cells: usize) -> Screen {
     let data = ctx.data;
     let target = Target::of(data);
-    let axis = Axis::of(data);
+    let axis = Axis::cut(data, cells);
     let capacity = Capacity::of(data);
     let main = main_bar(data);
     let cpu = cpu_row(ctx, &axis, &capacity);
@@ -397,7 +495,7 @@ pub fn screen(ctx: &Ctx<'_>) -> Screen {
         network_row(ctx, &axis, &target),
         gpu_row(ctx, &axis, &target),
         energy,
-        time_row(ctx, main.as_ref()),
+        time_row(ctx, &axis, main.as_ref()),
     ];
     let (suspect, suspect_view) = suspect_line(main.as_ref());
     // The lines kept neutral, grouped by why, in the screen's order.
@@ -466,10 +564,18 @@ fn mem_total(text: &str) -> Option<f64> {
 pub struct Axis {
     pub start: u64,
     pub end: u64,
+    /// How many cells the time is cut into: the sparklines' width.
+    pub cells: usize,
 }
 
 impl Axis {
+    #[cfg(test)]
     fn of(data: &Data) -> Axis {
+        Axis::cut(data, SPARK)
+    }
+
+    /// The run's time cut into `cells` cells.
+    fn cut(data: &Data, cells: usize) -> Axis {
         let life = data.run.results.iter().find_map(|results| {
             let lifetime = results.lifetime.as_ref()?;
             let released = lifetime.get("released_ns")?.as_u64()?;
@@ -486,6 +592,7 @@ impl Axis {
         Axis {
             start,
             end: end.max(start + 1),
+            cells: cells.max(1),
         }
     }
 
@@ -494,7 +601,7 @@ impl Axis {
     }
 
     fn cell_ns(&self) -> f64 {
-        self.span() / SPARK as f64
+        self.span() / self.cells as f64
     }
 
     /// Adds `amount`, spread evenly over `[from, to)`, to the cells it
@@ -506,13 +613,13 @@ impl Axis {
         let at = |ts: u64| (ts as f64 - self.start as f64) / cell;
         let (first, last) = (at(from), at(to.max(from)));
         if last - first < 1e-9 {
-            let index = first.clamp(0.0, (SPARK - 1) as f64) as usize;
+            let index = first.clamp(0.0, (self.cells - 1) as f64) as usize;
             *cells[index].get_or_insert(0.0) += amount;
             return;
         }
         let rate = amount / (last - first);
         let mut index = first.max(0.0).floor() as usize;
-        while (index as f64) < last && index < SPARK {
+        while (index as f64) < last && index < self.cells {
             let low = first.max(index as f64);
             let high = last.min(index as f64 + 1.0);
             if high > low {
@@ -633,7 +740,7 @@ fn timeline(results: &[&Results]) -> Vec<Vec<Reading>> {
 /// An amount read per interval (cpu nanoseconds, joules), per cell as a
 /// rate: the amount in the cell over the cell's nanoseconds, times `scale`.
 fn rate_cells(axis: &Axis, series: &[Vec<Reading>], scale: f64) -> Vec<Option<f64>> {
-    let mut cells = vec![None; SPARK];
+    let mut cells = vec![None; axis.cells];
     for points in series {
         for (since, at, value) in points {
             axis.spread(&mut cells, *since, *at, *value);
@@ -649,12 +756,12 @@ fn rate_cells(axis: &Axis, series: &[Vec<Reading>], scale: f64) -> Vec<Option<f6
 /// A level (bytes held), per cell: each series' largest reading in the cell,
 /// carried forward between readings, summed over the series.
 fn level_cells(axis: &Axis, series: &[Vec<Reading>]) -> Vec<Option<f64>> {
-    let mut cells: Vec<Option<f64>> = vec![None; SPARK];
+    let mut cells: Vec<Option<f64>> = vec![None; axis.cells];
     for points in series {
-        let mut own: Vec<Option<f64>> = vec![None; SPARK];
+        let mut own: Vec<Option<f64>> = vec![None; axis.cells];
         for (_, at, value) in points {
             let index = (at.saturating_sub(axis.start) as f64 / axis.cell_ns()) as usize;
-            let slot = &mut own[index.min(SPARK - 1)];
+            let slot = &mut own[index.min(axis.cells - 1)];
             *slot = Some(slot.map_or(*value, |held: f64| held.max(*value)));
         }
         let first = own.iter().position(Option::is_some);
@@ -688,7 +795,7 @@ fn peak_of(cells: &[Option<f64>]) -> Option<f64> {
 /// CPU: the cores the process kept busy, from its threads' on-cpu time.
 fn cpu_row(ctx: &Ctx<'_>, axis: &Axis, capacity: &Capacity) -> Row {
     let data = ctx.data;
-    let row = Row::new("CPU", "flame", ctx.focus);
+    let row = Row::new("CPU", "flame", ctx.focus, axis.cells);
     let held = on_target(data, "cpu.oncpu_time");
     let series = timeline(&held);
     if series.iter().all(Vec::is_empty) {
@@ -722,14 +829,35 @@ fn cpu_row(ctx: &Ctx<'_>, axis: &Axis, capacity: &Capacity) -> Row {
     if let Some(cap) = capacity.cores {
         figures.push(format!("{} of machine", units::percent(mean * 100.0 / cap)));
     }
+    // The function the flame it opens names first, in the flame's words.
+    if let Some(hot) = flame::hottest(data, ctx.focus, false) {
+        figures.push(format!(
+            "hottest {} {}",
+            hottest_name(&hot.name),
+            units::percent(hot.share * 100.0)
+        ));
+    }
     let trust = Trust::joined(data, held.iter().copied());
     row.spark(cells, capacity.cores).says(figures, trust)
+}
+
+/// The flame's name for its hottest function, in at most 32 cells: a longer
+/// one (a Python frame carries its file's path) is cut with an ellipsis, so
+/// the row never reads as a whole name what is only its start.
+fn hottest_name(name: &str) -> String {
+    const MOST: usize = 32;
+    if name.chars().count() <= MOST {
+        return name.to_owned();
+    }
+    let mut cut: String = name.chars().take(MOST - 1).collect();
+    cut.push('…');
+    cut
 }
 
 /// Memory: the resident size, its growth over the run, its peak.
 fn memory_row(ctx: &Ctx<'_>, axis: &Axis, capacity: &Capacity) -> Row {
     let data = ctx.data;
-    let row = Row::new("Memory", "ledger", ctx.focus);
+    let row = Row::new("Memory", "ledger", ctx.focus, axis.cells);
     let held = on_target(data, "mem.rss");
     let series = timeline(&held);
     if series.iter().all(Vec::is_empty) {
@@ -738,7 +866,20 @@ fn memory_row(ctx: &Ctx<'_>, axis: &Axis, capacity: &Capacity) -> Row {
     let cells = level_cells(axis, &series);
     let now = last_of(&cells).unwrap_or(0.0);
     let first = cells.iter().find_map(|cell| *cell).unwrap_or(0.0);
-    let peak = peak_of(&cells).unwrap_or(0.0);
+    // The peak the ledger this line opens draws, so the two never differ;
+    // the cells' own when the ledger holds nothing of the focus.
+    let peak = ledger::reading(data, ctx.focus)
+        .into_iter()
+        .find(|line| line.resource == "memory held")
+        .and_then(|line| match line.reading {
+            ledger::Reading::Served {
+                value,
+                blank: false,
+                ..
+            } => Some(value),
+            _ => None,
+        })
+        .unwrap_or_else(|| peak_of(&cells).unwrap_or(0.0));
     let growth = (now - first) * 1e9 / axis.span();
     let mut row = row;
     row.neutral = capacity
@@ -763,7 +904,7 @@ fn memory_row(ctx: &Ctx<'_>, axis: &Axis, capacity: &Capacity) -> Row {
 /// their p99 latency. Bytes on a device of unknown speed: one neutral hue.
 fn disk_row(ctx: &Ctx<'_>, axis: &Axis, target: &Target) -> Row {
     let data = ctx.data;
-    let row = Row::new("Disk", "heatmap", ctx.focus);
+    let row = Row::new("Disk", "heatmap", ctx.focus, axis.cells);
     let held = on_target(data, "io.latency");
     if held.is_empty() {
         let mut row = row.absent(data, &["io.latency"]);
@@ -771,7 +912,7 @@ fn disk_row(ctx: &Ctx<'_>, axis: &Axis, target: &Target) -> Row {
         row.view = "flows";
         return row;
     }
-    let mut cells = vec![None; SPARK];
+    let mut cells = vec![None; axis.cells];
     let (mut read, mut written) = (0.0, 0.0);
     let mut latencies = Vec::new();
     for event in held
@@ -819,12 +960,12 @@ fn disk_row(ctx: &Ctx<'_>, axis: &Axis, target: &Target) -> Row {
 /// retransmissions.
 fn network_row(ctx: &Ctx<'_>, axis: &Axis, target: &Target) -> Row {
     let data = ctx.data;
-    let row = Row::new("Network", "flows", ctx.focus);
+    let row = Row::new("Network", "flows", ctx.focus, axis.cells);
     let held = on_target(data, "net.socket");
     if held.is_empty() {
         return row.absent(data, &["net.socket"]);
     }
-    let mut cells = vec![None; SPARK];
+    let mut cells = vec![None; axis.cells];
     let (mut received, mut sent) = (0.0, 0.0);
     for event in held
         .iter()
@@ -907,7 +1048,7 @@ fn retransmits(data: &Data) -> String {
 /// that exists.
 fn gpu_row(ctx: &Ctx<'_>, axis: &Axis, target: &Target) -> Row {
     let data = ctx.data;
-    let row = Row::new("GPU", "lanes", ctx.focus);
+    let row = Row::new("GPU", "lanes", ctx.focus, axis.cells);
     let kernels = on_target(data, "gpu.kernel");
     let memory = on_target(data, "gpu.mem");
     if kernels.is_empty() && memory.is_empty() {
@@ -934,7 +1075,7 @@ fn gpu_row(ctx: &Ctx<'_>, axis: &Axis, target: &Target) -> Row {
         row.trust = trust;
         return row;
     }
-    let mut cells = vec![None; SPARK];
+    let mut cells = vec![None; axis.cells];
     for event in &launched {
         let duration = event.number("duration_ns").unwrap_or(0.0);
         axis.spread(
@@ -967,7 +1108,7 @@ fn gpu_row(ctx: &Ctx<'_>, axis: &Axis, target: &Target) -> Row {
 /// its share of the busy cores. Energy has no capacity: one neutral hue.
 fn energy_row(ctx: &Ctx<'_>, axis: &Axis, capacity: &Capacity, cpu: &Row) -> Row {
     let data = ctx.data;
-    let row = Row::new("Energy", "system", ctx.focus);
+    let row = Row::new("Energy", "system", ctx.focus, axis.cells);
     let held: Vec<&Results> = data.of_source("power.energy").collect();
     let series = timeline(&held);
     if series.iter().all(Vec::is_empty) {
@@ -979,7 +1120,7 @@ fn energy_row(ctx: &Ctx<'_>, axis: &Axis, capacity: &Capacity, cpu: &Row) -> Row
     // The process's share of the machine's busy cores in each cell: needs
     // the cores, which only a live run knows.
     let share: Option<Vec<Option<f64>>> = capacity.cores.map(|cores| {
-        (0..SPARK)
+        (0..axis.cells)
             .map(|index| {
                 let mine = cpu.values.get(index).copied().flatten()?;
                 let machine = busy[index]? * cores;
@@ -1033,9 +1174,9 @@ fn main_bar(data: &Data) -> Option<timebar::Bar> {
 }
 
 /// Time: the program's wall clock split by state, each state its share.
-fn time_row(ctx: &Ctx<'_>, bar: Option<&timebar::Bar>) -> Row {
+fn time_row(ctx: &Ctx<'_>, axis: &Axis, bar: Option<&timebar::Bar>) -> Row {
     let data = ctx.data;
-    let mut row = Row::new("Time", "timebar", ctx.focus);
+    let mut row = Row::new("Time", "timebar", ctx.focus, axis.cells);
     let Some(bar) = bar else {
         return row.absent(
             data,
@@ -1060,7 +1201,7 @@ fn time_row(ctx: &Ctx<'_>, bar: Option<&timebar::Bar>) -> Row {
     if scale <= 0.0 {
         return row.empty("no state read".to_owned());
     }
-    let cells = timebar::allocate(&amounts, scale, SPARK);
+    let cells = timebar::allocate(&amounts, scale, axis.cells);
     let mut graph: Vec<Span<'static>> = bar
         .parts
         .iter()
@@ -1074,8 +1215,8 @@ fn time_row(ctx: &Ctx<'_>, bar: Option<&timebar::Bar>) -> Row {
         })
         .collect();
     let drawn: usize = cells.iter().sum();
-    if drawn < SPARK {
-        graph.push(dim_span("·".repeat(SPARK - drawn)));
+    if drawn < axis.cells {
+        graph.push(dim_span("·".repeat(axis.cells - drawn)));
     }
     row.graph = graph;
     // By class, largest first: the four that matter most.
@@ -1248,7 +1389,9 @@ fn omn_cost(data: &Data) -> String {
 // Drawing
 // ---------------------------------------------------------------------------
 
-fn draw_row(row: &Row, selected: bool) -> Line<'static> {
+/// A line over `rows` terminal rows: its name and figures on the first, its
+/// sparkline over all of them.
+fn draw_row(row: &Row, selected: bool, rows: usize) -> Vec<Line<'static>> {
     let mut label = Style::new().add_modifier(Modifier::BOLD);
     if selected {
         label = label.add_modifier(Modifier::REVERSED);
@@ -1256,14 +1399,23 @@ fn draw_row(row: &Row, selected: bool) -> Line<'static> {
     if !row.held {
         label = label.add_modifier(Modifier::DIM);
     }
-    let mut spans = vec![
-        Span::raw(" "),
-        Span::styled(format!("{:<width$}", row.name, width = LABEL - 1), label),
-    ];
-    spans.extend(row.graph.iter().cloned());
-    spans.push(Span::raw("   "));
-    spans.extend(row.figures.iter().cloned());
-    Line::from(spans)
+    row.graph_lines(rows)
+        .into_iter()
+        .enumerate()
+        .map(|(index, graph)| {
+            let name = if index == 0 { row.name } else { "" };
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled(format!("{name:<width$}", width = LABEL - 1), label),
+            ];
+            spans.extend(graph);
+            if index == 0 {
+                spans.push(Span::raw("   "));
+                spans.extend(row.figures.iter().cloned());
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn rule(width: usize) -> Line<'static> {
@@ -1622,9 +1774,9 @@ mod tests {
     /// machine's capacity; a trust mark keeps the hue.
     #[test]
     fn usage_takes_the_gradient_by_the_capacity_and_trust_keeps_the_hue() {
-        assert_eq!(usage(0.1), Color::Green);
-        assert_eq!(usage(0.6), Color::Yellow);
-        assert_eq!(usage(0.95), Color::Red);
+        assert_eq!(usage::colour(0.1), usage::RAMP[0]);
+        assert_eq!(usage::colour(0.6), usage::RAMP[3]);
+        assert_eq!(usage::colour(0.95), usage::RAMP[5]);
 
         let mut data = recording();
         data.live = Some(Live {
@@ -1640,7 +1792,7 @@ mod tests {
         assert!(cpu.neutral.is_none());
         assert_eq!(
             cpu.figures[0].style.fg,
-            Some(usage(cpu.fill.unwrap())),
+            Some(usage::colour(cpu.fill.unwrap())),
             "the current value in the gradient"
         );
         // Live: provisional, a trust mark, and still the hue, never dimmed.
@@ -1652,6 +1804,165 @@ mod tests {
         // A resource with no capacity keeps the neutral hue.
         let network = row(&screen, "Network");
         assert_eq!(network.figures[0].style.fg, Some(NEUTRAL));
+    }
+
+    /// The lock the workload's main thread waits on is the timebar's lock
+    /// part, apart from its sleep; the suspect names the largest state,
+    /// which on this workload is the sleep (`doze` and the idle hold), not
+    /// the lock.
+    #[test]
+    fn the_time_line_splits_the_lock_and_the_suspect_names_the_largest() {
+        let data = recording();
+        let truth = manifest();
+        let bar = main_bar(&data).expect("the program's bar");
+        let seconds = |class: Class| -> f64 {
+            bar.parts
+                .iter()
+                .filter(|part| part.class == class)
+                .filter_map(|part| part.amount)
+                .sum::<f64>()
+                / 1e9
+        };
+        let lock = seconds(Class::Lock);
+        let held = truth["lock"]["seconds"].as_f64().unwrap();
+        assert!(
+            lock >= held * 0.9 && lock <= held * 1.3,
+            "the lock part holds {lock:.3} s, the holder sleeps {held} s under the lock"
+        );
+        let slept = seconds(Class::Sleep);
+        let asked = truth["sleep"]["seconds"].as_f64().unwrap()
+            + truth["memory"]["hold_s"].as_f64().unwrap();
+        assert!(
+            slept >= asked * 0.9,
+            "the sleep part holds {slept:.3} s, the program sleeps at least {asked} s"
+        );
+        assert!(slept > lock, "{slept} against {lock}");
+        let screen = screen_of(&data);
+        let time = row(&screen, "Time");
+        assert!(time.text.contains("lock "), "{}", time.text);
+        let suspect = text(&screen.suspect);
+        assert!(suspect.starts_with("▶ suspect: sleep"), "{suspect}");
+    }
+
+    /// The lines say what the pages they open say: the memory peak is the
+    /// ledger's, the cpu's hottest function is the flame's.
+    #[test]
+    fn the_lines_read_the_ledger_and_the_flame() {
+        let data = recording();
+        let focus = Focus::default();
+        let screen = screen_of(&data);
+        let held = ledger::reading(&data, &focus)
+            .into_iter()
+            .find(|line| line.resource == "memory held")
+            .expect("the ledger's memory line");
+        let ledger::Reading::Served { value, .. } = held.reading else {
+            panic!("the ledger holds the memory: {:?}", held.reading);
+        };
+        let memory = row(&screen, "Memory");
+        assert!(
+            memory
+                .text
+                .contains(&format!("peak {}", units::bytes(value))),
+            "{} against the ledger's {value}",
+            memory.text
+        );
+        let hot = flame::hottest(&data, &focus, false).expect("the flame's hottest");
+        let cpu = row(&screen, "CPU");
+        assert!(
+            cpu.text
+                .contains(&format!("hottest {}", hottest_name(&hot.name))),
+            "{} against the flame's {}",
+            cpu.text,
+            hot.name
+        );
+        // And the cpu's mean over the life is the ledger's cpu time.
+        let line = ledger::reading(&data, &focus)
+            .into_iter()
+            .find(|line| line.resource == "cpu time")
+            .expect("the ledger's cpu line");
+        let ledger::Reading::Served { value: cpu_ns, .. } = line.reading else {
+            panic!("the ledger holds the cpu");
+        };
+        let axis = Axis::of(&data);
+        let mean: f64 = cpu
+            .text
+            .split("avg ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|mean| mean.parse().ok())
+            .expect("the mean");
+        let burnt = mean * axis.span();
+        assert!(
+            (burnt - cpu_ns).abs() <= cpu_ns * 0.02,
+            "the line's {burnt} ns against the ledger's {cpu_ns}"
+        );
+    }
+
+    /// The screen fills the terminal: the sparklines take the width the
+    /// figures leave, and the lines share the height.
+    #[test]
+    fn the_screen_fills_the_terminal() {
+        let sizes = [(80u16, 24u16), (160, 48), (240, 60)];
+        for ((width, height), live) in sizes
+            .into_iter()
+            .flat_map(|size| [(size, false), (size, true)])
+        {
+            let mut data = recording();
+            if live {
+                // Live, half way: the same lines, provisional.
+                let opened = data.opened_ns();
+                data.live = Some(Live {
+                    opened_ns: opened,
+                    now_ns: opened + (data.closed_ns() - opened) / 2,
+                });
+            }
+            let mut app = App::new(data);
+            app.open("process").expect("the process view");
+            app.cost = Cost::Snapshot;
+            let buffer = snapshot::draw_app(&mut app, width, height);
+            let text = snapshot::text(&buffer);
+            let lines: Vec<&str> = text.lines().collect();
+            let cpu = lines
+                .iter()
+                .position(|line| line.starts_with(" CPU "))
+                .expect("the cpu line");
+            let time = lines
+                .iter()
+                .position(|line| line.starts_with(" Time "))
+                .expect("the time line");
+            let last = lines
+                .iter()
+                .rposition(|line| line.contains("in one hue"))
+                .expect("the notes");
+            // The frame's help line is the last row; the notes end above it,
+            // at most a row or two left over from the division.
+            assert!(
+                last + 2 + 7 >= usize::from(height) || height <= 24,
+                "{width}x{height} live {live}: the notes end at row {last}"
+            );
+            assert!(time > cpu, "{width}x{height}");
+            if height > 24 {
+                assert!(
+                    text.contains("Energy in one hue"),
+                    "{width}x{height}: every note is drawn\n{text}"
+                );
+                assert!(
+                    time - cpu > 7,
+                    "{width}x{height}: the lines keep one row each"
+                );
+            }
+            let graph = |line: &str| {
+                line.chars()
+                    .skip(LABEL)
+                    .take_while(|c| !c.is_ascii_alphanumeric())
+                    .count()
+            };
+            let drawn = graph(lines[time]);
+            assert!(
+                drawn + LABEL + 3 + FIGURES + 1 >= usize::from(width),
+                "{width}x{height}: the time bar is {drawn} cells wide"
+            );
+        }
     }
 
     /// The manifest's phases repeat the figures the program reads: they
@@ -1712,6 +2023,7 @@ mod tests {
         let axis = Axis {
             start: 0,
             end: SPARK as u64 * 100,
+            cells: SPARK,
         };
         let mut cells = vec![None; SPARK];
         axis.spread(&mut cells, 50, 250, 200.0);

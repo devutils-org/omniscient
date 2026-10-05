@@ -13,7 +13,7 @@
             {
               "key": "kernel=tiny",
               "events": 5000,
-              "total": 6221828.0
+              "total": 6228223.0
             }
           ],
           "rest": {
@@ -24,12 +24,45 @@
         }
       ],
       "events_seen": 5000,
+      "observed_ns": 411942964,
+      "window": {
+        "run_opened_ns": 1000929704702,
+        "opened_ns": 1000929704702,
+        "closed_ns": 1001341647666,
+        "attached": true
+      },
+      "stopped_because": "the launched program exited with exit status 0",
       "losses": {
         "dropped": 0,
         "failed_reads": 0,
         "late_ticks": 0,
         "undecoded": 0,
         "throttled": 0
+      },
+      "lifetime": {
+        "released_ns": 1000929596721,
+        "exited_ns": 1001341611955,
+        "exited_err_ns": 11570269,
+        "cpu_ns": 333092000
+      },
+      "notes": [
+        "pid 82412: CUPTI API 130401, 256 buffers of 256 KiB at most; 5 brackets map CUPTI's clock onto CLOCK_MONOTONIC to within 227 ns, at a rate of 1.000000489",
+        "device activities reported: 5000 kernel; the widest timestamp error was 277 ns",
+        "vendor:nvml: device 0 (NVIDIA GeForce RTX 2080 Ti): shader clock not shown locked (the driver's performance levels let it run from 300 to 2205 MHz; a lock set with `nvidia-smi -lgc` is not known to show there), no application clocks (this board does not have them), persistence mode off, clock event reasons: none",
+        "GPU timings on device 0 (NVIDIA GeForce RTX 2080 Ti) were taken on clocks not shown to be locked: the shader clock ran wherever the driver put it, so a duration depends on what the device did before it; `omn` reads clock state and never changes it"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 22004000,
+        "attributed_cpu_ns": 22004000,
+        "observed_cpu_ns": 332871490,
+        "observed_from": "the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 82412 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)",
+        "wall_ns": 412293216,
+        "measurement_ns": 71300,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "a vendor profiler injects into or replays the target, and says nothing of what that cost it",
+        "before_window_cpu_ns": 73905000,
+        "after_window_cpu_ns": 33000000
       },
       "served_by": [
         "vendor:cupti"

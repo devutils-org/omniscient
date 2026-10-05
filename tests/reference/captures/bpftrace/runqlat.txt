@@ -1,0 +1,34 @@
+/usr/share/bpftrace/tools/runqlat.bt:197:20-39: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    @usecs = hist((nsecs - $ns) / 1000);
+                   ~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/runqlat.bt:197:20-39: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    @usecs = hist((nsecs - $ns) / 1000);
+                   ~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/runqlat.bt:197:20-25: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    @usecs = hist((nsecs - $ns) / 1000);
+                   ~~~~~
+/usr/share/bpftrace/tools/runqlat.bt:197:28-31: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    @usecs = hist((nsecs - $ns) / 1000);
+                           ~~~
+Tracing CPU scheduler... Hit Ctrl-C to end.
+
+
+@usecs:
+[0]                    1 |                                                    |
+[1]                 4205 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[2, 4)              5726 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                  |
+[4, 8)              3638 |@@@@@@@@@@@@@@@@@@@@@                               |
+[8, 16)             2153 |@@@@@@@@@@@@                                        |
+[16, 32)            2532 |@@@@@@@@@@@@@@@                                     |
+[32, 64)            1359 |@@@@@@@@                                            |
+[64, 128)            801 |@@@@                                                |
+[128, 256)           842 |@@@@@                                               |
+[256, 512)           573 |@@@                                                 |
+[512, 1K)            895 |@@@@@                                               |
+[1K, 2K)            1624 |@@@@@@@@@                                           |
+[2K, 4K)            6937 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@           |
+[4K, 8K)            6110 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                |
+[8K, 16K)           8721 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[16K, 32K)           306 |@                                                   |
+[32K, 64K)            18 |                                                    |
+

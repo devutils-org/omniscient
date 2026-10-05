@@ -33,7 +33,7 @@ on cpu: 1.40k · hottest own py::burn:/omniscient/view/workloads/flame/../common
 │  sets up no frame pointer is lost -- every frameless     ││                                                          │
 │  leaf, and whole stacks of a target built without them   ││                                                          │
 │‼ 1 more on the last line; ! lists every caveat whole     ││                                                          │
-└ not narrowed to the focus: these stacks carry no thread ─┘└ narrowed to the focus ───────────────────────────────────┘
+└ not narrowed to the focus: these stacks carry no thread ─┘└ narrowed to the focus; own cost at the leaf: these stacks┘
 on cpu ▸ all
 1.40k samples ≈ 1.40s · 100% of all · own 0 · 1.40k events
 cpu.profile: names came from -- perf-2620696.map: perf-map, the 480 lines the program wrote for code no file holds; pyt…

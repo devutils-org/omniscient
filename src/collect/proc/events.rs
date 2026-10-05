@@ -256,55 +256,74 @@ impl Tree {
     /// not seen; then again until nothing changes, for a child whose parent's
     /// own exec came after it (a subshell that forked a command and then
     /// exec'd its last one).
-    pub fn select(&mut self, execs: &[(u32, u32)]) -> Vec<bool> {
-        let mut kept: Vec<bool> = execs
+    pub fn select(&mut self, execs: &[(u32, u32)]) -> Vec<Verdict> {
+        let mut verdicts: Vec<Verdict> = execs
             .iter()
             .map(|(pid, ppid)| self.admits(*pid, *ppid))
             .collect();
         loop {
             let mut changed = false;
             for (at, (pid, ppid)) in execs.iter().enumerate() {
-                if !kept[at] && self.members.contains(ppid) {
+                if verdicts[at] != Verdict::In && self.members.contains(ppid) {
                     self.members.insert(*pid);
-                    kept[at] = true;
+                    verdicts[at] = Verdict::In;
                     changed = true;
                 }
             }
             if !changed {
-                return kept;
+                return verdicts;
             }
         }
     }
 
     /// Whether an exec of `pid`, whose parent is `ppid`, is the tree's, and
     /// takes it in when it is.
-    pub fn admits(&mut self, pid: u32, ppid: u32) -> bool {
+    pub fn admits(&mut self, pid: u32, ppid: u32) -> Verdict {
         if self.members.contains(&pid) || self.members.contains(&ppid) {
             self.members.insert(pid);
-            return true;
+            return Verdict::In;
         }
         let mut walked = Vec::new();
         let mut at = ppid;
         // Bounded: a chain of parents is short, and pid 1 is everyone's end.
         for _ in 0..64 {
             if at <= 1 {
-                return false;
+                return Verdict::Out;
             }
             if self.members.contains(&at) {
                 self.members.extend(walked);
                 self.members.insert(ppid);
                 self.members.insert(pid);
-                return true;
+                return Verdict::In;
             }
             walked.push(at);
+            // A parent that has left `/proc` ends the walk without an
+            // answer: its own parent, which might have been the tree's, is
+            // no longer readable.
             let Some(parent) = parent_of(at) else {
-                return false;
+                return Verdict::Unknown;
             };
             at = parent;
         }
-        false
+        Verdict::Unknown
     }
 }
+
+/// What a [`Tree`] can say of one exec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The tree's.
+    In,
+    /// Shown not to be: its parents lead to pid 1 without meeting the tree.
+    Out,
+    /// Not known: a parent on the way had exited, so the chain stops short.
+    Unknown,
+}
+
+/// Why an exec of unknown parentage is counted among the losses.
+const UNKNOWN_PARENTAGE: &str =
+    "an exec whose parent had exited before its parentage could be read \
+     from `/proc`; whether it descended from the target is unknown, and it is not in the series";
 
 /// The parent of a live process, from `/proc/<pid>/stat`.
 fn parent_of(pid: u32) -> Option<u32> {
@@ -353,12 +372,23 @@ impl ExecCollector {
             let carried = batch.len();
             batch.append(&mut drained);
             let pairs: Vec<(u32, u32)> = batch.iter().map(|exec| (exec.tgid, exec.ppid)).collect();
-            let kept = tree.select(&pairs);
-            for (at, (exec, kept)) in batch.into_iter().zip(kept).enumerate() {
-                if kept {
+            let verdicts = tree.select(&pairs);
+            let mut unknown = 0;
+            for (at, (exec, verdict)) in batch.into_iter().zip(verdicts).enumerate() {
+                if verdict == Verdict::In {
                     drained.push(exec);
                 } else if at >= carried && !self.last_drain {
                     self.undecided.push(exec);
+                } else if verdict == Verdict::Unknown {
+                    // Dropped for good with its parentage unknown: it may
+                    // have been the tree's, so it is a loss, not a filter.
+                    unknown += 1;
+                }
+            }
+            if unknown > 0 {
+                self.inner.losses.failed_reads += unknown;
+                for _ in 0..unknown {
+                    self.inner.losses.note(UNKNOWN_PARENTAGE);
                 }
             }
             drained.sort_by_key(|exec| exec.ts_ns);
@@ -1037,7 +1067,22 @@ mod tests {
         // 100 execs; 102 is the child of 101, which execs after it; 900 is a
         // process whose parent is pid 1's and not ours.
         let kept = tree.select(&[(100, 50), (102, 101), (101, 100), (900, 1), (103, 102)]);
-        assert_eq!(kept, vec![true, true, true, false, true]);
+        use Verdict::{In, Out};
+        assert_eq!(kept, vec![In, In, In, Out, In]);
+    }
+
+    /// A parent that has left `/proc` is not evidence the exec is outside
+    /// the tree: the verdict is unknown, and a drop of it is a loss.
+    #[test]
+    fn a_parent_gone_from_proc_leaves_the_exec_unknown_not_outside() {
+        let mut tree = Tree::rooted_at(100);
+        // No pid above `pid_max` (at most 2^22) is ever in `/proc`.
+        let gone = (1 << 22) + 7;
+        assert_eq!(tree.admits(901, gone), Verdict::Unknown);
+        // Our own parentage reaches pid 1 through live processes.
+        let me = std::process::id();
+        let parent = parent_of(me).unwrap();
+        assert_eq!(tree.admits(me, parent), Verdict::Out);
     }
 
     fn a_signal() -> Signal {

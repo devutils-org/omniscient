@@ -82,6 +82,8 @@ pub struct FutexCollector {
     id: CollectorId,
     whose: Whose,
     program: Option<FutexProgram>,
+    /// Each process's parent, for the rows' `ppid`.
+    parents: super::Parents,
     losses: Losses,
     /// The kernel's skipped runs of the program, cumulative, as last read.
     skipped: u64,
@@ -107,6 +109,7 @@ impl FutexCollector {
             id: CollectorId::new("sched.futex/bpf:raw_tp"),
             whose,
             program: None,
+            parents: super::Parents::default(),
             losses: Losses::default(),
             skipped: 0,
             notes: Vec::new(),
@@ -154,6 +157,7 @@ impl FutexCollector {
             }
         };
         self.window_opened_ns = closed_ns;
+        self.parents.absorb(program.parents());
 
         if drain_losses.vanished > 0 {
             self.losses.undecoded += drain_losses.vanished;
@@ -196,6 +200,9 @@ impl FutexCollector {
                 self.filtered_in += row.count;
             }
             let mut event = event;
+            if let Some(ppid) = self.parents.of(row.tgid) {
+                event.attrs.push(Attr::uint("ppid", u64::from(ppid)));
+            }
             if let Some(id) = self.resolve_stack(&row) {
                 event.attrs.push(Attr::uint(STACK_ID_ATTR, u64::from(id)));
             }

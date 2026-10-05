@@ -5,7 +5,7 @@ omn top │ fixture system-wakeup │ 1.00s                                     
 │made it asked for:                                                                                                    │
 │sched.wakeup                                                                                                          │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌ processes the target's, by cpu ────────────────────────────────────────────────────┐┌ cost, share of one cpu ────────┐
+┌ processes every task measured, by cpu ─────────────────────────────────────────────┐┌ cost, share of one cpu ────────┐
 │no process in this run: nothing in it is measured per task                          ││none of this view's collectors  │
 │                                                                                    ││is in this run                  │
 │                                                                                    ││                                │

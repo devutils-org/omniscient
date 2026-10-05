@@ -270,7 +270,7 @@
   emits: [hist, topk, stack, raw, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
   keys: [task]
-  filter_fields: [comm, pid]
+  filter_fields: [comm, pid, kind]
   determinism: low
   caveats:
     - "On a contended program this source shortens what it measures: the bench
@@ -383,6 +383,77 @@
        and everything that happened in the same window as the first would fall
        outside the state. `window_ns` beside the value says how wide the window
        was."
+
+- id: sched.interrupts
+  family: sched
+  summary: "Interrupt counts per cpu, line and softirq vector"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/interrupts", "/proc/softirqs"], cost: free}
+  modes: [poll, count]
+  emits: [rate, topk, timeline, raw, summary]
+  targets: {system: native, cpu: native}
+  keys: [cpu]
+  filter_fields: [cpu, irq, line, name]
+  determinism: low
+  caveats:
+    - "A count, not a time: how many interrupts each cpu took between two reads
+       of `/proc/interrupts` and `/proc/softirqs`, as vmstat's `in` and `mpstat
+       -I` report them. `sched.irq` is how long they ran. A row carries `kind`
+       (`hard` or `soft`), `line` (the label the file gives it: a number, or
+       `LOC`, `RES`, `TIMER`) and `name` (the handler's, or the label); a row
+       that did not move in a window is not reported. `kind` is not a filter
+       field yet: the filter reads it as the source's own kind; `line` and
+       `name` tell the halves apart."
+
+- id: sched.slices
+  family: sched
+  summary: "One event per time slice on a cpu: its run, queue wait and time off"
+  unit: ns
+  backends:
+    # One ring record per switch either end of which is the target's, the
+    # leaving task's run and the coming task's queue wait read from the
+    # kernel's own `sched_info` stamps: `perf sched timehist`'s line.
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"], cost: high}
+  modes: [trace]
+  emits: [hist, topk, raw, summary]
+  targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
+  keys: [task, cpu]
+  filter_fields: [comm, pid, cpu, state, next_comm, run_ns, queue_ns, off_ns]
+  determinism: low
+  caveats:
+    - "An event is one slice of one task on one cpu, stamped where it left the
+       cpu: `run_ns` how long it ran (the kernel's `rq->clock - last_arrival`),
+       `queue_ns` how long it waited on the run queue before it ran, `off_ns`
+       how long it was off the cpu before it was queued, `state` how it left
+       (`preempted`, `sleeping`, `uninterruptible`), and `next_comm` who took
+       the cpu. A slice that began before the run carries no `queue_ns` or
+       `off_ns`. `queue_ns` is the kernel's `rq->clock - last_queued`, as
+       `schedstat` counts it: a task woken onto an idle cpu reads 0 there, where
+       the scheduler did not move its clock between the wakeup and the switch,
+       and `perf sched timehist`'s `sch delay`, timed between the tracepoints,
+       reads a few microseconds. It costs a ring record per switch of the target, which on a
+       machine-wide run is every switch of the machine."
+
+- id: sched.runqueue
+  family: sched
+  summary: "Runnable and blocked tasks, and the load averages"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/stat", "/proc/loadavg"], cost: free}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native}
+  keys: []
+  filter_fields: []
+  determinism: low
+  caveats:
+    - "One look at the machine's run queue per read, as vmstat's `r` and `b`
+       and `uptime` report it: `running` is `procs_running` (runnable tasks,
+       this tool's reading thread among them), `blocked` is `procs_blocked`
+       (uninterruptible sleep), `load1`, `load5` and `load15` the kernel's
+       damped averages. The machine's sum: the per-cpu queue length is not
+       exported outside debugfs."
 
 - id: sched.numa_balance
   family: sched

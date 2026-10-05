@@ -41,7 +41,7 @@
 [0m[32m│[0m[33m  [0m[2msymbols only: its internal functions are unnamed;[0m                           [0m[32m│[0m[2m│[0m                                                                              [0m[2m│[0m
 [0m[32m│[0m[33m  [0m[2m_ctypes.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its[0m      [0m[32m│[0m[2m│[0m                                                                              [0m[2m│[0m
 [0m[32m│[0m[33m  [0m[2minternal functions are unnamed[0m                                              [0m[32m│[0m[2m│[0m                                                                              [0m[2m│[0m
-[0m[32m└──────────────────────────────────────────────────────────────────────────────┘[0m[2m└──────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[32m└──────────────────────────────────────────────────────────────────────────────┘[0m[2m└[0m[2;33m own cost at the leaf: these stacks do not say which frame a perf map named (`[0m[2m┘[0m
 [0m[1;32mon cpu ▸ [0m[1mall[0m                                                                                                                                                    [0m
 [0m[2m1.40k samples ≈ 1.40s · 100% of all · own 0 · 1.40k events[0m                                                                                                      [0m
 [0m[2m⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits off cpu by thread · ! lists caveats[0m    [0m

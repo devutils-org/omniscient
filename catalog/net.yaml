@@ -31,6 +31,34 @@
        one second, so a handshake near 1 s is a lost SYN rather than a slow
        peer."
 
+- id: net.tcp.accept
+  family: net
+  summary: "Connections a server accepted, with the listener's queue"
+  unit: count
+  backends:
+    # The exit of `inet_csk_accept`, in the accepting task: the listener is
+    # its first argument and the accepted socket its return value.
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:inet_csk_accept(sock *, proto_accept_arg *)|(sock *, int, int *, bool)"], cost: low}
+  modes: [trace, count]
+  emits: [rate, topk, raw, summary]
+  targets: {pid: native, launch: native, system: native}
+  keys: [sock, task]
+  filter_fields: [comm, pid, saddr, sport, daddr, dport, family, backlog]
+  determinism: low
+  caveats:
+    - "What `tcpaccept` prints: one event per accepted connection, keyed by
+       the accepted socket's cookie (the key of `net.tcp.lifetime`,
+       `net.tcp.rtt` and `net.sockets`), with the accepting task, both ends,
+       and `backlog`, the listener's queue after this accept took one off it,
+       beside `max_backlog`, the bound `listen` gave it. `tcpaccept`'s `BL`
+       reads the accepted socket instead, which copied the listener's queue
+       when its SYN arrived: six queued connections accepted in turn are
+       `5` to `0` here and `0/16` to `5/16` there."
+    - "A --pid or launched target keeps the accepts of that one process, not
+       of its children."
+    - "An accept that failed or would have blocked returned no socket and is
+       no event."
+
 - id: net.tcp.lifetime
   family: net
   summary: "Connection duration and volume"
@@ -47,10 +75,22 @@
       equivalent: true
   modes: [trace]
   emits: [hist, topk, raw, timeline, summary]
-  targets: {system: native}
+  targets: {system: native, pid: native, launch: native}
   keys: [sock, task]
-  filter_fields: [comm, saddr, sport, daddr, dport, family, cookie]
+  filter_fields: [comm, saddr, sport, daddr, dport, family, cookie, attributed]
   determinism: low
+  caveats:
+    - "A connection belongs to the process that connected it, or that closed
+       it first (`SYN_SENT`, `FIN_WAIT1`, `LAST_ACK`, the transitions a
+       process makes itself), as `tcplife` attributes it: `attributed` is
+       `owner`. One no process acted on -- a reset, a timer -- carries the
+       task current at its close, `attributed` `at_close`."
+    - "A --pid or launched target keeps the connections of its process tree:
+       its descendants are followed through /proc at each drain (20 ms), and
+       a child that exited before it was ever seen is counted as a loss, not
+       placed in the tree or out of it. So is an `at_close` connection: the
+       task its close interrupted says nothing about who held it, so it is
+       neither kept nor left out as another process's."
 
 - id: net.tcp.rtt
   family: net
@@ -74,6 +114,14 @@
        drives its own decisions."
     - "Polling sees the connections alive at each tick. One opened and closed
        between two ticks is never seen -- a property of polling, not a loss."
+    - "Beside the round trip, each event carries the rest of `tcp_info` that
+       `ss -ti` prints, under names that carry their unit: `rto_ns`,
+       `min_rtt_ns`, `busy_ns`, `pacing_rate_bytes_per_s` and
+       `delivery_rate_bytes_per_s` (bytes, where `ss` prints bits),
+       `bytes_acked`, `bytes_received`, `bytes_sent`, `unacked`, `lost`,
+       `segs_out`, `snd_wnd` and more, and `congestion`, the algorithm's
+       name. Through `netlink` only; a field the kernel's `tcp_info` ends
+       before is absent, not zero."
     - "Narrowing to a process matches socket inodes against /proc/[pid]/fd, so a
        socket passed to another process over a unix socket is attributed to
        whoever holds the descriptor now."
@@ -101,12 +149,18 @@
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kfree_skb(sk_buff *, void *, skb_drop_reason, sock *)|(sk_buff *, void *, skb_drop_reason)", "kernel>=5.8"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:skb:kfree_skb", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
-  emits: [rate, topk, raw, summary]
+  emits: [rate, topk, raw, summary, stack]
   targets: {system: native}
   keys: [sock]
   filter_fields: [reason, protocol]
   determinism: medium
   caveats:
+    - "`-e stack` adds the kernel stack of each drop, interned in the kernel
+       (one walk per distinct stack, 64 frames deep) and named through
+       /proc/kallsyms, and `function`, the symbol `location` is in: where the
+       packet died and how it got there, as the bpftrace drop tools print it;
+       the tracer's own two leaf frames (`bpf_trace_run*`, `bpf_prog_*`) are
+       taken off. Without it no stack is walked."
     - "The drop reason field only exists on recent kernels: discover the
        tracepoint format at runtime instead of assuming it."
 
@@ -134,8 +188,10 @@
   determinism: low
   caveats:
     - "The file holds counters that only grow, so a run reports the increment
-       between two reads. The first read of a run is a baseline and produces
-       nothing: a run shorter than one poll interval measures nothing."
+       between two reads. The baseline is read before the observed program
+       starts, so its first bytes are in the first interval; the runner's
+       first tick, microseconds after it, is passed over rather than reported
+       as an interval of its own."
     - "Loopback traffic is counted twice, once received and once transmitted,
        because it is both."
     - "A series is an interface, and its `bytes` are both directions: each
@@ -153,18 +209,86 @@
   summary: "Packet counts"
   unit: count
   backends:
-    - {id: "fs:proc", requires: ["/proc/net/dev"], cost: free}
-    - {id: "netlink", requires: ["rtnetlink"], cost: free, equivalent: true}
+    - {id: "fs:proc", requires: ["/proc/net/dev"], cost: free, keys: [iface, dir]}
+    - {id: "netlink", requires: ["rtnetlink"], cost: free, equivalent: true, keys: [iface]}
   modes: [poll, count]
   emits: [rate, timeline, summary]
   targets: {system: native, iface: native}
-  keys: [iface]
+  keys: [iface, dir]
   filter_fields: [iface]
   determinism: low
   caveats:
-    - "Counters that only grow: a run reports the increment between two reads,
-       and its first read is a baseline that produces nothing."
+    - "Counters that only grow: a run reports the increment between two reads.
+       The baseline is read before the observed program starts, and the
+       runner's first tick, microseconds after it, is passed over rather than
+       reported as an interval."
+    - "A series is an interface, and its `packets` are both directions, with
+       `rx` and `tx` beside them. Keyed on `dir` (`--keys iface,dir`), each
+       interface's increase is two events, `dir:rx` and `dir:tx`, one series
+       per direction, as `ip -s link` reports them; `fs:proc` alone splits
+       it."
 
+
+- id: net.snmp
+  family: net
+  summary: "Every protocol counter, by nstat's name"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/net/snmp", "/proc/net/netstat"], cost: free}
+  modes: [count, poll, snapshot]
+  emits: [raw]
+  targets: {system: native}
+  keys: []
+  filter_fields: [name, section]
+  determinism: medium
+  caveats:
+    - "Every counter of /proc/net/snmp, /proc/net/netstat and /proc/net/snmp6,
+       named as `nstat` names it, the section and the field run together:
+       `TcpRetransSegs`, `TcpExtListenOverflows`, `Ip6InReceives`. Each event
+       is one counter, `name` and `section` beside its `value`; ask for one
+       with `--filter 'name == \"TcpRetransSegs\"'`."
+    - "A poll or a count reports increments, and only of the counters that
+       moved, as `nstat` does: a counter absent from an interval moved by zero
+       in it. The baseline is read before the observed program starts. A
+       snapshot reports every counter as it stands, as `value_since_boot`."
+    - "A few fields are settings or gauges, not counters -- `TcpCurrEstab`,
+       `IpForwarding`, `IpDefaultTTL`, `TcpRtoAlgorithm`, `TcpRtoMin`,
+       `TcpRtoMax`, `TcpMaxConn` (-1 for no limit) -- and are reported as
+       they stand in every interval, marked `gauge`."
+    - "Only `raw`: a series per counter needs a key naming the counter, which
+       the tool does not have yet, and one series of every counter summed
+       would be a number about nothing."
+    - "The counters are the reading process's network namespace's."
+
+- id: net.sockets
+  family: net
+  summary: "Every TCP and UDP socket, its state, queues and owner"
+  unit: bytes
+  backends:
+    - {id: "netlink", requires: ["sock_diag"], cost: low}
+  modes: [snapshot, poll]
+  emits: [raw]
+  targets: {system: native, pid: native}
+  keys: [sock]
+  filter_fields: [protocol, family, state, saddr, sport, daddr, dport, uid, pid, comm]
+  determinism: medium
+  caveats:
+    - "What `ss -tuanp` lists: one event per socket, keyed by its cookie, with
+       `protocol`, `state` in `ss`'s words (`LISTEN`, `ESTAB`, `TIME-WAIT`,
+       `UNCONN`), the endpoints, `uid`, and `pid` and `comm` of the process
+       holding it."
+    - "`recv_q` and `send_q` mean what `ss` says: on a listening socket the
+       accept queue's length and its bound; on any other, bytes the
+       application has not read and bytes the peer has not acknowledged."
+    - "The owner is found by matching socket inodes against /proc/<pid>/fd,
+       which another user's processes do not open to an unprivileged reader:
+       their sockets carry no `pid`, and the run's notes say how many
+       processes were unreadable. Under --pid an unreadable process is
+       refused at attach, and one that becomes unreadable (a setuid exec)
+       is a failed read, never an empty inventory. A connection still in an accept queue, and
+       a socket in TIME-WAIT, belong to no process."
+    - "Each poll lists the sockets alive at that tick; one opened and closed
+       between two ticks is never seen."
 
 - id: net.socket
   family: net
@@ -342,9 +466,14 @@
   # not happened yet, and on receive it never happens in a process context at
   # all. What a captured frame does have is the interface it crossed.
   keys: [iface]
-  filter_fields: [iface, protocol, dport, daddr]
+  filter_fields: [iface, protocol, saddr, sport, dport, daddr, direction]
   determinism: high
   caveats:
+    - "Loopback hands a packet socket every frame twice, once leaving
+       (`direction` `outgoing`) and once arriving (`host`), and both are kept:
+       they are two real crossings of the device. A count of packets as
+       tcpdump gives it on `lo` keeps one, `--filter 'direction != \"outgoing\"'`."
+
     - "Watch buffer drops. A capture that loses packets under load silently
        produces wrong conclusions."
     - "The kernel is told to copy only the headers of each frame, through a
@@ -379,8 +508,12 @@
        driver-specific list `ethtool -S` prints needs the ethtool netlink
        family, which is why that backend is first in the chain."
     - "Apart, and all of them in every emit: each interface is one series per
-       counter kind, keyed `<iface>/errors`, `/drops`, `/fifo`, `/collisions`
-       and `/carrier`, whose value is frames. The `iface` field is the
+       counter kind, keyed `<iface>/errors`, `/drops`, `/fifo`, `/collisions`,
+       `/carrier`, `/mcast` and `/missed`, whose value is frames. `mcast` is
+       multicast frames received, not a failure, kept because `ip -s link`
+       prints it beside them; `missed` is `rx_missed_errors` from sysfs, frames
+       the card had no buffer for, already inside `drops` (the kernel adds it
+       into the receive drop column) and given apart as `ip -s link` does. The `iface` field is the
        interface alone, so a filter on it keeps every kind of that interface."
     - "These are counters, so a run reports the increment between two reads and
        its first read is a baseline that produces nothing."

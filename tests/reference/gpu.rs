@@ -594,22 +594,20 @@ mod tests {
         assert!(smi_dmon("", "").is_err());
     }
 
-    // The four `omn` captures below are composed, not captured: written in
-    // the shape today's `omn` gives `topk` and `raw` (captured from
-    // `cpu.instructions` on 2026-10-04) with the gpu sources' attributes in
-    // the order `src/collect/gpu/counters.rs` emits them (`spread`, when
-    // there is one, at index 4) and the twenty-second wave's numbers,
-    // because this machine's NVIDIA driver was not loaded when they were
-    // written (docs/fixes/w23-gpu.md). Replace them by a real run's
-    // `results.json` once it is; until then no gpu pair counts as held.
+    // The four `omn` captures below are real runs' `results.json`
+    // (2026-10-05, the RTX 2080 Ti, driver loaded), by the commands of
+    // docs/fixes/w23-gpu.md, "Privileged runs wanted", step 2: `gpu.kernel`
+    // topk over `gpu_workload.py memory 5 16` and `launches 5000`, `gpu.api`
+    // topk over `linked.sh memory 5 16`, `gpu.counters` raw over `memory 5
+    // 16`. The numbers asserted are those runs'.
 
     #[test]
     fn omn_topk_reads_kernels_copies_and_calls_under_the_tools_keys() {
         let v = omn_topk(include_str!("captures/gpu/omn_kernel_topk.json"), "").unwrap();
         assert_eq!(get(&v, "copy/count"), 5.0);
-        assert_eq!(get(&v, "copy/total_ns"), 310495.0);
+        assert_eq!(get(&v, "copy/total_ns"), 312925.0);
         assert_eq!(get(&v, "[memcpy HtoD]/count"), 1.0);
-        assert_eq!(get(&v, "[memcpy HtoD]/total_ns"), 1522330.0);
+        assert_eq!(get(&v, "[memcpy HtoD]/total_ns"), 1815081.0);
         assert_eq!(get(&v, "[memset]/count"), 1.0);
         // The same keys as nsys's parser, so a pair's `key` names both.
         let nsys = nsys_gpu_sum(include_str!("captures/gpu/nsys_gpu_sum.csv"), "").unwrap();
@@ -629,7 +627,7 @@ mod tests {
         assert_eq!(get(&v, "copy/smsp__inst_executed.sum"), 808192.0);
         assert_eq!(get(&v, "copy/sm__ctas_launched.sum"), 272.0);
         assert_eq!(get(&v, "copy/l1tex__t_bytes.sum"), 33554432.0);
-        assert_eq!(get(&v, "copy/dram__bytes_read.sum"), 16838688.0);
+        assert_eq!(get(&v, "copy/dram__bytes_read.sum"), 16840992.0);
         assert_eq!(get(&v, "copy/launches"), 5.0);
         let ncu = ncu_metrics_csv(include_str!("captures/gpu/ncu_metrics.csv"), "").unwrap();
         for (key, _) in &ncu {

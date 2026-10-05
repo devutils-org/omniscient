@@ -53,6 +53,19 @@ const ARG_NEW_STATE: i16 = 16;
 const TCP_ESTABLISHED: i32 = 1;
 const TCP_CLOSE: i32 = 7;
 
+/// The three transitions a process makes on its own socket, in its own
+/// context: `connect` sends the SYN (`SYN_SENT`), `close` or `shutdown` sends
+/// the first FIN (`FIN_WAIT1`) or answers the peer's (`LAST_ACK`). The task
+/// current at the first of them is the connection's owner -- what `tcplife`
+/// records -- where the task current at `TCP_CLOSE`, often softirq's, is
+/// whoever was interrupted.
+const TCP_SYN_SENT: i32 = 2;
+const TCP_FIN_WAIT1: i32 = 4;
+const TCP_LAST_ACK: i32 = 9;
+
+/// `BPF_NOEXIST`: an owner recorded at the connect is kept at the close.
+const BPF_NOEXIST: i32 = 1;
+
 /// `AF_INET6`, from the same frozen numbering as the states above.
 const AF_INET6: i32 = 10;
 
@@ -92,13 +105,12 @@ pub struct TcpLifetime {
     pub family: u32,
     /// The local port, in network order as the kernel holds it.
     sport: u32,
-    /// The process that was current when the socket reached `TCP_CLOSE`.
-    ///
-    /// That is the closing process when an application closed the connection,
-    /// and is whatever happened to be running on that cpu when the kernel
-    /// closed it from a timer or on a reset. It is not "the process that owned
-    /// the connection", which this tracepoint cannot say: a connection becomes
-    /// established in softirq context at both ends, outside any process.
+    /// The connection's owner when `owned` is set: the process current at
+    /// the first transition it made itself (`SYN_SENT`, `FIN_WAIT1`,
+    /// `LAST_ACK`). Otherwise the process current when the socket reached
+    /// `TCP_CLOSE`, whatever happened to be running on that cpu when the
+    /// kernel closed it from a timer or on a reset, which is not the owner:
+    /// a connection becomes established in softirq context at both ends.
     pub pid: u32,
     pub tid: u32,
     comm: [u8; 16],
@@ -106,8 +118,9 @@ pub struct TcpLifetime {
     daddr: [u8; 16],
     /// The peer's port, in network order as the kernel holds it.
     dport: u32,
-    /// Written as zero, so that no byte of the record is left to the stack.
-    _pad: u32,
+    /// 1 when `pid`, `tid` and `comm` are the owner's (see `pid`), 0 when
+    /// they are the task current at the close.
+    pub owned: u32,
 }
 
 /// The size of the record the program writes.
@@ -188,7 +201,7 @@ impl TcpLifetime {
             comm,
             daddr,
             dport: word(120),
-            _pad: 0,
+            owned: word(124),
         })
     }
 }
@@ -211,7 +224,7 @@ const TID: i16 = EVENT + 84;
 const COMM: i16 = EVENT + 88;
 const DADDR: i16 = EVENT + 104;
 const DPORT: i16 = EVENT + 120;
-const PAD: i16 = EVENT + 124;
+const OWNED: i16 = EVENT + 124;
 /// The open map's key and value, and the drop counter's key, below the record.
 const OPEN_KEY: i16 = EVENT - 8;
 /// Three words: when the connection opened, and the two names the socket had
@@ -231,9 +244,15 @@ const HELD_INODE: i16 = EVENT - 56;
 const DROP_KEY: i16 = EVENT - 60;
 /// Eight bytes a pointer read lands in, below the drop counter's key.
 const SCRATCH: i16 = EVENT - 72;
+/// The owner map's value: `pid_tgid`, then the comm. Written here at an
+/// owner's transition, copied here out of the map at the close.
+const OWNER_VALUE: i16 = EVENT - 104;
+const OWNER_PID_TGID: i16 = 0;
+const OWNER_COMM: i16 = 8;
 
 const OPEN_KEY_BYTES: usize = 8;
 const OPEN_VALUE_BYTES: usize = 24;
+const OWNER_VALUE_BYTES: usize = 24;
 
 /// Builds the program, or says why this kernel cannot be read.
 fn instructions(
@@ -241,6 +260,7 @@ fn instructions(
     inode: SocketInode,
     ring_fd: i32,
     open_fd: i32,
+    owners_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     expect_signature(btf, "inet_sock_set_state", &[&SIGNATURE])?;
@@ -283,6 +303,29 @@ fn instructions(
     program.push(Insn::ldx(BPF_DW, 1, 6, ARG_NEW_STATE));
     program.jump_to("opened", Insn::jeq_imm(1, TCP_ESTABLISHED, 0));
     program.jump_to("closed", Insn::jeq_imm(1, TCP_CLOSE, 0));
+    program.jump_to("owner", Insn::jeq_imm(1, TCP_SYN_SENT, 0));
+    program.jump_to("owner", Insn::jeq_imm(1, TCP_FIN_WAIT1, 0));
+    program.jump_to("owner", Insn::jeq_imm(1, TCP_LAST_ACK, 0));
+    program.jump_to("done", Insn::ja());
+
+    // ---- the process acting on its own socket: its owner ----
+    program.label("owner");
+    program.push(Insn::stx(BPF_DW, R10, OPEN_KEY, 7));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_DW, R10, OWNER_VALUE + OWNER_PID_TGID, 0));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, (OWNER_VALUE + OWNER_COMM) as i32));
+    program.push(Insn::mov64_imm(2, 16));
+    program.push(Insn::call(GET_CURRENT_COMM));
+    program.extend(Insn::load_map_fd(1, owners_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, OPEN_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, OWNER_VALUE as i32));
+    // The first owner stands: the process that connected, or the one that
+    // closed a connection it accepted. A full map leaves the close's task.
+    program.push(Insn::mov64_imm(4, BPF_NOEXIST));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.jump_to("done", Insn::ja());
 
     // ---- the connection begins ----
@@ -316,6 +359,31 @@ fn instructions(
     // ---- the connection ends ----
     program.label("closed");
     program.push(Insn::stx(BPF_DW, R10, OPEN_KEY, 7));
+    // The owner first, and removed whether or not the connection was ever
+    // established: a refused connect recorded one at `SYN_SENT` too.
+    program.push(Insn::st_imm(BPF_W, R10, OWNED, 0));
+    // Initialised on every path, so the verifier sees no read of an unwritten
+    // slot below whichever branch it takes.
+    for word in 0..3 {
+        program.push(Insn::st_imm(BPF_DW, R10, OWNER_VALUE + word * 8, 0));
+    }
+    program.extend(Insn::load_map_fd(1, owners_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, OPEN_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("unowned", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 1, 0, OWNER_PID_TGID));
+    program.push(Insn::stx(BPF_DW, R10, OWNER_VALUE + OWNER_PID_TGID, 1));
+    program.push(Insn::ldx(BPF_DW, 1, 0, OWNER_COMM));
+    program.push(Insn::stx(BPF_DW, R10, OWNER_VALUE + OWNER_COMM, 1));
+    program.push(Insn::ldx(BPF_DW, 1, 0, OWNER_COMM + 8));
+    program.push(Insn::stx(BPF_DW, R10, OWNER_VALUE + OWNER_COMM + 8, 1));
+    program.push(Insn::st_imm(BPF_W, R10, OWNED, 1));
+    program.extend(Insn::load_map_fd(1, owners_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, OPEN_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+    program.label("unowned");
     program.extend(Insn::load_map_fd(1, open_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, OPEN_KEY as i32));
@@ -372,7 +440,6 @@ fn instructions(
     program.push(Insn::st_imm(BPF_DW, R10, SADDR + 8, 0));
     program.push(Insn::st_imm(BPF_DW, R10, DADDR, 0));
     program.push(Insn::st_imm(BPF_DW, R10, DADDR + 8, 0));
-    program.push(Insn::st_imm(BPF_W, R10, PAD, 0));
     read_narrow(&mut program, DPORT, 2, 7, dport_at);
     program.push(Insn::ldx(BPF_W, 1, R10, FAMILY));
     program.jump_to("v6", Insn::jeq_imm(1, AF_INET6, 0));
@@ -384,6 +451,19 @@ fn instructions(
     read_field(&mut program, DADDR, 16, 7, v6_daddr_at);
     program.label("addressed");
 
+    // The owner's names when one was recorded, the current task's otherwise.
+    program.push(Insn::ldx(BPF_W, 2, R10, OWNED));
+    program.jump_to("current", Insn::jeq_imm(2, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 0, R10, OWNER_VALUE + OWNER_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, TID, 0));
+    program.push(Insn::rsh64_imm(0, 32));
+    program.push(Insn::stx(BPF_W, R10, PID, 0));
+    program.push(Insn::ldx(BPF_DW, 1, R10, OWNER_VALUE + OWNER_COMM));
+    program.push(Insn::stx(BPF_DW, R10, COMM, 1));
+    program.push(Insn::ldx(BPF_DW, 1, R10, OWNER_VALUE + OWNER_COMM + 8));
+    program.push(Insn::stx(BPF_DW, R10, COMM + 8, 1));
+    program.jump_to("attributed", Insn::ja());
+    program.label("current");
     program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
     program.push(Insn::stx(BPF_W, R10, TID, 0));
     program.push(Insn::rsh64_imm(0, 32));
@@ -392,6 +472,7 @@ fn instructions(
     program.push(Insn::add64_imm(1, COMM as i32));
     program.push(Insn::mov64_imm(2, 16));
     program.push(Insn::call(GET_CURRENT_COMM));
+    program.label("attributed");
 
     program.extend(Insn::load_map_fd(1, ring_fd));
     program.push(Insn::mov64_reg(2, R10));
@@ -415,6 +496,8 @@ fn instructions(
 pub struct TcpLifetimeProgram {
     ring: RingBuffer,
     open: Hash,
+    /// Kept for the fd the program holds; nothing reads it from here.
+    _owners: Hash,
     drops: Counters,
     program: OwnedFd,
     _link: OwnedFd,
@@ -431,6 +514,8 @@ impl TcpLifetimeProgram {
                 .map_err(|error| map_failure("connection ring buffer", error))?;
         let open = Hash::create(OPEN_KEY_BYTES, OPEN_VALUE_BYTES, MAX_OPEN, "omn_tcp_open")
             .map_err(|error| map_failure("open connection map", error))?;
+        let owners = Hash::create(OPEN_KEY_BYTES, OWNER_VALUE_BYTES, MAX_OPEN, "omn_tcp_owner")
+            .map_err(|error| map_failure("connection owner map", error))?;
         let drops = Counters::create(COUNTER_SLOTS, "omn_tcp_lost")
             .map_err(|error| map_failure("connection counters", error))?;
 
@@ -439,6 +524,7 @@ impl TcpLifetimeProgram {
             SocketInode::locate(btf)?,
             ring_map.as_raw_fd(),
             open.as_raw_fd(),
+            owners.as_raw_fd(),
             drops.as_raw_fd(),
         )?;
         let program = load(&instructions, "omn_sock_state")?;
@@ -452,6 +538,7 @@ impl TcpLifetimeProgram {
         Ok(Self {
             ring,
             open,
+            _owners: owners,
             drops,
             program,
             _link: link,
@@ -545,7 +632,7 @@ mod tests {
             (COMM, offset_of!(TcpLifetime, comm), "comm"),
             (DADDR, offset_of!(TcpLifetime, daddr), "daddr"),
             (DPORT, offset_of!(TcpLifetime, dport), "dport"),
-            (PAD, offset_of!(TcpLifetime, _pad), "_pad"),
+            (OWNED, offset_of!(TcpLifetime, owned), "owned"),
         ] {
             assert_eq!(
                 (stack - EVENT) as usize,
@@ -626,7 +713,7 @@ mod tests {
     fn the_published_record_is_exactly_the_size_of_the_struct() {
         let Some(btf) = kernel_btf() else { return };
         let program =
-            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, 5).expect("a program");
+            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, 6, 5).expect("a program");
         let output_at = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -644,7 +731,7 @@ mod tests {
     fn the_program_reads_the_monotonic_clock_and_no_other() {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
-        let called: Vec<i32> = instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, 5)
+        let called: Vec<i32> = instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, 6, 5)
             .expect("a program")
             .iter()
             .filter(|insn| insn.code == 0x85)
@@ -661,14 +748,15 @@ mod tests {
         assert!(!called.contains(&KTIME_GET_BOOT_NS));
     }
 
-    /// Two states and no others. A program that acted on `FIN_WAIT1` would
-    /// close a connection that is still moving data, and one that acted on
-    /// `SYN_SENT` would call a refused connect a connection.
+    /// Two states bound a connection and three more name its owner, and no
+    /// others. A program that timed from `FIN_WAIT1` would close a connection
+    /// that is still moving data, and one that timed from `SYN_SENT` would
+    /// call a refused connect a connection: those three only record a task.
     #[test]
-    fn only_the_two_states_that_bound_a_connection_are_acted_on() {
+    fn only_the_states_that_bound_a_connection_or_name_its_owner_are_acted_on() {
         let Some(btf) = kernel_btf() else { return };
         let program =
-            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, 5).expect("a program");
+            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, 6, 5).expect("a program");
         let compared: Vec<i32> = program
             .iter()
             .filter(|insn| insn.code == 0x15 && insn.regs & 0xf == 1)
@@ -677,10 +765,13 @@ mod tests {
         assert!(compared.contains(&TCP_ESTABLISHED), "{compared:?}");
         assert!(compared.contains(&TCP_CLOSE), "{compared:?}");
         assert!(compared.contains(&AF_INET6), "{compared:?}");
+        for owner in [TCP_SYN_SENT, TCP_FIN_WAIT1, TCP_LAST_ACK] {
+            assert!(compared.contains(&owner), "{compared:?}");
+        }
         assert_eq!(
             compared.len(),
-            3,
-            "three comparisons against a constant and no more: {compared:?}"
+            6,
+            "six comparisons against a constant and no more: {compared:?}"
         );
     }
 
@@ -695,7 +786,7 @@ mod tests {
         let SocketInode::ThroughSocket { ino_at, .. } = walk else {
             unreachable!()
         };
-        let program = instructions(btf, walk, 3, 4, 5).expect("a program");
+        let program = instructions(btf, walk, 3, 4, 6, 5).expect("a program");
         assert!(
             program
                 .iter()

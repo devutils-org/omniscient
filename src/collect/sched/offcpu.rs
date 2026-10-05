@@ -100,6 +100,8 @@ pub struct OffCpuCollector {
     /// Whose blocks are kept.
     filter: Whose,
     program: Option<OffCpuProgram>,
+    /// Each process's parent, for the rows' `ppid`.
+    parents: super::Parents,
     losses: Losses,
     /// The kernel's skipped runs of the program, cumulative, as last read.
     skipped: u64,
@@ -156,6 +158,7 @@ impl OffCpuCollector {
             id: CollectorId::new("sched.offcpu/bpf:raw_tp"),
             filter,
             program: None,
+            parents: super::Parents::default(),
             losses: Losses::default(),
             skipped: 0,
             notes: Vec::new(),
@@ -198,6 +201,7 @@ impl OffCpuCollector {
             }
         };
         self.window_opened_ns = closed_ns;
+        self.parents.absorb(program.parents());
         // A task that exec'd in this window is named what it became, not what
         // it was when its row was made; see `bpf::Renames`.
         if let Some(renames) = self.renames.as_mut() {
@@ -242,6 +246,9 @@ impl OffCpuCollector {
             self.blocks_without_a_wakeup += entry.unwoken;
             self.unstamped += entry.unstamped;
             let mut attrs = attributes(&entry, window_ns);
+            if let Some(ppid) = self.parents.of(entry.tgid) {
+                attrs.push(Attr::uint("ppid", u64::from(ppid)));
+            }
             if let Some(id) = self.resolve_stack(&entry) {
                 attrs.push(Attr::uint(STACK_ID_ATTR, u64::from(id)));
             }

@@ -9,11 +9,11 @@
 │          [0m[2mnot in this run[0m                                                                                             │[0m
 ├ [0m[1mpower[0m ───────────────────────────────────────────────────────────────────────────────────────────────────────────────┤[0m
 │          [0m[2mnot in this run[0m                                                                                             │[0m
-├ [0m[1mdisk[0m [0m[2mbytes moved, per device, speed unknown so one hue; read apart from written: in the events o…[0m─ [0m[36m~low det[0m [0m[33mdegraded[0m ┤[0m
+├ [0m[1mdisk[0m [0m[2mbytes moved, per device, speed unknown so one hue; read apart from written needs the `dir` …[0m─ [0m[36m~low det[0m [0m[33mdegraded[0m ┤[0m
 │259:0     [0m[4;38;5;67m      ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁████████▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▂▂▂▂▁▁▁▁▁▁▁··[0m [0m[1;4;38;5;67m15.5MiB[0m[2m  peak [0m[4;38;5;67m33.1MiB/s[0m             │[0m
 │253:0     [0m[4;38;5;67m      ··············▁▁▁▁▁▁▁▁···········································[0m [0m[1;4;38;5;67m8.00KiB[0m[2m  peak [0m[4;38;5;67m38.0KiB/s[0m             │[0m
 │          [0m[2m+1 moved nothing: 7:0[0m                                                                                       │[0m
-├ [0m[1mnetwork[0m [0m[2mbytes moved, per interface, speed unknown so one hue; in apart from out: in the events o…[0m─ [0m[36m~low det[0m [0m[33mdegraded[0m ┤[0m
+├ [0m[1mnetwork[0m [0m[2mbytes moved, per interface, speed unknown so one hue; in apart from out needs the `dir` …[0m─ [0m[36m~low det[0m [0m[33mdegraded[0m ┤[0m
 │lo        [0m[4;38;5;67m      ▆▆▆▆▆▆▆▆▃▃▃▃▃▃████████▃▃▃▃▃▃▇▇▇▇▇▇▇▇▃▃▃▃▃▃▄▄▄▄▄▄▄▆▆▆▆▆▆▆▁▁▁▁▁▁▁··[0m [0m[1;4;38;5;67m224MiB[0m[2m  peak [0m[4;38;5;67m177MiB/s[0m               │[0m
 │wlan0     [0m[4;38;5;67m      ··············▁▁▁▁▁▁▁▁······▁▁▁▁▁▁▁▁······▁▁▁▁▁▁▁▁▁▁▁▁▁▁·······▁·[0m [0m[1;4;38;5;67m2.34KiB[0m[2m  peak [0m[4;38;5;67m3.75KiB/s[0m             │[0m
 │          [0m[2m+5 moved nothing: br-bf6c2e1afced br-cb843b6eb1dd docker0 enp38s0 tailscale0[0m                                │[0m

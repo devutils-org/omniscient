@@ -52,6 +52,11 @@ pub struct Pair {
     /// one): it must exit 0, or the pair fails.
     #[serde(default)]
     pub setup: Argv,
+    /// An argv run after each side (after the one run, in the modes with
+    /// one), whatever the side came to: what `setup` made that must not stay
+    /// behind. It must exit 0, or the pair fails.
+    #[serde(default)]
+    pub teardown: Argv,
     /// Written, but `omn` cannot serve it yet: what it lacks. Not run.
     #[serde(default)]
     pub gap: Option<String>,
@@ -362,6 +367,7 @@ impl Pair {
             .chain(&self.reference.command)
             .chain(&self.reference.report)
             .chain(self.setup.argv())
+            .chain(self.teardown.argv())
             .any(|a| a.contains("{pid}"));
         if uses_pid && self.run != RunMode::Attach {
             out.push("`{pid}` only means something with `run: attach`".into());
@@ -379,19 +385,19 @@ impl Pair {
                     .into(),
             );
         }
-        if let Argv::Invalid(v) = &self.setup {
-            out.push(format!(
-                "`setup` is an argv run before each side, not `{}`",
-                serde_norway::to_string(v).unwrap_or_default().trim()
-            ));
-        }
-        if self
-            .setup
-            .argv()
-            .first()
-            .is_some_and(|a| a.trim().is_empty())
-        {
-            out.push("`setup` starts with an empty program".into());
+        for (name, argv, when) in [
+            ("setup", &self.setup, "before"),
+            ("teardown", &self.teardown, "after"),
+        ] {
+            if let Argv::Invalid(v) = argv {
+                out.push(format!(
+                    "`{name}` is an argv run {when} each side, not `{}`",
+                    serde_norway::to_string(v).unwrap_or_default().trim()
+                ));
+            }
+            if argv.argv().first().is_some_and(|a| a.trim().is_empty()) {
+                out.push(format!("`{name}` starts with an empty program"));
+            }
         }
         for arg in &self.workload {
             if PLACEHOLDERS.iter().any(|p| arg.contains(p)) {
@@ -609,7 +615,14 @@ pub fn run_pair(pair: &Pair, parsers: &[Parser], omn: &Path) -> Outcome {
     }
     for binary in &pair.reference.requires {
         if !installed(binary) {
-            return Outcome::Skip(format!("`{binary}` is not installed here"), vec![]);
+            // A path is a file the pair needs (a device node, a driver's
+            // file), not a program one installs.
+            let why = if binary.contains('/') {
+                format!("`{binary}` does not exist here")
+            } else {
+                format!("`{binary}` is not installed here")
+            };
+            return Outcome::Skip(why, vec![]);
         }
     }
     for setting in &pair.reference.requires_setting {
@@ -645,9 +658,18 @@ pub fn run_pair(pair: &Pair, parsers: &[Parser], omn: &Path) -> Outcome {
         };
         let result = match pair.run {
             RunMode::Separate => run_separate(pair, omn, &tmp, i % 2 == 1),
-            RunMode::Attach | RunMode::Alongside => run_attached(pair, omn, &tmp),
-            RunMode::ToolWrapsOmn => run_wrapped(pair, omn, &tmp),
-            RunMode::OmnLaunchesTool => run_launched(pair, omn, &tmp),
+            RunMode::Attach | RunMode::Alongside => {
+                let r = run_attached(pair, omn, &tmp);
+                after_run(pair, &tmp, r)
+            }
+            RunMode::ToolWrapsOmn => {
+                let r = run_wrapped(pair, omn, &tmp);
+                after_run(pair, &tmp, r)
+            }
+            RunMode::OmnLaunchesTool => {
+                let r = run_launched(pair, omn, &tmp);
+                after_run(pair, &tmp, r)
+            }
         };
         let result = match result {
             Ok(r) => r,
@@ -920,8 +942,21 @@ fn judge_omn(pair: &Pair, side: &Side, results: Option<&str>) -> Option<Outcome>
     if side.timed_out {
         return Some(Outcome::Fail("omn did not finish in time".into()));
     }
+    // Since the twenty-fourth wave `omn` says which half of exit 1 it
+    // means, on its last line; the heuristics below are for a line it did
+    // not print.
+    let said = tail(&side.stderr, 1).pop().unwrap_or_default();
     match side.status.code() {
         Some(0) => None,
+        Some(1) if said.contains(OMN_RUN_FAILED) => Some(Outcome::Fail(format!(
+            "omn failed while running: {}",
+            tail(&side.stderr, 3).join(" | ")
+        ))),
+        Some(1) if said.contains(OMN_MACHINE_REFUSED) => {
+            Some(workload_fails_alone(pair).unwrap_or_else(|| {
+                Outcome::Skip("omn cannot run this here".into(), tail(&side.stderr, 8))
+            }))
+        }
         Some(1) if results.is_some_and(|r| !r.trim().is_empty()) => Some(Outcome::Fail(format!(
             "omn wrote its results and exited 1, so something failed while running: {}",
             tail(&side.stderr, 3).join(" | ")
@@ -944,6 +979,11 @@ fn judge_omn(pair: &Pair, side: &Side, results: Option<&str>) -> Option<Outcome>
     }
 }
 
+/// `omn`'s last line on exit 1 (`src/main.rs`, `Unavailable::line`): the
+/// machine refused the run, or the run failed once started.
+const OMN_MACHINE_REFUSED: &str = "exit 1: the machine refused the run";
+const OMN_RUN_FAILED: &str = "exit 1: the run failed after it started";
+
 /// The workload run once with no observer, asked before a skip is granted.
 ///
 /// Under `run: separate` the workload's stderr is part of each observer's, so
@@ -952,21 +992,45 @@ fn judge_omn(pair: &Pair, side: &Side, results: Option<&str>) -> Option<Outcome>
 /// `omn` exit 1. A workload that fails alone is the pair's defect, never the
 /// machine's: this is a failure naming it. Asked only on the way to a skip,
 /// so a pair that runs costs nothing more.
+///
+/// Under `run: omn_launches_tool` the program `omn` launches is the tool
+/// with the workload as its arguments (a job file, say), so that is what
+/// runs alone; the tool refused there is the machine's, and the skip stands.
 fn workload_fails_alone(pair: &Pair) -> Option<Outcome> {
-    if pair.workload.is_empty() {
+    let launched = pair.run == RunMode::OmnLaunchesTool;
+    let tmp = if launched { scratch(0).ok() } else { None };
+    let program: Vec<String> = match &tmp {
+        Some(tmp) => tool_argv(pair, &pair.reference.command, tmp, None)
+            .into_iter()
+            .chain(pair.workload.iter().cloned())
+            .collect(),
+        None if launched => return None,
+        None => pair.workload.clone(),
+    };
+    if program.is_empty() {
         return None;
     }
-    let mut cmd = Command::new(&pair.workload[0]);
-    cmd.args(&pair.workload[1..]);
-    let side = match spawn(&mut cmd).and_then(|child| finish(child, timeout(pair))) {
+    let side = spawn(&mut command_of(&program)).and_then(|child| finish(child, timeout(pair)));
+    if let Some(tmp) = &tmp {
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+    let what = if launched {
+        "the program omn launches (the tool and the workload)"
+    } else {
+        "the workload"
+    };
+    let side = match side {
         Ok(side) => side,
-        Err(e) => return Some(Outcome::Fail(format!("the workload does not start: {e}"))),
+        Err(e) => return Some(Outcome::Fail(format!("{what} does not start: {e}"))),
     };
     if side.timed_out || side.status.success() {
         return None;
     }
+    if launched && !refused_lines(pair, &side).is_empty() {
+        return None;
+    }
     Some(Outcome::Fail(format!(
-        "the workload fails with no observer ({}): {}",
+        "{what} fails with no observer ({}): {}",
         side.status,
         tail(&side.stderr, 3).join(" | ")
     )))
@@ -1192,18 +1256,37 @@ fn timeout(pair: &Pair) -> Duration {
 
 /// `setup`, when the pair has one: it must exit 0.
 fn run_setup(pair: &Pair, tmp: &Path) -> Result<(), String> {
-    let setup = pair.setup.argv();
-    if setup.is_empty() {
+    run_step("setup", pair.setup.argv(), pair, tmp)
+}
+
+/// `teardown`, when the pair has one: it must exit 0.
+fn run_teardown(pair: &Pair, tmp: &Path) -> Result<(), String> {
+    run_step("teardown", pair.teardown.argv(), pair, tmp)
+}
+
+/// A side's result, then `teardown` whatever it was: a teardown that fails
+/// fails the pair, after the side's own failure when it had one.
+fn after_run<T>(pair: &Pair, tmp: &Path, result: Result<T, String>) -> Result<T, String> {
+    match (result, run_teardown(pair, tmp)) {
+        (Ok(r), Ok(())) => Ok(r),
+        (Ok(_), Err(e)) => Err(e),
+        (Err(e), Ok(())) => Err(e),
+        (Err(e), Err(t)) => Err(format!("{e}; then {t}")),
+    }
+}
+
+fn run_step(name: &str, argv: &[String], pair: &Pair, tmp: &Path) -> Result<(), String> {
+    if argv.is_empty() {
         return Ok(());
     }
     let side = finish(
-        spawn(&mut command_of(&substitute(setup, tmp, None)))?,
+        spawn(&mut command_of(&substitute(argv, tmp, None)))?,
         timeout(pair),
     )?;
     if side.timed_out || !side.status.success() {
         return Err(format!(
-            "`setup` ({}) {}: {}",
-            setup.join(" "),
+            "`{name}` ({}) {}: {}",
+            argv.join(" "),
             if side.timed_out {
                 "did not finish in time".to_string()
             } else {
@@ -1223,15 +1306,21 @@ fn run_separate(
 ) -> Result<RunResult, String> {
     let limit = timeout(pair);
     let run_omn = || {
-        run_setup(pair, tmp)?;
-        let mut cmd = omn_command(pair, omn, tmp, &pair.workload, None);
-        finish(spawn(&mut cmd)?, limit)
+        let side = (|| {
+            run_setup(pair, tmp)?;
+            let mut cmd = omn_command(pair, omn, tmp, &pair.workload, None);
+            finish(spawn(&mut cmd)?, limit)
+        })();
+        after_run(pair, tmp, side)
     };
     let run_tool = || -> Result<Side, String> {
-        run_setup(pair, tmp)?;
-        let mut cmd = tool_command(pair, &pair.reference.command, tmp, None, true);
-        let side = finish(spawn(&mut cmd)?, limit)?;
-        report(pair, tmp, side, limit)
+        let side = (|| {
+            run_setup(pair, tmp)?;
+            let mut cmd = tool_command(pair, &pair.reference.command, tmp, None, true);
+            let side = finish(spawn(&mut cmd)?, limit)?;
+            report(pair, tmp, side, limit)
+        })();
+        after_run(pair, tmp, side)
     };
     let (omn_side, tool_side) = if tool_first {
         let t = run_tool()?;
@@ -1863,6 +1952,17 @@ compare: {omn: a, tolerance: {abs: 0}, why: "test"}
             other => panic!("{other:?}"),
         }
 
+        // A path is a file the pair needs, not a program to install.
+        let mut p = pair(base);
+        p.reference.requires = vec!["/dev/no-such-device-here".into()];
+        match run_pair(&p, &parsers(), Path::new(SH)) {
+            Outcome::Skip(reason, _) => assert_eq!(
+                reason, "`/dev/no-such-device-here` does not exist here",
+                "{reason}"
+            ),
+            other => panic!("{other:?}"),
+        }
+
         let mut p = pair(base);
         p.omn = vec![
             "-c".into(),
@@ -2155,6 +2255,128 @@ compare: {omn: a, omn_jq: ".a", tolerance: {abs: 0, side: above, band: 2}, why: 
         match run_pair(&p, &parsers(), Path::new(SH)) {
             Outcome::Fail(why) => {
                 assert!(why.contains("`setup`") && why.contains("broken"), "{why}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Exit 1's last line decides: "the machine refused" skips, "the run
+    /// failed after it started" fails, with or without results written.
+    #[test]
+    fn omns_last_line_says_which_exit_1_it_is() {
+        let mut p = pair(BASE);
+        p.omn[1] = "echo 'cannot open: has no viable backend' >&2; \
+                    echo 'exit 1: the machine refused the run; nothing was measured' >&2; exit 1"
+            .into();
+        assert!(matches!(
+            run_pair(&p, &parsers(), Path::new(SH)),
+            Outcome::Skip(..)
+        ));
+        p.omn[1] = "echo 'has no viable backend' >&2; \
+                    echo 'exit 1: the run failed after it started, before writing its results' >&2; \
+                    exit 1"
+            .into();
+        match run_pair(&p, &parsers(), Path::new(SH)) {
+            Outcome::Fail(why) => assert!(why.contains("failed while running"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `teardown`: after each side, whatever it came to; a failing one fails
+    /// the pair, quoting it.
+    #[test]
+    fn teardown_runs_after_each_side_whatever_it_came_to() {
+        let mut p = pair(BASE);
+        let log = std::env::temp_dir().join(format!("omn-teardown-{}", std::process::id()));
+        let _ = std::fs::remove_file(&log);
+        p.teardown = Argv::List(vec![
+            "sh".into(),
+            "-c".into(),
+            format!("echo x >> {}", log.display()),
+        ]);
+        let count = || {
+            std::fs::read_to_string(&log)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        // `separate`: once after omn, once after the tool.
+        expect_pass(&p);
+        assert_eq!(count(), 2);
+
+        // One run: once.
+        p.run = RunMode::Alongside;
+        expect_pass(&p);
+        assert_eq!(count(), 3);
+
+        // A side that fails still tears down.
+        p.run = RunMode::Separate;
+        p.setup = Argv::List(vec!["sh".into(), "-c".into(), "exit 4".into()]);
+        assert!(matches!(
+            run_pair(&p, &parsers(), Path::new(SH)),
+            Outcome::Fail(_)
+        ));
+        assert_eq!(count(), 4);
+        let _ = std::fs::remove_file(&log);
+
+        p.setup = Argv::default();
+        p.teardown = Argv::List(vec![
+            "sh".into(),
+            "-c".into(),
+            "echo left behind >&2; exit 2".into(),
+        ]);
+        match run_pair(&p, &parsers(), Path::new(SH)) {
+            Outcome::Fail(why) => {
+                assert!(
+                    why.contains("`teardown`") && why.contains("left behind"),
+                    "{why}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+        p.teardown = Argv::List(vec!["".into()]);
+        assert!(p
+            .problems(&parsers())
+            .iter()
+            .any(|e| e.contains("`teardown` starts with an empty program")));
+    }
+
+    /// Under `omn_launches_tool`, the program run alone before a skip is the
+    /// tool with the workload as its arguments: a job file as the workload
+    /// is no failure, a tool refused alone keeps the skip, and a tool that
+    /// fails alone otherwise is the pair's defect.
+    #[test]
+    fn the_program_omn_launches_is_what_runs_alone() {
+        let mut p = pair(BASE);
+        p.run = RunMode::OmnLaunchesTool;
+        // A job file: not a program, but the tool's argument.
+        p.workload = vec!["tests/reference.rs".into()];
+        p.omn = vec![
+            "-c".into(),
+            "echo 'has no viable backend' >&2; exit 1".into(),
+            "sh".into(),
+        ];
+        p.reference.command = vec![
+            "sh".into(),
+            "-c".into(),
+            "test -f \"$1\"".into(),
+            "sh".into(),
+        ];
+        match run_pair(&p, &parsers(), Path::new(SH)) {
+            Outcome::Skip(_, quoted) => assert_eq!(quoted, ["has no viable backend"]),
+            other => panic!("{other:?}"),
+        }
+
+        p.reference.command[2] = "echo 'cannot open: Permission denied' >&2; exit 1".into();
+        assert!(matches!(
+            run_pair(&p, &parsers(), Path::new(SH)),
+            Outcome::Skip(..)
+        ));
+
+        p.reference.command[2] = "echo 'no such job' >&2; exit 1".into();
+        match run_pair(&p, &parsers(), Path::new(SH)) {
+            Outcome::Fail(why) => {
+                assert!(why.contains("the program omn launches"), "{why}");
+                assert!(why.contains("no such job"), "{why}");
             }
             other => panic!("{other:?}"),
         }

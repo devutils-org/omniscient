@@ -200,6 +200,27 @@ fn bpftrace_hist_usecs(stdout: &str, _stderr: &str) -> Result<Values, String> {
 
 /// The data lines of a snoop tool: those whose `numeric` column parses as an
 /// integer, which drops the banner, the header and bpftrace's own messages.
+/// bpftrace's own report that its output buffer overflowed (`Lost N
+/// events`, on either stream): a tool that printed one line per event
+/// printed fewer lines than there were events, so its count is refused
+/// rather than compared short.
+fn lossless(stdout: &str, stderr: &str) -> Result<(), String> {
+    let lost: u64 = stdout
+        .lines()
+        .chain(stderr.lines())
+        .filter_map(|l| {
+            let rest = l.trim().strip_prefix("Lost ")?;
+            rest.strip_suffix(" events")?.trim().parse::<u64>().ok()
+        })
+        .sum();
+    if lost > 0 {
+        return Err(format!(
+            "bpftrace lost {lost} events: its output is short by them, so it is no count"
+        ));
+    }
+    Ok(())
+}
+
 fn rows(stdout: &str, numeric: usize) -> impl Iterator<Item = Vec<&str>> {
     stdout.lines().filter_map(move |line| {
         let words: Vec<&str> = line.split_whitespace().collect();
@@ -216,7 +237,8 @@ fn comm(words: &[&str], before: usize, after: usize) -> Option<String> {
 
 /// `TIME PID PPID ARGS`: one line per exec, `""` the total and
 /// `argv0:<path>` per program as it was executed.
-fn execsnoop(stdout: &str, _stderr: &str) -> Result<Values, String> {
+fn execsnoop(stdout: &str, stderr: &str) -> Result<Values, String> {
+    lossless(stdout, stderr)?;
     let mut values = vec![(String::new(), 0.0)];
     for words in rows(stdout, 1) {
         if words.len() < 4 || words[2].parse::<i64>().is_err() {
@@ -230,7 +252,8 @@ fn execsnoop(stdout: &str, _stderr: &str) -> Result<Values, String> {
 
 /// `TIME PID COMM SIG TPID RESULT`: one line per kill/tkill/tgkill sent,
 /// counted as `<SIG>` and `<comm>/<SIG>`, the sender's comm.
-fn killsnoop(stdout: &str, _stderr: &str) -> Result<Values, String> {
+fn killsnoop(stdout: &str, stderr: &str) -> Result<Values, String> {
+    lossless(stdout, stderr)?;
     let mut values = vec![(String::new(), 0.0)];
     for words in rows(stdout, 1) {
         let Some(comm) = comm(&words, 2, 3) else {
@@ -247,7 +270,8 @@ fn killsnoop(stdout: &str, _stderr: &str) -> Result<Values, String> {
 /// `PID COMM FD ERR PATH`: one line per open/openat/openat2 returned,
 /// counted as `comm:<comm>`; a failed open (`FD` -1) counts too, as omn's
 /// proc.syscall counts every call.
-fn opensnoop(stdout: &str, _stderr: &str) -> Result<Values, String> {
+fn opensnoop(stdout: &str, stderr: &str) -> Result<Values, String> {
+    lossless(stdout, stderr)?;
     let mut values = vec![(String::new(), 0.0)];
     for words in rows(stdout, 0) {
         if words.len() < 4 || words[2].parse::<i64>().is_err() {
@@ -261,7 +285,8 @@ fn opensnoop(stdout: &str, _stderr: &str) -> Result<Values, String> {
 
 /// `TIME(ms) MAJOR MINOR COMM PID LAT(ms)`: one line per completed request,
 /// counted as `comm:<comm>` (the issuer's) and summed as `lat_ms:<comm>`.
-fn biosnoop(stdout: &str, _stderr: &str) -> Result<Values, String> {
+fn biosnoop(stdout: &str, stderr: &str) -> Result<Values, String> {
+    lossless(stdout, stderr)?;
     let mut values = vec![(String::new(), 0.0)];
     for words in rows(stdout, 0) {
         if words.len() < 6 || words[1].parse::<i64>().is_err() {
@@ -280,7 +305,8 @@ fn biosnoop(stdout: &str, _stderr: &str) -> Result<Values, String> {
 
 /// `TIME PID COMM SADDR SPORT DADDR DPORT`: one line per active open,
 /// counted as `comm:<comm>`.
-fn tcpconnect(stdout: &str, _stderr: &str) -> Result<Values, String> {
+fn tcpconnect(stdout: &str, stderr: &str) -> Result<Values, String> {
+    lossless(stdout, stderr)?;
     let mut values = vec![(String::new(), 0.0)];
     for words in rows(stdout, 1) {
         let Some(comm) = comm(&words, 2, 4) else {
@@ -295,7 +321,8 @@ fn tcpconnect(stdout: &str, _stderr: &str) -> Result<Values, String> {
 /// `PID COMM LADDR LPORT RADDR RPORT TX_KB RX_KB MS`: one line per socket
 /// closed, both ends of a local connection included, counted as
 /// `comm:<comm>` and summed as `tx_kb:<comm>`, `rx_kb:<comm>`, `ms:<comm>`.
-fn tcplife(stdout: &str, _stderr: &str) -> Result<Values, String> {
+fn tcplife(stdout: &str, stderr: &str) -> Result<Values, String> {
+    lossless(stdout, stderr)?;
     let mut values = vec![(String::new(), 0.0)];
     for words in rows(stdout, 0) {
         if words.len() < 9 || words[words.len() - 1].parse::<f64>().is_err() {
@@ -396,6 +423,58 @@ mod tests {
         let v = bpftrace_map(&fixture("syscount"), "").unwrap();
         assert_eq!(get(&v, "@process[omnref]"), 7313.0);
         assert_eq!(get(&v, "@syscall[110]"), 7001.0);
+    }
+
+    /// Each tool's real output (2026-10-05, bpftrace 0.24 through `sudo
+    /// -n`), run as its pair runs it: `under.sh` over the pair's workload,
+    /// or system-wide for 6 s around it (`execsnoop`, `tcplife`). The
+    /// system-wide captures are trimmed to the workload's lines and five
+    /// others, without the paths of other people's programs; the
+    /// `.format.txt` files beside them keep the cases a real run did not
+    /// produce (a comm with a space, a sender that is not the workload).
+    fn real(tool: &str) -> String {
+        crate::common::capture("bpftrace", &format!("{tool}.txt"))
+    }
+
+    #[test]
+    fn every_parser_reads_its_tools_real_output() {
+        let v = bpftrace_map(&real("syscount"), "").unwrap();
+        assert_eq!(get(&v, "@process[omnref]"), 21215.0);
+        let v = opensnoop(&real("opensnoop"), "").unwrap();
+        assert_eq!(get(&v, "comm:omnref"), 624.0);
+        let v = killsnoop(&real("killsnoop"), "").unwrap();
+        assert_eq!(get(&v, "omnref/SIGUSR2"), 50.0);
+        let v = bpftrace_hist(&real("bitesize"), "").unwrap();
+        assert_eq!(get(&v, "@[omnref]/count"), 508.0);
+        assert_eq!(get(&v, "@[omnref]/4096"), 502.0);
+        assert_eq!(get(&v, "@[omnref]/p50"), 4096.0);
+        let v = biosnoop(&real("biosnoop"), "").unwrap();
+        assert_eq!(get(&v, "comm:omnref"), 509.0);
+        assert_eq!(get(&v, "lat_ms:omnref"), 8.0);
+        let v = bpftrace_hist_usecs(&real("biolatency"), "").unwrap();
+        assert_eq!(get(&v, "@usecs/count"), 509.0);
+        assert_eq!(get(&v, "@usecs/p50"), 8_000.0);
+        let v = bpftrace_hist_usecs(&real("runqlat"), "").unwrap();
+        assert_eq!(get(&v, "@usecs/count"), 46441.0);
+        assert_eq!(get(&v, "@usecs/p50"), 1_024_000.0);
+        let v = bpftrace_hist(&real("runqlen"), "").unwrap();
+        assert_eq!(get(&v, "@runqlen/count"), 2812.0);
+        assert_eq!(get(&v, "@runqlen/p50"), 2.0);
+        let v = tcpconnect(&real("tcpconnect"), "").unwrap();
+        assert_eq!(get(&v, "comm:omnref"), 10.0);
+        let v = execsnoop(&real("execsnoop"), "").unwrap();
+        assert_eq!(get(&v, "argv0:/bin/true"), 20.0);
+        let v = tcplife(&real("tcplife"), "").unwrap();
+        assert_eq!(get(&v, "comm:omnref"), 20.0);
+        assert_eq!(get(&v, "tx_kb:omnref"), 640.0);
+    }
+
+    #[test]
+    fn an_output_that_lost_events_is_refused() {
+        let text = format!("{}Lost 197 events\n", real("opensnoop"));
+        let e = opensnoop(&text, "").unwrap_err();
+        assert!(e.contains("lost 197 events"), "{e}");
+        assert!(biosnoop(&real("biosnoop"), "Lost 3 events\n").is_err());
     }
 
     #[test]

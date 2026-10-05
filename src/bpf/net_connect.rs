@@ -30,6 +30,10 @@
 
 use std::os::fd::AsRawFd;
 
+/// `net.tcp.accept`'s program, the other end of a handshake.
+#[path = "net_accept.rs"]
+pub mod accept;
+
 use crate::bpf::attach::fentry::{
     self, Function, Link, Narrowing, Side, BPF_H, GET_SOCKET_COOKIE, SKIP,
 };

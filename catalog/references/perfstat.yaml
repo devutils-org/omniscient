@@ -228,8 +228,10 @@
   # delegation, no privilege) and links it from the run's scratch directory;
   # the workload moves itself into it by the same fixed name, then spins.
   # perf -G takes a path relative to /sys/fs/cgroup, hence `../../..` up to the root, and omn
-  # takes the same spelling.
+  # takes the same spelling. teardown removes the cgroup once the run is
+  # over, the workload long gone from it.
   setup: [sh, -c, "c=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/omn-reference-perfstat; rmdir \"$c\" 2>/dev/null; mkdir \"$c\" && ln -sfn \"$c\" {tmp}/cg"]
+  teardown: [sh, -c, "c=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/omn-reference-perfstat; ! test -d \"$c\" || rmdir \"$c\""]
   workload: [sh, -c, "echo $$ > /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/omn-reference-perfstat/cgroup.procs && exec env PYTHONHASHSEED=0 python3 -S tests/reference/workloads/perfstat/spin.py 3000000"]
   run: alongside
   settle_ms: 700

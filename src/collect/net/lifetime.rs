@@ -13,7 +13,9 @@
 //! collector reports is the one current at the *close*, which is the owning
 //! process when an application closed the connection and is not when the kernel
 //! closed it from a timer. That is stated on the event and in the run rather
-//! than left to be assumed, and it is why a process target is refused here.
+//! than left to be assumed, and it is why a process target keeps only the
+//! connections whose owner the program saw: an `at_close` one is a counted
+//! loss under `--pid`, never placed by the task it interrupted.
 //!
 //! **The cookie is the join key.** `net.tcp.rtt` keys its series on the same
 //! number, read through `sock_diag`, so a `sock:cookie` join between the two
@@ -58,17 +60,23 @@ impl Prepared for Prepare {
                 self.mode
             ));
         }
-        if !matches!(target, Target::System) {
-            return Err(not_built(format!(
-                "a {} target cannot be served here: a connection becomes established in softirq \
-                 context at both ends, so the task current at that moment is whichever one the \
-                 interrupt landed on and is not the connection's owner -- attributing a \
-                 connection to a process needs a socket-to-process map this backend does not \
-                 build. Use --system.",
-                target.kind()
-            )));
-        }
-        Ok(Box::new(LifetimeCollector::new(self.filter)))
+        let tree = match target {
+            Target::System => None,
+            // A launch arrives here as its child's pid.
+            Target::Pid(pids) if !pids.is_empty() => Some(Tree::new(pids)),
+            other => {
+                return Err(not_built(format!(
+                    "a {} target cannot be served here: a connection is attributed to the \
+                     process that connected or closed it, and that is a process tree, not \
+                     a {}. Use --system or --pid.",
+                    other.kind(),
+                    other.kind()
+                )))
+            }
+        };
+        let mut collector = LifetimeCollector::new(self.filter);
+        collector.tree = tree;
+        Ok(Box::new(collector))
     }
 }
 
@@ -92,6 +100,82 @@ pub struct LifetimeCollector {
     predicate: Option<FilterExpr>,
     filtered_in: u64,
     filtered_out: u64,
+    /// A process target: the tree whose connections are kept.
+    tree: Option<Tree>,
+    /// Connections of other processes, left out under a process target.
+    outside: u64,
+    /// Connections whose task had exited before it could be placed in or
+    /// out of the tree.
+    unplaced: u64,
+    /// Connections no process was seen acting on, which a process target
+    /// can neither keep nor leave out.
+    unowned: u64,
+}
+
+/// The process tree a `--pid` or launch target follows: the roots and every
+/// descendant seen, refreshed at each drain through
+/// `/proc/<pid>/task/<tid>/children`, and an unknown pid placed by walking
+/// its parents while it is still there to walk.
+struct Tree {
+    known: std::collections::BTreeSet<u32>,
+}
+
+impl Tree {
+    fn new(roots: &[i32]) -> Self {
+        let mut tree = Self {
+            known: roots.iter().map(|pid| *pid as u32).collect(),
+        };
+        tree.refresh();
+        tree
+    }
+
+    fn refresh(&mut self) {
+        let mut pending: Vec<u32> = self.known.iter().copied().collect();
+        while let Some(pid) = pending.pop() {
+            let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+                continue;
+            };
+            for task in tasks.flatten() {
+                let Ok(text) = std::fs::read_to_string(task.path().join("children")) else {
+                    continue;
+                };
+                for child in text.split_whitespace().filter_map(|word| word.parse().ok()) {
+                    if self.known.insert(child) {
+                        pending.push(child);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether `pid` is in the tree: `Some(true)` or `Some(false)`, or
+    /// `None` when it has exited and was never seen.
+    fn holds(&mut self, pid: u32) -> Option<bool> {
+        if self.known.contains(&pid) {
+            return Some(true);
+        }
+        let mut at = pid;
+        for _ in 0..64 {
+            let stat = std::fs::read_to_string(format!("/proc/{at}/stat")).ok()?;
+            // The parent is the second field after the parenthesised comm.
+            let parent: u32 = stat
+                .rsplit_once(')')?
+                .1
+                .split_whitespace()
+                .nth(1)?
+                .parse()
+                .ok()?;
+            if self.known.contains(&parent) {
+                self.known.insert(pid);
+                return Some(true);
+            }
+            if parent <= 1 {
+                return Some(false);
+            }
+            at = parent;
+        }
+        Some(false)
+    }
 }
 
 impl LifetimeCollector {
@@ -111,6 +195,10 @@ impl LifetimeCollector {
             predicate,
             filtered_in: 0,
             filtered_out: 0,
+            tree: None,
+            outside: 0,
+            unplaced: 0,
+            unowned: 0,
         }
     }
 
@@ -142,8 +230,14 @@ impl LifetimeCollector {
                 .note("a record in the connection ring was shorter than one connection");
         }
 
+        if let Some(tree) = self.tree.as_mut() {
+            tree.refresh();
+        }
         let mut index = 0;
         for closed in batch {
+            if !self.in_target(&closed) {
+                continue;
+            }
             let candidate = self.event(&closed, seq + index);
             if let Some(predicate) = &self.predicate {
                 if !crate::filter::matches(predicate, &candidate) {
@@ -161,6 +255,49 @@ impl LifetimeCollector {
             }
             events.push(candidate);
             index += 1;
+        }
+    }
+
+    /// Whether a closed connection belongs to the target, counting the ones
+    /// that do not and the ones that cannot be told.
+    ///
+    /// Only an `owner` pid places a connection. An `at_close` one is the task
+    /// the close interrupted (a peer's reset, a timer, a connection opened
+    /// before the program attached), which says nothing about who held the
+    /// socket: sorting it in or out of the tree by that task would drop the
+    /// target's connections and keep strangers'. So under a process target it
+    /// is a counted loss, as a connection whose owner had exited is.
+    fn in_target(&mut self, closed: &TcpLifetime) -> bool {
+        let Some(tree) = self.tree.as_mut() else {
+            return true;
+        };
+        if closed.owned == 0 {
+            self.unowned += 1;
+            self.losses.dropped += 1;
+            self.losses.note(
+                "a connection closed with no process seen acting on it (a reset, a timer, or \
+                 one opened before the program attached), so it could be the target's or \
+                 another process's and was left out",
+            );
+            return false;
+        }
+        match tree.holds(closed.pid) {
+            Some(true) => true,
+            Some(false) => {
+                self.outside += 1;
+                false
+            }
+            None => {
+                // Possibly the target's: a loss, not a connection known to be
+                // someone else's.
+                self.unplaced += 1;
+                self.losses.dropped += 1;
+                self.losses.note(
+                    "a connection's process had exited before it could be placed in or out of \
+                     the target's tree",
+                );
+                false
+            }
         }
     }
 
@@ -212,12 +349,20 @@ fn attributes(closed: &TcpLifetime) -> Vec<Attr> {
         Attr::uint("segs_in", u64::from(closed.segs_in)),
         Attr::uint("family", u64::from(closed.family)),
         Attr::uint("sport", u64::from(closed.local_port())),
-        // The task current at the close. Named `comm` because that is the
-        // filter field the catalog offers, and qualified in the run's notes
-        // because it is not the connection's owner.
+        // The connection's owner when the program saw it act on the socket
+        // (`owner`), else the task current at the close (`at_close`), which
+        // the run's notes qualify: it is whoever the close interrupted.
         Attr::text("comm", closed.comm()),
         Attr::uint("pid", u64::from(closed.pid)),
         Attr::uint("tid", u64::from(closed.tid)),
+        Attr::text(
+            "attributed",
+            if closed.owned != 0 {
+                "owner"
+            } else {
+                "at_close"
+            },
+        ),
     ];
     if closed.inode != 0 {
         // Zero is not an inode. A socket accepted from a listen queue has none
@@ -283,11 +428,36 @@ impl Collector for LifetimeCollector {
     fn notes(&self) -> Vec<String> {
         let mut notes = self.notes.clone();
         notes.push(
-            "`comm` and `pid` are the task current when the connection reached TCP_CLOSE, which \
-             is the closing process when an application closed it and is not the connection's \
-             owner when the kernel closed it from a timer or on a reset"
+            "`comm` and `pid` are the connection's owner where `attributed` is `owner`: the \
+             process that connected, or that closed it first. Where it is `at_close`, the \
+             program saw no process act on the socket and they are the task current at \
+             TCP_CLOSE, which the kernel's timer or a reset makes whoever was interrupted"
                 .to_owned(),
         );
+        if self.tree.is_some() {
+            notes.push(format!(
+                "{} connections of processes outside the target were left out, by the process \
+                 each is attributed to",
+                self.outside
+            ));
+        }
+        if self.unplaced > 0 {
+            notes.push(format!(
+                "{} connections were left out because their process had exited before it \
+                 could be placed in or out of the target's tree: a child that lived less than \
+                 one drain ({} ms) is not seen",
+                self.unplaced,
+                DRAIN_INTERVAL.as_millis()
+            ));
+        }
+        if self.unowned > 0 {
+            notes.push(format!(
+                "{} connections were left out, as a loss, because no process was seen acting \
+                 on them: the pid current at their close is whoever the reset or timer \
+                 interrupted, which places them neither in nor out of the target's tree",
+                self.unowned
+            ));
+        }
         if self.without_inode > 0 {
             notes.push(format!(
                 "{} of {} connections carry no inode: a socket taken off a listen queue has \
@@ -370,16 +540,35 @@ mod tests {
     /// A process target is refused, and the refusal says what the tracepoint
     /// cannot do rather than pretending the filter would be meaningful.
     #[test]
-    fn a_process_target_is_refused_because_a_connection_has_no_process() {
-        let prepared = Box::new(Prepare {
-            mode: Mode::Trace,
-            filter: None,
-        });
-        let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
-            panic!("a connection is established in softirq context");
+    fn a_process_target_is_served_and_a_cgroup_target_is_refused() {
+        let prepared = || {
+            Box::new(Prepare {
+                mode: Mode::Trace,
+                filter: None,
+            })
         };
-        assert!(error.contains("softirq context"), "{error}");
-        assert!(error.contains("--system"), "{error}");
+        assert!(prepared().attach(&Target::Pid(vec![1])).is_ok());
+        let Err(error) = prepared().attach(&Target::Cgroup("/".into())) else {
+            panic!("a connection is attributed to a process tree");
+        };
+        assert!(error.contains("--pid"), "{error}");
+    }
+
+    /// The tree holds its root and what descends from it, and not this
+    /// test's parent.
+    #[test]
+    fn a_tree_holds_its_descendants_and_not_its_parent() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let me = std::process::id();
+        let mut tree = Tree::new(&[me as i32]);
+        assert_eq!(tree.holds(child.id()), Some(true));
+        let parent = std::os::unix::process::parent_id();
+        assert_eq!(tree.holds(parent), Some(false));
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     /// Every filter field the catalog declares is on the event: a predicate
@@ -443,6 +632,48 @@ mod tests {
                 .any(|attr| attr.name == "cookie"),
             "a cookie of zero must not be reported as a cookie"
         );
+    }
+
+    /// Under a process target only an owner places a connection: an
+    /// `at_close` record whose interrupted task happens to be the target is
+    /// not kept, one whose task is a stranger is not counted as outside, and
+    /// both are a loss. An owned one is placed by its pid.
+    #[test]
+    fn an_unowned_connection_under_a_process_target_is_a_loss_not_a_placement() {
+        let me = std::process::id();
+        let mut collector = LifetimeCollector::new(None);
+        collector.tree = Some(Tree::new(&[me as i32]));
+
+        let mut inside_by_chance = closed();
+        inside_by_chance.pid = me;
+        inside_by_chance.owned = 0;
+        assert!(!collector.in_target(&inside_by_chance));
+
+        let mut stranger_by_chance = closed();
+        stranger_by_chance.pid = std::os::unix::process::parent_id();
+        stranger_by_chance.owned = 0;
+        assert!(!collector.in_target(&stranger_by_chance));
+
+        assert_eq!(collector.unowned, 2);
+        assert_eq!(collector.outside, 0);
+        assert_eq!(collector.losses().dropped, 2);
+        assert!(collector
+            .notes()
+            .join(" ")
+            .contains("2 connections were left out, as a loss"));
+
+        let mut owned = closed();
+        owned.pid = me;
+        owned.owned = 1;
+        assert!(collector.in_target(&owned));
+        owned.pid = std::os::unix::process::parent_id();
+        assert!(!collector.in_target(&owned));
+        assert_eq!(collector.outside, 1);
+
+        // Machine-wide, nothing is placed and nothing is lost.
+        let mut system = LifetimeCollector::new(None);
+        assert!(system.in_target(&inside_by_chance));
+        assert!(system.losses().is_clean());
     }
 
     /// A connection still open at the end of the run is a fact about the

@@ -2,28 +2,28 @@ omn top │ fixture file-serving │ 2.56s                            view: snap
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  the target  2.56s · omn costs ≥0.74% cpu
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- CPU                                not asked: needs cpu.oncpu_time
- Memory                             not asked: needs mem.rss
- Disk                               not asked: needs io.latency
- Network █▂█▆▄▅▄▅▅█▃▆▂▇█▁▇▂▆▁▁▁▁▁   ↓ 1.17MiB/s    ↑ 42.5MiB/s   retrans not asked  ~low det degraded x3
- GPU                                not asked: needs gpu.kernel or gpu.mem
- Energy                             not asked: needs power.energy
- Time                               not asked: needs cpu.profile or sched.offcpu or sched.runqlat or cpu.oncpu_time
+ CPU                                           not asked: needs cpu.oncpu_time
+ Memory                                        not asked: needs mem.rss
+ Disk                                          not asked: needs io.latency
+ Network ▇  █   █  ▃  ██     █     █           ↓ 1.17MiB/s    ↑ 42.5MiB/s   retrans not asked  ~low det degraded x3
+         █  █▄  █  █  ██    ▁█▆    █
+         █  ██  █  █  ██  ▄ ███    █
+         █  ██  █  █ ▂██  █ ███ ▇  █
+         █  ██  █  █ ███  █ ███ █▄ █
+         █  ██  █  █ ███ ██ ███ ██ █
+         █  ██▆ █  █ ███ ██ ███ ██ █
+         █▄ ███ █ ██ ███ ██ ███ ██ █▃
+         ██▁███▂█ ██ ███ ██ ███ ██ ██
+         ████████▄██ ███ ██ ███ ██ ██
+         ███████████ ███ ██ ███ ██ ██
+         ███████████▁███▅██▁███▁██▁██▁▁▁▁▁▁▁
+ GPU                                           not asked: needs gpu.kernel or gpu.mem
+ Energy                                        not asked: needs power.energy
+ Time                                          not asked: needs cpu.profile or sched.offcpu or sched.runqlat or cpu.oncp
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ▶ suspect: none read                                                                                Enter/click → detail
 
 Network in one hue: a link's speed is not known
-
-
-
-
-
-
-
-
-
-
-
 
 
 

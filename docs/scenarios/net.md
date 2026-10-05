@@ -1079,6 +1079,51 @@ thing a reader reaches for and being a line that says `1 series`.
 
 ---
 
+## What the comparison asked, the twenty-fourth wave
+
+The comparison against `ip`, `nstat`, `ss`, `tcpdump` and the bpftrace and bcc
+tools (`docs/fixes/w22-net.md`, `w22-bpftrace.md`) named what `omn` was
+missing. This is what landed, each shown on this machine against something
+that is not `omn`.
+
+| Asked | Now | Shown against |
+|---|---|---|
+| `net.bytes`' polled baseline | read at `start`, before the program is released; the first tick passes over | 4 MiB pushed between the baseline and the first tick are in the second (`dev::what_moves_before_the_first_tick_is_measured_from_the_start`) |
+| `dir` on `net.packets` | `--keys iface,dir`, one series per direction, `fs:proc` | `ip -s link`: 1860 / 1860 packets each way over a pingpong |
+| `net.iface` and `net.backlog`'s closing read | a poll reads nothing at `stop` (the defect `dev.rs` had), and takes its baseline at `start` | the last point is the runner's last tick, not a zero beside it |
+| `missed` and `mcast` | two more `net.iface` kinds, `/missed` from sysfs's `rx_missed_errors`, absent rather than zero where sysfs has none | sysfs, every interface here (at zero only) |
+| `tcp_info`'s other fields | `rto_ns`, `min_rtt_ns`, `busy_ns`, both rates, `bytes_acked`, `bytes_received`, `bytes_sent`, `unacked`, `lost`, segment counts, windows, `congestion` | `ss -ti` on one connection, field by field (rates times eight) |
+| `net.snmp` | every counter of `/proc/net/snmp`, `netstat` and `snmp6` by `nstat`'s name, `raw` only (no key names a counter yet) | `nstat` over 200 refused connects: `TcpAttemptFails` 200 / 200, `TcpOutRsts` 200 / 200 |
+| a socket inventory | `net.sockets`: every TCP and UDP socket, state in `ss`'s words, queues, endpoints, owner | `ss -tuan`: 29 sockets, the same count per protocol and state |
+| `direction` in `--filter` | `net.capture` filters on `direction`, `saddr`, `sport` | `tcpdump` on `lo`, `direction != "outgoing"`: 932 / 932, 916 / 916 |
+| `net.tcp.lifetime` per launch | `--pid` and `-- PROGRAM`, the connection attributed to the process that connected or closed it first (`attributed: owner`) | a launched `sh` running 10 connections: 20 ends, all `owner`, another process's 20 in the same seconds left out |
+| `net.tcp.accept` | new, fexit on `inet_csk_accept`, the listener's queue after the accept | `tcpaccept.bt`: the same pid, comm, ends; queue 5 to 0 of 16 where `tcpaccept` prints the accepted socket's copy, 0 to 5 |
+| the stack on `net.drops` | `-e stack` (trace only), and `function`, the symbol `location` is in | `bpftrace`'s `kstack`: the same 21 frames, 50 / 50 |
+
+**`net.tcp.connect`'s 40 % in the backends bench is its trampolines.** The
+same `-- sleep 0.2` under three sources: `net.tcp.connect` (six fentry and
+fexit links) spent 69.2 ms of cpu inside the window, `net.tcp.accept` (one
+fexit link) 11.8 ms, `net.tcp.lifetime` (a raw tracepoint) 2.6 ms. About 11 ms
+of cpu a trampoline, paid whatever the run sees; over the bench's `launch`
+regime on `compute` that is the 40 %. Where in the run it is paid -- the
+attach in `start` or the detach in `stop` -- is reasoned, not shown: the
+in-window figure is the detach's, if `start` is before the window as the
+runner documents. Moving it means fewer trampolines: a `bpf:raw_tp` backend on
+`inet_sock_set_state` (`SYN_SENT` to `ESTABLISHED` or `TCP_CLOSE`), which
+would not see a connect that failed before a SYN left, and would say so.
+
+**Two things a reader of `tcpaccept` meets.** Its `BL` is the accepted
+socket's copy of the listener's queue, taken when the SYN arrived; `backlog`
+here is the listener's queue after the accept. And `lo` hands a packet socket
+every frame twice -- `outgoing` and `host` -- which `net.capture` keeps and
+libpcap drops; `--filter 'direction != "outgoing"'` is tcpdump's count.
+
+**Not done** (`docs/fixes/w24-net.md`): pcap output, which is an encoder and
+the header bytes on each event; a key naming a counter, so `net.snmp` has
+series; `net.tcp.lifetime`'s `bpf:tp` twin and `--tid`.
+
+---
+
 ## Reading these scenarios
 
 Three things the checks rely on and a reader should too.
@@ -1103,3 +1148,11 @@ run, and the veth scenario removes one and stops instead.
 **The window.** `events over 600.4ms` on a run that asked for two seconds is the
 run telling you its target went away. The number of events is not the thing to
 read; the window is.
+
+**An unknown owner is not a zero.** Two defects the twenty-fourth wave's
+review found, of one kind: `net.sockets --pid` on a process whose descriptors
+this user cannot read listed no socket and said "no loss", and
+`net.tcp.lifetime --pid` sorted a connection no process was seen acting on
+(`at_close`) in or out of the tree by whichever task its close interrupted.
+The first is now refused with the reason (and a failed read if it becomes
+unreadable mid-run); the second is a counted loss under a process target.

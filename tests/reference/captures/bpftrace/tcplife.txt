@@ -1,0 +1,36 @@
+/usr/share/bpftrace/tools/tcplife.bt:75:18-44: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    $delta_ms = (nsecs - @birth[$sk]) / 1e6;
+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/tcplife.bt:75:18-44: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+    $delta_ms = (nsecs - @birth[$sk]) / 1e6;
+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/tcplife.bt:75:18-23: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    $delta_ms = (nsecs - @birth[$sk]) / 1e6;
+                 ~~~~~
+/usr/share/bpftrace/tools/tcplife.bt:75:26-37: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+    $delta_ms = (nsecs - @birth[$sk]) / 1e6;
+                         ~~~~~~~~~~~
+PID   COMM       LADDR           LPORT RADDR           RPORT TX_KB RX_KB MS
+96004 omnref     127.0.0.1       55884 127.0.0.1       45723     64     0 0
+96004 omnref     127.0.0.1       45723 127.0.0.1       55884      0    64 0
+96004 omnref     127.0.0.1       55900 127.0.0.1       45723     64     0 0
+96004 omnref     127.0.0.1       45723 127.0.0.1       55900      0    64 0
+96004 omnref     127.0.0.1       55904 127.0.0.1       45723     64     0 0
+96004 omnref     127.0.0.1       45723 127.0.0.1       55904      0    64 0
+96004 omnref     127.0.0.1       55910 127.0.0.1       45723     64     0 0
+96004 omnref     127.0.0.1       45723 127.0.0.1       55910      0    64 0
+96004 omnref     127.0.0.1       55912 127.0.0.1       45723     64     0 0
+96004 omnref     127.0.0.1       45723 127.0.0.1       55912      0    64 0
+96004 omnref     127.0.0.1       55920 127.0.0.1       45723     64     0 0
+96004 omnref     127.0.0.1       45723 127.0.0.1       55920      0    64 0
+96004 omnref     127.0.0.1       55934 127.0.0.1       45723     64     0 0
+96004 omnref     127.0.0.1       45723 127.0.0.1       55934      0    64 0
+96004 omnref     127.0.0.1       55940 127.0.0.1       45723     64     0 0
+96004 omnref     127.0.0.1       45723 127.0.0.1       55940      0    64 0
+96004 omnref     127.0.0.1       55952 127.0.0.1       45723     64     0 0
+96004 omnref     127.0.0.1       45723 127.0.0.1       55952      0    64 0
+96004 omnref     127.0.0.1       55968 127.0.0.1       45723     64     0 0
+96004 omnref     127.0.0.1       45723 127.0.0.1       55968      0    64 0
+95969 gh         192.168.1.36    46802 140.82.121.5    443        2     5 768
+
+

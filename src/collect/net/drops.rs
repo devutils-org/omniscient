@@ -48,6 +48,9 @@ pub struct Prepare {
     /// resolver credits every `bpf` backend with filtering in the kernel and
     /// then leaves its events alone.
     pub filter: Option<FilterExpr>,
+    /// Whether the request asked for `stack`: the kernel stack of each drop,
+    /// interned in the kernel and symbolised through `/proc/kallsyms`.
+    pub wants_stacks: bool,
 }
 
 impl Prepared for Prepare {
@@ -67,7 +70,9 @@ impl Prepared for Prepare {
                 target.kind()
             )));
         }
-        Ok(Box::new(DropCollector::new(self.mode, self.filter)))
+        let mut collector = DropCollector::new(self.mode, self.filter);
+        collector.wants_stacks = self.wants_stacks;
+        Ok(Box::new(collector))
     }
 }
 
@@ -84,7 +89,7 @@ pub struct DropCollector {
     /// The program's counter is cumulative, so what is new is the difference.
     dropped: u64,
     /// The totals a `count` run accumulates, by what keys a series.
-    counted: BTreeMap<(u64, u32), Counted>,
+    counted: BTreeMap<(u64, u32, i32), Counted>,
     /// Drops seen with no socket, which is what makes `protocol` unanswerable.
     without_socket: u64,
     seen: u64,
@@ -94,6 +99,16 @@ pub struct DropCollector {
     predicate: Option<FilterExpr>,
     filtered_in: u64,
     filtered_out: u64,
+    /// Stacks asked: each drop carries its kernel stack's id, and `function`,
+    /// the symbol `location` is in.
+    wants_stacks: bool,
+    /// Kernel frames only, so the process it is built for does not matter.
+    symbolizer: Option<crate::stack::Symbolizer>,
+    /// Every stack the run resolved, root first, by the kernel's id.
+    stacks: BTreeMap<u64, Vec<String>>,
+    /// Drops whose stack the kernel could not walk, or whose id it evicted.
+    unwalkable: u64,
+    evicted_stacks: u64,
 }
 
 /// One `(socket, reason)` pair's drops over a counted window.
@@ -120,7 +135,70 @@ impl DropCollector {
             predicate,
             filtered_in: 0,
             filtered_out: 0,
+            wants_stacks: false,
+            symbolizer: None,
+            stacks: BTreeMap::new(),
+            unwalkable: 0,
+            evicted_stacks: 0,
         }
+    }
+
+    /// The frames behind a drop's stack, once per distinct id; the id to put
+    /// on the event, or `None` when there is none to point at.
+    fn resolve_stack(&mut self, dropped: &PacketDrop) -> Option<u32> {
+        if !self.wants_stacks {
+            return None;
+        }
+        let Some(id) = dropped.stack_id() else {
+            self.unwalkable += 1;
+            return None;
+        };
+        if self.stacks.contains_key(&u64::from(id)) {
+            return Some(id);
+        }
+        let program = self.program.as_ref()?;
+        let Some(addresses) = program.stack(id) else {
+            self.evicted_stacks += 1;
+            return None;
+        };
+        let truncated = addresses.len() >= program.stack_depth();
+        let symbolizer = self.symbolizer.as_mut()?;
+        let stack = symbolizer.symbolize(&crate::stack::RawStack {
+            kernel: addresses,
+            user: Vec::new(),
+            elsewhere: Vec::new(),
+        });
+        let mut frames: Vec<String> = stack
+            .frames
+            .iter()
+            .rev()
+            .map(crate::stack::Frame::label)
+            .collect();
+        // The leaf frames are this tool's: the tracepoint's trampoline and the
+        // program itself. What the drop's path was ends at the free.
+        while frames.last().is_some_and(|frame| {
+            frame.starts_with("bpf_prog_") || frame.starts_with("bpf_trace_run")
+        }) {
+            frames.pop();
+        }
+        if truncated {
+            frames.insert(0, "[truncated]".to_owned());
+        }
+        self.stacks.insert(u64::from(id), frames);
+        Some(id)
+    }
+
+    /// The symbol `location` is in, from the same kernel table.
+    fn function(&mut self, location: u64) -> Option<String> {
+        let symbolizer = self.symbolizer.as_mut()?;
+        let stack = symbolizer.symbolize(&crate::stack::RawStack {
+            kernel: vec![location],
+            user: Vec::new(),
+            elsewhere: Vec::new(),
+        });
+        let frame = stack.frames.first()?;
+        frame.symbol.as_ref()?;
+        Some(frame.label())
     }
 
     fn counting(&self) -> bool {
@@ -161,7 +239,7 @@ impl DropCollector {
 
         let mut index = 0;
         for dropped in batch {
-            let candidate = self.event(&dropped, 1, u64::from(dropped.len), seq + index);
+            let mut candidate = self.event(&dropped, 1, u64::from(dropped.len), seq + index);
             if let Some(predicate) = &self.predicate {
                 if !crate::filter::matches(predicate, &candidate) {
                     self.filtered_out += 1;
@@ -173,10 +251,20 @@ impl DropCollector {
             if dropped.protocol().is_none() {
                 self.without_socket += 1;
             }
+            if self.wants_stacks {
+                if let Some(function) = self.function(dropped.location) {
+                    candidate.attrs.push(Attr::text("function", function));
+                }
+                if let Some(id) = self.resolve_stack(&dropped) {
+                    candidate
+                        .attrs
+                        .push(Attr::uint(crate::emit::STACK_ID_ATTR, u64::from(id)));
+                }
+            }
             if self.counting() {
                 let held = self
                     .counted
-                    .entry((dropped.cookie, dropped.reason))
+                    .entry((dropped.cookie, dropped.reason, dropped.stack))
                     .or_insert(Counted {
                         drops: 0,
                         bytes: 0,
@@ -314,7 +402,21 @@ impl Collector for DropCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = DropProgram::load(RING_BYTES)?;
+        let program = DropProgram::load(RING_BYTES, self.wants_stacks)?;
+        if self.wants_stacks {
+            // The kernel's table, read before the window rather than inside
+            // the first drain (`stack::prime_kernel_symbols`).
+            crate::stack::prime_kernel_symbols();
+            let symbolizer = crate::stack::Symbolizer::for_process(std::process::id() as i32);
+            if !symbolizer.kernel_symbols_available() {
+                self.notes.push(
+                    "/proc/kallsyms gives no addresses to this process (kptr_restrict), so the \
+                     stacks' frames are addresses rather than names"
+                        .to_owned(),
+                );
+            }
+            self.symbolizer = Some(symbolizer);
+        }
         self.receive_socket = program.has_receive_socket();
         self.program = Some(program);
         Ok(())
@@ -350,8 +452,21 @@ impl Collector for DropCollector {
         self.losses.clone()
     }
 
+    fn stacks(&self) -> BTreeMap<u64, Vec<String>> {
+        self.stacks.clone()
+    }
+
     fn notes(&self) -> Vec<String> {
         let mut notes = self.notes.clone();
+        if self.unwalkable > 0 || self.evicted_stacks > 0 {
+            notes.push(format!(
+                "{} drops carry no stack: the kernel could not walk {} of them and had evicted \
+                 the stack of {} from its map",
+                self.unwalkable + self.evicted_stacks,
+                self.unwalkable,
+                self.evicted_stacks
+            ));
+        }
         if !self.receive_socket {
             notes.push(
                 "this kernel's `kfree_skb` does not say which socket a received packet would \
@@ -368,9 +483,10 @@ impl Collector for DropCollector {
                 self.without_socket, self.seen,
             ));
         }
+
         notes.push(
-            "the reason is this kernel's own `enum skb_drop_reason` value; the names are in its \
-             BTF and this build does not read them yet"
+            "`reason` is the running kernel's own name for its `enum skb_drop_reason` value, \
+             read from its BTF, and `reason_code` the number beside it"
                 .to_owned(),
         );
         if self.filtered_out > 0 || self.filtered_in > 0 {
@@ -391,7 +507,7 @@ mod tests {
     fn dropped() -> PacketDrop {
         // Built through the decoder rather than by naming private fields, which
         // is the same path a real record takes.
-        let mut bytes = [0u8; 48];
+        let mut bytes = [0u8; 56];
         bytes[0..8].copy_from_slice(&1_000u64.to_ne_bytes());
         bytes[8..12].copy_from_slice(&4u32.to_ne_bytes());
         bytes[12..16].copy_from_slice(&17u32.to_ne_bytes());
@@ -411,6 +527,7 @@ mod tests {
                 freq: "997hz".parse().expect("a frequency"),
             },
             filter: None,
+            wants_stacks: false,
         });
         let Err(error) = prepared.attach(&Target::System) else {
             panic!("a sampled mode must be refused");
@@ -426,6 +543,7 @@ mod tests {
         let prepared = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
+            wants_stacks: false,
         });
         let Err(error) = prepared.attach(&Target::Pid(vec![1])) else {
             panic!("a pid names nothing most drops belong to");
@@ -496,11 +614,10 @@ mod tests {
         );
     }
 
-    /// The run says the reason is a number and why, because a reader who sees
-    /// `reason 4` and no name will otherwise go looking for the name in this
-    /// tool rather than in the kernel's headers.
+    /// The run says whose name the reason is: the kernel's, from its BTF, so a
+    /// reader looks for it in the kernel's headers rather than in this tool.
     #[test]
-    fn the_run_says_the_reason_is_the_kernels_own_number() {
+    fn the_run_says_the_reason_is_the_kernels_own_name() {
         let collector = DropCollector::new(Mode::Trace, None);
         let notes = collector.notes().join(" ");
         assert!(notes.contains("skb_drop_reason"), "{notes}");

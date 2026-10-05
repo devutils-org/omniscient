@@ -42,7 +42,72 @@ pub fn parsers() -> Vec<Parser> {
             name: "omn_cpu_share",
             parse: omn_cpu_share,
         },
+        Parser {
+            name: "omn_cpu_util_polls",
+            parse: omn_cpu_util_polls,
+        },
     ]
+}
+
+/// One tick of the kernel's cpu accounting (`USER_HZ`, 100 wherever
+/// `/proc/stat` is read), in ns.
+const TICK_NS: f64 = 10_000_000.0;
+
+/// `cpu.util --system`'s raw events in `omn`'s JSON: the mean `busy` over
+/// the reads that cover an interval, keyed `busy` as `top`'s `%Cpu(s)`.
+///
+/// A read less than one tick after the window opened is refused, not left
+/// out: it is the leading read of defect 2 of `docs/fixes/w22-sysstat.md`,
+/// a first poll taken at once after the baseline read, whose share is a few
+/// ticks over a fraction of a millisecond -- 0, 0.5 or 1 -- which a mean then
+/// weighs like a whole second. Stream cpu fixed it in the twenty-fourth wave
+/// (`c13eb51`), so the pair fails, naming the defect, if it comes back,
+/// rather than passing on the reads around it. Every other read covers one
+/// poll interval, so their plain mean is the share over their span.
+fn omn_cpu_util_polls(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let doc: Value =
+        serde_json::from_str(stdout).map_err(|e| format!("omn's output is not JSON: {e}"))?;
+    let result = doc["results"]
+        .as_array()
+        .and_then(|r| r.iter().find(|r| r["source"] == "cpu.util"))
+        .ok_or("no cpu.util result in omn's output")?;
+    let opened = result["window"]["opened_ns"]
+        .as_f64()
+        .ok_or("no window.opened_ns in omn's cpu.util result")?;
+    let events = result["outputs"]
+        .as_array()
+        .and_then(|o| o.iter().find(|o| o["emit"] == "raw"))
+        .and_then(|o| o["events"].as_array())
+        .ok_or("no raw events in omn's cpu.util result")?;
+    for e in events {
+        let ts = e["ts_ns"]
+            .as_f64()
+            .ok_or_else(|| format!("a cpu.util event with no ts_ns: {e}"))?;
+        if ts - opened < TICK_NS {
+            return Err(format!(
+                "a cpu.util read {:.3} ms after the window opened, less than a tick: \
+                 the leading read of defect 2 (docs/fixes/w22-sysstat.md) is back",
+                (ts - opened) / 1e6
+            ));
+        }
+    }
+    let busy: Vec<f64> = events
+        .iter()
+        .map(|e| {
+            e["attrs"]
+                .as_array()
+                .and_then(|a| a.iter().find(|a| a["name"] == "busy"))
+                .and_then(|a| a["value"].as_f64())
+                .ok_or_else(|| format!("a cpu.util event with no busy: {e}"))
+        })
+        .collect::<Result<_, _>>()?;
+    if busy.is_empty() {
+        return Err("no cpu.util read covering an interval in omn's output".into());
+    }
+    Ok(vec![(
+        "busy".into(),
+        busy.iter().sum::<f64>() / busy.len() as f64,
+    )])
 }
 
 /// `cpu.oncpu_time`'s summary in `omn`'s JSON: the sum over its series of
@@ -386,6 +451,29 @@ mod tests {
         let empty = r#"{"results": [{"source": "cpu.oncpu_time", "observed_ns": 0,
             "outputs": [{"emit": "summary", "series": [{"count": 1, "mean": 5}]}]}]}"#;
         assert!(omn_cpu_share(empty, "").is_err());
+    }
+
+    #[test]
+    fn omn_cpu_util_polls_refuses_a_read_at_the_windows_opening() {
+        // A real `omn trace cpu.util --system -m poll -e raw -d 3s --window
+        // 1s..3s` from before stream cpu's fix (2026-10-05): reads at +0.3 ms
+        // (busy 1.0, a few ticks), +1.0004 s (0.846) and +1.9998 s (0.814)
+        // past the window's opening. The sub-tick read fails the parse.
+        let raw = capture("omn-cpu-util-raw-window.json");
+        let err = omn_cpu_util_polls(&raw, "").unwrap_err();
+        assert!(err.contains("defect 2"), "{err}");
+        // The same run without that read, which is what today's `omn` gives.
+        let mut doc: Value = serde_json::from_str(&raw).unwrap();
+        doc["results"][0]["outputs"]
+            .as_array_mut()
+            .and_then(|o| o.iter_mut().find(|o| o["emit"] == "raw"))
+            .and_then(|o| o["events"].as_array_mut())
+            .unwrap()
+            .remove(0);
+        let values = omn_cpu_util_polls(&doc.to_string(), "").unwrap();
+        let busy = get(&values, "busy");
+        assert!((busy - (0.846 + 0.814) / 2.0).abs() < 0.001, "{busy}");
+        assert!(omn_cpu_util_polls("{\"results\": []}", "").is_err());
     }
 
     #[test]

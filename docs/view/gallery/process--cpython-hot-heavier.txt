@@ -2,39 +2,39 @@ omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snap
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  python3  pid 2627262 · 1 thread · 7.92s · omn costs ≥8.12% cpu
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- CPU     ████████████████████████   0.979 cores    avg 0.993   peak 1.00  ~low det
- Memory  ▇▇▇▇▇▇▇▇▇▇▇▇▇███████████   17.7MiB        +381KiB/s   peak 17.7MiB
- Disk                               no block request of the process
- Network                            no socket bytes   0 retrans (machine)
- GPU                                no kernel launched   VRAM 0B
- Energy  ▇▇▇█▇▇▇▇▇▇▇▇▇▇▇▇▇▇█▇▇▇▇▇   51.1 W         avg 53.1 W   the machine's, not apportioned
- Time    ████████████████████████   on cpu 99.1%   run queue 0.02%  ~low det degraded x2
+ CPU     ▃▇▇▆▆▇▇▇▅█▆▇▇▇▇▇▆▇▇▇▇▇▆▇▇▇▇▇▇▇▆▇▇▇▅   0.971 cores    avg 0.993   peak 1.01   hottest py::score:/omniscient/case
+         ███████████████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+ Memory              ▁▁▁▂▂▃▃▄▄▄▄▅▅▅▆▆▆▇▇▇▇██   17.7MiB        +392KiB/s   peak 17.7MiB
+         ▅▅▆▆▆▇▇▇███████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+ Disk                                          no block request of the process
+ Network                                       no socket bytes   0 retrans (machine)
+ GPU                                           no kernel launched   VRAM 0B
+ Energy      ▅▆                    ▄█          50.9 W         avg 53.1 W   the machine's, not apportioned
+         ▄▆▆▆██▇▅▅▅▅▄▄▅▅▅▅▅▅▅▅▅▅▅▄▄██▆▄▄▄▅▄▄
+         ███████████████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+         ███████████████████████████████████
+ Time    ███████████████████████████████████   on cpu 99.1%   run queue 0.02%  ~low det degraded x2
+         ███████████████████████████████████
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ▶ suspect: on cpu (on-cpu)  99.1%                                                                   Enter/click → detail
 
 CPU in one hue: the machine's cores are not in the recording
 Memory in one hue: the machine's memory is not in the recording
 Energy in one hue: energy has no capacity
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ jk move between lines  enter open the line's page
