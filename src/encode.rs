@@ -1302,9 +1302,18 @@ fn text(results: &Results) -> String {
                     // missing are the slow ones -- and `last` is a value, not a
                     // statistic over the run.
                     let short = comparison(summary.short.as_ref());
+                    // The total where the values add up, marked as `n` is:
+                    // a loss pulls it down the same way.
+                    let total = summary.total.map_or_else(String::new, |total| {
+                        format!(
+                            "  total {}{}",
+                            quantity(total, results.unit),
+                            bound(summary.short.as_ref())
+                        )
+                    });
                     let _ = writeln!(
                         out,
-                        "    {:<14} n{short}{:<5} min {}  mean {}{}  max {}{}  last {}",
+                        "    {:<14} n{short}{:<5} min {}  mean {}{}  max {}{}  last {}{total}",
                         summary.key,
                         summary.count,
                         quantity(summary.min, results.unit),
@@ -2679,6 +2688,7 @@ mod tests {
                         max: 2_097_152.0,
                         mean: 1_572_864.0,
                         last: 2_097_152.0,
+                        total: None,
                         short: None,
                     }],
                 },

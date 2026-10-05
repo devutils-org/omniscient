@@ -764,20 +764,38 @@ pub enum Emit {
     Timeline,
     /// A single aggregate per series.
     Summary,
+    /// A single aggregate per distinct value of one attribute, written
+    /// `summary@<attr>`: nsys's per-kernel average, minimum and maximum are
+    /// `gpu.kernel -e summary@kernel` (gpu 2). Each row is named
+    /// `<attr>=<value>`, as `topk:N@<attr>`'s are.
+    SummaryBy(AttrName),
+    /// A histogram per distinct value of one attribute, written
+    /// `hist@<attr>`, `hist:log2@<attr>` or `hist:linear:<width>@<attr>`.
+    HistBy(HistScale, AttrName),
 }
 
 impl Emit {
     pub const DEFAULT_TOPK: u32 = 10;
 
+    /// The attribute this emit groups by instead of the series' keys, for
+    /// `topk:N@<attr>`, `summary@<attr>` and `hist@<attr>`.
+    pub fn by(self) -> Option<AttrName> {
+        match self {
+            Emit::TopK { by, .. } => by,
+            Emit::SummaryBy(by) | Emit::HistBy(_, by) => Some(by),
+            _ => None,
+        }
+    }
+
     pub fn kind(self) -> EmitKind {
         match self {
             Emit::Raw => EmitKind::Raw,
-            Emit::Hist(_) => EmitKind::Hist,
+            Emit::Hist(_) | Emit::HistBy(..) => EmitKind::Hist,
             Emit::Rate => EmitKind::Rate,
             Emit::TopK { .. } => EmitKind::TopK,
             Emit::Stack => EmitKind::Stack,
             Emit::Timeline => EmitKind::Timeline,
-            Emit::Summary => EmitKind::Summary,
+            Emit::Summary | Emit::SummaryBy(_) => EmitKind::Summary,
         }
     }
 }
@@ -787,6 +805,19 @@ impl FromStr for Emit {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
+        // `summary@<attr>` and `hist[:<scale>]@<attr>`: the attribute is the
+        // last thing written, after the scale. `topk` reads its own `@`.
+        if let Some((head, attr)) = s.rsplit_once('@') {
+            let name = head.split(':').next().unwrap_or_default().trim();
+            if matches!(name, "summary" | "hist") {
+                let by = AttrName::new(attr.trim())?;
+                return match head.parse::<Emit>()? {
+                    Emit::Summary => Ok(Emit::SummaryBy(by)),
+                    Emit::Hist(scale) => Ok(Emit::HistBy(scale, by)),
+                    other => Err(ParseError::new(format!("`{other}` takes no `@<attr>`"))),
+                };
+            }
+        }
         let mut parts = s.split(':');
         let name = parts.next().unwrap_or_default().trim();
         let argument = parts.next().map(str::trim);
@@ -876,6 +907,11 @@ impl fmt::Display for Emit {
             Emit::Hist(HistScale::Linear { width }) => write!(f, "hist:linear:{width}"),
             Emit::TopK { k, by: None } => write!(f, "topk:{k}"),
             Emit::TopK { k, by: Some(attr) } => write!(f, "topk:{k}@{attr}"),
+            Emit::SummaryBy(attr) => write!(f, "summary@{attr}"),
+            Emit::HistBy(HistScale::Log2, attr) => write!(f, "hist:log2@{attr}"),
+            Emit::HistBy(HistScale::Linear { width }, attr) => {
+                write!(f, "hist:linear:{width}@{attr}")
+            }
         }
     }
 }
@@ -2318,6 +2354,36 @@ requests:
             assert_eq!(emit.to_string(), text);
         }
         assert_eq!("hist".parse::<Emit>().unwrap(), Emit::Hist(HistScale::Log2));
+        // Per attribute (gpu 2): written after the scale, and read back.
+        for text in [
+            "summary@kernel",
+            "hist:log2@kernel",
+            "hist:linear:1000@kernel",
+        ] {
+            let emit: Emit = text.parse().unwrap();
+            assert_eq!(emit.to_string(), text);
+            assert_eq!(emit.by().map(AttrName::as_str), Some("kernel"));
+        }
+        assert_eq!(
+            "hist@op".parse::<Emit>().unwrap(),
+            Emit::HistBy(HistScale::Log2, AttrName::new("op").unwrap())
+        );
+        assert_eq!(
+            "summary@op".parse::<Emit>().unwrap().kind(),
+            EmitKind::Summary
+        );
+        assert!("summary@".parse::<Emit>().is_err());
+        assert!("summary@a b".parse::<Emit>().is_err());
+        assert!("rate@op".parse::<Emit>().is_err());
+        assert!("summary:x@op".parse::<Emit>().is_err());
+        assert_eq!(
+            "topk:3@op"
+                .parse::<Emit>()
+                .unwrap()
+                .by()
+                .map(AttrName::as_str),
+            Some("op")
+        );
         assert_eq!(
             "topk".parse::<Emit>().unwrap(),
             Emit::TopK {

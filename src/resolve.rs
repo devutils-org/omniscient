@@ -835,11 +835,14 @@ pub fn serves(entry: &Entry, backend: &Backend, request: &Request) -> bool {
 
 /// Why a backend cannot produce every emit the request asks, or `None` when
 /// it can: the preload shim serves `mem.heap.alloc`'s counts and no stack.
+/// An emit the entry itself does not offer is the validator's to refuse,
+/// before any backend is chosen and in its own words, and is let through
+/// here, as a key is by [`check_keys_carried`].
 fn cannot_serve_emits(entry: &Entry, backend: &Backend, request: &Request) -> Option<String> {
     let produces = entry.backend_emits(backend);
     let missing: Vec<EmitKind> = asked_emits(request)
         .into_iter()
-        .filter(|kind| !produces.contains(kind))
+        .filter(|kind| entry.emits.contains(kind) && !produces.contains(kind))
         .collect();
     if missing.is_empty() {
         return None;

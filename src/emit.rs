@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::catalog::Unit;
 use crate::collect::{Collection, Filtered, Losses};
 use crate::event::{Event, KeyValue};
-use crate::request::{Emit, EmitKind, KeyKind};
+use crate::request::{AttrName, Emit, EmitKind, KeyKind};
 use crate::resolve::ResolvedRequest;
 
 /// The attribute a collector puts on an event to say which stack it was taken
@@ -727,6 +727,15 @@ pub struct SeriesSummary {
     /// [`SUM_NS_ATTR`]; see [`SeriesHist::sum`].
     pub mean: f64,
     pub last: f64,
+    /// What the measurements add up to: `count * mean`, exactly, so that a
+    /// total -- the bytes a program allocated, a pid's cpu over the run, a
+    /// counter's packets -- is read rather than recomputed (heap 4, top 1).
+    /// Absent where the values are levels rather than increments, whose sum
+    /// means nothing: `mem.rss` polled fifty times is not fifty footprints.
+    /// Which is which is the catalog's, [`values_add_up`]. A lower bound when
+    /// `short` is present, as `count` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<f64>,
     /// Events that carried no value at all: measured by the collector as
     /// having happened, with nothing for this emit to aggregate -- an L1 hit
     /// that AMD's IBS samples by level and does not time. Counted rather than
@@ -969,6 +978,17 @@ pub fn aggregate(
     // `--keys` regroups every reducing emit; the default is the collector's
     // primary key, which is what `SeriesKey` documents.
     let axes = request.keys.as_slice();
+    let adds_up = values_add_up(request.source.as_str());
+    let polled = matches!(request.mode, crate::request::Mode::Poll { .. });
+    let ticks = if request
+        .emit
+        .iter()
+        .any(|emit| matches!(emit, Emit::Summary | Emit::Hist(_)))
+    {
+        groups_for(&collection.events, axes, value_attr, polled)?
+    } else {
+        None
+    };
     let mut outputs = Vec::new();
     for emit in &request.emit {
         outputs.push(match emit {
@@ -980,7 +1000,12 @@ pub fn aggregate(
                 first_ts_ns: collection.events.first().map(|event| event.ts_ns),
             },
             Emit::Summary => Output::Summary {
-                series: summary_by(&collection.events, axes, value_attr, &shorts)?,
+                series: match &ticks {
+                    Some(groups) => summary_of(borrowed(groups), value_attr, adds_up, |key| {
+                        shorts.for_series(key)
+                    })?,
+                    None => summary_by(&collection.events, axes, value_attr, adds_up, &shorts)?,
+                },
             },
             Emit::Rate => Output::Rate {
                 series: rate_by(
@@ -995,27 +1020,53 @@ pub fn aggregate(
                 let layout = *scale;
                 Output::Hist {
                     layout,
-                    series: hist_by(&collection.events, axes, value_attr, layout, &shorts)?,
+                    series: match &ticks {
+                        Some(groups) => hist_of(borrowed(groups), value_attr, layout, |key| {
+                            shorts.for_series(key)
+                        })?,
+                        None => hist_by(&collection.events, axes, value_attr, layout, &shorts)?,
+                    },
                 }
             }
-            Emit::TopK { k, by: None } => {
-                topk_by(&collection.events, axes, value_attr, *k, &shorts)?
+            Emit::SummaryBy(by) => {
+                uncarried(&collection.events, *by, "summary", &mut degradations);
+                Output::Summary {
+                    series: summary_over(
+                        &collection.events,
+                        by.as_str(),
+                        value_attr,
+                        adds_up,
+                        &shorts,
+                    )?,
+                }
             }
+            Emit::HistBy(scale, by) => {
+                uncarried(&collection.events, *by, "histogram", &mut degradations);
+                Output::Hist {
+                    layout: *scale,
+                    series: hist_over(
+                        &collection.events,
+                        by.as_str(),
+                        value_attr,
+                        *scale,
+                        &shorts,
+                    )?,
+                }
+            }
+            Emit::TopK { k, by: None } => nothing_counted(
+                topk_by(&collection.events, axes, value_attr, *k, &shorts)?,
+                request,
+                collection.observed_ns,
+                &shorts,
+            ),
             Emit::TopK { k, by: Some(by) } => {
-                let carried = collection
-                    .events
-                    .iter()
-                    .filter(|event| event.attr(by.as_str()).is_some())
-                    .count();
-                if carried < collection.events.len() {
-                    degradations.push(format!(
-                        "{} of {} events carried no `{by}`, so the ranking over it holds them \
-                         as `{by}=?`",
-                        collection.events.len() - carried,
-                        collection.events.len()
-                    ));
-                }
-                topk_over(&collection.events, by.as_str(), value_attr, *k, &shorts)?
+                uncarried(&collection.events, *by, "ranking", &mut degradations);
+                nothing_counted(
+                    topk_over(&collection.events, by.as_str(), value_attr, *k, &shorts)?,
+                    request,
+                    collection.observed_ns,
+                    &shorts,
+                )
             }
             Emit::Stack => {
                 let (output, unmeasured) =
@@ -1098,6 +1149,22 @@ pub fn aggregate(
     })
 }
 
+/// Says how many events carried no `by`, for an `@<attr>` emit that holds
+/// them in one `<by>=?` row.
+fn uncarried(events: &[Event], by: AttrName, what: &str, degradations: &mut Vec<String>) {
+    let carried = events
+        .iter()
+        .filter(|event| event.attr(by.as_str()).is_some())
+        .count();
+    if carried < events.len() {
+        degradations.push(format!(
+            "{} of {} events carried no `{by}`, so the {what} over it holds them as `{by}=?`",
+            events.len() - carried,
+            events.len()
+        ));
+    }
+}
+
 /// Groups events by their [`SeriesKey`], keeping the order they arrived in.
 ///
 /// `axes` are the keys the request asked to group by (`--keys`); empty means
@@ -1107,6 +1174,23 @@ fn grouped<'a>(events: &'a [Event], axes: &[KeyKind]) -> BTreeMap<SeriesKey, Vec
     for event in events {
         groups
             .entry(SeriesKey::by(event, axes))
+            .or_default()
+            .push(event);
+    }
+    groups
+}
+
+/// Groups events by their value of one attribute, each group named
+/// `<by>=<value>` and an event that carries none in `<by>=?`: what every
+/// `@<attr>` emit reads.
+fn grouped_over<'a>(events: &'a [Event], by: &str) -> BTreeMap<SeriesKey, Vec<&'a Event>> {
+    let mut groups: BTreeMap<SeriesKey, Vec<&Event>> = BTreeMap::new();
+    for event in events {
+        let value = event
+            .attr(by)
+            .map_or_else(|| "?".to_owned(), |value| value.to_string());
+        groups
+            .entry(SeriesKey::from(format!("{by}={value}").as_str()))
             .or_default()
             .push(event);
     }
@@ -1135,7 +1219,7 @@ fn summary(
     attr: &str,
     short: Option<&Shortfall>,
 ) -> Result<Vec<SeriesSummary>, EmitError> {
-    summary_by(events, &[], attr, &Shortfalls::run_wide(short))
+    summary_by(events, &[], attr, true, &Shortfalls::run_wide(short))
 }
 
 #[cfg(test)]
@@ -1254,10 +1338,138 @@ fn summary_by(
     events: &[Event],
     axes: &[KeyKind],
     attr: &str,
+    adds_up: bool,
     shorts: &Shortfalls,
 ) -> Result<Vec<SeriesSummary>, EmitError> {
+    summary_of(grouped(events, axes), attr, adds_up, |key| {
+        shorts.for_series(key)
+    })
+}
+
+/// A polled series regrouped by fewer keys than its events carry, with the
+/// readings of one tick added into one: `io.bytes` through `/proc/diskstats`
+/// reads every device at once, and `--keys dir` asks for a direction's bytes
+/// per tick, not one measurement per device -- four devices made `count` 4
+/// and `mean` a quarter of the bytes (io 5). Readings of one tick are the
+/// events of the series that share a timestamp, which a poll gives them; a
+/// traced event is a measurement of its own whatever its timestamp, so
+/// nothing but a poll is folded. An event with no value is kept as it is,
+/// counted as unmeasured.
+fn folded_ticks(
+    groups: BTreeMap<SeriesKey, Vec<&Event>>,
+    attr: &str,
+) -> Result<BTreeMap<SeriesKey, Vec<Event>>, EmitError> {
+    let mut folded = BTreeMap::new();
+    for (key, events) in groups {
+        let mut ticks: Vec<Event> = Vec::with_capacity(events.len());
+        let mut open: Option<(u64, Event, f64, usize)> = None;
+        for event in events {
+            let Some(value) = measured(event, attr)? else {
+                ticks.push(event.clone());
+                continue;
+            };
+            let value = weighed(event, attr, value);
+            match &mut open {
+                Some((ts, _, sum, readings)) if *ts == event.ts_ns => {
+                    *sum += value;
+                    *readings += 1;
+                }
+                _ => {
+                    if let Some(done) = open.take() {
+                        ticks.push(tick(done, attr));
+                    }
+                    open = Some((event.ts_ns, event.clone(), value, 1));
+                }
+            }
+        }
+        if let Some(done) = open.take() {
+            ticks.push(tick(done, attr));
+        }
+        folded.insert(key, ticks);
+    }
+    Ok(folded)
+}
+
+/// One tick's readings as one event: the first reading with `attr` set to
+/// their sum, and no weight -- the sum is one measurement. A tick of one
+/// reading is that reading, untouched.
+fn tick((_, mut event, sum, readings): (u64, Event, f64, usize), attr: &str) -> Event {
+    if readings == 1 {
+        return event;
+    }
+    event
+        .attrs
+        .retain(|one| one.name != attr && one.name != WEIGHT_ATTR && one.name != SUM_NS_ATTR);
+    event.attrs.push(crate::event::Attr::float(attr, sum));
+    event
+}
+
+/// The groups a reducing emit reads: by `axes`, and for a poll regrouped by
+/// fewer keys than its events carry, one event per tick ([`folded_ticks`]).
+fn groups_for(
+    events: &[Event],
+    axes: &[KeyKind],
+    attr: &str,
+    polled: bool,
+) -> Result<Option<BTreeMap<SeriesKey, Vec<Event>>>, EmitError> {
+    if !polled || axes.is_empty() {
+        return Ok(None);
+    }
+    folded_ticks(grouped(events, axes), attr).map(Some)
+}
+
+fn borrowed(groups: &BTreeMap<SeriesKey, Vec<Event>>) -> BTreeMap<SeriesKey, Vec<&Event>> {
+    groups
+        .iter()
+        .map(|(key, events)| (key.clone(), events.iter().collect()))
+        .collect()
+}
+
+/// Whether a source's values are increments a sum means something of --
+/// events, deltas, allocations -- rather than levels: its entry declares an
+/// emit that sums them, `rate`, `topk` or `stack`. A source the embedded
+/// catalog does not carry (one from `--catalog <dir>`) is given the total; a
+/// sum the reader can ignore is better than a missing one.
+pub fn values_add_up(source: &str) -> bool {
+    use std::sync::OnceLock;
+    static CATALOG: OnceLock<Option<crate::catalog::Catalog>> = OnceLock::new();
+    let catalog = CATALOG.get_or_init(|| crate::catalog::Catalog::embedded().ok());
+    let entry = catalog
+        .as_ref()
+        .zip(source.parse().ok())
+        .and_then(|(catalog, id)| catalog.get(&id).cloned());
+    entry.is_none_or(|entry| {
+        entry
+            .emits
+            .iter()
+            .any(|emit| matches!(emit, EmitKind::Rate | EmitKind::TopK | EmitKind::Stack))
+    })
+}
+
+/// `summary@<attr>`: one row per distinct value of `by`, named
+/// `<by>=<value>`, an event that carries none in `<by>=?`. The run's
+/// shortfall is on every row, as on `topk:N@<attr>`'s: a ring drops without
+/// regard to which value the record carried.
+fn summary_over(
+    events: &[Event],
+    by: &str,
+    attr: &str,
+    adds_up: bool,
+    shorts: &Shortfalls,
+) -> Result<Vec<SeriesSummary>, EmitError> {
+    summary_of(grouped_over(events, by), attr, adds_up, |_| {
+        shorts.run.clone()
+    })
+}
+
+fn summary_of(
+    groups: BTreeMap<SeriesKey, Vec<&Event>>,
+    attr: &str,
+    adds_up: bool,
+    short_of: impl Fn(&SeriesKey) -> Option<Shortfall>,
+) -> Result<Vec<SeriesSummary>, EmitError> {
     let mut summaries = Vec::new();
-    for (key, events) in grouped(events, axes) {
+    for (key, events) in groups {
         // (value, weight, what the measurements behind it add up to, the
         // largest of them it is known to hold)
         let mut values: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(events.len());
@@ -1281,8 +1493,9 @@ fn summary_by(
                     max: 0.0,
                     mean: 0.0,
                     last: 0.0,
+                    total: adds_up.then_some(0.0),
                     unmeasured,
-                    short: shorts.for_series(&key),
+                    short: short_of(&key),
                     key,
                 });
             }
@@ -1302,16 +1515,18 @@ fn summary_by(
             .iter()
             .map(|(_, _, _, highest)| *highest)
             .fold(f64::NEG_INFINITY, f64::max);
-        let mean = values.iter().map(|(_, _, sum, _)| *sum).sum::<f64>() / weights;
+        let total = sum(values.iter().map(|(_, _, total, _)| *total));
+        let mean = total / weights;
         let last = values.last().expect("checked above").0;
         summaries.push(SeriesSummary {
-            short: shorts.for_series(&key),
+            short: short_of(&key),
             key,
             count,
             min,
             max,
             mean,
             last,
+            total: adds_up.then_some(total),
             unmeasured,
         });
     }
@@ -1325,11 +1540,36 @@ fn hist_by(
     layout: BucketLayout,
     shorts: &Shortfalls,
 ) -> Result<Vec<SeriesHist>, EmitError> {
+    hist_of(grouped(events, axes), attr, layout, |key| {
+        shorts.for_series(key)
+    })
+}
+
+/// `hist@<attr>`: one histogram per distinct value of `by`, as
+/// [`summary_over`] does it.
+fn hist_over(
+    events: &[Event],
+    by: &str,
+    attr: &str,
+    layout: BucketLayout,
+    shorts: &Shortfalls,
+) -> Result<Vec<SeriesHist>, EmitError> {
+    hist_of(grouped_over(events, by), attr, layout, |_| {
+        shorts.run.clone()
+    })
+}
+
+fn hist_of(
+    groups: BTreeMap<SeriesKey, Vec<&Event>>,
+    attr: &str,
+    layout: BucketLayout,
+    short_of: impl Fn(&SeriesKey) -> Option<Shortfall>,
+) -> Result<Vec<SeriesHist>, EmitError> {
     if layout == (BucketLayout::Linear { width: 0 }) {
         return Err(EmitError::ZeroBucketWidth);
     }
     let mut histograms = Vec::new();
-    for (key, events) in grouped(events, axes) {
+    for (key, events) in groups {
         let mut counts: BTreeMap<u64, usize> = BTreeMap::new();
         let mut unbucketable = 0;
         let mut unmeasured = 0;
@@ -1363,7 +1603,7 @@ fn hist_by(
             continue;
         }
         histograms.push(SeriesHist {
-            short: shorts.for_series(&key),
+            short: short_of(&key),
             key,
             count,
             min: if count == 0 { 0.0 } else { min },
@@ -1454,18 +1694,8 @@ fn topk_over(
     k: u32,
     shorts: &Shortfalls,
 ) -> Result<Output, EmitError> {
-    let mut groups: BTreeMap<SeriesKey, Vec<&Event>> = BTreeMap::new();
-    for event in events {
-        let value = event
-            .attr(by)
-            .map_or_else(|| "?".to_owned(), |value| value.to_string());
-        groups
-            .entry(SeriesKey::from(format!("{by}={value}").as_str()))
-            .or_default()
-            .push(event);
-    }
     let mut totals = Vec::new();
-    for (key, events) in groups {
+    for (key, events) in grouped_over(events, by) {
         let mut total = 0.0;
         let mut unmeasured = 0;
         for event in &events {
@@ -1483,6 +1713,47 @@ fn topk_over(
         });
     }
     Ok(ranked(totals, k))
+}
+
+/// A ranking of a run that counted nothing over a window it did measure
+/// holds one zero row, named by the request's target (`launch`, `pid:1234`,
+/// `system`), rather than no row at all: "none" and "not measured" are
+/// different answers and an empty ranking reads as either (perfsched 5). A
+/// run that measured no window keeps its empty ranking.
+fn nothing_counted(
+    output: Output,
+    request: &crate::request::Request,
+    observed_ns: u64,
+    shorts: &Shortfalls,
+) -> Output {
+    let Output::TopK { k, series, rest } = output else {
+        return output;
+    };
+    if !series.is_empty() || !rest.is_empty() || observed_ns == 0 || k == 0 {
+        return Output::TopK { k, series, rest };
+    }
+    let key = match &request.target {
+        crate::request::Target::Pid(pids) if pids.len() == 1 => format!("pid:{}", pids[0]),
+        crate::request::Target::Tid(tids) if tids.len() == 1 => format!("tid:{}", tids[0]),
+        other => other.kind().as_str().to_owned(),
+    };
+    Output::TopK {
+        k,
+        series: vec![SeriesTotal {
+            key: SeriesKey::from(key.as_str()),
+            events: 0,
+            total: 0.0,
+            unmeasured: 0,
+            short: shorts.run.clone(),
+        }],
+        rest,
+    }
+}
+
+/// A sum that is `0.0` when there is nothing to add: `f64`'s own `sum` of an
+/// empty iterator is `-0.0`, which a result file then prints (perfsched 5).
+fn sum(values: impl Iterator<Item = f64>) -> f64 {
+    values.fold(0.0, |total, value| total + value)
 }
 
 /// Heaviest first, the first `k` kept and the rest summed.
@@ -1503,7 +1774,7 @@ fn ranked(mut totals: Vec<SeriesTotal>, k: u32) -> Output {
         rest: Rest {
             series: dropped.len(),
             events: dropped.iter().map(|series| series.events).sum(),
-            total: dropped.iter().map(|series| series.total).sum(),
+            total: sum(dropped.iter().map(|series| series.total)),
         },
     }
 }
@@ -1708,8 +1979,8 @@ fn pre_aggregated(emits: &[Emit], events: &[Event]) -> Option<String> {
     let affected: Vec<&str> = emits
         .iter()
         .filter_map(|emit| match emit {
-            Emit::Hist(_) => Some("`hist`"),
-            Emit::Summary => Some("`summary`"),
+            Emit::Hist(_) | Emit::HistBy(..) => Some("`hist`"),
+            Emit::Summary | Emit::SummaryBy(_) => Some("`summary`"),
             _ => None,
         })
         .collect();
@@ -2741,6 +3012,196 @@ mod tests {
         );
         // A key the event does not carry is its own part, not a neighbour's.
         assert_eq!(by(&[KeyKind::Cpu]), [("cpu:?".into(), 28.0)]);
+    }
+
+    fn quiet(events: Vec<Event>, observed_ns: u64) -> Collection {
+        let mut collection = two_threads(Losses::default(), Vec::new());
+        collection.events = events;
+        collection.observed_ns = observed_ns;
+        collection
+    }
+
+    /// A summary carries its total where the source's values add up (heap 4,
+    /// top 1), as `count * mean` exactly, and none over a level: fifty
+    /// readings of `mem.rss` are not fifty footprints.
+    #[test]
+    fn a_summary_totals_increments_and_not_levels() {
+        assert!(values_add_up("mem.heap.alloc"));
+        assert!(values_add_up("cpu.oncpu_time"));
+        assert!(values_add_up("net.packets"));
+        assert!(!values_add_up("mem.rss"));
+        assert!(!values_add_up("mem.heap.live"));
+        assert!(values_add_up("not.in.the.catalog"));
+
+        let events = vec![event(0, 7, 100), event(1, 7, 300), event(2, 8, 5)];
+        let series = summary_by(&events, &[], "bytes", true, &Shortfalls::run_wide(None)).unwrap();
+        let totals: Vec<(String, Option<f64>, f64)> = series
+            .iter()
+            .map(|one| (one.key.to_string(), one.total, one.mean * one.count as f64))
+            .collect();
+        assert_eq!(
+            totals,
+            [
+                ("task:7".into(), Some(400.0), 400.0),
+                ("task:8".into(), Some(5.0), 5.0)
+            ]
+        );
+
+        let resolved = rss_request(vec![Emit::Summary], Vec::new());
+        let results = aggregate(&resolved, quiet(events, 1_000), Unit::Bytes, "bytes").unwrap();
+        let Output::Summary { series } = &results.outputs[0] else {
+            panic!("a summary");
+        };
+        assert!(series.iter().all(|one| one.total.is_none()), "{series:?}");
+        let json = serde_json::to_string(series).unwrap();
+        assert!(!json.contains("total"), "{json}");
+    }
+
+    /// `summary@<attr>` and `hist@<attr>` (gpu 2): one row per distinct value
+    /// of the attribute, named as `topk:N@<attr>`'s rows are, an event that
+    /// carries none in `<attr>=?` and said so.
+    #[test]
+    fn a_summary_and_a_histogram_per_attribute_value() {
+        let with_op = |ts: u64, bytes: u64, op: Option<&str>| {
+            let mut one = event(ts, 7, bytes);
+            if let Some(op) = op {
+                one.attrs.push(Attr::text("op", op));
+            }
+            one
+        };
+        let events = vec![
+            with_op(0, 10, Some("copy")),
+            with_op(1, 30, Some("copy")),
+            with_op(2, 1000, Some("gemm")),
+            with_op(3, 7, None),
+        ];
+        let by = AttrName::new("op").unwrap();
+        let resolved = rss_request(
+            vec![Emit::SummaryBy(by), Emit::HistBy(BucketLayout::Log2, by)],
+            Vec::new(),
+        );
+        let results = aggregate(&resolved, quiet(events, 1_000), Unit::Bytes, "bytes").unwrap();
+        let Output::Summary { series } = &results.outputs[0] else {
+            panic!("a summary");
+        };
+        let rows: Vec<(String, usize, f64, f64, f64)> = series
+            .iter()
+            .map(|one| (one.key.to_string(), one.count, one.min, one.mean, one.max))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("op=?".into(), 1, 7.0, 7.0, 7.0),
+                ("op=copy".into(), 2, 10.0, 20.0, 30.0),
+                ("op=gemm".into(), 1, 1000.0, 1000.0, 1000.0),
+            ]
+        );
+        let Output::Hist { series, .. } = &results.outputs[1] else {
+            panic!("a histogram");
+        };
+        let counts: Vec<(String, usize)> = series
+            .iter()
+            .map(|one| (one.key.to_string(), one.count))
+            .collect();
+        assert_eq!(
+            counts,
+            [
+                ("op=?".into(), 1),
+                ("op=copy".into(), 2),
+                ("op=gemm".into(), 1)
+            ]
+        );
+        assert!(
+            results
+                .degradations
+                .iter()
+                .any(|note| note.contains("1 of 4 events carried no `op`")),
+            "{:?}",
+            results.degradations
+        );
+    }
+
+    /// A ranking of a run that measured a window and counted nothing holds
+    /// one zero row named by the target, not none (perfsched 5); one that
+    /// measured no window holds none. What it left out sums to `0`, never
+    /// `-0`.
+    #[test]
+    fn a_ranking_of_nothing_counted_is_one_zero_row_and_no_negative_zero() {
+        let resolved = rss_request(vec![Emit::TopK { k: 3, by: None }], Vec::new());
+        let results = aggregate(&resolved, quiet(Vec::new(), 1_000), Unit::Bytes, "bytes").unwrap();
+        let Output::TopK { series, rest, .. } = &results.outputs[0] else {
+            panic!("a ranking");
+        };
+        assert_eq!(series.len(), 1, "{series:?}");
+        assert_eq!(
+            series[0].key.to_string(),
+            format!("pid:{}", std::process::id())
+        );
+        assert_eq!((series[0].events, series[0].total), (0, 0.0));
+        assert!(rest.total.is_sign_positive(), "{rest:?}");
+        assert!(!serde_json::to_string(rest).unwrap().contains("-0"));
+
+        let results = aggregate(&resolved, quiet(Vec::new(), 0), Unit::Bytes, "bytes").unwrap();
+        let Output::TopK { series, .. } = &results.outputs[0] else {
+            panic!("a ranking");
+        };
+        assert!(series.is_empty(), "{series:?}");
+
+        let Output::TopK { rest, .. } = ranked(Vec::new(), 1) else {
+            panic!("a ranking");
+        };
+        assert!(rest.total.is_sign_positive(), "{rest:?}");
+    }
+
+    /// A poll regrouped by fewer keys than its events carry adds the readings
+    /// of one tick into one (io 5): two devices read at once are one reading
+    /// of a direction, not two measurements of half of it.
+    #[test]
+    fn a_regrouped_poll_folds_the_readings_of_one_tick() {
+        let with_file = |ts: u64, ino: u64, bytes: u64| {
+            let mut one = event(ts, 1, bytes);
+            one.keys.push(KeyValue::File { dev: 28, ino });
+            one
+        };
+        let events = vec![
+            with_file(0, 10, 4),
+            with_file(0, 11, 8),
+            with_file(5, 10, 2),
+            with_file(5, 11, 0),
+            with_file(9, 10, 6),
+        ];
+        let resolved = rss_request(
+            vec![Emit::Summary, Emit::Hist(BucketLayout::Log2)],
+            vec![KeyKind::Task],
+        );
+        let results = aggregate(
+            &resolved,
+            quiet(events.clone(), 1_000),
+            Unit::Bytes,
+            "bytes",
+        )
+        .unwrap();
+        let Output::Summary { series } = &results.outputs[0] else {
+            panic!("a summary");
+        };
+        let one = &series[0];
+        assert_eq!(one.key.to_string(), "task:1");
+        assert_eq!((one.count, one.min, one.max, one.last), (3, 2.0, 12.0, 6.0));
+        assert!((one.mean - 20.0 / 3.0).abs() < 1e-9, "{one:?}");
+        let Output::Hist { series, .. } = &results.outputs[1] else {
+            panic!("a histogram");
+        };
+        assert_eq!(series[0].count, 3);
+        assert_eq!(series[0].sum, 20.0);
+
+        // Keyed as the events are, nothing is folded.
+        let resolved = rss_request(vec![Emit::Summary], vec![KeyKind::Task, KeyKind::File]);
+        let results = aggregate(&resolved, quiet(events, 1_000), Unit::Bytes, "bytes").unwrap();
+        let Output::Summary { series } = &results.outputs[0] else {
+            panic!("a summary");
+        };
+        let counts: Vec<usize> = series.iter().map(|one| one.count).collect();
+        assert_eq!(counts, [3, 2]);
     }
 
     /// An event with no value attribute is one the collector saw and could not
