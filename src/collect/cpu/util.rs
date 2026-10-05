@@ -221,22 +221,28 @@ impl Collector for UtilCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        // The baseline is taken as the window opens, so the first poll already
-        // describes an interval and not the machine's uptime. A cpu that is not
-        // online is discovered here, before anything is launched, rather than
-        // on the first tick.
-        let readings = self.read().map_err(|error| match error {
+        // A cpu that is not online is discovered here, before anything is
+        // launched, rather than on the first tick. The reading is not kept:
+        // the runner takes its first sample immediately after this, and a
+        // baseline taken now made that first sample a share of a few
+        // microseconds to a few milliseconds -- a leading event of 0.0 or 0.5
+        // in the summary's `min` and `mean` beside the full windows (defect 2
+        // of `docs/fixes/w22-sysstat.md`). The first sample is the baseline.
+        self.read().map(|_| ()).map_err(|error| match error {
             SampleError::Transient(reason) | SampleError::TargetGone(reason) => reason,
-        })?;
-        if self.mode != Mode::Snapshot {
-            self.previous = readings.into_iter().collect();
-        }
-        Ok(())
+        })
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         let readings = self.read()?;
         let ts_ns = monotonic_ns();
+        // A poll's first read opens the window and describes nothing yet, so
+        // it is neither an event nor a read that found the file unmoved. A
+        // snapshot has no window, and reports since boot.
+        if self.mode != Mode::Snapshot && self.previous.is_empty() {
+            self.previous = readings.into_iter().collect();
+            return Ok(Vec::new());
+        }
         let mut events = Vec::with_capacity(readings.len());
         for (label, now) in readings {
             // One sequence number per event, so two cpus read in the same
@@ -559,6 +565,7 @@ mod tests {
             Which::Machine,
         );
         collector.start().expect("/proc/stat is readable");
+        assert!(collector.sample(0).expect("the baseline read").is_empty());
 
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let threads: Vec<_> = (0..burners)
@@ -574,7 +581,7 @@ mod tests {
             })
             .collect();
         std::thread::sleep(StdDuration::from_millis(400));
-        let events = collector.sample(0).expect("a second read");
+        let events = collector.sample(1).expect("a second read");
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         for thread in threads {
             thread.join().expect("a burner finished");
@@ -655,6 +662,7 @@ mod tests {
             Which::Cpus(vec![busy_cpu, neighbour]),
         );
         collector.start().expect("/proc/stat is readable");
+        assert!(collector.sample(0).expect("the baseline read").is_empty());
         let idle_before = idle_ticks_of(busy_cpu);
 
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -676,7 +684,7 @@ mod tests {
             })
         };
         std::thread::sleep(StdDuration::from_millis(500));
-        let events = collector.sample(0).expect("a second read");
+        let events = collector.sample(2).expect("a second read");
         let idle_after = idle_ticks_of(busy_cpu);
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         spinner.join().expect("the spinner finished");
@@ -731,6 +739,25 @@ mod tests {
             .expect_err("a cpu with no line cannot be read");
         assert!(reason.contains("not online"), "{reason}");
         assert!(reason.contains("not the same as"), "{reason}");
+    }
+
+    /// Defect 2 of `docs/fixes/w22-sysstat.md`: the runner samples right after
+    /// `start`, so the first read of a poll is its baseline. It emits nothing
+    /// and is not counted as a read that found the file unmoved.
+    #[test]
+    fn the_first_read_of_a_poll_is_a_baseline_and_emits_nothing() {
+        let mut collector = UtilCollector::new(
+            Mode::Poll {
+                interval: Mode::DEFAULT_POLL_INTERVAL,
+            },
+            Which::Machine,
+        );
+        collector.start().expect("/proc/stat is readable");
+        assert!(collector.previous.is_empty(), "start kept a baseline");
+        assert!(collector.sample(0).expect("the first read").is_empty());
+        assert_eq!((collector.reads, collector.unmoved), (0, 0));
+        assert!(collector.notes().is_empty());
+        assert!(collector.previous.contains_key(MACHINE));
     }
 
     #[test]

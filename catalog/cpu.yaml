@@ -247,6 +247,15 @@
   keys: [cgroup]
   filter_fields: []
   determinism: low
+  caveats:
+    - "Named as `mem.pressure` and `io.pressure` are: a poll reports
+       `stall_ratio`, the `some` counter's increase over its own window, with
+       `stalled_ns` and `interval_ns` beside it, and `full_stall_ratio` where
+       the kernel writes a `full` line (at machine scope it always reads 0 for
+       cpu). A snapshot observes no window and reports the kernel's decayed
+       averages under their own names, `some_avg10` first."
+    - "A poll's first read is its baseline and produces no event, so every
+       share in the series covers a full interval."
 
 - id: cpu.throttle
   family: cpu
