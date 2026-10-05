@@ -200,6 +200,7 @@ impl Ask {
             decompose: Vec::new(),
             escalate: None,
             record: None,
+            launch: Vec::new(),
         }
     }
 }
