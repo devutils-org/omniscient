@@ -1,5 +1,5 @@
 # The system view's sources, on its workload (`view/workloads/system/`): the
-# program's on-cpu time, and the machine's panels.
+# program's on-cpu time, the machine's panels and its process list.
 #
 #   omn -f view/workloads/system/session.yml
 name: system workload
@@ -31,3 +31,8 @@ requests:
     target: {system: true}
     mode: poll@250ms
     emit: [timeline, summary]
+  - label: tasks
+    source: proc.tasks
+    target: {system: true}
+    mode: poll@1s
+    emit: [raw]

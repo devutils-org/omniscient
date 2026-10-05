@@ -258,11 +258,12 @@ holds this table to the code.
 |---|---|---|---|---|---|
 | system | `cpu.util` | poll@250ms | timeline,summary | system | the cpu panel: utilization by state, and its sparkline |
 | system | `mem.pressure` | poll@250ms | timeline,summary | system | the memory panel: stall time under memory pressure |
-| system | `io.bytes` | poll@250ms | raw,timeline,summary | system | the disk panel: bytes read and written per device, apart, from the events |
-| system | `net.bytes` | poll@250ms | raw,timeline,summary | system | the network panel: bytes in and out per interface, apart, from the events |
+| system | `io.bytes` | poll@250ms | raw,timeline,summary (keys dev,dir) | system | the disk panel: bytes read and written per device, apart, by the `dir` key |
+| system | `net.bytes` | poll@250ms | raw,timeline,summary (keys iface,dir) | system | the network panel: bytes in and out per interface, apart, by the `dir` key |
 | system | `gpu.engine_busy` | poll@250ms | timeline,summary | system | the GPU panel: occupancy per engine |
 | system | `gpu.mem` | poll@250ms | timeline,summary | system | the GPU panel: memory held |
 | system | `power.energy` | poll@250ms | timeline,summary | system | the power panel: watts per RAPL domain |
+| system | `proc.tasks` | poll@1s | raw | system | the process list: the machine's processes, each its name, its cpu and its memory |
 | system | `cpu.oncpu_time` | poll@250ms | timeline,summary (keys task) | target | the process list: cpu time per thread |
 | flame | `cpu.profile` | sample@997hz | stack (stack fp) | target | the on-cpu icicle |
 | flame | `sched.offcpu` | trace | stack (stack fp) | target | the off-cpu icicle |
