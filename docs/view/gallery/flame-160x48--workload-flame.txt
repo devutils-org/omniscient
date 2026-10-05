@@ -41,7 +41,7 @@ on cpu: 1.40k · hottest own py::burn:/omniscient/view/workloads/flame/../common
 │  symbols only: its internal functions are unnamed;                           ││                                                                              │
 │  _ctypes.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its      ││                                                                              │
 │  internal functions are unnamed                                              ││                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────────────────────────┘└ own cost at the leaf: these stacks do not say which frame a perf map named (`┘
 on cpu ▸ all
 1.40k samples ≈ 1.40s · 100% of all · own 0 · 1.40k events
 ⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits off cpu by thread · ! lists caveats

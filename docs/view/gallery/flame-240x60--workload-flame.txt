@@ -53,7 +53,7 @@ on cpu: 1.40k · hottest own py::burn:/omniscient/view/workloads/flame/../common
 │                                                                                                                      ││                                                                                                                      │
 │                                                                                                                      ││                                                                                                                      │
 │                                                                                                                      ││                                                                                                                      │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘└ own cost at the leaf: these stacks do not say which frame a perf map named (`omn triage` reads the maps back) ───────┘
 on cpu ▸ all
 1.40k samples ≈ 1.40s · 100% of all · own 0 · 1.40k events
 ⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits off cpu by thread · ! lists caveats

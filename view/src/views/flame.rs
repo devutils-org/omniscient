@@ -552,6 +552,19 @@ struct Reading<'a> {
     focus: &'a Focus,
 }
 
+/// Whether a result's names came, in part, from a perf map: the maps its
+/// provenance lists, or a names note citing one (`names came from -- ...:
+/// perf-map, ...`). The view does not read the maps back from `/tmp` the
+/// way `omn triage` does for stacks without `named_by`: it draws what the
+/// recording says, and a map on this machine may not be the run's.
+fn cites_a_perf_map(results: &Results) -> bool {
+    !results.perf_maps.is_empty()
+        || results.notes.iter().any(|note| {
+            note.find("names came from -- ")
+                .is_some_and(|at| note[at..].contains(": perf-map, "))
+        })
+}
+
 /// Adds one run's results to a tree. Off cpu, from the blocks themselves
 /// when the run kept them and a thread split or a focus asks for them;
 /// otherwise from the stack emit. Returns what could not be done as asked.
@@ -572,6 +585,13 @@ fn fill(tree: &mut Tree, results: &[&Results], run: usize, reading: &Reading<'_>
     for one in results {
         let events = one.events();
         let charged = one.perf_map_named();
+        if one.named_by.is_empty() && !one.stacks.is_empty() && cites_a_perf_map(one) {
+            asides.push(
+                "own cost at the leaf: these stacks do not say which frame a perf map named \
+                 (`omn triage` reads the maps back)"
+                    .to_owned(),
+            );
+        }
         let from_events = wants_events
             && events
                 .iter()
@@ -3144,6 +3164,76 @@ mod tests {
         let alone = read(&kept, false);
         assert_eq!(total(&alone), 1000.0);
         assert!(alone.aside.unwrap().contains("2 blocks carried no stack"));
+    }
+
+    /// Off-cpu stacks carry no `named_by`: when their names came from a
+    /// perf map, the flame charges the leaf, and says that the triage reads
+    /// the maps back instead -- the two differ on screen, never silently.
+    #[test]
+    fn stacks_without_provenance_named_by_a_perf_map_say_where_own_cost_went() {
+        let mut results = Results {
+            label: "sched.offcpu".into(),
+            source: "sched.offcpu".into(),
+            unit: "ns".into(),
+            ..Results::default()
+        };
+        results.stacks.insert(
+            1,
+            vec!["py::main:/a.py".into(), "_PyEval_EvalFrameDefault".into()],
+        );
+        results.outputs = vec![Output::Stack {
+            stacks: vec![StackCount {
+                stack: 1,
+                events: 1,
+                total: 1000.0,
+                series: None,
+            }],
+            unattributed: 0,
+            short: None,
+        }];
+        let read = |results: &Results| {
+            let data = Data {
+                run: Run {
+                    results: vec![results.clone()],
+                    ..Run::default()
+                },
+                ..Data::default()
+            };
+            let focus = Focus::default();
+            build(
+                &data,
+                None,
+                &NEEDS[OFF],
+                "",
+                false,
+                &Reading {
+                    by_thread: false,
+                    focus: &focus,
+                },
+            )
+        };
+        let said = |pane: &Pane| {
+            pane.aside
+                .as_deref()
+                .is_some_and(|aside| aside.contains("`omn triage` reads the maps back"))
+        };
+        assert!(!said(&read(&results)), "no perf map, nothing to say");
+        results.notes.push(
+            "names came from -- perf-42.map: perf-map, the 3 lines it holds; python3: .symtab"
+                .into(),
+        );
+        let pane = read(&results);
+        assert!(said(&pane), "{:?}", pane.aside);
+        let Body::Tree(tree) = &pane.body else {
+            panic!("a tree")
+        };
+        assert!(!tree.charged_by_map);
+        let leaf = tree
+            .nodes
+            .iter()
+            .position(|node| node.name == "_PyEval_EvalFrameDefault")
+            .unwrap();
+        assert_eq!(tree.nodes[leaf].own[0], 1000.0, "charged to the leaf");
     }
 
     /// A `--keys task` profile has one row per task and stack: one stack id

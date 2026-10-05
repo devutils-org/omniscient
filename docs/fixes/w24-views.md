@@ -128,9 +128,32 @@ Reasoned only:
   both.
 - The flame's own cost is charged as the triage's: the innermost frame a perf
   map named, else the leaf. The two read one provenance and must name the
-  same functions.
+  same functions -- where the provenance exists. For stacks without
+  `named_by` (`sched.offcpu`'s) the triage reads the cited maps back from
+  `/tmp`; the view does not, because it draws what the recording says and a
+  map on the viewing machine may not be the run's. It charges the leaf there
+  and says so in the pane's aside ("own cost at the leaf: these stacks do not
+  say which frame a perf map named"). The divergence closes when
+  `sched.offcpu` writes `named_by` beside its stacks.
+
+## Review
+
+- **flame.rs, own cost of stacks without `named_by`** (gap): right. Kept
+  the view from reading perf maps back (see the decision line), and made the
+  divergence said rather than only inferable from the list's header: a
+  result with stacks, no `named_by` and a perf map in its provenance or its
+  names note now puts "own cost at the leaf: ... (`omn triage` reads the
+  maps back)" in the flame pane's aside. Held by
+  `stacks_without_provenance_named_by_a_perf_map_say_where_own_cost_went`;
+  the `flame-*--workload-flame` and `flame--workload-timebar` snapshots
+  re-blessed, since that recording's off-cpu stacks cite `perf-2620696.map`.
 
 ## Needs from another stream
+
+- **sched.offcpu** (`src/collect/sched/`): write `named_by` and `perf_maps`
+  beside the stacks as `cpu.profile` does; the flame and the triage then
+  charge off-cpu own cost alike, and the aside goes away.
+
 
 - **top** (`view/src/trust.rs`): `usage::RAMP`'s first four steps are under
   3:1 on a light terminal (178 is 2.10:1 on white). Proposed: `28, 64, 100,
