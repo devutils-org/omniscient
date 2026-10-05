@@ -263,6 +263,50 @@ impl FootprintCollector {
     }
 }
 
+impl FootprintCollector {
+    /// What `top` shows beside RSS: the virtual size (VIRT) and the resident
+    /// pages backed by a file or by shared memory (SHR), from `statm`'s first
+    /// and third fields; and, where the rollup is the file read, the swapped,
+    /// huge and locked parts of the footprint it already holds. Best effort:
+    /// a read that fails leaves the attribute out, never zero.
+    fn beside_rss(&self) -> Vec<Attr> {
+        let mut attrs = Vec::new();
+        let statm = std::fs::read_to_string(format!("/proc/{}/statm", self.pid)).ok();
+        if let Some((virt, shared)) = statm.as_deref().and_then(statm_virt_shared) {
+            attrs.push(Attr::uint("virt_bytes", virt * self.page_size));
+            attrs.push(Attr::uint("shared_bytes", shared * self.page_size));
+        }
+        if self.source != Source::Statm {
+            let rollup = std::fs::read_to_string(format!("/proc/{}/smaps_rollup", self.pid)).ok();
+            if let Some(text) = rollup {
+                for (name, field) in [
+                    ("swap_bytes", "Swap:"),
+                    ("anon_huge_bytes", "AnonHugePages:"),
+                    ("locked_bytes", "Locked:"),
+                ] {
+                    if let Some(bytes) = sum_fields(&text, &[field]) {
+                        attrs.push(Attr::uint(name, bytes));
+                    }
+                }
+            }
+        }
+        attrs
+    }
+}
+
+/// `statm`'s size and shared fields, in pages.
+fn statm_virt_shared(text: &str) -> Option<(u64, u64)> {
+    let fields: Vec<u64> = text
+        .split_whitespace()
+        .take(3)
+        .map(|field| field.parse().ok())
+        .collect::<Option<_>>()?;
+    match fields[..] {
+        [size, _, shared] if size > 0 => Some((size, shared)),
+        _ => None,
+    }
+}
+
 impl Collector for FootprintCollector {
     fn id(&self) -> &CollectorId {
         &self.id
@@ -284,6 +328,9 @@ impl Collector for FootprintCollector {
             Attr::uint("bytes", bytes),
             Attr::text("read_from", self.source.label()),
         ];
+        if self.metric == Metric::Rss {
+            attrs.extend(self.beside_rss());
+        }
         if let Some(comm) = self.comm.get() {
             attrs.push(Attr::text("comm", comm));
         }
@@ -720,6 +767,38 @@ mod tests {
             (2..=4).contains(&published),
             "a hundred milliseconds at fifty is two or three points, not {published}"
         );
+    }
+
+    /// VIRT and SHR as `top` shows them, held against the same process's
+    /// `status`, which the kernel fills from its counters rather than from
+    /// `statm`'s pages: `VmSize`, and `RssFile` plus `RssShmem`. A sleeping
+    /// child, so nothing moves between the two reads.
+    #[test]
+    fn rss_carries_virt_and_shr_the_way_status_states_them() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("sleep");
+        let pid = child.id() as i32;
+        std::thread::sleep(Duration::from_millis(50));
+        let mut collector =
+            FootprintCollector::new(pid, Metric::Rss, Source::SmapsRollup, Duration::ZERO);
+        let events = collector.sample(0).expect("the child's footprint");
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).expect("status");
+        let _ = child.kill();
+        let _ = child.wait();
+        let kib = |field: &str| sum_fields(&status, &[field]).expect(field);
+        let attr = |name: &str| events[0].attr(name).and_then(|v| v.as_f64()).expect(name) as u64;
+        assert_eq!(attr("virt_bytes"), kib("VmSize:"));
+        assert_eq!(attr("shared_bytes"), kib("RssFile:") + kib("RssShmem:"));
+        assert_eq!(attr("swap_bytes"), kib("VmSwap:"));
+        assert!(events[0].attr("locked_bytes").is_some());
+    }
+
+    #[test]
+    fn statm_without_an_address_space_has_no_virt() {
+        assert_eq!(statm_virt_shared("0 0 0 0 0 0 0"), None);
+        assert_eq!(statm_virt_shared("100 20 7 1 0 5 0"), Some((100, 7)));
     }
 
     #[test]

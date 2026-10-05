@@ -550,15 +550,17 @@ fn freeing_half_the_heap_moves_the_live_total_and_not_the_resident_size() {
 // collector and the emit layer -- against a program whose memory behaviour the
 // test chose.
 
-/// The six sources this stream added, with the backend each one is expected to
-/// be collected through.
-const BREADTH_SOURCES: [(&str, &str); 6] = [
+/// The sources that read a file or a kernel counter, with the backends each
+/// one is expected to be collected through.
+const BREADTH_SOURCES: [(&str, &str); 8] = [
     ("mem.pressure", "fs:proc, fs:cgroup"),
-    ("mem.swap", "fs:proc, fs:cgroup"),
+    ("mem.swap", "fs:proc, fs:cgroup, perf:kprobe"),
     ("mem.thp", "fs:sys, fs:proc"),
     ("mem.cgroup", "fs:cgroup"),
-    ("mem.numa", "fs:proc"),
+    ("mem.numa", "fs:proc, fs:sys"),
     ("mem.wss", "fs:proc:clear_refs"),
+    ("mem.oom", "fs:proc, fs:cgroup"),
+    ("mem.system", "fs:proc"),
 ];
 
 #[test]
@@ -876,4 +878,132 @@ fn the_machine_wide_readers_run_clean() {
             "{source} lost a read: {run}"
         );
     }
+}
+
+// --- A process's own swap-ins ---------------------------------------------
+
+/// A process whose working set does not fit under its scope's `MemoryHigh`
+/// reads its own pages back from swap on every walk. It is the only process
+/// in that scope, so the scope's `memory.stat` `pswpin` -- the kernel's count,
+/// in pages -- is the same reads counted another way; omn's window sits inside
+/// the two reads of it, so omn's count is at most the scope's and, the startup
+/// aside, most of it.
+///
+/// Through the binary, because a kprobe counter needs `CAP_PERFMON` whatever
+/// `perf_event_paranoid` says, and only `target/debug/omn` carries it.
+#[test]
+fn a_thrashing_process_s_swap_ins_are_its_scope_s() {
+    if !has_python() {
+        eprintln!("skipped: no python3 to thrash with");
+        return;
+    }
+    let swap_total = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("SwapFree:"))
+                .and_then(|rest| rest.split_whitespace().next()?.parse::<u64>().ok())
+        })
+        .unwrap_or(0);
+    if swap_total < 256 << 10 {
+        eprintln!("skipped: less than 256 MiB of free swap");
+        return;
+    }
+    let unit = format!("omn-test-swapin-{}", std::process::id());
+    let thrash = "import time\n\
+                  b = bytearray(b'\\xa5') * (96 << 20)\n\
+                  end = time.monotonic() + 8\n\
+                  s = 0\n\
+                  while time.monotonic() < end:\n\
+                  \x20   for o in range(0, 64 << 20, 4096): s += b[o]\n";
+    let Ok(mut child) = Command::new("systemd-run")
+        .args([
+            "--user",
+            "--scope",
+            "-q",
+            "-p",
+            "MemoryHigh=32M",
+            "--unit",
+            &unit,
+        ])
+        .args(["python3", "-c", thrash])
+        .spawn()
+    else {
+        eprintln!("skipped: no systemd-run to make a limited scope with");
+        return;
+    };
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let scope = format!(
+        "/sys/fs/cgroup/user.slice/user-{}.slice/user@{}.service/app.slice/{unit}.scope",
+        unsafe { libc::getuid() },
+        unsafe { libc::getuid() }
+    );
+    let pid = std::fs::read_to_string(format!("{scope}/cgroup.procs"))
+        .ok()
+        .and_then(|text| text.lines().last()?.trim().parse::<i32>().ok());
+    let pswpin = || -> Option<u64> {
+        std::fs::read_to_string(format!("{scope}/memory.stat"))
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix("pswpin "))?
+            .trim()
+            .parse()
+            .ok()
+    };
+    let (Some(pid), Some(before)) = (pid, pswpin()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        eprintln!("skipped: the scope {scope} has no process or no pswpin");
+        return;
+    };
+    let pid_text = pid.to_string();
+    let output = run(&[
+        "trace",
+        "mem.swap",
+        "--pid",
+        &pid_text,
+        "--backend",
+        "force:perf:kprobe",
+        "-m",
+        "count",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--duration",
+        "3s",
+    ]);
+    let after = pswpin().expect("pswpin");
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = Command::new("systemctl")
+        .args(["--user", "stop", &format!("{unit}.scope")])
+        .output();
+    let message = stderr(&output);
+    if message.contains("CAP_PERFMON") {
+        eprintln!("skipped: the binary carries no CAP_PERFMON (run `make`): {message}");
+        return;
+    }
+    let text = stdout(&output);
+    let counted: f64 = text
+        .split("\"swapins\"")
+        .nth(1)
+        .and_then(|rest| {
+            rest.trim_start_matches([':', ' ', '{'])
+                .split(|c: char| !c.is_ascii_digit())
+                .find(|word| !word.is_empty())?
+                .parse()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("no swapins in the output:\n{text}\n{message}"));
+    let pages = (after - before) as f64;
+    eprintln!("swap-ins counted {counted}, the scope's pswpin moved {pages}");
+    assert!(
+        pages > 10_000.0,
+        "the process did not thrash: {pages} pages in"
+    );
+    assert!(
+        counted <= pages * 1.02 && counted >= 0.6 * pages,
+        "omn counted {counted} swap-ins inside a window where the scope read {pages} pages"
+    );
 }
