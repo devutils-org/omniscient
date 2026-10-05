@@ -746,6 +746,28 @@ so a rename starts new rows. Held by
 failing opens under `python3`, the rename, then 300 opens and 300 failing
 ones, read 600 calls and 300 errors under the new name, exactly.
 
+### 11. `proc.tasks --tid` listed the whole process, each thread under the tid
+
+Found by the twenty-fourth wave's review, **fixed in its fix round**. A tid
+target was read as `/proc/<tid>/task`, which the kernel serves for any thread
+with the whole thread group in it: `--tid` of the last of a python process's
+four threads returned four events, every one with `pid` set to that tid. The
+run now reads `/proc/<pid>/task/<tid>` alone, with `pid` the thread's `Tgid:`
+from its `status`, and a tid that is not on the machine is refused at attach.
+Held by `a_thread_target_is_that_thread_under_its_own_process`
+(`tests/family_proc.rs`, the thread python reports by `get_native_id`) and by
+the unit test `a_thread_target_is_that_thread_alone_under_its_process`.
+
+### 12. `proc.exec`'s tree dropped execs of unknown parentage uncounted
+
+Found by the same review, **fixed in the same round**. On a pid or launched
+target, an exec whose walk up `/proc`'s parents met a parent that had already
+left `/proc` was treated as outside the tree and dropped once its carry-over
+drain was done, with nothing saying so. Such an exec is now `Unknown` rather
+than `Out` (a walk that ends at pid 1 is `Out`), and each one dropped for good
+is counted in `failed_reads` with its reason, so the run's losses report it.
+Held by `a_parent_gone_from_proc_leaves_the_exec_unknown_not_outside`.
+
 ## What the twenty-fourth wave added
 
 Every number below was read on this machine against something independent of

@@ -81,7 +81,9 @@
        parent is the process or a descendant it has seen. A descendant that
        forked without exec'ing (a subshell) is found by walking `/proc`'s
        parents at the drain, so one that had already exited by then is not,
-       and its child's execs are not kept."
+       and its child's execs are not kept: each such exec is counted among the
+       run's losses (`failed_reads`), since its parentage is unknown rather
+       than shown to be outside the tree."
 
 
 - id: proc.exit
@@ -165,7 +167,8 @@
   determinism: low
   caveats:
     - "One event per process of the machine (`--system`), or per thread of a
-       process (`--pid`, a launched program), each poll; every event of a poll
+       process (`--pid`, a launched program), or for the one thread of `--tid`
+       under the process it belongs to, each poll; every event of a poll
        carries the poll's one timestamp. Each carries `pid`, `tid`, `ppid`,
        `comm`, `state`, `uid`, `threads`, `rss_bytes` (from `statm`, as `top` reads it), `vsz_bytes`, `cpu_ns`,
        `utime_ns`, `stime_ns`, `nice`, `priority`, `minflt`, `majflt`, `cpu` (the
