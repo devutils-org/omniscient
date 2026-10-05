@@ -1,9 +1,11 @@
 # The twenty-fourth wave, stream reference
 
-Branch `feat/w24-reference`, merged with `main` twice (at stream run's
-merge, then at power's and lazy's). Nothing outside the row's files and no
-shared layer changed. Every item of `BRIEF.md`'s "reference" section landed
-except item 4, which waits on stream sched (below).
+Branch `feat/w24-reference`, merged with `main` three times: at stream
+run's merge, at power's and lazy's, then at cpu's, gpu's and emit's.
+Nothing outside the row's files changed, and no shared layer. Every item of
+`BRIEF.md`'s "reference" section landed. Item 4 is half done: stream cpu's
+fix retired the leading-event hold, and `pidstat-w`'s marker waits on
+stream sched (below).
 
 ## What landed
 
@@ -64,8 +66,10 @@ except item 4, which waits on stream sched (below).
   after the window opened. It is unit-tested on a real capture
   (`captures/top/omn-cpu-util-raw-window.json`). Three runs at a load of 12
   (not quiet) gave omn 0.525 / 0.501 / 0.607 against top 0.536 / 0.516 /
-  0.595: omn below twice and above once, 0.011 to 0.015 apart. The defect
-  is filed with stream cpu (below).
+  0.595: omn below twice and above once, 0.011 to 0.015 apart. **Stream
+  cpu fixed the poll in the same wave** (`c13eb51`: the first sample is
+  the baseline). After merging it, the parser leaves out nothing: 0.195
+  against 0.203, and 0.632 against 0.624. It stays as a guard.
 - **`load-latency`** held under load: omn 366.1 against perf mem 368.1
   cycles, medians of five. The twenty-third wave's quiet run held too, so
   no `known_defect` was added.
@@ -76,8 +80,9 @@ except item 4, which waits on stream sched (below).
   - `[memcpy HtoD]` 1815081 ns;
   - copy `dram__bytes_read.sum` 16840992.
 
-  `docs/replaces/gpu.md` no longer calls them composed. `pairs_gpu` itself
-  was not rerun here (stream gpu holds the device this wave).
+  `docs/replaces/gpu.md` no longer calls them composed. After stream
+  gpu's merge, with nothing else on the device, `pairs_gpu` gave **21
+  held**.
 - **bpftrace's two medians.** `biolatency` held at log2 buckets 16 against
   15. `runqlat` was a gap because omn could not watch the machine for a
   program's life. It now runs with `--system` beside the program (stream
@@ -185,6 +190,7 @@ except item 4, which waits on stream sched (below).
   | perfsched | 9 | | | |
   | bpftrace | 10 | | | |
   | perfstat | 11 | | | 2 |
+  | gpu | 21 | | | |
 
   - net is 8 held now that tcpdump runs; it was 7 held and 1 skipped.
   - io is 9 with the two new pairs.
@@ -198,6 +204,9 @@ except item 4, which waits on stream sched (below).
   - io's `fio-bytes`: omn above by other readers, 99 MB against 69 MB; the
     band is 5 %, above only.
   - bpftrace's `runqlat`: 2 buckets apart once at a load of 38.
+  - sysstat's `vmstat-si` and `vmstat-so`: failed once during a burst of
+    the machine's swapping (528 MB swapped out in the 4 s); they held
+    alone.
   - perfsched's `perf-trace-count`: perf trace lost events, now refused by
     its parser.
 
@@ -220,7 +229,13 @@ except item 4, which waits on stream sched (below).
    not merged yet. Once it does, the pair fails with "the defect no longer
    reproduces: remove `known_defect`", and the marker in
    `catalog/references/sysstat.yaml` is a one-line removal for whoever
-   merges sched, or for the coordinator.
+   merges sched, or for the coordinator. **Done for the other marker**
+   (`d79d4c8`). Stream cpu's leading-event fix made sysstat's
+   `poll_leading_event_is_held_as_a_known_defect` fail, as designed. It is
+   now `no_poll_source_emits_a_leading_event`, a guard over all four poll
+   sources. `raw_means` no longer skips a first event. The two `omn`
+   captures (cpu.util, cpu.pressure) are recaptured, and `omn_psi` drops
+   the old `some` naming (stream cpu's request).
 2. **New pairs stream power suggested** (`w24-power.md`): `Busy%`/`Avg_MHz`
    against turbostat, `energy-core` against `perf stat -a`, and `pidstat
    -w` cswch/s against `power.wakeups`. Not written. The first needs an
@@ -260,21 +275,14 @@ cargo test --test reference -- --test-threads=1 --nocapture
 
 ## Needs from another stream
 
-- **cpu** (`src/collect/cpu/util.rs`, or the window's late attach in
-  `src/collect/mod.rs` at `due_ns[index] = attached_ns`): `cpu.util`'s
-  first poll is due at once after `start()` took its baseline, so it
-  reports a share over a fraction of a millisecond (0, 0.5 or 1) that a
-  summary weighs like a whole interval. The run start does the same
-  (`due_ns: vec![monotonic_ns(); count]`). Reproduce with `omn trace
-  cpu.util --system -m poll -e raw -d 3s --format json`: the first event is
-  at +0.2 ms. Stream power fixed the same shape for `power.freq` ("a polled
-  source whose reading describes the moment before it takes its
-  window-open read as a baseline"). Once fixed, `omn_cpu_util_polls` leaves
-  out nothing and needs no change.
+- **cpu**: none left. The `cpu.util` first-poll defect this stream found
+  through `top-cpus` was fixed by stream cpu in the same wave (`c13eb51`),
+  and the merged branch shows it: no leading event.
 - **sched**: when the counted-window fix lands, remove `known_defect` from
   `pidstat-w` in `catalog/references/sysstat.yaml` (item 4 above).
 - **coordinator** (`docs/open-findings.md`):
-  - the `cpu.util` first-poll defect;
+  - the `cpu.util` first-poll defect, which is fixed: the explanation of
+    the twenty-third wave's `top-cpus` filing;
   - the tools' own losses under load (bpftrace, perf trace);
   - `cpu.ipc`'s separate-run spread under load.
 
