@@ -129,7 +129,10 @@ Tests of the round: `cargo test --lib collect::proc` 50 passed (3 new),
 `cargo test --lib catalog` 66 passed, `cargo test --test family_proc` 7
 passed (1 new), `cargo test --test scenario_proc` 29 passed, after `make`
 (capabilities granted); clippy (`--workspace --all-targets`) and `fmt
---check` clean.
+--check` clean. `cargo test --test cli` (for the documents): 32 passed, 1
+failed -- `the_catalog_document_s_cost_column_is_the_catalog_s_chain`, on
+`CATALOG.md`'s `mem.numa` and `mem.swap` rows, which came in with the merge of
+main (stream mem's) and which this stream does not touch.
 
 ## Privileged runs wanted
 
