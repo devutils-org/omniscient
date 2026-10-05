@@ -134,7 +134,14 @@ pub struct SocketsCollector {
 }
 
 impl SocketsCollector {
-    fn event(&self, protocol: &str, socket: &Socket, owners: &Owners, ts_ns: u64, seq: u64) -> Event {
+    fn event(
+        &self,
+        protocol: &str,
+        socket: &Socket,
+        owners: &Owners,
+        ts_ns: u64,
+        seq: u64,
+    ) -> Event {
         let family = if socket.family == libc::AF_INET as u8 {
             "inet"
         } else {
@@ -189,7 +196,9 @@ impl Collector for SocketsCollector {
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         let Some(diag) = self.diag.as_ref() else {
-            return Err(SampleError::Transient("the netlink socket is closed".into()));
+            return Err(SampleError::Transient(
+                "the netlink socket is closed".into(),
+            ));
         };
         if let Some(pid) = self.only {
             if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
@@ -200,7 +209,9 @@ impl Collector for SocketsCollector {
         for (protocol, number) in [("tcp", libc::IPPROTO_TCP), ("udp", libc::IPPROTO_UDP)] {
             for family in [libc::AF_INET as u8, libc::AF_INET6 as u8] {
                 match diag.dump(family, number as u8) {
-                    Ok(sockets) => dumped.extend(sockets.into_iter().map(|socket| (protocol, socket))),
+                    Ok(sockets) => {
+                        dumped.extend(sockets.into_iter().map(|socket| (protocol, socket)))
+                    }
                     Err(error) => {
                         self.losses.failed_reads += 1;
                         self.losses.note(format!(
@@ -249,7 +260,10 @@ mod tests {
     }
 
     fn text(event: &Event, name: &str) -> String {
-        event.attr(name).map(|value| value.to_string()).unwrap_or_default()
+        event
+            .attr(name)
+            .map(|value| value.to_string())
+            .unwrap_or_default()
     }
 
     /// Ground truth is what this test opened: a listener with one connection
@@ -296,6 +310,8 @@ mod tests {
         let datagram = find(&events, |event| sport(event, udp_port)).expect("the udp socket");
         assert_eq!(text(datagram, "protocol"), "udp");
         assert_eq!(text(datagram, "state"), "UNCONN");
-        assert!(events.iter().all(|event| text(event, "pid") == std::process::id().to_string()));
+        assert!(events
+            .iter()
+            .all(|event| text(event, "pid") == std::process::id().to_string()));
     }
 }

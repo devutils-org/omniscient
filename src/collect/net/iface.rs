@@ -334,10 +334,18 @@ mod tests {
     /// interval would be the microseconds since the last tick.
     #[test]
     fn a_poll_measures_from_the_start_and_reads_nothing_at_the_close() {
-        let mut collector = Box::new(Prepare(polling())).attach(&Target::Iface("lo".to_owned())).expect("readable");
+        let mut collector = Box::new(Prepare(polling()))
+            .attach(&Target::Iface("lo".to_owned()))
+            .expect("readable");
         collector.start().expect("the baseline");
-        assert!(collector.sample(0).unwrap().is_empty(), "the first tick passes over");
-        assert!(!collector.sample(1).unwrap().is_empty(), "the second measures");
+        assert!(
+            collector.sample(0).unwrap().is_empty(),
+            "the first tick passes over"
+        );
+        assert!(
+            !collector.sample(1).unwrap().is_empty(),
+            "the second measures"
+        );
         assert!(collector.stop().is_empty());
     }
 

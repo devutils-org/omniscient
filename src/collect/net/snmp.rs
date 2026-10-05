@@ -265,8 +265,9 @@ impl Collector for SnmpCollector {
             Ok(events) => events,
             Err(error) => {
                 self.losses.failed_reads += 1;
-                self.losses
-                    .note(format!("the closing read failed, so the run measured nothing: {error:?}"));
+                self.losses.note(format!(
+                    "the closing read failed, so the run measured nothing: {error:?}"
+                ));
                 Vec::new()
             }
         }
@@ -325,8 +326,8 @@ mod tests {
     #[test]
     fn a_counted_run_reports_the_refusals_it_caused() {
         let mut collector = Box::new(Prepare(Mode::Count))
-        .attach(&Target::System)
-        .expect("system");
+            .attach(&Target::System)
+            .expect("system");
         collector.start().expect("the baseline");
         // A port bound and closed is a port nobody listens on, here.
         let port = std::net::TcpListener::bind("127.0.0.1:0")
@@ -338,7 +339,10 @@ mod tests {
         for _ in 0..REFUSED {
             assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
         }
-        assert!(collector.sample(0).unwrap().is_empty(), "a count reads at the close");
+        assert!(
+            collector.sample(0).unwrap().is_empty(),
+            "a count reads at the close"
+        );
         let events = collector.stop();
         let moved = |name: &str| {
             events
@@ -350,10 +354,8 @@ mod tests {
         assert!(moved("TcpAttemptFails") >= REFUSED as f64, "{events:?}");
         assert!(moved("TcpOutRsts") >= REFUSED as f64, "{events:?}");
         assert!(
-            events
-                .iter()
-                .all(|event| event.attr("gauge").is_some()
-                    || event.attr("value").unwrap().as_f64() > Some(0.0)),
+            events.iter().all(|event| event.attr("gauge").is_some()
+                || event.attr("value").unwrap().as_f64() > Some(0.0)),
             "only what moved"
         );
     }
@@ -361,8 +363,8 @@ mod tests {
     #[test]
     fn a_snapshot_reports_every_counter_as_it_stands() {
         let mut collector = Box::new(Prepare(Mode::Snapshot))
-        .attach(&Target::System)
-        .expect("system");
+            .attach(&Target::System)
+            .expect("system");
         let events = collector.sample(0).expect("one read");
         let truth = read_all().unwrap();
         assert_eq!(events.len(), truth.len(), "every counter");
@@ -376,8 +378,7 @@ mod tests {
 
     #[test]
     fn a_process_target_is_refused() {
-        let Err(error) = Box::new(Prepare(Mode::Snapshot))
-        .attach(&Target::Pid(vec![1])) else {
+        let Err(error) = Box::new(Prepare(Mode::Snapshot)).attach(&Target::Pid(vec![1])) else {
             panic!("the counters are the machine's");
         };
         assert!(error.contains("--system"), "{error}");

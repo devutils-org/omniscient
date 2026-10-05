@@ -358,7 +358,12 @@ mod tests {
         let events = collector.sample(1).unwrap();
         assert_eq!(events.len(), 1, "{events:?}");
         for direction in ["rx", "tx"] {
-            let moved: u64 = events[0].attr(direction).unwrap().to_string().parse().unwrap();
+            let moved: u64 = events[0]
+                .attr(direction)
+                .unwrap()
+                .to_string()
+                .parse()
+                .unwrap();
             assert!(
                 moved >= VOLUME as u64,
                 "{direction}: {moved} bytes, {VOLUME} pushed before the first tick"

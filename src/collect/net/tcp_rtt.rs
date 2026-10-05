@@ -117,7 +117,12 @@ impl TcpRttCollector {
             ]
             .into_iter()
             .chain(extra_attrs(&info.extra))
-            .chain(socket.congestion.clone().map(|name| Attr::text("congestion", name)))
+            .chain(
+                socket
+                    .congestion
+                    .clone()
+                    .map(|name| Attr::text("congestion", name)),
+            )
             .collect(),
             collector_id: self.id.clone(),
             seq,
@@ -137,8 +142,14 @@ fn extra_attrs(extra: &TcpInfoExtra) -> Vec<Attr> {
         ("min_rtt_ns", us(extra.min_rtt_us)),
         ("rcv_rtt_ns", us(extra.rcv_rtt_us)),
         ("busy_ns", extra.busy_time_us.map(|us| us * 1_000)),
-        ("rwnd_limited_ns", extra.rwnd_limited_us.map(|us| us * 1_000)),
-        ("sndbuf_limited_ns", extra.sndbuf_limited_us.map(|us| us * 1_000)),
+        (
+            "rwnd_limited_ns",
+            extra.rwnd_limited_us.map(|us| us * 1_000),
+        ),
+        (
+            "sndbuf_limited_ns",
+            extra.sndbuf_limited_us.map(|us| us * 1_000),
+        ),
         ("pacing_rate_bytes_per_s", extra.pacing_rate),
         ("delivery_rate_bytes_per_s", extra.delivery_rate),
         ("bytes_acked", extra.bytes_acked),
@@ -325,12 +336,17 @@ mod tests {
         // RFC 4898's octets acked counts the SYN's sequence number too.
         assert_eq!(number(client_side, "bytes_acked"), VOLUME as f64 + 1.0);
         assert_eq!(number(server_side, "bytes_received"), VOLUME as f64);
-        assert!(number(client_side, "rto_ns") >= 200_000_000.0, "the kernel's floor");
+        assert!(
+            number(client_side, "rto_ns") >= 200_000_000.0,
+            "the kernel's floor"
+        );
         assert!(number(client_side, "min_rtt_ns") > 0.0);
         let algorithm = std::fs::read_to_string("/proc/sys/net/ipv4/tcp_congestion_control")
             .expect("the default algorithm");
         assert_eq!(
-            client_side.attr("congestion").map(|value| value.to_string()),
+            client_side
+                .attr("congestion")
+                .map(|value| value.to_string()),
             Some(algorithm.trim().to_owned())
         );
     }
