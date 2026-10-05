@@ -196,7 +196,7 @@ impl IrqCollector {
                 seq + index as u64,
             );
             if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &event) {
+                if !matches_half(predicate, &event, row.kind) {
                     self.filtered_out += row.count;
                     continue;
                 }
@@ -274,6 +274,30 @@ impl IrqCollector {
     }
 }
 
+/// Whether a row passes the filter, with `kind` naming the row's half.
+///
+/// The filter layer reads a field named `kind` as the event's own kind --
+/// `sched.irq` on every row -- before it looks at the attributes, so
+/// `kind == "hard"` selected nothing while the rows carried `kind` = `hard`
+/// (`docs/fixes/w22-bpftrace.md`, gap 2): an empty series where the machine
+/// had taken a hundred interrupts. The predicate is asked of the row with its
+/// kind set to the half for the length of the question, which is what this
+/// source's declared filter field `kind` means.
+fn matches_half(predicate: &FilterExpr, event: &Event, kind: u32) -> bool {
+    let mut asked = event.clone();
+    half(kind).clone_into(&mut asked.kind);
+    crate::filter::matches(predicate, &asked)
+}
+
+/// The half a row's `kind` names.
+fn half(kind: u32) -> &'static str {
+    if kind == KIND_SOFT {
+        "soft"
+    } else {
+        "hard"
+    }
+}
+
 /// What an event carries beside its value.
 ///
 /// `irq`, `cpu` and `name` are here because the catalog entry declares them as
@@ -297,14 +321,7 @@ fn attributes(row: &IrqRun, window_ns: u64) -> Vec<Attr> {
         Attr::uint("irq", u64::from(row.irq)),
         // Which half: a hard handler's `irq` is its line, a softirq's is its
         // vector, and the numbers overlap.
-        Attr::text(
-            "kind",
-            if row.kind == KIND_SOFT {
-                "soft"
-            } else {
-                "hard"
-            },
-        ),
+        Attr::text("kind", half(row.kind)),
         // The handler's name as `/proc/interrupts` shows it -- an interrupt line
         // number is a machine's private business; `nvme0q3` is a device -- and
         // a softirq's as `/proc/softirqs` does.
@@ -435,6 +452,27 @@ mod tests {
             first_ns: 0,
             name: "nvme0q3".to_owned(),
         }
+    }
+
+    /// `kind` in a filter names the row's half, as the catalog declares it:
+    /// the filter layer reads `kind` as the event's own kind, and
+    /// `kind == "hard"` used to select nothing (`docs/fixes/w22-bpftrace.md`,
+    /// gap 2).
+    #[test]
+    fn a_filter_on_kind_selects_the_half() {
+        let collector = IrqCollector::new(None, Mode::Trace, None);
+        let hard = collector.event(&row(), 1, 1, 0);
+        let mut soft_row = row();
+        soft_row.kind = KIND_SOFT;
+        let soft = collector.event(&soft_row, 1, 1, 1);
+        let hard_only: FilterExpr = r#"kind == "hard""#.parse().expect("a filter");
+        let soft_only: FilterExpr = r#"kind == "soft""#.parse().expect("a filter");
+        assert!(matches_half(&hard_only, &hard, crate::bpf::KIND_HARD));
+        assert!(!matches_half(&hard_only, &soft, KIND_SOFT));
+        assert!(matches_half(&soft_only, &soft, KIND_SOFT));
+        assert!(!matches_half(&soft_only, &hard, crate::bpf::KIND_HARD));
+        // What is reported keeps the source's own kind.
+        assert_eq!(hard.kind, "sched.irq");
     }
 
     /// A softirq row is named by its vector the way `/proc/softirqs` names
