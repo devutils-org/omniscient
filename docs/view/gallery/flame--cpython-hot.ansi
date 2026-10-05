@@ -1,7 +1,7 @@
 [0m[1momn top[0m │ fixture cpython-hot │ 3.99s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥9.54%[0m[35m │ target 93.1% cpu[0m [0m
  1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 [0m[1;2m flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference [0m[2m────────────────────────────[0m
-[0m[1mon cpu: [0m[2m3.96k · [0mhottest own [0m[1m__tls_get_addr[0m[2m 9.08%[0m │ [0m[1moff cpu: [0mnothing recorded                                            [0m
+[0m[1mon cpu: [0m[2m3.96k · [0mhottest own [0m[1mpy::score:/omniscient/cases/cpython-interpreter/hot.py[0m[2m 99.1%[0m │ [0m[1moff cpu: [0mnothing recorded    [0m
 [0m[32m┌[0m[1;32m on cpu [0m[2;32mcpu.profile 3.96k [0m[33m47 late[0m[32m [0m[36m~low det[0m[32m [0m[33mdegraded x4[0m[32m ───────────────────────────────────────────────────────────────┐[0m
 [0m[32m│width ∝ samples · heaviest left                                                                       [0m[2m 24 frames deep [0m[32m│[0m
 [0m[32m│[0m[1;2;97;42m▏all › ⋯20⋯ › py::score:/omniscient/cases/cpython-interpreter/hot.py 3.93k                                            [0m[32m│[0m
@@ -9,13 +9,13 @@
 [0m[32m│[0m[2;30;103m▏li[0m[2;30;101m▏l[0m[2;30;43m▏_[0m[2;30;101m▏l[0m[2;30;43m [0m[2;30;103m [0m[2;30;43m [0m[2;30;103m [0m[2;30;43m [0m[2;30;103m [0m[2;30;101m [0m[2;30;43m [0m[2;30;103m▏_Py_Dealloc[0m[2;30;43m▏__[0m[2;30;103m [0m[2;30;101m [0m[2;30;43m [0m[2;30;103m [0m[2;30;43m [0m[2;30;101m [0m[2;30;103m [0m[2;30;101m [0m    [0m[2;30;43m▏_Py_Deal…[0m[2;30;103m [0m[2;30;101m▏l[0m[2;30;43m [0m[2;30;103m [0m[2;30;101m [0m[2;30;43m [0m[2;30;103m [0m[2;30;101m [0m[2;30;103m [0m                                                      [0m[32m│[0m
 [0m[32m│[0m                 [0m[2;30;103m▏l[0m[2;30;43m▏l[0m[2;30;103m [0m[2;30;101m▏l[0m[2;30;43m [0m                   [0m[2;30;103m▏l[0m[2;30;43m [0m[2;30;103m [0m[2;30;101m [0m[2;30;103m [0m                                                                    [0m[32m│[0m
 [0m[32m│[0m                                                                                                                      [0m[32m│[0m
-[0m[32m│[0m[1mheaviest on their own[0m[2m (where it ends, every path summed)[0m                                                              [0m[32m│[0m
-[0m[32m│[0m[2m 9.08% [0m[33m███████████████████████[0m[2m __tls_get_addr[0m                                                                         [0m[32m│[0m
-[0m[32m│[0m[2m 6.84% [0m[33m█████████████████      [0m[2m _Py_Dealloc[0m                                                                            [0m[32m│[0m
-[0m[32m│[0m[2m 4.29% [0m[33m███████████            [0m[2m PyNumber_Remainder[0m                                                                     [0m[32m│[0m
-[0m[32m│[0m[2m 4.26% [0m[33m███████████            [0m[2m PyLong_FromLong[0m                                                                        [0m[32m│[0m
-[0m[32m│[0m[2m 3.08% [0m[33m████████               [0m[2m libpython3.14+0x19cf1e[0m                                                                 [0m[32m│[0m
-[0m[32m│[0m[2m 3.03% [0m[33m████████               [0m[2m libpython3.14+0x19cf26[0m                                                                 [0m[32m│[0m
+[0m[32m│[0m[1mheaviest on their own[0m[2m (the innermost frame a perf map named, else where it ends; every path summed)[0m                   [0m[32m│[0m
+[0m[32m│[0m[2m 99.1% [0m[33m███████████████████████[0m[2m py::score:/omniscient/cases/cpython-interpreter/hot.py[0m                                 [0m[32m│[0m
+[0m[32m│[0m[2m 0.33% [0m[33m▏                      [0m[2m py::load:/omniscient/cases/cpython-interpreter/hot.py[0m                                  [0m[32m│[0m
+[0m[32m│[0m[2m 0.18% [0m[33m▏                      [0m[2m py::rank:/omniscient/cases/cpython-interpreter/hot.py[0m                                  [0m[32m│[0m
+[0m[32m│[0m[2m 0.05% [0m[33m▏                      [0m[2m perf_swevent_event[0m                                                                     [0m[32m│[0m
+[0m[32m│[0m[2m 0.05% [0m[33m▏                      [0m[2m py::main:/omniscient/cases/cpython-interpreter/hot.py[0m                                  [0m[32m│[0m
+[0m[32m│[0m[2m 0.03% [0m[33m▏                      [0m[2m PyObject_GC_Del[0m                                                                        [0m[32m│[0m
 [0m[32m│[0m                                                                                                                      [0m[32m│[0m
 [0m[32m│[0m[33m‼ [0m[2mpmu:sw: time-based sampling: blind to phases running at reduced frequency[0m                                           [0m[32m│[0m
 [0m[32m│[0m[33m‼ [0m[2m534 of 1046 samples landed in a function that sets up no frame pointer (360 in ld-linux-x86-64.so.2, 170 in[0m         [0m[32m│[0m
@@ -35,6 +35,6 @@
 [0m[2m│[0m[33mdegraded[0m                                                                                                              [0m[2m│[0m
 [0m[2m└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1;32mon cpu ▸ [0m[1mpy::score:/omniscient/cases/cpython-interpreter/hot.py[0m[2m  the last of 22 frames called in one chain from all[0m     [0m
-[0m[2m3.93k samples ≈ 3.94s · 99.1% of all · own 0 · 3.93k events[0m                                                             [0m
+[0m[2m3.93k samples ≈ 3.94s · 99.1% of all · own 3.93k · 3.93k events[0m                                                         [0m
 [0m[2m⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓hl[0m move  [0m[1m⏎⌫[0m zoom  [0m[1m/*[0m find  [0m[1mom[0m pane  [0m[1mt[0m split  [0m[1md[0m shape  [0m[1m![0m caveats[0m

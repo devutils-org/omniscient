@@ -1,7 +1,7 @@
 [0m[1momn top[0m │ fixture cpython-hot │ 3.99s                             [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥9.54%[0m[35m │ target 93.1% cpu[0m [0m
  1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 [0m[1;2m flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference [0m[2m────────────────────────────[0m
-[0m[1mon cpu: [0m3.96k → 7.89k (x1.99, scaled to one) · shapes: the difference is `libpython3.14+0x1f9993` -22 own (x0.42, 3.2σ);[0m
+[0m[1mon cpu: [0m3.96k → 7.89k (x1.99, scaled to one) · shapes: no function's own cost moved beyond 3σ of a sample count's noise [0m
 [0m[32m┌[0m[1;32m on cpu [0m[2;32mcpu.profile 3.96k vs 7.89k [0m[33m136 late[0m[32m [0m[36m~low det[0m[32m [0m[33mdegraded x8[0m[32m ─────────────────────────────────────────────────────┐[0m
 [0m[32m│width ∝ the mean of the two runs · heaviest left                                                      [0m[2m 24 frames deep [0m[32m│[0m
 [0m[32m│[0m[1;2;97;42m▏all › ⋯20⋯ › py::score:/omniscient/cases/cpython-interpreter/hot.py 3.94k                                            [0m[32m│[0m
@@ -10,11 +10,11 @@
 [0m[32m│[0m                  [0m[2;97;100m▏l  ▏l [0m                    [0m[2;97;100m▏l    [0m                                                                   [0m[32m│[0m
 [0m[32m│[0m                                                                                                                      [0m[32m│[0m
 [0m[32m│[0m[1mmoved on their own[0m[2m -- this run → the other[0m                                                                            [0m[32m│[0m
-[0m[32m│[0m[2m      +48  x1.18   2.3σ _Py_Dealloc[0m                                                                                   [0m[32m│[0m
-[0m[32m│[0m[2m      -23  x0.76   2.0σ libpython3.14+0x1f9997[0m                                                                        [0m[32m│[0m
-[0m[32m│[0m[2;34m      -22  x0.42[0m[2m   3.2σ [0m[2;4mlibpython3.14+0x1f9993[0m                                                                        [0m[32m│[0m
-[0m[32m│[0m[2m      -16  x0.91   1.0σ PyNumber_Remainder[0m                                                                            [0m[32m│[0m
-[0m[32m│[0m[2;34m      -14  x0.18[0m[2m   3.3σ [0m[2;4mlibpython3.14+0x1f998c[0m                                                                        [0m[32m│[0m
+[0m[32m│[0m[2m      +19  x1.00   0.2σ py::score:/omniscient/cases/cpython-interpreter/hot.py[0m                                        [0m[32m│[0m
+[0m[32m│[0m[2m       -8  x0.39   2.0σ py::load:/omniscient/cases/cpython-interpreter/hot.py[0m                                         [0m[32m│[0m
+[0m[32m│[0m[2m       -3  x0.50   1.2σ py::rank:/omniscient/cases/cpython-interpreter/hot.py[0m                                         [0m[32m│[0m
+[0m[32m│[0m[2m       -1  x0.25   1.0σ perf_swevent_event[0m                                                                            [0m[32m│[0m
+[0m[32m│[0m[2m       -1  x0.00   1.0σ PyObject_GC_Del[0m                                                                               [0m[32m│[0m
 [0m[32m│[0m                                                                                                                      [0m[32m│[0m
 [0m[32m│[0m[33m‼ [0m[2mpmu:sw: time-based sampling: blind to phases running at reduced frequency[0m                                           [0m[32m│[0m
 [0m[32m│[0m[33m‼ [0m[2m534 of 1046 samples landed in a function that sets up no frame pointer (360 in ld-linux-x86-64.so.2, 170 in[0m         [0m[32m│[0m
@@ -35,6 +35,6 @@
 [0m[2m│[0m[33mdegraded x2[0m                                                                                                           [0m[2m│[0m
 [0m[2m└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1;32mon cpu ▸ [0m[1mpy::score:/omniscient/cases/cpython-interpreter/hot.py[0m[2m  the last of 22 frames called in one chain from all[0m     [0m
-[0m[2mthis run 3.93k → the other 3.95k samples[0m ([0m[2m+19, x1.00, 0.2σ: within the noise[0m)                                           [0m
+[0m[2mthis run 3.93k → the other 3.95k samples[0m ([0m[2m+19, x1.00, 0.2σ: within the noise[0m)[0m[2m · own 3.93k → 3.95k[0m                       [0m
 [0m[33mcpu.profile (+1 more, ! lists them): [0m[2mthe other run: 1102 of 2193 samples landed in a function that sets up no frame poi…[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓hl[0m move  [0m[1m⏎⌫[0m zoom  [0m[1m/*[0m find  [0m[1mom[0m pane  [0m[1mt[0m split  [0m[1md[0m shape  [0m[1m![0m caveats[0m

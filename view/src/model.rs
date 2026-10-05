@@ -12,7 +12,7 @@
 //! so a view never has two code paths: what it draws from a recording is what
 //! it would have drawn live.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -201,7 +201,32 @@ impl Results {
     pub fn frames(&self, stack: u64) -> &[String] {
         self.stacks.get(&stack).map(Vec::as_slice).unwrap_or(&[])
     }
+
+    /// The frames a perf map named, by label, in any of this result's
+    /// stacks, from its provenance (`named_by`): the code a JIT or an
+    /// interpreter's trampoline wrote a name for, which no file holds. A
+    /// frame `omn` recovered is the same function, its mark left off.
+    pub fn perf_map_named(&self) -> BTreeSet<String> {
+        let mut named = BTreeSet::new();
+        for (id, by) in &self.named_by {
+            let (Ok(id), Some(by)) = (id.parse::<u64>(), by.as_array()) else {
+                continue;
+            };
+            let Some(labels) = self.stacks.get(&id) else {
+                continue;
+            };
+            for (label, by) in labels.iter().zip(by) {
+                if by.as_str() == Some("perf-map") {
+                    named.insert(label.trim_end_matches(RECOVERED).to_owned());
+                }
+            }
+        }
+        named
+    }
 }
+
+/// What `omn` appends to a frame it recovered rather than unwound.
+pub const RECOVERED: &str = " [recovered]";
 
 /// One emit's worth of results, tagged by `emit` as `omn` writes it.
 ///

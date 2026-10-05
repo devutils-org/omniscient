@@ -1,7 +1,7 @@
 omn top │ fixture workload-flame │ 2.05s                                                                  view: snapshot │ collectors ≥13.2% │ target 61.6% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────────────────────────────────────────────
-on cpu: 1.40k · hottest own __tls_get_addr 8.65% │ off cpu: 2.61s · hottest own libc+0xa08f2 100%
+on cpu: 1.40k · hottest own py::burn:/omniscient/view/workloads/flame/../common.py 98.0% │ off cpu: 2.61s · hottest own libc+0xa08f2 100%
 ┌ on cpu cpu.profile 1.40k 23 late ~low det degraded x4 ───────────────────────┐┌ off cpu sched.offcpu 2.61s ~low det degraded ────────────────────────────────┐
 │width ∝ samples · heaviest left                               100 frames deep ││width ∝ time off cpu · heaviest left                           30 frames deep │
 │▏all 1.40k                                                                    ││▏all 2.61s                                                                    │
@@ -12,17 +12,17 @@ on cpu: 1.40k · hottest own __tls_get_addr 8.65% │ off cpu: 2.61s · hottest 
 │                      ▏_                                                      ││  100% ███████████████ libc+0xa08f2                                           │
 │                                                                              ││                                                                              │
 │                                                                              ││‼ bpf:raw_tp: user stacks only: the kernel side of a block is always the      │
-│heaviest on their own (where it ends, every path summed)                      ││  scheduler, and what it was waiting for is the task state                    │
-│ 8.65% ███████████████ __tls_get_addr                                         ││‼ names came from -- perf-2620696.map: perf-map, the 481 lines the program    │
-│ 7.51% █████████████   PyNumber_Remainder                                     ││  wrote for code no file holds; python3.14: its dynamic symbols only: its     │
-│ 5.58% ██████████      _Py_Dealloc                                            ││  internal functions are unnamed; libc.so.6: its dynamic symbols only: its    │
-│ 4.22% ███████         _raw_spin_unlock_irqrestore                            ││  internal functions are unnamed; libpython3.14.so.1.0: its dynamic symbols   │
-│ 3.00% █████           libpython3.14+0x5bd00                                  ││  only: its internal functions are unnamed                                    │
-│ 2.57% ████            libpython3.14+0x5ef6d                                  ││                                                                              │
-│ 2.43% ████            libpython3.14+0x19cf26                                 ││                                                                              │
-│ 2.43% ████            libpython3.14+0x59653                                  ││                                                                              │
-│ 2.14% ████            libpython3.14+0x1f999e                                 ││                                                                              │
-│ 2.07% ████            libpython3.14+0x5e870                                  ││                                                                              │
+│heaviest on their own (the innermost frame a perf map named, else where it en…││  scheduler, and what it was waiting for is the task state                    │
+│ 98.0% ███████████████ py::burn:/omniscient/view/workloads/flame/../common.py ││‼ names came from -- perf-2620696.map: perf-map, the 481 lines the program    │
+│ 0.21% ▏               py::_compile_bytecode:<frozen importlib._bootstrap_ext…││  wrote for code no file holds; python3.14: its dynamic symbols only: its     │
+│ 0.14% ▏               py::FileLoader.get_data:<frozen importlib._bootstrap_e…││  internal functions are unnamed; libc.so.6: its dynamic symbols only: its    │
+│ 0.14% ▏               py::SourceLoader.get_code:<frozen importlib._bootstrap…││  internal functions are unnamed; libpython3.14.so.1.0: its dynamic symbols   │
+│ 0.14% ▏               py::_call_with_frames_removed:<frozen importlib._boots…││  only: its internal functions are unnamed                                    │
+│ 0.07% ▏               _PyUnicode_InternImmortal                              ││                                                                              │
+│ 0.07% ▏               _Py_hashtable_get                                      ││                                                                              │
+│ 0.07% ▏               __zap_vma_range                                        ││                                                                              │
+│ 0.07% ▏               clear_highpages_kasan_tagged                           ││                                                                              │
+│ 0.07% ▏               ld-linux-x86-64+0x17bf1                                ││                                                                              │
 │                                                                              ││                                                                              │
 │‼ pmu:sw: time-based sampling: blind to phases running at reduced frequency   ││                                                                              │
 │‼ 1 frames fell in no mapping of the target and are reported by address       ││                                                                              │
