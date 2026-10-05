@@ -84,6 +84,15 @@ pub struct Lifetime {
     /// stopped. One that had already exited is reaped and not counted.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub adopted_ended: u32,
+    /// The program's exit code, when it exited rather than being killed by a
+    /// signal: what a shell's `$?` would say, so a caller reading the results
+    /// need not wait on the program itself to know whether it succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// The signal that ended the program, when one did -- `9` for a program
+    /// the run stopped (`terminated`), or whatever the program died of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
 }
 
 /// Whether this process adopts the orphans of the programs it launches
@@ -308,6 +317,11 @@ pub struct Gated {
     adopted_ended: u32,
     /// Whether [`Gated::end_orphans`] has run: once per program.
     orphans_ended: bool,
+    /// Whether the exited program has been reaped. [`Gated::finished`] sees
+    /// the exit without reaping it, so the zombie's `/proc/<pid>` -- its
+    /// `stat`, its cpu times -- is still there for the run's closing round;
+    /// the reap is [`Gated::end_orphans`]'s, after the collectors stopped.
+    reaped: bool,
 }
 
 impl Gated {
@@ -337,33 +351,66 @@ impl Gated {
         }
     }
 
-    /// Whether the child has exited, without blocking.
+    /// Whether the child has exited, without blocking, and without reaping
+    /// it.
+    ///
+    /// The exit is seen with `WNOWAIT`, which leaves the program a zombie:
+    /// its `/proc/<pid>/stat` stays readable, with the cpu it spent to the
+    /// end, until [`Gated::end_orphans`] reaps it once the run's collectors
+    /// have taken their closing reads. A reap here made the closing round of
+    /// a procfs collector find the program gone, and `cpu.oncpu_time` on
+    /// `fs:proc` lost its last interval (sysstat 9).
     pub fn finished(&mut self) -> Option<String> {
         if let Some(status) = self.status {
             return Some(describe(status));
         }
         let asked_ns = monotonic_ns();
-        let mut status = 0;
-        // `wait4` rather than `waitpid` for one field: the kernel hands over
-        // the child's own cpu accounting at the reap, exact to the microsecond,
-        // where `/proc/<pid>/stat` is in ticks of a hundredth of a second and
-        // stops being readable the moment the process is gone. That is the
-        // difference `cpu.oncpu_time` on a launched program was short by --
-        // always a multiple of the tick, because the cpu spent after the last
-        // poll is in no reading.
-        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-        // SAFETY: waiting on a child of this process, without blocking, into
-        // two locals this function owns.
-        let result = unsafe { libc::wait4(self.pid, &mut status, libc::WNOHANG, &mut usage) };
-        if result == self.pid {
+        // SAFETY: waiting on a child of this process, without blocking and
+        // without reaping it, into a siginfo this function owns.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                self.pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        // SAFETY: `si_pid` and `si_status` are the fields `waitid` fills
+        // for a child that changed state; zero when none did.
+        let (pid, code, value) = unsafe { (info.si_pid(), info.si_code, info.si_status()) };
+        if result == 0 && pid == self.pid {
             let seen_ns = monotonic_ns();
+            let status = wait_status(code, value);
             self.status = Some(status);
-            self.cpu_ns = Some(cpu_ns(&usage));
             self.exited = Some((seen_ns, seen_ns.saturating_sub(self.alive_ns)));
             Some(describe(status))
         } else {
             self.alive_ns = asked_ns;
             None
+        }
+    }
+
+    /// Reaps a program [`Gated::finished`] saw exit, once, taking the cpu
+    /// accounting the kernel hands over at the reap.
+    ///
+    /// `wait4` rather than `waitpid` for that one field: exact to the
+    /// microsecond, where `/proc/<pid>/stat` is in ticks of a hundredth of a
+    /// second -- the difference `cpu.oncpu_time` on a launched program was
+    /// short by, always a multiple of the tick.
+    fn reap(&mut self) {
+        if self.reaped || self.status.is_none() {
+            return;
+        }
+        let mut status = 0;
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        // SAFETY: reaping a child of this process that has exited, into two
+        // locals this function owns; it is a zombie, so this does not block.
+        let result = unsafe { libc::wait4(self.pid, &mut status, 0, &mut usage) };
+        self.reaped = true;
+        if result == self.pid {
+            self.status = Some(status);
+            self.cpu_ns = Some(cpu_ns(&usage));
         }
     }
 
@@ -412,6 +459,7 @@ impl Gated {
             self.status = Some(status);
             self.cpu_ns = Some(cpu_ns(&usage));
         }
+        self.reaped = true;
         self.end_orphans();
         let reaped_ns = monotonic_ns();
         // Its end is somewhere after it was last seen running, which may be
@@ -435,6 +483,9 @@ impl Gated {
         if self.status.is_none() || self.orphans_ended {
             return;
         }
+        // The program first: what follows reaps any child of this process,
+        // and the program's own reap is the one that hands over its cpu.
+        self.reap();
         self.orphans_ended = true;
         let (ended, refused) = end_adopted();
         self.adopted_ended += ended;
@@ -455,6 +506,14 @@ impl Gated {
             cpu_ns: self.cpu_ns,
             left_running: self.left_running,
             adopted_ended: self.adopted_ended,
+            exit_code: self
+                .status
+                .filter(|status| libc::WIFEXITED(*status))
+                .map(|status| libc::WEXITSTATUS(status)),
+            signal: self
+                .status
+                .filter(|status| libc::WIFSIGNALED(*status))
+                .map(|status| libc::WTERMSIG(status)),
         })
     }
 }
@@ -477,6 +536,7 @@ impl Drop for Gated {
             }
             self.gate = -1;
             self.status = Some(status);
+            self.reaped = true;
         }
         self.terminate();
         if self.pidfd >= 0 {
@@ -514,6 +574,16 @@ fn freeze(pid: i32) -> Vec<i32> {
         }
     }
     stopped
+}
+
+/// The wait status `waitpid` would have handed over, from what `waitid`
+/// says of a child: an exit code or the signal that ended it.
+fn wait_status(code: i32, value: i32) -> i32 {
+    match code {
+        libc::CLD_EXITED => (value & 0xff) << 8,
+        libc::CLD_DUMPED => (value & 0x7f) | 0x80,
+        _ => value & 0x7f,
+    }
 }
 
 fn describe(status: i32) -> String {
@@ -564,6 +634,37 @@ fn program_stderr(path: Option<&std::ffi::OsStr>) -> io::Result<Option<RawFd>> {
     Ok(Some(fd))
 }
 
+/// Where `execvp` would find `program`: itself when it names a path, the
+/// first entry of `path` holding an executable file of that name otherwise,
+/// and the name unchanged when none does -- so the one `execve` fails as
+/// `execvp`'s last one would, and the child exits 127.
+fn find_program(program: &str, path: Option<&std::ffi::OsStr>) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    if program.contains('/') || program.is_empty() {
+        return program.into();
+    }
+    // The default glibc searches when `PATH` is unset.
+    let path = path.map_or(&b"/bin:/usr/bin"[..], OsStrExt::as_bytes);
+    for directory in path.split(|byte| *byte == b':') {
+        // An empty entry is the current directory, as the shell reads it.
+        let directory = if directory.is_empty() {
+            b"."
+        } else {
+            directory
+        };
+        let candidate = std::path::Path::new(std::ffi::OsStr::from_bytes(directory)).join(program);
+        let Ok(c_candidate) = CString::new(candidate.as_os_str().as_bytes()) else {
+            continue;
+        };
+        // SAFETY: a NUL-terminated path this frame owns.
+        let executable = unsafe { libc::access(c_candidate.as_ptr(), libc::X_OK) } == 0;
+        if executable && candidate.metadata().is_ok_and(|meta| meta.is_file()) {
+            return candidate;
+        }
+    }
+    program.into()
+}
+
 /// Forks a child that waits at a gate, then execs `argv` when released.
 ///
 /// `environment` is added to the child's environment, which is how a preloaded
@@ -588,8 +689,21 @@ fn gated_with(
 
     // Everything the child needs is built before the fork: between fork and
     // exec only async-signal-safe calls are allowed, and allocating is not one.
-    let c_program = CString::new(program.as_str())
+    //
+    // The program is found on `PATH` here, in the parent, and the child makes
+    // one `execve`. `execvpe` searched in the child, after the gate, so each
+    // directory it tried before the one holding the program was an `execve`
+    // of the measured program's own -- three failed ones on this machine's
+    // `PATH` for `ls`, which `proc.exec` and a `perf trace` beside it counted
+    // as the program's (perfsched 2).
+    let found = find_program(program, std::env::var_os("PATH").as_deref());
+    let c_program = CString::new(found.as_os_str().as_encoded_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "program name contains a NUL"))?;
+    // What `execvp` does with a file the kernel does not know how to run --
+    // a script with no `#!` line -- is hand it to the shell; built here, as
+    // everything the child needs is.
+    let c_shell = CString::new("/bin/sh").expect("no NUL");
+    let mut shell_pointers: Vec<*const libc::c_char> = vec![c_shell.as_ptr(), c_program.as_ptr()];
     let c_argv: Vec<CString> = argv
         .iter()
         .map(|argument| {
@@ -600,6 +714,7 @@ fn gated_with(
     let mut argv_pointers: Vec<*const libc::c_char> =
         c_argv.iter().map(|argument| argument.as_ptr()).collect();
     argv_pointers.push(std::ptr::null());
+    shell_pointers.extend(argv_pointers.iter().skip(1));
 
     let mut variables: Vec<CString> = std::env::vars()
         .filter(|(name, _)| !environment.iter().any(|(added, _)| added == name))
@@ -667,11 +782,18 @@ fn gated_with(
             if let Some(fd) = stderr_fd {
                 libc::dup2(fd, 2);
             }
-            libc::execvpe(
+            libc::execve(
                 c_program.as_ptr(),
                 argv_pointers.as_ptr(),
                 environment_pointers.as_ptr(),
             );
+            if *libc::__errno_location() == libc::ENOEXEC {
+                libc::execve(
+                    c_shell.as_ptr(),
+                    shell_pointers.as_ptr(),
+                    environment_pointers.as_ptr(),
+                );
+            }
             // Only reached when exec failed; 127 is what a shell reports for
             // "command not found", and the parent surfaces it as the exit.
             libc::_exit(127);
@@ -703,7 +825,86 @@ fn gated_with(
         left_running: 0,
         adopted_ended: 0,
         orphans_ended: false,
+        reaped: false,
     })
+}
+
+/// Processes a run watches and did not start: a `--pid` target, whose exit
+/// ends the run the way a launched program's does, and the way `perf stat -p`
+/// ends when its process does.
+///
+/// Watched through a pidfd each, which becomes readable when its process
+/// exits and does not need the process to be this one's child. A pid the
+/// kernel will not give a pidfd for -- gone already, or a kernel below 5.3 --
+/// is not watched, and the run then ends at its duration as it did.
+pub struct Exits {
+    watched: Vec<(i32, RawFd)>,
+}
+
+impl Exits {
+    /// Watches each of `pids` that is running now.
+    pub fn of(pids: &[i32]) -> Exits {
+        let watched = pids
+            .iter()
+            .filter_map(|pid| {
+                // SAFETY: `pidfd_open` on a pid, which takes no pointer.
+                let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, *pid, 0) } as RawFd;
+                (fd >= 0).then(|| {
+                    // SAFETY: marking a descriptor this process just opened.
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+                    (*pid, fd)
+                })
+            })
+            .collect();
+        Exits { watched }
+    }
+
+    /// Whether every pid asked for is watched: a run whose end is these
+    /// exits needs all of them, or one it cannot see would never end it.
+    pub fn watches_all(&self, pids: &[i32]) -> bool {
+        !self.watched.is_empty() && self.watched.len() == pids.len()
+    }
+
+    /// The pids watched that have exited, and the one descriptor a run can
+    /// sleep on when it watches one process alone. With several, the first
+    /// to exit would stay readable and wake the run on every round, so the
+    /// run's own cadence is what notices.
+    pub fn wake_fd(&self) -> Option<RawFd> {
+        match self.watched.as_slice() {
+            [(_, fd)] => Some(*fd),
+            _ => None,
+        }
+    }
+
+    /// Why the run ends, once every watched process has exited.
+    pub fn all_exited(&self) -> Option<String> {
+        if self.watched.is_empty() {
+            return None;
+        }
+        let gone = self.watched.iter().all(|(_, fd)| {
+            let mut watched = libc::pollfd {
+                fd: *fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one pollfd this frame owns, without waiting.
+            let ready = unsafe { libc::poll(&mut watched, 1, 0) };
+            ready > 0 && watched.revents & libc::POLLIN != 0
+        });
+        gone.then(|| match self.watched.as_slice() {
+            [(pid, _)] => format!("pid {pid} exited"),
+            several => format!("the {} pids watched exited", several.len()),
+        })
+    }
+}
+
+impl Drop for Exits {
+    fn drop(&mut self) {
+        for (_, fd) in &self.watched {
+            // SAFETY: closing a descriptor this value owns, once.
+            unsafe { libc::close(*fd) };
+        }
+    }
 }
 
 #[cfg(test)]
@@ -778,6 +979,94 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("the child never finished");
+    }
+
+    fn ended_by_itself(child: &mut Gated) {
+        child.release();
+        for _ in 0..500 {
+            if child.finished().is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the child never finished");
+    }
+
+    /// The exit code is in the lifetime, so a reader of the results knows
+    /// whether the program succeeded without waiting on it.
+    #[test]
+    fn the_lifetime_carries_the_exit_code_or_the_signal() {
+        let mut child = gated(
+            &["sh".to_owned(), "-c".to_owned(), "exit 3".to_owned()],
+            &[],
+        )
+        .expect("fork");
+        ended_by_itself(&mut child);
+        child.end_orphans();
+        let life = child.lifetime().expect("a lifetime");
+        assert_eq!((life.exit_code, life.signal), (Some(3), None));
+        assert!(life.cpu_ns.is_some(), "the reap hands over the cpu");
+
+        let mut child = gated(&["/bin/sleep".to_owned(), "30".to_owned()], &[]).expect("fork");
+        child.release();
+        child.terminate();
+        let life = child.lifetime().expect("a lifetime");
+        assert_eq!((life.exit_code, life.signal), (None, Some(9)));
+        assert!(life.terminated);
+    }
+
+    /// An exit seen is not an exit reaped: the zombie's `stat` is still
+    /// there for the closing round, and the reap comes with the end of the
+    /// run.
+    #[test]
+    fn a_program_seen_exiting_is_readable_until_the_run_reaps_it() {
+        let mut child = gated(&["/bin/true".to_owned()], &[]).expect("fork");
+        let pid = child.pid();
+        ended_by_itself(&mut child);
+        assert!(
+            is_zombie(pid),
+            "seen exiting and not reaped: /proc/{pid}/stat is still readable"
+        );
+        child.end_orphans();
+        assert!(!is_zombie(pid), "reaped at the end of the run");
+        assert_eq!(child.lifetime().and_then(|life| life.exit_code), Some(0));
+    }
+
+    /// The search is the parent's: the child makes one `execve`, of the
+    /// file the search found, and none the program could be charged with.
+    #[test]
+    fn the_program_is_found_on_path_before_the_fork() {
+        let dir = std::env::temp_dir().join(format!("omn-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("omn-found-here");
+        std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut permissions = std::fs::metadata(&tool).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&tool, permissions).unwrap();
+        let path = format!("/nonexistent-a:/nonexistent-b:{}", dir.display());
+        assert_eq!(
+            find_program("omn-found-here", Some(std::ffi::OsStr::new(&path))),
+            tool
+        );
+        assert_eq!(
+            find_program("omn-nowhere", Some(std::ffi::OsStr::new(&path))),
+            std::path::PathBuf::from("omn-nowhere"),
+            "not found is left to the exec, which fails as execvp's would"
+        );
+        assert_eq!(
+            find_program("./x", Some(std::ffi::OsStr::new(&path))),
+            std::path::PathBuf::from("./x")
+        );
+        // A script with no `#!` line runs through the shell, as under execvp.
+        let bare = dir.join("omn-no-shebang");
+        std::fs::write(&bare, "exit 4\n").unwrap();
+        let mut permissions = std::fs::metadata(&bare).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&bare, permissions).unwrap();
+        let mut child = gated(&[bare.display().to_string()], &[]).expect("fork");
+        ended_by_itself(&mut child);
+        assert_eq!(child.finished().as_deref(), Some("exit status 4"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A gated child is parked in a `read` that only the parent can end. If the
