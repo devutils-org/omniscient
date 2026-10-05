@@ -39,11 +39,25 @@ const CPU_CLOCK: u64 = sys::bindings::PERF_COUNT_SW_CPU_CLOCK as u64;
 /// The program. `spin` is the leaf every branch ends in, and the iteration
 /// counts are the shares. At exit it prints the cpu time its own thread used,
 /// from `CLOCK_THREAD_CPUTIME_ID`, which is what the cost is measured against.
+///
+/// Between two batches, `pad` -- outside `spin`, so in no branch -- runs a
+/// pseudo-random number of the same iterations, uniform below `PAD_MASK + 1`
+/// (2^19, about half a millisecond at `-O1`: the 500 us period the share
+/// tests sample at). A batch is a fixed million iterations, so without the
+/// pad a period near a multiple of the batch samples the same phase of every
+/// batch and puts the samples in one branch; with it the phase each sample
+/// lands at is spread over a whole period, whatever the period. About a
+/// quarter more work per batch, which the batch counts below take back.
+/// `-DPAD_MASK=0` builds the program without it.
 const CALLTREE: &str = r#"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+
+#ifndef PAD_MASK
+#define PAD_MASK 0x7ffffULL
+#endif
 
 static volatile uint64_t sink;
 
@@ -61,10 +75,20 @@ __attribute__((noinline)) static void sort(void) { for (int i = 0; i < 300; i++)
 __attribute__((noinline)) static void checksum(void) { spin(100000); }
 __attribute__((noinline)) static void compute(void) { hash(); sort(); }
 __attribute__((noinline)) static void run_batch(void) { parse(); compute(); checksum(); }
+__attribute__((noinline)) static void pad(uint64_t n) {
+    uint64_t x = 3;
+    for (uint64_t i = 0; i < n; i++) x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+    sink += x;
+}
 
 int main(int argc, char **argv) {
     int batches = argc > 1 ? atoi(argv[1]) : 2000;
-    for (int b = 0; b < batches; b++) run_batch();
+    uint64_t state = 0x9e3779b97f4a7c15ULL;
+    for (int b = 0; b < batches; b++) {
+        run_batch();
+        state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+        pad(state & PAD_MASK);
+    }
     struct timespec cpu;
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu);
     fprintf(stderr, "cpu_ns=%lld\n", (long long)cpu.tv_sec * 1000000000LL + cpu.tv_nsec);
@@ -111,11 +135,12 @@ impl Build {
         }
     }
 
-    /// Batches for about a second of work: `-O0` is about three times slower.
+    /// Batches for about a second of work: `-O0` is about three times slower,
+    /// and the pad between batches is about a quarter of one.
     fn batches(self) -> &'static str {
         match self {
-            Build::Fp => "400",
-            _ => "1000",
+            Build::Fp => "320",
+            _ => "800",
         }
     }
 }
@@ -2288,4 +2313,101 @@ fn the_resolved_file_says_how_the_stacks_will_be_unwound_before_the_run() {
         "the dump said `{mode}` and the run says {notes:?}"
     );
     assert_eq!(resolved["stack"]["mode"], mode, "{}", resolved["stack"]);
+}
+
+/// A copied stack sampled after its target's `execve` is unwound by the image
+/// the target now runs, though the unwinder read the one before it and no
+/// tick re-read the maps since.
+///
+/// The target is a shell waiting on its input, whose maps the unwinder reads
+/// first -- the state a launched program's unwinder is in when it is built at
+/// the gate and a tick reads the fork -- and which then `exec`s the call tree.
+/// No `refresh_symbols` is called after that: the walks must find the new
+/// modules themselves. Before they did, every sample until the collector's
+/// next tick stopped at `spin`, 5 % of a one-second profile on a loaded
+/// machine and all of them here.
+#[test]
+fn a_copied_stack_sampled_after_an_exec_is_unwound_by_the_image_the_target_runs_now() {
+    let Some(binary) = build(Build::NoFp) else {
+        return;
+    };
+    let callchain = Callchain::CopiedStack { kernel: false };
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("read go; exec \"$0\" 100")
+        .arg(binary)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("sh runs");
+    let pid = child.id() as i32;
+    let spec = omn::perf::SampleSpec::software(CPU_CLOCK, NAMED_PERIOD_NS, callchain);
+    let mut event = match SampledEvent::open(&spec, Scope::Process(pid), 512) {
+        Ok(event) => event,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            eprintln!(
+                "skipped: this machine will not sample this process ({}): {error}",
+                paranoid_said()
+            );
+            return;
+        }
+    };
+    let mut unwinder = Unwinder::new(pid, callchain, None);
+    assert!(
+        unwinder.refresh_symbols(),
+        "the shell's maps are readable while it waits"
+    );
+    event.enable().unwrap();
+    child
+        .stdin
+        .take()
+        .expect("piped")
+        .write_all(b"go\n")
+        .expect("the shell reads its input");
+    let mut ids = Vec::new();
+    loop {
+        event.drain(|record| {
+            if let Record::Sample(sample) = record {
+                ids.extend(unwinder.record(&sample));
+            }
+        });
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    event.drain(|record| {
+        if let Record::Sample(sample) = record {
+            ids.extend(unwinder.record(&sample));
+        }
+    });
+    let (mut in_spin, mut whole) = (0, 0);
+    for id in &ids {
+        let frames: Vec<String> = unwinder
+            .table()
+            .get(*id)
+            .expect("an id the unwinder gave")
+            .frames
+            .iter()
+            .rev()
+            .map(|frame| frame.label())
+            .collect();
+        if frames.last().map(|leaf| plain(leaf)) != Some("spin") {
+            continue;
+        }
+        in_spin += 1;
+        if contains_path(&frames, &["main", "run_batch"]) {
+            whole += 1;
+        }
+    }
+    assert!(in_spin >= 100, "only {in_spin} samples in spin");
+    assert!(
+        whole * 100 >= in_spin * 99,
+        "{whole} of {in_spin} samples in spin were unwound to main through the image the \
+         target ran after its exec: {:?}",
+        unwinder.notes()
+    );
 }

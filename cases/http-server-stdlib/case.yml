@@ -182,22 +182,3 @@ causes:
           with: client.handler_off_ns
           slack_ns: 50000000
           plus: client.poll_ns
-
-# Checks this case shows failing, each filed against the file that owns what
-# got it wrong. A listed check that fails is reported as the open finding it
-# is; one that passes fails the test, so the line is removed once it is fixed.
-open_findings:
-  - check: every-cited-number-agrees-with-the-reference
-    filed: >-
-      docs/fixes/w18-cases.md, "a thread that waits beside the main thread
-      is not followed": the slow client's `blocked` row is the main thread's
-      `select` (2.3 s), a second longer than the serving thread's send
-      (1.3 s), because the serving thread was blocked too, not busy, and the
-      triage follows only a task that was on a cpu or queued for a quarter
-      of the block. The listing, where the serving thread was busy, now
-      agrees both ways
-  - check: the-sentence-claims-nothing-false
-    filed: >-
-      docs/fixes/w18-cases.md, "a thread that waits beside the main thread
-      is not followed": for the slow client, the block the sentence names,
-      and the stack the agent reads, are the accept loop's `select`

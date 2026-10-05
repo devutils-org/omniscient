@@ -137,3 +137,11 @@
        shared ring (finding 47). USDT is how a
        program you did not launch is reached, not a cheap way to reach one you
        did."
+
+# The family's default: none. See docs/lazy.md.
+- default:
+    family: runtime
+    none: "each runtime source answers for one language runtime -- a garbage
+      collector, a JIT, an allocator, a probe the program itself declares --
+      and which one a program runs is not known before it runs: name the source
+      for that runtime"

@@ -646,6 +646,10 @@ pub enum WalkEnd {
     DepthLimit,
 }
 
+/// How many re-reads of the maps a [`Cfi`] makes on a miss that bring it
+/// nothing, before it leaves the rest to the collector's tick.
+const MAX_FRUITLESS_REREADS: u32 = 8;
+
 /// One unwind of a copied stack: the instruction pointer, then each return
 /// address, leaf first.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -668,8 +672,14 @@ pub struct Cfi {
     unwinder: Native,
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     cache: NativeCache,
-    /// The start address of every module added, by mapping.
-    loaded: BTreeSet<u64>,
+    /// Every module added, by the start of its mapping: where it ends and
+    /// the file it maps, so a mapping replaced at the same address -- an
+    /// `execve` of a non-PIE binary -- is told from the one it replaced.
+    loaded: BTreeMap<u64, (u64, PathBuf)>,
+    /// Re-reads of the maps a walk made because its instruction pointer was
+    /// in no module added, and which added nothing: bounded, so a target
+    /// that runs in anonymous code (a JIT) does not read its maps per sample.
+    fruitless_rereads: u32,
     /// Modules whose file could not be read, by path: not retried.
     unreadable: BTreeSet<PathBuf>,
 }
@@ -682,8 +692,9 @@ impl Cfi {
             unwinder: Native::new(),
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             cache: NativeCache::new(),
-            loaded: BTreeSet::new(),
+            loaded: BTreeMap::new(),
             unreadable: BTreeSet::new(),
+            fruitless_rereads: 0,
         };
         // Not read now: a launched target is still a fork of this process
         // waiting at the gate when its unwinder is built, and its maps are
@@ -695,13 +706,24 @@ impl Cfi {
     /// ones mapped since the last read, and drops the ones that are gone -- an
     /// `execve` replaces every one of them, and a module left registered at an
     /// address the new image reuses would unwind it by the wrong rules.
-    pub fn refresh(&mut self) {
+    ///
+    /// Answers whether a module was added or dropped.
+    pub fn refresh(&mut self) -> bool {
         let regions = read_maps(self.pid);
         if regions.is_empty() {
-            return;
+            return false;
         }
-        let current: BTreeSet<u64> = regions.iter().map(|region| region.start).collect();
-        let gone: Vec<u64> = self.loaded.difference(&current).copied().collect();
+        let current: BTreeSet<(u64, u64, &Path)> = regions
+            .iter()
+            .filter_map(|region| Some((region.start, region.end, region.path.as_deref()?)))
+            .collect();
+        let gone: Vec<u64> = self
+            .loaded
+            .iter()
+            .filter(|(start, (end, path))| !current.contains(&(**start, *end, path.as_path())))
+            .map(|(start, _)| *start)
+            .collect();
+        let changed = !gone.is_empty();
         for start in gone {
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             {
@@ -710,8 +732,33 @@ impl Cfi {
             }
             self.loaded.remove(&start);
         }
+        let before = self.loaded.len();
         for region in &regions {
             self.add(region);
+        }
+        changed || self.loaded.len() != before
+    }
+
+    /// Whether `addr` is in a module added.
+    fn covers(&self, addr: u64) -> bool {
+        self.loaded
+            .range(..=addr)
+            .next_back()
+            .is_some_and(|(_, (end, _))| addr < *end)
+    }
+
+    /// Re-reads the maps when a walk starts in no module added: the modules
+    /// were read before the target's `execve` (a launched program is a fork
+    /// of this tool when its unwinder is built, and a tick may read it then),
+    /// or it mapped a library since. Without this, every sample between the
+    /// `execve` and the next tick's refresh stopped at its leaf -- 5 % of a
+    /// one-second profile on a loaded machine.
+    fn reread_for(&mut self, addr: u64) {
+        if self.covers(addr) || self.fruitless_rereads >= MAX_FRUITLESS_REREADS {
+            return;
+        }
+        if !self.refresh() || !self.covers(addr) {
+            self.fruitless_rereads += 1;
         }
     }
 
@@ -721,7 +768,7 @@ impl Cfi {
     }
 
     fn add(&mut self, region: &Region) {
-        if self.loaded.contains(&region.start) {
+        if self.loaded.contains_key(&region.start) {
             return;
         }
         let Some(path) = region.path.clone() else {
@@ -739,7 +786,7 @@ impl Cfi {
                 }
                 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
                 let _ = module;
-                self.loaded.insert(region.start);
+                self.loaded.insert(region.start, (region.end, path.clone()));
             }
             None => {
                 self.unreadable.insert(path);
@@ -767,6 +814,7 @@ impl Cfi {
         if self.loaded.is_empty() {
             self.refresh();
         }
+        self.reread_for(regs.ip);
         let mut beyond = false;
         let mut read_stack = |addr: u64| -> Result<u64, ()> {
             let offset = addr.checked_sub(regs.sp).ok_or(())? as usize;

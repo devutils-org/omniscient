@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use crate::clock::monotonic_ns;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
-use crate::event::{Attr, CollectorId, Event};
+use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::perf::{Counter, CounterGroup, Scope};
 use crate::request::{Mode, Target};
 
@@ -34,12 +34,17 @@ const DOMAINS: [(&str, &str); 4] = [
 
 pub struct Prepare {
     mode: Mode,
+    by_domain: bool,
 }
 
 impl Prepare {
-    pub fn new(mode: Mode) -> Result<Self, String> {
+    /// `by_domain` is the request's `domain` key: every domain this part
+    /// publishes, one series each. Without it, the package alone -- the
+    /// domains nest, and one unkeyed series across them would count the
+    /// cores' joules twice.
+    pub fn new(mode: Mode, by_domain: bool) -> Result<Self, String> {
         match mode {
-            Mode::Poll { .. } | Mode::Count => Ok(Self { mode }),
+            Mode::Poll { .. } | Mode::Count => Ok(Self { mode, by_domain }),
             other => Err(format!(
                 "energy is a counter that has to be differenced over a window: `{}` has none; \
                  poll it, or count it over a duration",
@@ -55,6 +60,7 @@ impl Prepared for Prepare {
             Target::System => Ok(Box::new(EnergyPmu {
                 id: CollectorId::new("power.energy/pmu"),
                 mode: self.mode,
+                by_domain: self.by_domain,
                 packages: package_leaders(),
                 opened: Vec::new(),
                 previous: BTreeMap::new(),
@@ -111,11 +117,54 @@ fn package_leaders() -> Vec<(u32, u32)> {
     leaders.into_iter().collect()
 }
 
+/// The unit that counts core energy per core, on AMD parts.
+const CORE_PMU: &str = "power_core";
+const CORE_EVENT: &str = "energy-core";
+
+/// Package `package`'s cores domain through the per-core unit: one counter
+/// per cpu of the unit's cpumask (the kernel lists one thread per core) that
+/// lies in that package. None when the unit is absent or a counter refuses.
+fn per_core_domain(package: u32) -> Option<Opened> {
+    let counter = Counter::from_sysfs("cores", CORE_PMU, CORE_EVENT)?;
+    let mask =
+        std::fs::read_to_string(format!("{}/{CORE_PMU}/cpumask", crate::perf::PMU_DEVICES)).ok()?;
+    let cpus = crate::capabilities::parse_cpu_list(mask.trim())?;
+    let mut groups = Vec::new();
+    for cpu in cpus {
+        let in_package = std::fs::read_to_string(format!(
+            "/sys/devices/system/cpu/cpu{cpu}/topology/physical_package_id"
+        ))
+        .ok()
+        .and_then(|id| id.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+        if in_package != package {
+            continue;
+        }
+        let group = CounterGroup::open(&[counter], Scope::Cpu(cpu)).ok()?;
+        group.enable().ok()?;
+        groups.push(group);
+    }
+    if groups.is_empty() {
+        return None;
+    }
+    let (scale, unit) = crate::perf::sysfs_scale(CORE_PMU, CORE_EVENT)?;
+    Some(Opened {
+        package,
+        domain: CORE_EVENT,
+        label: "cores",
+        groups,
+        scale,
+        unit,
+    })
+}
+
 struct Opened {
     package: u32,
     domain: &'static str,
     label: &'static str,
-    group: CounterGroup,
+    /// One counter for a package domain; one per core for a domain the part
+    /// counts per core (AMD's `power_core`), summed into the package's total.
+    groups: Vec<CounterGroup>,
     /// What one tick of this counter is worth, and in what unit.
     scale: f64,
     unit: String,
@@ -131,6 +180,8 @@ struct Reading {
 pub struct EnergyPmu {
     id: CollectorId,
     mode: Mode,
+    /// Every domain, keyed, or the package alone, unkeyed.
+    by_domain: bool,
     packages: Vec<(u32, u32)>,
     opened: Vec<Opened>,
     /// Last raw reading per (package, domain), for the difference.
@@ -149,30 +200,31 @@ impl EnergyPmu {
         let ts_ns = monotonic_ns();
         let mut readings = BTreeMap::new();
         for opened in &self.opened {
-            let Ok(values) = opened.group.read() else {
+            let mut ticks = 0u64;
+            let mut whole = true;
+            for group in &opened.groups {
+                match group.read().ok().and_then(|values| values.first().copied()) {
+                    Some(value) => ticks = ticks.wrapping_add(value.value),
+                    None => whole = false,
+                }
+            }
+            if !whole {
+                // A sum missing one core's counter is not the domain's energy.
                 self.losses.failed_reads += 1;
                 self.losses.note(format!(
                     "the `{}` energy counter of package {} could not be read",
                     opened.domain, opened.package
                 ));
                 continue;
-            };
-            let Some(value) = values.first() else {
-                continue;
-            };
-            readings.insert(
-                (opened.package, opened.domain),
-                Reading {
-                    ticks: value.value,
-                    ts_ns,
-                },
-            );
+            }
+            readings.insert((opened.package, opened.domain), Reading { ticks, ts_ns });
         }
         readings
     }
 
     /// The energy between two readings of one domain, or nothing and a loss.
     fn delta_event(
+        keyed: bool,
         id: &CollectorId,
         losses: &mut Losses,
         opened: &Opened,
@@ -200,7 +252,13 @@ impl EnergyPmu {
             ts_ns: after.ts_ns,
             ts_err_ns: 0,
             kind: "power.energy".to_owned(),
-            keys: Vec::new(),
+            // One series per domain: they nest, and a sum across them is
+            // the cores' joules counted twice.
+            keys: if keyed {
+                vec![KeyValue::domain(opened.label)]
+            } else {
+                Vec::new()
+            },
             attrs: vec![
                 Attr::float("joules", ticks as f64 * opened.scale),
                 Attr::text("domain", opened.label),
@@ -208,6 +266,9 @@ impl EnergyPmu {
                 Attr::uint("ticks", ticks),
                 Attr::uint("interval_ns", interval_ns),
                 Attr::text("unit", opened.unit.clone()),
+                // How many counters the number sums: one for a package
+                // domain, one per core for AMD's per-core unit.
+                Attr::uint("counters", opened.groups.len() as u64),
             ],
             collector_id: id.clone(),
             seq,
@@ -227,6 +288,9 @@ impl Collector for EnergyPmu {
     fn start(&mut self) -> Result<(), String> {
         for (package, leader) in self.packages.clone() {
             for (domain, label) in DOMAINS {
+                if !self.by_domain && label != "package" {
+                    continue;
+                }
                 let Some(counter) = Counter::from_sysfs(label, PMU, domain) else {
                     continue;
                 };
@@ -244,10 +308,24 @@ impl Collector for EnergyPmu {
                     package,
                     domain,
                     label,
-                    group,
+                    groups: vec![group],
                     scale,
                     unit,
                 });
+            }
+            // A part that counts core energy per core (AMD's `power_core`
+            // unit) rather than per package (Intel's `power/energy-cores`):
+            // one counter per core the unit lists, summed into the package's
+            // `cores` domain -- which is what `perf stat -a` reports for it.
+            if self.by_domain
+                && !self
+                    .opened
+                    .iter()
+                    .any(|opened| opened.package == package && opened.label == "cores")
+            {
+                if let Some(opened) = per_core_domain(package) {
+                    self.opened.push(opened);
+                }
             }
         }
 
@@ -288,9 +366,15 @@ impl Collector for EnergyPmu {
                 // A counter's first reading is a baseline, not a measurement.
                 continue;
             };
-            if let Some(event) =
-                Self::delta_event(&self.id, &mut self.losses, opened, previous, reading, index)
-            {
+            if let Some(event) = Self::delta_event(
+                self.by_domain,
+                &self.id,
+                &mut self.losses,
+                opened,
+                previous,
+                reading,
+                index,
+            ) {
                 events.push(event);
                 index += 1;
             }
@@ -316,9 +400,15 @@ impl Collector for EnergyPmu {
             else {
                 continue;
             };
-            if let Some(event) =
-                Self::delta_event(&self.id, &mut self.losses, opened, baseline, reading, index)
-            {
+            if let Some(event) = Self::delta_event(
+                self.by_domain,
+                &self.id,
+                &mut self.losses,
+                opened,
+                baseline,
+                reading,
+                index,
+            ) {
                 events.push(event);
                 index += 1;
             }
@@ -337,9 +427,12 @@ mod tests {
 
     fn collector() -> Option<Box<dyn Collector>> {
         let prepare = Box::new(
-            Prepare::new(Mode::Poll {
-                interval: Mode::DEFAULT_POLL_INTERVAL,
-            })
+            Prepare::new(
+                Mode::Poll {
+                    interval: Mode::DEFAULT_POLL_INTERVAL,
+                },
+                false,
+            )
             .ok()?,
         );
         let mut collector = prepare.attach(&Target::System).ok()?;
@@ -397,7 +490,7 @@ mod tests {
 
     #[test]
     fn a_process_target_is_refused_rather_than_estimated() {
-        let prepare = Box::new(Prepare::new(Mode::Count).unwrap());
+        let prepare = Box::new(Prepare::new(Mode::Count, false).unwrap());
         let Err(reason) = prepare.attach(&Target::Pid(vec![1])) else {
             panic!("there is no per-process energy in the hardware");
         };
