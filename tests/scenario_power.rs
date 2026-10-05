@@ -2328,7 +2328,7 @@ fn a_program_that_sleeps_three_hundred_times_wakes_three_hundred_times() {
         .filter_map(|line| field(line, "wakeups=")?.parse::<f64>().ok())
         .sum();
     assert!(
-        (150.0..=340.0).contains(&total),
+        (285.0..=340.0).contains(&total),
         "300 sleeps were counted as {total} wakeups: {out}"
     );
     for line in &events {

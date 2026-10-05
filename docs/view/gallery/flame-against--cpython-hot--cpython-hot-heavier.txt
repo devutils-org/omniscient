@@ -1,7 +1,7 @@
 omn top │ fixture cpython-hot │ 3.99s                             view: snapshot │ collectors ≥9.54% │ target 93.1% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
-on cpu: 3.96k → 7.89k (x1.99) · absolute: the difference is `__tls_get_addr` +383 own (x2.06, 11.5σ); 42 more of 372 mov
+on cpu: 3.96k → 7.89k (x1.99) · absolute: the difference is `py::score:/omniscient/cases/cpython-interpreter/hot.py` +39
 ┌ on cpu cpu.profile 3.96k vs 7.89k 136 late ~low det degraded x8 ─────────────────────────────────────────────────────┐
 │width ∝ the mean of the two runs · heaviest left                                                       30 frames deep │
 │▏all › ⋯20⋯ › py::score:/omniscient/cases/cpython-interpreter/hot.py 5.89k                                            │
@@ -10,11 +10,11 @@ on cpu: 3.96k → 7.89k (x1.99) · absolute: the difference is `__tls_get_addr` 
 │                  ▏l  ▏l                     ▏l                                                                       │
 │                                                                                                                      │
 │moved on their own -- this run → the other                                                                            │
-│     +383  x2.06  11.5σ __tls_get_addr                                                                                │
-│     +364  x2.34  12.1σ _Py_Dealloc                                                                                   │
-│     +189  x2.12   8.2σ PyLong_FromLong                                                                               │
-│     +137  x1.81   6.3σ PyNumber_Remainder                                                                            │
-│     +129  x2.08   6.7σ libpython3.14+0x19cf26                                                                        │
+│    +3932  x2.00  36.2σ py::score:/omniscient/cases/cpython-interpreter/hot.py                                        │
+│       -3  x0.77   0.6σ py::load:/omniscient/cases/cpython-interpreter/hot.py                                         │
+│       -1  x0.00   1.0σ PyObject_GC_Del                                                                               │
+│       -1  x0.00   1.0σ __zap_vma_range                                                                               │
+│       -1  x0.00   1.0σ _raw_spin_unlock_irqrestore                                                                   │
 │                                                                                                                      │
 │‼ pmu:sw: time-based sampling: blind to phases running at reduced frequency                                           │
 │‼ 534 of 1046 samples landed in a function that sets up no frame pointer (360 in ld-linux-x86-64.so.2, 170 in         │
@@ -35,6 +35,6 @@ on cpu: 3.96k → 7.89k (x1.99) · absolute: the difference is `__tls_get_addr` 
 │degraded x2                                                                                                           │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 on cpu ▸ py::score:/omniscient/cases/cpython-interpreter/hot.py  the last of 22 frames called in one chain from all
-this run 3.93k → the other 7.86k samples (+3932, x2.00, 36.2σ)
+this run 3.93k → the other 7.86k samples (+3932, x2.00, 36.2σ) · own 3.93k → 7.86k
 cpu.profile (+1 more, ! lists them): the other run: 1102 of 2193 samples landed in a function that sets up no frame poi…
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

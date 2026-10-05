@@ -229,6 +229,9 @@ impl PageCacheRow {
 pub struct Narrowing {
     pub tgid: Option<u32>,
     pub tid: Option<u32>,
+    /// The map of the processes `tgid` started, which [`PageCacheProgram::load`]
+    /// creates and fills in: the caller leaves it `None`.
+    pub descendants: Option<i32>,
 }
 
 /// Where the fields of the chain from a folio to its file sit on this kernel.
@@ -289,7 +292,23 @@ fn pg_head(btf: &Btf) -> Result<i32, String> {
 fn narrow(program: &mut Program, narrowing: Narrowing) {
     if let Some(tgid) = narrowing.tgid {
         program.push(Insn::ldx(BPF_W, 1, R10, PID_TGID + 4));
-        program.jump_to("done", Insn::jne_imm(1, tgid as i32, 0));
+        match narrowing.descendants {
+            None => {
+                program.jump_to("done", Insn::jne_imm(1, tgid as i32, 0));
+            }
+            // The target compared as a constant, any other thread group looked
+            // up in the processes it started: a launched shell's `cat` is the
+            // run's.
+            Some(map) => {
+                program.jump_to("narrow_kept", Insn::jeq_imm(1, tgid as i32, 0));
+                program.extend(Insn::load_map_fd(1, map));
+                program.push(Insn::mov64_reg(2, R10));
+                program.push(Insn::add64_imm(2, (PID_TGID + 4) as i32));
+                program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+                program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+                program.label("narrow_kept");
+            }
+        }
     }
     if let Some(tid) = narrowing.tid {
         program.push(Insn::ldx(BPF_W, 1, R10, PID_TGID));
@@ -608,11 +627,20 @@ pub struct PageCacheProgram {
     drops: Counters,
     programs: Vec<OwnedFd>,
     _links: Vec<OwnedFd>,
+    /// The processes a process target started, followed from the fork.
+    descendants: Option<super::sched_common::Descendants>,
 }
 
 impl PageCacheProgram {
-    pub fn load(narrowing: Narrowing) -> Result<Self, String> {
+    pub fn load(mut narrowing: Narrowing) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
+        let descendants = match narrowing.tgid {
+            Some(root) => Some(super::sched_common::Descendants::follow(root)?),
+            None => None,
+        };
+        narrowing.descendants = descendants
+            .as_ref()
+            .map(super::sched_common::Descendants::map_fd);
         // SAFETY: `sysconf` takes an integer and returns one.
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         if page != 1 << PAGE_SHIFT {
@@ -667,6 +695,7 @@ impl PageCacheProgram {
             drops,
             programs,
             _links: links,
+            descendants,
         })
     }
 
@@ -715,6 +744,10 @@ impl PageCacheProgram {
     /// that cpu; see `BlockProgram::skipped`.
     pub fn skipped(&self) -> u64 {
         crate::bpf::attach::fentry::skipped(self.programs.iter())
+            + self
+                .descendants
+                .as_ref()
+                .map_or(0, super::sched_common::Descendants::skipped)
     }
 
     pub fn capacity(&self) -> u32 {
@@ -918,7 +951,8 @@ mod tests {
         assert_eq!(
             compares(Narrowing {
                 tgid: Some(4242),
-                tid: None
+                tid: None,
+                descendants: None,
             }),
             1
         );

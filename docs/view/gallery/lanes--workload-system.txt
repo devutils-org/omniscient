@@ -4,8 +4,12 @@ omn top │ fixture workload-system │ 2.00s                         view: snap
 │sched.switches 156 23 late ~low det degraded x2  sched.wakeup 151 23 late ~low det degraded  sched.offcpu 18 ~low det │
 │degraded  gpu.kernel 0 12 late degraded                                                                               │
 │24.1ms a cell          ╷0ns                ╷500ms               ╷1.00s               ╷1.50s                of the span│
-│system-main    2621722│█▁           ▄█████████████████████████████████████████▃▂▃                         │awake 52.3%│
-│              off cpu │ ████████████▅                                         ▆▇▆████████████████████████▃│ blkd 46.9%│
+│system-main    2621722│█             █████████████████████████████████████████                            │awake 52.3%│
+│                      │█            ▃█████████████████████████████████████████▁                           │           │
+│                      │█▃           ███████████████████████████████████████████▅█                         │           │
+│              off cpu │ ▆███████████                                           ▄▁████████████████████████ │ blkd 46.9%│
+│                      │ ████████████▆                                         ███████████████████████████ │           │
+│                      │ █████████████                                         ████████████████████████████│           │
 │Thread-1 (drai 2621802│                                                         ▁                         │awake 0.09%│
 │────────────────────────────────────────────────────────────────────────────────────────────▲ 1.68s───────────────────│
 │system-main 2621722 (pid 2621722) at 1.68s: blocked, sleeping 600ms, 1.38s → 1.98s, left cpu 0                        │
@@ -17,10 +21,6 @@ omn top │ fixture workload-system │ 2.00s                         view: snap
 │     300ms 32.0% sleeping      1 blocks  clock_nanosleep ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …              │
 │    30.7ms 3.28% sleeping      1 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
 │    6.18ms 0.66% uninterr.     9 blocks  fsync ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

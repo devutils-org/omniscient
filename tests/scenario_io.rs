@@ -726,19 +726,21 @@ fn something_this_source_does(source: &str) -> (&'static str, &'static str) {
 
 /// The sources of this family that have a collector in this build.
 ///
-/// Five through `/proc/diskstats` and PSI, four through the block layer's own
+/// Six through `/proc/diskstats` and PSI, four through the block layer's own
 /// raw tracepoints, three through fentry, and two through the page cache's
 /// own raw tracepoints. The two mechanisms answer different questions and the
 /// sweep covers both: a combination the catalog offers and the build cannot
 /// serve is a promise broken in the one place nobody looks, and that is as
 /// true of an eBPF backend as of a file.
-fn collected_sources() -> [&'static str; 14] {
+fn collected_sources() -> [&'static str; 16] {
     [
         "io.bytes",
         "io.iops",
         "io.merges",
         "io.inflight",
         "io.pressure",
+        // The twenty-fourth wave's `%util`, from the io-ticks column.
+        "io.util",
         "io.latency",
         "io.queue",
         "io.size",
@@ -747,6 +749,8 @@ fn collected_sources() -> [&'static str; 14] {
         "io.syscall",
         "io.fs",
         "io.fsync",
+        // The twenty-fourth wave's VFS call counter.
+        "io.vfs",
         // The ninth wave's two, over the page cache's raw tracepoints.
         "io.pagecache",
         "io.readahead",
@@ -6346,4 +6350,228 @@ fn a_file_event_names_the_block_devices_its_filesystem_is_on() {
         );
     }
     let _ = std::fs::remove_file(&target);
+}
+
+// ---------------------------------------------------------------------------
+// The launched program's descendants
+
+/// Forks, and runs `DIRECT_READS` in the child alone: the parent submits
+/// nothing, the way `fio` without `thread` forks its job and waits.
+const FORKED_DIRECT_READS: &str = r#"
+import os, sys
+reads = sys.argv[1]
+child = os.fork()
+if child == 0:
+    sys.argv = [reads] + sys.argv[2:]
+    exec(compile(open(reads).read(), reads, "exec"))
+    os._exit(0)
+_, status = os.waitpid(child, 0)
+sys.exit(os.waitstatus_to_exitcode(status))
+"#;
+
+/// A launched program's forked child is followed: its reads are the run's.
+///
+/// `omn trace io.latency -- fio <job>` without `thread` reported 0 requests
+/// for 28 807 reads fio completed, and "29678 block_rq_complete events had no
+/// opening", because the programs compared the submitter with the launched
+/// process alone (`docs/scenarios/io.md`, defect 25). Here the launched
+/// process forks and the child makes every read, so a filter on the launched
+/// process alone keeps none of them; the child's are counted one for one,
+/// under the child's pid.
+#[test]
+fn a_launched_programs_forked_child_is_followed() {
+    if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = lacks_here("io.latency", "bpf:raw_tp") {
+        eprintln!("skipped: {reason:?}");
+        return;
+    }
+    const READS: usize = 1024;
+    let path = direct_read_file("io-forked-reads.bin", READS);
+    let reads = script("io-forked-reads.py", DIRECT_READS);
+    let forks = script("io-forked-parent.py", FORKED_DIRECT_READS);
+    let account_path = scratch("io-forked-reads.json");
+    let _ = std::fs::remove_file(&account_path);
+    let output = run(&[
+        "io.latency",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        forks.to_str().expect("a path"),
+        reads.to_str().expect("a path"),
+        path.to_str().expect("a path"),
+        &READS.to_string(),
+        account_path.to_str().expect("a path"),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let did = account(&account_path);
+    if let Some(error) = did["refused"].as_str() {
+        eprintln!("skipped: {} refuses O_DIRECT ({error})", path.display());
+        return;
+    }
+    if did["resident"].as_u64() != Some(0) {
+        eprintln!("skipped: the file stayed in the page cache: {did}");
+        return;
+    }
+    let child = did["pid"].as_u64().expect("the child's pid");
+    let document = json(&output);
+    let result = result(&document, "io.latency");
+    let found = raw_events(result)
+        .into_iter()
+        .filter(|attrs| attrs["pid"].as_u64() == Some(child))
+        .filter(|attrs| {
+            attrs["rwbs"]
+                .as_str()
+                .is_some_and(|rwbs| rwbs.starts_with('R'))
+        })
+        .count();
+    let dropped = losses(result)["dropped"].as_u64().unwrap_or(0) as usize;
+    assert!(
+        found <= READS,
+        "{found} requests from the child for {READS} reads: something is counted twice"
+    );
+    assert!(
+        found + dropped >= READS,
+        "the child made {READS} direct reads and the run kept {found} of its requests, \
+         reporting {dropped} lost: the launched program's child is not followed. {}",
+        stderr(&output)
+    );
+}
+
+/// `io.vfs` counts every `vfs_write`, of any file type: a program that writes
+/// 20 000 times to `/dev/null` from a forked child is found 20 000 times, and
+/// the parent, which writes nothing, adds nothing. `/dev/null` is not a
+/// regular file, so `io.fs` would count none of them.
+#[test]
+fn every_vfs_write_of_a_forked_child_is_counted() {
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = lacks_here("io.vfs", "bpf:fentry") {
+        eprintln!("skipped: {reason:?}");
+        return;
+    }
+    const WRITES: u64 = 20_000;
+    let workload = script(
+        "io-vfs-writes.py",
+        r#"
+import os, sys
+count = int(sys.argv[1])
+child = os.fork()
+if child == 0:
+    fd = os.open(os.devnull, os.O_WRONLY)
+    for _ in range(count):
+        os.write(fd, b"x")
+    os._exit(0)
+os.waitpid(child, 0)
+"#,
+    );
+    let output = run(&[
+        "io.vfs",
+        "-m",
+        "count",
+        "-e",
+        "raw",
+        "--filter",
+        "op == \"vfs_write\"",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        workload.to_str().expect("a path"),
+        &WRITES.to_string(),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document = json(&output);
+    let result = result(&document, "io.vfs");
+    let events = raw_events(result);
+    assert_eq!(events.len(), 1, "one counted event: {events:?}");
+    let calls = events[0]["calls"].as_u64().expect("calls");
+    let dropped = losses(result)["dropped"].as_u64().unwrap_or(0);
+    // Python writes nothing on its way in or out; a few calls of slack for
+    // an interpreter that one day does.
+    assert!(
+        calls + dropped >= WRITES && calls <= WRITES + 8,
+        "{WRITES} writes from a forked child, {calls} counted, {dropped} reported lost"
+    );
+    assert_eq!(events[0]["vfs_write"].as_u64(), Some(calls));
+}
+
+/// `io.fsync` follows the launched program's forked children: a parent that
+/// syncs nothing and a child that syncs three files is three syncs, under the
+/// child's pid. The filter compared the launched process alone before.
+#[test]
+fn the_syncs_of_a_forked_child_are_timed() {
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = lacks_here("io.fsync", "bpf:fentry") {
+        eprintln!("skipped: {reason:?}");
+        return;
+    }
+    let directory = scratch("io-forked-syncs");
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let workload = script(
+        "io-forked-syncs.py",
+        r#"
+import json, os, sys
+directory, account = sys.argv[1], sys.argv[2]
+child = os.fork()
+if child == 0:
+    for index in range(3):
+        fd = os.open(os.path.join(directory, f"sync-{index}"), os.O_WRONLY | os.O_CREAT, 0o644)
+        os.write(fd, b"x" * 4096)
+        os.fsync(fd)
+        os.close(fd)
+    json.dump({"pid": os.getpid()}, open(account, "w"))
+    os._exit(0)
+os.waitpid(child, 0)
+"#,
+    );
+    let account_path = scratch("io-forked-syncs.json");
+    let _ = std::fs::remove_file(&account_path);
+    let output = run(&[
+        "io.fsync",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        workload.to_str().expect("a path"),
+        directory.to_str().expect("a path"),
+        account_path.to_str().expect("a path"),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let child = account(&account_path)["pid"]
+        .as_u64()
+        .expect("the child's pid");
+    let document = json(&output);
+    let result = result(&document, "io.fsync");
+    let syncs = raw_events(result)
+        .into_iter()
+        .filter(|attrs| attrs["pid"].as_u64() == Some(child))
+        .count();
+    let dropped = losses(result)["dropped"].as_u64().unwrap_or(0) as usize;
+    assert!(
+        syncs <= 3 && syncs + dropped >= 3,
+        "the child synced 3 files, {syncs} were timed under its pid and {dropped} reported \
+         lost: {}",
+        stderr(&output)
+    );
 }

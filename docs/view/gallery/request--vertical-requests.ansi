@@ -13,9 +13,13 @@
 │                                                                                                                      │[0m
 │[0m[1;32m── a001 · 40.8ms from its first byte in to its last byte out · thread 2619020 [0m[2m────────────────────────────────────────[0m│[0m
 │[0m[2m            ┊0              ┊10.0ms         ┊20.0ms         ┊30.0ms           [0m                                        │[0m
+│            [0m[36m░[0m                                                                                                         │[0m
 │[0m[36m  net in    ░[0m                                                                   20.4µs before start                   │[0m
+│            [0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m                                        │[0m
 │[0m[1m  serving   [0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m  40.8ms from start to done             │[0m
+│                                                                                                                      │[0m
 │[0m[34m  on device [0m                                                                  [0m[2m  no block request[0m                      │[0m
+│                                                                                                                      │[0m
 │[0m[96m  net out   [0m                                                                  [0m[2m  gone when done[0m                        │[0m
 │[0m[2;3m  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order[0m                 │[0m
 │                                                                                                                      │[0m
@@ -24,16 +28,12 @@
 │[0m[32m  █ [0mon cpu       54.2µs   0.13% [0m[32m▏    [0mIDENTITY                                  off cpu 2 times, preempted 0           │[0m
 │[0m[33m  ▓ [0mrun queue    22.3µs   0.05% [0m[33m▏    [0mIDENTITY                       [0m[1mdisk       [0m[2mno block request issued[0m                │[0m
 │[0m[35m  ▀ [0mlock/sleep   40.7ms   99.8% [0m[35m▀▀▀▀ [0mIDENTITY [0m[2mwoken by tid 2619021[0m  [0m[1mnetwork    [0min 20.4µs · out 0ns                    │[0m
-│[0m[34m  ▄ [0m[2mdisk              ·         [0m[34m     [0mIDENTITY                       [0m[1mlock/sleep [0mlongest 40.7ms, woken by tid 2619021   │[0m
-│[0m[96m  ░ [0m[2mnet out           ·         [0m[96m     [0m[2mKEY      [0m                                                                        │[0m
+│[0m[34m  ▄ [0m[2mdisk              ·         [0m[34m     [0mIDENTITY                                  52B read · 59B queued                  │[0m
+│[0m[96m  ░ [0m[2mnet out           ·         [0m[96m     [0m[2mKEY      [0m                      [0m[1mlock/sleep [0mlongest 40.7ms, woken by tid 2619021   │[0m
 │[0m[2m  IDENTITY: read off the serving thread  KEY: joined by the socket[0m                                                    │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │[0m[1m  what sets it apart from the other 4 requests: [0m[35m▀ [0m[31mlock/sleep +40.7ms[0m[2m (theirs 0ns)[0m                                     │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m

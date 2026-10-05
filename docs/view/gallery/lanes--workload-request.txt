@@ -4,8 +4,12 @@ omn top │ fixture workload-request │ 1.14s                        view: snap
 │sched.switches 242 13 late ~low det degraded  sched.wakeup 246 13 late ~low det degraded  sched.offcpu 88 ~low det    │
 │degraded x2  gpu.kernel 0 9 late degraded                                                                             │
 │13.8ms a cell          ╷0ns          ╷200ms         ╷400ms        ╷600ms         ╷800ms        ╷1.00s      of the span│
-│server         2622175│▅▁  ▁   ▁ ▁   ▁   ▁  ▁   ▁  ▁ ▁   ▁▁  ▁  ▁   ▁  ▁  ▁  ▁▁  ▁  ▁   ▁   ▁ ▁  ▁▁   ▁  ▁│awake 1.21%│
-│              off cpu │▄█████████████████████████████████████████████████████████████████████████████████▁│ blkd 97.7%│
+│server         2622175│                                                                                   │awake 1.21%│
+│                      │▇                                                                                  │           │
+│                      │█▁  ▁   ▁ ▁   ▃   ▁  ▁   ▁  ▁ ▁   ▁▁  ▁  ▁   ▁  ▁  ▁  ▁▂  ▁  ▁   ▁   ▁ ▁  ▁▂   ▁  ▁│           │
+│              off cpu │ █████████████▆████████████████████████████████████████▇███████████████████▇██████ │ blkd 97.7%│
+│                      │▂█████████████████████████████████████████████████████████████████████████████████ │           │
+│                      │██████████████████████████████████████████████████████████████████████████████████▃│           │
 │server         2622177│ ───▁───▁─▁───▁───▁──▁───▁──▁─▁───▁▁──▁──▁───▁──▁──▁──▁▁──▁──▁───▁───▁─▁──▁▁───▁──▁│awake 0.25%│
 │server         2622176│ ───────▁─▁─────────────────▁─▁─────────────────▁──▁─────────────────▁─▁──────────▁│awake 0.03%│
 │────────────────────────────────────────────────────────────────────────────────────────────────▲ 1.01s───────────────│
@@ -19,10 +23,6 @@ omn top │ fixture workload-request │ 1.14s                        view: snap
 │     121ms 10.8% sleeping      4 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start                    │
 │    28.9ms 2.58% uninterr.   128 blocks  libc.so.6 ← main ← libc.so.6 ← __libc_start_main ← _start                    │
 │    5.87ms 0.52% uninterr.    21 blocks  fsync ← libc.so.6 ← __libc_start_main ← _start                               │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

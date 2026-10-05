@@ -2,7 +2,7 @@ omn top │ fixture http-server │ 2.85s │ focus: tid 2618479        view: sn
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ ledger -- what Thread-1 (proce (task 2618479) cost over 2.85s of wall-clock ─────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
-│  cpu time        2.72s on cpu     95.5% of one cpu          ▆▆▇██████▇▇█████████████    ≥45.7ms  ~low det            │
+│  cpu time        2.72s on cpu     95.5% of one cpu          ▆▆███████▇██████████████    ≥45.7ms  ~low det            │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
 │  blocked time    8.86ms           0.00 threads               ▂▁  ▁   ▁   ▁   ▁    ▁█    ≥83.1ms  ~low det degraded   │
 │  memory held     --                                                                                                  │
@@ -10,14 +10,14 @@ omn top │ fixture http-server │ 2.85s │ focus: tid 2618479        view: sn
 │  memory faulted  16.3k faults     5.73k/s                   a total only                ≥24.0ms  32 late             │
 │▸ I/O syscalls    26 calls         65.7µs inside them        1.02µs ▃█ 4.10µs            ≥70.5ms  ~low det degraded x2│
 │    bytes                  1B  read, 1.56KiB written                                                                  │
-│  network         28.3MiB moved    28.3MiB out, 1.76KiB in    ▁▅▅▅▅▅▅ █▅▅▅▅▅ ▅▅▅▅▅▅▅▅    ≥73.2ms  ~low det degraded x3│
+│  network         28.3MiB moved    28.3MiB out, 1.76KiB in    ████ █████████ ████████    ≥73.2ms  ~low det degraded x3│
 │    176 socket calls                                                                                                  │
 │  retransmits     0 sent again     machine-wide              a total only                 ≥478µs  9 late ~low det     │
 │  GPU memory      --                                                                                                  │
 │    nothing of tid 2618479 in this result: its series are keyed task:2618476                                          │
 │  GPU time        --                                                                                                  │
 │    nothing of tid 2618479 in this result: its series are keyed                                                       │
-│  energy          152J machine     53.3W on average          ▇▇▇▇▇▇▇▇▇▇▇████▇▇▇▇▇▇▇▇     ≥94.2µs                      │
+│  energy          152J machine     53.3W on average          ▇▇▇▇▇▇▇▇▇▇█████▇▇▇▇▇▇▇      ≥94.2µs                      │
 │    no estimate for one task: the own account it would be charged by is the whole target's                            │
 │                                                                                                                      │
 │  to know all of this: ≥303ms of omn's cpu, ≥10.6% of what the target spent                                           │

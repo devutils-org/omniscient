@@ -1217,6 +1217,12 @@ pub enum KeyKind {
     /// `results.json` keeps the split the views draw live
     /// (`DECISIONS.md`, the twenty-first wave).
     Dir,
+    /// `syscall:<name>`, the system call a `proc.syscall` row counted, so
+    /// one run keyed on it is a `strace -c` table (the twenty-fourth wave).
+    Syscall,
+    /// `comm:<name>`, the task's name when the event happened: what the
+    /// bpftrace and bcc tools aggregate by (the twenty-fourth wave).
+    Comm,
     /// `domain:package`, `domain:cores`, `domain:dram`: an energy domain.
     ///
     /// Domains nest -- RAPL's cores are inside their package -- so one
@@ -1234,7 +1240,7 @@ pub enum KeyKind {
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 16] = [
+    pub const ALL: [KeyKind; 18] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -1249,6 +1255,8 @@ impl KeyKind {
         KeyKind::Cpu,
         KeyKind::Node,
         KeyKind::Dir,
+        KeyKind::Syscall,
+        KeyKind::Comm,
         KeyKind::Domain,
         KeyKind::Func,
     ];
@@ -1275,6 +1283,8 @@ impl KeyKind {
             KeyKind::Cpu => "cpu",
             KeyKind::Node => "node",
             KeyKind::Dir => "dir",
+            KeyKind::Syscall => "syscall",
+            KeyKind::Comm => "comm",
             KeyKind::Domain => "domain",
             KeyKind::Func => "func",
         }

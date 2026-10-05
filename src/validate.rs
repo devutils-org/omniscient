@@ -803,6 +803,12 @@ fn check_stack(
                 "drop --stack none, or emit something other than stacks",
             ));
         }
+        if request.keys.contains(&crate::request::KeyKind::Func) {
+            rejections.push(Rejection::with_hint(
+                "`--keys func` with `--stack none` names each sample by the leaf frame of a stack it forbids unwinding",
+                "drop --stack none, or key by something other than func",
+            ));
+        }
         return;
     }
     let mode = request.mode.kind();
@@ -1173,6 +1179,42 @@ mod tests {
             "{}",
             rejections[0]
         );
+    }
+
+    /// `func` is read off each sample's stack, so `--stack none` leaves it
+    /// nothing to name: refused, not a single `func:?` row.
+    #[test]
+    fn a_function_key_and_no_unwinding_contradict_each_other() {
+        let mut request = request(
+            "cpu.profile",
+            Target::Pid(vec![1]),
+            "sample@99hz",
+            "topk:10",
+        );
+        request.keys = vec![crate::request::KeyKind::Func];
+        request.stack = Some(StackMode::None);
+        let rejections = reject(&request);
+        assert!(
+            rejections
+                .iter()
+                .any(|one| one.message.starts_with("`--keys func` with `--stack none`")),
+            "{rejections:?}"
+        );
+    }
+
+    /// An entry that offers `func` produces stacks for it to be read from:
+    /// otherwise every event of it is `func:?`.
+    #[test]
+    fn an_entry_offering_the_function_key_produces_stacks() {
+        for entry in catalog().entries() {
+            if entry.keys.contains(&crate::request::KeyKind::Func) {
+                assert!(
+                    entry.emits.contains(&EmitKind::Stack),
+                    "`{}` offers `func` and emits no stack",
+                    entry.id
+                );
+            }
+        }
     }
 
     #[test]

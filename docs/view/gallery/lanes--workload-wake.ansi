@@ -4,8 +4,12 @@
 │[0m[1msched.switches [0m[2m12[0m [0m[33m5 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m  [0m[1msched.wakeup [0m[2m917[0m [0m[33m5 late[0m [0m[36m~low det[0m  [0m[1msched.offcpu [0m[2m17[0m [0m[36m~low det[0m [0m[33mdegraded[0m    │[0m
 │[0m[1mgpu.kernel [0m0 [0m[33m3 late[0m [0m[33mdegraded[0m                                                                                          │[0m
 │[0m[2m3.18ms a cell[0m          [0m[2m╷0ns[0m           [0m[2m╷50.0ms[0m         [0m[2m╷100ms[0m          [0m[2m╷150ms[0m         [0m[2m╷200ms[0m                [0m[2mof the span[0m│[0m
-│[0m[1;7mwake-main      2621136[0m[2m│[0m[2;32m████████▂[0m[2m                                 [0m[2;7m [0m[2m                                  [0m[2;32m▂▅[0m[2m    │awake 10.9%[0m│[0m
-│[0m[2m              off cpu │        [0m[2;34m▇█████████████████████████████████[0m[2;7;34m█[0m[2;34m██████████████████████████████████▇[0m[2m     │ blkd 83.8%[0m│[0m
+│[0m[1;7mwake-main      2621136[0m[2m│[0m[2;32m████████[0m[2m                                  [0m[2;7m [0m[2m                                        │awake 10.9%[0m│[0m
+│                      [0m[2m│[0m[2;32m████████[0m[2m                                  [0m[2;7m [0m[2m                                   [0m[2;32m▆[0m[2m    │[0m           │[0m
+│                      [0m[2m│[0m[2;32m████████▆[0m[2m                                 [0m[2;7m [0m[2m                                  [0m[2;32m▆█[0m[2m    │[0m           │[0m
+│[0m[2m              off cpu │        [0m[2;34m▃█████████████████████████████████[0m[2;7;34m█[0m[2;34m██████████████████████████████████▃[0m[2m     │ blkd 83.8%[0m│[0m
+│                      [0m[2m│        [0m[2;34m██████████████████████████████████[0m[2;7;34m█[0m[2;34m███████████████████████████████████[0m[2m     │[0m           │[0m
+│                      [0m[2m│        [0m[2;34m██████████████████████████████████[0m[2;7;34m█[0m[2;34m███████████████████████████████████[0m[2m     │[0m           │[0m
 │[0m[2m─────────────────────────────────────────────────────────────────[0m[2;32m▲ 137ms[0m[2m──────────────────────────────────────────────[0m│[0m
 │[0m[1mwake-main 2621136 (pid 2621136) at 137ms: [0m[2;34mblocked, sleeping[0m[2m 219ms, 27.1ms → 247ms, left cpu 12[0m                        │[0m
 │  woken by [0m[1mrelay-a 2621137[0m[2m, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone[0m        │[0m
@@ -16,10 +20,6 @@
 │  [0m[2m   925µs 0.42%[0m [0m[2;34msleeping  [0m[2m    2 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m                        │[0m
 │  [0m[2m   509µs 0.23%[0m [0m[2;33muninterr. [0m[2m    1 blocks  vfork ← _posixsubprocess.cpython-314-x86_64-linux-gnu.so x2 ← …[0m              │[0m
 │  [0m[2m   376µs 0.17%[0m [0m[2;33muninterr. [0m[2m    2 blocks  vfork ← _posixsubprocess.cpython-314-x86_64-linux-gnu.so x2 ← …[0m              │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

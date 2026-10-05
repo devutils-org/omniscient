@@ -17,7 +17,7 @@ omn top │ fixture workload-flows │ 993ms                          view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃ wlan0       192B      █  │
-│sockets 5.00MiB -> interfaces 10.0MiB = 2.01x · 5 interfaces idle · lo counts a byte twice; sockets are not tied to in│
+│sockets 5.00MiB -> interfaces 10.0MiB = 2.01x · 5 interfaces idle · lo counts a byte twice; a socket is tied to the in│
 │ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
 │         thread             descriptor                                         cache         device, the machine's    │
 │     flows-main ┃█████████┃ fd 40            █     →8.00MiB ←8.00MiB   ┃█████████┃█████████┃ 259:0    9.27MiB   █     │

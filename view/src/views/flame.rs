@@ -34,7 +34,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Sparkline, Wrap};
 use ratatui::Frame;
 
 use super::{Action, Ctx, Focus, Need, Region, Scope, View};
-use crate::model::{Data, Output, Refusal, Results, StackCount};
+use crate::model::{Data, Output, Refusal, Results, StackCount, RECOVERED};
 use crate::trust::{self, palette, Trust};
 use crate::units;
 
@@ -349,6 +349,9 @@ struct Tree {
     /// A frame's node by its caller's and its name, so the two runs of a
     /// comparison land on the same nodes.
     index: HashMap<(usize, String), usize>,
+    /// Whether a stack's own weight went to the innermost frame a perf map
+    /// named rather than to its leaf, as the triage charges it.
+    charged_by_map: bool,
 }
 
 impl Tree {
@@ -365,18 +368,25 @@ impl Tree {
             unit,
             compare: None,
             index: HashMap::new(),
+            charged_by_map: false,
         }
     }
 
-    /// Adds one stack's weight, root first, to run `run` (0 or 1).
+    /// Adds one stack's weight, root first, to run `run` (0 or 1). Its own
+    /// weight goes to the innermost frame among `charged` -- the frames a
+    /// perf map named: an interpreted function, whose interpreter's native
+    /// frames under it are its own cost -- else to its leaf, as `omn
+    /// triage`'s difference charges it.
     fn add<'a>(
         &mut self,
         frames: impl IntoIterator<Item = &'a str>,
         weight: f64,
         events: u64,
         run: usize,
+        charged: &BTreeSet<String>,
     ) {
         let mut at = 0;
+        let mut charge = None;
         self.nodes[0].value[run] += weight;
         self.nodes[0].events[run] += events;
         for frame in frames {
@@ -399,9 +409,15 @@ impl Tree {
             };
             self.nodes[next].value[run] += weight;
             self.nodes[next].events[run] += events;
+            if !charged.is_empty() && charged.contains(frame.trim_end_matches(RECOVERED)) {
+                charge = Some(next);
+            }
             at = next;
         }
-        self.nodes[at].own[run] += weight;
+        if charge.is_some() {
+            self.charged_by_map = true;
+        }
+        self.nodes[charge.unwrap_or(at)].own[run] += weight;
     }
 
     /// The weight a node is drawn with: its value, or in a comparison the
@@ -555,6 +571,7 @@ fn fill(tree: &mut Tree, results: &[&Results], run: usize, reading: &Reading<'_>
     let mut unplaced = 0u64;
     for one in results {
         let events = one.events();
+        let charged = one.perf_map_named();
         let from_events = wants_events
             && events
                 .iter()
@@ -600,7 +617,7 @@ fn fill(tree: &mut Tree, results: &[&Results], run: usize, reading: &Reading<'_>
                     Some(stack) => path.extend(named(one, stack as u64)),
                     None => path.push("[no stack]".to_owned()),
                 }
-                tree.add(path.iter().map(String::as_str), weight, 1, run);
+                tree.add(path.iter().map(String::as_str), weight, 1, run, &charged);
             }
             if one.losses.evicted > 0 {
                 asides.push(format!(
@@ -638,13 +655,20 @@ fn fill(tree: &mut Tree, results: &[&Results], run: usize, reading: &Reading<'_>
                         stack.total,
                         stack.events,
                         run,
+                        &charged,
                     );
                 }
                 if unattributed == 0 {
                     continue;
                 }
                 if tree.unit != Unit::Nanos {
-                    tree.add(["[no stack]"], unattributed as f64, unattributed, run);
+                    tree.add(
+                        ["[no stack]"],
+                        unattributed as f64,
+                        unattributed,
+                        run,
+                        &BTreeSet::new(),
+                    );
                     continue;
                 }
                 // Off cpu the emit counts the blocks that carried no stack,
@@ -664,7 +688,7 @@ fn fill(tree: &mut Tree, results: &[&Results], run: usize, reading: &Reading<'_>
                     }
                 }
                 if found > 0 {
-                    tree.add(["[no stack]"], time, found, run);
+                    tree.add(["[no stack]"], time, found, run, &BTreeSet::new());
                 }
                 unplaced += unattributed.saturating_sub(found + untimed);
             }
@@ -2264,14 +2288,23 @@ impl Flame {
         } else {
             said_lines.len() + 1
         };
-        let entries = height.saturating_sub(1 + caveat_rows).min(12);
+        // As many as the pane has rows for, and their bars as wide as a
+        // fifth of it: a tall or wide terminal lists more and draws them
+        // larger, rather than leaving the pane's foot empty.
+        let entries = height.saturating_sub(1 + caveat_rows);
+        let bar_cells = (width / 5).clamp(12, 40);
         match &tree.compare {
             None => {
                 lines.push(Line::from(vec![
                     Span::styled("heaviest on their own", bold),
                     Span::styled(
                         fit(
-                            " (where it ends, every path summed)",
+                            if tree.charged_by_map {
+                                " (the innermost frame a perf map named, else where it ends; \
+                                 every path summed)"
+                            } else {
+                                " (where it ends, every path summed)"
+                            },
                             width.saturating_sub(21),
                         ),
                         Style::new().add_modifier(Modifier::DIM),
@@ -2296,14 +2329,17 @@ impl Flame {
                         format!("{:>6} ", units::percent(100.0 * value / total)),
                         style,
                     )];
-                    let bar = trust::error_bar(value, value, high, max, 12);
+                    let bar = trust::error_bar(value, value, high, max, bar_cells as u16);
                     spans.extend(
                         bar.spans
                             .into_iter()
                             .map(|span| span.patch_style(Style::new().fg(palette_for(pane)))),
                     );
                     spans.push(Span::styled(
-                        format!(" {}", fit(&display_name(name), width.saturating_sub(20))),
+                        format!(
+                            " {}",
+                            fit(&display_name(name), width.saturating_sub(8 + bar_cells))
+                        ),
                         style,
                     ));
                     lines.push(Line::from(spans));
@@ -2619,12 +2655,22 @@ mod tests {
                 .filter(|change| !unnamed(change))
                 .count()
         };
+        // The recordings say which frames their perf map named, so each
+        // sample's own weight is the Python function it ran in: the one the
+        // heavier run calls more, `score`, moves absolutely, and nothing
+        // named moves in shape.
         assert!(
-            named(&absolute) >= 4 * named(&shape).max(1),
+            named(&absolute) > named(&shape),
             "absolutely {} named functions moved, in shape {}: the heavier run is the same \
              program doing more, which only the shape comparison says",
             named(&absolute),
             named(&shape)
+        );
+        assert!(
+            difference
+                .iter()
+                .any(|change| change.function.starts_with("py::score:")),
+            "{difference:?}"
         );
         assert!(
             moved(&absolute) >= 2 * moved(&shape),

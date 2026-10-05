@@ -17,7 +17,7 @@ omn top │ fixture workload-ledger │ 1.26s                         view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃ wlan0       192B     █   │
-│sockets 2.25MiB -> interfaces 4.51MiB = 2.01x · 5 interfaces idle · lo counts a byte twice; sockets are not tied to in│
+│sockets 2.25MiB -> interfaces 4.51MiB = 2.01x · 5 interfaces idle · lo counts a byte twice; a socket is tied to the in│
 │ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ───────────────────────────│
 │         thread             descriptor                                         cache         device, the machine's    │
 │    ledger-main ┃█████████┃ fd 40            █     →4.00MiB            ┃█████████┃█████████┃ 259:0    4.16MiB    █    │

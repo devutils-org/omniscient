@@ -182,6 +182,21 @@ record_sqlite_latency() {
     commits "$work/latency.sql"
     "$omn" latency --objective latency --dump-session --format yaml -- \
         sqlite3 -init "$work/latency.sql" "$work/latency.db" .quit >"$work/latency.yml"
+    # `omn latency` asks the blocked time for its stacks only; the views draw
+    # it from its events too -- the timebar splits it by state, the lanes
+    # place each block -- so the recording asks its `raw` rows beside them.
+    python3 - "$work/latency.yml" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+head, _, body = text.partition("requests:\n")
+requests = re.split(r"(?m)^(?=- )", body)
+for i, request in enumerate(requests):
+    if re.search(r"(?m)^  label: blocked$", request):
+        requests[i] = re.sub(r"(?m)^(  emit:\n)", r"\1  - raw\n", request, count=1)
+open(path, "w").write(head + "requests:\n" + "".join(requests))
+PY
+    grep -q -- '- raw' "$work/latency.yml"
     "$omn" top --headless -d 20s -f "$work/latency.yml" -o "$here/sqlite-latency" >/dev/null
     keep sqlite-latency
 }

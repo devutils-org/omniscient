@@ -165,6 +165,8 @@ const PEND_KEY: i16 = -96;
 const DROP_KEY: i16 = -100;
 /// Eight bytes a probe read lands in on the way to a register.
 const SCRATCH: i16 = -112;
+/// The calling thread group, as the key of a lookup in the descendants map.
+const FOLLOW_KEY: i16 = -104;
 /// The pending value: when, and which function.
 const PEND_VALUE: i16 = -128;
 const PEND_TS: i16 = 0;
@@ -243,9 +245,14 @@ struct Shape<'a> {
 }
 
 /// The entry half: stamp the thread, unless an outer sync already has.
+///
+/// A process target is compared as a constant, and with `descendants` every
+/// other thread group is looked up in the map of the processes it started:
+/// a launched shell's `sync`-ing child is the run's.
 fn entry_instructions(
     shape: &Shape<'_>,
     narrowing: Narrowing,
+    descendants: Option<i32>,
     pending_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
@@ -255,7 +262,21 @@ fn entry_instructions(
     if let Some(tgid) = narrowing.tgid {
         program.push(Insn::mov64_reg(1, 7));
         program.push(Insn::rsh64_imm(1, 32));
-        program.jump_to(SKIP, Insn::jne_imm(1, tgid as i32, 0));
+        match descendants {
+            None => {
+                program.jump_to(SKIP, Insn::jne_imm(1, tgid as i32, 0));
+            }
+            Some(map) => {
+                program.push(Insn::stx(BPF_W, R10, FOLLOW_KEY, 1));
+                program.jump_to("followed", Insn::jeq_imm(1, tgid as i32, 0));
+                program.extend(Insn::load_map_fd(1, map));
+                program.push(Insn::mov64_reg(2, R10));
+                program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
+                program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+                program.jump_to(SKIP, Insn::jeq_imm(0, 0, 0));
+                program.label("followed");
+            }
+        }
     }
     program.push(Insn::st_imm(BPF_DW, R10, PEND_KEY, 0));
     program.push(Insn::stx(BPF_W, R10, PEND_KEY, 7));
@@ -488,6 +509,8 @@ pub struct FsyncProgram {
     links: Vec<Link>,
     /// Whether `do_fsync` was found and timed.
     pub by_descriptor: bool,
+    /// The processes a process target started, followed from the fork.
+    descendants: Option<crate::bpf::sched_common::Descendants>,
 }
 
 impl FsyncProgram {
@@ -520,6 +543,13 @@ impl FsyncProgram {
             );
         }
         let offsets = Offsets::read(btf)?;
+        let descendants = match narrowing.tgid {
+            Some(root) => Some(crate::bpf::sched_common::Descendants::follow(root)?),
+            None => None,
+        };
+        let followed = descendants
+            .as_ref()
+            .map(crate::bpf::sched_common::Descendants::map_fd);
 
         let bytes = ring_bytes(RING_BYTES);
         let ring_map =
@@ -532,8 +562,13 @@ impl FsyncProgram {
 
         let mut built = Vec::new();
         for shape in &shapes {
-            let entry =
-                entry_instructions(shape, narrowing, pending.as_raw_fd(), drops.as_raw_fd())?;
+            let entry = entry_instructions(
+                shape,
+                narrowing,
+                followed,
+                pending.as_raw_fd(),
+                drops.as_raw_fd(),
+            )?;
             let exit = exit_instructions(
                 shape,
                 &offsets,
@@ -570,6 +605,7 @@ impl FsyncProgram {
             pending,
             links,
             by_descriptor: by_descriptor.is_some(),
+            descendants,
         })
     }
 
@@ -593,6 +629,17 @@ impl FsyncProgram {
     /// Runs the kernel skipped; see `fentry::Link::misses`.
     pub fn missed(&self) -> u64 {
         fentry::misses(&self.links)
+            + self
+                .descendants
+                .as_ref()
+                .map_or(0, crate::bpf::sched_common::Descendants::skipped)
+    }
+
+    /// Processes the target started that the map had no room for.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants
+            .as_ref()
+            .map_or(0, crate::bpf::sched_common::Descendants::missed)
     }
 
     /// Stamps left, as `(in flight, orphaned)`.
@@ -688,7 +735,8 @@ mod tests {
                     .any(|insn| insn.code == 0x55 && insn.imm == via as i32),
                 "the {name} exit must compare the stamp's tag with its own"
             );
-            let entry = entry_instructions(&shape, Narrowing::default(), 3, 5).expect("a program");
+            let entry =
+                entry_instructions(&shape, Narrowing::default(), None, 3, 5).expect("a program");
             assert!(
                 entry
                     .iter()

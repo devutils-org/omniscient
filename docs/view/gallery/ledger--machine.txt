@@ -2,7 +2,8 @@ omn top │ fixture machine │ 20.0s                                           
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ ledger -- what the machine cost over 20.0s of wall-clock ────────────────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
-│▸ cpu time        2.75s on cpu     13.7% of one cpu          █▃▃▃▃▃▃▂▂▂▂▃▂▂▂▂▂▂▂▂▃▄▂▂     ≥323ms  ~low det            │
+│                                                             █                    ▁                                   │
+│▸ cpu time        2.75s on cpu     13.7% of one cpu          █▄▅▄▄▄▄▃▃▃▅▃▄▃▃▃▃▃▃▄██▅▃     ≥323ms  ~low det            │
 │    task 2619032        591ms  ███          21.5%                                                                     │
 │    task 3085           171ms  █            6.23%                                                                     │
 │    task 2412           110ms  ▏            3.99%                                                                     │
@@ -15,9 +16,11 @@ omn top │ fixture machine │ 20.0s                                           
 │  I/O syscalls    not in this run: io.syscall was not asked for                                                       │
 │  network         not in this run: net.socket was not asked for                                                       │
 │  retransmits     not in this run: net.tcp.retransmit@system was not asked for                                        │
+│                                                                                                                      │
 │  GPU memory      654MiB peak      of 654MiB on the device   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄     7.05ms                      │
 │  GPU time        not in this run: gpu.kernel was not asked for                                                       │
-│  energy          431J machine     21.5W on average          █▄▄▄▄▄▇▄▄▄▅▅▇▄▄▄▄▄▇▄█▇▆▆     ≥754µs                      │
+│                                                             █     ▇   ▂ █     █▆▆▂▄▅                                 │
+│  energy          431J machine     21.5W on average          █▆▆▆▆▆█▆▆▆█▆█▇▆▆▆▇██████     ≥754µs                      │
 │                                                                                                                      │
 │  to know all of this: ≥331ms of omn's cpu                                                                            │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
@@ -27,9 +30,6 @@ omn top │ fixture machine │ 20.0s                                           
 │· to know it: 323ms of omn's cpu, and unknown inside the target -- the kernel is not timing eBPF programs on this run:│
 │`kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl            │
 │kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable                 │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

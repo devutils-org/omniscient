@@ -8,7 +8,7 @@
 //! is drawn provisional. When it ends, [`Update::Ended`] replaces it all with
 //! the run as `results.json` would hold it.
 
-use crate::model::{Data, Event, Live, Output};
+use crate::model::{Data, Drain, Event, Live, Output};
 
 /// The most events a live request keeps on screen. Older ones are let go and
 /// counted as evicted, with the reason, so the figure built from what is left
@@ -30,6 +30,18 @@ pub enum Update {
     },
     /// The runner's clock, when nothing new arrived.
     Tick { now_ns: u64 },
+    /// What the collector of request `index` says of its events, on every
+    /// change, even after its first events were drawn: the attribute its
+    /// value is in, the stamp its rows carry, and the drains that found
+    /// drops so far. A source attached late, or a drop found mid-run, reaches
+    /// the screen when it happens rather than at the end; the result's events
+    /// stay as they are.
+    Described {
+        index: usize,
+        value_attr: Option<String>,
+        row_stamp: Option<String>,
+        drains: Vec<Drain>,
+    },
     /// The run is over: the whole of it.
     Ended(Box<Data>),
     /// The run starts over with these requests: the runner refused some
@@ -105,6 +117,25 @@ pub fn apply(data: &mut Data, update: Update) {
                 live.now_ns = live.now_ns.max(now_ns);
             }
         }
+        Update::Described {
+            index,
+            value_attr,
+            row_stamp,
+            drains,
+        } => {
+            if let Some(results) = data.run.results.get_mut(index) {
+                results.value_attr = value_attr;
+                results.row_stamp = row_stamp;
+                // A drain the view holds and the runner no longer lists is
+                // kept: drops are never forgotten once they were drawn.
+                for drain in drains {
+                    if !results.drains.contains(&drain) {
+                        results.drains.push(drain);
+                    }
+                }
+                results.drains.sort_by_key(|drain| drain.ts_ns);
+            }
+        }
         Update::Restart(restart) => *data = *restart,
         Update::Abort => {}
         Update::Ended(ended) => {
@@ -171,6 +202,58 @@ pub fn as_live_until(data: &Data, until_ns: u64) -> Data {
 mod tests {
     use super::*;
     use crate::model::Results;
+
+    /// A result described after its first events keeps them, takes the
+    /// description, and adds each drain once: the update a late source and a
+    /// mid-run drop reach the screen by.
+    #[test]
+    fn a_description_after_the_first_events_keeps_them_and_adds_its_drains() {
+        let mut data = live();
+        apply(
+            &mut data,
+            Update::Events {
+                index: 0,
+                events: vec![event(1), event(2)],
+                now_ns: 2,
+                unconverted: None,
+            },
+        );
+        let drain = |ts_ns, dropped| Drain { ts_ns, dropped };
+        apply(
+            &mut data,
+            Update::Described {
+                index: 0,
+                value_attr: Some("bytes".into()),
+                row_stamp: Some("end".into()),
+                drains: vec![drain(5, 3)],
+            },
+        );
+        apply(
+            &mut data,
+            Update::Described {
+                index: 0,
+                value_attr: Some("bytes".into()),
+                row_stamp: Some("end".into()),
+                drains: vec![drain(9, 1), drain(5, 3)],
+            },
+        );
+        let results = &data.run.results[0];
+        assert_eq!(results.events().len(), 2, "the events stay");
+        assert_eq!(results.value_attr.as_deref(), Some("bytes"));
+        assert_eq!(results.row_stamp.as_deref(), Some("end"));
+        assert_eq!(results.drains, vec![drain(5, 3), drain(9, 1)]);
+        // An index the run does not have changes nothing.
+        apply(
+            &mut data,
+            Update::Described {
+                index: 7,
+                value_attr: None,
+                row_stamp: None,
+                drains: Vec::new(),
+            },
+        );
+        assert_eq!(data.run.results.len(), 1);
+    }
 
     #[test]
     fn a_source_kept_without_raw_says_it_arrives_empty() {

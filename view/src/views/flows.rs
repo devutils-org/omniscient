@@ -184,7 +184,9 @@ struct Sink {
     bytes: f64,
     spark: Vec<f64>,
     /// The target's files on it, from `io.fs`'s `blk_devs`, and the bytes
-    /// they moved through the page cache: the file -> device edge.
+    /// they moved through the page cache: the file -> device edge; for an
+    /// interface, the target's sockets whose route left by it, from
+    /// `net.socket`'s `iface`, and their bytes: the socket -> interface edge.
     fed: Option<(usize, u64)>,
 }
 
@@ -461,7 +463,57 @@ fn network(ctx: &Ctx<'_>) -> Band {
         band.title = title(data, &other, "net.socket");
     }
     fill_machine(&mut band, data, "net.bytes", "iface:");
+    route(&mut band, ctx, &raw);
     band
+}
+
+/// The socket -> interface edge: each socket row's interface key (the
+/// interface its cached route left by at the call, `net.socket`'s `iface`)
+/// names the interface the machine's column measured, as a file's
+/// `blk_devs` names its device. A row with no route carries none, and ties
+/// nothing.
+fn route(band: &mut Band, ctx: &Ctx<'_>, sockets: &[&Results]) {
+    let mut fed: BTreeMap<String, (BTreeSet<u64>, u64)> = BTreeMap::new();
+    for results in sockets {
+        for event in results.events() {
+            let tid = event
+                .tid()
+                .or_else(|| event.number("tid").map(|tid| tid as i32))
+                .unwrap_or(0);
+            let pid = event
+                .pid()
+                .or_else(|| event.number("pid").map(|pid| pid as i32))
+                .unwrap_or(0);
+            if ctx.focus.pid.is_some_and(|focus| focus != pid)
+                || ctx.focus.tid.is_some_and(|focus| focus != tid)
+            {
+                continue;
+            }
+            let Some(cookie) = event.keys.iter().find_map(|key| match key {
+                Key::Sock { cookie } => Some(*cookie),
+                _ => None,
+            }) else {
+                continue;
+            };
+            // The key names the interface as the machine's source keys it,
+            // its namespace included; the attribute is the bare name.
+            let Some(iface) = event.keys.iter().find_map(|key| match key {
+                Key::Iface { .. } => Some(key.to_string()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let bytes = event.number("bytes").unwrap_or(0.0).max(0.0) as u64;
+            let entry = fed.entry(iface).or_default();
+            entry.0.insert(cookie);
+            entry.1 += bytes;
+        }
+    }
+    for sink in &mut band.sinks {
+        if let Some((sockets, bytes)) = fed.get(&sink.key) {
+            sink.fed = Some((sockets.len(), *bytes));
+        }
+    }
 }
 
 fn storage(ctx: &Ctx<'_>) -> Band {
@@ -1077,9 +1129,13 @@ impl Columns {
     fn for_width(width: u16) -> Columns {
         let task_width = 15;
         let sink_width = 24.min(width / 5);
-        let ribbon = (width / 12).clamp(4, 10);
+        // Past the 118 cells of a 120-column terminal the ribbons and the
+        // objects' column take the extra width, so the diagram spans the
+        // terminal rather than leaving its right half to the sinks' labels.
+        let extra = width.saturating_sub(118);
+        let ribbon = (width / 12).clamp(4, 10) + extra / 7;
         let fixed = task_width + 1 + 1 + ribbon + 1 + 1 + ribbon + 1 + ribbon + 2 + sink_width;
-        let object_width = width.saturating_sub(fixed).clamp(12, 44);
+        let object_width = width.saturating_sub(fixed).clamp(12, 44 + extra / 6);
         let task_bar = task_width + 1;
         let object_bar = task_bar + 1 + ribbon;
         let object_label = object_bar + 1;
@@ -1541,7 +1597,12 @@ fn draw_band(
             span,
             band.machine_trust.style().fg(MACHINE),
         );
-        let line = sink_line(sink, &band.machine_trust, usize::from(columns.sink_width));
+        let line = sink_line(
+            sink,
+            band.kind,
+            &band.machine_trust,
+            usize::from(columns.sink_width),
+        );
         buffer.set_line(
             diagram.x + columns.sink_label,
             diagram.y + span.0 as u16,
@@ -1700,7 +1761,7 @@ fn object_figures(object: &Object, seconds: f64) -> String {
     text
 }
 
-fn sink_line(sink: &Sink, trust: &Trust, width: usize) -> Line<'static> {
+fn sink_line(sink: &Sink, kind: Kind, trust: &Trust, width: usize) -> Line<'static> {
     let style = trust.style();
     let name_width = width.saturating_sub(17).clamp(4, 10);
     let mut spans = vec![
@@ -1712,10 +1773,15 @@ fn sink_line(sink: &Sink, trust: &Trust, width: usize) -> Line<'static> {
         Span::raw(" "),
         Span::styled(sparkline(&sink.spark), style.fg(BAR)),
     ];
-    if let Some((files, _)) = sink.fed {
-        // The edge from the target's files, in words beside the device.
+    if let Some((count, _)) = sink.fed {
+        // The edge from the target's files or sockets, in words beside the
+        // device or the interface.
+        let word = match kind {
+            Kind::Network => "socket",
+            Kind::Storage => "file",
+        };
         spans.push(Span::styled(
-            format!(" ◂ {files} file{}", if files == 1 { "" } else { "s" }),
+            format!(" ◂ {count} {word}{}", if count == 1 { "" } else { "s" }),
             Style::new().add_modifier(Modifier::DIM),
         ));
     }
@@ -1804,8 +1870,12 @@ fn footer_line(band: &Band, dropped: &[String]) -> Line<'static> {
     if spans.is_empty() {
         return Line::default();
     }
+    let routed = band.sinks.iter().any(|sink| sink.fed.is_some());
     spans.push(Span::styled(
         match band.kind {
+            Kind::Network if routed => {
+                " · lo counts a byte twice; a socket is tied to the interface its route left by"
+            }
             Kind::Network => " · lo counts a byte twice; sockets are not tied to interfaces",
             Kind::Storage if !band.comparable => {
                 " · no ratio: a descriptor may be a socket or a pipe, whose bytes never \
@@ -2219,7 +2289,7 @@ mod tests {
             .objects
             .iter()
             .any(|object| object.detail.contains("above block device 259:0")));
-        let line = sink_line(fed[0], &Trust::clean(), 40);
+        let line = sink_line(fed[0], Kind::Storage, &Trust::clean(), 40);
         let text: String = line
             .spans
             .iter()

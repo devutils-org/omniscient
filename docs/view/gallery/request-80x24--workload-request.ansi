@@ -1,0 +1,24 @@
+[0m[1momn top[0m │ fixture workload-request │ 1.14s                       [0m[35mview: snapshot[0m [0m
+ 1 system  2 flame  3 ledger [0m[1;7m 4 request [0m 5 timebar  6 heatmap  7 lanes  8 wake  [0m
+┌ request -- what one request costs ───────────────────────────────────────────┐[0m
+│[0m[1m16 requests served by server (pid 2622175)[0m · slowest a010 40.5ms · median 30.1│[0m
+│                                                                              │[0m
+│[0m[1m  req      span  its life by state, to on…  mostly[0m                            │[0m
+│[0m[32m▶ [0m[1;32ma001 [0m[1m   153µs  [0m▏                          net in 72.7% · on cpu 27.3%       │[0m
+│[0m[32m  [0ma002   30.3ms  [0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m        lock/sleep 99.4%                  │[0m
+│[0m[32m  [0ma003   8.76ms  [0m[32m█[0m[34m▄▄▄▄[0m                      disk 83.1% · on cpu 9.96%[0m[2m  +13 mor[0m│[0m
+│  [0m[36m░░ [0m[2mnet in   [0m[32m██ [0m[2mon cpu   [0m[33m▓▓ [0m[2mrun queue   [0m[35m▀▀ [0m[2mlock/sleep   [0m[34m▄▄ [0m[2mdisk   [0m[96m░░ [0m[2mnet out [0m│[0m
+│                                                                              │[0m
+│[0m[1;32m── a001 · 153µs from its first byte in to its last byte out · thread 2622175 [0m[2m─[0m│[0m
+│[0m[2m            ┊0               ┊100µs   [0m                                        │[0m
+│[0m[36m  net in    ░░░░░░░░░░░░░░░░░░░[0m         111µs before start                    │[0m
+│[0m[1m  serving   [0m                  [0m[32m████████[0m  41.7µs from start to done             │[0m
+│[0m[34m  on device [0m                          [0m[2m  no block request[0m                      │[0m
+│[0m[96m  net out   [0m                          [0m[2m  gone when done[0m                        │[0m
+│[0m[2;3m  inside `serving` the states are drawn by share: net.request sums them, it do[0m│[0m
+│                                                                              │[0m
+│[0m[1m  where its 153µs went               [0m[2mevidence[0m                       [0m[1mits share[0m │[0m
+│                                                                              │[0m
+│[0m[1m  what sets it apart from the other 15 requests: [0m[36m░ [0m[31mnet in +99.3µs[0m[2m (theirs 11.5[0m│[0m
+└──────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m request  [0m[1ms[0m sort  [0m[1mente[0m

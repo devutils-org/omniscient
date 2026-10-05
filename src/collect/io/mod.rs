@@ -28,6 +28,7 @@ mod pagecache;
 mod pressure;
 mod underneath;
 pub(super) mod vfs;
+mod vfscount;
 mod writeback;
 
 /// Whether this request's collector builds a log2 histogram in the kernel and
@@ -101,6 +102,12 @@ pub fn factories() -> Vec<Factory> {
                 resolved.request.mode,
             )?))
         }),
+        Factory::new("io.util", "fs:proc", |resolved| {
+            Ok(Box::new(diskstats::Prepare::new(
+                Metric::Util,
+                resolved.request.mode,
+            )?))
+        }),
         Factory::new("io.pressure", "fs:proc", |resolved| {
             Ok(Box::new(pressure::Prepare::new(resolved.request.mode)?))
         }),
@@ -144,6 +151,13 @@ pub fn factories() -> Vec<Factory> {
         Factory::new("io.fs", "bpf:fentry", |resolved| {
             Ok(Box::new(vfs::Prepare {
                 layer: Layer::Fs,
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        // Every VFS call, counted by function and timed never: `vfsstat`.
+        Factory::new("io.vfs", "bpf:fentry", |resolved| {
+            Ok(Box::new(vfscount::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
             }))

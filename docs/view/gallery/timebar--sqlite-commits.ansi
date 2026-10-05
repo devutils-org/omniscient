@@ -8,6 +8,10 @@
 │   most-sampled leaf `sqlite3+0x90183`: 241 of 4653 samples: the samples are spread, no one function dominates        │[0m
 │ [0m[2m  decisive: ahead of the next state (410ms) and of what no row read (0ns) -- omn latency's rule, on the view's read…[0m │[0m
 │                                                                                                                      │[0m
+│                       [0m[2m│[0m[2;32m████████████████████████████████████████████████████████[0m[2;34m▓▓▓▓▓[0m[2m ┤[0m                               │[0m
+│                       [0m[2m│[0m[2;32m████████████████████████████████████████████████████████[0m[2;34m▓▓▓▓▓[0m[2m ┤[0m                               │[0m
+│                       [0m[2m│[0m[2;32m████████████████████████████████████████████████████████[0m[2;34m▓▓▓▓▓[0m[2m ┤[0m                               │[0m
+│                       [0m[2m│[0m[2;32m████████████████████████████████████████████████████████[0m[2;34m▓▓▓▓▓[0m[2m ┤[0m                               │[0m
 │ [0m[1;32m▸ 2618623 sqlite3     [0m[2m├[0m[2;32m█████████████████████[0m[1;2;7;32m on cpu 90.8% [0m[2;32m█████████████████████[0m[2;34m▓▓▓▓▓[0m[2m ┤    5.11s [0m[1;32m ▶ on cpu 90.8%    [0m  │[0m
 │ [0m[2m                     0 ───────────────────────────┼ 2.55s ───────────────────────────┤ 5.11s                        [0m │[0m
 │                        [0m[32m█[0m on cpu   [0m[35m▚[0m run queue   [0m[34m▓[0m I/O                                                                │[0m
@@ -26,10 +30,6 @@
 │ [0m[2m  latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.[0m                              │[0m
 │ [0m[2mTrust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it[0m  │[0m
 │ [0m[2m  gives up (2).[0m                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

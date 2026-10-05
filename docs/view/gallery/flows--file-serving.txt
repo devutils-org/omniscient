@@ -17,7 +17,7 @@ omn top │ fixture file-serving │ 2.56s                            view: snap
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃                          │
 │                                                                                 ┃█████████┃ wlan0    2.34KiB  ▂ ▂█▄ ▇│
-│sockets 112MiB -> interfaces 224MiB = 2.00x · 5 interfaces idle · lo counts a byte twice; sockets are not tied to inte│
+│sockets 112MiB -> interfaces 224MiB = 2.00x · 5 interfaces idle · lo counts a byte twice; a socket is tied to the inte│
 │ storage · io.fs bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low det degraded ────────────────────────────────│
 │         thread             file                                               cache         device, the machine's    │
 │Thread-1 (proce ┃█████████┃ btrfs 3898837 ███▅██▅  ←96.0MiB            ┃█████████┃█████████┃ 259:0    15.5MiB ▂▂▁█▂▂▁ │

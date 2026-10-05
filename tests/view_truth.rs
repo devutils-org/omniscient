@@ -287,6 +287,25 @@ fn flows_draws_the_sockets_bytes_exactly() {
     );
 }
 
+/// `flows`: the workload's one socket is a loopback connection
+/// (`127.0.0.1`), so its route leaves by `lo`: the interface drawn tied to
+/// it, and to no other.
+#[test]
+fn flows_ties_the_socket_to_the_loopback() {
+    let drawn = screen("flows", &[], 200, 50);
+    let tied: Vec<&str> = drawn.lines().filter(|line| line.contains("◂ ")).collect();
+    let sockets: Vec<&&str> = tied
+        .iter()
+        .filter(|line| line.contains(" socket"))
+        .collect();
+    assert_eq!(sockets.len(), 1, "one interface tied:\n{drawn}");
+    let after_bar = sockets[0].rsplit('┃').next().expect("the sink column");
+    assert!(
+        after_bar.trim_start().starts_with("lo ") && after_bar.contains("◂ 1 socket"),
+        "{after_bar}\n{drawn}"
+    );
+}
+
 /// `flows`: each file's bytes are exact, each way, on the descriptor the
 /// manifest says it was opened on (`io.syscall`'s rows are per descriptor).
 #[test]
@@ -556,6 +575,39 @@ fn request_draws_each_requests_cause() {
 /// the one core `crunch` burns, the resident peak above the 32 MiB touched,
 /// the socket's bytes exact over the program's life, and the lock wait named
 /// on the time line.
+/// Each request's bytes on its socket, read off the request view, against
+/// the server's own text: the request line the client sends
+/// (`examples/vertical/server.c`, `GET /?lock=<ms>&reads=<n>&body=<n>
+/// HTTP/1.1` and its `Host` header) and the response it answers with (a
+/// 57-byte header and a 2-byte body), counted from the plan.
+#[test]
+fn request_draws_each_requests_bytes_as_its_server_wrote_them() {
+    let truth = manifest("request");
+    let kinds = truth["requests"].as_array().expect("requests");
+    let total: usize = kinds.iter().map(|kind| num(&kind["count"]) as usize).sum();
+    let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n".len() + 2;
+    for index in 0..total {
+        let kind = &kinds[index % kinds.len()];
+        let plan: Vec<&str> = kind["plan"].as_str().expect("a plan").split(':').collect();
+        let request = format!(
+            "GET /?lock={}&reads={}&body=0 HTTP/1.1\r\nHost: omn\r\n\r\n",
+            plan[0], plan[1]
+        )
+        .len();
+        let keys = vec![KeyCode::Down; index];
+        let drawn = screen("request", &keys, 160, 60);
+        let id = format!("a{:03x}", index + 1);
+        assert!(
+            drawn.contains(&format!("── {id} ")),
+            "{id} not selected:\n{drawn}"
+        );
+        let read: f64 = in_line(&drawn, " read · ", bytes);
+        let queued: f64 = first(&drawn, " read · ", bytes);
+        assert_eq!(read, request as f64, "{id}: read\n{drawn}");
+        assert_eq!(queued, response as f64, "{id}: queued\n{drawn}");
+    }
+}
+
 #[test]
 fn process_draws_each_line_as_its_workload_loaded_it() {
     let truth = manifest("process");

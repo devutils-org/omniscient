@@ -6,11 +6,13 @@ omn top │ fixture file-serving │ 2.56s                            view: snap
 │  blocked time    not in this run: sched.offcpu was not asked for                                                     │
 │  memory held     not in this run: mem.rss was not asked for                                                          │
 │  memory faulted  not in this run: mem.faults was not asked for                                                       │
+│                                                                                                                      │
 │  I/O syscalls    888 calls        14.7ms inside them        1.02µs ▄▂▂▂█▁▁▁ 262µs       ≥6.51ms  ~low det degraded x2│
 │    2620523 Thread…    13.2ms  ███████████  89.8%                                                                     │
 │    2620518 python3    1.50ms  █            10.2%                                                                     │
 │    bytes              112MiB  read, 3.00MiB written                                                                  │
-│  network         112MiB moved     109MiB out, 3.00MiB in     █ █▇█ █▁█ ██ ██ ██▁        ≥6.24ms  ~low det degraded x3│
+│                                                             █ █▆ █ █ ██ █ ███ █                                      │
+│  network         112MiB moved     109MiB out, 3.00MiB in    █ ██▃█ █▁██ █ ███ █▁        ≥6.24ms  ~low det degraded x3│
 │    568 socket calls                                                                                                  │
 │  retransmits     not in this run: net.tcp.retransmit@system was not asked for                                        │
 │  GPU memory      not in this run: gpu.mem was not asked for                                                          │
@@ -23,8 +25,6 @@ omn top │ fixture file-serving │ 2.56s                            view: snap
 │cpu.oncpu_time -- cpu time, per thread                                                                                │
 │This run did not ask for it. `omn top` live asks for every line of the sheet; a recording made by another session     │
 │holds what that session asked.                                                                                        │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

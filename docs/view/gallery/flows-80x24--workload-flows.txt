@@ -1,0 +1,24 @@
+omn top │ fixture workload-flows │ 993ms                         view: snapshot
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake
+┌ flows -- where the bytes went: process to socket to interface, process to fil┐
+│pid 2621407 over 993ms   4.00MiB sent, 1.00MiB received   9.00MiB written, 9.6│
+│ network · net.socket bpf:fentry ~low det degraded x3 · net.bytes fs:proc ~low│
+│         thread          socket                     stack      interface, the │
+│     flows-main ┃██████┃▶inet :41506      █    ┃██████┃██████┃ lo   10.0MiB   │
+│    tid 2621407 ┃▀▀▀▀▀▀┃  5.03MiB/s, 84 calls, ┃▀▀▀▀▀▀┃██████┃                │
+│                                                      ┃██████┃                │
+│                                                      ┃██████┃                │
+│                                                      ┃██████┃ wla…    192B   │
+│sockets 5.00MiB -> interfaces 10.0MiB = 2.01x · 5 interfaces idle · lo counts │
+│ storage · io.syscall bpf:fentry ~low det degraded x2 · io.bytes fs:proc ~low │
+│         thread          descriptor                 cache      device, the mac│
+│     flows-main ┃██████┃ fd 40            █    ┃██████┃██████┃ 259… 9.27MiB   │
+│    tid 2621407 ┃██▀▀██┃  16.1MiB/s, 257 calls,┃██████┃██████┃                │
+│                ┃██████┃ fd 3          █       ┃██████┃                       │
+│                ┃███▀██┃ fd 41            █    ┃██████┃                       │
+│                ┃▀▀████┃ fd 2                 █┃██████┃                       │
+│descriptors 18.6MiB -> devices 9.27MiB · 2 devices idle · no ratio: a descript│
+│▶ socket 172841 (inet, peer port 41506): 4.00MiB sent in 64 calls, 4.03MiB/s; │
+│1.00MiB received in 20 calls, 1.01MiB/s                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ socket or file  enter
