@@ -2835,3 +2835,75 @@ fn a_cgroup_target_sees_the_forks_signals_and_calls_inside_it_and_none_beside_it
          the run reports lost, and {ceiling} after omn started, and {calls} calls were kept"
     );
 }
+
+/// `proc.syscall`'s `comm` is the name each call was made under (the
+/// twenty-second wave's bpftrace gap 1, a defect until the twenty-fourth).
+///
+/// The row used to keep the name its window's first call saw, so a task that
+/// renamed itself kept its old name on every call it had made once in that
+/// window, and `comm == "<new name>"` dropped them: 500 opens after a
+/// `prctl(PR_SET_NAME)` counted 1. Ground truth is the workload's own
+/// choice: `N` failing opens under `python3`, the rename, `N` opens that
+/// succeed and `N` that fail, all under the new name. Keyed `comm,syscall`,
+/// the new name's series is exactly `2N` calls, and its rows' `errors` add
+/// up to exactly `N`.
+#[test]
+fn a_task_that_renames_itself_is_counted_under_each_name_with_its_errors() {
+    needs_python!();
+    const N: u64 = 300;
+    let program = format!(
+        "import ctypes, os, sys\n\
+         libc = ctypes.CDLL(None)\n\
+         def fail():\n    try: os.close(os.open('/nonexistent-omn-rename', os.O_RDONLY))\n    except OSError: pass\n\
+         for _ in range({N}): fail()\n\
+         libc.prctl(15, b'omn-renamed', 0, 0, 0)\n\
+         for _ in range({N}): os.close(os.open('/proc/self/stat', os.O_RDONLY))\n\
+         for _ in range({N}): fail()\n\
+         sys.stderr.write('CALLS {N}\\n')\n"
+    );
+    let output = omn(&[
+        "proc.syscall",
+        "--mode",
+        "count",
+        "--emit",
+        "raw",
+        "--keys",
+        "comm,syscall",
+        "--filter",
+        "syscall == \"openat\" && comm == \"omn-renamed\"",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        &program,
+    ]);
+    if skipped_without_bpf(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(reported(&output, "CALLS "), N);
+    let doc = document(&output);
+    let rows = events(&doc["results"][0]);
+    let calls: f64 = rows.iter().filter_map(|row| attr_f64(row, "count")).sum();
+    let errors: f64 = rows.iter().filter_map(|row| attr_f64(row, "errors")).sum();
+    assert_eq!(
+        calls as u64,
+        2 * N,
+        "the renamed task opened {} times; losses {}",
+        2 * N,
+        doc["results"][0]["losses"]
+    );
+    assert_eq!(errors as u64, N, "{N} of those opens failed");
+    for row in &rows {
+        let keys = row["keys"].to_string();
+        assert!(
+            keys.contains("omn-renamed"),
+            "a row of another name: {keys}"
+        );
+        assert!(
+            keys.contains("\"openat\""),
+            "a row of another syscall: {keys}"
+        );
+    }
+}

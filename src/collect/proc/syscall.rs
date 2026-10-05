@@ -190,7 +190,7 @@ fn pushed_down_syscall(filter: &FilterExpr) -> Result<Option<u32>, String> {
     }
 }
 
-/// One `(task, syscall, bucket)` row's totals over a counted run.
+/// One `(task, comm, syscall, bucket)` row's totals over a counted run.
 ///
 /// Named rather than a tuple in the map's value because three numbers of the
 /// same type in a row is where a swap goes unnoticed.
@@ -198,11 +198,14 @@ fn pushed_down_syscall(filter: &FilterExpr) -> Result<Option<u32>, String> {
 struct CountedRow {
     calls: u64,
     total_ns: u64,
-    comm: String,
+    errors: u64,
 }
 
-/// A counted run's rows, keyed the way the kernel keys them.
-type CountedRows = std::collections::BTreeMap<(u32, u32, u32, u32), CountedRow>;
+/// A counted run's rows, keyed the way the kernel keys them: `(tid, tgid,
+/// nr, bucket, comm)`. The name is in the key for the reason the kernel's row
+/// carries it there -- a task that renames itself is two rows, each call under
+/// the name it was made with.
+type CountedRows = std::collections::BTreeMap<(u32, u32, u32, u32, String), CountedRow>;
 
 pub struct SyscallCollector {
     id: CollectorId,
@@ -304,8 +307,10 @@ impl SyscallCollector {
                 ts_err_ns: 0,
                 kind: "proc.syscall".to_owned(),
                 // The calling task is the series: this is its latency, not the
-                // machine's.
-                keys: vec![KeyValue::task(row.tid as i32)],
+                // machine's. The syscall and the name ride beside it, so `-k
+                // syscall` is one run's `strace -c` table and `-k comm` the
+                // bpftrace tools' per-name one.
+                keys: keys(&row),
                 attrs: attributes(&row, window_ns),
                 collector_id: self.id.clone(),
                 seq: seq + index as u64,
@@ -321,11 +326,11 @@ impl SyscallCollector {
             if counting {
                 let total = self
                     .totals
-                    .entry((row.tid, row.tgid, row.nr, row.bucket))
+                    .entry((row.tid, row.tgid, row.nr, row.bucket, row.comm))
                     .or_default();
                 total.calls += row.count;
                 total.total_ns += row.total_ns;
-                total.comm = row.comm;
+                total.errors += row.errors;
                 continue;
             }
             self.rows += 1;
@@ -345,7 +350,7 @@ impl SyscallCollector {
         let window_ns = monotonic_ns().saturating_sub(self.window_opened_ns);
         let closed_ns = monotonic_ns();
         let mut events = Vec::with_capacity(self.totals.len());
-        for (index, ((tid, tgid, nr, bucket), total)) in self.totals.iter().enumerate() {
+        for (index, ((tid, tgid, nr, bucket, comm), total)) in self.totals.iter().enumerate() {
             let row = SyscallRow {
                 tid: *tid,
                 tgid: *tgid,
@@ -353,8 +358,9 @@ impl SyscallCollector {
                 bucket: *bucket,
                 count: total.calls,
                 total_ns: total.total_ns,
+                errors: total.errors,
                 first_ns: 0,
-                comm: total.comm.clone(),
+                comm: comm.clone(),
             };
             self.rows += 1;
             events.push(Event {
@@ -370,7 +376,7 @@ impl SyscallCollector {
                 },
                 ts_err_ns: 0,
                 kind: "proc.syscall".to_owned(),
-                keys: vec![KeyValue::task(row.tid as i32)],
+                keys: keys(&row),
                 attrs: attributes(&row, window_ns),
                 collector_id: self.id.clone(),
                 seq: seq + index as u64,
@@ -422,6 +428,16 @@ impl SyscallCollector {
     }
 }
 
+/// The keys a row's event carries: its task first, which is the series when
+/// no key is asked for, then the syscall and the name.
+fn keys(row: &SyscallRow) -> Vec<KeyValue> {
+    vec![
+        KeyValue::task(row.tid as i32),
+        KeyValue::syscall(syscall_names::label(row.nr)),
+        KeyValue::comm(row.comm.clone()),
+    ]
+}
+
 /// What an event carries beside its value.
 ///
 /// `comm`, `pid` and `syscall` are here because the catalog entry declares them
@@ -445,6 +461,10 @@ fn attributes(row: &SyscallRow, window_ns: u64) -> Vec<Attr> {
         // a log2 bucket is a factor of two wide, so a total built from bounds
         // inherits that error and this does not.
         Attr::uint("total_ns", row.total_ns),
+        // How many of `count` returned an errno (`[-4095, -1]`), which is
+        // `strace -c`'s `errors` column. Summed, not weighted: it is already
+        // a count of calls.
+        Attr::uint("errors", row.errors),
         Attr::uint("bucket", u64::from(row.bucket)),
         // The interval the row was collected over. Not a denominator: a call is
         // counted where it ended, so a call longer than the tick reports
@@ -582,6 +602,7 @@ mod tests {
             bucket: 11,
             count: 42,
             total_ns: 55_000,
+            errors: 3,
             first_ns: 0,
             comm: "sh".to_owned(),
         }

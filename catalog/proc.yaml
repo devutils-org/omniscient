@@ -11,8 +11,8 @@
   modes: [trace, count]
   emits: [hist, topk, rate, raw, summary]
   targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, system: native}
-  keys: [task]
-  filter_fields: [comm, syscall, pid]
+  keys: [task, syscall, comm]
+  filter_fields: [comm, syscall, pid, errors]
   determinism: low
   caveats:
     - "An event is one bucket of one window, and it is stamped at the moment the
@@ -23,6 +23,14 @@
        was."
     - "raw_syscalls fires on everything: aggregate in the kernel, or filter by
        syscall number inside the eBPF program."
+    - "Every row carries its task, its syscall and the task's name when the call
+       returned, so `-k syscall` is one run's `strace -c` table and `-k comm`
+       the bpftrace tools' per-name one. A task that renames itself
+       (`prctl(PR_SET_NAME)`) is counted under each name for the calls it made
+       with it."
+    - "`errors` on each row is how many of its calls returned an errno (a value
+       in `[-4095, -1]`), `strace -c`'s `errors` column. It is per row (`-e
+       raw`); no aggregating emit sums it yet."
 
 - id: proc.exec
   family: proc

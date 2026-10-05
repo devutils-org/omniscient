@@ -176,6 +176,20 @@ pub enum KeyValue {
     Dir {
         dir: Direction,
     },
+    /// `syscall:<name>`, the system call an event counted or timed: what a
+    /// `strace -c` table is one row per, so one `proc.syscall` run keyed on
+    /// it answers that table rather than one run per syscall. The name is
+    /// this build's table for the architecture (`syscall_<n>` where it has
+    /// none).
+    Syscall {
+        name: String,
+    },
+    /// `comm:<name>`, the task's name as the kernel held it when the event
+    /// happened: what bpftrace's and bcc's tools aggregate by, where `task`
+    /// keeps one series per thread.
+    Comm {
+        comm: String,
+    },
 }
 
 /// Which way a counted byte or operation went. A closed set: a block device
@@ -317,6 +331,14 @@ impl KeyValue {
         KeyValue::Task { tid }
     }
 
+    pub fn syscall(name: impl Into<String>) -> Self {
+        KeyValue::Syscall { name: name.into() }
+    }
+
+    pub fn comm(comm: impl Into<String>) -> Self {
+        KeyValue::Comm { comm: comm.into() }
+    }
+
     pub fn proc(pidns: u64, pid: i32) -> Self {
         KeyValue::Proc { pidns, pid }
     }
@@ -357,6 +379,8 @@ impl KeyValue {
             KeyValue::Cpu { .. } => KeyKind::Cpu,
             KeyValue::Node { .. } => KeyKind::Node,
             KeyValue::Dir { .. } => KeyKind::Dir,
+            KeyValue::Syscall { .. } => KeyKind::Syscall,
+            KeyValue::Comm { .. } => KeyKind::Comm,
         }
     }
 }
@@ -389,6 +413,8 @@ impl fmt::Display for KeyValue {
             KeyValue::Cpu { cpu } => write!(f, "cpu:{cpu}"),
             KeyValue::Node { node } => write!(f, "node:{node}"),
             KeyValue::Dir { dir } => write!(f, "dir:{dir}"),
+            KeyValue::Syscall { name } => write!(f, "syscall:{name}"),
+            KeyValue::Comm { comm } => write!(f, "comm:{comm}"),
         }
     }
 }
