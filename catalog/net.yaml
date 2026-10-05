@@ -214,6 +214,34 @@
        would be a number about nothing."
     - "The counters are the reading process's network namespace's."
 
+- id: net.sockets
+  family: net
+  summary: "Every TCP and UDP socket, its state, queues and owner"
+  unit: bytes
+  backends:
+    - {id: "netlink", requires: ["sock_diag"], cost: low}
+  modes: [snapshot, poll]
+  emits: [raw]
+  targets: {system: native, pid: native}
+  keys: [sock]
+  filter_fields: [protocol, family, state, saddr, sport, daddr, dport, uid, pid, comm]
+  determinism: medium
+  caveats:
+    - "What `ss -tuanp` lists: one event per socket, keyed by its cookie, with
+       `protocol`, `state` in `ss`'s words (`LISTEN`, `ESTAB`, `TIME-WAIT`,
+       `UNCONN`), the endpoints, `uid`, and `pid` and `comm` of the process
+       holding it."
+    - "`recv_q` and `send_q` mean what `ss` says: on a listening socket the
+       accept queue's length and its bound; on any other, bytes the
+       application has not read and bytes the peer has not acknowledged."
+    - "The owner is found by matching socket inodes against /proc/<pid>/fd,
+       which another user's processes do not open to an unprivileged reader:
+       their sockets carry no `pid`, and the run's notes say how many
+       processes were unreadable. A connection still in an accept queue, and
+       a socket in TIME-WAIT, belong to no process."
+    - "Each poll lists the sockets alive at that tick; one opened and closed
+       between two ticks is never seen."
+
 - id: net.socket
   family: net
   summary: "Socket read and write latency"

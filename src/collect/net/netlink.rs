@@ -231,11 +231,16 @@ impl Diag {
 
     /// Dumps every TCP socket of one address family.
     pub fn dump_tcp(&self, family: u8) -> io::Result<Vec<Socket>> {
-        self.request(family)?;
+        self.dump(family, libc::IPPROTO_TCP as u8)
+    }
+
+    /// Dumps every socket of one address family and protocol (TCP, UDP).
+    pub fn dump(&self, family: u8, protocol: u8) -> io::Result<Vec<Socket>> {
+        self.request(family, protocol)?;
         self.collect()
     }
 
-    fn request(&self, family: u8) -> io::Result<()> {
+    fn request(&self, family: u8, protocol: u8) -> io::Result<()> {
         let mut message = [0u8; NLMSG_HDR_LEN + REQ_LEN];
         let total = message.len() as u32;
 
@@ -247,7 +252,7 @@ impl Diag {
 
         // struct inet_diag_req_v2
         message[16] = family;
-        message[17] = libc::IPPROTO_TCP as u8;
+        message[17] = protocol;
         // Ask for `tcp_info`, which is where the round-trip time lives. The
         // extension bitmask is one-based.
         message[18] = (1 << (INET_DIAG_INFO - 1)) | (1 << (INET_DIAG_CONG - 1));
