@@ -270,6 +270,7 @@ impl Ask {
             }],
             escalate: None,
             record: None,
+            launch: Vec::new(),
         }
     }
 }
