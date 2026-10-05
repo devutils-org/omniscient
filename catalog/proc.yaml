@@ -113,6 +113,38 @@
        workers will see fewer than it started."
 
 
+- id: proc.tasks
+  family: proc
+  summary: "The machine's processes, or every thread of one, as top and ps list them"
+  unit: ratio
+  backends:
+    - {id: "fs:proc", requires: ["/proc/[pid]/stat"], cost: low}
+  modes: [poll, snapshot]
+  emits: [raw, timeline, summary]
+  targets: {system: native, pid: native, tid: native, launch: native}
+  keys: [task, comm]
+  filter_fields: [comm, pid, tid, ppid, state, uid, threads, rss_bytes, busy]
+  determinism: low
+  caveats:
+    - "One event per process of the machine (`--system`), or per thread of a
+       process (`--pid`, a launched program), each poll; every event of a poll
+       carries the poll's one timestamp. Each carries `pid`, `tid`, `ppid`,
+       `comm`, `state`, `uid`, `threads`, `rss_bytes` (from `statm`, as `top` reads it), `vsz_bytes`, `cpu_ns`,
+       `utime_ns`, `stime_ns`, `nice`, `priority`, `minflt`, `majflt`, `cpu` (the
+       one it last ran on) and `age_ns`."
+    - "The value, `busy`, is the share of one cpu the task ran over the interval
+       since the previous poll: `top`'s `%CPU` over a hundred, so a process of
+       four spinning threads reads 4. A task first seen in a poll has no
+       previous reading and its share is over its whole life instead, `ps`'s
+       `%CPU`; `since` on the event says which (`poll` or `start`)."
+    - "`utime` and `stime` count clock ticks (10 ms on most kernels), so a share
+       is good to one tick over its interval: one per cent of a one-second poll.
+       A task that lived between two polls is in neither."
+    - "A process's line is its threads' sum; a thread's is its own. A process
+       that leaves between the listing and its read is in no event and is not a
+       loss: it is not on the machine any more."
+
+
 - id: proc.signals
   family: proc
   summary: "Signals delivered"
