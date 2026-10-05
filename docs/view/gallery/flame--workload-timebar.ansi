@@ -33,7 +33,7 @@
 [0m[32m│[0m[33m  [0m[2msets up no frame pointer is lost -- every frameless[0m     [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m│[0m[33m  [0m[2mleaf, and whole stacks of a target built without them[0m   [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m│[0m[33m‼ 2 more on the last line; ! lists every caveat whole[0m     [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
-[0m[32m└──────────────────────────────────────────────────────────┘[0m[2m└──────────────────────────────────────────────────────────┘[0m
+[0m[32m└──────────────────────────────────────────────────────────┘[0m[2m└[0m[2;33m own cost at the leaf: these stacks do not say which frame[0m[2m┘[0m
 [0m[1;32mon cpu ▸ [0m[1mall[0m                                                                                                            [0m
 [0m[2m1.22k samples ≈ 1.22s · 100% of all · own 0 · 1.22k events[0m                                                              [0m
 [0m[33mcpu.profile (+1 more, ! lists them): [0m[2mnames came from -- perf-2620821.map: perf-map, the 567 lines the program wrote for…[0m

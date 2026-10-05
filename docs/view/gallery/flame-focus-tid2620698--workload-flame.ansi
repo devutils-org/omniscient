@@ -33,7 +33,7 @@
 [0m[32m│[0m[33m  [0m[2msets up no frame pointer is lost -- every frameless[0m     [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m│[0m[33m  [0m[2mleaf, and whole stacks of a target built without them[0m   [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
 [0m[32m│[0m[33m‼ 1 more on the last line; ! lists every caveat whole[0m     [0m[32m│[0m[2m│[0m                                                          [0m[2m│[0m
-[0m[32m└[0m[33m not narrowed to the focus: these stacks carry no thread [0m[32m─┘[0m[2m└[0m[2;33m narrowed to the focus [0m[2m───────────────────────────────────┘[0m
+[0m[32m└[0m[33m not narrowed to the focus: these stacks carry no thread [0m[32m─┘[0m[2m└[0m[2;33m narrowed to the focus; own cost at the leaf: these stacks[0m[2m┘[0m
 [0m[1;32mon cpu ▸ [0m[1mall[0m                                                                                                            [0m
 [0m[2m1.40k samples ≈ 1.40s · 100% of all · own 0 · 1.40k events[0m                                                              [0m
 [0m[33mcpu.profile: [0m[2mnames came from -- perf-2620696.map: perf-map, the 480 lines the program wrote for code no file holds; pyt…[0m

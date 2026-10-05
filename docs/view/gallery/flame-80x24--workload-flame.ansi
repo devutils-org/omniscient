@@ -17,7 +17,7 @@
 [0m[32m│[0m[2m 0.14% [0m[33m▏           [0m[2m py::SourceLoader.…[0m[32m│[0m[2m│[0m[33m  [0m[2mfor is the task state[0m               [0m[2m│[0m
 [0m[32m│[0m                                      [0m[32m│[0m[2m│[0m[33m‼ 1 more; ! lists every caveat whole[0m  [0m[2m│[0m
 [0m[32m│[0m[33m‼ 5 more on the last line; ! lists ev…[0m[32m│[0m[2m│[0m                                      [0m[2m│[0m
-[0m[32m└──────────────────────────────────────┘[0m[2m└──────────────────────────────────────┘[0m
+[0m[32m└──────────────────────────────────────┘[0m[2m└[0m[2;33m own cost at the leaf: these stacks do[0m[2m┘[0m
 [0m[1;32mon cpu ▸ [0m[1mpy::Thread._bootstrap_inner:/usr/lib/python3.14/threading.py[0m[2m  the last [0m
 [0m[2m1.37k samples ≈ 1.38s · 98.0% of all · own 0 · 1.37k events[0m                     [0m
 [0m[33mcpu.profile (+4 more, ! lists them): [0m[2mpmu:sw: time-based sampling: blind to phas…[0m

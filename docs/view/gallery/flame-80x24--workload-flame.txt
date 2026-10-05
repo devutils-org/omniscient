@@ -17,7 +17,7 @@ on cpu: 1.40k · hottest own py::burn:/omniscient/view/workloads/flame/../common
 │ 0.14% ▏            py::SourceLoader.…││  for is the task state               │
 │                                      ││‼ 1 more; ! lists every caveat whole  │
 │‼ 5 more on the last line; ! lists ev…││                                      │
-└──────────────────────────────────────┘└──────────────────────────────────────┘
+└──────────────────────────────────────┘└ own cost at the leaf: these stacks do┘
 on cpu ▸ py::Thread._bootstrap_inner:/usr/lib/python3.14/threading.py  the last
 1.37k samples ≈ 1.38s · 98.0% of all · own 0 · 1.37k events
 cpu.profile (+4 more, ! lists them): pmu:sw: time-based sampling: blind to phas…

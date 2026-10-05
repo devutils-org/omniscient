@@ -33,7 +33,7 @@ on cpu: 1.22k · hottest own py::burn:/omniscient/view/workloads/timebar/../comm
 │  sets up no frame pointer is lost -- every frameless     ││                                                          │
 │  leaf, and whole stacks of a target built without them   ││                                                          │
 │‼ 2 more on the last line; ! lists every caveat whole     ││                                                          │
-└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────┘└ own cost at the leaf: these stacks do not say which frame┘
 on cpu ▸ all
 1.22k samples ≈ 1.22s · 100% of all · own 0 · 1.22k events
 cpu.profile (+1 more, ! lists them): names came from -- perf-2620821.map: perf-map, the 567 lines the program wrote for…
