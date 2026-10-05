@@ -427,8 +427,14 @@
        `queue_ns` how long it waited on the run queue before it ran, `off_ns`
        how long it was off the cpu before it was queued, `state` how it left
        (`preempted`, `sleeping`, `uninterruptible`), and `next_comm` who took
-       the cpu. A slice that began before the run carries no `queue_ns` or
-       `off_ns`. `queue_ns` is the kernel's `rq->clock - last_queued`, as
+       the cpu. `off_ns` and `queue_ns` add up to the gap between the task's
+       switch out and its next switch in. A slice that began before the run
+       carries no `queue_ns` or `off_ns`, and neither does one whose task came
+       in with no queue stamp and whose switch out the run did not see: those
+       are counted in the facts, never read as a zero wait. `queue_ns` is the
+       kernel's `rq->clock - last_queued` plus what `run_delay` grew by while
+       the task was away (the part of a wait spent on a cpu the balancer moved
+       it from), as
        `schedstat` counts it: a task woken onto an idle cpu reads 0 there, where
        the scheduler did not move its clock between the wakeup and the switch,
        and `perf sched timehist`'s `sch delay`, timed between the tracepoints,

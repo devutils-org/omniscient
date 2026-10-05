@@ -2104,7 +2104,8 @@ fn a_launched_shells_children_name_it_as_their_parent() {
 /// `sched.slices` against two things it did not compute: the slices' runs
 /// add up to the cpu the kernel charged the program at its reap, and a
 /// thread that spins for a wall-clock interval is runnable for all of it, so
-/// its runs and its queue waits add up to that interval.
+/// its runs and its queue waits add up to that interval, with no time off
+/// the cpu between them.
 #[test]
 fn time_slices_add_up_to_the_cpu_and_the_runnable_time() {
     let threads = 4 * std::thread::available_parallelism().map_or(4, |n| n.get());
@@ -2163,6 +2164,25 @@ fn time_slices_add_up_to_the_cpu_and_the_runnable_time() {
     assert!(
         runnable * 10 >= wanted * 7,
         "{threads} threads spinning 300 ms were runnable {runnable} ns of {wanted}"
+    );
+    // A spinner that was preempted never left the queue until it ran again:
+    // its whole gap is queue wait, and `off_ns` is what is left of the gap
+    // once the wait is taken out. Counting the wait into `off_ns` too, or
+    // missing the part closed on a cpu the balancer moved it from, shows here
+    // as time off a runnable task could not have had.
+    let preempted: Vec<_> = spinners
+        .iter()
+        .filter(|e| e["state"] == "preempted" && e.get("off_ns").is_some())
+        .collect();
+    let queued: u64 = preempted
+        .iter()
+        .filter_map(|e| e["queue_ns"].as_u64())
+        .sum();
+    let off: u64 = preempted.iter().filter_map(|e| e["off_ns"].as_u64()).sum();
+    assert!(
+        off * 100 <= queued,
+        "{} preempted slices were off the cpu {off} ns besides {queued} ns on the queue",
+        preempted.len()
     );
 }
 

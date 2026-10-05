@@ -35,7 +35,8 @@ use super::insn::{
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
 use super::ring::{ring_bytes, RingBuffer};
 use super::sched_common::{
-    push_followed_filter, push_last_queued, push_rq_clock, Descendants, Followed, KernelClock,
+    push_followed_filter, push_last_queued, push_rq_clock, push_run_delay, Descendants, Followed,
+    KernelClock,
 };
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 
@@ -393,19 +394,33 @@ pub struct Switch {
     pub prev_state: u32,
     /// The tracepoint's `preempt` flag.
     pub preempt: u32,
-    /// Which end the target is: 1 the task coming in, 2 the task leaving.
+    /// Which end the target is: 1 the task coming in, 2 the task leaving;
+    /// and [`QUEUE_STAMPED`] when `queue_ns` was read from a stamp.
     pub matched: u32,
     /// How long the task leaving ran, by the run queue's clock:
     /// `rq->clock - sched_info.last_arrival`, or 0 with no stamp.
     pub run_ns: u64,
     /// How long the task coming in waited on the queue, by the same clock:
-    /// `rq->clock - sched_info.last_queued`, or 0 with no stamp.
+    /// `rq->clock - sched_info.last_queued`, or 0 with no stamp, which
+    /// `matched` tells from a real zero by [`QUEUE_STAMPED`].
     pub queue_ns: u64,
     prev_comm: [u8; 16],
     next_comm: [u8; 16],
+    /// `sched_info.run_delay` of the task leaving: every wait the kernel had
+    /// closed for it, read as its time off begins.
+    pub prev_delay: u64,
+    /// The same of the task coming in, read before `sched_info_arrive` closes
+    /// this wait: what grew since it left is the part of the wait spent on a
+    /// cpu it was moved away from, which `queue_ns` alone does not see.
+    pub next_delay: u64,
 }
 
-const SWITCH_BYTES: usize = 88;
+const SWITCH_BYTES: usize = 104;
+
+/// The bit of [`Switch::matched`] set when the task coming in held a queue
+/// stamp no later than its run queue's clock, so `queue_ns` is a wait and not
+/// the absence of one.
+const QUEUE_STAMPED: u32 = 4;
 
 impl Switch {
     pub fn prev_comm(&self) -> String {
@@ -414,6 +429,12 @@ impl Switch {
 
     pub fn next_comm(&self) -> String {
         super::sched_common::text_of(&self.next_comm)
+    }
+
+    /// How long the task coming in waited on the queue, or `None` when it
+    /// held no stamp to tell: not the same as a zero wait.
+    pub fn queue(&self) -> Option<u64> {
+        (self.matched & QUEUE_STAMPED != 0).then_some(self.queue_ns)
     }
 
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -440,6 +461,8 @@ impl Switch {
             queue_ns: long(48),
             prev_comm,
             next_comm,
+            prev_delay: long(88),
+            next_delay: long(96),
         })
     }
 }
@@ -458,6 +481,8 @@ const SW_RUN: i16 = SW_EVENT + 40;
 const SW_QUEUE: i16 = SW_EVENT + 48;
 const SW_PREV_COMM: i16 = SW_EVENT + 56;
 const SW_NEXT_COMM: i16 = SW_EVENT + 72;
+const SW_PREV_DELAY: i16 = SW_EVENT + 88;
+const SW_NEXT_DELAY: i16 = SW_EVENT + 96;
 const SW_NOW: i16 = SW_EVENT - 8;
 const SW_STAMP: i16 = SW_NOW - 8;
 const SW_CLOCK_SCRATCH: i16 = SW_STAMP - 8;
@@ -562,6 +587,10 @@ fn stream_instructions(
         program.jump_to("done", Insn::jeq_imm(1, 0, 0));
     }
 
+    // Both ends' closed waits, before anything below can jump to the emit.
+    push_run_delay(&mut program, &clock, 7, SW_PREV_DELAY);
+    push_run_delay(&mut program, &clock, 8, SW_NEXT_DELAY);
+
     // The run queue's clock, and each end's stamp against it. A stamp of
     // zero, or one ahead of the clock, is no stamp, and its field stays 0.
     // Reached through a task's `se.cfs_rq`, which the idle task has none of:
@@ -593,6 +622,12 @@ fn stream_instructions(
         program.push(Insn::stx(BPF_DW, R10, into, 1));
         if into == SW_RUN {
             program.label("queued");
+        } else {
+            // A real zero wait and no stamp both leave 0 in the field: the
+            // flag is what tells them apart.
+            program.push(Insn::ldx(BPF_W, 1, R10, SW_MATCHED));
+            program.push(Insn::or64_imm(1, QUEUE_STAMPED as i32));
+            program.push(Insn::stx(BPF_W, R10, SW_MATCHED, 1));
         }
     }
 
@@ -727,6 +762,8 @@ mod tests {
             (SW_QUEUE, offset_of!(Switch, queue_ns)),
             (SW_PREV_COMM, offset_of!(Switch, prev_comm)),
             (SW_NEXT_COMM, offset_of!(Switch, next_comm)),
+            (SW_PREV_DELAY, offset_of!(Switch, prev_delay)),
+            (SW_NEXT_DELAY, offset_of!(Switch, next_delay)),
         ] {
             assert_eq!((stack - SW_EVENT) as usize, field);
         }
