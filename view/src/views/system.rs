@@ -576,17 +576,18 @@ const DIRS: &[(&str, &str)] = &[
 /// are kept as they are.
 fn fold_dirs(tracks: Vec<Track>, reading: &Reading) -> Vec<Track> {
     if reading.parts.is_empty()
-        || !tracks
-            .iter()
-            .any(|track| key_parts(&track.key).iter().any(|part| part.starts_with("dir:")))
+        || !tracks.iter().any(|track| {
+            key_parts(&track.key)
+                .iter()
+                .any(|part| part.starts_with("dir:"))
+        })
     {
         return tracks;
     }
     let names: Vec<&'static str> = reading.parts.iter().map(|(name, _)| *name).collect();
     let mut kept = Vec::new();
     // By the key without its direction: each part's points by instant.
-    let mut folded: BTreeMap<String, (Option<String>, BTreeMap<u64, Vec<Point>>)> =
-        BTreeMap::new();
+    let mut folded: BTreeMap<String, (Option<String>, BTreeMap<u64, Vec<Point>>)> = BTreeMap::new();
     for track in tracks {
         let parts = key_parts(&track.key);
         let Some(dir) = parts.iter().find_map(|part| part.strip_prefix("dir:")) else {
@@ -2513,6 +2514,145 @@ impl System {
             frame.render_widget(Paragraph::new(Line::from(said)), foot);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The batch output.
+// ---------------------------------------------------------------------------
+
+/// The batch table's columns, in order: each heading and the list's column
+/// it prints, raw (nanoseconds, bytes, counts, a share of one cpu).
+const BATCH: &[(&str, Col)] = &[
+    ("CPU", Col::Cpu),
+    ("ON_CPU_NS", Col::CpuTime),
+    ("RSS_BYTES", Col::Rss),
+    ("FAULTS", Col::Faults),
+    ("RUN_QUEUE_NS", Col::RunQueue),
+    ("IO_CALLS", Col::IoCalls),
+    ("IN_IO_NS", Col::InIo),
+    ("LOCK_NS", Col::Lock),
+    ("GPU_MEM_BYTES", Col::GpuMem),
+];
+
+/// A number as the batch prints it: whole when it is whole, four
+/// significant decimals otherwise, never in a unit's words.
+fn batch_number(value: f64) -> String {
+    if !value.is_finite() {
+        return "-".to_owned();
+    }
+    if value.fract() == 0.0 && value.abs() < 1e15 {
+        return format!("{value:.0}");
+    }
+    format!("{value:.4}")
+}
+
+/// The `system` view as text a script parses, `top -b`'s use: what the
+/// machine's panels hold, one `machine` line per series, then every task,
+/// sorted as `sort` says (`cpu`, `memory`, `faults`, `io`, `runqueue`), a
+/// whitespace-separated table with `-` where a column was not measured for a
+/// task. Nothing is in a unit's words: shares are fractions, times
+/// nanoseconds, sizes bytes. What a column is not to be read at face value
+/// for (a loss, a time error, a refusal) is said on a `#` line, never left
+/// out.
+pub fn batch(data: &Data, sort: &str) -> Result<String, String> {
+    let sort = match sort {
+        "cpu" => Sort::Cpu,
+        "memory" => Sort::Memory,
+        "faults" => Sort::Faults,
+        "io" => Sort::Io,
+        "runqueue" => Sort::RunQueue,
+        other => {
+            return Err(format!(
+                "there is no sort `{other}`; the sorts are cpu, memory, faults, io, runqueue"
+            ))
+        }
+    };
+    let mut out = String::new();
+    let axis = Axis::of(data);
+    // One line: a launched program's own text may hold newlines.
+    let origin: String = data
+        .origin
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    out.push_str(&format!("# omn top --batch: {origin}\n"));
+    out.push_str(&format!("# span_ns {}\n", axis.span_ns));
+    out.push_str("# machine SOURCE KEY mean=PER_SECOND_OR_SHARE peak=... last=... total=SOURCE_UNIT [PART=SOURCE_UNIT ...]\n");
+    for (label, source) in MACHINE {
+        match served(data, label, source) {
+            None => {}
+            Some(Held::Refused(refusal)) => {
+                out.push_str(&format!("# {source} refused: {}\n", refusal.reason));
+            }
+            Some(Held::Served(results, trust, _)) => {
+                for sentence in trust.sentences() {
+                    out.push_str(&format!("# {source}: {sentence}\n"));
+                }
+                let mut all: Vec<Track> = results
+                    .iter()
+                    .flat_map(|results| tracks(data, results))
+                    .collect();
+                all.sort_by(|one, other| one.key.cmp(&other.key));
+                for track in all.iter().filter(|track| track.tangled.is_none()) {
+                    let key = key_name(&track.key).replace(char::is_whitespace, "_");
+                    let mut line = format!(
+                        "machine {source} {key} mean={} peak={} last={} total={}",
+                        batch_number(track.mean()),
+                        batch_number(track.peak()),
+                        batch_number(track.last().unwrap_or(f64::NAN)),
+                        batch_number(track.total()),
+                    );
+                    for (part, total) in track.part_totals() {
+                        line.push_str(&format!(" {part}={}", batch_number(total)));
+                    }
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    let procs = processes(data, sort);
+    if let Some(refusal) = &procs.refused {
+        out.push_str(&format!(
+            "# {} refused: {}\n",
+            refusal.source, refusal.reason
+        ));
+    }
+    for (col, trust) in &procs.columns {
+        let Some((head, _)) = BATCH.iter().find(|(_, held)| held == col) else {
+            continue;
+        };
+        for sentence in trust.sentences() {
+            out.push_str(&format!("# {head}: {sentence}\n"));
+        }
+    }
+    let mut head = vec!["ID", "KIND", "NAME"];
+    head.extend(BATCH.iter().map(|(head, _)| *head));
+    out.push_str(&head.join(" "));
+    out.push('\n');
+    for row in &procs.rows {
+        let name = row
+            .name
+            .as_deref()
+            .map(|name| name.replace(char::is_whitespace, "_"))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "-".to_owned());
+        let mut line = vec![
+            row.tid.to_string(),
+            if row.process { "process" } else { "thread" }.to_owned(),
+            name,
+        ];
+        for (_, col) in BATCH {
+            line.push(
+                row.cells
+                    .get(col)
+                    .map_or_else(|| "-".to_owned(), |value| batch_number(*value)),
+            );
+        }
+        out.push_str(&line.join(" "));
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
