@@ -405,3 +405,14 @@
        CUPTI's own sample count over the program's kernels is held to the
        samples reported; a shortfall past what it said it dropped is counted
        as lost."
+
+# The family's default: what `omn trace gpu -- PROGRAM` composes, per cost
+# band. The engines' occupancy is the device's, read for the whole machine
+# while the program runs; its memory is the program's. See docs/lazy.md.
+- default:
+    family: gpu
+    question: "How busy is the GPU while the program runs, and how much memory does it hold?"
+    low:
+      - {source: gpu.engine_busy, mode: "poll@100ms", emit: [timeline, summary], target: system,
+         label: "gpu busy"}
+      - {source: gpu.mem, mode: "poll@100ms", emit: [summary], label: "gpu memory"}

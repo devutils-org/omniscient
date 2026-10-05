@@ -204,7 +204,7 @@ impl Profile {
             ));
         }
         profile.notes.extend(chosen.degradations.iter().cloned());
-        profile.perf_map = PerfMapNames::of(&chosen.notes);
+        profile.perf_map = PerfMapNames::of_run(std::slice::from_ref(chosen));
         if let Some(written) = written {
             profile.perf_map.written_after(written);
         }
@@ -687,6 +687,11 @@ pub struct PerfMapNames {
     /// Every symbol the maps hold.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub symbols: BTreeSet<String>,
+    /// Whether the maps were read back from their files after the run,
+    /// rather than named by the results' provenance: only then can one have
+    /// been rewritten since.
+    #[serde(skip)]
+    pub read_back: bool,
 }
 
 impl PerfMapNames {
@@ -696,12 +701,98 @@ impl PerfMapNames {
         Self::of_in(notes, Path::new("/tmp"))
     }
 
-    /// The maps cited by any request of a run. One process writes one map,
-    /// and the request that says so is not always the one whose stacks it
-    /// named: `cpu.profile`'s unwinder writes the names note, and
-    /// `sched.offcpu`'s stacks pass through the same map's frames.
+    /// The frames a perf map named in a run, from what its results say.
+    ///
+    /// A result that carries its stacks' provenance (`named_by`, written
+    /// beside `stacks` by `cpu.profile`) says which frame a perf map named,
+    /// label by label, and which maps those were (`perf_maps`): nothing is
+    /// read back from `/tmp`, so a map rewritten since, or a recycled pid's,
+    /// cannot lend this run names it never had. Only when a result holds
+    /// stacks without that provenance -- `sched.offcpu`'s, whose frames pass
+    /// through the same map -- are the maps read back, from the paths the
+    /// results name, else from the ones the names note cites; one whose
+    /// device and inode are no longer the ones the run read is said as
+    /// rewritten.
     pub fn of_run(results: &[Results]) -> Self {
-        Self::of(results.iter().flat_map(|one| &one.notes))
+        Self::of_run_in(results, Path::new("/tmp"))
+    }
+
+    /// As [`PerfMapNames::of_run`], a note's maps read from `dir`.
+    pub fn of_run_in(results: &[Results], dir: &Path) -> Self {
+        let mut names = Self::default();
+        let mut files: Vec<&crate::stack::PerfMapFile> = Vec::new();
+        let mut uncovered = false;
+        for one in results {
+            let provenance = &one.provenance;
+            if !one.stacks.is_empty() && provenance.named_by.is_empty() {
+                uncovered = true;
+            }
+            for (id, named_by) in &provenance.named_by {
+                let Some(labels) = one.stacks.get(id) else {
+                    continue;
+                };
+                for (label, by) in labels.iter().zip(named_by) {
+                    if *by == Some(crate::stack::NamedBy::PerfMap) {
+                        names
+                            .symbols
+                            .insert(label.trim_end_matches(RECOVERED).to_owned());
+                    }
+                }
+            }
+            for file in &provenance.perf_maps {
+                if !files.iter().any(|known| known.path == file.path) {
+                    files.push(file);
+                }
+            }
+        }
+        let cited = || Self::of_in(results.iter().flat_map(|one| &one.notes), dir);
+        if !uncovered {
+            // Every stack says what named it: the maps are named, not read.
+            names.read = if files.is_empty() {
+                let mut cited: BTreeSet<String> = BTreeSet::new();
+                for note in results.iter().flat_map(|one| &one.notes) {
+                    cited.extend(perf_maps_cited(note));
+                }
+                cited
+                    .into_iter()
+                    .map(|map| dir.join(map).display().to_string())
+                    .collect()
+            } else {
+                files.iter().map(|file| file.path.clone()).collect()
+            };
+            if names.symbols.is_empty() && names.read.is_empty() {
+                return Self::default();
+            }
+            return names;
+        }
+        if files.is_empty() {
+            let mut read_back = cited();
+            read_back.symbols.extend(names.symbols);
+            return read_back;
+        }
+        names.read_back = true;
+        for file in files {
+            match std::fs::read_to_string(&file.path) {
+                Ok(text) => {
+                    names.symbols.extend(
+                        text.lines()
+                            .filter_map(crate::stack::PerfMapLine::parse)
+                            .map(|line| label_of(&line.symbol)),
+                    );
+                    names.read.push(file.path.clone());
+                    let same = std::fs::metadata(&file.path).is_ok_and(|meta| {
+                        use std::os::unix::fs::MetadataExt as _;
+                        (file.dev, file.ino) == (0, 0)
+                            || (meta.dev(), meta.ino()) == (file.dev, file.ino)
+                    });
+                    if !same {
+                        names.rewritten.push(file.path.clone());
+                    }
+                }
+                Err(error) => names.unreadable.push(format!("{}: {error}", file.path)),
+            }
+        }
+        names
     }
 
     /// As [`PerfMapNames::of`], with the maps read from `dir`.
@@ -713,6 +804,7 @@ impl PerfMapNames {
         }
         for map in cited {
             let path = dir.join(&map);
+            names.read_back = true;
             match std::fs::read_to_string(&path) {
                 Ok(text) => {
                     names.symbols.extend(
@@ -735,7 +827,10 @@ impl PerfMapNames {
     /// that a newer map also holds is still a frame some map named, and the
     /// sentence says the map is newer than the run.
     pub fn written_after(&mut self, written: SystemTime) {
-        self.rewritten = self
+        if !self.read_back {
+            return;
+        }
+        let newer: Vec<String> = self
             .read
             .iter()
             .filter(|path| {
@@ -743,8 +838,10 @@ impl PerfMapNames {
                     .and_then(|meta| meta.modified())
                     .is_ok_and(|modified| modified > written)
             })
+            .filter(|path| !self.rewritten.contains(path))
             .cloned()
             .collect();
+        self.rewritten.extend(newer);
     }
 
     /// Whether a perf map named the frame this label is.
@@ -1498,6 +1595,104 @@ mod tests {
         assert_eq!(
             executable_names("no-such-program-here"),
             ["no-such-program-here"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A result whose stacks carry `named_by`: one stack, the interpreter's
+    /// leaf under a frame a perf map named.
+    fn profiled(perf_maps: serde_json::Value) -> Results {
+        serde_json::from_value(serde_json::json!({
+            "label": "on-cpu", "source": "cpu.profile", "backend": "pmu:sw",
+            "outputs": [], "events_seen": 0, "observed_ns": 0, "stopped_because": "exit",
+            "unit": serde_json::to_value(crate::catalog::Unit::Count).unwrap(),
+            "losses": serde_json::to_value(crate::collect::Losses::default()).unwrap(),
+            "notes": [NOTE],
+            "stacks": {"1": ["main", "py::score:/tmp/hot.py", "_PyEval_EvalFrameDefault"]},
+            "named_by": {"1": ["elf", "perf-map", "elf"]},
+            "perf_maps": perf_maps,
+        }))
+        .unwrap_or_else(|error| panic!("a minimal Results: {error}"))
+    }
+
+    /// The results say which frame a perf map named: nothing is read back
+    /// from the directory the note points at, so a map there that holds
+    /// other names lends none of them.
+    #[test]
+    fn the_results_provenance_names_the_mapped_frames_without_reading_the_map() {
+        let dir = std::env::temp_dir().join(format!("omn-provenance-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Another process's map under the same name: what a reused pid leaves.
+        std::fs::write(
+            dir.join("perf-4242.map"),
+            "7f0000001000 b py::other:/tmp/x.py\n",
+        )
+        .unwrap();
+        let results = [profiled(serde_json::json!([]))];
+        let names = PerfMapNames::of_run_in(&results, &dir);
+        assert!(names.named("py::score:/tmp/hot.py"));
+        assert!(names.named("py::score:/tmp/hot.py [recovered]"));
+        assert!(!names.named("py::other:/tmp/x.py"), "{names:?}");
+        assert!(!names.named("_PyEval_EvalFrameDefault"));
+        assert!(!names.read_back);
+        assert_eq!(
+            names.read,
+            [dir.join("perf-4242.map").display().to_string()]
+        );
+        assert!(names.said().unwrap().contains("innermost frame"));
+        // The map named by the results' own `perf_maps` is the one said.
+        let named = [profiled(serde_json::json!([
+            {"path": "/tmp/perf-4242.map", "dev": 1, "ino": 2}
+        ]))];
+        let names = PerfMapNames::of_run_in(&named, &dir);
+        assert_eq!(names.read, ["/tmp/perf-4242.map"]);
+        let mut written = names.clone();
+        written.written_after(SystemTime::UNIX_EPOCH);
+        assert!(written.rewritten.is_empty(), "nothing was read back");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A result whose stacks carry no provenance (`sched.offcpu`'s) beside
+    /// one that does: the map is read back, from the path the results name,
+    /// and a file that is no longer the one the run read is said.
+    #[test]
+    fn stacks_without_provenance_read_the_named_map_back_and_say_another_file() {
+        let dir = std::env::temp_dir().join(format!("omn-provenance-b-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let map = dir.join("perf-4242.map");
+        std::fs::write(&map, "7f0000001000 b py::wait:/tmp/hot.py\n").unwrap();
+        let meta = std::fs::metadata(&map).unwrap();
+        let (dev, ino) = {
+            use std::os::unix::fs::MetadataExt as _;
+            (meta.dev(), meta.ino())
+        };
+        let offcpu: Results = serde_json::from_value(serde_json::json!({
+            "label": "blocked", "source": "sched.offcpu", "backend": "ebpf",
+            "outputs": [], "events_seen": 0, "observed_ns": 0, "stopped_because": "exit",
+            "unit": serde_json::to_value(crate::catalog::Unit::Ns).unwrap(),
+            "losses": serde_json::to_value(crate::collect::Losses::default()).unwrap(),
+            "stacks": {"7": ["main", "py::wait:/tmp/hot.py", "select"]},
+        }))
+        .unwrap_or_else(|error| panic!("a minimal Results: {error}"));
+        let path = map.display().to_string();
+        let same = [
+            profiled(serde_json::json!([{"path": path, "dev": dev, "ino": ino}])),
+            offcpu.clone(),
+        ];
+        let names = PerfMapNames::of_run_in(&same, &dir);
+        assert!(names.read_back);
+        assert!(names.named("py::wait:/tmp/hot.py"), "{names:?}");
+        assert!(names.named("py::score:/tmp/hot.py"));
+        assert!(names.rewritten.is_empty(), "{names:?}");
+        let other = [
+            profiled(serde_json::json!([{"path": path, "dev": dev, "ino": ino + 1}])),
+            offcpu,
+        ];
+        let names = PerfMapNames::of_run_in(&other, &dir);
+        assert_eq!(names.rewritten, [path]);
+        assert!(
+            names.said().unwrap().contains("modified after"),
+            "{names:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1319,6 +1319,33 @@ as they were.
   `src/collect/gpu/mod.rs`). Persistence mode was read back both ways, on
   and off.
 
+## Settled in the twenty-fourth wave: the lazy mode
+
+- **A family name where a source is expected composes that family's
+  default** (stream lazy, `docs/lazy.md`). `omn trace cpu -- prog`, `omn mem
+  --pid 1234 -d 5s`, `omn io --cost med -- prog`: a family name has no dot,
+  so it never collides with a source. The default is catalog data, a `-
+  default:` item at the end of the family's own `catalog/<family>.yaml`,
+  naming the requests it composes per band (`low`, `med`, `high`, the
+  catalog's cost words without `free` and `extreme`); the loader refuses one
+  that names a source, mode, emit, key or target the family does not have,
+  that puts a source in a band its cheapest backend cannot keep, or that
+  takes the person's target with a source refusing a program or a pid.
+  `--cost` absent is the cheapest band the family has; a band it does not
+  declare falls to the dearest under it and says so; one under its cheapest
+  is refused with the band to ask. The run prints every request it composed
+  in the long form before anything is resolved, then says what it chose,
+  degraded and lost like any run, and names each request this machine serves
+  through a backend that declares more than the band. **`--cost` is not a
+  budget**: it chooses the requests, and the measured ceiling stays
+  `--budget`'s, which a person can add -- a 1 % ceiling stops a short
+  program's 100 ms poll on its first round, which is not what a beginner
+  asked for. A family with no safe default (`runtime`, `none:` with the
+  reason) refuses with the reason and its sources. A default never runs a
+  session from `examples/`; a default may name only its own family's
+  sources, so a machine-wide family (`power`) runs on `--system` with a
+  duration, never on a program.
+
 ## Open
 
 - **The phase 6 criterion for the in-kernel histogram** (io, pending the
