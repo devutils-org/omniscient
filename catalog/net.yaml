@@ -31,6 +31,34 @@
        one second, so a handshake near 1 s is a lost SYN rather than a slow
        peer."
 
+- id: net.tcp.accept
+  family: net
+  summary: "Connections a server accepted, with the listener's queue"
+  unit: count
+  backends:
+    # The exit of `inet_csk_accept`, in the accepting task: the listener is
+    # its first argument and the accepted socket its return value.
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:inet_csk_accept(sock *, proto_accept_arg *)|(sock *, int, int *, bool)"], cost: low}
+  modes: [trace, count]
+  emits: [rate, topk, raw, summary]
+  targets: {pid: native, launch: native, system: native}
+  keys: [sock, task]
+  filter_fields: [comm, pid, saddr, sport, daddr, dport, family, backlog]
+  determinism: low
+  caveats:
+    - "What `tcpaccept` prints: one event per accepted connection, keyed by
+       the accepted socket's cookie (the key of `net.tcp.lifetime`,
+       `net.tcp.rtt` and `net.sockets`), with the accepting task, both ends,
+       and `backlog`, the listener's queue after this accept took one off it,
+       beside `max_backlog`, the bound `listen` gave it. `tcpaccept`'s `BL`
+       reads the accepted socket instead, which copied the listener's queue
+       when its SYN arrived: six queued connections accepted in turn are
+       `5` to `0` here and `0/16` to `5/16` there."
+    - "A --pid or launched target keeps the accepts of that one process, not
+       of its children."
+    - "An accept that failed or would have blocked returned no socket and is
+       no event."
+
 - id: net.tcp.lifetime
   family: net
   summary: "Connection duration and volume"

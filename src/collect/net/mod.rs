@@ -1,5 +1,6 @@
 //! Collectors for the `net` family.
 
+mod accept;
 mod afpacket;
 mod backlog;
 mod capture;
@@ -120,6 +121,13 @@ pub fn factories() -> Vec<Factory> {
         // The handshake, over fentry: opened by the caller, closed by softirq.
         Factory::new("net.tcp.connect", "bpf:fentry", |resolved| {
             Ok(Box::new(connect::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        // The other end of a handshake: the server taking it off its queue.
+        Factory::new("net.tcp.accept", "bpf:fentry", |resolved| {
+            Ok(Box::new(accept::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
             }))
