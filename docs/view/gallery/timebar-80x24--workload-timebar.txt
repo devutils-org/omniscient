@@ -8,11 +8,11 @@ omn top │ fixture workload-timebar │ 2.69s                       view: snaps
 │   2.04s waiting in futex(2) over 5 wait(s), from `sched.futex`               │
 │   decisive: ahead of the next state (600ms) and of what no row read (0ns) -… │
 │                                                                              │
-│ ▸ 2620821 timebar-main├▞▞ lock 75.9% ▞▞▞░░░░░┤    2.69s  ▶ lock 75.9%        │
-│   2620839 worker      ├███████▚▚▚▞▞▞░░░░     ┤    2.69s  ▶ on cpu 33.5%      │
-│   2620966 holder      ├░░░                   ┤    2.69s  ▶ sleep 14.9%       │
-│   2620967 rival       ├███▚▚                 ┤    2.69s  ▶ on cpu 12.3%      │
-│                      0 ───────┼ 1.34s ───────┤ 2.69s                         │
+│ ▸ 2620821 timebar-main├█▞▞▞▞▞▞▞▞▞▞ lock 75.9% ▞▞▞▞▞▞▞▞▞▞░░░░░░░░░┤    2.69s  │
+│   2620839 worker      ├██████████████▚▚▚▚▚▞▞▞▞▞▞░░░░░░░          ┤    2.69s  │
+│   2620966 holder      ├░░░░░░                                    ┤    2.69s  │
+│   2620967 rival       ├█████▚▚▚▚▚                                ┤    2.69s  │
+│                      0 ─────────────────┼ 1.34s ─────────────────┤ 2.69s     │
 │                        █ on cpu   ▚ run queue   ▞ lock   ▓ I/O   ░ sleep     │
 │                                                                              │
 │   state              source          amount          share   ±         read… │
