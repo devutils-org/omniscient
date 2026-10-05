@@ -1,0 +1,33 @@
+stdlib/strings.bt:224:3-33: WARNING: Return value discarded.
+  __syscall_name((int32)n, &$v);
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/syscount.bt:92:18-39: WARNING: expanded from
+    @syscallname[syscall_name(args.id)] = count();
+                 ~~~~~~~~~~~~~~~~~~~~~
+Counting syscalls... Hit Ctrl-C to end.
+
+Top 10 syscalls IDs:
+@syscall[8]: 101
+@syscall[270]: 103
+@syscall[3]: 120
+@syscall[257]: 124
+@syscall[5]: 226
+@syscall[262]: 278
+@syscall[0]: 302
+@syscall[10]: 4159
+@syscall[110]: 20000
+@syscall[202]: 83964
+
+Top 10 processes:
+@process[opt cgu.10]: 559
+@process[opt cgu.14]: 652
+@process[opt cgu.08]: 755
+@process[opt cgu.11]: 857
+@process[opt cgu.05]: 3332
+@process[rustc]: 10702
+@process[omnref]: 21215
+@process[opt cgu.02]: 22208
+@process[opt cgu.00]: 22295
+@process[opt cgu.13]: 26192
+
+
