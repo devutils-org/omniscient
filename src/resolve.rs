@@ -18,7 +18,7 @@ use crate::capabilities::{Capabilities, Environment, Probe};
 use crate::catalog::{Backend, Catalog, Cost, Entry, TargetSupport};
 use crate::error::{one_of, ParseError};
 use crate::filter::FilterExpr;
-use crate::request::{KeyKind, ModeKind, Request, Target, TargetKind};
+use crate::request::{EmitKind, KeyKind, ModeKind, Request, Target, TargetKind};
 
 /// A request plus every decision made about it. The lockfile of a measurement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,15 +231,25 @@ pub enum ResolveError {
     /// no one backend serves the two together. No machine could serve it, so
     /// it is the request's to change -- `sched.switches --cgroup -m trace`,
     /// where the one backend that serves a cgroup counts and does not trace.
+    ///
+    /// The emits asked are part of the same question: `mem.heap.alloc -e
+    /// stack` on a chain whose one collected backend captures no stack is
+    /// refused here, before the run, rather than after it with no stack to
+    /// write.
     #[error(
-        "`{source_id}` cannot serve a `{target}` target in `{mode}` mode: no backend of its \
-         chain declares the two together:\n{}",
+        "`{source_id}` cannot serve a `{target}` target in `{mode}` mode{}: no backend of its \
+         chain declares {} together:\n{}",
+        emitting(.emits),
+        if .emits.is_empty() { "the two" } else { "them all" },
         .rejections.join("\n")
     )]
     NoBackendDeclares {
         source_id: String,
         target: TargetKind,
         mode: ModeKind,
+        /// The emits the request asked, every one of which a backend must
+        /// produce; empty for a request that asked none.
+        emits: Vec<EmitKind>,
         rejections: Vec<String>,
     },
     #[error("`{source_id}` has no backend `{backend}`")]
@@ -249,8 +259,8 @@ pub enum ResolveError {
     /// between the request and it, and a `--backend force:` hint is given
     /// only for one this build collects and this machine can run.
     #[error(
-        "`{source_id}` is filtered on `{field}`, which the selected backend `{backend}` does not \
-         carry:\n  {}",
+        "`{source_id}` reads `{field}`, in its filter or an `@{field}` emit, which the selected \
+         backend `{backend}` does not carry:\n  {}",
         .elsewhere.as_ref().map_or_else(
             || format!("no backend of `{source_id}` carries it"),
             |elsewhere| elsewhere.to_string(),
@@ -513,6 +523,9 @@ pub fn resolve(
         if let Some(reason) = cannot_serve_mode(entry, backend, request.mode.kind()) {
             return Err(refuse(vec![reason]));
         }
+        if let Some(reason) = cannot_serve_emits(entry, backend, request) {
+            return Err(refuse(vec![reason]));
+        }
         check_filter_fields(entry, backend, request, capabilities)?;
         check_keys_carried(entry, backend, request, capabilities)?;
         let requirements = probe_all(capabilities, backend, Some(&request.target));
@@ -548,7 +561,8 @@ pub fn resolve(
     let mut some_backend_fits = false;
     for (index, backend) in entry.backends.iter().enumerate() {
         let unfit = cannot_serve_target(entry, backend, request.target.kind())
-            .or_else(|| cannot_serve_mode(entry, backend, request.mode.kind()));
+            .or_else(|| cannot_serve_mode(entry, backend, request.mode.kind()))
+            .or_else(|| cannot_serve_emits(entry, backend, request));
         if let Some(reason) = unfit {
             chain.push(ConsideredBackend {
                 id: backend.id.clone(),
@@ -663,6 +677,7 @@ pub fn resolve(
             source_id: request.source.to_string(),
             target: request.target.kind(),
             mode: request.mode.kind(),
+            emits: asked_emits(request),
             rejections: chain
                 .into_iter()
                 .map(|considered| match considered.verdict {
@@ -815,6 +830,63 @@ fn build(
 pub fn serves(entry: &Entry, backend: &Backend, request: &Request) -> bool {
     cannot_serve_target(entry, backend, request.target.kind()).is_none()
         && cannot_serve_mode(entry, backend, request.mode.kind()).is_none()
+        && cannot_serve_emits(entry, backend, request).is_none()
+}
+
+/// Why a backend cannot produce every emit the request asks, or `None` when
+/// it can: the preload shim serves `mem.heap.alloc`'s counts and no stack.
+/// An emit the entry itself does not offer is the validator's to refuse,
+/// before any backend is chosen and in its own words, and is let through
+/// here, as a key is by [`check_keys_carried`].
+fn cannot_serve_emits(entry: &Entry, backend: &Backend, request: &Request) -> Option<String> {
+    let produces = entry.backend_emits(backend);
+    let missing: Vec<EmitKind> = asked_emits(request)
+        .into_iter()
+        .filter(|kind| entry.emits.contains(kind) && !produces.contains(kind))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let names = |kinds: &[EmitKind]| {
+        kinds
+            .iter()
+            .map(|kind| format!("`{}`", kind.as_str()))
+            .collect::<Vec<_>>()
+    };
+    Some(format!(
+        "`{}` emits {}, not {}",
+        backend.id,
+        one_of(names(produces).iter().map(String::as_str)),
+        one_of(names(&missing).iter().map(String::as_str))
+    ))
+}
+
+/// The distinct emit kinds a request asks, in the order it asks them.
+fn asked_emits(request: &Request) -> Vec<EmitKind> {
+    let mut kinds = Vec::new();
+    for emit in &request.emit {
+        let kind = emit.kind();
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    kinds
+}
+
+/// `, emitting `stack`` after a target and a mode, or nothing for a request
+/// that asked no emit.
+fn emitting(emits: &[EmitKind]) -> String {
+    if emits.is_empty() {
+        return String::new();
+    }
+    format!(
+        ", emitting {}",
+        emits
+            .iter()
+            .map(|kind| format!("`{}`", kind.as_str()))
+            .collect::<Vec<_>>()
+            .join(" and ")
+    )
 }
 
 /// Why a backend cannot serve a target, or `None` when it can.
@@ -902,11 +974,23 @@ fn check_filter_fields(
     request: &Request,
     capabilities: &Capabilities,
 ) -> Result<(), ResolveError> {
-    let Some(filter) = &request.filter else {
-        return Ok(());
-    };
+    // A ranking, a summary or a histogram per attribute reads a field the
+    // way a filter does: over one the backend never fills, every event is
+    // `<attr>=?`, one row holding the whole run.
+    let mut fields: Vec<&str> = request
+        .filter
+        .as_ref()
+        .map(|filter| filter.fields().into_iter().collect())
+        .unwrap_or_default();
+    fields.extend(
+        request
+            .emit
+            .iter()
+            .filter_map(|emit| emit.by())
+            .map(|by| by.as_str()),
+    );
     let carried = entry.backend_filter_fields(backend);
-    for field in filter.fields() {
+    for field in fields {
         if carried.iter().any(|known| known == field)
             || !entry.filter_fields.iter().any(|known| known == field)
         {
@@ -979,7 +1063,8 @@ fn key_elsewhere(
     capabilities: &Capabilities,
 ) -> KeyElsewhere {
     let unfit = cannot_serve_target(entry, backend, request.target.kind())
-        .or_else(|| cannot_serve_mode(entry, backend, request.mode.kind()));
+        .or_else(|| cannot_serve_mode(entry, backend, request.mode.kind()))
+        .or_else(|| cannot_serve_emits(entry, backend, request));
     if let Some(reason) = unfit {
         return KeyElsewhere::Unfit {
             backend: backend.id.clone(),
@@ -1937,6 +2022,123 @@ mod tests {
             }
             other => panic!("a pin past the mode must be refused, got {other:?}"),
         }
+    }
+
+    /// `mem.heap.alloc -e stack` (heap 1): a backend whose own `emits` leave
+    /// `stack` out is passed over with that reason, pinned or walked, so the
+    /// refusal comes before the launch and not after it with nothing to
+    /// write; a request it does serve still reaches it. With every backend of
+    /// the chain narrowed, no backend declares the request and the refusal
+    /// names the emit.
+    #[test]
+    fn a_backend_whose_emits_leave_the_requests_out_is_passed_over_with_the_reason() {
+        let embedded = Catalog::embedded().unwrap();
+        let mut entry = embedded
+            .get(&"mem.heap.alloc".parse().unwrap())
+            .unwrap()
+            .clone();
+        entry.backends[0].emits = Some(vec![EmitKind::TopK, EmitKind::Summary]);
+        let catalog = Catalog::from_entries(vec![entry.clone()]).unwrap();
+        let capabilities = Capabilities::detect();
+        let mut request = fixture("mem.heap.alloc", Target::Launch(vec!["true".into()]));
+        request.mode = crate::request::Mode::Trace;
+        request.emit = vec!["stack".parse().unwrap()];
+        let passed_over = |reasons: &[String]| {
+            reasons
+                .iter()
+                .any(|reason| reason.contains("`preload` emits `topk`, `summary`, not `stack`"))
+        };
+        match resolve(&catalog, &capabilities, &request) {
+            Ok(resolved) => {
+                assert_ne!(resolved.backend.id, "preload", "{:?}", resolved.chain);
+                let preload = resolved
+                    .chain
+                    .iter()
+                    .find(|considered| considered.id == "preload")
+                    .unwrap();
+                match &preload.verdict {
+                    Verdict::Rejected(reasons) => assert!(passed_over(reasons), "{reasons:?}"),
+                    other => panic!("preload has to be passed over: {other:?}"),
+                }
+            }
+            Err(ResolveError::NoViableBackend { rejections, .. }) => {
+                assert!(passed_over(&rejections), "{rejections:?}")
+            }
+            Err(other) => panic!("unexpected: {other}"),
+        }
+
+        request.backend = Some("force:preload".parse().unwrap());
+        match resolve(&catalog, &capabilities, &request) {
+            Err(ResolveError::NoViableBackend { rejections, .. }) => {
+                assert!(passed_over(&rejections), "{rejections:?}")
+            }
+            other => panic!("a pin past the emit must be refused, got {other:?}"),
+        }
+
+        request.emit = vec!["topk".parse().unwrap()];
+        let resolved = resolve(&catalog, &capabilities, &request).expect("a topk resolves");
+        assert_eq!(resolved.backend.id, "preload");
+
+        for backend in &mut entry.backends {
+            backend.emits = Some(vec![EmitKind::TopK, EmitKind::Stack]);
+        }
+        entry.backends[0].emits = Some(vec![EmitKind::TopK]);
+        entry.emits = vec![EmitKind::TopK, EmitKind::Stack];
+        for backend in entry.backends.iter_mut().skip(1) {
+            backend.targets = Some(
+                [(TargetKind::Launch, TargetSupport::Native)]
+                    .into_iter()
+                    .collect(),
+            );
+        }
+        let catalog = Catalog::from_entries(vec![entry]).unwrap();
+        request.backend = None;
+        request.target = Target::Pid(vec![std::process::id() as i32]);
+        request.emit = vec!["stack".parse().unwrap()];
+        match resolve(&catalog, &capabilities, &request) {
+            Err(error @ ResolveError::NoBackendDeclares { .. }) => {
+                let text = error.to_string();
+                assert!(text.contains("emitting `stack`"), "{text}");
+                assert!(text.contains("them all together"), "{text}");
+            }
+            other => panic!("no backend declares a pid with stack: {other:?}"),
+        }
+    }
+
+    /// perfrecord 1: a filter, and a ranking or summary per attribute, over
+    /// a field the resolved backend never fills is refused before the run,
+    /// from the backend's own field list, not counted after it.
+    #[test]
+    fn an_attribute_emit_over_a_field_the_backend_never_fills_is_refused() {
+        let embedded = Catalog::embedded().unwrap();
+        let mut entry = embedded
+            .get(&"cpu.profile".parse().unwrap())
+            .unwrap()
+            .clone();
+        for backend in &mut entry.backends {
+            if backend.id == "pmu:sw" {
+                backend.filter_fields = Some(vec!["cpu".to_owned()]);
+            }
+        }
+        let catalog = Catalog::from_entries(vec![entry]).unwrap();
+        let mut request = fixture("cpu.profile", Target::System);
+        request.mode = "sample@997hz".parse().unwrap();
+        request.backend = Some("force:pmu:sw".parse().unwrap());
+        for emit in ["topk:5@comm", "summary@comm", "hist@comm"] {
+            request.emit = vec![emit.parse().unwrap()];
+            match resolve(&catalog, &Capabilities::detect(), &request) {
+                Err(ResolveError::FilterFieldNotCarried { field, backend, .. }) => {
+                    assert_eq!((field.as_str(), backend.as_str()), ("comm", "pmu:sw"));
+                }
+                Err(ResolveError::NoViableBackend { .. }) => {} // no perf here
+                other => panic!("`{emit}` over comm must be refused: {other:?}"),
+            }
+        }
+        request.emit = vec!["topk:5@cpu".parse().unwrap()];
+        assert!(!matches!(
+            resolve(&catalog, &Capabilities::detect(), &request),
+            Err(ResolveError::FilterFieldNotCarried { .. })
+        ));
     }
 
     fn backend_of<'a>(catalog: &'a Catalog, source: &str, id: &str) -> (&'a Entry, &'a Backend) {
