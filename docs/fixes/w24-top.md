@@ -167,3 +167,23 @@ python3 -c "import json; d=json.load(open('/tmp/omn-top-machine/results.json'));
   not in this stream's row): `system` lists the machine's processes from
   `proc.tasks` and splits disk and network by `dir`. `process` fills the
   terminal, and its CPU line names the flame's hottest function.
+
+## Review
+
+- **`system::batch` left tangled machine series out without a word**
+  (gap): fixed. A series whose instants disagree on how many parts they
+  hold (a RAPL or GPU engine read missing at some instants) now gets a
+  `# SOURCE KEY: up to N parts in one series, a read missing at some
+  instants: not told apart, so not given` line in place of its `machine`
+  line, as the panels say "not drawn". Shown by
+  `a_timeline_of_several_domains_is_split_by_their_order_or_not_drawn`,
+  which now also runs the batch on the tangled series.
+- **Found on merging main** (not from the reviewer): main's flame change
+  (`86c86ee`, own cost charged by the perf map) moved the process-run
+  recording's hottest function from `__tls_get_addr` to
+  `py::burn:/omniscient/view/workloads/process/../common.py`. The CPU
+  line cut it at 32 characters with no mark, which broke
+  `the_lines_read_the_ledger_and_the_flame` and read as a whole name. The
+  line now cuts a longer name with an ellipsis (`hottest_name`), the test
+  compares against that, and `process--process-run` is re-blessed (one
+  line: the new hottest function).
