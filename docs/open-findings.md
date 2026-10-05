@@ -13561,3 +13561,69 @@ beside the block, the eBPF samples set aside, and the names read from
 `every-cited-number-agrees-with-the-reference` is the check that should close
 now that `ppid` is on the raw events; `read_mcp`'s job can read it the way
 `parents()` does.
+
+## The runs after the twenty-fourth wave, one at a time (2026-10-05)
+
+`STATE.md`'s "Still to run" items 11 to 14, at `f04e6cf`, with the user
+typing what needs a password. The user was working on the machine for item
+12, so its timing pairs ran beside a light interactive load.
+
+### Item 14: the root `bpftrace` stream net left running
+
+Stopped by the user (`sudo kill -INT 204407`) before anything else ran;
+`pgrep bpftrace` empty after.
+
+### Item 12: the reference pairs with `CAP_NET_RAW`, one family at a time
+
+`make CAPTURE=1`, then `cargo test --test reference -- --test-threads=1`:
+**169 passed, 2 failed**. Per family: bpftrace 10, gpu 21, heap 8 (+1 gap,
+`memleak`), io 9, net 8, perfrecord 4 (+1 failed), perfsched 9, perfstat 12
+(+1 failed), power 7, sysstat 13, top 11; nothing skipped.
+`tcpdump-captured` held, not skipped. `perf-trace-count` held in this run
+(perf lost nothing this time), so its refusal on perf's own losses is
+intermittent, as filed above.
+
+- `hot-functions` (perfrecord): +0.0501 where 0.05 is allowed, then held
+  twice alone (+0.020, +0.010). Its sampling noise; in the tally, not a
+  defect.
+- `cpu.cycles.system` (perfstat): red again and alone, omn below `perf stat
+  -a` by **468 and 473 M cycles** in two runs whose totals differ (2.64 and
+  2.16 G for perf). A deficit that stays fixed while the total moves is a
+  fixed cost outside omn's window, which fits omn's own start and exit
+  (the doubled startup filed above) rather than a counting defect. The
+  pair's band should take that cost as its slack, as proposed above.
+
+### Item 13: a live `omn top` of the machine, alone
+
+`omn top --headless -d 8s`: `cpu.util@system` 32 events, `mem.pressure` 32,
+`power.energy` 32, `gpu.*` 33, `proc.tasks` 3833. The pollers keep their
+cadence when the machine is not loaded, so the starvation stream top saw
+was the wave's load, not the runner. Still open: `sched.futex` is asked by
+the system view and refused (`no system support`), which the view should
+not ask.
+
+### Item 11: `gpu.throttle` under a lowered power limit -- the board does not count it
+
+At `nvidia-smi -pl 150` (default 300 W, RTX 2080 Ti, driver 615.71.09),
+`tests/gpu_workload.py kernel 3000` draws under 100 W (`below_base_clocks`
+0.97, `low_utilization` 0.16): it never meets the limit. A full-device FMA
+burn (68x32 blocks of 1024 threads, ~23 ms a launch; scratchpad, not in the
+tree) holds the board at 148-151 W for 29 s. Against it:
+
+- `nvidia-smi dmon -s pv`: `pviol` 0 on every sample.
+- The driver's own counter, `nvidia-smi -q -d PERFORMANCE`'s "SW Power
+  Capping": **unchanged** across a 10.2 s burn (0 ms added), the SM at 1950
+  of 2205 MHz.
+- `omn trace gpu.throttle -m count`: `power_cap_ratio` 0.0, `ratio` 0.0.
+
+So omn reads what the driver counts, and on this board and driver a power
+limit enforced through boost is not counted as power capping by anyone: item
+11's expectation (`power_cap_ratio` above 0 where `pviol` is) cannot be shown
+here. **A defect found on the way**: `gpu.throttle` reports
+`below_application_clocks_ratio` and `below_base_clocks_ratio` at 0.996
+while the SM runs at 1950 MHz, above any base clock, and the driver answers
+"deprecated" for application clocks (`nvidia-smi -q -d CLOCK`). Both shares
+are carried as measurements with nothing saying the driver no longer
+defines them; `src/collect/gpu/` (stream gpu) should drop them, or carry
+them as unknown with the driver's answer, on a driver that deprecates
+application clocks. Limit put back to 300 W by the user.
