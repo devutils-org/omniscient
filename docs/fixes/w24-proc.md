@@ -91,11 +91,45 @@ Reasoned only: the aarch64 path register for `openat` (`regs[1]`, offset 8)
 3. **`proc.calls` has no `bpf:tp` fallback** and reads paths for `openat`
    only (not `open`, `openat2`, `execve`); `proc.exec`'s tree loses a
    descendant whose forking parent never exec'd and had already exited by the
-   drain (the catalog says so; a `sched_process_fork` program would make it
-   exact).
+   drain -- counted in `failed_reads` since the review round, but still lost
+   (a `sched_process_fork` program would make it exact).
 4. **Examples.** The new scenarios are inline commands, not sessions in
    `examples/` (stream triage's); a session per new source would let a reader
    rerun them with `omn -f`.
+
+## Review
+
+Two findings, both fixed (the fix round's commit is on top of this branch):
+
+- **`proc.tasks --tid` widened to the process, with the tid as its pid**
+  (`src/collect/proc/tasks.rs`, defect). Reproduced before the fix: `--tid`
+  of one of a 4-thread python's threads gave 4 events, every `pid` the tid.
+  Now `Target::Tid` is its own `Whose::Thread { pid, tid }`: the pid is the
+  thread's `Tgid:` read at attach, the poll reads `/proc/<pid>/task/<tid>`
+  only, a thread that exits ends the run as gone, and a tid not on the
+  machine is refused at attach. After: 1 event, `tid` the thread and `pid`
+  the process. Tests: `a_thread_target_is_that_thread_alone_under_its_process`
+  and `a_thread_that_is_not_there_is_refused` (unit),
+  `a_thread_target_is_that_thread_under_its_own_process`
+  (`tests/family_proc.rs`, through `target/debug/omn`).
+- **`proc.exec`'s tree drops of unknown parentage were uncounted**
+  (`src/collect/proc/events.rs`, gap). `Tree::admits` now answers a
+  `Verdict`: `In`, `Out` (the walk reached pid 1) or `Unknown` (a parent on
+  the way had left `/proc`, or the walk ran past its 64 hops). An exec still
+  not `In` after its one carry-over, or at the last drain, and `Unknown`, is
+  counted in `failed_reads` with the reason "an exec whose parent had exited
+  before its parentage could be read ...". The catalog caveat says so. Test:
+  `a_parent_gone_from_proc_leaves_the_exec_unknown_not_outside` (a parent
+  above `pid_max` is `Unknown`; this test process, whose parents are live up
+  to pid 1, is `Out`). The count is reasoned for a real lost parent: no test
+  produces the race (a forking parent that never exec'd and exited before
+  the drain) on demand.
+
+Tests of the round: `cargo test --lib collect::proc` 50 passed (3 new),
+`cargo test --lib catalog` 66 passed, `cargo test --test family_proc` 7
+passed (1 new), `cargo test --test scenario_proc` 29 passed, after `make`
+(capabilities granted); clippy (`--workspace --all-targets`) and `fmt
+--check` clean.
 
 ## Privileged runs wanted
 
@@ -107,7 +141,8 @@ None: everything above ran under the capabilities `make` grants.
   a rename is two rows, each call under the name it was made with
   (`proc.syscall`, the twenty-fourth wave).
 - `proc.tasks` is the machine's process table on `fs:proc`: one event per
-  process (`--system`) or per thread (`--pid`, launch) per poll, value `busy`
+  process (`--system`) or per thread (`--pid`, launch), or the one thread of
+  `--tid` under its own process, per poll, value `busy`
   as a share of one cpu since the previous poll, or over the task's life when
   first seen (`since` says which); the resident set from `statm`, as `top`
   reads it.

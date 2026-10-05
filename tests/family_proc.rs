@@ -337,3 +337,70 @@ fn the_machine_lists_a_process_this_test_started() {
     assert_eq!(attr(event, "state").unwrap(), "S");
     assert_eq!(attr(event, "threads").unwrap().as_u64(), Some(1));
 }
+
+/// `proc.tasks --tid` is that one thread, under the process it belongs to.
+/// The kernel serves `/proc/<tid>/task` with the whole thread group, which is
+/// what a `--tid` run once listed -- every thread, each labelled with the tid
+/// as its pid.
+#[test]
+fn a_thread_target_is_that_thread_under_its_own_process() {
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+    let program = "import sys, threading\n\
+                   stop = threading.Event()\n\
+                   ids = []\n\
+                   def work():\n\
+                   \x20   ids.append(threading.get_native_id())\n\
+                   \x20   stop.wait()\n\
+                   workers = [threading.Thread(target=work) for _ in range(3)]\n\
+                   for worker in workers:\n\
+                   \x20   worker.start()\n\
+                   while len(ids) < 3:\n\
+                   \x20   pass\n\
+                   print(ids[-1], flush=True)\n\
+                   sys.stdin.read()\n\
+                   stop.set()\n";
+    let mut child = Command::new("python3")
+        .args(["-c", program])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("python3");
+    let mut line = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(child.stdout.as_mut().unwrap()),
+        &mut line,
+    )
+    .unwrap();
+    let tid = line.trim().to_owned();
+    let output = Command::new(BINARY)
+        .args([
+            "proc.tasks",
+            "--tid",
+            &tid,
+            "--mode",
+            "snapshot",
+            "--emit",
+            "raw",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("omn should run");
+    drop(child.stdin.take());
+    child.wait().ok();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json results");
+    let events = run["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .expect("events")
+        .clone();
+    assert_eq!(events.len(), 1, "one thread, one event: {events:?}");
+    assert_eq!(attr(&events[0], "tid").unwrap().to_string(), tid);
+    assert_eq!(
+        attr(&events[0], "pid").unwrap().as_u64(),
+        Some(u64::from(child.id()))
+    );
+}
