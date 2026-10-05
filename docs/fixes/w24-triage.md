@@ -104,6 +104,28 @@ every_case_is_well_formed` and the two agent-reading unit tests pass;
    the raw events it can read it the way `parents()` does. Not done
    because nothing carries it to test against.
 
+## Review
+
+One finding, a gap, fixed.
+
+- **`Tasks::job`/`descends` dropped a busy process whose own events
+  carried no `ppid`** once any event did. Right: a missing parent was read
+  as "not under". `descends` now answers yes, no or unknown: yes when the
+  parents lead to the chosen child's parent, no when they lead to one of
+  the program's own processes first (those are above it) or loop, and
+  unknown when they stop at a process no event gave a parent. The unknown
+  ones are kept apart as `Job::unplaced` (and `unplaced_on_cpu`), neither
+  counted in the job nor dropped, serialized when not empty and said in
+  the text as `and N busy task(s) off the way the run did not place under
+  it or beside it, their parent unknown, not counted in the job: on a cpu
+  ...`. Shown by the partial-coverage half added to
+  `with_ppid_the_job_is_what_runs_under_the_chosen_child_s_parent` (no
+  real source carries `ppid` yet, so a unit test is all there is to show
+  it with). `cargo test --lib triage`: 78 passed; `cargo clippy
+  --workspace --all-targets -- -D warnings` and `cargo fmt --check` clean.
+  For the coordinator's `docs/triage.md` line: `followed.job.unplaced`
+  and `followed.job.unplaced_on_cpu` beside `under`.
+
 ## Needs from another stream
 
 ### To stream run (`src/main.rs`): exit 1 for a broken triage
@@ -127,7 +149,8 @@ least each task's first event of `sched.offcpu` or `sched.runqlat`.
 ### To the coordinator (`docs/triage.md`, `docs/cases.md`, `docs/mcp.md`, `man/omn.1`)
 
 - `docs/triage.md`: the latency answer's `failures` and `program_stderr`
-  fields, `saturate`'s `failures`, `followed.job.under`.
+  fields, `saturate`'s `failures`, `followed.job.under`, `followed.job.unplaced`
+  and `followed.job.unplaced_on_cpu`.
 - `docs/cases.md`, "The agent's reading": the step to a thread blocked on
   a connection beside the block (same process by the offcpu events' `pid`,
   a quarter of the block, whole its own rows, no job), the eBPF samples
