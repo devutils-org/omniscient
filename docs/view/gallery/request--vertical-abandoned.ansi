@@ -10,9 +10,17 @@
 │                                                                                                                      │[0m
 │[0m[1;32m── a002 · 5.16ms from its first byte in to its last byte out · thread 2619812 [0m[2m────────────────────────────────────────[0m│[0m
 │[0m[2m            ┊0          ┊1.00ms      ┊2.00ms      ┊3.00ms      ┊4.00ms        [0m                                        │[0m
+│            [0m[36m░[0m                                                                                                         │[0m
+│            [0m[36m░[0m                                                                                                         │[0m
 │[0m[36m  net in    ░[0m                                                                   15.4µs before start                   │[0m
+│            [0m[32m█[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m                                        │[0m
+│            [0m[32m█[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m                                        │[0m
 │[0m[1m  serving   [0m[32m█[0m[35m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[0m  5.14ms from start to done             │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
 │[0m[34m  on device [0m                                                                  [0m[2m  io.latency not in this run[0m            │[0m
+│                                                                                                                      │[0m
+│                                                                                                                      │[0m
 │[0m[96m  net out   [0m                                                                  [0m[2m  gone when done[0m                        │[0m
 │[0m[2;3m  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order[0m                 │[0m
 │                                                                                                                      │[0m
@@ -27,14 +35,6 @@
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │[0m[1m  what sets it apart from the other 1 request: [0m[35m▀ [0m[31mlock/sleep +5.08ms[0m[2m (theirs 0ns)[0m                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
 [0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m request  [0m[1ms[0m sort  [0m[1menter[0m focus it, then its lanes  [0m[1ml[0m its thread[0m

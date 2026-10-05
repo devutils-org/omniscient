@@ -13,9 +13,13 @@ omn top │ fixture vertical-requests │ 413ms                       view: snap
 │                                                                                                                      │
 │── a001 · 40.8ms from its first byte in to its last byte out · thread 2619020 ────────────────────────────────────────│
 │            ┊0              ┊10.0ms         ┊20.0ms         ┊30.0ms                                                   │
+│            ░                                                                                                         │
 │  net in    ░                                                                   20.4µs before start                   │
+│            ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                                        │
 │  serving   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  40.8ms from start to done             │
+│                                                                                                                      │
 │  on device                                                                     no block request                      │
+│                                                                                                                      │
 │  net out                                                                       gone when done                        │
 │  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order                 │
 │                                                                                                                      │
@@ -30,10 +34,6 @@ omn top │ fixture vertical-requests │ 413ms                       view: snap
 │                                                                                                                      │
 │                                                                                                                      │
 │  what sets it apart from the other 4 requests: ▀ lock/sleep +40.7ms (theirs 0ns)                                     │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

@@ -7,7 +7,7 @@ omn top │ fixture cpython-hot │ 3.99s                             view: snap
 │    own account         3.95s  with its descendants, as the scheduler counts them                                     │
 │    machine busy        5.95s  ████████     66.3%                                                                     │
 │  blocked time    0ns              0.00 threads              no block seen               ≥62.7ms  ~low det degraded   │
-│  memory held     17.5MiB peak     +2.93MiB from 14.6MiB     ▁▁▁▂▂▃▃▃▃▄▄▅▅▅▅▆▆▇▇▇▇███     1.34ms                      │
+│  memory held     17.5MiB peak     +2.93MiB from 14.6MiB     ▁▁▁▂▂▃▃▃▄▄▄▅▅▅▅▆▆▆▇▇▇███     1.34ms                      │
 │  memory faulted  3.06k faults     768/s                     a total only                ≥2.49ms  47 late             │
 │  I/O syscalls    258 calls        380µs inside them         256ns ▁█▅▂▁▁ 16.4µs         ≥56.0ms  ~low det degraded x2│
 │    bytes              478KiB  read, 10.7KiB written                                                                  │
@@ -15,7 +15,7 @@ omn top │ fixture cpython-hot │ 3.99s                             view: snap
 │  retransmits     1 sent again     machine-wide              a total only                 ≥352µs  10 late ~low det deg│
 │  GPU memory      0B peak          of 655MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁     1.65ms                      │
 │  GPU time        0ns on GPU       0 kernels and copies      no series kept               ≥585µs  10 late degraded    │
-│  energy          229J machine     57.3W on average          ████▇▇▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▆▆    ≥58.6µs                      │
+│  energy          229J machine     57.3W on average          ████▇▆▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▆     ≥58.6µs                      │
 │    ≈ the target's       152J  an estimate, not a measurement: its share of the machine's busy cpu, 3.95s of 5.95s    │
 │                                                                                                                      │
 │  to know all of this: ≥228ms of omn's cpu, ≥5.77% of what the target spent                                           │

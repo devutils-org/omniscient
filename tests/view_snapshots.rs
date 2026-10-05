@@ -155,3 +155,62 @@ fn every_view_after_a_click() {
         );
     }
 }
+
+/// The sizes every view is drawn at to be seen filling the terminal: a
+/// small one, a large one and a wide one.
+const SIZES: [(u16, u16); 3] = [(80, 24), (160, 48), (240, 60)];
+
+/// The views this file holds to the sizes, each on its own workload's
+/// recording. `system` is the model the others follow; it and `process`
+/// are held to the sizes by their own tests (`tests/view_top_*.rs`).
+const SIZED: [&str; 8] = [
+    "flame", "ledger", "request", "timebar", "heatmap", "lanes", "wake", "flows",
+];
+
+/// How far down and how far right a drawing reaches inside the frame, as
+/// a share of the rows between the tabs and the help line and of the
+/// columns: what is not a frame's border or a blank.
+fn reach(buffer: &omn_view::ratatui::buffer::Buffer) -> (f64, f64) {
+    let text = omn_view::snapshot::text(buffer);
+    let rows: Vec<&str> = text.lines().collect();
+    // The header and the tabs above, the help line below.
+    let body = &rows[2..rows.len() - 1];
+    let border = |c: char| matches!(c, '│' | '┃' | '─' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | ' ');
+    let mut lowest = 0;
+    let mut rightmost = 0;
+    for (index, row) in body.iter().enumerate() {
+        let cells: Vec<char> = row.chars().collect();
+        if let Some(last) = cells.iter().rposition(|c| !border(*c)) {
+            lowest = index + 1;
+            rightmost = rightmost.max(last + 1);
+        }
+    }
+    (
+        lowest as f64 / body.len() as f64,
+        rightmost as f64 / f64::from(buffer.area.width),
+    )
+}
+
+/// The user's remark (2026-10-05): every view fills the terminal the way
+/// `system` does, not drawn in a corner with the rest empty. Each view is
+/// drawn at the three sizes, held to a snapshot at each, and its drawing
+/// must reach the last quarter of the rows and of the columns.
+#[test]
+fn every_view_fills_the_terminal() {
+    for view in SIZED {
+        let recording = format!("workload-{view}");
+        for (width, height) in SIZES {
+            let buffer = draw(fixture(&recording), view, width, height);
+            let (down, right) = reach(&buffer);
+            assert!(
+                down >= 0.75 && right >= 0.75,
+                "{view} at {width}x{height} reaches {:.0}% of the rows and {:.0}% of the \
+                 columns: drawn in a corner\n{}",
+                down * 100.0,
+                right * 100.0,
+                omn_view::snapshot::text(&buffer)
+            );
+            assert_snapshot(&format!("{view}-{width}x{height}--{recording}"), &buffer);
+        }
+    }
+}

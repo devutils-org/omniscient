@@ -708,6 +708,13 @@ pub enum Key {
     Node {
         node: u32,
     },
+    /// The direction a counted byte or operation went (`read`, `write`,
+    /// `discard`, `flush`, `rx`, `tx`): one series per direction. Kept as
+    /// the word `omn` writes, so a direction this side does not list yet is
+    /// still a direction, not an [`Key::Other`].
+    Dir {
+        dir: String,
+    },
     #[serde(untagged)]
     Other(Value),
 }
@@ -735,6 +742,7 @@ impl fmt::Display for Key {
             Key::Dev { major, minor } => write!(f, "dev:{major}+{minor}"),
             Key::Cpu { cpu } => write!(f, "cpu:{cpu}"),
             Key::Node { node } => write!(f, "node:{node}"),
+            Key::Dir { dir } => write!(f, "dir:{dir}"),
             Key::Other(value) => write!(f, "{value}"),
         }
     }
@@ -1061,4 +1069,31 @@ impl Data {
 
 fn is_zero(count: &u64) -> bool {
     *count == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `dir` key, as `omn` writes it on an event, is a direction and
+    /// prints as `omn` prints it -- not a JSON object under `Other`.
+    #[test]
+    fn a_direction_key_is_read_and_printed_as_omn_writes_it() {
+        let keys: Vec<Key> =
+            serde_json::from_str(r#"[{"dir":{"dir":"read"}},{"dev":{"major":259,"minor":0}}]"#)
+                .unwrap();
+        assert_eq!(
+            keys[0],
+            Key::Dir {
+                dir: "read".to_owned()
+            }
+        );
+        assert_eq!(keys[0].to_string(), "dir:read");
+        assert_eq!(keys[1].to_string(), "dev:259+0");
+        // Written back as it was read.
+        assert_eq!(
+            serde_json::to_string(&keys[0]).unwrap(),
+            r#"{"dir":{"dir":"read"}}"#
+        );
+    }
 }

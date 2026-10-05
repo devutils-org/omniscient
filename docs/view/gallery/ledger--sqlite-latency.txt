@@ -3,6 +3,7 @@ omn top │ fixture sqlite-latency │ 288ms                          view: snap
 ┌ ledger -- what the target cost over 288ms of wall-clock ─────────────────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        not in this run: cpu.oncpu_time was not asked for                                                   │
+│                                                                                                                      │
 │  blocked time    0ns              0.00 threads              no block seen               ≥6.12ms  ~low det degraded   │
 │  memory held     not in this run: mem.rss was not asked for                                                          │
 │  memory faulted  not in this run: mem.faults was not asked for                                                       │
@@ -19,7 +20,6 @@ omn top │ fixture sqlite-latency │ 288ms                          view: snap
 │cpu.oncpu_time -- cpu time, per thread                                                                                │
 │This run did not ask for it. `omn top` live asks for every line of the sheet; a recording made by another session     │
 │holds what that session asked.                                                                                        │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

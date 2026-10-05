@@ -8,6 +8,10 @@
 │   52 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <- sq… │[0m
 │ [0m[2m  decisive: ahead of the next state (39.1ms) and of what no row read (1.00ms) -- omn latency's rule, on the run's d…[0m │[0m
 │                                                                                                                      │[0m
+│                       [0m[2m│[0m[2;32m████████[0m[2;35m▚[0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[2m┤[0m                               │[0m
+│                       [0m[2m│[0m[2;32m████████[0m[2;35m▚[0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[2m┤[0m                               │[0m
+│                       [0m[2m│[0m[2;32m████████[0m[2;35m▚[0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[2m┤[0m                               │[0m
+│                       [0m[2m│[0m[2;32m████████[0m[2;35m▚[0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[2m┤[0m                               │[0m
 │ [0m[1;32m▸ task 2619011        [0m[2m├[0m[2;32m████████[0m[2;35m▚[0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[1;2;7;34m blocked 85.7% [0m[2;34m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓[0m[2m┤    289ms [0m[1;34m ▶ blocked 85.7%   [0m  │[0m
 │ [0m[2m                     0 ───────────────────────────┼ 146ms ───────────────────────────┤ 291ms                        [0m │[0m
 │                        [0m[32m█[0m on cpu   [0m[35m▚[0m run queue   [0m[34m▓[0m blocked                                                            │[0m
@@ -30,10 +34,6 @@
 │ [0m[2m  heaviest.[0m                                                                                                          │[0m
 │ [0m[2mTrust: 3 rounds of reads came late: nothing is missing, but the series is not spaced as asked; the source is not[0m     │[0m
 │ [0m[2m  reproducible between two runs of the same workload; served by a fallback that says what it gives up (5).[0m           │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m

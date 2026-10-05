@@ -10,12 +10,12 @@ on cpu: 7.89k · hottest own __tls_get_addr 9.41% │ off cpu: nothing recorded
 │                  ▏l ▏l                                                                                               │
 │                                                                                                                      │
 │heaviest on their own (where it ends, every path summed)                                                              │
-│ 9.41% ████████████ __tls_get_addr                                                                                    │
-│ 8.05% ██████████   _Py_Dealloc                                                                                       │
-│ 4.54% ██████       PyLong_FromLong                                                                                   │
-│ 3.89% █████        PyNumber_Remainder                                                                                │
-│ 3.16% ████         libpython3.14+0x19cf26                                                                            │
-│ 2.85% ████         libpython3.14+0x19cf1e                                                                            │
+│ 9.41% ███████████████████████ __tls_get_addr                                                                         │
+│ 8.05% ████████████████████    _Py_Dealloc                                                                            │
+│ 4.54% ███████████             PyLong_FromLong                                                                        │
+│ 3.89% ██████████              PyNumber_Remainder                                                                     │
+│ 3.16% ████████                libpython3.14+0x19cf26                                                                 │
+│ 2.85% ███████                 libpython3.14+0x19cf1e                                                                 │
 │                                                                                                                      │
 │‼ pmu:sw: time-based sampling: blind to phases running at reduced frequency                                           │
 │‼ 1102 of 2193 samples landed in a function that sets up no frame pointer (743 in ld-linux-x86-64.so.2, 358 in        │

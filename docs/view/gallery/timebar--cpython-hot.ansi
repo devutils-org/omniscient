@@ -8,6 +8,10 @@
 │   most-sampled leaf `__tls_get_addr`: 360 of 3963 samples: the samples are spread, no one function dominates         │[0m
 │ [0m[2m  decisive: ahead of the next state (2.28ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea…[0m │[0m
 │                                                                                                                      │[0m
+│                       [0m[2m│[0m[2;32m█████████████████████████████████████████████████████████████[0m[2m ┤[0m                               │[0m
+│                       [0m[2m│[0m[2;32m█████████████████████████████████████████████████████████████[0m[2m ┤[0m                               │[0m
+│                       [0m[2m│[0m[2;32m█████████████████████████████████████████████████████████████[0m[2m ┤[0m                               │[0m
+│                       [0m[2m│[0m[2;32m█████████████████████████████████████████████████████████████[0m[2m ┤[0m                               │[0m
 │ [0m[1;32m▸ 2627059 python3     [0m[2m├[0m[2;32m███████████████████████[0m[1;2;7;32m on cpu 98.9% [0m[2;32m████████████████████████[0m[2m ┤    3.99s [0m[1;32m ▶ on cpu 98.9%    [0m  │[0m
 │ [0m[2m                     0 ───────────────────────────┼ 1.99s ───────────────────────────┤ 3.99s                        [0m │[0m
 │                        [0m[32m█[0m on cpu   [0m[35m▚[0m run queue                                                                        │[0m
@@ -26,10 +30,6 @@
 │ [0m[2m  latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.[0m                              │[0m
 │ [0m[2mTrust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it[0m  │[0m
 │ [0m[2m  gives up (2).[0m                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

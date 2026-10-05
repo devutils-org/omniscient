@@ -10,12 +10,12 @@
 [0m[32m│[0m                 [0m[2;30;103m▏l[0m[2;30;43m▏l[0m[2;30;103m [0m[2;30;101m▏l[0m[2;30;43m [0m                   [0m[2;30;103m▏l[0m[2;30;43m [0m[2;30;103m [0m[2;30;101m [0m[2;30;103m [0m                                                                    [0m[32m│[0m
 [0m[32m│[0m                                                                                                                      [0m[32m│[0m
 [0m[32m│[0m[1mheaviest on their own[0m[2m (where it ends, every path summed)[0m                                                              [0m[32m│[0m
-[0m[32m│[0m[2m 9.08% [0m[33m████████████[0m[2m __tls_get_addr[0m                                                                                    [0m[32m│[0m
-[0m[32m│[0m[2m 6.84% [0m[33m█████████   [0m[2m _Py_Dealloc[0m                                                                                       [0m[32m│[0m
-[0m[32m│[0m[2m 4.29% [0m[33m██████      [0m[2m PyNumber_Remainder[0m                                                                                [0m[32m│[0m
-[0m[32m│[0m[2m 4.26% [0m[33m██████      [0m[2m PyLong_FromLong[0m                                                                                   [0m[32m│[0m
-[0m[32m│[0m[2m 3.08% [0m[33m████        [0m[2m libpython3.14+0x19cf1e[0m                                                                            [0m[32m│[0m
-[0m[32m│[0m[2m 3.03% [0m[33m████        [0m[2m libpython3.14+0x19cf26[0m                                                                            [0m[32m│[0m
+[0m[32m│[0m[2m 9.08% [0m[33m███████████████████████[0m[2m __tls_get_addr[0m                                                                         [0m[32m│[0m
+[0m[32m│[0m[2m 6.84% [0m[33m█████████████████      [0m[2m _Py_Dealloc[0m                                                                            [0m[32m│[0m
+[0m[32m│[0m[2m 4.29% [0m[33m███████████            [0m[2m PyNumber_Remainder[0m                                                                     [0m[32m│[0m
+[0m[32m│[0m[2m 4.26% [0m[33m███████████            [0m[2m PyLong_FromLong[0m                                                                        [0m[32m│[0m
+[0m[32m│[0m[2m 3.08% [0m[33m████████               [0m[2m libpython3.14+0x19cf1e[0m                                                                 [0m[32m│[0m
+[0m[32m│[0m[2m 3.03% [0m[33m████████               [0m[2m libpython3.14+0x19cf26[0m                                                                 [0m[32m│[0m
 [0m[32m│[0m                                                                                                                      [0m[32m│[0m
 [0m[32m│[0m[33m‼ [0m[2mpmu:sw: time-based sampling: blind to phases running at reduced frequency[0m                                           [0m[32m│[0m
 [0m[32m│[0m[33m‼ [0m[2m534 of 1046 samples landed in a function that sets up no frame pointer (360 in ld-linux-x86-64.so.2, 170 in[0m         [0m[32m│[0m

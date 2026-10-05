@@ -8,6 +8,10 @@ omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snap
 │   most-sampled leaf `__tls_get_addr`: 743 of 7892 samples: the samples are spread, no one function dominates         │
 │   decisive: ahead of the next state (1.84ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
 │                                                                                                                      │
+│                       │█████████████████████████████████████████████████████████████ ┤                               │
+│                       │█████████████████████████████████████████████████████████████ ┤                               │
+│                       │█████████████████████████████████████████████████████████████ ┤                               │
+│                       │█████████████████████████████████████████████████████████████ ┤                               │
 │ ▸ 2627262 python3     ├███████████████████████ on cpu 99.1% ████████████████████████ ┤    7.93s  ▶ on cpu 99.1%      │
 │                      0 ───────────────────────────┼ 3.97s ───────────────────────────┤ 7.93s                         │
 │                        █ on cpu   ▚ run queue                                                                        │
@@ -26,10 +30,6 @@ omn top │ fixture cpython-hot-heavier │ 7.93s                     view: snap
 │   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │
 │ Trust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it  │
 │   gives up (2).                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

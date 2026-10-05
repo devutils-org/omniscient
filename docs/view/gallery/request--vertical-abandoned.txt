@@ -10,9 +10,17 @@ omn top │ fixture vertical-abandoned │ 184ms                      view: snap
 │                                                                                                                      │
 │── a002 · 5.16ms from its first byte in to its last byte out · thread 2619812 ────────────────────────────────────────│
 │            ┊0          ┊1.00ms      ┊2.00ms      ┊3.00ms      ┊4.00ms                                                │
+│            ░                                                                                                         │
+│            ░                                                                                                         │
 │  net in    ░                                                                   15.4µs before start                   │
+│            █▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                                        │
+│            █▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                                        │
 │  serving   █▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  5.14ms from start to done             │
+│                                                                                                                      │
+│                                                                                                                      │
 │  on device                                                                     io.latency not in this run            │
+│                                                                                                                      │
+│                                                                                                                      │
 │  net out                                                                       gone when done                        │
 │  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order                 │
 │                                                                                                                      │
@@ -27,14 +35,6 @@ omn top │ fixture vertical-abandoned │ 184ms                      view: snap
 │                                                                                                                      │
 │                                                                                                                      │
 │  what sets it apart from the other 1 request: ▀ lock/sleep +5.08ms (theirs 0ns)                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ request  s sort  enter focus it, then its lanes  l its thread

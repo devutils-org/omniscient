@@ -4,8 +4,12 @@ omn top │ fixture workload-flows │ 993ms                          view: snap
 │sched.switches 42 10 late ~low det degraded x2  sched.wakeup 114 10 late ~low det degraded  sched.offcpu 22 ~low det  │
 │degraded x3  gpu.kernel 0 7 late degraded                                                                             │
 │12.0ms a cell          ╷0ns            ╷200ms           ╷400ms           ╷600ms          ╷800ms            of the span│
-│flows-main     2621407│██▃                        ▂▃ ▁▁                                                   │awake 3.64%│
-│              off cpu │  ▆████████████████████████▇▆████████████████████████████████████████████████████▆ │ blkd 94.8%│
+│flows-main     2621407│██                                                                                 │awake 3.64%│
+│                      │██                                                                                 │           │
+│                      │███                        ▆█ ▂▃                                                   │           │
+│              off cpu │  ▁████████████████████████▃▁█▇▆█████████████████████████████████████████████████▁ │ blkd 94.8%│
+│                      │  ████████████████████████████████████████████████████████████████████████████████ │           │
+│                      │  ████████████████████████████████████████████████████████████████████████████████ │           │
 │───────────────────────────────────────────────────────────────────────────────▲ 677ms────────────────────────────────│
 │flows-main 2621407 (pid 2621407) at 677ms: blocked, sleeping 600ms, 377ms → 977ms, left cpu 2                         │
 │  woken by an interrupt (hardirq), then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone │
@@ -16,10 +20,6 @@ omn top │ fixture workload-flows │ 993ms                          view: snap
 │    29.0ms 3.08% sleeping      1 blocks  accept4 ← _socket.cpython-314-x86_64-linux-gnu.so x2 ← …                     │
 │    6.00ms 0.64% uninterr.    10 blocks  fsync ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
 │    4.95ms 0.53% sleeping      1 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                        │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

@@ -2,14 +2,14 @@ omn top │ fixture many-requests │ 15.8s                           view: snap
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ ledger -- what task 2619831 and 2 more cost over 15.8s of wall-clock ────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
-│▸ cpu time        55.8ms on cpu    0.35% of one cpu          █▆▆▅▆▆▅▅▅▅▅▅▅▆▅▅▅▅▆▆▆▆▅▇    ≥53.8ms  ~low det            │
+│▸ cpu time        55.8ms on cpu    0.35% of one cpu          ▅▃▃▄▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃█    ≥53.8ms  ~low det            │
 │    2619831 server     27.7ms  ██████       49.7%                                                                     │
 │    2619833 server     25.3ms  █████        45.3%                                                                     │
 │    2619832 server     2.83ms  █            5.07%                                                                     │
 │    user and system apart: on the raw events only, which this run did not keep                                        │
 │    own account        55.8ms  with its descendants, as the scheduler counts them                                     │
 │    machine busy        2.09s  ▏            2.67%                                                                     │
-│  blocked time    47.2s            2.99 threads              ▆█▇▇█▇▇██▇▇███▆████▆█▇▇█     ≥126ms  ~low det degraded   │
+│  blocked time    47.2s            2.99 threads              ▅▆▅▇▅▅▇▆▅▇▅▅▅▅▅▇▅▅▇▅▅▇▅█     ≥126ms  ~low det degraded   │
 │    2619832 server      15.8s  ████         33.4%                                                                     │
 │    2619831 server      15.7s  ████         33.3%                                                                     │
 │    2619833 server      15.7s  ████         33.3%                                                                     │
@@ -23,14 +23,14 @@ omn top │ fixture many-requests │ 15.8s                           view: snap
 │    2619831 server      369ms  ▏            2.31%                                                                     │
 │    2619833 server      416µs  ▏            0.00%                                                                     │
 │    bytes              730KiB  read, 256KiB written                                                                   │
-│  network         64.5KiB moved    32.2KiB out, 32.2KiB in   ▆▇▇▇▇█▆█▇▆██▇▇▇█▆█▇▇█▆▇█     ≥149ms  ~low det degraded x3│
+│  network         64.5KiB moved    32.2KiB out, 32.2KiB in   ▆▅▅█▅▅██▅█▅▆▆▅▅▇▅▆▆▆▅▇▆█     ≥149ms  ~low det degraded x3│
 │    2619831 server    32.2KiB  ██████       50.0%                                                                     │
 │    2619833 server    32.2KiB  ██████       50.0%                                                                     │
 │    1.65k socket calls                                                                                                │
 │  retransmits     0 sent again     machine-wide              a total only                 ≥559µs  118 late ~low det   │
 │  GPU memory      0B peak          of 654MiB on the device   ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁     2.95ms                      │
 │  GPU time        0ns on GPU       0 kernels and copies      no series kept              ≥1.02ms  118 late degraded   │
-│  energy          570J machine     36.1W on average          ▇▇▇█▇▇▇▇▇▇▇█▇▇▇▇▇▇█▇▇▇▇▆    ≥98.6µs                      │
+│  energy          570J machine     36.1W on average          ▆▆▆█▆▆▆▆▆▆██▆▆▆▆▆▆█▆▆▆▆▅    ≥98.6µs                      │
 │    ≈ the target's      15.2J  an estimate, not a measurement: its share of the machine's busy cpu, 55.8ms of 2.09s   │
 │                                                                                                                      │
 │  to know all of this: ≥487ms of omn's cpu, ≥873% of what the target spent                                            │

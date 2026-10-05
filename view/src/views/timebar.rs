@@ -2108,7 +2108,10 @@ impl View for Timebar {
         lines.push(Line::default());
 
         // The bars, as many as leave room for the table under them.
-        let tail = 10 + 2 + 18;
+        // Under 100 cells the bars keep the width the suspect's column
+        // would take: the first suspect is named above them.
+        let suspects = width >= 100;
+        let tail = 10 + if suspects { 2 + 18 } else { 0 };
         let bar_w = width.saturating_sub(LABEL + tail + 2).max(10);
         let common = visible
             .iter()
@@ -2187,11 +2190,13 @@ impl View for Timebar {
             spans.extend(bar_spans(one, scale, bar_w, true));
             let whole = one.whole.map_or("?".to_owned(), units::duration);
             spans.push(Span::styled(format!("{whole:>9} "), one.trust.style()));
-            let (suspect, suspect_style) = one.suspect_short();
-            spans.push(Span::styled(
-                format!(" {}", fit(&suspect, 18)),
-                suspect_style,
-            ));
+            if suspects {
+                let (suspect, suspect_style) = one.suspect_short();
+                spans.push(Span::styled(
+                    format!(" {}", fit(&suspect, 18)),
+                    suspect_style,
+                ));
+            }
             lines.push(Line::from(spans));
         }
         if fold_line > 0 {

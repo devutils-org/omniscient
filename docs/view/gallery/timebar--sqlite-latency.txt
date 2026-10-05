@@ -8,6 +8,10 @@ omn top │ fixture sqlite-latency │ 288ms                          view: snap
 │   52 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <- sq… │
 │   decisive: ahead of the next state (39.1ms) and of what no row read (1.00ms) -- omn latency's rule, on the run's d… │
 │                                                                                                                      │
+│                       │████████▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤                               │
+│                       │████████▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤                               │
+│                       │████████▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤                               │
+│                       │████████▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤                               │
 │ ▸ task 2619011        ├████████▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ blocked 85.7% ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤    289ms  ▶ blocked 85.7%     │
 │                      0 ───────────────────────────┼ 146ms ───────────────────────────┤ 291ms                         │
 │                        █ on cpu   ▚ run queue   ▓ blocked                                                            │
@@ -30,10 +34,6 @@ omn top │ fixture sqlite-latency │ 288ms                          view: snap
 │   heaviest.                                                                                                          │
 │ Trust: 3 rounds of reads came late: nothing is missing, but the series is not spaced as asked; the source is not     │
 │   reproducible between two runs of the same workload; served by a fallback that says what it gives up (5).           │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

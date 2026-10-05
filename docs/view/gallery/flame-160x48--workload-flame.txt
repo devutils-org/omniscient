@@ -1,0 +1,48 @@
+omn top │ fixture workload-flame │ 2.05s                                                                  view: snapshot │ collectors ≥13.2% │ target 61.6% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+ flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────────────────────────────────────────────
+on cpu: 1.40k · hottest own __tls_get_addr 8.65% │ off cpu: 2.61s · hottest own libc+0xa08f2 100%
+┌ on cpu cpu.profile 1.40k 23 late ~low det degraded x4 ───────────────────────┐┌ off cpu sched.offcpu 2.61s ~low det degraded ────────────────────────────────┐
+│width ∝ samples · heaviest left                               100 frames deep ││width ∝ time off cpu · heaviest left                           30 frames deep │
+│▏all 1.40k                                                                    ││▏all 2.61s                                                                    │
+│▏⋯py::Thread._bootstrap_inner:/usr/lib/python3.14/threading.py 98.0%        ▏l││▏⋯py::Thread.join:/usr/lib/python3.14/threading.py 76.6%    ▏py::nap:/omnisci…│
+│▏⋯libpython3.14+0x16af1c 69.8%                        ▏py::burn:/omniscient…  ││▏⋯libc+0xa08f2 38.4%          ▏⋯libc+0xa08f2 38.2%          ▏+0xa08f2 20.7% ▏l│
+│▏py::burn:/omniscient/view/workloads/flame…▏py::burn:…▏_P▏li▏Py▏_ ▏_          ││                                                                              │
+│▏_Py_…▏lib▏PyN…▏lib▏_r▏li ▏l               ▏P ▏_                              ││heaviest on their own (where it ends, every path summed)                      │
+│                      ▏_                                                      ││  100% ███████████████ libc+0xa08f2                                           │
+│                                                                              ││                                                                              │
+│                                                                              ││‼ bpf:raw_tp: user stacks only: the kernel side of a block is always the      │
+│heaviest on their own (where it ends, every path summed)                      ││  scheduler, and what it was waiting for is the task state                    │
+│ 8.65% ███████████████ __tls_get_addr                                         ││‼ names came from -- perf-2620696.map: perf-map, the 481 lines the program    │
+│ 7.51% █████████████   PyNumber_Remainder                                     ││  wrote for code no file holds; python3.14: its dynamic symbols only: its     │
+│ 5.58% ██████████      _Py_Dealloc                                            ││  internal functions are unnamed; libc.so.6: its dynamic symbols only: its    │
+│ 4.22% ███████         _raw_spin_unlock_irqrestore                            ││  internal functions are unnamed; libpython3.14.so.1.0: its dynamic symbols   │
+│ 3.00% █████           libpython3.14+0x5bd00                                  ││  only: its internal functions are unnamed                                    │
+│ 2.57% ████            libpython3.14+0x5ef6d                                  ││                                                                              │
+│ 2.43% ████            libpython3.14+0x19cf26                                 ││                                                                              │
+│ 2.43% ████            libpython3.14+0x59653                                  ││                                                                              │
+│ 2.14% ████            libpython3.14+0x1f999e                                 ││                                                                              │
+│ 2.07% ████            libpython3.14+0x5e870                                  ││                                                                              │
+│                                                                              ││                                                                              │
+│‼ pmu:sw: time-based sampling: blind to phases running at reduced frequency   ││                                                                              │
+│‼ 1 frames fell in no mapping of the target and are reported by address       ││                                                                              │
+│‼ 2 tasks the target started were found on a tick after they began, and had   ││                                                                              │
+│  used 33.97 ms of cpu by then, by the kernel's own account: that time is in  ││                                                                              │
+│  no sample here. A task that started and ended between two ticks is in none  ││                                                                              │
+│  at all                                                                      ││                                                                              │
+│‼ stacks unwound by `fp`: the caller of a function that sets up no frame      ││                                                                              │
+│  pointer is lost -- every frameless leaf, and whole stacks of a target built ││                                                                              │
+│  without them                                                                ││                                                                              │
+│‼ names came from -- perf-2620696.map: perf-map, the 480 lines the program    ││                                                                              │
+│  wrote for code no file holds; python3.14: its dynamic symbols only: its     ││                                                                              │
+│  internal functions are unnamed; ld-linux-x86-64.so.2: its dynamic symbols   ││                                                                              │
+│  only: its internal functions are unnamed; libc.so.6: its dynamic symbols    ││                                                                              │
+│  only: its internal functions are unnamed; libpython3.14.so.1.0: its dynamic ││                                                                              │
+│  symbols only: its internal functions are unnamed;                           ││                                                                              │
+│  _ctypes.cpython-314-x86_64-linux-gnu.so: its dynamic symbols only: its      ││                                                                              │
+│  internal functions are unnamed                                              ││                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘
+on cpu ▸ all
+1.40k samples ≈ 1.40s · 100% of all · own 0 · 1.40k events
+⏎ zooms into the selected box, ⌫ out · / finds a name, * the selected one · o switches pane, m shows it alone · t splits off cpu by thread · ! lists caveats
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

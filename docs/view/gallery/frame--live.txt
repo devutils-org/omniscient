@@ -4,17 +4,17 @@ omn top │ fixture http-server │ 1.42s live                           view: s
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        0ns on cpu       0.00% of one cpu          no series kept           at the end  ~low det live degrad│
 │    user and system apart: on the raw events only, which this run did not keep                                        │
-│  blocked time    2.32s            1.63 threads                ▁▂ ▂▂  ▂▇▂ ▂ ▂ ▂█ ▂ ▂▂ at the end  ~low det live degrad│
+│  blocked time    2.32s            1.63 threads                ▁▂ ▂▂ ▂ ▇▂ ▂ ▂ ▂█ ▂ ▂▂ at the end  ~low det live degrad│
 │    2618477 python3     1.32s  ███████      56.7%                                                                     │
 │    2618476 python3     1.01s  █████        43.3%                                                                     │
 │    2618479 Thread…    1.58ms  ▏            0.07%                                                                     │
 │  memory held     0B peak                                    no series kept           at the end  live degraded       │
 │  memory faulted  0 faults         0/s                       a total only             at the end  live degraded       │
-│  I/O syscalls    387 calls        2.66ms inside them        █ ▂ ▁▁▁  ▁ ▁ ▁ ▁ ▁▁ ▁ ▁▁ at the end  ~low det live degrad│
+│  I/O syscalls    387 calls        2.66ms inside them        █ ▂▁ ▁▁ ▁  ▁ ▁ ▁ ▁▁ ▁ ▁▁ at the end  ~low det live degrad│
 │    2618476 python3    2.63ms  ████████████ 98.8%                                                                     │
 │    2618479 Thread…    33.2µs  ▏            1.25%                                                                     │
 │    bytes             4.04MiB  read, 768B written                                                                     │
-│  network         13.6MiB moved    13.6MiB out, 936B in        ▁ ██ █ █ █ █ █ ██ █ ██ at the end  ~low det live degrad│
+│  network         13.6MiB moved    13.6MiB out, 936B in        ▁█ █ ██  █ █ █ ██ █ ██ at the end  ~low det live degrad│
 │    85 socket calls                                                                                                   │
 │  retransmits     0 sent again     machine-wide              a total only             at the end  ~low det live degrad│
 │  GPU memory      0B peak          of -0B on the device      no series kept           at the end  live degraded       │

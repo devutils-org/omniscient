@@ -2,14 +2,14 @@
  1 system  2 flame [0m[1;7m 3 ledger [0m 4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process                      [0m
 ┌ ledger -- [0m[1mwhat task 2619831 and 2 more cost over 15.8s of wall-clock[0m ────────────────────────────────────────────────┐[0m
 │[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
-│[0m[1;32m▸ cpu time        [0m[2m55.8ms on cpu[0m    [0m[2m0.35% of one cpu[0m          [0m[2;32m█▆▆▅▆▆▅▅▅▅▅▅▅▆▅▅▅▅▆▆▆▆▅▇[0m [0m[35m   ≥53.8ms[0m  [0m[36m~low det[0m            │[0m
+│[0m[1;32m▸ cpu time        [0m[2m55.8ms on cpu[0m    [0m[2m0.35% of one cpu[0m          [0m[2;32m▅▃▃▄▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃█[0m [0m[35m   ≥53.8ms[0m  [0m[36m~low det[0m            │[0m
 │    2619831 server  [0m[2m   27.7ms  ██████       49.7%[0m                                                                     │[0m
 │    2619833 server  [0m[2m   25.3ms  █████        45.3%[0m                                                                     │[0m
 │    2619832 server  [0m[2m   2.83ms  █            5.07%[0m                                                                     │[0m
 │[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
 │    own account     [0m[1m   55.8ms[0m  [0m[2mwith its descendants, as the scheduler counts them[0m                                     │[0m
 │    machine busy        2.09s  ▏            2.67%                                                                     │[0m
-│  [0m[1mblocked time    [0m[2m47.2s[0m            [0m[2m2.99 threads[0m              [0m[2;32m▆█▇▇█▇▇██▇▇███▆████▆█▇▇█[0m [0m[35m    ≥126ms[0m  [0m[36m~low det[0m [0m[33mdegraded[0m   │[0m
+│  [0m[1mblocked time    [0m[2m47.2s[0m            [0m[2m2.99 threads[0m              [0m[2;32m▅▆▅▇▅▅▇▆▅▇▅▅▅▅▅▇▅▅▇▅▅▇▅█[0m [0m[35m    ≥126ms[0m  [0m[36m~low det[0m [0m[33mdegraded[0m   │[0m
 │    2619832 server  [0m[2m    15.8s  ████         33.4%[0m                                                                     │[0m
 │    2619831 server  [0m[2m    15.7s  ████         33.3%[0m                                                                     │[0m
 │    2619833 server  [0m[2m    15.7s  ████         33.3%[0m                                                                     │[0m
@@ -23,14 +23,14 @@
 │    2619831 server  [0m[2m    369ms  ▏            2.31%[0m                                                                     │[0m
 │    2619833 server  [0m[2m    416µs  ▏            0.00%[0m                                                                     │[0m
 │    bytes           [0m[2m   730KiB[0m  [0m[2mread, 256KiB written[0m                                                                   │[0m
-│  [0m[1mnetwork         [0m[2m64.5KiB moved[0m    [0m[2m32.2KiB out, 32.2KiB in[0m   [0m[2;32m▆▇▇▇▇█▆█▇▆██▇▇▇█▆█▇▇█▆▇█[0m [0m[35m    ≥149ms[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m│[0m
+│  [0m[1mnetwork         [0m[2m64.5KiB moved[0m    [0m[2m32.2KiB out, 32.2KiB in[0m   [0m[2;32m▆▅▅█▅▅██▅█▅▆▆▅▅▇▅▆▆▆▅▇▆█[0m [0m[35m    ≥149ms[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m│[0m
 │    2619831 server  [0m[2m  32.2KiB  ██████       50.0%[0m                                                                     │[0m
 │    2619833 server  [0m[2m  32.2KiB  ██████       50.0%[0m                                                                     │[0m
 │[0m[2;3m    1.65k socket calls[0m                                                                                                │[0m
 │  [0m[1mretransmits     [0m[2m0 sent again[0m     [0m[3mmachine-wide[0m              [0m[2;3ma total only[0m             [0m[35m    ≥559µs[0m  [0m[33m118 late[0m [0m[36m~low det[0m   │[0m
 │  [0m[1mGPU memory      [0m0B peak          [0m[2mof 654MiB on the device[0m   [0m[32m▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁[0m [0m[35m    2.95ms[0m                      │[0m
 │  [0m[1mGPU time        [0m0ns on GPU       0 kernels and copies      [0m[2;3mno series kept[0m           [0m[35m   ≥1.02ms[0m  [0m[33m118 late[0m [0m[33mdegraded[0m   │[0m
-│  [0m[1menergy          [0m570J machine     36.1W on average          [0m[32m▇▇▇█▇▇▇▇▇▇▇█▇▇▇▇▇▇█▇▇▇▇▆[0m [0m[35m   ≥98.6µs[0m                      │[0m
+│  [0m[1menergy          [0m570J machine     36.1W on average          [0m[32m▆▆▆█▆▆▆▆▆▆██▆▆▆▆▆▆█▆▆▆▆▅[0m [0m[35m   ≥98.6µs[0m                      │[0m
 │    ≈ the target's  [0m[3m    15.2J[0m  [0m[2;3man estimate, not a measurement: its share of the machine's busy cpu, 55.8ms of 2.09s[0m   │[0m
 │                                                                                                                      │[0m
 │[0m[1m  to know all of this[0m[35m: ≥487ms of omn's cpu, ≥873% of what the target spent[0m                                            │[0m

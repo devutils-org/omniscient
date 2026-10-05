@@ -1,0 +1,24 @@
+omn top │ fixture workload-lanes │ 2.24s                         view: snapshot
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake
+┌ lanes -- threads side by side: one lane per thread and per GPU stream, along ┐
+│sched.switches 277 26 late ~low det degraded  sched.wakeup 353 26 late ~low   │
+│det degraded  sched.offcpu 168 ~low det degraded x2  gpu.kernel 12 9 late     │
+│52.2ms a cell          ╷0ns               ╷1.00s                   of the span│
+│gpu0 s7 spin          │                               ▃████████▃  │ busy 19.9%│
+│lanes-main     2621955│▄────────────────────────▁▁─▁───────────▁  │awake 1.21%│
+│lane-b         2621957│──█▅──▃█▂──▆▇──▁█▄──▄█▁──▇▆                │awake 21.6%│
+│lane-c         2621958│▁──▄█▁──▇▆──▂█▃──▅█▁──█▆──▃█▃              │awake 21.5%│
+│lane-a         2621956│▅█▁──█▆──▃█▃──▆█───█▅──▃▄                  │awake 19.9%│
+│lane-gpu       2622145│                            ▅██▄▁▁▁▁▁▁▁▁─  │awake 7.00%│
+│cuda-EvtHandlr 2622151│                             ─▁▁▁▁▁▁▁▁▁▁▁  │awake 0.09%│
+│lane-gpu       2622147│                            ─▁▁▁▁▁▁▁▁▁▁▁▁  │awake 0.05%│
+│1-9 of 13 lanes ↑/↓148│                            ─▁▁▁▁▁▁▁▁▁▁▁▁  │awake 0.04%│
+│───────────────────────────────────────────────────────▲ 1.72s────────────────│
+│lane-gpu 2622145 (pid 2621955) at 1.72s: blocked, sleeping 49.0ms, 1.70s →    │
+│1.74s, left cpu 0                                                             │
+│  woken by cuda-EvtHandlr 2622151; state, stack: its window's sched.offcpu row│
+│nearest in size                                                               │
+│  in libc.so.6 x2 ← libcuda.so.615.71.09 x5 ← cuCtxSynchronize ← …            │
+│▆ awake: on a cpu or queued  ─ blocked  ━ uninterruptible  ▆ kernel  ▆ copy  h│
+└──────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ lane  h/l H/L cursor
