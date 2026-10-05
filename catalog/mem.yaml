@@ -398,6 +398,30 @@
     - "numa_maps counts each mapping in its own page size, so a transparently
        promoted region is counted in 2 MiB pages and not in 4 KiB ones."
 
+- id: mem.oom
+  family: mem
+  summary: "OOM kills, for the machine or one cgroup"
+  unit: count
+  backends:
+    - {id: "fs:cgroup", requires: ["cgroup2:memory.events"], cost: free,
+       targets: {cgroup: native, container: native, pid: native, tid: native, launch: native}}
+    - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free, equivalent: true, targets: {system: native}}
+  modes: [count, poll]
+  emits: [summary, timeline, rate, raw]
+  targets: {system: native, cgroup: native, container: native, pid: native, tid: native, launch: native}
+  keys: [cgroup]
+  filter_fields: []
+  determinism: low
+  caveats:
+    - "Counts, not victims: which task died, what it held and the allocation
+       that triggered the kill are in the oom:mark_victim tracepoint, which no
+       backend here reads yet."
+    - "A pid names its cgroup: the kernel counts kills per cgroup, never per
+       process, and memory.events includes every cgroup below the one named.
+       Beside `kills` the cgroup backend carries `oom` (times it ran out,
+       which reclaim can end without a kill) and `max` (times it touched its
+       hard limit)."
+
 - id: mem.system
   family: mem
   summary: "The machine's memory: used, available, cache, slab, swap (what free prints)"

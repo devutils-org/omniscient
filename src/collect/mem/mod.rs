@@ -7,6 +7,7 @@ mod footprint;
 pub mod heap;
 mod ibs;
 mod numa;
+mod oom;
 mod page_faults;
 mod pressure;
 mod stall;
@@ -134,6 +135,18 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("mem.numa", "fs:proc", |resolved| {
             Ok(Box::new(numa::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("mem.oom", "fs:proc", |resolved| {
+            Ok(Box::new(oom::Prepare::new(
+                oom::Scope::Machine,
+                resolved.request.mode,
+            )?))
+        }),
+        Factory::new("mem.oom", "fs:cgroup", |resolved| {
+            Ok(Box::new(oom::Prepare::new(
+                oom::Scope::Cgroup,
+                resolved.request.mode,
+            )?))
         }),
         Factory::new("mem.system", "fs:proc", |resolved| {
             Ok(Box::new(system::Prepare::new(resolved.request.mode)?))
