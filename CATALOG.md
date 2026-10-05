@@ -24,10 +24,42 @@ automatically.
 source   <family>.<metric>          io.latency, cpu.cycles
 target   what to observe            pid | tid | cgroup | cpu | system | ./prog
 mode     how to observe             count | sample | trace | poll | snapshot
-emit     what comes out             raw | hist | rate | topk | stack | timeline
-keys     correlation keys           req | task | file | sock | blk | mem | gpu
+emit     what comes out             raw | hist | rate | topk | stack | timeline | summary
+keys     correlation keys           req | task | proc | file | sock | blk | mem | gpu | cgroup
+                                    iface | dev | cpu | node | dir | syscall | comm | domain | func
 filter   predicate                  pushed into the kernel when possible, else userspace
 ```
+
+`topk:N@<attr>`, `summary@<attr>` and `hist[:<scale>]@<attr>` group by the
+values of one attribute rather than by the series: rows `<attr>=<value>`, and
+`<attr>=?` for the events that carry none, said. The attribute must be one of
+the entry's `filter_fields` and one the resolved backend fills, or the request
+is refused before the run. `summary` carries a `total` where the source's
+values add up (its entry declares `rate`, `topk` or `stack`), and none over a
+level (`mem.rss`, a ratio, a temperature).
+
+Five keys came after the first ten. `dir` is a byte or request counter's
+direction, one series per direction: `io.latency`, `io.queue`, `io.size`,
+`io.bytes`, `io.iops`, `io.merges`, `net.bytes`, `net.packets`. `syscall` and
+`comm` key `proc.syscall` and `proc.calls` by call and by task name (`-k
+syscall` is `strace -c`'s table in one run), and `comm` the other `proc`
+sources. `domain` splits `power.energy` by RAPL domain. `func` is **derived**:
+no collector attaches it, the emit layer reads it from the leaf frame of each
+event's stack (`--keys func` with `--stack none` is refused); a source offers
+it by listing it in its `keys:`, and none does yet.
+
+**A family where a source is expected** -- `omn cpu -- prog`, `omn trace mem
+--pid 1234 -d 5s`, `omn io --cost med -- prog` -- composes that family's
+default: catalog data, a `- default:` item at the end of the family's own
+file, naming the requests it composes per cost band (`low`, `med`, `high`;
+`--cost` absent is the cheapest the family declares, a band it does not
+declare falls to the dearest under it and says so, one under its cheapest is
+refused). A family name has no dot, so it never collides with a source. The
+run prints every request it composed in the long form first, and names each
+one this machine serves through a backend declaring more than the band.
+`--cost` chooses requests; it is not a budget. A family with no safe default
+says why (`runtime`), and `omn list` ends with a `DEFAULTS:` section.
+`docs/lazy.md` is the walk-through.
 
 **Backend notation**
 
@@ -121,6 +153,27 @@ caveats:
 `targets`: `native` (filtered at the backend level), `bpf_only` (filtered inside
 the program), `no` (invalid combination, must fail validation).
 
+A family file may end with one `- default:` item, the lazy mode's (§0):
+
+```yaml
+- default:
+    family: net
+    question: "How long does the program wait on its sockets and connections?"
+    low:
+      - {source: net.socket, mode: trace, emit: [hist, summary], label: "socket latency"}
+    med:
+      - {source: net.socket, mode: trace, emit: [hist, summary], label: "socket latency"}
+      - {source: net.tcp.connect, mode: trace, emit: [hist, summary], label: "connect latency"}
+```
+
+A request names `source`, `mode`, `emit`, and may name `keys`, `stack`,
+`label` and `target: system`; without a target it takes the person's. `none:
+<reason>` stands for a family with no safe default. The loader refuses a
+source not of the family, a mode, emit, key or target it does not have, a band
+under the source's cheapest backend's cost, the person's target given to a
+source that refuses a program or a pid, a band machine-wide in one band and
+not in another, and two defaults for one family.
+
 A backend may carry its own `targets` and `filter_fields`. Absent, it serves
 and carries whatever the entry declares, which is the common case. Present, the
 map speaks only for that backend and is not widened by the entry's: a target
@@ -131,6 +184,12 @@ system-wide request because a sibling could serve one; a predicate over a field
 the selected backend never emits would empty the series rather than narrow it.
 The loader refuses a backend that claims a target or a field the entry does not
 offer, and an entry that offers one no backend in its chain serves.
+
+A backend may declare its own `emits:`, a non-empty subset of the entry's,
+when it serves fewer than its siblings. The resolver passes over a backend
+that does not produce an emit the request asks for, with the reason, before
+the run; the loader refuses an empty list, one wider than the entry's, and an
+entry emit no backend of the chain produces.
 
 A backend may also declare `unit:` when its values are in another unit than the
 entry's: `cpu.cycles` through `pmu:sw` reads the cpu clock, so it says
@@ -254,15 +313,16 @@ never unless asked. Each frame says which of them named it (`elf`,
 |---|---|---|---|---|---|---|
 | `cpu.cycles` | unhalted cycles | `pmu` (HW_CPU_CYCLES) | count, sample | all | low | medium |
 | `cpu.instructions` | retired instructions | `pmu` (HW_INSTRUCTIONS) | count, sample | all | low | **high** |
+| `cpu.branches` | retired branch instructions | `pmu` (HW_BRANCH_INSTRUCTIONS) | count, poll, sample | all | low | **high** |
 | `cpu.ipc` | derived cycles/instr | — | count | all | low | medium |
 | `cpu.branch_misses` | mispredicted branches | `pmu` | count, sample | all | low | medium |
 | `cpu.cache_misses` | LLC misses | `pmu` (HW_CACHE_MISSES) | count, sample | all | low | low |
 | `cpu.topdown` | TMA: front-end / back-end / bad-spec / retiring | `pmu` (slots + topdown-*) | count | all | low | medium |
-| `cpu.profile` | on-CPU profile with stacks | `pmu:sw` (CPU_CLOCK) or `pmu` cycles + callchain | sample@freq | all | low / med | low |
-| `cpu.oncpu_time` | effective CPU time | `bpf:raw_tp` sched_stat_runtime (poll, per thread) · `bpf:tp` sched_switch · `fs:cgroup` cpu.stat · `fs:proc` | trace, poll | pid, tid, cgroup, system | low / free | low |
+| `cpu.profile` | on-CPU time profile with stacks, `pid` and `comm` on every sample | `pmu:sw` (CPU_CLOCK) + callchain · `pmu` cycles (no collector: `cpu.cycles -m sample`) | sample@freq | all | low / med | low |
+| `cpu.oncpu_time` | effective CPU time | `bpf:raw_tp` sched_stat_runtime (poll, per thread) · `bpf:tp` sched_switch · `fs:cgroup` cpu.stat · `fs:proc` · `pmu:sw` TASK_CLOCK (count: `perf stat`'s task-clock) | trace, poll, count | pid, tid, cgroup, system | low / free | low |
 | `cpu.context_switches` | context switches | `pmu:sw` | count, sample | pid, cgroup, cpu | low | low |
 | `cpu.migrations` | cross-core migrations | `pmu:sw` (CPU_MIGRATIONS) | count | pid, cgroup | low | low |
-| `cpu.util` | utilization by state | `fs:proc` /proc/stat · `fs:cgroup` cpu.stat | poll | system, cpu, cgroup | low / free | low |
+| `cpu.util` | utilization by state, the window's ticks per state in `fields` | `fs:proc` /proc/stat · `fs:cgroup` cpu.stat | poll | system, cpu, cgroup | low / free | low |
 | `cpu.pressure` | PSI CPU stall | `fs:proc` /proc/pressure/cpu · cgroup cpu.pressure | poll | system, cgroup | free | low |
 | `cpu.throttle` | CFS cgroup throttling | `fs:cgroup` cpu.stat (nr_throttled) | poll | cgroup | free | medium |
 | `cpu.flow` | exhaustive control flow | `pmu:aux` intel_pt / cs_etm | trace | pid, cpu | high | high |
@@ -289,6 +349,24 @@ never unless asked. Each frame says which of them named it (`elf`,
   to the end of the run.
 - Disabling SMT or pinning affinity shifts counters by 10-30 %: capture it in the
   resolved environment.
+- **Every counting source that declares `sample` samples on its own counter**
+  (`perf record -e <event>`), through the sampler, rings, unwinders and
+  symbols of `cpu.profile`: `cpu.cycles -m sample@997hz -e stack` is `perf
+  record`'s default, a cycles profile at a fixed period of cycles (the cpu's
+  highest frequency over the rate). The others sample in the kernel's
+  frequency mode, each sample weighing one until the period is decoded, which
+  a note says. `cpu.profile` stays the on-cpu *time* profile: `omn latency`
+  and `omn diff` read its samples as nanoseconds, so its cycles row has no
+  collector on purpose. The cache sources of `mem` still refuse `sample`.
+- `cpu.oncpu_time -m count` is task-clock, one total read when the window
+  closes (`pmu:sw`, last in the chain, so no other resolution moved).
+- A polled `cpu.util` or `cpu.pressure` takes its first read as the baseline,
+  never an event: the first event covers a whole interval. `cpu.util` puts the
+  window's ticks per state (`user_ticks`, `system_ticks`, `iowait_ticks`, ...,
+  `cpu<N>.` per core with `--cpu`) in the results' `fields`, and the shares in
+  a note. `cpu.pressure` speaks the PSI reader's names, as `mem.pressure` and
+  `io.pressure` do: `stall_ratio`, `stalled_ns`, `some_avg10/60/300`,
+  `full_*`.
 
 ---
 
@@ -314,6 +392,8 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `mem.compaction` / `.thp` | defrag, huge pages | `bpf:tp` compaction:* · `fs:sys` | trace, poll | system | low | low |
 | `mem.swap` | swap in/out | `fs:proc` vmstat · `fs:cgroup` memory.swap.current · `perf:kprobe` swap_read_folio (pid) | poll, count | system, cgroup, pid | free / low | low |
 | `mem.pressure` | PSI memory | `fs:proc` /proc/pressure/memory | poll | system, cgroup | free | low |
+| `mem.system` | the machine's memory as `free` prints it: used, available, buff/cache, slab and its split, swap | `fs:proc` /proc/meminfo | poll, snapshot | system | free | low |
+| `mem.oom` | OOM kills | `fs:cgroup` memory.events (kills, oom, oom_group_kill, max) · `fs:proc` vmstat (the machine) | count, poll | cgroup, pid, launch, system | free | low |
 
 **Caveats**
 
@@ -331,6 +411,19 @@ never unless asked. Each frame says which of them named it (`elf`,
   (`/sys/kernel/mm/transparent_hugepage/enabled`) just like clock frequencies.
 - Uncore `mem.bandwidth` is **inherently system-wide**: refuse `--pid`.
   Per-process attribution needs RDT/MBM, available only on some CPUs.
+- `mem.rss` carries VIRT and SHR (`statm`) and the rollup's `Swap`,
+  `AnonHugePages` and `Locked` beside the resident size; `mem.heap.live`
+  carries `peak_bytes` and `peak_allocations`, and `mem.heap.alloc`'s frees
+  each block's `lifetime_ns`.
+- `mem.latency`'s rate in Hz is a target the kernel adjusts towards: the
+  run's first note states the rate it delivered over the time the followed
+  tasks ran, and why when under 90 % (AMD's IBS unit with `cnt_ctl` and
+  `swfilt` settles at about 66-74 % of the rate asked, `perf record` alone
+  with the same bits too). `mem.sharing` names each contested line's offsets,
+  instructions, loads and stores.
+- `mem.swap` per process is a counting kprobe on `swap_read_folio`, no program
+  loaded, last in its chain (`--backend force:perf:kprobe`): a pid's default
+  stays its cgroup's flow, in bytes.
 
 ---
 
@@ -351,6 +444,8 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `io.writeback` | deferred writeback | `bpf:tp` writeback:* | trace | system, cgroup | low | low |
 | `io.fsync` | sync latency | `bpf:fentry` vfs_fsync · ext4_sync_file | trace | pid | high | low |
 | `io.pressure` | PSI I/O | `fs:proc` /proc/pressure/io | poll | system, cgroup | low / free | low |
+| `io.util` | the share of the window a request was outstanding (`iostat`'s `%util`), `queue` (aqu-sz) beside it | `fs:proc` diskstats | poll, count | system | free | low |
+| `io.vfs` | VFS calls by operation, of any file: one event per interval, each function's count beside the total, `--filter 'op == "vfs_open"'` | `bpf:fentry` on twelve VFS entry points (`vfs_read`, `vfs_write`, `vfs_open`, `do_fsync`, ...) | count, poll | pid, tid, cgroup, system, launch | high | medium |
 
 **Caveats**
 
@@ -369,6 +464,15 @@ never unless asked. Each frame says which of them named it (`elf`,
   gets mistaken for noise.
 - SSDs drift: internal GC, write cache, SLC buffer. Precondition and watch for
   inter-run drift, otherwise test ordering determines the result.
+- **A process target follows the processes it starts** in every io program --
+  block (`io.latency`, `io.queue`, `io.size`), `io.fsync`, `io.pagecache`,
+  `io.readahead`, `io.vfs` -- through the descendants map the sched sources
+  use, `--pid` included; a child the full map could not hold is said, and the
+  totals are then lower bounds. `io.syscall` and `io.fs` do not follow yet.
+- A swap on a bio-based device (`zram`) is read I/O that `/proc/<pid>/io`
+  charges and neither `io.latency` nor `io.bytes` sees; on a multi-device
+  filesystem one file's I/O lands on several partitions, so a filter on the
+  mount's source undercounts it.
 
 ---
 
@@ -377,7 +481,8 @@ never unless asked. Each frame says which of them named it (`elf`,
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
 | `net.tcp.connect` | connection setup latency | `bpf:fentry` tcp_v4/v6_connect | trace | pid, cgroup, system | low | low |
-| `net.tcp.lifetime` | duration + volume per connection | `bpf:tp` sock:inet_sock_set_state | trace | pid, cgroup | low | low |
+| `net.tcp.lifetime` | duration + volume per connection, by its owner | `bpf:raw_tp` · `bpf:tp` sock:inet_sock_set_state | trace | pid, launch, system | low | low |
+| `net.tcp.accept` | connections a server accepted, with the listener's queue | `bpf:fentry` inet_csk_accept | trace, count | pid, launch, system | low | low |
 | `net.tcp.rtt` | RTT, cwnd, congestion state | `netlink` sock_diag · `bpf:fentry` on tcp_sock | poll, trace | pid, system | med | low |
 | `net.tcp.retransmit` | retransmissions | `bpf:tp` tcp:tcp_retransmit_skb | trace, count | system, pid | low | low |
 | `net.drops` | dropped packets (+ reason) | `bpf:tp` skb:kfree_skb (reason on recent kernels) | trace, count | system | low | medium |
@@ -390,7 +495,9 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `net.hwts` | NIC hardware timestamps | `SO_TIMESTAMPING` + PHC (per packet, no collector yet) · `netlink:ethtool` + PTP clock (what an interface can stamp, how far its clock is from ours) | trace, poll, snapshot | pid (socket opt), iface, system | free | high |
 | `net.xdp` | in-driver counters | `bpf` XDP | count | iface | free | medium |
 | `net.capture` | raw packets | `af_packet` TPACKETv3 | trace | iface | high | high |
-| `net.iface` | errors, drops, pause frames | `netlink` ethtool -S | poll | iface | free / low | medium |
+| `net.iface` | errors, drops, pause frames, `mcast`, `missed` | `netlink` ethtool -S · `fs:proc` /proc/net/dev | poll | iface | free / low | medium |
+| `net.snmp` | every protocol counter, by `nstat`'s name | `fs:proc` /proc/net/snmp, netstat, snmp6 | count, poll, snapshot | system | free | medium |
+| `net.sockets` | every TCP and UDP socket, its state, queues and owner (`ss -tuanp`) | `netlink` sock_diag | snapshot, poll | pid, system | low | medium |
 
 **Caveats**
 
@@ -418,7 +525,29 @@ never unless asked. Each frame says which of them named it (`elf`,
   state (on cpu, runnable, asleep, disk) plus `net_rx` and `net_tx`, read by
   the socket's cookie. `catalog/net.yaml` holds the rest of its caveats.
 - `net.capture`: watch buffer drops. A capture that loses packets under load
-  silently produces wrong conclusions.
+  silently produces wrong conclusions. `direction`, `saddr` and `sport` are
+  filter fields: `lo` hands a packet socket every frame twice (`outgoing` and
+  `host`), and `direction != "outgoing"` keeps libpcap's one.
+- `net.packets` carries `dir` on `fs:proc`, one series per direction.
+  `net.bytes` and `net.packets` take their baseline at `start()`; a polled
+  `net.iface` or `net.backlog` reads nothing at `stop()`.
+- `net.tcp.rtt` through `netlink` carries the rest of `tcp_info` as `ss -ti`
+  prints it (rto, minrtt, bytes acked and sent, segments, pacing and delivery
+  rates) and the congestion algorithm.
+- `net.tcp.lifetime`'s process is the connection's **owner**, the task current
+  at `SYN_SENT`, `FIN_WAIT1` or `LAST_ACK`, as `tcplife` attributes it
+  (`attributed: owner`); under a pid or a launch, a connection only seen at
+  its close is a counted loss. `net.tcp.accept` follows one process, not a
+  launched tree.
+- `net.drops -e stack` is the kernel stack of each drop, named through
+  `/proc/kallsyms`, with `function` the symbol `location` is in.
+- `net.snmp` is `raw` only until a key names a counter; a counter that did not
+  move is absent from an interval, as in `nstat`. `net.sockets --pid` on a
+  process whose descriptors it cannot read is refused, never an empty
+  inventory.
+- `net.request`'s results carry `rx_bytes` and `tx_bytes` (what the server
+  read off the socket and queued) and `holder_since_ns`, the start of the
+  longest sleep, in `fields`.
 - Multi-host introduces clock drift between machines, a different class of
   problem from local correlation. Out of scope for phase 1.
 
@@ -441,6 +570,9 @@ invisible to every CPU profiler.
 | `sched.mutex` | pthread contention | `preload` · `bpf:usdt` · `bpf:uprobe` pthread_mutex_* | trace | pid, tid | extreme | low |
 | `sched.irq` | time in interrupt handlers | `bpf:raw_tp` · `bpf:tp` irq:irq_handler_entry/exit | trace, count | cpu, system | med | low |
 | `sched.numa_balance` | automatic NUMA migrations | `bpf:raw_tp` · `bpf:tp` sched:sched_stick_numa etc. | trace, count | system | low | low |
+| `sched.interrupts` | interrupt counts per cpu, line and softirq vector | `fs:proc` /proc/interrupts, /proc/softirqs | poll, count | cpu, system | free | low |
+| `sched.runqueue` | runnable and blocked tasks, load averages | `fs:proc` /proc/stat, /proc/loadavg | poll, snapshot | system | free | low |
+| `sched.slices` | one event per time slice: its run, queue wait and time off (`perf sched timehist`) | `bpf:raw_tp` sched_switch | trace | pid, tid, cgroup, system, launch | high | low |
 
 **Caveats**
 
@@ -468,6 +600,21 @@ invisible to every CPU profiler.
   ends it (`rq->clock` less the queue stamp), so a task's waits add up to
   what its `schedstat` says. The tracepoints' account, wakeup to switch, is
   beside it as `wake_to_run_ns`.
+- A counted `sched.switches` rate on a task is per second of the run; the
+  counter's enabled time, which advances only while the task runs, is kept as
+  `oncpu_ns`.
+- A filter field named `kind` is the row's kind: `sched.irq --filter 'kind ==
+  "hard"'`, `sched.lock -e topk:5@kind` (a lock's type, as `perf lock
+  contention` groups them).
+- `sched.offcpu`, `sched.runqlat` and `sched.futex` rows carry `ppid`.
+  `sched.runqlat`'s results carry the run's summary over `wake_to_run_ns` in
+  `fields`.
+- `sched.slices`' `queue_ns` is the kernel's `sched_info` account, 0 on a wake
+  onto an idle cpu where `perf sched timehist`'s `sch delay` is a few
+  microseconds; `off_ns` and `queue_ns` add up to the gap between a switch out
+  and the next switch in.
+- `sched.interrupts` counts a counter that wrapped past 2^32; a reset is a
+  failed read with a note.
 - `catalog/sched.yaml` is the authority on each chain, its targets and its
   caveats; this table is the summary.
 
@@ -478,10 +625,11 @@ invisible to every CPU profiler.
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
 | `power.energy` | pkg / cores / dram / gpu | `pmu` RAPL (power/energy-*/) · `fs:sys` powercap energy_uj | count, poll | **system / package** | free | medium |
-| `power.freq` | effective frequency | `bpf:tp` power:cpu_frequency · `fs:sys` scaling_cur_freq · MSR aperf/mperf | poll, trace | cpu, system | free / low | low |
+| `power.freq` | effective frequency, busy and idle shares, average | `bpf:raw_tp` · `bpf:tp` power:cpu_frequency (trace) · `pmu` msr/aperf/, msr/mperf/, msr/tsc/ · `fs:sys` cpuinfo_avg_freq + /proc/stat | poll, trace | cpu, system | free / low | low |
 | `power.cstate` | idle state residency | `bpf:tp` power:cpu_idle · `fs:sys` | trace, poll | cpu | low / high | low |
 | `power.temp` | temperatures | `fs:sys` hwmon | poll | system | low | low |
 | `power.throttle` | thermal / PL1-PL2 throttling | `fs:sys` · MSR · `bpf:tp` thermal:* | poll, trace | system | free | medium |
+| `power.wakeups` | how often a process's threads wake (powertop's wakeups per process) | `fs:proc` voluntary_ctxt_switches per thread | poll | pid, launch | low | medium |
 
 **Caveats**
 
@@ -492,7 +640,20 @@ invisible to every CPU profiler.
 - RAPL is per package: `--pid` is invalid. Per-process attribution is a derived
   estimate (share of cycles) and must be labelled as such.
 - `power.energy` emits `raw`: each reading's joules, per domain, kept to the
-  end of the run, beside the summary, rate and timeline.
+  end of the run, beside the summary, rate and timeline. **Unkeyed it reads
+  the package alone**: the domains nest, and one series across them counted
+  the cores twice. `--keys domain` gives one series per domain, AMD's
+  per-core `energy-core` summed into `domain:cores`; `fs:sys` does not carry
+  the key.
+- `power.freq` resolves to `pmu` for a poll: APERF, MPERF and the TSC through
+  the kernel's `msr` perf unit, unprivileged, turbostat's arithmetic (`busy`
+  is Busy%, `hz` Bzy_MHz, `avg_hz` Avg_MHz) over each interval; the first
+  read is the baseline. Through `fs:sys`, a reading equal to a setpoint the
+  driver declares is said as one (`measures=setpoint`): an idle cpu's
+  `cpuinfo_avg_freq` falls back to it.
+- `power.wakeups` counts each thread's voluntary context switches, one sleep
+  ended by one wakeup; a thread born and gone between two reads is in neither
+  listing, and `--system` waits on a walk of every process.
 
 ---
 
@@ -505,7 +666,9 @@ invisible to every CPU profiler.
 | `gpu.freq` | clock frequency | `fs:sys` amdgpu / i915 · `vendor:nvml` | poll, snapshot | system, launch | free / high | low |
 | `gpu.power` | energy drawn | `fs:sys` amdgpu hwmon · `vendor:nvml` | count, poll, snapshot | system, launch | free / high | low |
 | `gpu.temp` | temperature | `fs:sys` amdgpu hwmon · `vendor:nvml` | poll, snapshot | system, launch | free / low | low |
-| `gpu.mem` | VRAM allocated / used | `fs:sys` amdgpu · `vendor:nvml` | poll, snapshot | system, pid, launch | free / med | medium |
+| `gpu.mem` | VRAM allocated / used; a process target is its tree | `fs:sys` amdgpu · `vendor:nvml` | poll, snapshot | system, pid, launch | free / med | medium |
+| `gpu.mem_freq` | memory clock (`dmon`'s `mclk`) | `vendor:nvml` | poll, snapshot | system, launch | med | low |
+| `gpu.throttle` | share of the time the clocks were held, per reason (`dmon -s v`) | `vendor:nvml` field values | poll, count | system, launch | med | low |
 | `gpu.kernel` | GPU time per kernel | `vendor:cupti` (Activity) · `rocprof` · `l0` | trace | launch | extreme | medium |
 | `gpu.api` | host-side submission latency | `preload` cuLaunchKernel / vkQueueSubmit | trace | pid | high | low |
 | `gpu.counters` | counters inside a kernel, per launch, each with its verdict | `vendor:cupti` (range profiler, kernel replay) · `rocprofv3` | trace | launch | extreme | medium |
@@ -524,6 +687,13 @@ invisible to every CPU profiler.
   `med` for occupancy and VRAM, `high` for a clock or a power reading, `low`
   for a temperature (each caveat in `catalog/gpu.yaml` gives the per-call
   figure).
+- Every NVML event's `ts_err_ns` is its read's span, and a read the driver
+  held past 25 ms is said with the reason (it holds them while a CUDA context
+  is created or destroyed). The end-of-run clock state is read after the
+  window, its cpu in `after_window_cpu_ns`. `gpu.engine_busy` carries the
+  launched tree's own share (`process_ratio`, `process_memory_ratio`, `pmon`'s
+  `sm` and `mem`) beside the device's; `gpu.throttle`'s value is the largest
+  limiting reason's share.
 - `gpu.job` measures a **command buffer**, not a kernel, IRQ included. It cannot
   tell you whether the GPU is saturating its SMs or waiting on VRAM.
 - `gpu_scheduler` tracepoint fields are **volatile across versions**: discover the
@@ -552,15 +722,27 @@ invisible to every CPU profiler.
 
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
-| `proc.syscall` | per-syscall latency and count | `bpf:tp` raw_syscalls:sys_enter/sys_exit | trace, count | pid, cgroup, system | extreme | low |
-| `proc.exec` / `.exit` | process lifecycle | `bpf:tp` sched:sched_process_exec/exit | trace | system, cgroup | low | medium |
+| `proc.syscall` | per-syscall latency, count and errors, keyed by `syscall` and `comm` | `bpf:raw_tp` · `bpf:tp` raw_syscalls:sys_enter/sys_exit | trace, count | pid, tid, cgroup, system, launch | extreme | low |
+| `proc.calls` | one record per syscall: when, how long, what it returned, `openat`'s path | `bpf:raw_tp` sys_enter/sys_exit | trace | pid, tid, cgroup, system, launch | extreme | low |
+| `proc.exec` / `.exit` | process lifecycle | `bpf:raw_tp` · `bpf:tp` sched:sched_process_exec/exit | trace | system, cgroup (`proc.exec`: pid, launch) | low | medium |
+| `proc.tasks` | the machine's processes, or every thread of one, as `top` and `ps` list them | `fs:proc` stat, statm, status | poll, snapshot | pid, tid, system, launch | low | low |
 | `proc.fd` | open descriptors vs limit | `fs:proc` | poll | pid | low | medium |
 | `proc.threads` | thread count | `fs:proc` | poll | pid | low | medium |
 | `proc.signals` | signals received | `bpf:tp` signal:* | trace | pid | low | medium |
 
 `proc.syscall` as a raw trace on a syscall-heavy workload is expensive
 (`raw_syscalls` fires on *everything*): aggregate in the kernel, or filter by
-syscall number inside the eBPF program.
+syscall number inside the eBPF program. Its row's task name is part of the
+kernel's key, read on every call, so a renamed task's calls are counted under
+the name each was made with; `proc.calls` is the per-call record beside it,
+not a mode of it.
+
+`proc.tasks`' value is `busy`, the share of one cpu since the previous poll
+(`top`'s `%CPU` / 100), or over the task's life when first seen (`ps`'s), as
+`since` says; the resident set is `statm`'s, as `top` reads it. `--tid` is
+that thread under its own process. `proc.exec` on a pid or a launch is that
+process and its descendants, followed by the parent each exec carries;
+`proc.signals` names its sender (`sender_comm`, `sender_pid`).
 
 ---
 
@@ -644,14 +826,20 @@ loses are the ones from the moments that stalled -- the slow ones. `sample` and
 ## 13. Global options
 
 ```
---duration 30s              session duration
+--duration 30s              session duration; a ceiling beside a launched program or --pid,
+                            whose exit ends the run
+-r N, --repeat N            the run N times, each summary's mean and spread (perf stat -r)
+--cost low|med|high         beside a family: the band of its default to compose
+-- prog                     alone, the target; beside --system, --cpu, --cgroup, --iface,
+                            --pid, --tid or --container, the window (launch: in a session)
 --budget 2%                 overhead ceiling, enforced by the runner: over it, a
                             cheaper backend of the chain or a stop, and it says which
 --filter "bytes > 4096"     pushed into the kernel when possible, else userspace
 --stack auto|sframe|fp+leaf|dwarf|lbr|fp|none
                             unwind mode; auto (the default) chooses by
                             machine and target, as a chain
---emit hist|raw|rate|topk|stack|timeline
+--emit hist|raw|rate|topk|stack|timeline|summary
+                            topk:N@attr, summary@attr, hist[:scale]@attr per attribute value
 --keys req,task,blk         correlation keys to attach
 --backend force:<id>        escape hatch, for the comparison bench only
 --out <dir>                 results + resolved file

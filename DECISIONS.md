@@ -1346,6 +1346,99 @@ as they were.
   sources, so a machine-wide family (`power`) runs on `--system` with a
   duration, never on a program.
 
+
+Checked at the merge against `src/lazy.rs`, `src/cli.rs` and the nine
+`default:` items in `catalog/*.yaml`: as written. `--cost` takes `low`, `med`
+or `high` (`FamilyDefault::BANDS`), the composition prints its long form
+first, and `omn list` ends with a `DEFAULTS:` section. Two of the family
+streams asked for a default to grow (`net.tcp.lifetime` in net's `med`,
+`proc.tasks` in proc's `low`); neither is in yet, and neither changes the
+rule.
+
+## Settled in the twenty-fourth wave
+
+From the decision lines of the sixteen handoffs (`docs/fixes/w24-*.md`); the
+lazy mode's are above. No open line is settled. One is opened (`cpu.profile`'s
+`pmu` row, under "Open").
+
+**The run's shape** (`docs/fixes/w24-run.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A program beside a target | **The window, not a second target**: the runner launches it, ends with it and binds it to no request; `launch:` beside the requests in a session. A request that launches a program of its own beside it is refused (exit 2). | A run launches one program; `perf stat -a -- prog` and `turbostat prog` measure the machine for a program's life. |
+| `--pid` | **Ends with its process**, through a pidfd; `-d` is a ceiling, not a requirement. A tid is not watched. | `perf stat -p` ends when the pid exits; a pidfd names a process. |
+| `-r N` | **Spreads summaries only**: mean, sample deviation, min, max and perf's relative error per series; every run's own results kept beside the spread, each run's losses said. A request with no `summary` is refused. | One number per series per run is what a repetition is read against. |
+| Exit 1 | **Its last line is one of three fixed sentences**: the machine refused, the run failed before writing, or it failed after writing. A machine refusal after a run started is a failed run. | A caller may match them, and the set stays closed. |
+| The launcher | **Searches `PATH` itself and the child execs once**; the exit is seen with `WNOWAIT` and reaped after the closing round. | The program's `execve` count is its own, and the closing round reads the zombie. |
+| A bounded target picked by default | **Not done**: `omn trace cpu.util -- prog` is refused with a hint naming `--system -- prog`. | Turning "this program" into "this machine" is the user's call, not the tool's. |
+
+**The results layer** (`docs/fixes/w24-emit.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A backend's own emits | **`emits:`, a non-empty subset of the entry's**; the resolver passes over a backend that does not produce an asked emit, with the reason, before the run. | heap 1: an emit refused after the run is an invalid combination degraded. |
+| `summary.total` | **Written only where the values add up** (the entry declares `rate`, `topk` or `stack`); absent over a level; `>=` when records were lost. | A sum of readings of a level means nothing; a total withheld is never wrong. |
+| `summary@<attr>`, `hist@<attr>` | **As `topk:N@<attr>`**: rows `<attr>=<value>`, `<attr>=?` for events carrying none (said), validated against the entry's `filter_fields`, refused when the resolved backend never fills the attribute. | One grammar for every per-attribute emit, and the filter's rule for what a backend carries. |
+| A ranking that counted nothing | **One zero row named by the target**, over a window it measured; none when no window was measured; no `-0.0`. | An empty table reads as a run that did not happen. |
+| A regrouped poll | **One tick's readings added into one measurement**, only where the values add up; a level keeps its readings apart (the review's fix). | io 5's devices folded per tick; three RTTs are not one. |
+| `func` | **A derived key**, the leaf frame of each event's stack, read by the emit layer; no collector attaches it; `--keys func` with `--stack none` refused, events without a stack counted in a note. | A key every stack-carrying source gets by one catalog line. |
+
+**The collectors** (`docs/fixes/w24-{cpu,gpu,io,mem,net,power,proc,sched}.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A counting source's `sample` mode | **Samples on its own counter** through one collector (`profile::SAMPLED`): `cpu.cycles -m sample -e stack` is the cycles profile, `perf record -e <event>` is `<source> -m sample`. Cycles at a fixed period of cycles; the rest in the kernel's frequency mode, each sample weighing one until the period is decoded. | One sampler, every event; a fixed period has no natural unit for the others. |
+| `cpu.profile` | **The on-cpu time profile**; its `pmu` (cycles) row has no collector on purpose. | `omn latency` and `omn diff` read its samples as periods of nanoseconds. |
+| Task-clock | **`cpu.oncpu_time -m count` on `pmu:sw`**, last in the chain, not a source of its own. | The same quantity; no existing resolution moves. |
+| `cpu.pressure`'s attributes | **The PSI reader's names** (`stall_ratio`, `some_avg10`, ...), as `mem.pressure` and `io.pressure`. | One family of sources, one naming. |
+| A polled source whose reading describes the moment before | **Takes its window-open read as a baseline, not an event** (`cpu.util`, `cpu.pressure`, `power.freq`, `net.bytes`, `net.packets`); a polled counter reads nothing in `stop()`, only a `count` closes there (`net.iface`, `net.backlog`). | A share of a few milliseconds weighed like a whole interval was sysstat 2 and `top-cpus`' bias. |
+| A process target in io | **Follows the processes it starts, in every io program** (block, fsync, page cache, VFS calls), through `sched_common::Descendants`; `--pid` included. | A forked fio read 0 requests. |
+| An fentry collector's teardown | **Unlinks its trampolines after the window**, not in `stop()`. | The unlink walks every ftrace record: a fixed cost of the tool, like the attach. |
+| `io.util` | **A share of 1, not a percentage**, `queue` (aqu-sz) beside it. | Every ratio in the catalog is a share. |
+| `io.vfs` | **One event per interval**, each function's count beside the total, filterable on `op`, until a key for the function exists. | No `op` key on the seam yet. |
+| A rate in Hz on a sampling source | **A target the kernel adjusts towards**; a run states the rate it delivered over the time the followed tasks ran, never over the wall (`mem.latency`). | A loss is counted and surfaced: 66-74 % of the rate asked was silent. |
+| A per-process count the kernel keeps only per cgroup | **Read through a counting kprobe on the function doing the work**, no program loaded, last in its chain (`mem.swap` on `perf:kprobe`); a pid's default stays the cgroup's flow. | No existing resolution moves; the kprobe is opt-in by `--backend`. |
+| A connection's process | **Its owner**: the task current at the first transition a process makes on its own socket (`SYN_SENT`, `FIN_WAIT1`, `LAST_ACK`), as `tcplife` attributes it; the task at `TCP_CLOSE` only where none was seen, said in `attributed`, and a loss under a process target. | The task a close interrupts is not the connection's. |
+| A counter that did not move | **Absent from a `net.snmp` interval**, as in `nstat`; a snapshot lists every counter. | `nstat`'s own reading. |
+| `power.freq` | **APERF/MPERF through the `msr` perf unit first**, ahead of sysfs. | It opens unprivileged, every number covers the interval, and an idle cpu reads the clock it ran at, not a setpoint. |
+| Energy domains | **A key, `domain`; unkeyed, the package alone.** | Domains nest; one series across them counted the cores twice. |
+| A wakeup per process | **A voluntary context switch**: one sleep, ended by one wakeup. | procfs counts them per thread, unprivileged. |
+| `gpu.mem` on a process | **The process tree, walked at each reading.** | The launched pid alone missed every program under a wrapper. |
+| An NVML event's `ts_err_ns` | **The span of its read**; a read the driver held past 25 ms is said with the reason, a late tick it causes stays counted. | The value is from somewhere between the call and the timestamp. |
+| End-of-run facts not about the window | **Read after the window**, their cpu in `after_window_cpu_ns`. | NVML's event reasons cost 17 to 32 ms a call. |
+| A held-clocks share | **The largest of the limiting reasons' shares**, clamped at 1. | A lower bound on the union NVML does not give. |
+| A syscall row's task name | **Part of the kernel's key, read on every call**: a rename is two rows. | bpftrace 1: a renamed task's calls counted under its old name. |
+| `proc.tasks` | **The machine's process table on `fs:proc`**: one event per process (`--system`) or per thread (`--pid`, launch), or the one thread of `--tid` under its process, per poll; `busy` a share of one cpu since the previous poll, or over the task's life when first seen (`since`); the resident set from `statm`, as `top` reads it. | `top`'s first use, and the table `omn top` reads. |
+| `proc.exec` on a pid or a launch | **That process and its descendants**, followed by the parent each exec carries; an exec of unknown parentage a counted loss. | bpftrace 3: per-launch exec lists. |
+| Per-call syscall records | **Their own source, `proc.calls`**, beside the bucketed `proc.syscall`, not a mode of it. | A record per call and a row per name are different costs. |
+| A counted `sched.switches` rate on a task | **Per second of the run**; the counter's enabled time, which advances only while the task runs, is kept as `oncpu_ns` and is not the denominator. | sysstat 1: 33 235/s for about 945/s. |
+| A filter field named `kind` on a sched source | **The row's kind** (an interrupt's half, a lock's type), not the source's. | bpftrace 2: `kind == "hard"` returned no series. |
+| `sched.slices`' `queue_ns` | **The kernel's `sched_info` account**, as `sched.runqlat`'s; the tracepoints' wakeup-to-switch figure has its own name (`wake_to_run_ns`); `off_ns` and `queue_ns` add up to the gap between a switch out and the next switch in, the wait counting the part closed into `run_delay` on a cpu the task was moved from. | One account per quantity, and the two parts of a gap add up. |
+
+**The pairs** (`docs/fixes/w24-reference.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A tool's own reported loss | **Fails the parse naming it** (`Lost N events`, `LOST N events!`), never compared as a count. | A short count is neither omn's defect nor the machine's refusal. Whether a loss should skip rather than fail is filed (`perf-trace-count`). |
+| `teardown:` | **Mirrors `setup:`**: always runs, and a failure there fails the pair. | A cgroup left behind changes the next run. |
+| Under `omn_launches_tool` | **The program omn launches runs alone before a skip** (the tool with the workload), not the workload. | A job file as the workload is not a program. |
+| A missing `requires` entry | **A path "does not exist here", a binary "is not installed here".** | The skip says what is missing. |
+| Exit 1 | **Read by omn's last line first**, the heuristics only when it is absent. | Stream run's three sentences. |
+
+**The views, the triage and the unwinder** (`docs/fixes/w24-{views,top,triage,unwind}.md`):
+
+| Decision | Choice | Reason |
+|---|---|---|
+| A view's layout | **Scales with the terminal**: every growable element takes the rows and columns the fixed lines leave, up to a bound that keeps it readable; held at 80x24, 160x48 and 240x60 to reaching the last quarter of both. | The user's remark: no view draws in a corner. |
+| The flame's own cost | **Charged as the triage's**: the innermost frame a perf map named, else the leaf; for stacks without `named_by` the view charges the leaf and says so, and does not read maps back from the viewing machine. | One provenance, the same functions; a map on the viewing machine may not be the run's. |
+| The batch output | **Raw numbers, never a unit's words**: shares as fractions, nanoseconds, bytes, `-` for not measured; every trust mark on a `#` line. | A parser skipping comments reads numbers only, and a person still sees what not to trust. |
+| A process's cpu within a run, from `proc.tasks` | **Its polls' shares over their intervals**; a first reading over the task's life counts only when the task started inside the run. | A life's share is not the run's. |
+| A disk's or a link's directions | **One row with its parts**; a discard or a flush is not added to the bytes. | `/proc/diskstats`' own total does not hold them. |
+| Several launches' stderr | **`FILE.<n>`**, numbered from 1 across both passes, `FILE` keeping the last launch's. | One file per run a reference can be read from, and the last where one run leaves it. |
+| The perf-map names | **The results' own** (`named_by`); a map read back from disk only for stacks without provenance, by the path and `(dev, ino)` the results recorded. | A map in `/tmp` can be another process's. |
+| A copied stack whose ip is in no known module | **Re-reads the target's maps before giving up**, a bounded number of times. | A launched program's unwinder is built before its `execve`. |
+| A workload holding a profile's shares | **Decorrelates its phase from the sampling period by construction** (a pseudo-random pad outside the measured branches, at least one period wide). | A period no divisor of the workload did not hold: 22.9 points off a share. |
+
 ## Open
 
 - **The phase 6 criterion for the in-kernel histogram** (io, pending the
@@ -1412,6 +1505,17 @@ as they were.
   answers who it waited on with no frame names, at the price of one more
   source in the cheap pass. Leaving it open costs C servers whose libc frames
   are unnamed their slow client.
+
+- **`cpu.profile`'s `pmu` (cycles) row** (twenty-fourth wave, stream cpu).
+  The cycles profile is `cpu.cycles -m sample -e stack` now, and
+  `cpu.profile` stays the on-cpu time profile (settled above), so the row
+  has no collector on purpose: made the chain's first served backend, it
+  would turn every `cpu.profile` into a cycles profile that `omn latency` and
+  `omn diff` read as nanoseconds. Either the row is removed from the chain,
+  or it stays as a pointer whose refusal names `cpu.cycles -m sample`.
+  Leaving it open costs nothing measured: `omn list` counts one more
+  backend without a collector, and a request pinned to it is refused as the
+  build's gap rather than pointed at the source that serves it.
 
 A new open line goes here with what it costs to leave it open, which is the
 habit that kept this section honest.

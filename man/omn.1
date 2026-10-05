@@ -1,10 +1,17 @@
-.TH OMN 1 "2026-09" "Omniscient" "User Commands"
+.TH OMN 1 "2026-10" "Omniscient" "User Commands"
 .SH NAME
 omn \- one vocabulary for system observability
 .SH SYNOPSIS
 .B omn
 .I source
 .RI [ options ]
+.RI [ target ]
+.RI [ "\-\- program [args]" ]
+.br
+.B omn
+.I family
+.RB [ \-\-cost
+.IR band ]
 .RI [ target ]
 .RI [ "\-\- program [args]" ]
 .br
@@ -75,6 +82,12 @@ What to measure, as
 .IR family . metric :
 .BR io.latency ", " cpu.instructions ", " net.tcp.rtt .
 .BR "omn list" " enumerates them."
+Several, separated by commas or spaces, are measured over one window and one
+launch, each with the same target and axes:
+.B "omn trace cpu.instructions,cpu.cycles \-\- prog"
+is
+.BR "perf stat \-e instructions,cycles \-\- prog" .
+A family alone is the lazy mode (below).
 .TP
 .B target
 What to observe:
@@ -92,12 +105,68 @@ What comes out:
 .B keys
 Correlation keys to attach:
 .BR req ", " task ", " proc ", " file ", " sock ", " blk ", " mem ", " gpu ", "
-.BR cgroup ", " iface .
+.BR cgroup ", " iface ", " dev ", " cpu ", " node ", " dir ", " syscall ", "
+.BR comm ", " domain ", " func .
+.B dir
+splits a byte or request counter by direction,
+.B syscall
+and
+.B comm
+key the syscall sources by call and by task name,
+.B domain
+splits
+.B power.energy
+by RAPL domain, and
+.B func
+is derived from each event's stack (its leaf frame), not attached by a
+collector; a source offers it by listing it in its catalog
+.BR keys: .
 .PP
 A bare
 .BI "omn " source
 is short for
 .BI "omn trace " source .
+.SS A family alone: the lazy mode
+A family name where a source is expected \(em
+.BR "omn cpu \-\- prog" ,
+.BR "omn trace mem \-\-pid 1234 \-d 5s" ,
+.B "omn io \-\-cost med \-\- prog"
+\(em composes that family's default: the minimum that answers its first
+question, written in the family's own catalog file as data, one list of
+requests per cost band. A family name has no dot, so it never collides with a
+source; a word that is neither is refused naming the families.
+.BI \-\-cost " low" "\fR|\fP" med "\fR|\fP" high
+picks the band: absent, the cheapest the family declares; a band it does not
+declare falls to the dearest under it, and says so; one under its cheapest is
+refused with the band to ask. The person gives only the target,
+.B \-\-duration
+and
+.BR \-\-budget ;
+the per-request flags
+.RB ( \-\-mode ", " \-\-emit ", " \-\-keys ", " \-\-filter ", " \-\-stack ", "
+.BR \-\-symbols ", " \-\-backend ", " \-\-window ", " \-\-until ", " \-\-label )
+are refused by name, and
+.B \-\-cost
+beside a source or a session file points at
+.BR \-\-budget .
+.PP
+Before anything is resolved, the run prints the band, the family's question
+and every request it composed in the long form, which typed back asks for the
+same requests; after resolution it names each request this machine serves
+through a backend that declares more than the band. Then it says what it
+chose, degraded and lost like any run.
+.B \-\-cost
+chooses requests and is not a ceiling: the measured ceiling stays
+.BR \-\-budget 's.
+A family with no safe default
+.RB ( runtime )
+is refused with the reason and its sources; a machine-wide one
+.RB ( power )
+runs on
+.B \-\-system
+with a duration, never on a program.
+.B omn list
+ends with every family's default.
 .SS What it refuses
 The validator runs before anything is attached. It rejects a target a source
 cannot carry, a mode it does not support, an emit that mode cannot produce, a
@@ -234,7 +303,19 @@ measures, live or from a recording. See
 .SS Target
 .TP
 .BI \-\-pid " PID" "\fR, " \-\-tid " TID"
-An existing process or thread. Repeatable as a comma-separated list.
+An existing process or thread. Repeatable as a comma-separated list. A run on
+.B \-\-pid
+ends when its process exits (with several, when the last does), as
+.B "perf stat \-p"
+ends, so
+.B \-d
+is a ceiling rather than a requirement and
+.B "\-m count \-\-pid"
+runs without it; a tid is not watched. A run on a pid, tid, cgroup or
+container says how long after
+.B omn
+started each source attached: what the target did before that is in no
+reading.
 .TP
 .BI \-\-cgroup " PATH"
 A cgroup v2 path.
@@ -262,7 +343,34 @@ The whole machine.
 .BI \-\- " program " [ args ]
 Launch the program and measure it. The program is held at a gate until every
 collector is attached, so the measurement starts before its first instruction,
-and the run ends when it does.
+and the run ends when it does. The launcher searches
+.B PATH
+itself, so the program's one
+.BR execve (2)
+is the file it found.
+.IP
+Beside another target \(em
+.BR \-\-system ", " \-\-cpu ", " \-\-cgroup ", " \-\-iface ", " \-\-pid ", "
+.BR \-\-tid " or " \-\-container
+\(em the program is the window, not a second target: that target is measured
+for as long as the program runs, the way
+.B "perf stat \-a \-\- prog"
+and
+.B "turbostat prog"
+measure. In a session file the window is
+.B launch:
+beside the requests, and a request that launches a program of its own beside
+it is refused: a run launches one program. A source that cannot follow a
+program names the bounded spelling in its refusal.
+.IP
+The program's exit is in
+.IR results.json :
+.I lifetime.exit_code
+when it exited,
+.I lifetime.signal
+when it was killed.
+.B omn
+itself exits 0 when the run succeeded, whatever the program returned.
 .IP
 When the run stops first \(em its duration elapsed, a budget ended it, the
 view was quit \(em the program and every process it started are stopped
@@ -293,7 +401,14 @@ so the program's lines and
 .BR omn 's
 are told apart at the source. What
 .B OMN_PROGRAM_STDERR
-sets, and it wins over the variable. Refused, with exit 2, beside a command
+sets, and it wins over the variable. With
+.BI "omn latency \-\-runs " N\fR,
+each launch's stderr is also kept as
+.IR FILE .1
+\&...
+.IR FILE . N ,
+numbered in the order the launches ran, the file itself holding the last
+one's; a launch that wrote nothing takes no number. Refused, with exit 2, beside a command
 that launches nothing; a file that cannot be opened stops the launch with the
 reason.
 .SS Measurement
@@ -314,7 +429,27 @@ or
 .BI topk: N @ ATTR
 to rank the distinct values of one attribute rather than the series:
 .B topk:5@reason
-ranks the reasons packets were dropped. A counted window ranks too.
+ranks the reasons packets were dropped. A counted window ranks too, and a
+ranking that measured a window and counted nothing holds one zero row named
+by the target.
+.BI summary@ ATTR
+and
+.BI hist "\fR[\fP" :SCALE "\fR]\fP" @ ATTR
+summarise per value of one attribute the same way
+.RB ( "summary@kernel" ),
+rows named
+.IB ATTR = value
+and
+.IB ATTR =?
+for the events that carry none, said; the attribute must be a filter field
+the resolved backend fills, or the request is refused before the run.
+.B summary
+carries a
+.B total
+where the source's values add up (counts, bytes, times), marked
+.B >=
+when the run lost records, and none over a level (a resident size, a ratio, a
+temperature).
 Asking for two emits costs one collection.
 .TP
 .BI \-k ", " \-\-keys " KEY"
@@ -346,8 +481,44 @@ for in full before it removes anything, and what it removed is reported beside
 the losses.
 .TP
 .BI \-d ", " \-\-duration " DURATION"
-How long to observe. Required unless a program is launched or the mode is
+How long to observe. Required unless a program is launched, a
+.B \-\-pid
+is watched, or the mode is
 .BR snapshot .
+.TP
+.BI \-r ", " \-\-repeat " N"
+Run the session
+.I N
+times, one after another, each with a launch of its own, and report each
+.B summary
+value's mean, sample standard deviation, min, max and relative error of the
+mean, as
+.B "perf stat \-r"
+does. A launched program's
+.BI task: pid
+keys become
+.BI task:# k\fR,
+ranked by pid within each run, so the runs line up. Each run's losses are said
+on standard error under its
+.BI "run " i " of " N
+line, and a spread with a lossy run in it names that run. A structured format
+prints the spread and every run's output; under
+.BR \-o ,
+each run is written to
+.IR run\-<i>/
+and the spread to
+.IR repeat.json .
+Refused before anything runs: no
+.B summary
+to spread,
+.BR "\-r 0" ,
+a recording, a binary format.
+.TP
+.BI \-\-cost " BAND"
+Beside a family, the cost band of its default:
+.BR low ", " med " or " high .
+See
+.BR "A family alone" .
 .TP
 .BI \-b ", " \-\-budget " PERCENT"
 An overhead ceiling, as
@@ -552,6 +723,17 @@ has at most one \fIworkload\fR target \(em \fBlaunch\fR, \fBpid\fR, \fBtid\fR,
 beside it (\fBsystem\fR, \fBcpu\fR, \fBiface\fR): that is the shape of every
 confounder check, where the machine's state is read beside the program it might
 explain. Only the workload target decides when the run ends.
+.PP
+A program that bounds machine targets without being one is written
+.B "launch: [prog, args]"
+beside the requests: the runner launches it, ends the run with it, and binds
+it to no request, which is what
+.B "omn trace power.energy \-\-system \-\- prog"
+dumps with
+.BR \-\-dump\-request .
+A request that launches a program of its own beside a
+.B launch:
+is refused.
 .SS Windows and the escalation
 A request's \fBwindow\fR is when it is watched inside the run: \fB1s..3s\fR,
 \fB1s..\fR or \fB..2s\fR, as on the command line. The rest of the session
@@ -906,7 +1088,17 @@ The measurement ran, or the question was answered.
 .TP
 .B 1
 This run cannot happen here: this machine cannot serve the request, or
-something failed while running. The request itself is valid and will run on a
+something failed while running. The last line of standard error says which,
+in one of three fixed sentences a caller may match:
+.RS
+.EX
+exit 1: the machine refused the run; nothing was measured
+exit 1: the run failed after it started, before writing its results
+exit 1: the run failed after it started; what it read is written above
+.EE
+.RE
+.IP
+The request itself is valid and will run on a
 machine that has what it needs. Also a run that went to its end but whose
 collector broke the program it measured \(em the GPU's injection library
 killing its target as it exited \(em said in an
@@ -1038,6 +1230,51 @@ omn net.tcp.rtt \-\-system \-m poll@1s \-d 30s \-e timeline
 Instructions retired by a program, the most reproducible number in the catalog:
 .EX
 omn cpu.instructions \-m count \-e summary \-\- ./bench
+.EE
+.TP
+Where a program's cpu time goes, without naming a source, mode or emit:
+.EX
+omn cpu \-\- ./bench
+omn sched \-\-cost med \-\- ./server \-\-once
+.EE
+.TP
+The machine's energy while a program runs, as \fBperf stat \-a \-\- prog\fR:
+.EX
+omn power.energy \-\-system \-m count \-e summary \-\- ./bench
+.EE
+.TP
+Two counters on one launch, five runs, with their spread:
+.EX
+omn cpu.instructions,cpu.branches \-m count \-e summary \-r 5 \-\- ./bench
+.EE
+.TP
+A program's syscalls as \fBstrace \-c\fR's table, and each call as \fBstrace\fR prints it:
+.EX
+omn proc.syscall \-m count \-k syscall \-e summary \-\- ./server \-\-once
+omn proc.calls \-e raw \-\-filter 'syscall == "openat"' \-\- ./server \-\-once
+.EE
+.TP
+The machine's processes, as \fBtop \-b\fR lists them:
+.EX
+omn proc.tasks \-\-system \-m poll@1s \-e raw \-d 5s
+.EE
+.TP
+A cycles profile, \fBperf record\fR's default:
+.EX
+omn cpu.cycles \-m sample@997hz \-e stack \-\- ./bench
+.EE
+.TP
+What the machine counts as \fBnstat\fR, \fBss \-tuan\fR, \fBfree\fR and \fBvmstat\fR do:
+.EX
+omn net.snmp \-\-system \-m count \-e raw \-d 5s
+omn net.sockets \-\-system \-m snapshot \-e raw
+omn mem.system \-\-system \-m snapshot \-e summary
+omn sched.interrupts,sched.runqueue \-\-system \-m poll@1s \-e timeline \-d 5s
+.EE
+.TP
+Each time slice of a program, as \fBperf sched timehist\fR:
+.EX
+omn sched.slices \-e raw \-\- ./server \-\-once
 .EE
 .TP
 Block I/O over 4 KiB, as a histogram:

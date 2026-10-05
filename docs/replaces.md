@@ -34,38 +34,41 @@ make && cargo test --test reference -- --nocapture   # every family
 
 ## Across families
 
-From the eleven tables at the twenty-third wave's merge. **Every verdict
+From the eleven tables at the twenty-fourth wave's merge. **Every verdict
 here is the shared runner's**: each family's pairs run through `cargo test
---test reference`, and the tally below is the coordinator's run on a quiet
-machine at `1edb677` (2026-10-04; `docs/open-findings.md`, "The twenty-third
-wave, coordinator, after the merge").
+--test reference`, and the tally below is the coordinator's run alone on a
+quiet machine, one family after another (`--test-threads=1`), at `a5f0acb`
+(2026-10-05; `docs/open-findings.md`, "The twenty-fourth wave, coordinator,
+after the merge"), sysstat read after `367ad20`.
 
 | Family | Pairs | Held | Skipped | Gaps | Known defects | Failed |
 |---|---|---|---|---|---|---|
-| [perfstat](replaces/perfstat.md) | 13 | 13 | 0 | 0 | 0 | 0 |
+| [perfstat](replaces/perfstat.md) | 13 | 12 | 0 | 0 | 0 | 1 |
 | [perfrecord](replaces/perfrecord.md) | 5 | 5 | 0 | 0 | 0 | 0 |
-| [perfsched](replaces/perfsched.md) | 9 | 9 | 0 | 0 | 0 | 0 |
-| [bpftrace](replaces/bpftrace.md) | 10 | 9 | 0 | 1 | 0 | 0 |
-| [sysstat](replaces/sysstat.md) | 13 | 12 | 0 | 0 | 1 | 0 |
-| [top](replaces/top.md) | 11 | 10 | 0 | 0 | 0 | 1 |
+| [perfsched](replaces/perfsched.md) | 9 | 8 | 0 | 0 | 0 | 1 |
+| [bpftrace](replaces/bpftrace.md) | 10 | 10 | 0 | 0 | 0 | 0 |
+| [sysstat](replaces/sysstat.md) | 13 | 13 | 0 | 0 | 0 | 0 |
+| [top](replaces/top.md) | 11 | 11 | 0 | 0 | 0 | 0 |
 | [heap](replaces/heap.md) | 9 | 8 | 0 | 1 | 0 | 0 |
-| [net](replaces/net.md) | 8 | 8 | 0 | 0 | 0 | 0 |
-| [power](replaces/power.md) | 7 | 6 | 1 | 0 | 0 | 0 |
+| [net](replaces/net.md) | 8 | 7 | 1 | 0 | 0 | 0 |
+| [power](replaces/power.md) | 7 | 7 | 0 | 0 | 0 | 0 |
 | [gpu](replaces/gpu.md) | 21 | 21 | 0 | 0 | 0 | 0 |
-| [io](replaces/io.md) | 7 | 7 | 0 | 0 | 0 | 0 |
-| **all** | **113** | **108** | **1** | **2** | **1** | **1** |
+| [io](replaces/io.md) | 9 | 9 | 0 | 0 | 0 | 0 |
+| **all** | **115** | **111** | **1** | **1** | **0** | **2** |
 
-The privileged families (perfsched, bpftrace, heap, net, power) are from the
-coordinator's run after the merge, with `/etc/sudoers.d` granting the
-witnesses alone without a password and each wrapper sending only its tool
-through `sudo -n` (`reference.sudo`); the others from the full run at
-`1edb677`. The one skip is `cpupower monitor -m Mperf`: `cpupower` checks for
-uid 0 itself and `sudo -n` does not grant it. The two gaps are scope, not
-numbers: `runqlat.bt` watches the machine over a program's run, which `omn`
-cannot bound yet, and `memleak` counts mmap'd memory, which
-`mem.heap.live` does not. The known defect is `pidstat -w` against
-`sched.switches`' counted rate; the failure is `top-cpus`, which held when
-rerun alone, at the edge of its band.
+What moved since the twenty-third wave: **no pair skips on `sudo -n`**
+(cpupower granted, the runner asking per tool); `runqlat` is no longer a gap
+(it runs with `--system` beside the program, the bounded window stream run
+landed); `top-cpus` holds (its bias was `cpu.util`'s leading event, fixed);
+`pidstat -w` holds (its `known_defect` was the counted window, fixed); io
+gained `fio-clat-p50` and `iostat-w-per-s`. The one skip is
+`tcpdump-captured`, run without `make CAPTURE=1` (it held with it in stream
+reference's run, 1810 against 1810). The gap is `memleak`, which counts
+mmap'd memory `mem.heap.live` does not. The two failures are filed:
+`cpu.cycles.system` (omn's own start and exit dominate the difference on an
+idle machine; the twenty-third wave's build fails the same way by hand) and
+`perf-trace-count` (`perf trace -s` reports lost events on every run here,
+and the parser refuses a lossy output).
 
 ### Replaced fully
 
@@ -78,68 +81,74 @@ through the runner:
   cgroup (`-G`); `perf stat -p PID`'s raw count
   ([perfstat](replaces/perfstat.md)).
 - `perf record` + `perf report --sort dso,sym` self shares, `perf top -p`,
-  `perf mem`'s mean load latency (on a quiet machine: the two time different
-  mixes of loads, filed), `perf c2c`'s hottest line
+  `perf mem`'s mean load latency, `perf c2c`'s hottest line
   ([perfrecord](replaces/perfrecord.md)).
-- `strace -c -w` for one syscall's count and wall time, `strace -T`'s mean
-  on a long call ([perfsched](replaces/perfsched.md)).
+- `perf sched`, `perf lock contention`, `strace -c -w` for one syscall's
+  count and wall time, `strace -T`'s mean on a long call
+  ([perfsched](replaces/perfsched.md)).
+- syscount, opensnoop, killsnoop, execsnoop, bitesize, biosnoop,
+  biolatency, runqlat, tcpconnect, tcplife ([bpftrace](replaces/bpftrace.md)).
 - `vmstat`'s busy share (and `si`/`so`, at zero), `/proc/pressure/*`,
-  `mpstat`, `iostat -c`, `sar -u` live, `numastat -p`, `pidstat -r`
-  ([sysstat](replaces/sysstat.md)).
-- `top -b -p`'s RES, TIME+ and `%CPU`; `pmap -x` and `-XX` totals (RSS,
-  PSS, USS); `smem -P`'s RSS, PSS and USS ([top](replaces/top.md)).
+  `mpstat`, `iostat -c`, `sar -u` live, `numastat -p`, `pidstat -r` and
+  `pidstat -w` ([sysstat](replaces/sysstat.md)).
+- `top -b -p`'s RES, TIME+ and `%CPU`, and `%Cpu(s)`; `pmap -x` and `-XX`
+  totals (RSS, PSS, USS); `smem -P`'s RSS, PSS and USS
+  ([top](replaces/top.md)).
 - dhat's total bytes and blocks, `t-gmax` and `t-end`; massif's peak;
   heaptrack's calls, peak and leaked bytes ([heap](replaces/heap.md)).
 - `ip -s link`'s bytes and packets; `nstat`'s listen overflows, listen
-  drops and `TcpRetransSegs`; `ss -ti`'s rtt ([net](replaces/net.md)).
+  drops and `TcpRetransSegs`; `ss -ti`'s rtt; tcpdump's filtered count
+  ([net](replaces/net.md)).
 - Package energy against `perf stat -a -e power/energy-pkg/` and
   `turbostat`; `turbostat`'s busy frequency; `cpupower monitor -m
-  Idle_Stats`; `sensors` ([power](replaces/power.md)).
+  Idle_Stats` and `-m Mperf`; the RAPL files; `sensors`
+  ([power](replaces/power.md)).
 - nsys's launches, copies and driver-call counts per kernel and call, kernel
   and copy device time; ncu's instruction, block, L1 and DRAM counters;
   nvidia-smi's power, shader clock, utilisation, temperature and
   per-process VRAM, query and `dmon` ([gpu](replaces/gpu.md)).
-- fio's completed reads, bytes and operations; `iostat -dx`'s `r/s`,
-  `rkB/s` and `r_await` ([io](replaces/io.md)).
+- fio's completed reads, bytes and operations and its clat median;
+  `iostat -dx`'s `r/s`, `rkB/s`, `r_await` and `w/s` ([io](replaces/io.md)).
 
 ### Replaced in part
 
 | Tool | What `omn` serves, and agrees on | What it lacks (the gap, filed) |
 |---|---|---|
-| `perf stat` | the rows above | `branches`; several events on one launch; `-r N`; task-clock as a source; `-a -- prog` bounded by a program; `--pid` ending with its process |
-| `perf record`/`report`, `perf top` | self shares by function and object | a per-function table in `trace`'s output, inclusive shares compared, cycles sampling, any PMU event, `perf annotate`; `--pid` attaching in under 500 ms |
-| `perf mem`, `perf c2c` | the mean latency; the hottest line | latency by level as a key; the IBS sampler's delivered rate said, its `peer` level checked; the line's offsets, code addresses and pids |
-| `perf trace -s`, `perf sched`, `perf lock` | calls, latency, switches, migrations, contentions (held with root; `perf trace -s` loses calls, so its count is a lower bound) | `syscall` as a key; errors; per-call and per-switch records; a summary of `wake_to_run_ns`; lock kind and caller as keys |
-| `strace -c`, `strace -T` | one syscall a run, exact | every syscall in one run; errors; argument decoding (out of scope) |
-| `bpftrace`'s tools | syscount, opensnoop, killsnoop, execsnoop, bitesize, biosnoop, biolatency, runqlat, tcpconnect, tcplife: nine held with root, exact or within a few events; runqlat a gap of scope | a `comm` key; per-launch `proc.exec` and `net.tcp.lifetime`; opened paths, senders; two filter **defects** (`comm` on renamed tasks, `sched.irq`'s `kind`) |
-| `vmstat`, `pidstat`, `mpstat`, `sar` | the rows above | memory, load and run queue, interrupts; `pidstat -w`'s rate (a **defect**, the pair's `known_defect`: the window); `pidstat -u`; `mpstat -P ALL` compared; `sar`'s history |
-| `top`, `pmap`, `smem` | one process's footprint and cpu; `%Cpu(s)` within 0.05 (**failed once** in the quiet run, `omn` below; filed) | the machine's process table; VIRT and SHR; per-mapping rows; a user key; `cpu.util` by state |
-| `valgrind --tool=dhat`/`massif`, `heaptrack` | totals and the peak (shown where the workload holds it) | stacks from `mem.heap.alloc` (a **defect**: refused after the run); a high-water mark; live blocks; lifetimes; attach to a running program |
+| `perf stat` | the rows above; `branches`, several events on one launch, `-r N` (0.018 % from `perf stat -r 5`), task-clock, `-a -- prog`, `--pid` ending with its process, all shown by hand | pairs for the new shapes; `cpu.cycles.system` red on a quiet machine (filed) |
+| `perf record`/`report`, `perf top` | self shares by function and object; a per-function table (`-k func`, shown against `perf report` within 0.5 points); cycles sampling and any PMU event (shown by hand) | `func` offered by `cpu.profile`'s catalog entry (one line), inclusive shares, an object key, the frequency-mode samples' period, `perf annotate`; `--pid` attaching in under 500 ms (said now, not faster) |
+| `perf mem`, `perf c2c` | the mean latency; the hottest line; the line's offsets, instructions, loads and stores; the delivered sampling rate said | latency by level as a key |
+| `perf trace -s`, `perf sched`, `perf lock` | calls, latency, switches, migrations, contentions; per-call records (`proc.calls`), per-switch slices (`sched.slices`), a lock's type (`topk@kind`), the run queue's summary over `wake_to_run_ns` -- shown by hand, no pair yet | `perf trace -s` losing events on every run here, so its pair fails (filed); a lock's caller |
+| `strace -c`, `strace -T` | one syscall a run, exact; every syscall in one run (`-k syscall`); per-call records with errno against `strace -e` (shown by hand) | the `errors` column in an aggregating emit; argument decoding (out of scope) |
+| `bpftrace`'s tools | the ten above; the `comm` key, per-launch `proc.exec` and `net.tcp.lifetime`, `openat`'s path, a signal's sender, `sched.irq`'s halves (both filter **defects** fixed); tcpaccept, vfsstat, swapin and oomkill's counts as sources (no pair yet) | `runqlen` per cpu; `oomkill`'s victim |
+| `vmstat`, `pidstat`, `mpstat`, `sar` | the rows above; `free` (`mem.system`, to the byte), load and run queue (`sched.runqueue`), interrupts (`sched.interrupts`), system `numastat` (`mem.numa --system`), `mpstat`'s per-state split -- served, no pair yet | `pidstat -u`; `mpstat -P ALL` compared; `slabtop` (root's file); `sar`'s history |
+| `top`, `htop`, `btop`, `pmap`, `smem` | one process's footprint and cpu; `%Cpu(s)`; the machine's process table (`proc.tasks`, `omn top`'s `system`, against `top -b` by hand); VIRT and SHR | `omn top --batch` as a flag (its output is landed) and its pair; per-mapping rows; a user key |
+| `valgrind --tool=dhat`/`massif`, `heaptrack` | totals and the peak; a high-water mark, live blocks, lifetimes | stacks from `mem.heap.alloc` (a **defect**: still refused after the run, its catalog line not landed); attach to a running program |
 | `memleak` | outstanding bytes (a gap: `memleak` counts mmap'd memory, `omn` does not) | outstanding by stack; `-p` |
-| `ip -s link`, `ss -ti` | bytes, packets, errors at zero; rtt | `net.packets` by direction; `missed`, `mcast`; `tcp_info`'s other fields |
-| `tcpdump` | a filtered count, equal by hand once `lo`'s second copy of each frame is left out (held with root and `make CAPTURE=1`) | `direction` as a filter field; pcap output; decoding (out of scope) |
-| `turbostat`, `cpupower` | energy, busy frequency, idle residency (the RAPL files held once readable; Mperf skips: `cpupower` wants uid 0) | `Busy%` and `Avg_MHz`; an idle share; the core domain; an idle cpu's reading said for what it is; `power.freq`'s first poll before the load |
-| `nsys`, `ncu`, `nvidia-smi` | the rows above | per-kernel distributions; NVTX; launch facts and occupancy; PCIe, throttle reasons, ECC; per-process engine busy; `gpu.mem` under a wrapper |
-| `fio`, `iostat -dx` | fio's counts; its mean completion latency with `io.latency` 28 % below (the layers above the device; a one-sided 50 %); `iostat -dx`'s reads | `io.latency` following a forked job (a **defect**); `%util`; per-process `io.bytes` and `io.iops`; a write pair; a `dir` key on `io.latency` |
+| `ip -s link`, `ss`, `nstat` | bytes, packets (by `dir`), errors, `missed`, `mcast`; rtt and the rest of `tcp_info` (equal to `ss -tin`); every counter (`net.snmp`, against `nstat` by hand); the socket inventory (`net.sockets`, against `ss -tuan` by hand) | pairs for the new sources; `ss -s` |
+| `tcpdump` | a filtered count, held with `make CAPTURE=1`; `direction` as a filter field | pcap output; decoding (out of scope) |
+| `turbostat`, `cpupower`, `powertop` | energy, busy frequency, idle residency, Mperf; `Busy%` and `Avg_MHz` through APERF/MPERF (turbostat's arithmetic, by hand), the core domain (against `perf stat -a`), an idle cpu's setpoint said, per-process wakeups | pairs for the new attributes; `power.cstate`'s idle share as a counted window; `powertop`'s per-process energy estimate and its machine-wide list |
+| `nsys`, `ncu`, `nvidia-smi` | the rows above; per-kernel distributions (`summary@kernel`); the memory clock, throttle reasons (`dmon -s v`'s `pviol`), per-process engine busy (`pmon`'s `sm`), `gpu.mem` under a wrapper -- shown by hand | NVTX; launch facts as values and occupancy; PCIe (measured, waits on a rate unit), ECC (not supported here) |
+| `fio`, `iostat -dx` | fio's counts, its mean completion latency (`io.latency` 28 % below, one-sided) and median; `iostat -dx`'s reads and `w/s`; a forked job followed (the **defect** fixed); `%util` (`io.util`, by hand); `dir` on `io.latency` | per-process `io.bytes` and `io.iops`; pairs for `io.util` and `io.vfs` |
 
 ### Not replaced
 
-- **No `omn` source**: `free`, `uptime`'s load, `slabtop`, system
-  `numastat`, `vmstat -s`/`-m` ([sysstat](replaces/sysstat.md));
-  `runqlen`, `tcpaccept`, `oomkill`, `vfsstat`, `swapin` per process
-  ([bpftrace](replaces/bpftrace.md)); `nstat`'s other counters, `ss -tan`,
-  `ss -tlnp`, `ss -s`, `tcpdump -w` ([net](replaces/net.md)); `powertop`'s
-  per-process estimate ([power](replaces/power.md); installed, root-only);
-  `nvidia-smi dmon -s v/t/e` ([gpu](replaces/gpu.md)); `perf sched
-  map`/`replay`, `perf lock record` ([perfsched](replaces/perfsched.md)).
-- **Interactive only, no batch output to compare**: `htop`, `btop`, and
-  `omn top` itself ([top](replaces/top.md)).
+- **No `omn` source**: `slabtop`, `vmstat -s`/`-m`
+  ([sysstat](replaces/sysstat.md)); `runqlen` per cpu
+  ([bpftrace](replaces/bpftrace.md)); `ss -s`, `tcpdump -w`
+  ([net](replaces/net.md)); `powertop`'s per-process estimate
+  ([power](replaces/power.md)); `nvidia-smi dmon -s t/e`
+  ([gpu](replaces/gpu.md)); `perf sched map`/`replay`, `perf lock record`
+  ([perfsched](replaces/perfsched.md)).
+- **Interactive only, no batch output to compare**: `htop`, `btop`; `omn
+  top`'s batch output is landed in the view library, the flag that prints it
+  is not ([top](replaces/top.md)).
 - **Out of reach of the mechanism**: dhat's reads and writes per block
   ([heap](replaces/heap.md)); `strace`'s argument decoding.
 
 Each gap is a line in its family's handoffs (`docs/fixes/w22-<family>.md`,
-"Gaps", and `docs/fixes/w23-<family>.md`) and, grouped by the file it lands
-in, in `STATE.md`'s "What remains".
+"Gaps", `docs/fixes/w23-<family>.md`, and the twenty-fourth wave's stream
+handoffs `docs/fixes/w24-<stream>.md`) and, grouped by the file it lands in,
+in `STATE.md`'s "What remains".
 
 ## What a verdict rests on
 

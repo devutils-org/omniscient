@@ -14,8 +14,8 @@ for where the two meet.
 
 The request model, the catalog, the resolver, the validator, the collector
 layer, the emit and encode layers and a join engine all exist and are used by
-every source. Ninety-nine sources across nine families collect for real, over
-nine mechanisms: procfs and sysfs, `perf_event_open` counting and sampling,
+every source. A hundred and fifteen sources across nine families collect for
+real, over nine mechanisms: procfs and sysfs, `perf_event_open` counting and sampling,
 netlink, an `LD_PRELOAD` shim, NVML through `dlopen`, CUPTI from an injection
 library the CUDA driver loads (since the nineteenth wave), `af_packet` with a
 `PACKET_MMAP` ring, and eBPF through raw tracepoints, classic tracepoints,
@@ -273,10 +273,10 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 6 — emit, aggregation, budget | **done but for one measurement**: the 2 M IOPS overhead of the in-kernel histogram. Run once before the seventeenth wave, it read 23.57 % (781 ns a request at 3.16 M IOPS); the wave gave the histogram its own program pair, whose cost is the coordinator's next `null_blk` run, and whether 1 % is the right criterion is open (`DECISIONS.md`). The eighteenth wave found why the program statistics read 0 runs (the block programs were closed at the stop, before the run read their account) and keeps them loaded until the close. Run after its merge: 11.54 %, 332 ns a request, of which the programs' own run time is most (298.5 ns a request with the statistics on, which add about 125); `tp_btf` is the next cut, and the criterion is still open. A kernel-built row's sum is its exact `total_ns` in every emit since the seventeenth wave. Since the sixteenth wave the budget's ladder steps from `trace` to `sample` on a collector that weighs its samples (`mem.faults` on `pmu:sw`), held to the task's own fault count across the move, and weighs the target in nanoseconds. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. And since the tenth wave, **hot attach**: a request carries a `window` inside the run, attached and detached while the rest keep running, and two sources attached for one phase each of a program count that phase within +0.17 % and nothing of the other. Three edges are filed with the files that own them: the join engine credits events after a detach to a stale state, the results document does not yet say where a window was, and a per-task counter attached late to a program that already has threads counts one of them. |
 | 7 — declarative configuration | **done**, every criterion: since the sixteenth wave's sweep every gap between two fresh matrix cells is explained by their resolved records. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
 | 8 — self-benchmark | **done**; the second table ran before the seventeenth wave (68 minutes, its test green, 46 pairs flagged over their declared band, worst `io.fsync` through `bpf:fentry` at 142 %), and since the eighteenth wave the bands are corrected to it: 43 `cost:` lines moved, two stand with their reason, the table is recorded in `docs/bench.md` and `tests/bench_bands.rs` fails when a band and its row disagree. A table re-measured after the wave's fixes is the next run. Since the nineteenth wave the GPU tracers have a table of their own, per regime and against a negative control (`gpu.kernel` `extreme` from +67 % launch-bound, `gpu.api` `high`), held by `tests/bench_gpu.rs`. The harness has every task the phase lists, and it has measured: 94 (source, backend) pairs alone on this machine, every workload admitted by a gate that judges what a median resolves and refuses a busy machine (`docs/bench.md`). The resolver's seven choices between served backends were confirmed. What the table corrects is the cost bands: an in-kernel collector's cost is in the target's dilation, not the tool's cpu (`proc.syscall`: 0.42 % against +296 %), and the preload shim cost an allocation-bound program about 150 times -- two system calls a record -- until it was moved onto a shared ring, which brought a record to about 70 ns. Finding 47 files each. |
-| 9 — breadth | nearly done; **99 of 102 sources, 112 of 206 backends** (the 112th since the twentieth wave: `cpu.oncpu_time` per thread through `bpf:raw_tp`). The three without a collector wait on hardware this machine lacks; the vendor library (CUPTI) was the nineteenth wave's. |
+| 9 — breadth | nearly done; **115 of 118 sources, 133 of 226 backends** since the twenty-fourth wave added sixteen sources (`cpu.branches`, `mem.system`, `mem.oom`, `io.util`, `io.vfs`, `net.snmp`, `net.sockets`, `net.tcp.accept`, `sched.interrupts`, `sched.runqueue`, `sched.slices`, `power.wakeups`, `gpu.mem_freq`, `gpu.throttle`, `proc.calls`, `proc.tasks`) and new backends to existing ones (`cpu.oncpu_time`'s task-clock, `power.freq`'s APERF/MPERF, `mem.numa`'s `fs:sys`, `mem.swap`'s counting kprobe). The three without a collector wait on hardware this machine lacks; the vendor library (CUPTI) was the nineteenth wave's. |
 | 10 — intelligence layer | **its first method is done by the engine**. TSA — where a thread's wall clock went — is what `examples/join-decompose-compute.yml` produces: three states, each row's kind and resolution, the program's life as the whole, and a residue inside its own resolution. Since the tenth wave the layer above it exists and calls the engine like any other user: the objective is required and refused when missing, `omn latency` names what dominates a run or its tail, `omn saturate` reads a queue by Little's law, and `omn diff` subtracts two profiles -- each checked against a workload whose limit the test chose. Since the eleventh wave **the escalation** closes it: a session's `escalate:` block attaches the layer the cheap pass names mid-run, detaches the rest and holds the budget; a program cpu-bound then lock-bound gets the lock layer 0.4 to 0.5 s after the switch (`docs/triage.md`). **Done.** Since the eighteenth wave `omn latency` follows a wait for a child into the child that ran during it and names the busiest other thread beside a block it ran in, asks `sched.mutex` only in a second pass, and takes `--symbols`. |
 | 11 — a model reads it | **done** (the twelfth wave): `omn-mcp`, an MCP server over stdio in the workspace, exposing the catalog, the runs a directory holds and this machine's sweep, as the documents themselves regrouped per request with what each is missing stated first. It probes nothing (the `omn` binary answers every machine question), and runs a session only when its operator allowed it, bounded, budgeted, and never one that launches a program (`docs/mcp.md`). What it filed: `omn list --format json` carrying the sweep, so the server stops parsing the text table. Since the fourteenth wave the use case runs end to end: an agent benchmarks a launched program through approved sessions and says what dominates its time, every number it is handed held to the run's files (`docs/mcp.md`, "The walk-through"). Since the eighteenth wave one privilege model: the capabilities are on `omn` alone and `omn-mcp` collects through it, shown on a `CAP_BPF` run; `run_session` takes an optional budget, says what a budget is a share of (`budget_against`) and hands back the program's stdout. |
-| 12 — programs nobody wrote for it | **started in the seventeenth wave**: a case is a directory (`cases/<name>/case.yml`, `docs/cases.md`), asked both ways by `tests/cases.rs`, `omn latency` and `omn-mcp`. Seven cases since the eighteenth wave brought `gcc-shell` back (`sqlite3-stripped`, `sqlite3-durability`, `cpython-interpreter`, `cpython-perf-map`, `http-server-stdlib`, `make-sqlite`, `gcc-shell`). The first suspect is the known cause, both ways, for every cause asked here, `make-sqlite`'s one-job cause in four runs of five; what still gets the cited numbers wrong (a job is a chain of processes, a thread that waits beside the main thread) is filed; since the twentieth wave the triage follows a thread blocked on a connection beside the block (`waiting`), carries the rest of a job (`followed.job`) and never names its own eBPF frames, shown on its own workloads and not yet on those cases. Three of six exit criteria met (a seventh program is a directory, a stripped binary named from debuginfod both ways, and every case at paranoid 2: run after the merge, each cause answers as at -1 with the capabilities and skips both ways with the machine's reason without them, through the skip gate); `ROADMAP.md` says which are partly. |
+| 12 — programs nobody wrote for it | **started in the seventeenth wave**: a case is a directory (`cases/<name>/case.yml`, `docs/cases.md`), asked both ways by `tests/cases.rs`, `omn latency` and `omn-mcp`. Seven cases since the eighteenth wave brought `gcc-shell` back (`sqlite3-stripped`, `sqlite3-durability`, `cpython-interpreter`, `cpython-perf-map`, `http-server-stdlib`, `make-sqlite`, `gcc-shell`). The first suspect is the known cause, both ways, for every cause asked here, `make-sqlite`'s one-job cause in four runs of five; what still gets the cited numbers wrong (a job is a chain of processes, a thread that waits beside the main thread) is filed; since the twentieth wave the triage follows a thread blocked on a connection beside the block (`waiting`), carries the rest of a job (`followed.job`) and never names its own eBPF frames, shown on its own workloads and not yet on those cases. Four of six exit criteria met since the twenty-fourth wave followed `http-server-stdlib`'s slow client on the agent's way too (no case ends with a confident wrong suspect; and a seventh program is a directory, a stripped binary named from debuginfod both ways, and every case at paranoid 2: run after the merge, each cause answers as at -1 with the capabilities and skips both ways with the machine's reason without them, through the skip gate); `ROADMAP.md` says which are partly. |
 
 ---
 
@@ -1526,181 +1526,368 @@ against `top`'s 0.204; alone, 0.076 against 0.120, both times `omn` below):
 filed to stream top as a possible one-sided bias. The decisions are in
 `DECISIONS.md`, "Settled in the twenty-third wave".
 
-**After the twenty-third wave, in order:**
+**The twenty-fourth wave is merged**, all sixteen streams, and
+`docs/briefs/wave-24-found.md` keeps its brief: **what the comparison found,
+all at once** -- "After the twenty-third wave"'s items 1, 3 and 4 split by
+the file each lands in, sixteen streams started together in one phase, each
+merged `--no-ff` as soon as it was done and reviewed while merged, its
+review's fixes a second merge: `63ebae6` unwind (`1007a75`), `0cb4513` run
+(`747b26d`), `ae5b924` triage (`e8e6ad6`), `6703f29` lazy (`5d12d25`),
+`9e429d0` power (`6fd3eeb`), `6812949` gpu (`baf618b`), `293f4cc` cpu
+(`6b4e123`), `e7eaa0b` emit (`36b3d57`), `cee7aa5` mem, `172a033` proc
+(`32525bf`), `67dc878` views (`5646f8a`), `8894116` io (`6404005`),
+`ea07472` reference (`052d383`), `c1626f9` sched (`a5f0acb`), `f2c39c3` top
+(`a08cc27`), `4da72f2` net (`6a8b4c2`); then three merge fixes and the full
+suite's filing (`a2ce567`, `6f3c25a`, `367ad20`, `a062341`). Each stream's
+handoff is `docs/fixes/w24-<stream>.md`.
 
-1. **The gaps the comparison found**, by the file each lands in. The number
-   after a family is its handoff's gap (`docs/fixes/w22-<family>.md`); a
-   **defect** breaks a standing invariant or a number, the rest are
-   features.
-   - **`tests/reference/` and the families' YAML: what the twenty-third
-     wave left.** The runner and the eleven families' pairs are done (every
-     pair runs through it, the 22 rows are backed, the harnesses are gone);
-     what is left of the bullet:
-     - **`top-cpus`** (top): failed in the quiet full run (`omn` 0.140
-       against 0.204) and held alone at 0.044 of its 0.05, `omn` below both
-       times. Three quiet runs recording which side is higher; if `top` is,
-       the pair names the bias in its `why` or `omn`'s window starts at
-       `top`'s first sample (`docs/open-findings.md`).
-     - **`load-latency`** (perfrecord): held in the quiet run, 10-12 % below
-       under load; if it goes red on a quiet machine it becomes a
-       `known_defect` naming the `mem.latency` population finding, not a
-       wider band.
-     - **gpu's four `omn_*.json` parser captures** are composed by hand; the
-       driver is loaded now, so `w23-gpu.md`'s four `omn trace` commands
-       recapture them, unprivileged, and the parser tests' numbers move.
-     - **The runner** (`tests/reference/runner.rs`): a root check by command
-       (`sudo -n` grants `/usr/bin/tcpdump` here, not everything, so net's
-       tcpdump pair skips; net); a `teardown:` argv (perfstat's cgroup stays
-       behind); under `omn_launches_tool`, `workload_fails_alone` running
-       `command` + `workload` (io); "does not exist here" for a device path
-       in `requires` (gpu).
-     - **Pairs worth one more shape once root is granted**: bpftrace's two
-       medians and perfsched's six `perf` pairs `alongside` (one run, not
-       two); io's percentile pair (`omn_parse` with `log2_buckets`); a write
-       pair beside io's three `iostat -dx` read pairs.
-   - **`src/cli.rs` and `src/main.rs`, the run's shape**: **a machine-wide
-     target bounded by a launched program** -- `--system`, `--cpu`,
-     `--cgroup`, `--iface` and `--pid` beside `-- prog`, the way `perf stat
-     -a -- prog` and `turbostat prog` measure -- asked by five families
-     (perfstat 3, power 1, io 3, top 6, net); several sources on one launch
-     (perfstat 2, top 5); `-r N`, one request repeated with mean and spread
-     (perfstat 5); exit 1 saying whether the machine refused or a run failed
-     before writing (reference); `--pid` ending when its
-     process exits, as `perf stat -p` does (perfstat, top: `-m count --pid`
-     refuses without `-d`, and `-d` runs on after the pid is gone); `omn
-     trace --pid` attached in under 500 ms, or saying when it is
-     (perfrecord); the launched program's exit status in `results.json`, so
-     the runner need not read it through a pidfd (runner).
-   - **`src/collect/launch.rs` and the launched tree**: the launcher's `PATH`
-     search counted as the program's `execve`s (perfsched 2); `io.latency`
-     (io 1, **defect**: 0 requests for a forked fio) and `gpu.mem` (gpu 1:
-     0 under a wrapper) following the launched program's descendants;
-     `proc.exec` and `net.tcp.lifetime` per launch (bpftrace 3); the closing
-     round before the reap, so `cpu.oncpu_time` on `fs:proc` keeps its last
-     interval (sysstat 9, and the twenty-first wave's request).
-   - **Defects in the collectors**: `proc.syscall`'s `comm` filter reading
-     the comm an aggregate first saw (bpftrace 1); `sched.irq --filter 'kind
-     == "hard"'` returning no series (bpftrace 2); `sched.switches`' counted
-     rate divided by a 12 to 22 ms window (sysstat 1, held by `pidstat -w`'s
-     `known_defect`); a poll's leading event of a few ms in `cpu.util` and
-     `cpu.pressure` (sysstat 2, held by its test); `mem.heap.alloc` listing
-     `stack` and refusing it only after the run (heap 1); a filter on a field
-     the resolved backend never fills refused before the run, not counted
-     after it (`cpu.profile` on `pmu:sw`, perfrecord 1); `mem.latency`'s IBS sampler delivering about 58 % of the
-     rate asked without saying so, and calling 18 % of its timed loads `peer`
-     where `perf mem` calls 6 % a cache hit (perfrecord, twenty-third wave);
-     `power.freq`'s first poll taken at window open, before anything launched
-     beside it (power, twenty-third wave).
-   - **`src/emit.rs` and the keys** (`src/request.rs`): a total in `summary`
-     (heap 4, top 1; net: a counter's total is mean x count today); `summary` and `hist` per key (`@kernel`, gpu 2); a
-     summary over `sched.runqlat`'s `wake_to_run_ns` (perfsched 8);
-     `topk` with a zero series rather than none, and no `-0.0` (perfsched
-     5); keys asked: `syscall` on `proc.syscall` (perfsched 1, one run for
-     `strace -c`), `comm` (bpftrace 4), function and object on `cpu.profile`
-     (perfrecord 3-4), `level` on `mem.latency` (perfrecord 5), lock kind
-     and caller on `sched.lock` (perfsched 6), mapping and user on the
-     memory sources (top 4, 8), `dir` on `net.packets` (net) and on
-     `io.latency` (io, so a read/write split needs no filter); `summary` over
-     `fs:proc` keyed `dir` alone folding devices into one series (io 5).
-   - **New sources and attributes** (`catalog/*.yaml`, then a collector):
-     `cpu.branches` (perfstat 1); task-clock as a source (perfstat 4);
-     `mem.system` from `/proc/meminfo`, load and run queue, slab, the
-     machine's NUMA counters, interrupt counts (sysstat 4-8), `sched.runqlen`,
-     `net.tcp.accept`, `mem.oom`, per-process swap-in, VFS calls by operation
-     (bpftrace 5, 7); `%util` (io 4); VIRT and SHR, every thread of a pid on
-     `fs:proc`, the per-state cpu split (top 3, 7, 9); `net.snmp`, a socket
-     inventory, pcap output, `tcp_info`'s other fields, `missed` and `mcast`, `direction` as a field `net.capture`'s `--filter` can
-     name (`lo` hands every frame twice, outgoing and host)
-     (net); syscall errors and per-call records (perfsched 3-4), a per-switch
-     stream (perfsched 9); `power.freq`'s busy share and average, an idle
-     share, the core energy domain, per-process wakeups (power 3-6), and
-     `power.freq` on an idle cpu saying what it reads (power 2); the GPU's
-     NVTX, launch facts, memory clock as a value, per-process engine busy,
-     PCIe, throttle and ECC, more driver calls and a CUPTI callback backend
-     (gpu 3-9); a cycles `cpu.profile`, sampling any PMU event, instruction
-     attribution, `c2c`'s per-line detail (perfrecord 2, 6-8); the heap's
-     eBPF attach, high-water mark, live blocks and lifetimes (heap 2-3,
-     5-6); attributes on `proc.syscall`'s `openat`, `proc.signals`,
-     `io.writeback`, `net.drops` (bpftrace 6); a caveat on `mem.faults`'
-     earlier open (perfstat 6); `cpu.pressure`'s attributes named as its
-     siblings' (sysstat 3); `sar`'s unattended history (sysstat 10).
-   - **`view/` and `omn top`**: no per-process table of the machine, which is
-     `top`'s, `htop`'s and `btop`'s first use (top 2) -- see item 3.
-   - **`catalog/io.yaml`, two caveats** (cross, twenty-third wave): a swap on
-     a bio-based device (`zram`) is read I/O that `/proc/<pid>/io` charges and
-     neither `io.latency` nor `io.bytes` sees; on a multi-device filesystem
-     one file's I/O lands on several partitions, so a filter on the mount's
-     source undercounts it.
-   - **Still open from the twenty-first wave**, nothing under `src/` having
-     moved (`docs/open-findings.md`): `Unwinder::symbolizer` and
-     `perf_maps`; a block request a `kworker` dispatched; `net.bytes`'
-     polled baseline; the machine's capacity in a recording; `CATALOG.md`'s
-     `targets: {pid: "no: ..."}` form, `dir` and `net.request`'s fields; the
-     triage's failure channel, `--program-stderr` with `--runs`, the
-     provenance and the job restricted to the followed child's parent;
-     `cpu.profile`'s `pid` per sample and `ppid` on the sched sources; the
-     cases (`make-sqlite`'s critical path, `http-server-stdlib`'s slow client
-     on the MCP way, `sqlite3-durability`'s commits); the smaller ones (the
-     unwind share tests' aliasing, the uprobe's tid, `DEVICE_STACKS` as data,
-     a sweep from an installed tree).
-2. **What the user grants, so the last skipped pair runs.** Everything is
-   installed and granted now, through `/etc/sudoers.d/omniscient-witnesses`
-   (`bpftrace`, the bcc tools, `tcpdump`, `turbostat`, `perf` without a
-   password), tracefs at 755, RAPL readable and `make CAPTURE=1`; the runner
-   sends only the tool through `sudo -n` (`reference.sudo`). After the merge:
-   108 of 113 pairs held, 2 gaps of scope (`runqlat`, `memleak-outstanding`),
-   1 known defect, `top-cpus` at its band's edge, and one skip:
-   `freq-cpupower-mperf`, because `cpupower` checks for uid 0 itself. Add
-   `/usr/bin/cpupower` to the sudoers line (and `privileged: true` stays).
-   tracefs' mode and `energy_uj`'s read bit reset at boot, and a plain `make`
-   drops `CAP_NET_RAW`:
+**The one thing to know first**: the comparison's defects are closed but one
+(heap 1's data line, below), and **sixteen new sources** collect --
+`cpu.branches`, `mem.system`, `mem.oom`, `io.util`, `io.vfs`, `net.snmp`,
+`net.sockets`, `net.tcp.accept`, `sched.interrupts`, `sched.runqueue`,
+`sched.slices`, `power.wakeups`, `gpu.mem_freq`, `gpu.throttle`,
+`proc.calls`, `proc.tasks` -- beside a lazy mode (`omn cpu -- prog`), a
+machine-wide target bounded by a launched program (`omn trace power.energy
+--system -- prog`), several sources on one launch, `-r N`, and `omn top`'s
+`system` view listing the machine's processes. `omn list`: **118 sources,
+111 usable here, 115 with a collector, 133 of 226 backends** (95, 99 and 112
+of 206 before). The reference pairs, alone on a quiet machine
+(`--test-threads=1`, at `a5f0acb`):
+
+| Family | Held | Skipped | Gaps | Known defects | Failed |
+|---|---|---|---|---|---|
+| bpftrace | 10 | 0 | 0 | 0 | 0 |
+| gpu | 21 | 0 | 0 | 0 | 0 |
+| heap | 8 | 0 | 1 | 0 | 0 |
+| io | 9 | 0 | 0 | 0 | 0 |
+| net | 7 | 1 | 0 | 0 | 0 |
+| perfrecord | 5 | 0 | 0 | 0 | 0 |
+| perfsched | 8 | 0 | 0 | 0 | 1 |
+| perfstat | 12 | 0 | 0 | 0 | 1 |
+| power | 7 | 0 | 0 | 0 | 0 |
+| sysstat | 13 | 0 | 0 | 0 | 0 |
+| top | 11 | 0 | 0 | 0 | 0 |
+| **all** | **111** | **1** | **1** | **0** | **2** |
+
+sysstat is read after `367ad20`: `pidstat-w` failed its `known_defect` in
+the run because stream sched fixed the counted rate (933.7/s against 936/s),
+and held alone once the marker was removed. The skip is `tcpdump-captured`,
+run without `make CAPTURE=1`; the gap is `memleak` (it counts mmap'd memory).
+The two failures are filed: `cpu.cycles.system` (-26 to -39 % where -8 % is
+allowed: omn's own start and exit dominate a quiet machine, the wave-23 build
+fails the same way by hand) and `perf-trace-count` (perf reports lost events
+on every run, now refused by its parser). `runqlat` is no longer a gap (run
+with `--system` beside the program), and **no pair skips on `sudo -n`** any
+more: cpupower, memleak, perf and the bpftrace tools are all granted.
+
+- **run** (`w24-run.md`): a program beside `--system`, `--cpu`, `--cgroup`,
+  `--iface`, `--pid`, `--tid` or `--container` is the window, `launch:` in a
+  session (shown: energy over a 2 s program equal to `perf stat -a --` in
+  watts to 0.1 W); several sources on one launch; `-r N` with mean, sample
+  deviation and perf's relative error (0.018 % from `perf stat -r 5`); exit
+  1's last line one of three fixed sentences; `--pid` ending when its
+  process exits; the attach moment said; `lifetime.exit_code`/`signal`; the
+  launcher's `PATH` search in the parent and the closing round before the
+  reap, so `cpu.oncpu_time` on `fs:proc` keeps its last interval. Two
+  shared-layer additions (`run_core`'s `bound`, `Session::launch`).
+- **emit** (`w24-emit.md`): per-backend `emits:` in the loader, a backend not
+  producing an asked emit passed over before the run; `summary.total` where
+  the values add up; `summary@<attr>` and `hist@<attr>`; a zero ranking row
+  and no `-0.0`; a regrouped poll folded per tick (additive sources only, the
+  review's fix); the derived `func` key; `@<attr>` emits over a field the
+  backend never fills refused before the run.
+- **cpu** (`w24-cpu.md`): the poll's leading event gone (sysstat 2);
+  `cpu.pressure` speaking the PSI reader's names; `cpu.branches`; task-clock
+  as `cpu.oncpu_time -m count` on `pmu:sw`; the per-state split in `fields`
+  (against `mpstat` within 0.5 points); every counting source's `sample`
+  served by one sampler on its own counter (`cpu.cycles -m sample -e stack`
+  is `perf record`'s default; shares within 0.02 of perf's); `pid` and
+  `comm` on every `cpu.profile` sample.
+- **gpu** (`w24-gpu.md`): `gpu.mem` following the launched tree (412 MiB
+  under a wrapper, 0 before); NVML's held reads said, each event's
+  `ts_err_ns` its read's span; the end-of-run clock state read after the
+  window (a temperature poll 22-27 % of its program before, 0.75-2.15 %
+  after); `gpu.mem_freq`, `gpu.throttle`, the launched tree's engine share.
+- **io** (`w24-io.md`): every io program follows forked children (fio's
+  forked job 21 329 requests, its own `total_ios`; 0 before); `dir` on
+  `io.latency`, `io.queue`, `io.size`; `io.util` (49.37 % against iostat's
+  49.38 %); `io.vfs` (100 003 reads and writes against `strace -c`'s); the
+  fentry unlink moved after the window (`io.fsync` 265-343 % to 4.7-6.4 %);
+  the two caveats.
+- **mem** (`w24-mem.md`): `mem.latency`'s delivered rate said, its cause
+  shown with `perf record` alone (the IBS unit with `omn`'s two format bits
+  settles at 66-74 % of the rate), `peer` checked against perf's decoding;
+  `mem.system` (`free -b` to the byte); `mem.oom`; `mem.numa` on `fs:sys`;
+  per-process swap-ins through a counting kprobe; VIRT, SHR, Swap,
+  AnonHugePages, Locked; the heap's peak, live blocks and lifetimes;
+  `mem.sharing`'s per-line detail.
+- **net** (`w24-net.md`): the polled baselines at `start()` and no read at a
+  poll's `stop()`; `dir` on `net.packets`; `direction`, `saddr`, `sport` on
+  `net.capture`; `mcast`, `missed`; `tcp_info`'s other fields (equal to `ss
+  -tin`); `net.snmp` (exact against `nstat`), `net.sockets` (the same 29 as
+  `ss -tuan`), `net.tcp.lifetime` per launch by its owner, `net.tcp.accept`,
+  the kernel stack on `net.drops` (the same 21 frames as bpftrace).
+- **power** (`w24-power.md`): `power.freq`'s first poll a baseline; APERF,
+  MPERF and the TSC through the `msr` perf unit as `power.freq`'s first
+  backend, turbostat's arithmetic exactly; an idle cpu's setpoint said for
+  what it is; the core energy domain behind a `domain` key, unkeyed the
+  package alone; `power.wakeups`.
+- **proc** (`w24-proc.md`): `proc.syscall` counting each call under the name
+  it was made with (1000 for 1 before), `errors`, and `syscall`/`comm` keys
+  (`strace -c` in one run); `proc.tasks`, the machine's process table that
+  `omn top` reads; `proc.signals`' sender; `proc.exec` per launch;
+  `proc.calls`, one record per syscall (648 opens, 406 `ENOENT`, as strace).
+- **sched** (`w24-sched.md`): the `kind` filter of `sched.irq` (bpftrace 2)
+  and the counted switch rate (sysstat 1, 940/s for about 945/s); the
+  run-queue summary over `wake_to_run_ns`; `sched.interrupts`,
+  `sched.runqueue`, `sched.slices`; `ppid` on `sched.offcpu`,
+  `sched.runqlat`, `sched.futex`; `sched.lock` by `kind`.
+- **reference** (`w24-reference.md`): the runner's root check by command,
+  `teardown:`, the launched program alone, a missing path "does not exist
+  here", exit 1 read by omn's last line; `top-cpus`'s bias traced to the
+  leading event (fixed by cpu) and its parser refusing the read rather than
+  leaving it out; `fio-clat-p50` and `iostat-w-per-s`; gpu's four captures
+  and eleven bpftrace, two perfsched, memleak and power captures replaced by
+  real output; a tool's own reported losses refused.
+- **views** (`w24-views.md`): every view takes the terminal's width and
+  height, held at 80x24, 160x48 and 240x60; `--against` and focus in the
+  standard set; the usage gradient measured (it fails 3:1 on a light
+  terminal, a ramp proposed); the request view's bytes; flows' socket ->
+  interface edge; the flame charging own cost as the triage does;
+  `Update::Described` and `Key::Dir` in the mirror.
+- **top** (`w24-top.md`): `system` lists the machine's processes from
+  `proc.tasks` (`top -b`'s `%CPU` and RES to the KiB), splits disk and
+  network by `dir`; `process` fills the terminal and reads the shared
+  palette, ledger and flame; the batch output's library half
+  (`views::system::batch`). **Found**: a live `omn top` of the machine
+  starves its pollers.
+- **lazy** (`w24-lazy.md`): a family name where a source is expected, a
+  `default:` per family in its own catalog file, `--cost low|med|high`,
+  every default run here against an independent count; `docs/lazy.md`.
+- **unwind** (`w24-unwind.md`): a copied stack sampled after the target's
+  `execve` walked by the image it runs now (110 of 41 246 stacks cut before,
+  13 after); `Unwinder::symbolizer()`, `perf_map_file()`, `executable()`;
+  the share tests' aliasing removed by a pseudo-random pad (worst branch 22.9
+  points off its share before, 3.9 after).
+- **triage** (`w24-triage.md`): the failure channel; `--program-stderr`
+  with `--runs` keeping `FILE.<n>`; the perf-map names from the results'
+  `named_by`; the job restricted to the followed child's parent once events
+  carry `ppid`; `http-server-stdlib`'s slow client on the MCP way, its two
+  open findings removed, and `sqlite3-durability`'s commits both ways.
+
+**At the merge** (`docs/open-findings.md`, "The twenty-fourth wave,
+coordinator, after the merge"): `make`, then `make check`, red in the lib
+tests (1694 passed, 2 failed, each in the flaky tally and passing alone);
+then `--no-fail-fast`: **3048 passed, 13 failed, 15 ignored**. Three were
+merge regressions where streams met, all in documents and data, fixed on
+`main`: `CATALOG.md`'s `mem.numa` and `mem.swap` rows (`a2ce567`), the view
+README's needs table and the system workload's session after `system` asked
+`proc.tasks` and keyed by `dir` (`6f3c25a`), `pidstat-w`'s `known_defect`
+(`367ad20`). The second `make check`: red on one test in the flaky tally
+(`cross_io`, passing alone), 1869 passed. Filed: the portability cells swept
+before the wave's sources existed (not a code fault, the matrix sweep's),
+`cpu.cycles.system`, and `perf-trace-count`; and with them the wave's one
+regression in cost, **`omn trace`'s startup doubled** (37 to 86 ms of user
+cpu in the debug build), 45 % of it `emit::values_add_up` parsing the
+embedded catalog a second time. The decisions are in `DECISIONS.md`,
+"Settled in the twenty-fourth wave".
+
+**After the twenty-fourth wave, in order:**
+
+1. **What the twenty-fourth wave left of the comparison**, by the file each
+   lands in: the handoffs' "Not done" items and the requests one stream made
+   of another (`docs/fixes/w24-<stream>.md`; the requests are also in
+   `docs/open-findings.md`, "Needs from another stream -- the twenty-fourth
+   wave"). A **defect** breaks a standing invariant or a number; the rest
+   are features.
+   - **The shared layers, the coordinator's**:
+     - `src/emit.rs` and the catalog loader: **`omn trace`'s startup
+       doubled** (37 to 86 ms of user cpu in the debug build), 45 % of it
+       `emit::values_add_up` parsing the embedded catalog a second time;
+       give it the run's catalog, or parse the embedded one once per process
+       (the coordinator's run). Then `cpu.cycles.system`'s band, which needs
+       a slack that does not depend on the machine's idle rate.
+     - `src/collect/mod.rs` and `omn top`'s session in `src/main.rs`: **a
+       live `omn top` of the machine starves its pollers** (top, finding 1:
+       `cpu.util` 2 events for about 64 asked, `proc.tasks` one poll, while
+       the per-target trace sources watch the whole machine); a poll round
+       that never runs is counted nowhere. Rerun alone first ("Still to
+       run", item 13).
+     - `src/bpf/fentry.rs`: `Narrowing` with a descendants map, so
+       `io.syscall`, `io.fs` and `net.socket` follow forked children (io;
+       lazy's io default names `io.syscall`, so `omn io -- ./script.sh`
+       reads as an idle program until it lands).
+     - `src/perf.rs`: `PERF_SAMPLE_PERIOD` decoded, so the frequency-mode
+       samples of `cpu.instructions`, `cpu.branches` and the misses carry a
+       `weight` and their shares are perf's (cpu).
+     - `src/catalog.rs`: a rate unit (`bytes_per_second`) for `gpu.pcie`
+       (gpu); an entry-level `stacks: device` on `gpu.profile`, so
+       `DEVICE_STACKS` goes and `check_stack` reads the entry (unwind, gpu,
+       emit).
+     - `src/bpf/mod.rs`: a `mod` line for a per-cpu `sched.runqlen` program
+       on a 99 Hz cpu-clock event (sched; `sched.runqueue` is the machine's
+       sum meanwhile).
+   - **`src/request.rs`, `src/event.rs`, `src/filter.rs`, `src/format.rs`
+     (emit)**: keys asked of the seam -- `op` (`io.vfs`, and `syscall`'s
+     general spelling), a counter name (`net.snmp` as series), `level`
+     (`mem.latency`), `mapping` and `user` (the memory sources, top 4 and
+     8); a request naming its value attribute (`registers`, `memory_hz`,
+     `process_ratio`, `busy`, `avg_hz`), and a summary that also sums a named
+     attribute per series (`proc.syscall`'s `errors`, so `-k syscall -e
+     summary` is `strace -c` with its errors column); timeline and rate
+     counting an event without the value as unmeasured, as summary does
+     (`power.freq` through `pmu` on a cpu that never left idle); `filter.rs`
+     reading an attribute named `kind` before the event's own kind (sched's
+     root cause of the irq defect, worked around in the collectors); an
+     `object` key (it needs the unwinder to keep every frame's object) and
+     an inclusive per-function share (perfrecord 3-4); a `pcap` encoder
+     (net); `omn list --format json` carrying the defaults and each
+     backend's own `emits` (lazy, emit).
+   - **The catalog lines one stream asked of another** (`catalog/*.yaml`):
+     - **heap 1, still a defect on `main`**: stream emit's resolver refuses
+       an emit a backend does not produce before the run, but
+       `catalog/mem.yaml`'s `preload` backend of `mem.heap.alloc` does not
+       yet say `emits: [hist, topk, raw, summary]`, so `omn trace
+       mem.heap.alloc -e stack -- prog` still runs the program and refuses
+       after it. One line (emit's request to mem).
+     - `func` in `cpu.profile`'s `keys:` (and the counting sources that
+       sample), now that `KeyKind::Func` is on `main`: one line, perfrecord
+       3 (emit's request to cpu).
+     - `cpu.oncpu_time`'s `fs:proc` caveat, "a launched program is reaped
+       before the run's closing read", no longer true (run).
+     - `mem.cache_l1`, `mem.cache_llc`, `mem.cache_tlb`' `sample`, a row
+       each in `profile::SAMPLED` (cpu, for mem's entries).
+     - The lazy defaults: `net.tcp.lifetime` in net's `med` now that it
+       serves a launch; `proc.tasks` beside `proc.threads` in proc's `low`
+       (net, proc).
+     - `catalog/references/perfrecord.yaml`'s `load-latency` `why`: the
+       cause of the IBS rate and `peer` (mem).
+   - **`src/collect/cpu/`**: `cpu.profile`'s provenance filling `perf_maps`
+     and `executables` from the unwinders (`Unwinder::perf_map_file`,
+     `executable`; unwind gives the lines); `start()` priming
+     `/proc/kallsyms` before the window, which is why `cpu.profile --pid`
+     attaches 1.0 to 1.5 s after omn starts (run, with unwind's
+     `src/stack.rs`); `cpu.context_switches -m count -e rate` dividing by
+     `enabled_ns`, the defect sched fixed for `sched.switches` (sched);
+     instruction attribution, an `insn:<func>+0x<off>` key (perfrecord 7);
+     `cpu.profile`'s `pmu` row, removed or kept as a pointer to `cpu.cycles
+     -m sample` (the coordinator's call, `DECISIONS.md`).
+   - **`src/collect/sched/`**: `named_by` and `perf_maps` beside
+     `sched.offcpu`'s stacks, so the flame and the triage charge off-cpu own
+     cost alike (views; carried from the twenty-first wave); `ppid` as a
+     filter field and on `sched.switches`, `sched.migrations`,
+     `sched.wakeup`, `sched.lock`; `sched.lock`'s caller and address
+     (perfsched 6); the tracepoints' wakeup-to-switch wait in
+     `sched.slices`.
+   - **`src/collect/io/`**: a block request a `kworker` dispatched, charged
+     to the bio's submitter (carried; not reproduced on a launched program,
+     seen machine-wide); `io.bytes` on `fs:proc` counting bytes from before
+     the window in its first event, up to 3.4 s of startup (top, finding 2).
+   - **`src/collect/net/`**: a `bpf:raw_tp` road for `net.tcp.connect`,
+     whose 69 ms in-window cost is its six trampolines' detach; the captured
+     header bytes for pcap; `net.tcp.lifetime --tid`; `net.tcp.accept`
+     following a launched tree; `ss -s`.
+   - **`src/collect/mem/`**: the heap's eBPF attach (heap 2, a stream of its
+     own); `mem.oom`'s victim (`oom:mark_victim`); a per-cache slab
+     (`/proc/slabinfo` is root's).
+   - **`src/collect/power/`**: `power.cstate -e rate` (a counted window);
+     `power.wakeups --system` through `proc.tasks`; the per-process energy
+     estimate.
+   - **`src/collect/gpu/`, `shim/`, `cupti/`**: `gpu.pcie` (measured, waits
+     on the unit); launch facts as values; NVTX, `cuMemsetD8`,
+     `cuModuleLoadData`, `cuCtxCreate`, a callback backend (the shim's and
+     cupti's owners); `gpu.freq`'s three clock calls a reading; whether the
+     GPU bench counts a driver-held late tick as a lost record (the bench's
+     owner).
+   - **`src/collect/proc/`**: `proc.calls` on `bpf:tp`, and paths for
+     `open`, `openat2`, `execve`; `proc.exec`'s tree exact through
+     `sched_process_fork`.
+   - **`src/main.rs` and `src/cli.rs` (run)**: `omn top --batch [--sort
+     cpu|memory|faults|io|runqueue]`, the flag over the landed
+     `views::system::batch` (top); `omn latency` and `omn saturate` exiting
+     1 when their answer carries `failures` (triage); `Tap::described`
+     sending `Update::Described` on every change (views); `Beside::capacity`
+     filled once the model has it (run, views, top); the process cpu spent
+     after a window closed said in the cost line (io); the `--emit` help
+     naming `summary@<attr>` and `hist@<attr>`, and `--program-stderr`'s
+     `FILE.<n>` (emit, triage).
+   - **`view/`**: `Beside::capacity` and the `Lifetime` mirror's `exit_code`
+     and `signal` in `view/src/model.rs`, `Capacity::of` reading it for a
+     replay (run, top); flows' machine band folding `dir:` series into one
+     sink per device, as `system::fold_dirs` does (top); `usage::RAMP`
+     under 3:1 on a light terminal, `28, 64, 100, 136, 166, 160` proposed,
+     then the ignored test un-ignored (views to top); `ON LOCKS -58 lost`
+     reading as a negative count; the `process` suspect reading sleep where
+     `sched.futex` holds the wait (the timebar subtracting the futex waits);
+     flows' file -> device ribbon; a placed drop on screen.
+   - **`tests/reference/` and `catalog/references/`**: `perf-trace-count`
+     skipping, not failing, when perf says it lost events (the runner's
+     owner); pairs for what landed -- `io.util` against `iostat %util`,
+     `io.vfs` against vfsstat or `strace -c`, a forked fio; `net.snmp`
+     against `nstat`, `net.sockets` against `ss -tuan`, `ss -ti`'s other
+     fields, tcpaccept, tcplife per launch, the drop stacks,
+     `tcpdump-captured` through `direction != "outgoing"`;
+     `sched.interrupts` against vmstat's `in`, `sched.runqueue` against
+     `r`/`b`, `sched.slices` against `perf sched timehist`, runqlat's mean
+     against `wake_to_run_mean_ns`, `perf lock contention`'s type against
+     `topk@kind`; `Busy%`/`Avg_MHz` against turbostat, `energy-core`
+     against `perf stat -a`, `pidstat -w` against `power.wakeups`;
+     `cpu.util`'s `summary.mean` against `mpstat`; `omn top --batch`
+     against `top -b`; the parsers reading `summary.total`; the pairs
+     written as `omn ... --system -- workload` in place of the tool wrapping
+     omn (perfstat 3, power 1, io 3, top 6, net); a `mem.slab` pair once
+     slabtop is granted.
+   - **The cases** (`tests/cases.rs`, `src/triage/`): `make-sqlite`'s
+     critical path rerun now that `ppid` is on the sched sources (its
+     open finding should then fail as passing); `read_mcp`'s job by `ppid`;
+     `sqlite3-durability`'s `every-commit-waits-for-the-disk` (blocked 24
+     to 27 ms over `schedstat` where 8 and 12 are allowed).
+   - **Documents, the coordinator's**: `docs/triage.md` (the answers'
+     `failures` and `program_stderr`, `followed.job.under`, `unplaced`,
+     `unplaced_on_cpu`), `docs/cases.md` (the agent's reading of a thread
+     blocked on a connection, the eBPF samples set aside, `named_by` first),
+     `docs/unwind.md` (the exec re-read, `CALLTREE`'s pad),
+     `docs/view/system.md`, `docs/view/process.md` and
+     `docs/view/request.md` ("bytes on the network" is stale), `GUIDE.md`
+     (the run's new shape), `docs/bench.md`'s `io.fsync` row (the share was
+     the unlink, now after the window; `net.tcp.connect`'s 39 % is likely
+     the same).
+2. **What the user grants.** Every reference pair that wanted root now runs
+   through `sudo -n` (`/etc/sudoers.d/omniscient-witnesses`, cpupower
+   included), and every capture written from documentation has been
+   replaced by the tool's real output but power's wrapped one. What is left:
+   `make CAPTURE=1` before the reference run (`tcpdump-captured` skips
+   without it), the boot-time settings, and `slabtop` in the sudoers line
+   for a future `mem.slab` pair (`slabtop -o -s c` reads `/proc/slabinfo`,
+   root's):
 
    ```console
    sudo mount -o remount,mode=755 /sys/kernel/tracing          # after each boot
    sudo chmod o+r /sys/class/powercap/intel-rapl:0/energy_uj   # after each boot
    cd /home/moha/repos/omniscient && make CAPTURE=1
-   cargo test --test reference -- --nocapture
+   cargo test --test reference -- --test-threads=1 --nocapture
    ```
 
-   Then the captures still written from documentation replaced by the tools'
-   real output (the commands are in each `docs/fixes/w23-<family>.md`,
-   "Privileged runs wanted"): perfsched's two other `perf` captures
-   (`perf-trace-s.txt`, `perf-sched-latency.txt`; timehist's and lock's are
-   real now), bpftrace's
-   `<tool>.txt` beside each `.format.txt`, `memleak.txt`, power's
-   `cpupower_mperf.txt` and `rapl_window*.txt`; each parser test's numbers
-   moved to its capture. And the runs "Needs privilege" carries.
-3. **The views' open points**, after the user's look at a terminal. First,
-   the user's remark (2026-10-05): every view should fill the terminal the
-   way `system` does, not draw in a corner and leave the rest empty. Then the
-   `process` view live and replayed, its lines and pages, the usage gradient
-   on a dark and a light terminal and in 256-colour tmux, the mouse in
-   Ghostty and through tmux (item 9 of "Needs privilege"); `omn top`'s
-   `system` view listing the machine's processes, the one use of `top`,
-   `htop` and `btop` no pair could hold, and a batch output a pair could
-   parse; the `process` suspect on a lock the timebar now splits; the `raw`
-   `system`'s other panels could keep (`cpu.util`, `gpu.mem`) and the
-   ledger's `cpu.oncpu_time`; `sqlite-latency`'s `blocked` with its events;
-   a recording holding a drop; `Update::Described` in `view/src/feed.rs`;
-   `Key::Dir` in the mirror, `system` split by `dir`; `process` on
-   `trust::usage`, `ledger::reading` and `flame::hottest`; the request view's
-   bytes; flows' socket-to-interface edge and file-to-device ribbon;
-   `--against` and focus snapshots in the standard set.
-4. **A lazy mode for people who are not experts** (the user, 2026-10-05).
-   `omn` can do everything, and that is what makes it heavy for a beginner:
-   a source, a mode, an emit, a stack mode and a duration before the first
-   number. The lazy path takes only a family and a target -- `cpu`, `mem`,
-   `io`, ... on a program or a pid -- and composes the rest from a default
-   per family, the minimum that answers that family's first question.
-   Optionally the person adds how much they are ready to pay (`low`, `med`,
-   ...), and the default picks within that cost band. The defaults are
-   catalog data, one per family, never code (a family owns its default the
-   way it owns its sources), and the run still says what it chose, what it
-   degraded and what it lost, so nothing silent comes in with the
-   convenience. To settle first in `DECISIONS.md`: the spelling (a family
-   name where a source is expected, or a verb of its own), how a default
-   relates to the sessions in `examples/`, and what a family with no safe
-   default answers.
+   And the runs "Needs privilege" carries.
+3. **The views' open points left**, after the user's look at a terminal: the
+   mouse in Ghostty and through tmux, and the gradient by eye on a light
+   terminal (item 9 of "Needs privilege", and the two `gradient--*.ansi`
+   strips); the ramp itself, the capacity in a recording, `Update::Described`
+   sent, flows' `dir` fold, the file -> device ribbon and a placed drop
+   (item 1, `view/` and `src/main.rs`). Landed in the twenty-fourth wave:
+   every view fills the terminal, `system` lists the machine's processes
+   and splits by `dir`, `process` on the shared palette, the request view's
+   bytes, the socket -> interface edge, `--against` and focus snapshots,
+   `sqlite-latency`'s `blocked` with its events, a recording holding a drop.
+4. **The lazy mode, what is left**: `omn list --format json` and `omn-mcp`
+   offering the defaults (a `family` + `cost` argument through
+   `omn::lazy::compose`); a low band this machine cannot keep is said, not
+   avoided -- `cpu.profile` (`pmu:sw`), `mem.rss` (`smaps_rollup`, with
+   `statm` free below it) and both gpu sources declare `med` at `--cost
+   low`, and choosing the backend by band is the resolver's change; and the
+   io default's children (item 1, `src/bpf/fentry.rs`). Landed: the
+   spelling, a default for every family or its reason, the loader's
+   refusals, every default checked here against an independent count.
 5. **Then, once `omn` is polished: a portability wave across
    distributions** -- Debian, Fedora, Ubuntu, Gentoo, NixOS; x86_64 and
    aarch64; containers -- each measured, never read from documentation: what
@@ -1713,13 +1900,14 @@ Below the milestones, and not scheduled:
   A consumer of one more format, not a source: `DECISIONS.md` boundary 6 says
   why LTTng is a peer rather than a backend. Low priority; nothing depends on
   it and no measurement here is worse without it.
-- **Four decisions are open** (`DECISIONS.md`): the phase 6 criterion for
+- **Five decisions are open** (`DECISIONS.md`): the phase 6 criterion for
   the in-kernel histogram, pending what `tp_btf` leaves; what the budget's
   first check may stop a run on (its one-time half landed in the twentieth
   wave, the 10 ms slack proposed with numbers); a cost per regime in the
   catalog's schema (proposed with numbers); and since the twentieth wave,
   whether the latency session asks
-  `sched.wakeup`. How a reference pair reads a value `omn` computes was
+  `sched.wakeup`; and since the twenty-fourth wave, whether `cpu.profile`'s
+  `pmu` row stays as a pointer to `cpu.cycles -m sample` or goes. How a reference pair reads a value `omn` computes was
   settled before the twenty-third wave: a parser of `omn`'s output. How a byte counter's direction becomes a
   series was settled in the twenty-first wave: a key, `dir`.
 - **An `lbr` collector** waits on a cpu with a branch call stack (Intel from
@@ -1836,7 +2024,17 @@ commands below (`sysctl kernel.perf_event_paranoid` 2 and -1,
 machine-wide, so **the coordinator runs them alone**, never while streams
 build or test.
 
-### Still to run, after the twenty-third wave
+### Still to run, after the twenty-fourth wave
+
+**Added by the twenty-fourth wave**: items 11 to 14 below, and item 10 done
+(every reference pair that wanted root ran through `sudo -n` in the wave and
+at its merge; no pair skips on it). The streams ran only what `make`'s
+capabilities and the granted witnesses allow; nothing machine-wide, and no
+bench. Item 1 is now wanted for a reason of its own:
+`portability::every_cell_covers_the_whole_catalog` stays red until the cells
+are swept with the wave's sixteen new sources.
+
+#### Carried from the twenty-third wave
 
 **Items 2 to 5 ran on 2026-10-05**, alone after the reboot onto the NVIDIA
 driver (`docs/open-findings.md`, "The runs carried since the nineteenth
@@ -2046,7 +2244,7 @@ poller makes the energy counter under-count for every reader of the board.
    target/debug/omn top --view ledger -- python3 view/workloads/timebar/workload.py   # the blocked line, Enter -> timebar
    ```
 
-10. **The reference pairs that need root** (the twenty-second wave's, run
+10. ~~**The reference pairs that need root**~~ -- **done in the twenty-fourth wave**: stream reference ran every pair through `sudo -n` and replaced the captures (`docs/fixes/w24-reference.md`), and the coordinator's quiet run had no skip on root; only `tcpdump-captured` wants `make CAPTURE=1` first (item 2 of "What remains"). As it was written (the twenty-second wave's, run
     through the shared runner since the twenty-third; typed by the user,
     nothing here is in the sudoers file): the 20 pairs that skip on
     `sudo -n`, and the captures still written from documentation. The
@@ -2054,6 +2252,65 @@ poller makes the energy counter under-count for every reader of the board.
     tools for the first time; perfsched's six `perf` pairs, whose tolerances
     were set from `omn`'s spread alone; memleak's outstanding bytes;
     tcpdump's count through the runner; the RAPL files and cpupower's Mperf.
+
+#### Added by the twenty-fourth wave
+
+11. **The held clocks' share with a lowered power limit** (stream gpu; root,
+    **not in the sudoers file**, so typed by the user; the board to itself,
+    the limit put back after):
+
+    ```console
+    nvidia-smi --query-gpu=power.default_limit --format=csv
+    sudo nvidia-smi -pl 150
+    cd /home/moha/repos/omniscient && target/debug/omn trace gpu.throttle -m count -e raw --format json -- python3 tests/gpu_workload.py kernel 3000
+    sudo nvidia-smi -pl 250     # or the default limit read above
+    ```
+
+    with `nvidia-smi dmon -s v` beside it. Read: `power_cap_ratio` above 0
+    where `dmon`'s `pviol` is, and `gpu.throttle`'s value the largest
+    limiting share. Then `scripts/bench.sh gpu backends` (item 3) reads the
+    NVML pollers against their bands now that the end-of-run clock state is
+    read after the window, `gpu.freq`'s late ticks as lost records or not,
+    and `io.fsync`'s row near 5 % (its reason in `docs/bench.md` then fails
+    `bench_bands` by design: the share was the fentry unlink, now after the
+    window).
+
+12. **The reference pairs, quiet and with the capture's capability** (no
+    root beyond what `sudo -n` grants; alone, nothing on the GPU):
+
+    ```console
+    cd /home/moha/repos/omniscient && make CAPTURE=1
+    cargo test --test reference -- --test-threads=1 --nocapture
+    ```
+
+    Read: `tcpdump-captured` held, not skipped; `perf-trace-count` and
+    `cpu.cycles.system` as filed (`docs/open-findings.md`, the twenty-fourth
+    wave); `runqlat`, `fio-bytes`, `perf-sched-timehist-sched-in` and
+    `psi-cpu-some`, red only under the parallel workspace run, held.
+
+13. **A live `omn top` of the machine, alone** (stream top, finding 1; no
+    privilege beyond `make`'s):
+
+    ```console
+    cd /home/moha/repos/omniscient && make
+    target/debug/omn top --headless -d 8s -o /tmp/omn-top-machine
+    python3 -c "import json; d=json.load(open('/tmp/omn-top-machine/results.json')); [print(r['label'], r['events_seen']) for r in d['results']]"
+    ```
+
+    Read: `cpu.util@system` near 32 events for 8 s at `poll@250ms`, not 2;
+    if it is 2 alone too, the starvation is the runner's, not the load's.
+
+14. **A root `bpftrace` stream net left running** (`sudo -n bpftrace
+    /usr/share/bpftrace/tools/tcpaccept.bt`, pid 204407, still running when
+    the wave was merged; `sudo -n` does not grant its `kill`). By a person:
+
+    ```console
+    pgrep -af tcpaccept.bt && sudo kill -INT 204407
+    ```
+
+    And item 5's cases once more alone: `make-sqlite`'s
+    `every-cited-number-agrees-with-the-reference` should now close (its
+    open finding failing as passing) since `ppid` is on the sched sources.
 
 ### What the earlier runs found
 

@@ -972,6 +972,10 @@ triage follows, and two ways run with different privileges are not compared
       wait is for a child; `make-sqlite`'s one-job row is now over the
       reference rather than under (7.1 s against 5.3 s: the job is every busy
       task off the way, waiting on `ppid`). Left `[~]`.*
+      *Twenty-fourth wave: the triage restricts the job to the processes
+      under the followed child's parent when the events carry `ppid`
+      (`Job::under`), and the sched sources carry it, two streams of one
+      wave; `make-sqlite` was not rerun with both. Left `[~]`.*
 - [~] Every number a verdict cites agrees with the reference's own account,
       within that account's resolution.
       *Seventeenth wave, partly: within the stated slack for `sqlite3-stripped`
@@ -999,7 +1003,13 @@ triage follows, and two ways run with different privileges are not compared
       `http-server-stdlib`'s slow client (MCP) and `sqlite3-durability`'s
       commits (25 to 28 ms over a 6 ms slack) still list theirs. Left
       `[~]`.*
-- [~] Where the cause is out of the tool's sight (interpreted or JIT frames, a
+      *Twenty-fourth wave (`docs/fixes/w24-triage.md`): `http-server-stdlib`'s
+      slow client agrees on the MCP way too (blocked 1319.6 ms against the
+      client's 1319.5), its two open findings removed;
+      `sqlite3-durability`'s `commits-that-wait-for-nothing` passes both ways.
+      `every-commit-waits-for-the-disk` (24 to 26.5 ms over `schedstat`) and
+      `make-sqlite` still list theirs. Left `[~]`.*
+- [x] Where the cause is out of the tool's sight (interpreted or JIT frames, a
       closed GPU), the verdict says so by name. No case ends with a confident
       wrong suspect.
       *Seventeenth wave, not met: without a perf map the verdict presents an
@@ -1020,6 +1030,11 @@ triage follows, and two ways run with different privileges are not compared
       `tests/triage.rs` gets; a lossy lower row that could overtake the
       largest undecides the verdict rather than naming the run queue. Left:
       the slow client in its case (above). Left `[~]`.*
+      *Twenty-fourth wave: the slow client is followed both ways in its
+      case, the person's and the agent's naming the same blocked thread and
+      leaf, and the agent's way sets the tool's eBPF samples aside as the
+      person's does. That was the item this box had left; met, on the
+      triage stream's runs under load and the coordinator's full suite.*
 - [x] One case names a stripped distribution binary's functions from
       debuginfod, and says where each name came from.
       *Seventeenth wave, the agent's way: `sqlite3-stripped` through
@@ -1074,7 +1089,7 @@ it has no "obviously wrong" output.
 | Cost regression | the phase 8 harness, in CI (built, and run by hand on a quiet machine; not in CI, since its variance gate exists to refuse a loaded one) |
 | Portability | a VM kernel matrix: floor, LTS, recent, no BTF (built in the eleventh wave: `scripts/matrix.sh`, `docs/portability.md`) |
 | Join robustness | injection of disorder, losses, recycled pointers |
-| Reference tools | `omn` against each tool it replaces, on the same workload within a declared tolerance: pairs as data (`catalog/references/`), the tools as witnesses only, one runner (`tests/reference.rs`), a verdict table per family (`docs/replaces.md`). Built in the twenty-second wave; every pair through the runner since the twenty-third: 113 pairs, 91 held, 20 skipped on root, 1 known defect, 1 failed (`top-cpus`, held alone) in the quiet run at its merge (`STATE.md`, "What remains", items 1 and 2) |
+| Reference tools | `omn` against each tool it replaces, on the same workload within a declared tolerance: pairs as data (`catalog/references/`), the tools as witnesses only, one runner (`tests/reference.rs`), a verdict table per family (`docs/replaces.md`). Built in the twenty-second wave; every pair through the runner since the twenty-third; at the twenty-fourth wave's merge, 115 pairs, 111 held, 1 skipped (`tcpdump-captured` without `make CAPTURE=1`), 1 gap, 0 known defects, 2 failed (`cpu.cycles.system`, `perf-trace-count`, both filed) in the quiet run, none skipped on root (`STATE.md`, "What remains", items 1 and 2) |
 | Degradation | run without privileges, without BTF, without tracefs — check that it degrades **while saying so** (built with the matrix, one configuration each; the CI is the unprivileged cell) |
 
 ---
