@@ -52,8 +52,15 @@ fn exit_for(whose: omn::collect::Whose) -> u8 {
     use omn::collect::Whose;
     match whose {
         Whose::Request => EXIT_REJECTED,
+        // A refusal after a run started -- the second run of `-r N`, say --
+        // is a session that measured and then failed, not a machine that
+        // refused it: the earlier runs read what they read.
         Whose::Machine => {
-            said_which(Unavailable::Machine);
+            said_which(if RUN_STARTED.load(std::sync::atomic::Ordering::SeqCst) {
+                Unavailable::FailedUnwritten
+            } else {
+                Unavailable::Machine
+            });
             EXIT_UNAVAILABLE
         }
         Whose::Build => EXIT_NOT_IMPLEMENTED,
@@ -1655,8 +1662,9 @@ fn measure(
 
 /// `-r N`: the session run `repeat` times, one after another, each run a
 /// launch of its own, and each summary value's mean and spread across them
-/// ([`repeat::spread`]). Every run's costs and losses are said as a run's
-/// are, numbered; every run's results are kept in the document, and under
+/// ([`repeat::spread`]). Every run's losses, degradations and costs are
+/// said on stderr under its `run i of N:` line, and the text spread ends
+/// naming the runs that lost anything; every run's results are kept in the document, and under
 /// `-o` in a directory of their own, `run-<i>`.
 #[allow(clippy::too_many_arguments)]
 fn measure_repeated(
@@ -1679,7 +1687,26 @@ fn measure_repeated(
             Ok(collections) => collections,
             Err(error) => {
                 eprintln!("error: run {index} of {repeat} could not run");
-                return Ok(refused_at_collect(catalog, &error, resolved));
+                if index > 1 {
+                    let written = match &session.out {
+                        Some(directory) => {
+                            format!(", and wrote theirs to {}/run-<i>", directory.display())
+                        }
+                        None => String::new(),
+                    };
+                    eprintln!(
+                        "the {} run(s) before it measured{written}; no spread was taken",
+                        index - 1
+                    );
+                }
+                let code = refused_at_collect(catalog, &error, resolved);
+                if index == 1 {
+                    return Ok(code);
+                }
+                // Whoever's gap the refusal names, the session already ran:
+                // what failed is the run, not the request or the build.
+                said_which(Unavailable::FailedUnwritten);
+                return Ok(ExitCode::from(EXIT_UNAVAILABLE));
             }
         };
         RUN_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1691,6 +1718,7 @@ fn measure_repeated(
         attached_late(resolved, &collections);
         let (run, costs, served_by) = assemble(catalog, session, &ladder, resolved, collections)?;
         eprintln!("run {index} of {repeat}:");
+        eprint!("{}", repeat::losses(&run));
         report_costs(&costs, &run);
         if let Some(directory) = &session.out {
             let output = encode::run_output_bytes(session.format, &run)?;
@@ -1719,7 +1747,7 @@ fn measure_repeated(
         runs: &runs,
     };
     let output = match session.format {
-        OutputFormat::Text => repeat::text(repeat, &spread),
+        OutputFormat::Text => repeat::text(repeat, &spread, &repeat::lossy(&runs)),
         format => format.serialize_document(&document)?,
     };
     print!("{output}");
