@@ -36,7 +36,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
 use super::insn::{helper, Insn, Program, BPF_DW, BPF_W, R10};
-use super::map::{map_failure, Counters};
+use super::map::{map_failure, Counters, StackTraces};
 use super::net_program::{
     count_drop, expect_signature, load, read_field, read_narrow, SocketInode,
 };
@@ -93,14 +93,33 @@ pub struct PacketDrop {
     /// one thing that says *where* in the stack the packet died; nothing here
     /// resolves it to a symbol.
     pub location: u64,
+    /// What `bpf_get_stackid` returned for the kernel stack at the drop: an
+    /// id into the program's stack map, negative when the kernel could not
+    /// walk or intern it, [`PacketDrop::NO_STACK`] when no stack was asked.
+    pub stack: i32,
+    /// Written as zero, so that no byte of the record is left to the stack.
+    _pad: u32,
 }
 
 /// The size of the record the program writes.
-const RECORD_BYTES: usize = 48;
+const RECORD_BYTES: usize = 56;
+
+/// How many distinct drop stacks the map holds, and how deep each is walked.
+const MAX_STACKS: u32 = 4096;
+const MAX_STACK_DEPTH: u32 = 64;
 
 impl PacketDrop {
     /// What a protocol field holds when the drop had no socket.
     pub const NO_PROTOCOL: u32 = u32::MAX;
+
+    /// What the stack field holds when the request asked for no stack. Not a
+    /// value `bpf_get_stackid` returns: its errors are small negative errnos.
+    pub const NO_STACK: i32 = i32::MIN;
+
+    /// The stack's id, when one was asked for and the kernel interned it.
+    pub fn stack_id(&self) -> Option<u32> {
+        (self.stack >= 0).then_some(self.stack as u32)
+    }
 
     /// The socket's protocol, when the drop had a socket.
     ///
@@ -130,12 +149,14 @@ impl PacketDrop {
             cookie: long(24),
             inode: long(32),
             location: long(40),
+            stack: word(48) as i32,
+            _pad: 0,
         })
     }
 }
 
 /// Stack offsets, negative from the frame pointer, matching `PacketDrop`.
-const EVENT: i16 = -48;
+const EVENT: i16 = -56;
 const TS: i16 = EVENT;
 const REASON: i16 = EVENT + 8;
 const PROTOCOL: i16 = EVENT + 12;
@@ -144,6 +165,8 @@ const FAMILY: i16 = EVENT + 20;
 const COOKIE: i16 = EVENT + 24;
 const INODE: i16 = EVENT + 32;
 const LOCATION: i16 = EVENT + 40;
+const STACK: i16 = EVENT + 48;
+const PAD: i16 = EVENT + 52;
 /// The one-word key of the drop counter, and eight bytes a pointer read lands
 /// in, both below the record.
 const DROP_KEY: i16 = EVENT - 8;
@@ -155,6 +178,7 @@ fn instructions(
     inode: SocketInode,
     ring_fd: i32,
     drops_fd: i32,
+    stacks_fd: Option<i32>,
 ) -> Result<Vec<Insn>, String> {
     let signature = expect_signature(btf, "kfree_skb", &[&WITH_RX_SOCKET, &WITHOUT_RX_SOCKET])?;
     let has_rx_socket = signature.len() == WITH_RX_SOCKET.len();
@@ -184,6 +208,22 @@ fn instructions(
     program.push(Insn::stx(BPF_DW, R10, LOCATION, 1));
 
     read_narrow(&mut program, LEN, 4, 7, len_at);
+
+    // The kernel stack at the drop, interned: the walk happens once per
+    // distinct stack and four bytes travel with each drop.
+    program.push(Insn::st_imm(BPF_W, R10, PAD, 0));
+    match stacks_fd {
+        Some(stacks_fd) => {
+            program.push(Insn::mov64_reg(1, 6));
+            program.extend(Insn::load_map_fd(2, stacks_fd));
+            program.push(Insn::mov64_imm(3, 0));
+            program.push(Insn::call(helper::GET_STACKID));
+            program.push(Insn::stx(BPF_W, R10, STACK, 0));
+        }
+        None => {
+            program.push(Insn::st_imm(BPF_W, R10, STACK, PacketDrop::NO_STACK));
+        }
+    }
 
     // Written before anything conditional writes them, because every byte of
     // the record has to be set before it is published: a padding word or a
@@ -242,6 +282,7 @@ fn instructions(
 pub struct DropProgram {
     ring: RingBuffer,
     drops: Counters,
+    stacks: Option<StackTraces>,
     /// Whether this kernel's tracepoint carries the receive-side socket.
     has_rx_socket: bool,
     program: OwnedFd,
@@ -250,7 +291,8 @@ pub struct DropProgram {
 
 impl DropProgram {
     /// Loads and attaches the program, or says why the kernel refused.
-    pub fn load(requested_ring_bytes: usize) -> Result<Self, String> {
+    /// With `with_stacks`, each drop carries the id of its kernel stack.
+    pub fn load(requested_ring_bytes: usize, with_stacks: bool) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
         let bytes = ring_bytes(requested_ring_bytes);
         let has_rx_socket = btf.tracepoint_signature("kfree_skb")?.len() == WITH_RX_SOCKET.len();
@@ -259,12 +301,19 @@ impl DropProgram {
             .map_err(|error| map_failure("drop ring buffer", error))?;
         let drops = Counters::create(1, "omn_drop_lost")
             .map_err(|error| map_failure("drop counter", error))?;
+        let stacks = with_stacks
+            .then(|| {
+                StackTraces::create(MAX_STACKS, MAX_STACK_DEPTH, "omn_drop_stk")
+                    .map_err(|error| map_failure("drop stack map", error))
+            })
+            .transpose()?;
 
         let instructions = instructions(
             btf,
             SocketInode::locate(btf)?,
             ring_map.as_raw_fd(),
             drops.as_raw_fd(),
+            stacks.as_ref().map(StackTraces::as_raw_fd),
         )?;
         let program = load(&instructions, "omn_kfree_skb")?;
         let link = syscall::raw_tracepoint_open("kfree_skb", program.as_raw_fd())
@@ -275,6 +324,7 @@ impl DropProgram {
         Ok(Self {
             ring,
             drops,
+            stacks,
             has_rx_socket,
             program,
             _link: link,
@@ -307,6 +357,17 @@ impl DropProgram {
     /// Drops the program could not publish because the ring was full.
     pub fn dropped(&self) -> u64 {
         self.drops.read(0)
+    }
+
+    /// The kernel addresses behind a stack id, leaf first; `None` when the
+    /// map evicted it or no stacks were asked.
+    pub fn stack(&self, id: u32) -> Option<Vec<u64>> {
+        self.stacks.as_ref()?.get(id).ok().flatten()
+    }
+
+    /// How deep a stack is walked: one this deep may have been cut.
+    pub fn stack_depth(&self) -> usize {
+        MAX_STACK_DEPTH as usize
     }
 }
 
@@ -346,6 +407,8 @@ mod tests {
             (COOKIE, offset_of!(PacketDrop, cookie), "cookie"),
             (INODE, offset_of!(PacketDrop, inode), "inode"),
             (LOCATION, offset_of!(PacketDrop, location), "location"),
+            (STACK, offset_of!(PacketDrop, stack), "stack"),
+            (PAD, offset_of!(PacketDrop, _pad), "_pad"),
         ] {
             assert_eq!(
                 (stack - EVENT) as usize,
@@ -383,7 +446,7 @@ mod tests {
     fn every_field_is_written_before_the_record_is_published() {
         let Some(btf) = kernel_btf() else { return };
         let program =
-            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4).expect("a program");
+            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, Some(5)).expect("a program");
         let published = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -399,6 +462,8 @@ mod tests {
             (COOKIE, "cookie"),
             (INODE, "inode"),
             (LOCATION, "location"),
+            (STACK, "stack"),
+            (PAD, "_pad"),
         ] {
             assert!(
                 program[..published].iter().any(|insn| {
@@ -420,7 +485,7 @@ mod tests {
     fn the_published_record_is_exactly_the_size_of_the_struct() {
         let Some(btf) = kernel_btf() else { return };
         let program =
-            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4).expect("a program");
+            instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, Some(5)).expect("a program");
         let output_at = program
             .iter()
             .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
@@ -440,7 +505,7 @@ mod tests {
     fn the_program_reads_the_monotonic_clock_and_no_other() {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
-        let called: Vec<i32> = instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4)
+        let called: Vec<i32> = instructions(btf, SocketInode::locate(btf).unwrap(), 3, 4, Some(5))
             .expect("a program")
             .iter()
             .filter(|insn| insn.code == 0x85)
@@ -476,7 +541,7 @@ mod tests {
         let SocketInode::ThroughSocket { ino_at, .. } = walk else {
             unreachable!()
         };
-        let program = instructions(btf, walk, 3, 4).expect("a program");
+        let program = instructions(btf, walk, 3, 4, None).expect("a program");
         assert!(
             program
                 .iter()

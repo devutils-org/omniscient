@@ -147,12 +147,18 @@
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:kfree_skb(sk_buff *, void *, skb_drop_reason, sock *)|(sk_buff *, void *, skb_drop_reason)", "kernel>=5.8"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:skb:kfree_skb", "bpf"], cost: low, equivalent: true}
   modes: [trace, count]
-  emits: [rate, topk, raw, summary]
+  emits: [rate, topk, raw, summary, stack]
   targets: {system: native}
   keys: [sock]
   filter_fields: [reason, protocol]
   determinism: medium
   caveats:
+    - "`-e stack` adds the kernel stack of each drop, interned in the kernel
+       (one walk per distinct stack, 64 frames deep) and named through
+       /proc/kallsyms, and `function`, the symbol `location` is in: where the
+       packet died and how it got there, as the bpftrace drop tools print it;
+       the tracer's own two leaf frames (`bpf_trace_run*`, `bpf_prog_*`) are
+       taken off. Without it no stack is walked."
     - "The drop reason field only exists on recent kernels: discover the
        tracepoint format at runtime instead of assuming it."
 

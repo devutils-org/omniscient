@@ -107,6 +107,7 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(drops::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                wants_stacks: resolved.request.emit.contains(&crate::request::Emit::Stack),
             }))
         }),
         Factory::new("net.softirq", "bpf:raw_tp", |resolved| {
