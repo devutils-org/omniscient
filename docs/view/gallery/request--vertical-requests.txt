@@ -28,8 +28,8 @@ omn top │ fixture vertical-requests │ 413ms                       view: snap
 │  █ on cpu       54.2µs   0.13% ▏    IDENTITY                                  off cpu 2 times, preempted 0           │
 │  ▓ run queue    22.3µs   0.05% ▏    IDENTITY                       disk       no block request issued                │
 │  ▀ lock/sleep   40.7ms   99.8% ▀▀▀▀ IDENTITY woken by tid 2619021  network    in 20.4µs · out 0ns                    │
-│  ▄ disk              ·              IDENTITY                       lock/sleep longest 40.7ms, woken by tid 2619021   │
-│  ░ net out           ·              KEY                                                                              │
+│  ▄ disk              ·              IDENTITY                                  52B read · 59B queued                  │
+│  ░ net out           ·              KEY                            lock/sleep longest 40.7ms, woken by tid 2619021   │
 │  IDENTITY: read off the serving thread  KEY: joined by the socket                                                    │
 │                                                                                                                      │
 │                                                                                                                      │

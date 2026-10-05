@@ -28,7 +28,7 @@
 │[0m[32m  █ [0mon cpu        244µs   0.71% [0m[32m▏    [0mIDENTITY                                  off cpu 9 times, preempted 0           │[0m
 │[0m[33m  ▓ [0mrun queue     152µs   0.44% [0m[33m▏    [0mIDENTITY                       [0m[1mdisk       [0m[2mno block request issued[0m                │[0m
 │[0m[35m  ▀ [0m[2mlock/sleep        ·         [0m[35m     [0mIDENTITY                       [0m[1mnetwork    [0min 18.7µs · out 33.9ms                 │[0m
-│[0m[34m  ▄ [0m[2mdisk              ·         [0m[34m     [0mIDENTITY                                                                         │[0m
+│[0m[34m  ▄ [0m[2mdisk              ·         [0m[34m     [0mIDENTITY                                  56B read · 128KiB queued               │[0m
 │[0m[96m  ░ [0mnet out      33.9ms   98.8% [0m[96m░░░░ [0m[2mKEY      by socket 196640[0m                                                        │[0m
 │[0m[2m  IDENTITY: read off the serving thread  KEY: joined by the socket[0m                                                    │[0m
 │                                                                                                                      │[0m

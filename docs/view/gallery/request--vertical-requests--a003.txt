@@ -31,10 +31,10 @@ omn top │ fixture vertical-requests │ 413ms                       view: snap
 │  ▄ disk         2.55ms   10.8% ▏    IDENTITY                                  waited 2.55ms, 456µs off the device    │
 │  ░ net out           ·              KEY                                       ~low det degraded x3                   │
 │  IDENTITY: read off the serving thread  KEY: joined by the socket  network    in 19.0µs · out 0ns                    │
+│                                                                               53B read · 59B queued                  │
 │                                                                    lock/sleep longest 20.2ms, woken by tid 2619021   │
 │                                                                                                                      │
 │  what sets it apart from the other 4 requests: ▀ lock/sleep +20.2ms (theirs 0ns) · ▄ disk +2.55ms (theirs 0ns)       │
-│                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ request  s sort  enter focus it, then its lanes  l its thread

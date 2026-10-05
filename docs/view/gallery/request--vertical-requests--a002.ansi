@@ -31,7 +31,7 @@
 │[0m[34m  ▄ [0mdisk         9.07ms   88.4% [0m[34m▄▄▄▄ [0mIDENTITY                                  [0m[2mwaited 9.07ms, 504µs off the device[0m    │[0m
 │[0m[96m  ░ [0m[2mnet out           ·         [0m[96m     [0m[2mKEY      [0m                                 [0m[36m~low det[0m [0m[33mdegraded x3[0m                   │[0m
 │[0m[2m  IDENTITY: read off the serving thread  KEY: joined by the socket[0m  [0m[1mnetwork    [0min 17.5µs · out 0ns                    │[0m
-│                                                                                                                      │[0m
+│                                                                               52B read · 59B queued                  │[0m
 │                                                                                                                      │[0m
 │[0m[1m  what sets it apart from the other 4 requests: [0m[34m▄ [0m[31mdisk +9.07ms[0m[2m (theirs 0ns) · [0m[32m█ [0m[31mon cpu +730µs[0m[2m (theirs 149µs)[0m          │[0m
 │                                                                                                                      │[0m

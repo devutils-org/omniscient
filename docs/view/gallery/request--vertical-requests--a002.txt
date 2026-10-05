@@ -31,7 +31,7 @@ omn top │ fixture vertical-requests │ 413ms                       view: snap
 │  ▄ disk         9.07ms   88.4% ▄▄▄▄ IDENTITY                                  waited 9.07ms, 504µs off the device    │
 │  ░ net out           ·              KEY                                       ~low det degraded x3                   │
 │  IDENTITY: read off the serving thread  KEY: joined by the socket  network    in 17.5µs · out 0ns                    │
-│                                                                                                                      │
+│                                                                               52B read · 59B queued                  │
 │                                                                                                                      │
 │  what sets it apart from the other 4 requests: ▄ disk +9.07ms (theirs 0ns) · █ on cpu +730µs (theirs 149µs)          │
 │                                                                                                                      │

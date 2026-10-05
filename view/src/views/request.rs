@@ -148,6 +148,12 @@ struct Request {
     preempted: u64,
     holder_tid: Option<i64>,
     holder_ns: f64,
+    /// What the server read off the socket from the first byte to the end,
+    /// and what it queued on it from the birth to the end; `None` when
+    /// `net.request` did not see where it started (absent, not zero), or the
+    /// recording predates the attribute.
+    rx_bytes: Option<u64>,
+    tx_bytes: Option<u64>,
 }
 
 /// The request id an event carries, as its `req` key spells it.
@@ -220,6 +226,14 @@ impl Request {
                 .filter(|tid| *tid > 0.0)
                 .map(|tid| tid as i64),
             holder_ns: number("holder_ns"),
+            rx_bytes: event
+                .number("rx_bytes")
+                .filter(|bytes| *bytes >= 0.0)
+                .map(|bytes| bytes as u64),
+            tx_bytes: event
+                .number("tx_bytes")
+                .filter(|bytes| *bytes >= 0.0)
+                .map(|bytes| bytes as u64),
         })
     }
 
@@ -1178,6 +1192,40 @@ fn draw_detail(
     frame.render_widget(Paragraph::new(share).wrap(Wrap { trim: false }), right);
 }
 
+/// What a request moved on its socket: read and queued, each said unknown
+/// rather than zero when `net.request` did not see where it started, and
+/// the recording named when it predates the count.
+fn bytes_span(request: &Request, trust: &Trust, gathered: &Gathered<'_>) -> Span<'static> {
+    let counted = gathered
+        .results
+        .iter()
+        .flat_map(|results| results.events())
+        .any(|event| event.attr("rx_bytes").is_some() || event.attr("tx_bytes").is_some());
+    if !counted {
+        return Span::styled(
+            "bytes: not in this recording, made before net.request counted them",
+            dim(),
+        );
+    }
+    if request.sock.is_none() {
+        return Span::styled("bytes: no socket followed", dim());
+    }
+    let side = |bytes: Option<u64>| bytes.map_or("?".to_owned(), |b| units::bytes(b as f64));
+    let text = format!(
+        "{} read · {} queued",
+        side(request.rx_bytes),
+        side(request.tx_bytes)
+    );
+    if request.rx_bytes.is_none() || request.tx_bytes.is_none() {
+        Span::styled(
+            format!("{text} (? where its start was not seen)"),
+            Style::new().fg(palette::LOSS),
+        )
+    } else {
+        Span::styled(text, trust.style())
+    }
+}
+
 /// The waterfall's rows: its axis, its four rows and the line under them.
 const WATERFALL: u16 = 6;
 /// The rows of the waterfall that are bars.
@@ -1804,7 +1852,7 @@ fn share_lines(
         }
     }
 
-    // Network.
+    // Network: its time on either side, then its volume.
     lines.push(Line::from(vec![
         head("network"),
         Span::styled(
@@ -1815,6 +1863,10 @@ fn share_lines(
             ),
             trust.style(),
         ),
+    ]));
+    lines.push(Line::from(vec![
+        indent(),
+        bytes_span(request, trust, gathered),
     ]));
 
     // The lock.

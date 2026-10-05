@@ -30,8 +30,8 @@ omn top │ fixture vertical-abandoned │ 184ms                      view: snap
 │  ▓ run queue    24.2µs   0.47% ▏                                   disk       io.latency not in this run: its block  │
 │  ▀ lock/sleep   5.08ms   98.4% ▀▀▀▀          woken by tid 2619813  requests are unknown                              │
 │  ▄ disk              ·                                             network    in 15.4µs · out 0ns                    │
-│  ░ net out           ·                                             lock/sleep longest 5.06ms, woken by tid 2619813   │
-│  no decomposition in this run: the evidence is not graded                                                            │
+│  ░ net out           ·                                                        51B read · 59B queued                  │
+│  no decomposition in this run: the evidence is not graded          lock/sleep longest 5.06ms, woken by tid 2619813   │
 │                                                                                                                      │
 │                                                                                                                      │
 │  what sets it apart from the other 1 request: ▀ lock/sleep +5.08ms (theirs 0ns)                                      │

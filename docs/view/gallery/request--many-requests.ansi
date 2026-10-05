@@ -30,7 +30,7 @@
 │[0m[32m  █ [0mon cpu       39.0µs   24.5% [0m[32m█    [0m[2m         [0m                                 off cpu 0 times, preempted 0           │[0m
 │[0m[33m  ▓ [0m[2mrun queue         ·         [0m[33m     [0m[2m         [0m                      [0m[1mdisk       [0m[2mno block request issued[0m                │[0m
 │[0m[35m  ▀ [0m[2mlock/sleep        ·         [0m[35m     [0m[2m         [0m                      [0m[1mnetwork    [0min 120µs · out 0ns                     │[0m
-│[0m[34m  ▄ [0m[2mdisk              ·         [0m[34m     [0m[2m         [0m                                                                        │[0m
+│[0m[34m  ▄ [0m[2mdisk              ·         [0m[34m     [0m[2m         [0m                                 51B read · 59B queued                  │[0m
 │[0m[96m  ░ [0m[2mnet out           ·         [0m[96m     [0m[2m         [0m                                                                        │[0m
 │[0m[2m  no decomposition in this run: the evidence is not graded[0m                                                            │[0m
 │                                                                                                                      │[0m
