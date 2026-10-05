@@ -1128,6 +1128,72 @@ The fix is a lock in `tests/scenario_sched.rs`, held for the length of a
 scenario; `tests/scenario_gpu.rs` has the same pattern for the same reason, one
 device instead of one machine.
 
+### 14. `sched.irq --filter 'kind == "hard"'` returned no series — **fixed in the twenty-fourth wave**
+
+Found by the bpftrace comparison (`docs/fixes/w22-bpftrace.md`, gap 2): the
+raw events carried `kind` = `hard` and `soft`, and a filter on it selected
+nothing, in count and trace mode. The filter layer reads a field named
+`kind` as the event's own kind (`sched.irq` on every row) before it looks at
+the attributes. The collector now asks the predicate of each row with its
+kind set to the half (`collect::sched::matches_as`, shared with `sched.lock`,
+whose `kind` is the lock's). Shown: over 2 s, the hard rows counted 400
+handler runs against `/proc/interrupts`' 428 over the run and its start-up,
+the soft rows 10 610 against `/proc/softirqs`' 12 236.
+`family_sched::a_filter_on_the_interrupt_half_keeps_that_half`. The root
+(`src/filter.rs` reading the attribute first) is filed with stream emit; a
+fs:proc source filtered by the runner, such as `sched.interrupts`, does not
+declare `kind` until it lands.
+
+### 15. A counted `sched.switches` rate divided by the task's time on a cpu — **fixed in the twenty-fourth wave**
+
+Found by the sysstat comparison (`docs/fixes/w22-sysstat.md`, defect 1):
+`-m count -e rate -- switch.py 1000` gave 1016 switches over a `window_ns`
+of 17 ms, 59 928/s, where `pidstat -w` says about 945/s. The counted path is
+`cpu`'s counter collector, whose `enabled_ns` is the right denominator for a
+cycle count and the wrong one for switches: a per-task counter's enabled
+time advances only while the task is on a cpu. For a task target the
+attribute is renamed `oncpu_ns` (`collect::sched::WallWindow`), so the rate
+is over the run's window: 1002 over 1.07 s, 940/s.
+`family_sched::a_counted_switch_rate_is_per_second_of_the_run`. The
+`pidstat-w` pair's `known_defect` marker now fails, which is stream
+reference's to remove; `cpu.context_switches` keeps the same denominator
+and is filed with stream cpu.
+
+---
+
+## The twenty-fourth wave's sources
+
+- **`sched.interrupts`** (`fs:proc`, poll and count): interrupts per cpu,
+  line and softirq vector between two reads of `/proc/interrupts` and
+  `/proc/softirqs`. Three 1 s polls: 17 585, 24 981 and 40 738 hard
+  interrupts against vmstat's `in` 17 850, 22 806 and 42 021 over its own
+  seconds. A poll's first interval opens at its first read, so it carries no
+  few-millisecond leading event. `family_sched::the_interrupt_counts_are_the_machines`.
+- **`sched.runqueue`** (`fs:proc`, poll and snapshot): `procs_running`,
+  `procs_blocked` and the load averages, vmstat's `r` and `b` and `uptime`.
+  Four spinning threads read as at least five runnable tasks
+  (`family_sched::spinners_are_in_the_machines_run_queue`). The per-cpu
+  queue length `runqlen.bt` samples is not here: it needs a sampled eBPF
+  program (filed in `docs/fixes/w24-sched.md`).
+- **`sched.slices`** (`bpf:raw_tp`, trace): one event per time slice, the
+  line `perf sched timehist` prints: `run_ns`, `queue_ns`, `off_ns`,
+  `state`, `next_comm`. On `sleeper.py 100 2`: 102 slices whose runs add up to
+  11.95 ms against the reap's 11.62 ms, `off_ns` median 2.05 ms as timehist's
+  wait. Sixty-four threads spinning 1 s of wall time: runs 19.23 s against
+  the kernel's 19.11 s, runs and queue waits 63.1 s for 64 runnable seconds.
+  `queue_ns` is the kernel's `sched_info` account: a task woken onto an idle
+  cpu reads 0, where timehist's `sch delay` reads 3 to 11 us.
+  `family_sched::time_slices_add_up_to_the_cpu_and_the_runnable_time`.
+- **`sched.runqlat`'s run summary**: `wake_to_run_mean_ns` and the sums, by
+  name in `fields`, and a sentence. `sleeper.py 100 2`: 106 waits, 3.6 us,
+  against a bpftrace `sched_wakeup`-to-`sched_switch` script's 100 waits,
+  4.2 us.
+- **`ppid`** on `sched.offcpu`, `sched.runqlat`, `sched.futex` and
+  `sched.slices` rows: the fork program writes the parent, and a child gone
+  before a drain keeps it (`family_sched::a_launched_shells_children_name_it_as_their_parent`).
+- **`sched.lock` by `kind`**: `topk:N@kind` ranks waits as `perf lock
+  contention` groups by type (`family_sched::lock_waits_rank_by_the_kind_of_lock`).
+
 ---
 
 ## What this family contributes to a crossing

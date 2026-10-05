@@ -4,8 +4,12 @@ omn top │ fixture sqlite-commits │ 5.11s                          view: snap
 │sched.switches 1.37k 58 late ~low det degraded  sched.wakeup 1.43k 59 late ~low det degraded  sched.offcpu 506 ~low   │
 │det degraded  gpu.kernel 0 27 late degraded                                                                           │
 │61.5ms a cell          ╷0ns            ╷1.00s          ╷2.00s          ╷3.00s           ╷4.00s             of the span│
-│sqlite3        2618623│█▇▆█▇█▇█▇█▇█▇█▇█▇█▇█▇███▇█▇█▇███▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇█▇▁ │awake 89.7%│
-│              off cpu │▁▂▃ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▁ ▂ ▂ ▂ ▁ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂ ▂  │ blkd 8.03%│
+│sqlite3        2618623│▆▅▂█▅█▅█▅█▅█▅█▅█▅█▅█▄█▆█▅█▄█▅█▇█▅█▅█▅█▅█▅█▅█▅█▅█▅█▅█▄█▄█▄█▅█▄█▅█▅█▅█▅█▅█▅█▅█▅█▅█▅  │awake 89.7%│
+│                      │█████████████████████████████████████████████████████████████████████████████████  │           │
+│                      │█████████████████████████████████████████████████████████████████████████████████▃ │           │
+│              off cpu │                                                                                   │ blkd 8.03%│
+│                      │                                                                                   │           │
+│                      │▃▄▇ ▄ ▄ ▄ ▄ ▄ ▄ ▄ ▄ ▅ ▃ ▄ ▅ ▄ ▂ ▄ ▄ ▄ ▄ ▄ ▄ ▄ ▄ ▄ ▄ ▅ ▅ ▅ ▄ ▅ ▄ ▄ ▄ ▄ ▄ ▄ ▄ ▄ ▄ ▄  │           │
 │────────────────────────▲ 118ms───────────────────────────────────────────────────────────────────────────────────────│
 │sqlite3 2618623 (pid 2618623) at 118ms: blocked, uninterruptible 9.59ms, 113ms → 123ms, left cpu 17                   │
 │  woken by tid 2618682, outside the target; state, stack: its window's sched.offcpu row nearest in size               │
@@ -15,10 +19,6 @@ omn top │ fixture sqlite-commits │ 5.11s                          view: snap
 │     303ms 72.3% uninterr.   513 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │
 │    59.2ms 14.1% uninterr.   248 blocks  fdatasync ← sqlite3 x11 ← libc.so.6 ← __libc_start_main ← sqlite3            │
 │    57.4ms 13.7% uninterr.   249 blocks  fdatasync ← sqlite3 x10 ← libc.so.6 ← __libc_start_main ← sqlite3            │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

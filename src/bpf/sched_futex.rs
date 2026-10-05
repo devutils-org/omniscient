@@ -546,6 +546,14 @@ impl FutexProgram {
         self.descendants.as_ref().map_or(0, Descendants::missed)
     }
 
+    /// The parents of the processes the target started, as `(tgid, ppid)`;
+    /// see [`Descendants::parents`]. Empty for any other target.
+    pub fn parents(&self) -> Vec<(u32, u32)> {
+        self.descendants
+            .as_ref()
+            .map_or_else(Vec::new, Descendants::parents)
+    }
+
     pub fn load(whose: Whose) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
         // A process target is followed into every process it starts, as

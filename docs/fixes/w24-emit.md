@@ -201,9 +201,35 @@ withheld, never wrong.
 - A ranking that measured a window and counted nothing holds one zero row
   named by the target, not none.
 - A poll regrouped by fewer keys than its events carry adds up one tick's
-  readings into one measurement for `summary` and `hist`.
+  readings into one measurement for `summary` and `hist`, but only where
+  the source's values add up. A level keeps its readings apart.
 - `func` is a derived key: the emit layer reads it from the leaf frame of
-  each event's stack. No collector attaches it.
+  each event's stack. No collector attaches it. `--keys func` with
+  `--stack none` is refused, and the events that carried no stack are
+  counted in a degradation note.
+
+## Review
+
+The fix round answered two findings. Both were right.
+
+- **The tick fold summed levels (defect).** `groups_for` folded every
+  regrouped poll, so `net.tcp.rtt -m poll -k task -e summary` over three
+  connections reported the sum of three RTTs per tick. The fold is now
+  gated on `polled && values_add_up(source)`. A level regrouped by fewer
+  keys keeps one measurement per reading, which is what it did before the
+  io 5 change. `a_regrouped_poll_folds_the_readings_of_one_tick` now runs
+  the fold over an additive source (`net.packets`). It also checks that
+  `mem.rss`, a level, keeps all five readings: count 5, mean 4, not 3 ticks.
+- **`func:?` with no reason (gap).** `derive_func` now returns how many
+  events had no stack it could resolve. When that number is above zero the
+  result carries "N of M events carried no stack to name a function by, so
+  `--keys func` holds them as `func:?`". `check_stack` refuses `--keys func`
+  together with `--stack none`, with a hint. A unit test asserts that every
+  embedded entry offering `func` also declares the `stack` emit. None offers
+  it yet, so the test guards the cpu stream's addition. Making a collector
+  capture stacks when only `-k func` is asked (mem.heap.alloc captures them
+  for `-e stack` only) is collector code, outside this stream's files. Until
+  a collector does it, the degradation note is how a stackless run shows up.
 
 ## Privileged runs wanted
 

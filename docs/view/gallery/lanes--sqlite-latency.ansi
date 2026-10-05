@@ -1,16 +1,16 @@
-[0m[1momn top[0m │ fixture sqlite-latency │ 288ms                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥3.93%[0m[35m │ target 8.74% cpu[0m [0m
+[0m[1momn top[0m │ fixture sqlite-latency │ 334ms                          [0m[35mview: snapshot[0m │ [0m[35mcollectors [0m[2;35m≥6.74%[0m[35m │ target 11.4% cpu[0m [0m
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  9 flows  0 process                      [0m
 ┌ lanes -- threads side by side: one lane per thread and per GPU stream, along time ───────────────────────────────────┐[0m
-│[0m[1msched.switches [0m[2mnot in this run[0m  [0m[1msched.wakeup [0m[2mnot in this run[0m  [0m[1msched.offcpu [0m[2mno raw events[0m  [0m[1mgpu.kernel [0m[2mnot in this run[0m  │[0m
+│[0m[1msched.switches [0m[2mnot in this run[0m  [0m[1msched.wakeup [0m[2mnot in this run[0m  [0m[1msched.offcpu [0m[2m72[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1mgpu.kernel [0m[2mnot in[0m    │[0m
+│[0m[2mthis run[0m                                                                                                              │[0m
 │                                                                                                                      │[0m
 │[0m[3mNo thread or GPU stream in this run to draw a lane of. What it holds:[0m                                                 │[0m
 │[0m[1msched.switches  [0m[2mnot in this run[0m                                                                                       │[0m
 │[0m[1msched.wakeup    [0m[2mnot in this run[0m                                                                                       │[0m
-│[0m[1msched.offcpu    [0m[2min the run as stack only: a lane is drawn from each event, `raw`[0m                                      │[0m
+│[0m[1msched.offcpu    [0m[2m72 events[0m [0m[36m~low det[0m [0m[33mdegraded[0m                                                                           │[0m
 │[0m[1mgpu.kernel      [0m[2mnot in this run[0m                                                                                       │[0m
 │                                                                                                                      │[0m
 │[0m[2mA run `omn top` makes of a program (`omn top -- prog`, `--pid`) asks for each of them.[0m                                │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

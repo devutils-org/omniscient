@@ -2,7 +2,7 @@ omn top │ fixture workload-ledger │ 1.26s                         view: snap
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ ledger -- what task 2621625 and 1 more cost over 1.26s of wall-clock ────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
-│  cpu time        636ms on cpu     50.3% of one cpu          ██████████▄▄▄▄▃▁▁▁▁▁▁▁▁▁    ≥17.7ms  ~low det            │
+│  cpu time        636ms on cpu     50.3% of one cpu          ██████████▄▄▄▄▄▁▁▁▁▁▁▁▁▁    ≥17.7ms  ~low det            │
 │    2621625 ledger…     602ms  ███████████  94.7%                                                                     │
 │    2621704 python3    33.8ms  █            5.31%                                                                     │
 │    user and system apart: on the raw events only, which this run did not keep                                        │

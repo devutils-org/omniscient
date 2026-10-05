@@ -286,4 +286,16 @@ mod tests {
         assert_eq!(get(&v, "bytes"), 7.0);
         assert!(memleak_outstanding("Attaching to pid 1\n", "").is_err());
     }
+
+    #[test]
+    fn memleak_reads_its_real_report() {
+        // libbpf-tools' memleak through `sudo -n`, the pair's own command over
+        // `blocks.py 64 1048576 4 0.3` (2026-10-05): one report after the
+        // program exited, 368 stacks. More than dhat's end because memleak
+        // also counts mmap'd regions (the pair's `gap`): the first two stacks
+        // are 3064432 bytes each.
+        let v = memleak_outstanding(&capture("memleak.txt"), "").unwrap();
+        assert_eq!(get(&v, "bytes"), 7726413.0);
+        assert_eq!(get(&v, "allocations"), 564.0);
+    }
 }

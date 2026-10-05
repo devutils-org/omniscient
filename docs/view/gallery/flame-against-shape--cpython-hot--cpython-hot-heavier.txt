@@ -1,7 +1,7 @@
 omn top │ fixture cpython-hot │ 3.99s                             view: snapshot │ collectors ≥9.54% │ target 93.1% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs' difference ────────────────────────────
-on cpu: 3.96k → 7.89k (x1.99, scaled to one) · shapes: the difference is `libpython3.14+0x1f9993` -22 own (x0.42, 3.2σ);
+on cpu: 3.96k → 7.89k (x1.99, scaled to one) · shapes: no function's own cost moved beyond 3σ of a sample count's noise
 ┌ on cpu cpu.profile 3.96k vs 7.89k 136 late ~low det degraded x8 ─────────────────────────────────────────────────────┐
 │width ∝ the mean of the two runs · heaviest left                                                       24 frames deep │
 │▏all › ⋯20⋯ › py::score:/omniscient/cases/cpython-interpreter/hot.py 3.94k                                            │
@@ -10,11 +10,11 @@ on cpu: 3.96k → 7.89k (x1.99, scaled to one) · shapes: the difference is `lib
 │                  ▏l  ▏l                     ▏l                                                                       │
 │                                                                                                                      │
 │moved on their own -- this run → the other                                                                            │
-│      +48  x1.18   2.3σ _Py_Dealloc                                                                                   │
-│      -23  x0.76   2.0σ libpython3.14+0x1f9997                                                                        │
-│      -22  x0.42   3.2σ libpython3.14+0x1f9993                                                                        │
-│      -16  x0.91   1.0σ PyNumber_Remainder                                                                            │
-│      -14  x0.18   3.3σ libpython3.14+0x1f998c                                                                        │
+│      +19  x1.00   0.2σ py::score:/omniscient/cases/cpython-interpreter/hot.py                                        │
+│       -8  x0.39   2.0σ py::load:/omniscient/cases/cpython-interpreter/hot.py                                         │
+│       -3  x0.50   1.2σ py::rank:/omniscient/cases/cpython-interpreter/hot.py                                         │
+│       -1  x0.25   1.0σ perf_swevent_event                                                                            │
+│       -1  x0.00   1.0σ PyObject_GC_Del                                                                               │
 │                                                                                                                      │
 │‼ pmu:sw: time-based sampling: blind to phases running at reduced frequency                                           │
 │‼ 534 of 1046 samples landed in a function that sets up no frame pointer (360 in ld-linux-x86-64.so.2, 170 in         │
@@ -35,6 +35,6 @@ on cpu: 3.96k → 7.89k (x1.99, scaled to one) · shapes: the difference is `lib
 │degraded x2                                                                                                           │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 on cpu ▸ py::score:/omniscient/cases/cpython-interpreter/hot.py  the last of 22 frames called in one chain from all
-this run 3.93k → the other 3.95k samples (+19, x1.00, 0.2σ: within the noise)
+this run 3.93k → the other 3.95k samples (+19, x1.00, 0.2σ: within the noise) · own 3.93k → 3.95k
 cpu.profile (+1 more, ! lists them): the other run: 1102 of 2193 samples landed in a function that sets up no frame poi…
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓hl move  ⏎⌫ zoom  /* find  om pane  t split  d shape  ! caveats

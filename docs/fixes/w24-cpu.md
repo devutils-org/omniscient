@@ -129,8 +129,8 @@ All on this machine, under the wave's load.
   (`a_mode_the_build_does_not_implement_exits_as_unimplemented` now asks
   `mem.cache_l1 -m sample`, the one counting source left without a sampler).
 - `cargo test --test reference` -- `pairs_sysstat` for the five pairs above,
-  held; `poll_leading_event_is_held_as_a_known_defect` **fails, as intended**
-  (filed below).
+  held. (Before the fix round, `poll_leading_event_is_held_as_a_known_defect`
+  failed as its own signal that the defect was fixed; see "Review".)
 - `cargo test --test cli the_catalog_document_s_cost_column` -- passed.
 - `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt
   --check` -- clean. No `make check`, no `cargo test --workspace`.
@@ -209,15 +209,9 @@ $ sudo -n perf record -q -e branch-misses -F 997 -o perf2.data -- target/referen
 
 ### To reference (`tests/reference/sysstat.rs`)
 
-- **Drop `poll_leading_event_is_held_as_a_known_defect`** and `raw_means`'
-  skip of the leading event: the defect is fixed and the hold test now fails
-  with its own "defect 2 looks fixed" message (it reports `cpu.util` only,
-  because its loop stops at the first failure; `cpu.pressure` is fixed too:
-  0 of 40). Until then that test is red on any build of this branch.
-- `omn_psi`'s `("some", "some")` mapping can go: `cpu.pressure` now says
-  `stall_ratio` and `full_stall_ratio` like its siblings (the pair holds
-  either way). The committed capture `omn-cpu-pressure-raw.json` is the old
-  naming and only feeds the parser's own test.
+- Done in this stream's fix round (see "Review"). Still open: the
+  `summary.mean` pair for `cpu.util` against `mpstat` that
+  `docs/open-findings.md` asks for once the leading event is fixed.
 
 ### To emit
 
@@ -234,3 +228,32 @@ $ sudo -n perf record -q -e branch-misses -F 997 -o perf2.data -- target/referen
 - `man/omn.1` and `STATE.md`: sysstat 2 and 3, perfstat 1 and 4, top 7 (the
   `fields` half), perfrecord 1, 2 and 8 done; perfrecord 3-4 with emit;
   perfrecord 7 open.
+
+## Review
+
+The reviewer was right: the branch fixed defect 2 but left
+`poll_leading_event_is_held_as_a_known_defect` red and `raw_means` skipping a
+real first event, so the coordinator's full suite would have gone red. Fixed
+here rather than waiting for the reference stream, in
+`tests/reference/sysstat.rs` only (outside the owned set, a test file, not a
+shared layer):
+
+- `raw_means` no longer skips a leading event; every raw event is a full
+  period and counts.
+- The hold test is turned around as `poll_has_no_leading_event`: ten short
+  runs (`poll@50ms`, `-d 175ms`) each of `cpu.util`, `cpu.pressure`,
+  `mem.pressure` and `io.pressure`, and no event may be stamped within half a
+  period of the window's opening.
+- `omn-cpu-util-raw.json` and `omn-cpu-pressure-raw.json` recaptured with
+  this branch's binary (`-m poll@1s -e raw -d 3s`): three events each, the
+  first a second after the window opened, `cpu.pressure` under the new names.
+  `omn_cpu_util_leaves_out_the_few_ms_leading_event` is now
+  `omn_cpu_util_means_every_raw_event`; `omn_psi_reads_both_namings` is
+  `omn_psi_maps_the_pressure_names`, and `omn_psi`'s `("some", "some")`
+  mapping, which nothing emits any more, is gone.
+
+Tests: `cargo test --test reference sysstat` -- 17 passed (the parsers,
+`poll_has_no_leading_event`, `pairs_sysstat`); `cargo clippy --workspace
+--all-targets -- -D warnings` and `cargo fmt --check` clean.
+`docs/open-findings.md` still names the old test in two historical entries;
+the coordinator's to close.

@@ -1,0 +1,22 @@
+/usr/share/bpftrace/tools/runqlen.bt:51:10-18: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+  $len = (uint64)$my_q.nr_queued;
+         ~~~~~~~~
+/usr/share/bpftrace/tools/runqlen.bt:49:11-32: WARNING: Unnecessary cast: expression is already of type struct task_struct *
+  $task = (struct task_struct*)curtask;
+          ~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/runqlen.bt:50:11-27: WARNING: Unnecessary cast: expression is already of type struct cfs_rq *
+  $my_q = (struct cfs_rq*)$task.se.cfs_rq;
+          ~~~~~~~~~~~~~~~~
+Sampling run queue length at 99 Hertz... Hit Ctrl-C to end.
+
+
+@runqlen:
+[0]                  187 |@@@@@@@                                             |
+[1]                  189 |@@@@@@@                                             |
+[2]                 1241 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[3]                  987 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@           |
+[4]                  181 |@@@@@@@                                             |
+[5]                   17 |                                                    |
+[6]                    7 |                                                    |
+[7]                    3 |                                                    |
+

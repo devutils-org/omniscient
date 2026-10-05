@@ -1,0 +1,198 @@
+{
+  "results": [
+    {
+      "label": "cpu.util",
+      "source": "cpu.util",
+      "unit": "ratio",
+      "backend": "fs:proc",
+      "outputs": [
+        {
+          "emit": "raw",
+          "events": [
+            {
+              "ts_ns": 819200213647,
+              "kind": "cpu.util",
+              "attrs": [
+                {
+                  "name": "busy",
+                  "value": 1.0
+                },
+                {
+                  "name": "user",
+                  "value": 0.5
+                },
+                {
+                  "name": "nice",
+                  "value": 0.0
+                },
+                {
+                  "name": "system",
+                  "value": 0.5
+                },
+                {
+                  "name": "idle",
+                  "value": 0.0
+                },
+                {
+                  "name": "iowait",
+                  "value": 0.0
+                },
+                {
+                  "name": "irq",
+                  "value": 0.0
+                },
+                {
+                  "name": "softirq",
+                  "value": 0.0
+                },
+                {
+                  "name": "steal",
+                  "value": 0.0
+                },
+                {
+                  "name": "window",
+                  "value": "since the previous read"
+                }
+              ],
+              "collector_id": "cpu.util/fs:proc",
+              "seq": 0
+            },
+            {
+              "ts_ns": 820200376584,
+              "kind": "cpu.util",
+              "attrs": [
+                {
+                  "name": "busy",
+                  "value": 0.846089850249584
+                },
+                {
+                  "name": "user",
+                  "value": 0.7383527454242929
+                },
+                {
+                  "name": "nice",
+                  "value": 0.0
+                },
+                {
+                  "name": "system",
+                  "value": 0.09525790349417637
+                },
+                {
+                  "name": "idle",
+                  "value": 0.13519134775374375
+                },
+                {
+                  "name": "iowait",
+                  "value": 0.018718801996672214
+                },
+                {
+                  "name": "irq",
+                  "value": 0.011231281198003328
+                },
+                {
+                  "name": "softirq",
+                  "value": 0.0012479201331114808
+                },
+                {
+                  "name": "steal",
+                  "value": 0.0
+                },
+                {
+                  "name": "window",
+                  "value": "since the previous read"
+                }
+              ],
+              "collector_id": "cpu.util/fs:proc",
+              "seq": 1
+            },
+            {
+              "ts_ns": 821199772902,
+              "kind": "cpu.util",
+              "attrs": [
+                {
+                  "name": "busy",
+                  "value": 0.8138275718450646
+                },
+                {
+                  "name": "user",
+                  "value": 0.7305289462723865
+                },
+                {
+                  "name": "nice",
+                  "value": 0.0
+                },
+                {
+                  "name": "system",
+                  "value": 0.07163681799250313
+                },
+                {
+                  "name": "idle",
+                  "value": 0.15160349854227406
+                },
+                {
+                  "name": "iowait",
+                  "value": 0.03456892961266139
+                },
+                {
+                  "name": "irq",
+                  "value": 0.010828821324448146
+                },
+                {
+                  "name": "softirq",
+                  "value": 0.0008329862557267805
+                },
+                {
+                  "name": "steal",
+                  "value": 0.0
+                },
+                {
+                  "name": "window",
+                  "value": "since the previous read"
+                }
+              ],
+              "collector_id": "cpu.util/fs:proc",
+              "seq": 2
+            }
+          ]
+        }
+      ],
+      "events_seen": 3,
+      "observed_ns": 1999847608,
+      "window": {
+        "run_opened_ns": 818199346290,
+        "opened_ns": 819199946144,
+        "closed_ns": 821199793752,
+        "attached": true,
+        "attach_ns": 323833
+      },
+      "stopped_because": "its window closed: detached 3.000 s into the run, as asked",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "degradations": [
+        "watched only from 1.000 s into the run, as its window asked: attaching it took 323.8us while the target ran, and its numbers cover its window alone"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 1587000,
+        "attributed_cpu_ns": 1587000,
+        "observed_cpu_ns": 39900000000,
+        "observed_from": "everything but idle on every cpu (/proc/stat)",
+        "wall_ns": 2000187411,
+        "measurement_ns": 299360,
+        "measurements": 2,
+        "in_target_cpu_ns": 0,
+        "in_target_from": "nothing of this collector runs in the target's context: it reads the kernel's account, or a file, from its own",
+        "before_window_cpu_ns": 65134000,
+        "after_window_cpu_ns": 273000
+      },
+      "served_by": [
+        "fs:proc"
+      ],
+      "value_attr": "busy"
+    }
+  ]
+}

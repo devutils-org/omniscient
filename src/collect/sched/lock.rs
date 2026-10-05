@@ -193,8 +193,10 @@ impl LockCollector {
             // The predicate runs before the stack is symbolized: resolving the
             // frames of a row about to be thrown away costs a read of a
             // process's mappings for nothing.
+            // `kind` is the lock's, which `topk:N@kind` ranks by, as
+            // `perf lock contention` groups by type; see `super::matches_as`.
             if let Some(predicate) = &self.predicate {
-                if !crate::filter::matches(predicate, &event) {
+                if !super::matches_as(predicate, &event, &row.kind()) {
                     self.filtered_out += row.count;
                     continue;
                 }

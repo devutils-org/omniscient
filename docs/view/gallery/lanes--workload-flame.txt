@@ -4,12 +4,24 @@ omn top │ fixture workload-flame │ 2.05s                          view: snap
 │sched.switches 50 22 late ~low det degraded  sched.wakeup 29 22 late ~low det degraded  sched.offcpu 23 ~low det      │
 │degraded  gpu.kernel 0 3 late degraded                                                                                │
 │24.7ms a cell          ╷0ns                ╷500ms              ╷1.00s              ╷1.50s                  of the span│
-│flame-main     2620696│█▁                                       ▁                                        ▁│awake 1.18%│
-│              off cpu │▁█████████████████████████████████████████████████████████████████████████████████▄│ blkd 98.1%│
-│hot            2620697│▁██████████████████████████████                                                    │awake 36.1%│
-│              off cpu │ ▁                                                                                 │ blkd 0.00%│
-│warm           2620698│                                         ▁█▄ ▂█▄ ▁█▅ ▁█▅  █▆  █▆  ▇▇  ▇▇  ▆█  ▆█   │awake 19.5%│
-│              off cpu │                                         ▂ ▅█▇ ▅██ ▄██ ▄██▁▃██▁▃██▂▂██▂▂██▃▁██▃▁██▄│ blkd 29.5%│
+│flame-main     2620696│█                                                                                  │awake 1.18%│
+│                      │█                                                                                  │           │
+│                      │█▁                                       ▁                                        ▁│           │
+│              off cpu │ █████████████████████████████████████████████████████████████████████████████████ │ blkd 98.1%│
+│                      │ █████████████████████████████████████████████████████████████████████████████████▃│           │
+│                      │▁██████████████████████████████████████████████████████████████████████████████████│           │
+│hot            2620697│ █████████████████████████████▇                                                    │awake 36.1%│
+│                      │ ██████████████████████████████                                                    │           │
+│                      │▁██████████████████████████████                                                    │           │
+│              off cpu │                                                                                   │ blkd 0.00%│
+│                      │                                                                                   │           │
+│                      │ ▁                                                                                 │           │
+│warm           2620698│                                          █   █   █   █   █   ▆▂  ▅▄  ▃▅  ▂▇   █   │awake 19.5%│
+│                      │                                          █▂  █▄  █▅  █▇  ██  ██  ██  ██  ██  ██   │           │
+│                      │                                         ▂██ ▄██ ▃██ ▁██  ██  ██  ██  ██  ██  ██   │           │
+│              off cpu │                                            █▅  █▆  ██  ██  ██  ██  ██  ██  ██  ██ │ blkd 29.5%│
+│                      │                                           ▇██ ▅██ ▄██ ▂██ ▁██  ██  ██  ██  ██▁ ██▂│           │
+│                      │                                         ▄ ███ ███ ███ ███▁███▃▇██▄▅██▆▄██▇▂███▁███│           │
 │────────────────────────────────────────────▲ 530ms───────────────────────────────────────────────────────────────────│
 │flame-main 2620696 (pid 2620696) at 530ms: blocked, sleeping 1.00s, 28.9ms → 1.03s, left cpu 12                       │
 │  woken by hot 2620697, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone            │
@@ -21,18 +33,6 @@ omn top │ fixture workload-flame │ 2.05s                          view: snap
 │     999ms 49.7% sleeping      1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …                    │
 │    5.07ms 0.25% sleeping      2 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …             │
 │    5.06ms 0.25% sleeping      1 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …             │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │▆ awake: on a cpu or queued  ─ blocked  ━ uninterruptible  ▆ kernel  ▆ copy  height: share of the cell                │

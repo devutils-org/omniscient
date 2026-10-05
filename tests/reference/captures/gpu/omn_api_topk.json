@@ -13,27 +13,27 @@
             {
               "key": "api=cuMemcpyDtoH",
               "events": 1,
-              "total": 1524678.0
+              "total": 1804804.0
             },
             {
               "key": "api=cuMemcpyHtoD",
               "events": 1,
-              "total": 1520311.0
+              "total": 1597692.0
             },
             {
               "key": "api=cuCtxSynchronize",
               "events": 1,
-              "total": 355120.0
+              "total": 354743.0
             },
             {
               "key": "api=cuMemAlloc",
               "events": 3,
-              "total": 265002.0
+              "total": 312013.0
             },
             {
               "key": "api=cuLaunchKernel",
               "events": 5,
-              "total": 31877.0
+              "total": 33721.0
             }
           ],
           "rest": {
@@ -44,6 +44,14 @@
         }
       ],
       "events_seen": 11,
+      "observed_ns": 504753368,
+      "window": {
+        "run_opened_ns": 1001480150786,
+        "opened_ns": 1001480150786,
+        "closed_ns": 1001984904154,
+        "attached": true
+      },
+      "stopped_because": "the launched program exited with exit status 0",
       "losses": {
         "dropped": 0,
         "failed_reads": 0,
@@ -51,10 +59,30 @@
         "undecoded": 0,
         "throttled": 0
       },
+      "lifetime": {
+        "released_ns": 1001480054916,
+        "exited_ns": 1001984884004,
+        "exited_err_ns": 4391774,
+        "cpu_ns": 461307000
+      },
+      "overhead": {
+        "collector_cpu_ns": 5300000,
+        "attributed_cpu_ns": 5300000,
+        "observed_cpu_ns": 461086610,
+        "observed_from": "the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 82521 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)",
+        "wall_ns": 505039780,
+        "measurement_ns": 69620,
+        "measurements": 2,
+        "in_target_cpu_ns": 77452,
+        "in_target_runs": 17,
+        "in_target_from": "the preload shim's own clock around one hooked call in 17 of the GPU API calls it reported, from the hook's entry to its return less the real function it wraps, scaled to every call (published in the shared ring's header). What is not in it: the jump into the hook and back, and what the ring's writes do to the program's caches, so this is a lower bound; a clock read cost 32 ns when the shim was loaded, and a timed call pays four. A timed call whose own span came to over 200 us had its thread preempted in it: that span is the scheduler's, so the call is priced at the mean of the others and counted apart (`in_target_left_out`). Shared by every preload source of this class on the launch",
+        "before_window_cpu_ns": 74490000,
+        "after_window_cpu_ns": 132000
+      },
       "served_by": [
         "preload"
       ],
-      "value_attr": "duration_ns"
+      "value_attr": "latency_ns"
     }
   ]
 }

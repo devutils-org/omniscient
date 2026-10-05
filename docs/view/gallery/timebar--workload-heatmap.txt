@@ -8,7 +8,9 @@ omn top │ fixture workload-heatmap │ 1.97s                        view: snap
 │   83 % of it from one stack, leaf first: __recv <- _socket.cpython-314-x86_64-linux-gnu.so+0x10170 <- _socket.cpyth… │
 │   decisive: ahead of the next state (43.3ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
 │                                                                                                                      │
+│                       │█░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ ┤                               │
 │ ▸ 2621525 heatmap-main├█░░░░░░░░░░░░░░░░░░░░░░░ sleep 96.8% ░░░░░░░░░░░░░░░░░░░░░░░░ ┤    1.97s  ▶ sleep 96.8%       │
+│                       │█░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░           ┤                               │
 │   2621526 heatmap-peer├█░░░░░░░░░░░░░░░░░░ sleep 80.4% ░░░░░░░░░░░░░░░░░░░           ┤    1.97s  ▶ sleep 80.4%       │
 │                      0 ───────────────────────────┼ 986ms ───────────────────────────┤ 1.97s                         │
 │                        █ on cpu   ▚ run queue   ▓ I/O   ▙ child   ░ sleep                                            │
@@ -31,8 +33,6 @@ omn top │ fixture workload-heatmap │ 1.97s                        view: snap
 │   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │
 │ Trust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it  │
 │   gives up (2).                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

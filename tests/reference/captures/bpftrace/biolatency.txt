@@ -1,0 +1,73 @@
+/usr/share/bpftrace/tools/biolatency.bt:25:18-53: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+  @usecs = hist((nsecs - @start[args.sector]) / 1000);
+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:23:1-22: WARNING: expanded from
+/@start[args.sector]/
+~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:25:18-53: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+  @usecs = hist((nsecs - @start[args.sector]) / 1000);
+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:23:1-22: WARNING: expanded from
+/@start[args.sector]/
+~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:25:18-53: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+  @usecs = hist((nsecs - @start[args.sector]) / 1000);
+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:23:1-22: WARNING: expanded from
+/@start[args.sector]/
+~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:25:18-53: WARNING: signed operands for '/' can lead to undefined behavior (cast to unsigned to silence warning)
+  @usecs = hist((nsecs - @start[args.sector]) / 1000);
+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:23:1-22: WARNING: expanded from
+/@start[args.sector]/
+~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:25:18-23: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+  @usecs = hist((nsecs - @start[args.sector]) / 1000);
+                 ~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:23:1-22: WARNING: expanded from
+/@start[args.sector]/
+~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:25:26-45: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+  @usecs = hist((nsecs - @start[args.sector]) / 1000);
+                         ~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:23:1-22: WARNING: expanded from
+/@start[args.sector]/
+~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:25:18-23: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+  @usecs = hist((nsecs - @start[args.sector]) / 1000);
+                 ~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:23:1-22: WARNING: expanded from
+/@start[args.sector]/
+~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:25:26-45: WARNING: Expression of type: uint64 being cast to type: int64. This may cause unexpected results. Use an explicit cast to suppress this warning.
+  @usecs = hist((nsecs - @start[args.sector]) / 1000);
+                         ~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:23:1-22: WARNING: expanded from
+/@start[args.sector]/
+~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:26:3-30: WARNING: Return value discarded.
+  delete(@start, args.sector);
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:23:1-22: WARNING: expanded from
+/@start[args.sector]/
+~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:26:3-30: WARNING: Return value discarded.
+  delete(@start, args.sector);
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/biolatency.bt:23:1-22: WARNING: expanded from
+/@start[args.sector]/
+~~~~~~~~~~~~~~~~~~~~~
+Tracing block device I/O... Hit Ctrl-C to end.
+
+
+@usecs:
+[4, 8)                22 |@@                                                  |
+[8, 16)              415 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[16, 32)               7 |                                                    |
+[32, 64)              27 |@@@                                                 |
+[64, 128)             28 |@@@                                                 |
+[128, 256)             8 |@                                                   |
+[256, 512)             1 |                                                    |
+[512, 1K)              1 |                                                    |
+

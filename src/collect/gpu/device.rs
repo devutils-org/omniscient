@@ -21,7 +21,7 @@
 use std::time::Duration as StdDuration;
 
 use crate::clock::monotonic_ns;
-use crate::collect::{Collector, Prepared, SampleError};
+use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, AttrValue, CollectorId, Event, KeyValue};
 use crate::request::{Mode, Target};
 
@@ -286,6 +286,10 @@ pub struct NvmlCollector {
     /// Per device, the throttle counters at the previous reading (or at the
     /// start, before the first): what `gpu.throttle`'s shares are taken over.
     throttle_base: Vec<ThrottleRead>,
+    /// What the closing read of a `count` window lost. The run counts a
+    /// failed `sample` itself, but `stop` returns events only, so a closing
+    /// read that fails is counted here -- see [`closing_read`].
+    losses: Losses,
 }
 
 /// **NVML makes a read wait while a CUDA context is created or destroyed on
@@ -546,6 +550,7 @@ impl NvmlCollector {
             counter_check: CounterCheck::default(),
             held: HeldReads::default(),
             throttle_base: Vec::new(),
+            losses: Losses::default(),
         })
     }
 
@@ -789,6 +794,33 @@ impl NvmlCollector {
     }
 }
 
+/// The events of a `count` window's closing read, with what it lost counted.
+///
+/// For `gpu.power` and `gpu.throttle` that read is the window's only one, so a
+/// closing read that fails would otherwise end the window with no event and
+/// nothing to say why: a silent loss. A transient failure is a failed read,
+/// as the run counts one from `sample`. A gone target is too, with one
+/// exception: `gpu.mem` of a process that has exited, where the window's
+/// earlier readings are the series and the exit is how it was meant to end.
+fn closing_read(
+    read: Result<Vec<Event>, SampleError>,
+    metric: Metric,
+    process_scoped: bool,
+    losses: &mut Losses,
+) -> Vec<Event> {
+    match read {
+        Ok(events) => events,
+        Err(SampleError::TargetGone(_)) if metric == Metric::Mem && process_scoped => Vec::new(),
+        Err(SampleError::Transient(reason) | SampleError::TargetGone(reason)) => {
+            losses.failed_reads += 1;
+            losses.note(format!(
+                "the closing read of the counted window failed: {reason}"
+            ));
+            Vec::new()
+        }
+    }
+}
+
 impl Collector for NvmlCollector {
     fn id(&self) -> &CollectorId {
         &self.id
@@ -1012,7 +1044,12 @@ impl Collector for NvmlCollector {
             return Vec::new();
         }
         self.last_read_ns = None;
-        self.sample(CLOSING).unwrap_or_default()
+        let read = self.sample(CLOSING);
+        closing_read(read, self.metric, self.pid.is_some(), &mut self.losses)
+    }
+
+    fn losses(&self) -> Losses {
+        self.losses.clone()
     }
 
     /// What this collector had to give up, in the one place every emit and
@@ -1156,6 +1193,56 @@ mod tests {
 
     // One lock for the whole test binary: see `energy_counter_lock` and `CounterCheck`.
     use crate::collect::gpu::energy_counter_lock as energy_lock;
+
+    /// A counted window's closing read that fails is a failed read with its
+    /// reason, not an empty window that looks complete; a process that exited
+    /// before the closing read of its `gpu.mem` window is how that window ends.
+    #[test]
+    fn a_closing_read_that_fails_is_counted() {
+        let mut losses = Losses::default();
+        let events = closing_read(
+            Err(SampleError::Transient(
+                "gpu.throttle on board: no time between reads".into(),
+            )),
+            Metric::Throttle,
+            false,
+            &mut losses,
+        );
+        assert!(events.is_empty());
+        assert_eq!(losses.failed_reads, 1, "{losses:?}");
+        assert!(
+            losses
+                .reasons
+                .keys()
+                .any(|reason| reason.contains("closing read")
+                    && reason.contains("no time between reads")),
+            "{losses:?}"
+        );
+
+        closing_read(
+            Err(SampleError::TargetGone(
+                "board is no longer reachable".into(),
+            )),
+            Metric::Power,
+            false,
+            &mut losses,
+        );
+        assert_eq!(losses.failed_reads, 2, "{losses:?}");
+
+        let mut clean = Losses::default();
+        closing_read(
+            Err(SampleError::TargetGone("process 42 exited".into())),
+            Metric::Mem,
+            true,
+            &mut clean,
+        );
+        assert!(clean.is_clean(), "{clean:?}");
+        assert_eq!(
+            closing_read(Ok(Vec::new()), Metric::Throttle, false, &mut clean).len(),
+            0
+        );
+        assert!(clean.is_clean(), "{clean:?}");
+    }
 
     /// A read the driver held is counted and said, with the worst; a run of
     /// prompt reads says nothing.

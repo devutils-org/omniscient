@@ -30,7 +30,7 @@ omn top │ fixture many-requests │ 15.8s                           view: snap
 │  █ on cpu       39.0µs   24.5% █                                              off cpu 0 times, preempted 0           │
 │  ▓ run queue         ·                                             disk       no block request issued                │
 │  ▀ lock/sleep        ·                                             network    in 120µs · out 0ns                     │
-│  ▄ disk              ·                                                                                               │
+│  ▄ disk              ·                                                        51B read · 59B queued                  │
 │  ░ net out           ·                                                                                               │
 │  no decomposition in this run: the evidence is not graded                                                            │
 │                                                                                                                      │

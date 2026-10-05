@@ -38,7 +38,7 @@ use std::time::Duration as StdDuration;
 use crate::bpf::{BlockEvent, BlockProgram, Stage, Submitter};
 use crate::clock::monotonic_ns;
 use crate::collect::{not_built, Collector, Losses, Prepared, SampleError};
-use crate::event::{Attr, CollectorId, Event, KeyValue};
+use crate::event::{Attr, CollectorId, Direction, Event, KeyValue};
 use crate::filter::FilterExpr;
 use crate::request::{Mode, Target};
 
@@ -517,6 +517,9 @@ impl BlockCollector {
             .chain((record.req != 0).then(|| KeyValue::Req {
                 id: crate::bpf::request_key(record.req),
             }))
+            // The operation, from the low byte of the flags `rwbs` is built
+            // from: what `--keys dir` splits on, with no filter.
+            .chain(direction(record.cmd_flags).map(KeyValue::dir))
             .collect(),
             attrs,
             collector_id: self.id.clone(),
@@ -554,6 +557,16 @@ impl BlockCollector {
             );
             self.skipped = skipped;
         }
+        let unfollowed = program.unfollowed();
+        if unfollowed > 0 {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so {} requests are in no event",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "its" } else { "their" },
+            ));
+        }
         self.unpaired = program.unpaired();
     }
 }
@@ -563,6 +576,21 @@ fn value_of(measure: Measure, record: &BlockEvent) -> u64 {
     match measure {
         Measure::Latency | Measure::Queue => record.delta_ns,
         Measure::Size => u64::from(record.bytes),
+    }
+}
+
+/// The direction of a request's operation, or none for one that is neither a
+/// read, a write, a discard nor a flush (a driver-private or zone operation).
+/// The same low byte, and the same grouping, as [`rwbs`]'s first letter.
+fn direction(cmd_flags: u32) -> Option<Direction> {
+    match cmd_flags & 0xff {
+        0 => Some(Direction::Read),
+        // REQ_OP_WRITE and REQ_OP_WRITE_ZEROES.
+        1 | 9 => Some(Direction::Write),
+        // REQ_OP_DISCARD and REQ_OP_SECURE_ERASE.
+        3 | 5 => Some(Direction::Discard),
+        2 => Some(Direction::Flush),
+        _ => None,
     }
 }
 
@@ -756,8 +784,8 @@ impl Collector for BlockCollector {
         // number somebody will otherwise try to explain.
         if self.submitter != Submitter::Any {
             notes.push(
-                "a process target sees the requests submitted in its own context, which is \
-                 reads; a write leaves through writeback in a kworker minutes later and carries \
+                "a process target sees the requests submitted in its own context or in that of \
+                 a process it started, which is reads; a write leaves through writeback in a kworker minutes later and carries \
                  no submitter at all, so it is absent here rather than counted as zero"
                     .to_owned(),
             );
@@ -895,6 +923,29 @@ mod tests {
 
     fn collector(measure: Measure) -> BlockCollector {
         BlockCollector::new(measure, Mode::Trace, Submitter::Any, None)
+    }
+
+    /// `dir` and `rwbs` read the same low byte and must agree: a request
+    /// keyed `dir:read` whose letters say `W` is a split nobody could trust.
+    #[test]
+    fn the_direction_key_agrees_with_the_kernels_letters() {
+        for op in 0u32..=255 {
+            let letters = rwbs(op | (1 << 11));
+            let expected = match letters.chars().next() {
+                Some('R') => Some(Direction::Read),
+                Some('W') => Some(Direction::Write),
+                Some('D') => Some(Direction::Discard),
+                Some('F') => Some(Direction::Flush),
+                _ => None,
+            };
+            assert_eq!(direction(op), expected, "op {op}: `{letters}`");
+        }
+        let event = collector(Measure::Latency).event(&record(), 0);
+        assert!(
+            event.keys.contains(&KeyValue::dir(Direction::Write)),
+            "{:?}",
+            event.keys
+        );
     }
 
     /// Every filter field the catalog offers must be on the events, or a

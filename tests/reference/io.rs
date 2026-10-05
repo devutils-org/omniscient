@@ -47,6 +47,10 @@ pub fn parsers() -> Vec<Parser> {
             name: "omn_summary_as_iostat",
             parse: omn_summary_as_iostat,
         },
+        Parser {
+            name: "omn_hist_as_fio",
+            parse: omn_hist_as_fio,
+        },
     ]
 }
 
@@ -180,10 +184,8 @@ fn iostat_json(stdout: &str, stderr: &str) -> Result<Values, String> {
 /// delays a periodic emit and removes nothing from a summary of events.
 const RECORD_LOSSES: [&str; 4] = ["dropped", "failed_reads", "undecoded", "throttled"];
 
-/// The requests and their mean over every series of every `summary` emit
-/// in `omn`'s results: `(count, mean weighted by count)`.
-fn omn_summary(stdout: &str, stderr: &str) -> Result<(f64, f64), String> {
-    let doc = json_document(stdout, stderr)?;
+/// `omn`'s results, refused when their `losses` removed records.
+fn lossless_results(doc: &Value) -> Result<&Vec<Value>, String> {
     let results = doc
         .get("results")
         .and_then(Value::as_array)
@@ -204,6 +206,14 @@ fn omn_summary(stdout: &str, stderr: &str) -> Result<(f64, f64), String> {
             lost.join(", ")
         ));
     }
+    Ok(results)
+}
+
+/// The requests and their mean over every series of every `summary` emit
+/// in `omn`'s results: `(count, mean weighted by count)`.
+fn omn_summary(stdout: &str, stderr: &str) -> Result<(f64, f64), String> {
+    let doc = json_document(stdout, stderr)?;
+    let results = lossless_results(&doc)?;
     let mut series_seen = 0;
     let (mut count, mut weighted) = (0.0, 0.0);
     for output in results
@@ -245,6 +255,64 @@ fn omn_summary_as_iostat(stdout: &str, stderr: &str) -> Result<Values, String> {
     Ok(vec![
         ("all.r_ios".to_string(), count),
         ("all.r_await_ns".to_string(), mean),
+    ])
+}
+
+/// `omn`'s `hist` emits (log2), every series merged bucket by bucket: the
+/// median as the low edge of the bucket that holds it, keyed
+/// `read.clat_p50_ns` as fio's, for a pair held to `log2_buckets`. The
+/// requests are the reads of the launched process, as in
+/// `omn_summary_as_fio`.
+fn omn_hist_as_fio(stdout: &str, stderr: &str) -> Result<Values, String> {
+    let doc = json_document(stdout, stderr)?;
+    let results = lossless_results(&doc)?;
+    let mut buckets: std::collections::BTreeMap<u64, f64> = Default::default();
+    for output in results
+        .iter()
+        .filter_map(|r| r.get("outputs").and_then(Value::as_array))
+        .flatten()
+        .filter(|o| o.get("emit").and_then(Value::as_str) == Some("hist"))
+    {
+        if output.get("layout").and_then(Value::as_str) != Some("log2") {
+            return Err("omn's hist is not log2: its buckets are not fio's to compare".into());
+        }
+        for s in output
+            .get("series")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            for b in s
+                .get("buckets")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let low = b
+                    .get("low")
+                    .and_then(Value::as_u64)
+                    .ok_or("a bucket without an integer `low`")?;
+                *buckets.entry(low).or_default() +=
+                    number(b.get("count").unwrap_or(&Value::Null), "bucket.count")?;
+            }
+        }
+    }
+    let total: f64 = buckets.values().sum();
+    if total <= 0.0 {
+        return Err("omn's results have no hist with a request in it".into());
+    }
+    let mut seen = 0.0;
+    let p50 = buckets
+        .iter()
+        .find(|(_, n)| {
+            seen += **n;
+            seen >= total / 2.0
+        })
+        .map(|(low, _)| *low as f64)
+        .expect("a non-empty histogram has a median bucket");
+    Ok(vec![
+        ("read.total_ios".to_string(), total),
+        ("read.clat_p50_ns".to_string(), p50),
     ])
 }
 
@@ -355,6 +423,18 @@ mod tests {
             get(&omn_summary_as_iostat(&late, "").unwrap(), "all.r_ios"),
             23375.0
         );
+    }
+
+    #[test]
+    fn omn_hist_reads_the_median_bucket_of_a_real_run() {
+        // `omn trace io.latency -m trace -e hist --format json -o DIR -- fio
+        // --output-format=json randread.fio` (2026-10-05, under the wave's
+        // load): 19212 requests, 19073 of them in [32768, 65536); fio's own
+        // clat p50 that run was 78336 ns, one log2 bucket above.
+        let v = omn_hist_as_fio(include_str!("captures/io/omn-io-latency-hist.json"), "").unwrap();
+        assert_eq!(get(&v, "read.total_ios"), 19212.0);
+        assert_eq!(get(&v, "read.clat_p50_ns"), 32768.0);
+        assert!(omn_hist_as_fio(OMN_LAUNCH, "").is_err());
     }
 
     #[test]

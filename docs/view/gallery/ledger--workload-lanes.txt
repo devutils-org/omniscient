@@ -2,7 +2,7 @@ omn top │ fixture workload-lanes │ 2.24s                          view: snap
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ ledger -- what task 2621955 and 11 more cost over 2.24s of wall-clock ───────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
-│▸ cpu time        1.76s on cpu     78.7% of one cpu          ██████████████▇▇▇▅▅▃▃▃▃▃    ≥20.4ms  ~low det            │
+│▸ cpu time        1.76s on cpu     78.7% of one cpu          ▆▆▆▆▆▆▆▆▆▆▆▆▆▆▅▅█▄▄▂▂▂▂▂    ≥20.4ms  ~low det            │
 │    2621957 lane-b      481ms  ███          27.2%                                                                     │
 │    2621956 lane-a      481ms  ███          27.2%                                                                     │
 │    2621958 lane-c      480ms  ███          27.2%                                                                     │
@@ -11,7 +11,7 @@ omn top │ fixture workload-lanes │ 2.24s                          view: snap
 │    user and system apart: on the raw events only, which this run did not keep                                        │
 │    own account         1.76s  with its descendants, as the scheduler counts them                                     │
 │    machine busy        2.65s  ████████     66.6%                                                                     │
-│  blocked time    9.24s            4.12 threads               ▁▂▂ ▂▂▂▂ ▂▂▂ ▂▇ ▂▂▃▃ ▃█    ≥34.9ms  ~low det degraded x2│
+│  blocked time    9.24s            4.12 threads               ▁▂▂▂▂▂▂▂▂▂▂▂▂ ▇▁▂▂▃▃▃▄█    ≥34.9ms  ~low det degraded x2│
 │    2621955 python3     2.08s  ███          22.5%                                                                     │
 │    2621958 lane-c      968ms  █            10.5%                                                                     │
 │    2621957 lane-b      887ms  █            9.60%                                                                     │
@@ -30,7 +30,7 @@ omn top │ fixture workload-lanes │ 2.24s                          view: snap
 │    2622151 lane-g…    31.9µs  ▏            1.65%                                                                     │
 │    and 3 more tasks: 50.5µs                                                                                          │
 │    bytes             1.17MiB  read, 411B written                                                                     │
-│  network         1.70KiB moved    1.70KiB out, 0B in                         ▃▂▅▆ ▆█    ≥32.9ms  ~low det degraded x3│
+│  network         1.70KiB moved    1.70KiB out, 0B in                        ▃▂▂▅▆▆█     ≥32.9ms  ~low det degraded x3│
 │    2622148 omn-cu…   1.44KiB  ██████████   84.8%                                                                     │
 │    2621955 python3      184B  █            10.6%                                                                     │
 │    2622145 lane-g…       80B  █            4.61%                                                                     │

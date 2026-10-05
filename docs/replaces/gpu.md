@@ -29,9 +29,9 @@ itself saw every pair skip on `` `/dev/nvidiactl` is not installed here ``:
 the machine had rebooted into a kernel the NVIDIA module was not built for
 (`docs/fixes/w23-gpu.md`); by the coordinator's run the driver was loaded.
 Held through the runner, the `omn_topk` and `omn_counters` parsers read real
-`omn` output; their unit tests still read four `omn_*.json` captures composed
-by hand in today's `omn` shape, to be recaptured (the commands are in the
-handoff's "Privileged runs wanted", step 2; no root is needed now). Each row
+`omn` output, and so do their unit tests: the four `omn_*.json` captures
+were recaptured from real runs on 2026-10-05 with the driver loaded
+(`docs/fixes/w24-reference.md`). Each row
 gives the runner's numbers first, then the twenty-second wave's, measured by
 the family's own harness (since deleted) on the same pairs.
 

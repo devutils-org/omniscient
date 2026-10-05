@@ -1,9 +1,10 @@
-omn top │ fixture sqlite-latency │ 288ms                          view: snapshot │ collectors ≥3.93% │ target 8.74% cpu
+omn top │ fixture sqlite-latency │ 334ms                          view: snapshot │ collectors ≥6.74% │ target 11.4% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
-┌ ledger -- what the target cost over 288ms of wall-clock ─────────────────────────────────────────────────────────────┐
+┌ ledger -- what sqlite3 (task 199588) cost over 334ms of wall-clock ──────────────────────────────────────────────────┐
 │  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST               │
 │▸ cpu time        not in this run: cpu.oncpu_time was not asked for                                                   │
-│  blocked time    0ns              0.00 threads              no block seen               ≥6.12ms  ~low det degraded   │
+│                                                                    █       █      ▆                                  │
+│  blocked time    255ms            0.76 threads                     █       █      █▃    ≥13.8ms  ~low det degraded   │
 │  memory held     not in this run: mem.rss was not asked for                                                          │
 │  memory faulted  not in this run: mem.faults was not asked for                                                       │
 │  I/O syscalls    not in this run: io.syscall was not asked for                                                       │
@@ -13,13 +14,12 @@ omn top │ fixture sqlite-latency │ 288ms                          view: snap
 │  GPU time        not in this run: gpu.kernel was not asked for                                                       │
 │  energy          not in this run: power.energy@system was not asked for                                              │
 │                                                                                                                      │
-│  to know all of this: ≥6.12ms of omn's cpu, ≥16.4% of what the target spent                                          │
+│  to know all of this: ≥13.8ms of omn's cpu, ≥23.8% of what the target spent                                          │
 │    a lower bound: some collectors' time inside the target is not timed here; each line's detail says which           │
 │ cpu time -- ↑/↓ another line ────────────────────────────────────────────────────────────────────────────────────────│
 │cpu.oncpu_time -- cpu time, per thread                                                                                │
 │This run did not ask for it. `omn top` live asks for every line of the sheet; a recording made by another session     │
 │holds what that session asked.                                                                                        │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

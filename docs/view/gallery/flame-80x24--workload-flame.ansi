@@ -1,0 +1,24 @@
+[0m[1momn top[0m │ fixture workload-flame │ 2.05s                         [0m[35mview: snapshot[0m [0m
+ 1 system [0m[1;7m 2 flame [0m 3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  [0m
+[0m[1;2m flame -- a flamegraph in the terminal: on-cpu and off-cpu stacks, and two runs'[0m
+[0m[1mon cpu: [0m[2m1.40k · [0mhottest own [0m[1mpy::burn:/omniscient/view/workloads/flame/../common.[0m
+[0m[32m┌[0m[1;32m on cpu [0m[2;32mcpu.profile 1.40k [0m[33m23 late[0m[32m [0m[36m~low[0m[32m┐[0m[2m┌[0m[1;2m off cpu [0m[2msched.offcpu 2.61s [0m[2;36m~low det[0m[2m [0m[2;33md[0m[2m┐[0m
+[0m[32m│width ∝ samples · hea…[0m[2m 42 frames deep [0m[32m│[0m[2m│[0m[32mwidth ∝ time off cpu …[0m[2m 30 frames deep │[0m
+[0m[32m│[0m[1;2;97;42m▏py::Thread._bootstrap_inner:/usr/lib…[0m[32m│[0m[2m│[0m[1;2;30;47m▏all 2.61s                            [0m[2m│[0m
+[0m[32m│[0m[2;30;101m▏+0x16af1c 69.8%           [0m[2;30;43m▏py::burn…[0m [0m[32m│[0m[2m│[0m[2;30;104m▏py::Thread.join:/usr/lib/py…[0m[2;30;46m▏+0xa08f2[0m[2m│[0m
+[0m[32m│[0m[2;30;101m▏py::burn:/omniscien…[0m[2;30;43m▏py::…[0m[2;30;103m [0m[2;30;101m [0m[2;30;43m [0m[2;30;101m▏_[0m[2;30;43m [0m[2;30;103m [0m[2;30;101m [0m[2;30;43m [0m[2;30;103m [0m [0m[32m│[0m[2m│[0m[2;30;46m▏+0xa08f2 38.4%[0m[2;30;106m▏⋯libc+0xa08f2[0m         [0m[2m│[0m
+[0m[32m│[0m[2;30;43m▏_P[0m[2;30;103m▏l[0m[2;30;101m▏P[0m[2;30;103m▏l[0m[2;30;101m▏_[0m[2;30;43m [0m[2;30;103m [0m[2;30;43m [0m[2;30;101m [0m[2;30;43m [0m[2;30;101m [0m[2;30;43m [0m[2;30;103m [0m[2;30;101m [0m[2;30;103m [0m[2;30;43m [0m[2;30;103m [0m[2;30;43m [0m[2;30;103m [0m[2;30;43m [0m[2;30;103m [0m [0m[2;30;101m [0m[2;30;43m [0m        [0m[32m│[0m[2m│[0m                                      [0m[2m│[0m
+[0m[32m│[0m[2;30;103m [0m[2;30;101m [0m [0m[2;30;43m [0m[2;30;103m [0m[2;30;43m [0m [0m[2;30;103m [0m[2;30;101m [0m                             [0m[32m│[0m[2m│[0m[1mheaviest on their own[0m[2m (where it ends,…│[0m
+[0m[32m│[0m                                      [0m[32m│[0m[2m│  100% [0m[36m████████████[0m[2m libc+0xa08f2[0m      [0m[2m│[0m
+[0m[32m│[0m[1mheaviest on their own[0m[2m (the innermost …[0m[32m│[0m[2m│[0m                                      [0m[2m│[0m
+[0m[32m│[0m[2m 98.0% [0m[33m████████████[0m[2m py::burn:/omnisci…[0m[32m│[0m[2m│[0m[33m‼ [0m[2mbpf:raw_tp: user stacks only: the[0m   [0m[2m│[0m
+[0m[32m│[0m[2m 0.21% [0m[33m▏           [0m[2m py::_compile_byte…[0m[32m│[0m[2m│[0m[33m  [0m[2mkernel side of a block is always the│[0m
+[0m[32m│[0m[2m 0.14% [0m[33m▏           [0m[2m py::FileLoader.ge…[0m[32m│[0m[2m│[0m[33m  [0m[2mscheduler, and what it was waiting[0m  [0m[2m│[0m
+[0m[32m│[0m[2m 0.14% [0m[33m▏           [0m[2m py::SourceLoader.…[0m[32m│[0m[2m│[0m[33m  [0m[2mfor is the task state[0m               [0m[2m│[0m
+[0m[32m│[0m                                      [0m[32m│[0m[2m│[0m[33m‼ 1 more; ! lists every caveat whole[0m  [0m[2m│[0m
+[0m[32m│[0m[33m‼ 5 more on the last line; ! lists ev…[0m[32m│[0m[2m│[0m                                      [0m[2m│[0m
+[0m[32m└──────────────────────────────────────┘[0m[2m└──────────────────────────────────────┘[0m
+[0m[1;32mon cpu ▸ [0m[1mpy::Thread._bootstrap_inner:/usr/lib/python3.14/threading.py[0m[2m  the last [0m
+[0m[2m1.37k samples ≈ 1.38s · 98.0% of all · own 0 · 1.37k events[0m                     [0m
+[0m[33mcpu.profile (+4 more, ! lists them): [0m[2mpmu:sw: time-based sampling: blind to phas…[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑↓hl[0m move  [0m[1m⏎⌫[0m zoom  [0m[1m/*[0m fi[0m

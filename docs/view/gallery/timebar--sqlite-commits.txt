@@ -8,6 +8,10 @@ omn top │ fixture sqlite-commits │ 5.11s                          view: snap
 │   most-sampled leaf `sqlite3+0x90183`: 241 of 4653 samples: the samples are spread, no one function dominates        │
 │   decisive: ahead of the next state (410ms) and of what no row read (0ns) -- omn latency's rule, on the view's read… │
 │                                                                                                                      │
+│                       │████████████████████████████████████████████████████████▓▓▓▓▓ ┤                               │
+│                       │████████████████████████████████████████████████████████▓▓▓▓▓ ┤                               │
+│                       │████████████████████████████████████████████████████████▓▓▓▓▓ ┤                               │
+│                       │████████████████████████████████████████████████████████▓▓▓▓▓ ┤                               │
 │ ▸ 2618623 sqlite3     ├█████████████████████ on cpu 90.8% █████████████████████▓▓▓▓▓ ┤    5.11s  ▶ on cpu 90.8%      │
 │                      0 ───────────────────────────┼ 2.55s ───────────────────────────┤ 5.11s                         │
 │                        █ on cpu   ▚ run queue   ▓ I/O                                                                │
@@ -26,10 +30,6 @@ omn top │ fixture sqlite-commits │ 5.11s                          view: snap
 │   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │
 │ Trust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it  │
 │   gives up (2).                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

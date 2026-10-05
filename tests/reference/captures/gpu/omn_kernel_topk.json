@@ -11,24 +11,24 @@
           "k": 20,
           "series": [
             {
-              "key": "kernel=[memcpy HtoD]",
-              "events": 1,
-              "total": 1522330.0
-            },
-            {
               "key": "kernel=[memcpy DtoH]",
               "events": 1,
-              "total": 1427898.0
+              "total": 2055014.0
+            },
+            {
+              "key": "kernel=[memcpy HtoD]",
+              "events": 1,
+              "total": 1815081.0
             },
             {
               "key": "kernel=copy",
               "events": 5,
-              "total": 310495.0
+              "total": 312925.0
             },
             {
               "key": "kernel=[memset]",
               "events": 1,
-              "total": 27232.0
+              "total": 29344.0
             }
           ],
           "rest": {
@@ -39,12 +39,45 @@
         }
       ],
       "events_seen": 8,
+      "observed_ns": 406464833,
+      "window": {
+        "run_opened_ns": 1000403804366,
+        "opened_ns": 1000403804366,
+        "closed_ns": 1000810269199,
+        "attached": true
+      },
+      "stopped_because": "the launched program exited with exit status 0",
       "losses": {
         "dropped": 0,
         "failed_reads": 0,
         "late_ticks": 0,
         "undecoded": 0,
         "throttled": 0
+      },
+      "lifetime": {
+        "released_ns": 1000403671895,
+        "exited_ns": 1000810247488,
+        "exited_err_ns": 6037026,
+        "cpu_ns": 359948000
+      },
+      "notes": [
+        "pid 82389: CUPTI API 130401, 256 buffers of 256 KiB at most; 6 brackets map CUPTI's clock onto CLOCK_MONOTONIC to within 284 ns, at a rate of 0.999999868",
+        "device activities reported: 5 kernel, 2 memcpy, 1 memset; the widest timestamp error was 284 ns",
+        "vendor:nvml: device 0 (NVIDIA GeForce RTX 2080 Ti): shader clock not shown locked (the driver's performance levels let it run from 300 to 2205 MHz; a lock set with `nvidia-smi -lgc` is not known to show there), no application clocks (this board does not have them), persistence mode off, clock event reasons: none",
+        "GPU timings on device 0 (NVIDIA GeForce RTX 2080 Ti) were taken on clocks not shown to be locked: the shader clock ran wherever the driver put it, so a duration depends on what the device did before it; `omn` reads clock state and never changes it"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 2669000,
+        "attributed_cpu_ns": 2669000,
+        "observed_cpu_ns": 359534630,
+        "observed_from": "the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 82389 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)",
+        "wall_ns": 406734555,
+        "measurement_ns": 76180,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "a vendor profiler injects into or replays the target, and says nothing of what that cost it",
+        "before_window_cpu_ns": 124353000,
+        "after_window_cpu_ns": 30194000
       },
       "served_by": [
         "vendor:cupti"

@@ -260,6 +260,9 @@ pub fn push_kernel_wait(
 pub struct Descendants {
     root: u32,
     followed: Hash,
+    /// Processes freed since the last read of [`Descendants::parents`], with
+    /// their parents: the free program moves an entry here as it deletes it.
+    exited: Hash,
     missed: Counters,
     /// Processes already under the root that the map had no room for.
     missed_at_start: u64,
@@ -409,10 +412,12 @@ impl Descendants {
         let btf = super::kernel_btf()?;
         let followed = Hash::create(4, 4, MAX_DESCENDANTS, "omn_sched_desc")
             .map_err(|error| map_failure("descendants map", error))?;
+        let exited = Hash::create(4, 4, MAX_DESCENDANTS, "omn_sched_dexit")
+            .map_err(|error| map_failure("exited descendants map", error))?;
         let missed = Counters::create(1, "omn_sched_dmiss")
             .map_err(|error| map_failure("descendants drop counter", error))?;
         let fork = fork_instructions(btf, root, followed.as_raw_fd(), missed.as_raw_fd())?;
-        let free = free_instructions(btf, followed.as_raw_fd())?;
+        let free = free_instructions(btf, followed.as_raw_fd(), exited.as_raw_fd())?;
         let fork_program = load_raw(&fork, "omn_sched_fork")?;
         let fork_link =
             syscall::raw_tracepoint_open("sched_process_fork", fork_program.as_raw_fd()).map_err(
@@ -426,6 +431,7 @@ impl Descendants {
         let mut descendants = Self {
             root,
             followed,
+            exited,
             missed,
             missed_at_start: 0,
             fork_program,
@@ -433,12 +439,12 @@ impl Descendants {
             free_program,
             _free_link: free_link,
         };
-        for tgid in processes_under(root) {
+        for (tgid, parent) in processes_under(root) {
             if tgid != root {
                 // A process already there that cannot be added is followed by
                 // nobody, and is counted where a fork the map had no room for
                 // is.
-                if update_elem(descendants.followed.as_raw_fd(), tgid).is_err() {
+                if update_elem(descendants.followed.as_raw_fd(), tgid, parent).is_err() {
                     descendants.missed_at_start += 1;
                 }
             }
@@ -469,6 +475,35 @@ impl Descendants {
             );
         }
         processes
+    }
+
+    /// The parent of every process the target started, as `(tgid, ppid)`:
+    /// the ones followed now, and the ones freed since the last call, which
+    /// this call forgets. The root is not here; its parent is in `/proc`.
+    pub fn parents(&self) -> Vec<(u32, u32)> {
+        let pair = |key: &[u8], value: &[u8]| -> Option<(u32, u32)> {
+            Some((
+                u32::from_ne_bytes(key.get(..4)?.try_into().ok()?),
+                u32::from_ne_bytes(value.get(..4)?.try_into().ok()?),
+            ))
+        };
+        let mut parents = Vec::new();
+        if let Ok((keys, _)) = self.followed.keys() {
+            for key in keys {
+                if let Ok(Some(value)) = syscall::map_lookup(self.followed.as_raw_fd(), &key, 4) {
+                    parents.extend(pair(&key, &value));
+                }
+            }
+        }
+        if let Ok(drained) = self.exited.drain() {
+            parents.extend(
+                drained
+                    .entries
+                    .iter()
+                    .filter_map(|(key, value)| pair(key, value)),
+            );
+        }
+        parents
     }
 
     /// Processes the target started that the map had no room for, so whose
@@ -517,8 +552,9 @@ fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(),
 /// `sched_process_fork(parent, child)`: the child's thread group joins the map
 /// when the parent's is the root's or is in it.
 ///
-/// A new thread is a fork too, with the parent's thread group: it writes the
-/// key that is already there, which changes nothing.
+/// A new thread is a fork too, with the parent's thread group, and writes
+/// nothing: the value is the parent's thread group, and a thread's would be
+/// its own.
 fn fork_instructions(
     btf: &Btf,
     root: u32,
@@ -542,11 +578,20 @@ fn fork_instructions(
     program.jump_to("done", Insn::jeq_imm(0, 0, 0));
     program.label("parent_followed");
 
+    // The value is the parent's thread group, which is the child's `ppid`
+    // for as long as the map holds it (`Descendants::parents`).
+    program.push(Insn::ldx(BPF_W, 1, R10, FOLLOW_KEY));
+    program.push(Insn::stx(BPF_W, R10, FOLLOW_VALUE, 1));
     read_narrow(&mut program, FOLLOW_KEY, 4, 8, tgid_offset);
     // A thread of the root is the root.
     program.push(Insn::ldx(BPF_W, 1, R10, FOLLOW_KEY));
     program.jump_to("done", Insn::jeq_imm(1, root as i32, 0));
-    program.push(Insn::st_imm(BPF_W, R10, FOLLOW_VALUE, 1));
+    // A new thread of a followed process is that process, and writing its
+    // own thread group as its parent would overwrite the real one.
+    program.push(Insn::ldx(BPF_W, 2, R10, FOLLOW_VALUE));
+    program.jump_to("new_process", Insn::jne_reg(1, 2, 0));
+    program.jump_to("done", Insn::ja());
+    program.label("new_process");
     program.extend(Insn::load_map_fd(1, followed_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
@@ -569,7 +614,7 @@ fn fork_instructions(
 
 /// `sched_process_free(task)`: a thread group leaves the map when its
 /// leader's `task_struct` is freed, which is after every thread of it is.
-fn free_instructions(btf: &Btf, followed_fd: i32) -> Result<Vec<Insn>, String> {
+fn free_instructions(btf: &Btf, followed_fd: i32, exited_fd: i32) -> Result<Vec<Insn>, String> {
     check_signature(btf, "sched_process_free", &FREE_SIGNATURE)?;
     let pid_offset = btf.member_offset("task_struct", "pid")?;
     let tgid_offset = btf.member_offset("task_struct", "tgid")?;
@@ -582,6 +627,22 @@ fn free_instructions(btf: &Btf, followed_fd: i32) -> Result<Vec<Insn>, String> {
     program.push(Insn::ldx(BPF_W, 2, R10, FOLLOW_KEY));
     // Not the leader: the group is still alive.
     program.jump_to("done", Insn::jne_reg(1, 2, 0));
+    // Its parent is kept in the exited map until the next drain reads it, so
+    // a process born and gone between two drains still has its `ppid`.
+    program.extend(Insn::load_map_fd(1, followed_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_W, 1, 0, 0));
+    program.push(Insn::stx(BPF_W, R10, FOLLOW_VALUE, 1));
+    program.extend(Insn::load_map_fd(1, exited_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, FOLLOW_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
     program.extend(Insn::load_map_fd(1, followed_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, FOLLOW_KEY as i32));
@@ -594,17 +655,18 @@ fn free_instructions(btf: &Btf, followed_fd: i32) -> Result<Vec<Insn>, String> {
     Ok(instructions)
 }
 
-/// The processes under `root` now, root included: each thread's
+/// The processes under `root` now, root included, each with the process it
+/// was found under (the root's is 0): each thread's
 /// `/proc/<tgid>/task/<tid>/children`, walked down.
-fn processes_under(root: u32) -> Vec<u32> {
+fn processes_under(root: u32) -> Vec<(u32, u32)> {
     let mut found = Vec::new();
-    let mut pending = vec![root];
+    let mut pending = vec![(root, 0)];
     let mut seen = std::collections::BTreeSet::new();
-    while let Some(tgid) = pending.pop() {
+    while let Some((tgid, parent)) = pending.pop() {
         if !seen.insert(tgid) {
             continue;
         }
-        found.push(tgid);
+        found.push((tgid, parent));
         let Ok(threads) = std::fs::read_dir(format!("/proc/{tgid}/task")) else {
             continue;
         };
@@ -614,15 +676,16 @@ fn processes_under(root: u32) -> Vec<u32> {
             pending.extend(
                 children
                     .split_whitespace()
-                    .filter_map(|pid| pid.parse::<u32>().ok()),
+                    .filter_map(|pid| pid.parse::<u32>().ok())
+                    .map(|child| (child, tgid)),
             );
         }
     }
     found
 }
 
-/// `BPF_MAP_UPDATE_ELEM` of a four-byte key with the value one.
-fn update_elem(map_fd: i32, tgid: u32) -> std::io::Result<()> {
+/// `BPF_MAP_UPDATE_ELEM` of a four-byte key with its parent as the value.
+fn update_elem(map_fd: i32, tgid: u32, parent: u32) -> std::io::Result<()> {
     #[repr(C)]
     struct ElemAttr {
         map_fd: u32,
@@ -633,7 +696,7 @@ fn update_elem(map_fd: i32, tgid: u32) -> std::io::Result<()> {
     }
     const BPF_MAP_UPDATE_ELEM: i64 = 2;
     let key = tgid.to_ne_bytes();
-    let value = 1u32.to_ne_bytes();
+    let value = parent.to_ne_bytes();
     let mut attr = ElemAttr {
         map_fd: map_fd as u32,
         pad: 0,

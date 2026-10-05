@@ -100,6 +100,8 @@ const LABEL: u16 = 22;
 const SHARE: u16 = 11;
 /// The rows of the detail under the lanes, at least.
 const DETAIL: u16 = 5;
+/// The most rows each state of a tall lane is drawn on.
+const DEPTH: u16 = 3;
 
 pub struct Lanes {
     /// The lane the keys act on, by its identity, so a lane keeps its
@@ -853,20 +855,42 @@ fn bar(share: f64) -> &'static str {
     EIGHTHS[eighths - 1]
 }
 
-/// The awake row of a tall lane: the share of the cell awake.
-fn awake_glyph(cell: &Cell, width_ns: f64) -> (&'static str, Option<Color>) {
+/// One row of a share drawn `rows` high, `level` rows up from its base: the
+/// part of the share that reaches that row, or nothing. The base row always
+/// draws what is there, at least an eighth.
+fn stacked(share: f64, rows: usize, level: usize) -> Option<&'static str> {
+    let fill = share * rows as f64 - level as f64;
+    (level == 0 || fill > 0.0).then(|| bar(fill.min(1.0)))
+}
+
+/// A row of a tall lane's awake part, `level` up of its `rows`: the share of
+/// the cell awake.
+fn awake_glyph(
+    cell: &Cell,
+    width_ns: f64,
+    rows: usize,
+    level: usize,
+) -> (&'static str, Option<Color>) {
     if cell.awake > 0 {
-        (bar(cell.awake as f64 / width_ns), Some(AWAKE))
-    } else if cell.unknown > 0 {
+        match stacked(cell.awake as f64 / width_ns, rows, level) {
+            Some(glyph) => (glyph, Some(AWAKE)),
+            None => (" ", None),
+        }
+    } else if cell.unknown > 0 && level == 0 {
         ("┄", None)
     } else {
         (" ", None)
     }
 }
 
-/// The blocked row of a tall lane: the share of the cell blocked, in the
-/// colour of the state that held most of it.
-fn blocked_glyph(cell: &Cell, width_ns: f64) -> (&'static str, Option<Color>) {
+/// A row of a tall lane's blocked part, `level` up of its `rows`: the share
+/// of the cell blocked, in the colour of the state that held most of it.
+fn blocked_glyph(
+    cell: &Cell,
+    width_ns: f64,
+    rows: usize,
+    level: usize,
+) -> (&'static str, Option<Color>) {
     let blocked = cell.sleeping + cell.disk;
     if blocked == 0 {
         return (" ", None);
@@ -876,7 +900,10 @@ fn blocked_glyph(cell: &Cell, width_ns: f64) -> (&'static str, Option<Color>) {
     } else {
         SLEEPING
     };
-    (bar(blocked as f64 / width_ns), Some(colour))
+    match stacked(blocked as f64 / width_ns, rows, level) {
+        Some(glyph) => (glyph, Some(colour)),
+        None => (" ", None),
+    }
 }
 
 /// The glyph and colour of one cell of a one-row lane.
@@ -1144,8 +1171,25 @@ impl Lanes {
         let free = room - refusal_rows;
         let tall = threads.min(free.saturating_sub(DETAIL + lanes.len() as u16));
         let wanted = lanes.len() as u16 + tall;
-        let lane_rows = wanted.clamp(1, free);
-        let detail_rows = DETAIL + (free - lane_rows);
+        let mut lane_rows = wanted.clamp(1, free);
+        let mut detail_rows = DETAIL + (free - lane_rows);
+        // The selected lane's detail, measured before the rows are shared
+        // out: on a tall terminal what it leaves deepens every tall lane, up
+        // to three rows a state, rather than standing empty under it.
+        let detail_lines = selected
+            .map(|index| detail(model, &lanes, &lanes[index], cursor, area.width))
+            .unwrap_or_default();
+        let detail_need = detail_lines
+            .iter()
+            .map(|line| line.width().div_ceil(usize::from(area.width)).max(1))
+            .sum::<usize>() as u16;
+        let mut depth: u16 = 1;
+        if tall > 0 && tall == threads {
+            let extra = detail_rows.saturating_sub(detail_need.max(DETAIL));
+            depth += (extra / (2 * tall)).min(DEPTH - 1);
+            lane_rows += (depth - 1) * 2 * tall;
+            detail_rows -= (depth - 1) * 2 * tall;
+        }
         let rows = usize::from(lane_rows);
         if let Some(selected) = selected {
             if selected < self.scroll {
@@ -1173,7 +1217,8 @@ impl Lanes {
         for (index, lane) in lanes.iter().enumerate().skip(self.scroll) {
             let two = active(lane)
                 && (lanes[..index].iter().filter(|lane| active(lane)).count() as u16) < tall;
-            if row + u16::from(two) >= y + lane_rows {
+            let height = if two { 2 * depth } else { 1 };
+            if row + height > y + lane_rows {
                 break;
             }
             let (name, trust, mut label_style) = match lane {
@@ -1203,7 +1248,7 @@ impl Lanes {
                 label_style,
             );
             self.regions.push(Region::new(
-                Rect::new(area.x, row, area.width, 1 + u16::from(two)),
+                Rect::new(area.x, row, area.width, height),
                 index,
             ));
             // The tool's own threads are its cost, not the program's: their
@@ -1246,8 +1291,14 @@ impl Lanes {
                 buffer.set_string(x_time + columns, row, "│", dim);
             };
             if two {
-                paint(row, &|cell| awake_glyph(cell, width_ns));
-                paint(row + 1, &|cell| blocked_glyph(cell, width_ns));
+                let rows = usize::from(depth);
+                for up in 0..depth {
+                    let level = usize::from(depth - 1 - up);
+                    paint(row + up, &|cell| awake_glyph(cell, width_ns, rows, level));
+                    paint(row + depth + up, &|cell| {
+                        blocked_glyph(cell, width_ns, rows, level)
+                    });
+                }
                 if let Lane::Thread(thread) = lane {
                     let blocked: u64 = thread
                         .spans
@@ -1257,7 +1308,7 @@ impl Lanes {
                         .sum();
                     buffer.set_string(
                         x_time + columns + 1,
-                        row + 1,
+                        row + depth,
                         format!(
                             "{:>width$}",
                             format!(
@@ -1270,7 +1321,7 @@ impl Lanes {
                     );
                     buffer.set_stringn(
                         area.x,
-                        row + 1,
+                        row + depth,
                         format!("{:>width$}", "off cpu ", width = usize::from(LABEL)),
                         usize::from(LABEL),
                         dim,
@@ -1280,7 +1331,7 @@ impl Lanes {
                 paint(row, &|cell| glyph(cell, width_ns));
             }
             buffer.set_string(x_time + columns + 1, row, share, trust.style());
-            row += 1 + u16::from(two);
+            row += height;
         }
         if tall == 0 && lanes.len() > rows {
             buffer.set_stringn(
@@ -1316,10 +1367,7 @@ impl Lanes {
             buffer.set_string(x, y, marker, Style::new().fg(palette::ACCENT));
         }
         y += 1;
-        let detail = selected
-            .map(|index| detail(model, &lanes, &lanes[index], cursor, area.width))
-            .unwrap_or_default();
-        Paragraph::new(detail)
+        Paragraph::new(detail_lines)
             .wrap(Wrap { trim: false })
             .render(Rect::new(area.x, y, area.width, detail_rows), buffer);
         y += detail_rows;

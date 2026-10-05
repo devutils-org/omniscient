@@ -1,0 +1,24 @@
+[0m[1momn top[0m │ fixture workload-lanes │ 2.24s                         [0m[35mview: snapshot[0m [0m
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap [0m[1;7m 7 lanes [0m 8 wake  [0m
+┌ lanes -- threads side by side: one lane per thread and per GPU stream, along ┐[0m
+│[0m[1msched.switches [0m[2m277[0m [0m[33m26 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.wakeup [0m[2m353[0m [0m[33m26 late[0m [0m[36m~low[0m   │[0m
+│[0m[36mdet[0m [0m[33mdegraded[0m  [0m[1msched.offcpu [0m[2m168[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m  [0m[1mgpu.kernel [0m[2m12[0m [0m[33m9 late[0m     │[0m
+│[0m[2m52.2ms a cell[0m          [0m[2m╷0ns[0m               [0m[2m╷1.00s[0m                   [0m[2mof the span[0m│[0m
+│[0m[35mgpu0 s7 spin          [0m[2m│[0m                               [0m[35m▃[0m[7;35m█[0m[35m███████▃[0m  [0m[2m│ busy 19.9%[0m│[0m
+│lanes-main     2621955[0m[2m│[0m[2;32m▄[0m[2;34m────────────────────────[0m[2;32m▁▁[0m[2;34m─[0m[2;32m▁[0m[2;34m───[0m[2;7;34m─[0m[2;34m───────[0m[2;32m▁[0m[2m  │awake 1.21%[0m│[0m
+│lane-b         2621957[0m[2m│[0m[2;34m──[0m[2;32m█▅[0m[2;34m──[0m[2;32m▃█▂[0m[2;34m──[0m[2;32m▆▇[0m[2;34m──[0m[2;32m▁█▄[0m[2;34m──[0m[2;32m▄█▁[0m[2;34m──[0m[2;32m▇▆[0m[2m     [0m[2;7m [0m[2m          │awake 21.6%[0m│[0m
+│lane-c         2621958[0m[2m│[0m[2;32m▁[0m[2;34m──[0m[2;32m▄█▁[0m[2;34m──[0m[2;32m▇▆[0m[2;34m──[0m[2;32m▂█▃[0m[2;34m──[0m[2;32m▅█▁[0m[2;34m──[0m[2;32m█▆[0m[2;34m──[0m[2;32m▃█▃[0m[2m   [0m[2;7m [0m[2m          │awake 21.5%[0m│[0m
+│lane-a         2621956[0m[2m│[0m[2;32m▅█▁[0m[2;34m──[0m[2;32m█▆[0m[2;34m──[0m[2;32m▃█▃[0m[2;34m──[0m[2;32m▆█[0m[2;34m───[0m[2;32m█▅[0m[2;34m──[0m[2;32m▃▄[0m[2m       [0m[2;7m [0m[2m          │awake 19.9%[0m│[0m
+│[0m[1;7mlane-gpu       2622145[0m[2m│                            [0m[2;32m▅██▄[0m[2;7;32m▁[0m[2;32m▁▁▁▁▁▁▁[0m[2;34m─[0m[2m  │awake 7.00%[0m│[0m
+│[0m[4;32mcuda-EvtHandlr 2622151[0m[2m│                             [0m[2;34m─[0m[2;32m▁▁[0m[2;7;32m▁[0m[2;32m▁▁▁▁▁▁▁▁[0m[2m  │awake 0.09%[0m│[0m
+│lane-gpu       2622147[0m[2m│                            [0m[2;34m─[0m[2;32m▁▁▁[0m[2;7;32m▁[0m[2;32m▁▁▁▁▁▁▁▁[0m[2m  │awake 0.05%[0m│[0m
+│[0m[2;3m1-9 of 13 lanes ↑/↓148[0m[2m│[0m[2;3m                            [0m[2;3;34m─[0m[2;3;32m▁▁▁[0m[2;3;7;32m▁[0m[2;3;32m▁▁▁▁▁▁▁▁[0m[2;3m  [0m[2m│awake 0.04%[0m│[0m
+│[0m[2m───────────────────────────────────────────────────────[0m[2;32m▲ 1.72s[0m[2m────────────────[0m│[0m
+│[0m[1mlane-gpu 2622145 (pid 2621955) at 1.72s: [0m[2;34mblocked, sleeping[0m[2m 49.0ms, 1.70s →[0m    │[0m
+│[0m[2m1.74s, left cpu 0[0m                                                             │[0m
+│  woken by [0m[1mcuda-EvtHandlr 2622151[0m[2m; state, stack: its window's sched.offcpu row[0m│[0m
+│[0m[2mnearest in size[0m                                                               │[0m
+│[0m[2m  in [0m[2;34mlibc.so.6 x2 ← libcuda.so.615.71.09 x5 ← cuCtxSynchronize ← …[0m            │[0m
+│[0m[32m▆[0m awake: on a cpu or queued  [0m[34m─[0m blocked  [0m[33m━[0m uninterruptible  [0m[35m▆[0m kernel  [0m[36m▆[0m copy  [0m[2mh[0m│[0m
+└──────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[1mq[0m quit  [0m[1m←/→ tab[0m view  [0m[1m1-9[0m jump  [0m[1mf[0m clear focus  [0m[1m?[0m help  [0m[1m↑/↓[0m lane  [0m[1mh/l H/L[0m cursor [0m

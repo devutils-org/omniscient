@@ -8,8 +8,11 @@ omn top │ fixture workload-flame │ 2.05s                          view: snap
 │   2.01s waiting in futex(2) over 11 wait(s), from `sched.futex`                                                      │
 │   decisive: ahead of the next state (27.7ms) and of what no row read (0ns) -- omn latency's rule, on the view's rea… │
 │                                                                                                                      │
+│                       │█▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞┤                               │
 │ ▸ 2620696 flame-main  ├█▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 98.1% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞┤    2.05s  ▶ lock 98.1%        │
+│                       │████████████░░░░░░░░░░░░░░░░░░                                ┤                               │
 │   2620698 warm        ├████████████░░ sleep 29.3% ░░░                                ┤    2.05s  ▶ sleep 29.3%       │
+│                       │██████████████████████████████                                ┤                               │
 │   2620697 hot         ├████████ on cpu 48.8% ████████                                ┤    2.05s  ▶ on cpu 48.8%      │
 │                      0 ───────────────────────────┼ 1.03s ───────────────────────────┤ 2.05s                         │
 │                        █ on cpu   ▚ run queue   ▞ lock   ░ sleep                                                     │
@@ -30,9 +33,6 @@ omn top │ fixture workload-flame │ 2.05s                          view: snap
 │   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │
 │ Trust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it  │
 │   gives up (2).                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

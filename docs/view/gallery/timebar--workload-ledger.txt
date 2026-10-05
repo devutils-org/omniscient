@@ -8,7 +8,9 @@ omn top │ fixture workload-ledger │ 1.26s                         view: snap
 │   95 % of it from one stack, leaf first: clock_nanosleep <- libpython3.14.so.1.0+0x5dfc1 <- libpython3.14.so.1.0+0x… │
 │   decisive: ahead of the next state (602ms) and of what no row read (0ns) -- omn latency's rule, on the view's read… │
 │                                                                                                                      │
+│                       │██████████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ ┤                               │
 │ ▸ 2621625 ledger-main ├████████ on cpu 47.6% ████████░░░░░░░░░ sleep 49.9% ░░░░░░░░░ ┤    1.26s  ▶ sleep 49.9%       │
+│                       │██                                                            ┤                               │
 │   2621704 python3     ├██                                                            ┤    1.26s  ▶ on cpu 2.67%      │
 │                      0 ───────────────────────────┼ 632ms ───────────────────────────┤ 1.26s                         │
 │                        █ on cpu   ▚ run queue   ▓ I/O   ▙ child   ░ sleep                                            │
@@ -31,8 +33,6 @@ omn top │ fixture workload-ledger │ 1.26s                         view: snap
 │   latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.                              │
 │ Trust: the source is not reproducible between two runs of the same workload; served by a fallback that says what it  │
 │   gives up (2).                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

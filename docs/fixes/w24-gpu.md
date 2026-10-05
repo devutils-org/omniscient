@@ -195,3 +195,19 @@ Ranked:
 - **shim / cupti owners**: `cuMemsetD8`, `cuModuleLoadData`, `cuCtxCreate` in
   the interposed list (gpu 3); NVTX ranges and a callback-API backend (gpu
   4, 5) live in `cupti/`.
+
+## Review
+
+- **A counted window's closing read that fails went uncounted** (gap,
+  `src/collect/gpu/device.rs`). The reviewer was right: `stop` discarded the
+  error of `sample(CLOSING)`, and for `gpu.power` and `gpu.throttle` in
+  `count` that read is the window's only one, so a transient failure ended it
+  with no event and clean losses. Fixed: `stop` now goes through
+  `closing_read`, which counts a failed closing read in the collector's own
+  `losses` (`failed_reads` plus the reason, absorbed by the run after `stop`),
+  for every metric. A gone device counts too; the one exception is `gpu.mem`
+  of a process that has exited, where the earlier readings are the series and
+  the exit is how the window was meant to end. Shown by
+  `a_closing_read_that_fails_is_counted` (the helper, with synthetic
+  results); reasoned, not shown: a real NVML closing read failing, which the
+  board here does not produce on demand.

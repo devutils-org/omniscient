@@ -1526,3 +1526,100 @@ kernel's own column over an enclosing window) is still what does.
   summary per direction needs a key the series can be grouped on, and
   `KeyKind` (`src/request.rs`) has none. Filed in `docs/fixes/w20-io.md`.
 - **One program for both `io.latency` histograms**: optional, not started.
+
+## The twenty-fourth wave
+
+What the comparison against the tools `omn` replaces found in this family
+(`docs/fixes/w22-io.md`, `docs/fixes/w23-io.md`), defects first.
+
+### 25. A launched program's forked children were not followed — **fixed**
+
+`omn trace io.latency -m trace -e summary -- fio <job>` without `thread`
+(fio forks its job and waits) reported 0 requests for the 28 807 reads fio
+completed, and "29678 block_rq_complete events had no opening this run
+recorded". Every io program compared the submitter's thread group with the
+launched process alone. They now take the descendants map the sched sources
+keep from `sched_process_fork` (`src/bpf/sched_common.rs`): the target is
+compared as a constant first, any other thread group looked up in the map.
+
+| Source | Workload | omn | Independent |
+|---|---|---|---|
+| `io.latency` (ring) | forked fio, 4 KiB random direct reads, 2 s | 21 329 | fio `total_ios` 21 329 |
+| `io.latency` (kernel histogram) | the same | 21 224 | fio 21 224 |
+| `io.fsync` | `sh -c` running two programs that each fsync once | 2 syncs | 2 |
+| `io.pagecache` | `sh -c 'cat <cold 64 MiB file>'` | 16 384 pages filled | 64 MiB / 4096 |
+
+Held by `a_launched_programs_forked_child_is_followed` (1024 direct reads in
+a forked child, counted one for one under the child's pid) and
+`the_syncs_of_a_forked_child_are_timed`. The first failed once, at its first
+run, and passed the next six; the failure's message was not kept. `io.syscall`
+and `io.fs` still compare the launched process alone: their entry program is
+`src/bpf/fentry.rs`'s, a shared layer, and the change is filed
+(`docs/fixes/w24-io.md`).
+
+### 26. `io.fsync`'s 142 % and 144 % in the backends bench was the unlink — **moved**
+
+The bench's `io.fsync` row measured 142 % and then 144 % of its target's cpu
+with no event, and the table read it as the fentry attach. `perf record` of
+one run says it is half the attach and half the detach:
+`__bpf_trampoline_link_prog` 13.22 % of `omn`'s samples and
+`bpf_trampoline_unlink_prog` 12.95 %, each almost all `ftrace_replace_code`,
+which walks every ftrace record of the kernel once per trampoline changed.
+The attach falls before the window opens and is said as such; the unlink was
+in `stop()`, inside the window, six trampolines for about 69 ms of cpu
+against a 25 ms target. The programs now stay attached until the collector
+is dropped, after the run has closed its accounts, as `io.latency`'s are:
+three runs read 69.7, 70.2 and 70.4 ms before, and 0.99, 1.7 and 1.1 ms
+after (4.7 to 6.4 % of the 21 to 26 ms target). The unlink is still paid; it
+is after the window, and nothing reads it there (filed to stream run).
+
+### 27. `dir` as a key on `io.latency`, `io.queue` and `io.size`
+
+From the request's operation, the low byte `rwbs` is built from: `read`,
+`write`, `discard`, `flush`, and no `dir` for a driver-private operation.
+`the_direction_key_agrees_with_the_kernels_letters` holds the two readings of
+that byte to one another for all 256 values. A mixed fio job (`rw=randrw`,
+direct): `dir:read` n=16 391 and `dir:write` n=16 380, fio's `total_ios`
+16 391 and 16 380.
+
+### 28. `io.util`, the share of a window a device was busy
+
+The io-ticks column of `/proc/diskstats` over the window, iostat's `%util`,
+with the weighted column's average queue beside it (`queue`, iostat's
+`aqu-sz`). Four seconds around a two-second fio job, `iostat -d -x -y 4 1`
+over the same four: `nvme0n1` 49.37 % against 49.38, queue 17.772 against
+17.77 (other streams were using the disk). Held by
+`utilization_is_the_busy_time_over_the_window` on a substituted file.
+
+### 29. `io.vfs`, every VFS call by function
+
+What `vfsstat` reports, any file type: one fentry program per VFS entry
+point, an atomic add each. `dd if=/dev/zero of=/dev/null bs=4k
+count=100000`: `vfs_read` 100 003 and `vfs_write` 100 003, `strace -c`'s
+read and write counts exactly. An `fsync(2)` reaches neither `vfs_fsync`
+copy here (both are inlined into `do_fsync`, as `io.fsync`'s comment
+says), so `do_fsync` is counted beside `vfs_fsync_range`. Its cost is
+declared `high` on one measurement: a 1-byte read/write loop of 6 M calls
+ran 1.36 s alone and 1.95 s counted, +45 %, under the wave's load. Held by
+`every_vfs_write_of_a_forked_child_is_counted` (20 000 writes from a forked
+child, counted exactly).
+
+### Not done this wave
+
+- **A block request a `kworker` dispatched** (`docs/open-findings.md`, the
+  twenty-first wave, stream record): not reproduced. Twelve runs of a 4 MiB
+  write and fsync under a launched `io.latency`, and two of the process
+  workload itself, attributed 32 of 32 128 KiB writes to the program each
+  time. A system-wide run did show kblockd's `kworker/13:1H` issuing other
+  programs' writes, so the path exists. The fix that was asked for -- the
+  submitter read at `block_rq_insert`, in the task's context, and carried to
+  the issue -- is a third program in the hot path, and with no workload that
+  shows the loss it would be reasoned only. Ranked first for the next wave.
+- **`op` as a key on `io.vfs`**: one event per interval carries each
+  function's count beside the total, and a filter on `op` keeps one; a
+  series per function needs a `KeyValue` the emit layer groups on
+  (`src/event.rs`, filed).
+- A loaded-machine failure of
+  `a_cold_read_of_a_known_file_is_measured_against_the_bytes_it_had_to_move`
+  ("the session's window never enclosed the read", three tries, load
+  average 30): passed alone at once. Noted, not widened.
