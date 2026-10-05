@@ -2701,8 +2701,17 @@ pub fn batch(data: &Data, sort: &str) -> Result<String, String> {
                     .flat_map(|results| tracks(data, results))
                     .collect();
                 all.sort_by(|one, other| one.key.cmp(&other.key));
-                for track in all.iter().filter(|track| track.tangled.is_none()) {
+                for track in &all {
                     let key = key_name(&track.key).replace(char::is_whitespace, "_");
+                    // Left out of the numbers, but said: the parts of one
+                    // series whose instants disagree cannot be told apart.
+                    if let Some(most) = track.tangled {
+                        out.push_str(&format!(
+                            "# {source} {key}: up to {most} parts in one series, a read missing \
+                             at some instants: not told apart, so not given\n"
+                        ));
+                        continue;
+                    }
                     let mut line = format!(
                         "machine {source} {key} mean={} peak={} last={} total={}",
                         batch_number(track.mean()),
@@ -3179,6 +3188,16 @@ mod tests {
             4 * tick,
         ));
         assert!(drawn.contains("not told apart, so not drawn"), "{drawn}");
+        let data = data_of(
+            vec![power_result(vec![timeline(&[2, 1, 2, 2])], "pmu")],
+            4 * tick,
+        );
+        let text = batch(&data, "cpu").expect("the batch");
+        assert!(
+            text.contains("# power.energy system: up to 2 parts in one series"),
+            "{text}"
+        );
+        assert!(!text.contains("machine power.energy"), "{text}");
         let drawn = screen(data_of(
             vec![power_result(vec![timeline(&[1, 1, 1, 1])], "pmu")],
             4 * tick,

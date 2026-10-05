@@ -831,14 +831,27 @@ fn cpu_row(ctx: &Ctx<'_>, axis: &Axis, capacity: &Capacity) -> Row {
     }
     // The function the flame it opens names first, in the flame's words.
     if let Some(hot) = flame::hottest(data, ctx.focus, false) {
-        let name: String = hot.name.chars().take(32).collect();
         figures.push(format!(
-            "hottest {name} {}",
+            "hottest {} {}",
+            hottest_name(&hot.name),
             units::percent(hot.share * 100.0)
         ));
     }
     let trust = Trust::joined(data, held.iter().copied());
     row.spark(cells, capacity.cores).says(figures, trust)
+}
+
+/// The flame's name for its hottest function, in at most 32 cells: a longer
+/// one (a Python frame carries its file's path) is cut with an ellipsis, so
+/// the row never reads as a whole name what is only its start.
+fn hottest_name(name: &str) -> String {
+    const MOST: usize = 32;
+    if name.chars().count() <= MOST {
+        return name.to_owned();
+    }
+    let mut cut: String = name.chars().take(MOST - 1).collect();
+    cut.push('…');
+    cut
 }
 
 /// Memory: the resident size, its growth over the run, its peak.
@@ -1856,7 +1869,8 @@ mod tests {
         let hot = flame::hottest(&data, &focus, false).expect("the flame's hottest");
         let cpu = row(&screen, "CPU");
         assert!(
-            cpu.text.contains(&format!("hottest {}", hot.name)),
+            cpu.text
+                .contains(&format!("hottest {}", hottest_name(&hot.name))),
             "{} against the flame's {}",
             cpu.text,
             hot.name
