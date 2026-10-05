@@ -1,39 +1,39 @@
-omn top │ fixture sqlite-latency │ 288ms                          view: snapshot │ collectors ≥3.93% │ target 8.74% cpu
+omn top │ fixture sqlite-latency │ 334ms                          view: snapshot │ collectors ≥6.74% │ target 11.4% cpu
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
 ┌ timebar -- where the wall-clock went: one bar per thread, by state ──────────────────────────────────────────────────┐
 │ where-the-time-went  one bar per task, whole: the program's life, gate to reap                                       │
 │                                                                                                                      │
-│ ▶ first suspect  task 2619011: blocked 247ms (85.7% of its wall clock)                                               │
-│   off cpu, blocked -- not split by task state here, so a disk and a sleep are not told apart                         │
-│   52 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <- sq… │
-│   decisive: ahead of the next state (39.1ms) and of what no row read (1.00ms) -- omn latency's rule, on the run's d… │
+│ ▶ first suspect  199588 sqlite3: blocked: uninterruptible 240ms (71.9% of its wall clock)                            │
+│   blocked on a device, usually a disk: I/O-bound                                                                     │
+│   49 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <- sq… │
+│   decisive: ahead of the next state (62.2ms) and of what no row read (1.00ms) -- omn latency's rule, on the run's d… │
 │                                                                                                                      │
-│                       │████████▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤                               │
-│                       │████████▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤                               │
-│                       │████████▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤                               │
-│                       │████████▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤                               │
-│ ▸ task 2619011        ├████████▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ blocked 85.7% ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤    289ms  ▶ blocked 85.7%     │
-│                      0 ───────────────────────────┼ 146ms ───────────────────────────┤ 291ms                         │
-│                        █ on cpu   ▚ run queue   ▓ blocked                                                            │
+│                       │███████████▚▚▚▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  ┤                               │
+│                       │███████████▚▚▚▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  ┤                               │
+│                       │███████████▚▚▚▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  ┤                               │
+│                       │███████████▚▚▚▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  ┤                               │
+│ ▸ 199588 sqlite3      ├███████████▚▚▚▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ I/O 71.9% ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  ┤    334ms  ▶ I/O 71.9%         │
+│                      0 ───────────────────────────┼ 167ms ───────────────────────────┤ 334ms                         │
+│                        █ on cpu   ▚ run queue   ▓ I/O                                                                │
 │                                                                                                                      │
 │   state                            source          amount          share   ±         reads  trust                    │
-│   whole: the program's life, gate…                 289ms           100%    ±9.10ms                                   │
-│ █ on-cpu                           cpu.profile     39.1ms          13.6%   ±1.00ms   39     3 late ~low det degraded │
-│     ↳ most-sampled leaf `__btrfs_check_leaf`: 7 of 39 samples: the samples are spread, no one function dominates     │
-│     ↳ 39 samples x 1.003 ms                                                                                          │
-│ ▚ runnable                         sched.runqlat   5.05ms          1.75%   exact     58     ~low det degraded        │
-│ ▓ blocked                          sched.offcpu    247ms           85.7%   exact     72     ~low det degraded        │
-│     ↳ 52 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <… │
-│     ↳ `total_ns` less `queued_ns`, summed                                                                            │
-│   residue: the whole less the rows                 -2.78ms         -0.96%  ±10.1ms   within its resolution           │
+│   whole: the program's life, gate…                 334ms           100%    ±37.0ms                                   │
+│ █ on-cpu                           cpu.profile     62.2ms          18.6%   ±1.00ms   62     3 late ~low det degraded │
+│     ↳ most-sampled leaf `memcpy_orig`: 4 of 62 samples: the samples are spread, no one function dominates            │
+│     ↳ 62 samples x 1.003 ms                                                                                          │
+│ ▚ runnable                         sched.runqlat   20.5ms          6.14%   exact     114    ~low det degraded        │
+│ ▓ blocked: uninterruptible         sched.offcpu    240ms           71.9%   exact     964    ~low det degraded        │
+│     ↳ 49 % of it from one stack, leaf first: fdatasync <- sqlite3+0x19a6a9 <- sqlite3+0x6eabb <- sqlite3+0x19a888 <… │
+│   residue: the whole less the rows                 11.1ms          3.32%   ±38.0ms   within its resolution           │
 │                                                                                                                      │
-│ The whole: exact at the gate; the exit is bracketed to the last 9.102 ms, which is how long before the reap the      │
+│ The whole: exact at the gate; the exit is bracketed to the last 36.966 ms, which is how long before the reap the     │
 │   program was last seen alive.                                                                                       │
-│ `blocked` is drawn whole: the run holds `sched.offcpu`'s stacks, not its events, so a block cannot be split by the   │
-│   task state it recorded (`omn latency` splits it from the events it holds while it runs). Its stack is the run's    │
-│   heaviest.                                                                                                          │
 │ Trust: 3 rounds of reads came late: nothing is missing, but the series is not spaced as asked; the source is not     │
-│   reproducible between two runs of the same workload; served by a fallback that says what it gives up (5).           │
+│   reproducible between two runs of the same workload; served by a fallback that says what it gives up (6).           │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

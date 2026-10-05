@@ -2381,7 +2381,10 @@ mod tests {
         let Verdict::Names { part, share, .. } = &bar.verdict else {
             panic!("{:?}", bar.verdict)
         };
-        assert_eq!(bar.parts[*part].state, "blocked");
+        // The recording keeps the blocked rows' events, so the part is split
+        // by the state the task blocked in: a commit waiting on fdatasync is
+        // in the disk's uninterruptible sleep.
+        assert_eq!(bar.parts[*part].state, "blocked: uninterruptible");
         assert!(share.unwrap() > 0.5, "{share:?}");
         // Named by the stack it blocked in: the commit's sync.
         assert!(
