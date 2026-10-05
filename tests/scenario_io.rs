@@ -726,19 +726,21 @@ fn something_this_source_does(source: &str) -> (&'static str, &'static str) {
 
 /// The sources of this family that have a collector in this build.
 ///
-/// Five through `/proc/diskstats` and PSI, four through the block layer's own
+/// Six through `/proc/diskstats` and PSI, four through the block layer's own
 /// raw tracepoints, three through fentry, and two through the page cache's
 /// own raw tracepoints. The two mechanisms answer different questions and the
 /// sweep covers both: a combination the catalog offers and the build cannot
 /// serve is a promise broken in the one place nobody looks, and that is as
 /// true of an eBPF backend as of a file.
-fn collected_sources() -> [&'static str; 14] {
+fn collected_sources() -> [&'static str; 15] {
     [
         "io.bytes",
         "io.iops",
         "io.merges",
         "io.inflight",
         "io.pressure",
+        // The twenty-fourth wave's `%util`, from the io-ticks column.
+        "io.util",
         "io.latency",
         "io.queue",
         "io.size",

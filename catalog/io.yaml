@@ -220,6 +220,33 @@
        `diskstats_inflight` and `sysfs_inflight` carry each, and
        `sysfs_inflight` is absent, not zero, where the file could not be read."
 
+- id: io.util
+  family: io
+  summary: "Device utilization: the share of the window a request was outstanding"
+  unit: ratio
+  backends:
+    # The io-ticks column of /proc/diskstats, over the window: what `iostat
+    # -x` prints as `%util` and `sar -d` as `%util`.
+    - {id: "fs:proc", requires: ["/proc/diskstats"], cost: free,
+       degraded: "per device, at the kernel's tick granularity"}
+  modes: [poll, count]
+  emits: [timeline, raw, summary]
+  targets: {system: native}
+  keys: [dev]
+  filter_fields: [dev]
+  determinism: low
+  caveats:
+    - "Busy is not saturated. A device that serves many requests at once (an
+       NVMe drive, an SSD, a RAID set) is at 1.0 long before it is at its
+       limit; on such a device read `queue` (iostat's `aqu-sz`) and
+       `io.latency` beside it."
+    - "The kernel counts the busy time in jiffies: a request outstanding at a
+       tick charges the whole tick, so a window of a few ticks is coarse, and a
+       short burst can read as a full tick. Poll at 100 ms or more."
+    - "`util` is a share of 1, not a percentage: `iostat`'s 42.0 is 0.42 here.
+       `busy_ns` carries the time itself and `queue` the average number of
+       requests outstanding over the window."
+
 - id: io.syscall
   family: io
   summary: "I/O latency as the application sees it"
