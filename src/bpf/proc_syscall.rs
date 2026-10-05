@@ -93,15 +93,15 @@ const SKIPPED_BY_PREDICATE: u32 = 2;
 /// before the key is used: the kernel hashes all of it, and a byte nobody wrote
 /// puts two identical calls in two rows.
 const ROW_VALUE: i16 = -64;
-const ROW_KEY: i16 = -80;
-const PEND_VALUE: i16 = -96;
-const PEND_KEY: i16 = -104;
-const DROP_KEY: i16 = -112;
+const ROW_KEY: i16 = -96;
+const PEND_VALUE: i16 = -112;
+const PEND_KEY: i16 = -120;
+const DROP_KEY: i16 = -128;
 /// Where the exit program keeps the row map it looked up through the
 /// generation slot, once per run; see `map::select_rows`.
-const ROWS_SLOT: i16 = -120;
+const ROWS_SLOT: i16 = -136;
 /// Eight bytes for a cgroup or thread comparison, `insn::push_current_filter`.
-const FILTER_SCRATCH: i16 = -128;
+const FILTER_SCRATCH: i16 = -144;
 
 /// The layout of a row key, as byte offsets within it.
 const KEY_TID: i16 = 0;
@@ -113,7 +113,18 @@ const KEY_NR: i16 = 8;
 /// The log2 bucket the call fell into. Part of the key is what makes this a
 /// histogram rather than a mean.
 const KEY_BUCKET: i16 = 12;
-const ROW_KEY_BYTES: usize = 16;
+/// The calling task's name when the call returned.
+///
+/// Part of the key, not of the value: a row is created at a window's first
+/// call of its `(task, syscall, bucket)`, and a name stored there once was the
+/// name of every later call in that window -- a task that renamed itself
+/// (`prctl(PR_SET_NAME)`) kept its old name on every call it had made once,
+/// and a `comm` filter on the new name dropped them (the twenty-second wave's
+/// bpftrace gap 1). In the key, a rename starts new rows, and each call is
+/// counted under the name it was made with.
+const KEY_COMM: i16 = 16;
+const COMM_BYTES: usize = 16;
+const ROW_KEY_BYTES: usize = 32;
 
 /// The layout of a row value.
 const VALUE_COUNT: i16 = 0;
@@ -121,8 +132,10 @@ const VALUE_COUNT: i16 = 0;
 /// the bucket is a factor of two wide and a total built from its bounds would
 /// inherit that error.
 const VALUE_TOTAL_NS: i16 = 8;
-const VALUE_COMM: i16 = 16;
-const COMM_BYTES: usize = 16;
+/// How many of the row's calls returned an error: a value in `[-4095, -1]`,
+/// the range the kernel's `IS_ERR_VALUE` gives an errno. `strace -c`'s
+/// `errors` column (the twenty-second wave's perfsched gap 3).
+const VALUE_ERRORS: i16 = 16;
 /// When the first call of this row's window *began*.
 ///
 /// A bucketed source emits one event per row per window, and stamping that
@@ -133,8 +146,8 @@ const COMM_BYTES: usize = 16;
 ///
 /// Written once, where the row is created, which is that key's first call of
 /// the window: the rows map is drained and emptied every window.
-const VALUE_FIRST_NS: i16 = 32;
-const ROW_VALUE_BYTES: usize = 40;
+const VALUE_FIRST_NS: i16 = 24;
+const ROW_VALUE_BYTES: usize = 32;
 
 /// The pending map: thread id to the moment it entered a syscall, and which.
 const PEND_KEY_BYTES: usize = 4;
@@ -147,7 +160,7 @@ const PEND_VALUE_BYTES: usize = 16;
 /// otherwise would be the one exception nobody expects.
 const LICENSE: &str = "Dual MIT/GPL";
 
-/// One `(task, syscall, bucket)` row's calls over one drain interval.
+/// One `(task, comm, syscall, bucket)` row's calls over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyscallRow {
     pub tid: u32,
@@ -161,6 +174,8 @@ pub struct SyscallRow {
     pub count: u64,
     /// The exact total, which the bucket bounds cannot give back.
     pub total_ns: u64,
+    /// How many of `count` returned an error.
+    pub errors: u64,
     /// When the first of this row's window began, which is what the event is
     /// timestamped with. Zero means unknown, and falls back to the drain.
     pub first_ns: u64,
@@ -191,7 +206,7 @@ impl SyscallRow {
             |bytes: &[u8], at: usize| u32::from_ne_bytes(bytes[at..at + 4].try_into().expect("4"));
         let long =
             |bytes: &[u8], at: usize| u64::from_ne_bytes(bytes[at..at + 8].try_into().expect("8"));
-        let comm = &value[VALUE_COMM as usize..VALUE_COMM as usize + COMM_BYTES];
+        let comm = &key[KEY_COMM as usize..KEY_COMM as usize + COMM_BYTES];
         let end = comm
             .iter()
             .position(|byte| *byte == 0)
@@ -203,6 +218,7 @@ impl SyscallRow {
             bucket: word(key, KEY_BUCKET as usize),
             count: long(value, VALUE_COUNT as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
+            errors: long(value, VALUE_ERRORS as usize),
             first_ns: long(value, VALUE_FIRST_NS as usize),
             comm: String::from_utf8_lossy(&comm[..end]).into_owned(),
         })
@@ -383,6 +399,25 @@ fn exit_instructions(
     insn::push_log2_bucket(&mut program, 9, &LOG2);
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
 
+    // Whether the call failed, kept where a new row's value is built: one
+    // for a return value in `[-4095, -1]`, zero otherwise. The return value
+    // is the tracepoint's second argument, the context's second word.
+    program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_ERRORS, 0));
+    program.push(Insn::ldx(BPF_DW, 1, 6, 8));
+    program.jump_to("not_an_error", Insn::jsge_imm(1, 0, 0));
+    program.jump_to("an_error", Insn::jsge_imm(1, -4095, 0));
+    program.jump_to("not_an_error", Insn::ja());
+    program.label("an_error");
+    program.push(Insn::st_imm(BPF_DW, R10, ROW_VALUE + VALUE_ERRORS, 1));
+    program.label("not_an_error");
+
+    // The name, on every call: it is part of the key (see `KEY_COMM`). The
+    // helper pads with zeroes to the size, so the key has no stale byte.
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, (ROW_KEY + KEY_COMM) as i32));
+    program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
+    program.push(Insn::call(extra_helper::GET_CURRENT_COMM));
+
     // The row map of this interval, taken once: a drain may swap it at any
     // instruction, and a lookup and an insert that named two maps would put
     // one call in each.
@@ -397,6 +432,8 @@ fn exit_instructions(
     program.push(Insn::mov64_imm(1, 1));
     program.push(Insn::atomic_add(BPF_DW, 0, VALUE_COUNT, 1));
     program.push(Insn::atomic_add(BPF_DW, 0, VALUE_TOTAL_NS, 9));
+    program.push(Insn::ldx(BPF_DW, 1, R10, ROW_VALUE + VALUE_ERRORS));
+    program.push(Insn::atomic_add(BPF_DW, 0, VALUE_ERRORS, 1));
     program.jump_to("done", Insn::ja());
 
     program.label("first_call");
@@ -408,12 +445,6 @@ fn exit_instructions(
     program.push(Insn::mov64_reg(1, 8));
     program.push(Insn::sub64_reg(1, 9));
     program.push(Insn::stx(BPF_DW, R10, ROW_VALUE + VALUE_FIRST_NS, 1));
-    // The name is read once, when the row is created, rather than on every
-    // call: it does not change, and this is the hot path.
-    program.push(Insn::mov64_reg(1, R10));
-    program.push(Insn::add64_imm(1, (ROW_VALUE + VALUE_COMM) as i32));
-    program.push(Insn::mov64_imm(2, COMM_BYTES as i32));
-    program.push(Insn::call(extra_helper::GET_CURRENT_COMM));
     program.push(row_map(1, ROWS_SLOT));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, ROW_KEY as i32));
@@ -618,6 +649,7 @@ mod tests {
                 bucket,
                 count: 1,
                 total_ns: 0,
+                errors: 0,
                 first_ns: 0,
                 comm: String::new(),
             };
@@ -806,7 +838,7 @@ mod tests {
         let fields = [
             (VALUE_COUNT, 8),
             (VALUE_TOTAL_NS, 8),
-            (VALUE_COMM, COMM_BYTES as i16),
+            (VALUE_ERRORS, 8),
             (VALUE_FIRST_NS, 8),
         ];
         let mut covered = [false; ROW_VALUE_BYTES];
@@ -824,6 +856,67 @@ mod tests {
         assert!(
             covered.iter().all(|byte| *byte),
             "the row value has a byte the program never writes"
+        );
+    }
+
+    /// Every byte of the row key is a field: a byte nobody wrote would hash
+    /// one task's calls into rows nobody else's share, and the drain would
+    /// report them apart for no reason a reader could see.
+    #[test]
+    fn every_byte_of_the_row_key_is_accounted_for() {
+        let fields = [
+            (KEY_TID, 4),
+            (KEY_TGID, 4),
+            (KEY_NR, 4),
+            (KEY_BUCKET, 4),
+            (KEY_COMM, COMM_BYTES as i16),
+        ];
+        let mut covered = [false; ROW_KEY_BYTES];
+        for (at, size) in fields {
+            for byte in at..at + size {
+                assert!(
+                    !covered[byte as usize],
+                    "the row key writes byte {byte} twice"
+                );
+                covered[byte as usize] = true;
+            }
+        }
+        assert!(covered.iter().all(|byte| *byte));
+    }
+
+    /// The defect this layout fixes (the twenty-second wave's bpftrace gap 1):
+    /// the name is read out of the key, so two names are two rows.
+    #[test]
+    fn the_name_is_read_out_of_the_key() {
+        let mut key = [0u8; ROW_KEY_BYTES];
+        key[KEY_COMM as usize..KEY_COMM as usize + 5].copy_from_slice(b"after");
+        let mut value = [0u8; ROW_VALUE_BYTES];
+        value[VALUE_ERRORS as usize] = 2;
+        let row = SyscallRow::decode(&key, &value).expect("a row");
+        assert_eq!(row.comm, "after");
+        assert_eq!(row.errors, 2);
+    }
+
+    /// The exit program reads the return value and the name on every call: a
+    /// name read only when a row was created is the defect above.
+    #[test]
+    fn the_exit_program_reads_the_name_on_every_call() {
+        let Some(btf) = kernel_btf() else { return };
+        let program = exit_instructions(&btf, 3, 4, 5).expect("a program");
+        let comm_call = program
+            .iter()
+            .position(|insn| insn.code == 0x85 && insn.imm == extra_helper::GET_CURRENT_COMM)
+            .expect("the name is read");
+        let first_lookup = program
+            .iter()
+            .enumerate()
+            .filter(|(_, insn)| insn.code == 0x85 && insn.imm == helper::MAP_LOOKUP_ELEM)
+            .map(|(at, _)| at)
+            .nth(1)
+            .expect("the row lookup");
+        assert!(
+            comm_call < first_lookup,
+            "the name is in the key the lookup uses"
         );
     }
 
