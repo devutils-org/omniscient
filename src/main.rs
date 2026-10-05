@@ -52,8 +52,54 @@ fn exit_for(whose: omn::collect::Whose) -> u8 {
     use omn::collect::Whose;
     match whose {
         Whose::Request => EXIT_REJECTED,
-        Whose::Machine => EXIT_UNAVAILABLE,
+        Whose::Machine => {
+            said_which(Unavailable::Machine);
+            EXIT_UNAVAILABLE
+        }
         Whose::Build => EXIT_NOT_IMPLEMENTED,
+    }
+}
+
+/// Which of the two answers exit 1 gives: the machine refused the run, or
+/// the run failed. A caller deciding whether a pair is a skip (the machine
+/// cannot) or a failure (it could, and something broke) reads it from the
+/// last line of stderr, which is one of [`Unavailable::line`]'s, rather than
+/// guess it from whether results were written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unavailable {
+    /// Refused before anything ran: no backend here, a counter that would
+    /// not open, a target that is not there. Nothing was measured.
+    Machine,
+    /// The run started and failed before it wrote its results.
+    FailedUnwritten,
+    /// The run reached its end and wrote its results, and a collector broke
+    /// the program it measured on the way.
+    FailedWritten,
+}
+
+impl Unavailable {
+    fn line(self) -> &'static str {
+        match self {
+            Unavailable::Machine => "exit 1: the machine refused the run; nothing was measured",
+            Unavailable::FailedUnwritten => {
+                "exit 1: the run failed after it started, before writing its results"
+            }
+            Unavailable::FailedWritten => {
+                "exit 1: the run failed after it started; what it read is written above"
+            }
+        }
+    }
+}
+
+/// Whether a run has started: the collectors attached and the program
+/// released. An error after it is a run that failed, not a refusal.
+static RUN_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Says which exit 1 this is, once per process.
+fn said_which(which: Unavailable) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !SAID.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        eprintln!("{}", which.line());
     }
 }
 
@@ -86,7 +132,48 @@ fn restore_own_dumpability() {
     }
 }
 
+mod repeat;
+
+/// When this process started, on `CLOCK_MONOTONIC`: what a run attached to a
+/// process already running says its attach came after.
+static STARTED_NS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// What a run attached to processes already running says of when it
+/// attached: what they did between the command and the attach is in no
+/// reading, and `perf stat -p` and `perf record -p` attach within a few
+/// milliseconds, so a reader comparing against them needs to know.
+fn attached_late(resolved: &[ResolvedRequest], collections: &[collect::Collection]) {
+    let Some(started_ns) = STARTED_NS.get() else {
+        return;
+    };
+    for (resolved, collection) in resolved.iter().zip(collections) {
+        let target = &resolved.request.target;
+        if !matches!(
+            target,
+            omn::request::Target::Pid(_)
+                | omn::request::Target::Tid(_)
+                | omn::request::Target::Cgroup(_)
+                | omn::request::Target::Container(_)
+        ) || !collection.window.attached
+        {
+            continue;
+        }
+        let after_ns = collection.window.opened_ns.saturating_sub(*started_ns);
+        eprintln!(
+            "note: `{}` attached to {target} {} after omn started; what it did before that is \
+             in no reading",
+            resolved
+                .request
+                .label
+                .as_deref()
+                .unwrap_or(resolved.request.source.as_str()),
+            span(after_ns)
+        );
+    }
+}
+
 fn main() -> ExitCode {
+    let _ = STARTED_NS.set(omn::clock::monotonic_ns());
     restore_own_dumpability();
     // A launched program's orphans are reparented here, where a stop can
     // still end them (`collect::adopt_orphans`). This process starts nothing
@@ -122,7 +209,14 @@ fn main() -> ExitCode {
             // validator, has always exited 2, and the two are the same answer.
             match error.downcast_ref::<omn::error::ParseError>() {
                 Some(_) => ExitCode::from(EXIT_REJECTED),
-                None => ExitCode::from(EXIT_UNAVAILABLE),
+                None => {
+                    said_which(if RUN_STARTED.load(std::sync::atomic::Ordering::SeqCst) {
+                        Unavailable::FailedUnwritten
+                    } else {
+                        Unavailable::Machine
+                    });
+                    ExitCode::from(EXIT_UNAVAILABLE)
+                }
             }
         }
     }
@@ -228,10 +322,73 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         None => cli::to_session(&args, &catalog)?,
     };
 
+    // A session's `launch` is the run's window, and a request's launch would
+    // be a second program: the program is launched once, as one or the
+    // other. Refused before anything is asked of the machine.
+    if let Some(launched) = session.requests.iter().find(|request| {
+        !session.launch.is_empty() && matches!(request.target, omn::request::Target::Launch(_))
+    }) {
+        eprintln!(
+            "error: the session launches `{}` as its window, and `{}` launches a program of its \
+             own: a run launches one program, as the session's `launch` or as a request's \
+             target",
+            session.launch.join(" "),
+            launched
+                .label
+                .clone()
+                .unwrap_or_else(|| launched.source.to_string())
+        );
+        return Ok(ExitCode::from(EXIT_REJECTED));
+    }
+
     let report = match validate::validate_session(&catalog, &session) {
         Ok(report) => report,
-        Err(rejections) => return Ok(reject(&rejections)),
+        Err(mut rejections) => {
+            // A program alone is the target; a source that cannot follow
+            // one is measured for its life beside a target it accepts, and
+            // the reader is told the spelling rather than left at "cannot".
+            if args.file.is_none() && !args.program.is_empty() && session.launch.is_empty() {
+                for rejection in &mut rejections {
+                    if rejection.message.contains("cannot be measured per launch") {
+                        let hint = format!(
+                            "to measure it for the program's life, name the target beside the \
+                             program: `omn trace {} --system -- {}`",
+                            args.source
+                                .iter()
+                                .map(|source| source.as_str())
+                                .collect::<Vec<_>>()
+                                .join(","),
+                            args.program.join(" ")
+                        );
+                        rejection.hint = Some(match rejection.hint.take() {
+                            Some(first) => format!("{first}\n  hint: {hint}"),
+                            None => hint,
+                        });
+                    }
+                }
+            }
+            return Ok(reject(&rejections));
+        }
     };
+
+    // `-r` is refused before the machine is asked anything: a repetition
+    // that cannot report a spread, or of a run with no single end, is a
+    // request that cannot mean what it asks.
+    if let Some(repeat) = args.repeat {
+        let refusal = repeat::refusal(&session, repeat).or_else(|| {
+            (repeat > 1 && !session.format.renders_documents()).then(|| {
+                format!(
+                    "-r writes each value's spread beside every run's results, which `{}` cannot \
+                     carry: text, json, yaml or toml",
+                    session.format
+                )
+            })
+        });
+        if let Some(refusal) = refusal {
+            eprintln!("error: {refusal}");
+            return Ok(ExitCode::from(EXIT_REJECTED));
+        }
+    }
 
     // A dump is a document about the request, and a results format cannot
     // hold one. Asked before the machine is, because the answer does not
@@ -300,6 +457,7 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
                 }
                 Err(reason) => {
                     eprintln!("error: {reason}");
+                    said_which(Unavailable::Machine);
                     return Ok(ExitCode::FAILURE);
                 }
             },
@@ -428,6 +586,19 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         );
     }
 
+    let repeat = args.repeat.unwrap_or(1);
+    if repeat > 1 {
+        return measure_repeated(
+            &catalog,
+            &capabilities,
+            &session,
+            &report,
+            &defaulted,
+            &resolutions,
+            &unserved,
+            repeat,
+        );
+    }
     measure(
         &catalog,
         &capabilities,
@@ -1229,10 +1400,11 @@ fn shared_stdout_warning(session: &Session) -> Option<String> {
     // person, who can see what came from where, and it is the format every run
     // launching a program in a terminal uses.
     let structured = session.format != OutputFormat::Text;
-    let launches = session
-        .requests
-        .iter()
-        .any(|request| matches!(request.target, omn::request::Target::Launch(_)));
+    let launches = !session.launch.is_empty()
+        || session
+            .requests
+            .iter()
+            .any(|request| matches!(request.target, omn::request::Target::Launch(_)));
     (structured && launches && session.out.is_none()).then(|| {
         format!(
             "`{}` is one document and the launched program writes to the same stdout, so \
@@ -1414,11 +1586,14 @@ fn measure(
     announce(session, report, defaulted);
 
     let mut ladder = Ladder::new(catalog, capabilities, resolved);
-    let collections = match collect::run_all_within_unserved(resolved, &mut ladder, unserved) {
+    let bound = (!session.launch.is_empty()).then_some(session.launch.as_slice());
+    let collections = match collect::run_all_bounded(resolved, &mut ladder, unserved, bound) {
         Ok(collections) => collections,
         Err(error) => return Ok(refused_at_collect(catalog, &error, resolved)),
     };
+    RUN_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
     let failures = failures(&collections);
+    attached_late(resolved, &collections);
     let (run, costs, served_by) = assemble(catalog, session, &ladder, resolved, collections)?;
 
     // Bytes rather than a `String`, because one of the nine formats is not
@@ -1453,6 +1628,94 @@ fn measure(
     Ok(outcome(&failures))
 }
 
+/// `-r N`: the session run `repeat` times, one after another, each run a
+/// launch of its own, and each summary value's mean and spread across them
+/// ([`repeat::spread`]). Every run's costs and losses are said as a run's
+/// are, numbered; every run's results are kept in the document, and under
+/// `-o` in a directory of their own, `run-<i>`.
+#[allow(clippy::too_many_arguments)]
+fn measure_repeated(
+    catalog: &Catalog,
+    capabilities: &Capabilities,
+    session: &Session,
+    report: &Report,
+    defaulted: &Defaulted,
+    resolved: &[ResolvedRequest],
+    unserved: &[collect::Unserved],
+    repeat: u32,
+) -> anyhow::Result<ExitCode> {
+    announce(session, report, defaulted);
+    let bound = (!session.launch.is_empty()).then_some(session.launch.as_slice());
+    let mut runs = Vec::with_capacity(repeat as usize);
+    let mut broke = Vec::new();
+    for index in 1..=repeat {
+        let mut ladder = Ladder::new(catalog, capabilities, resolved);
+        let collections = match collect::run_all_bounded(resolved, &mut ladder, unserved, bound) {
+            Ok(collections) => collections,
+            Err(error) => {
+                eprintln!("error: run {index} of {repeat} could not run");
+                return Ok(refused_at_collect(catalog, &error, resolved));
+            }
+        };
+        RUN_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        for failure in failures(&collections) {
+            if !broke.contains(&failure) {
+                broke.push(failure);
+            }
+        }
+        attached_late(resolved, &collections);
+        let (run, costs, served_by) = assemble(catalog, session, &ladder, resolved, collections)?;
+        eprintln!("run {index} of {repeat}:");
+        report_costs(&costs, &run);
+        if let Some(directory) = &session.out {
+            let output = encode::run_output_bytes(session.format, &run)?;
+            write_artifacts(
+                &directory.join(format!("run-{index}")),
+                session.format,
+                &served_by,
+                &costs,
+                &output,
+            )?;
+        }
+        runs.push(run);
+    }
+    // The requests whose program each run launched anew, by the label their
+    // results carry.
+    let launched: Vec<String> = resolved
+        .iter()
+        .zip(&runs[0].results)
+        .filter(|(resolved, _)| matches!(resolved.request.target, omn::request::Target::Launch(_)))
+        .map(|(_, results)| results.label.clone())
+        .collect();
+    let spread = repeat::spread(&runs, &launched);
+    let document = repeat::Repeated {
+        repeat,
+        spread: &spread,
+        runs: &runs,
+    };
+    let output = match session.format {
+        OutputFormat::Text => repeat::text(repeat, &spread),
+        format => format.serialize_document(&document)?,
+    };
+    print!("{output}");
+    for caveat in report.caveats() {
+        eprintln!("caveat: {caveat}");
+    }
+    if let Some(directory) = &session.out {
+        std::fs::create_dir_all(directory)?;
+        std::fs::write(
+            directory.join("repeat.json"),
+            serde_json::to_string_pretty(&document)?,
+        )?;
+        eprintln!(
+            "\nwrote each run's results to {0}/run-<i>, and the spread across them to \
+             {0}/repeat.json",
+            directory.display()
+        );
+    }
+    Ok(outcome(&broke))
+}
+
 /// What the collectors said they broke ([`collect::Collection::failure`]),
 /// each sentence once however many collections of one collector carried it.
 fn failures(collections: &[collect::Collection]) -> Vec<String> {
@@ -1476,6 +1739,7 @@ fn outcome(failures: &[String]) -> ExitCode {
     if failures.is_empty() {
         ExitCode::SUCCESS
     } else {
+        said_which(Unavailable::FailedWritten);
         ExitCode::FAILURE
     }
 }
@@ -1648,11 +1912,13 @@ fn record(
         sink: &mut sink,
     };
     let mut cheaper = Shared(&ladder);
+    let bound = (!session.launch.is_empty()).then_some(session.launch.as_slice());
     let (collections, recorded) =
-        match collect::record_within(resolved, &mut cheaper, &mut recorder) {
+        match collect::record_bounded(resolved, &mut cheaper, &mut recorder, bound) {
             Ok(done) => done,
             Err(error) => return Ok(refused_at_collect(catalog, &error, resolved)),
         };
+    RUN_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
     drop(recorder);
     let failures = failures(&collections);
 
@@ -2745,6 +3011,7 @@ fn top_session(
         decompose: Vec::new(),
         escalate: None,
         record: None,
+        launch: Vec::new(),
     };
     Ok((session, refused, notes))
 }

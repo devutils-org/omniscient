@@ -270,6 +270,7 @@ impl Ask {
             }],
             escalate: None,
             record: None,
+            launch: Vec::new(),
         }
     }
 }
@@ -458,12 +459,19 @@ pub struct Followed {
 /// The rest of a job: the processes the program started, other than the
 /// child decomposed in a wait's place, and how long they were busy.
 ///
-/// The run does not say which of them ran within the wait, nor which is
-/// whose parent: these are every busy task a source placed in a process off
-/// the way, so for a program that waits for its job most of its life they
-/// are the rest of the wait, and for one that does not they may be more.
+/// The run does not say which of them ran within the wait. Where it says
+/// whose parent each process is (`ppid`), they are the processes under the
+/// chosen child's parent ([`Job::under`]); where it does not, every busy
+/// task a source placed in a process off the way, so for a program that
+/// waits for its job most of its life they are the rest of the wait, and
+/// for one that does not they may be more.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Job {
+    /// The process the job was restricted to, the chosen child's parent and
+    /// everything under it, when the run said whose parent each process is;
+    /// absent, the tasks are every busy one off the way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub under: Option<u64>,
     /// The tasks, busiest first.
     pub tasks: Vec<String>,
     /// Their time on a cpu, added up.
@@ -556,6 +564,18 @@ pub struct Answer {
     /// the first pass had named. The answer is the second pass's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub second_pass: Option<String>,
+    /// What the collectors said they broke in the program, each sentence
+    /// once, over every run of both passes ([`engine::Ran::failures`]). Not
+    /// empty, the verdict is read off a program the tool broke: the text
+    /// says so, and `omn -f`'s exit 1 is wanted beside it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<String>,
+    /// Where each launch's standard error was kept, in the order the
+    /// launches ran (both passes), when `--program-stderr` (or
+    /// `OMN_PROGRAM_STDERR`) named a file: `FILE.1`, `FILE.2`, ... -- the
+    /// file itself holds the last launch's, as it would after one run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub program_stderr: Vec<String>,
 }
 
 impl Answer {
@@ -622,6 +642,16 @@ impl Answer {
                 "  without `{}` ({}): {}",
                 dropped.label, dropped.source, dropped.reason
             );
+        }
+        if !self.program_stderr.is_empty() {
+            let _ = writeln!(
+                out,
+                "  the program's stderr, run by run: {}",
+                self.program_stderr.join(", ")
+            );
+        }
+        for failure in &self.failures {
+            let _ = writeln!(out, "  broken by the tool: {failure}");
         }
         out
     }
@@ -691,9 +721,13 @@ fn write_reading(out: &mut String, run: &Reading, title: &str, indent: &str) {
         );
         write_reading(out, &followed.reading, "", &format!("{indent}  "));
         if let Some(job) = &followed.job {
+            let whose = match job.under {
+                Some(under) => format!("under process {under}, the child's parent"),
+                None => "off the way".to_owned(),
+            };
             let _ = writeln!(
                 out,
-                "{indent}  the rest of the job, {} other busy task(s) off the way: on a cpu {}, \
+                "{indent}  the rest of the job, {} other busy task(s) {whose}: on a cpu {}, \
                  runnable {} ({})",
                 job.tasks.len(),
                 span(job.on_cpu),
@@ -754,11 +788,11 @@ pub fn answer(
     first
         .requests
         .retain(|request| request.label.as_deref() != Some(MUTEX));
-    let answer = conclude(
-        ask,
-        run_all(catalog, capabilities, &first, ask)?,
-        dropped.clone(),
-    );
+    let mut launches = Launches::from_environment(&ask.target);
+    let (runs, failures) = run_all(catalog, capabilities, &first, ask, &mut launches)?;
+    let mut answer = conclude(ask, runs, dropped.clone());
+    answer.failures = failures;
+    answer.program_stderr = launches.kept.clone();
     if !mutex {
         return Ok(answer);
     }
@@ -771,7 +805,15 @@ pub fn answer(
     else {
         return Ok(answer);
     };
-    let mut second = conclude(ask, run_all(catalog, capabilities, &full, ask)?, dropped);
+    let (runs, failures) = run_all(catalog, capabilities, &full, ask, &mut launches)?;
+    let mut second = conclude(ask, runs, dropped);
+    second.failures = answer.failures.clone();
+    for failure in failures {
+        if !second.failures.contains(&failure) {
+            second.failures.push(failure);
+        }
+    }
+    second.program_stderr = launches.kept;
     let window = match ask.target {
         Target::Launch(_) => format!("a second pass of {} run(s)", ask.runs),
         _ => "a second window as long as the first".to_owned(),
@@ -784,18 +826,105 @@ pub fn answer(
     Ok(second)
 }
 
+/// Every run of one pass, read, and what the collectors said they broke in
+/// any of them, each sentence once.
 fn run_all(
     catalog: &Catalog,
     capabilities: &Capabilities,
     session: &Session,
     ask: &Ask,
-) -> Result<Vec<Reading>, TriageError> {
+    launches: &mut Launches,
+) -> Result<(Vec<Reading>, Vec<String>), TriageError> {
     let mut runs = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
     for _ in 0..ask.runs {
-        let run = engine::run(catalog, capabilities, session)?;
-        runs.push(read(&run, &ask.target)?);
+        launches.before();
+        let run = engine::run(catalog, capabilities, session);
+        // Kept whether or not the run could be read: a launch that failed
+        // is the one whose stderr says why.
+        launches.ran()?;
+        let ran = run?;
+        for failure in ran.failures {
+            if !failures.contains(&failure) {
+                failures.push(failure);
+            }
+        }
+        runs.push(read(&ran.run, &ask.target)?);
     }
-    Ok(runs)
+    Ok((runs, failures))
+}
+
+/// The launches of one answer, and where each one's standard error was
+/// kept.
+///
+/// The launch writes the program's stderr to the file `--program-stderr`
+/// names, created or truncated (`OMN_PROGRAM_STDERR`, which the flag sets):
+/// with `--runs N`, or a second pass, each launch truncated the one before
+/// it, and only the last run's was left. So after each launch the file is
+/// copied to `FILE.<n>`, `n` counting the launches from 1 in the order they
+/// ran, and the file itself is left holding the last one's, as after a
+/// single run. Nothing is copied for a process already running, whose
+/// stderr is not the tool's to keep.
+#[derive(Debug, Default)]
+pub struct Launches {
+    file: Option<std::path::PathBuf>,
+    /// The copies made, in order.
+    pub kept: Vec<String>,
+}
+
+impl Launches {
+    /// The file the launch writes to, from the environment the launch reads
+    /// it from; none for a target that is not launched.
+    pub fn from_environment(target: &Target) -> Self {
+        let file = std::env::var_os(crate::collect::PROGRAM_STDERR_VARIABLE)
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from);
+        Self::to(
+            matches!(target, Target::Launch(_))
+                .then_some(file)
+                .flatten(),
+        )
+    }
+
+    /// The launches of an answer whose program writes its stderr to `file`.
+    pub fn to(file: Option<std::path::PathBuf>) -> Self {
+        Self {
+            file,
+            kept: Vec::new(),
+        }
+    }
+
+    /// A launch is about to start: an earlier launch's file is taken away,
+    /// so one that fails before it writes any is not kept under its number.
+    pub fn before(&self) {
+        if let Some(file) = &self.file {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
+    /// One launch ended: its stderr copied beside the file, numbered. A
+    /// launch that wrote no file -- it failed before it started -- keeps
+    /// nothing and takes no number.
+    pub fn ran(&mut self) -> Result<(), TriageError> {
+        let Some(file) = &self.file else {
+            return Ok(());
+        };
+        if !file.exists() {
+            return Ok(());
+        }
+        let mut copy = file.clone().into_os_string();
+        copy.push(format!(".{}", self.kept.len() + 1));
+        let copy = std::path::PathBuf::from(copy);
+        std::fs::copy(file, &copy).map_err(|error| engine::Failure {
+            whose: crate::collect::Whose::Machine,
+            message: format!(
+                "the program's stderr could not be kept as {}: {error}",
+                copy.display()
+            ),
+        })?;
+        self.kept.push(copy.display().to_string());
+        Ok(())
+    }
 }
 
 /// Why the run the verdict reads needs `sched.mutex` to split a sleep, if it
@@ -846,6 +975,8 @@ pub fn conclude(ask: &Ask, runs: Vec<Reading>, dropped: Vec<Dropped>) -> Answer 
         runs,
         dropped,
         second_pass: None,
+        failures: Vec::new(),
+        program_stderr: Vec::new(),
     }
 }
 
@@ -1263,6 +1394,7 @@ pub fn read(run: &Run, target: &Target) -> Result<Reading, TriageError> {
         run,
         tables: &output.tables,
         pid_of: pids(run),
+        parent_of: parents(run),
         seen: BTreeSet::from([task.clone()]),
         processes: BTreeSet::new(),
     };
@@ -1482,6 +1614,21 @@ fn task_number(task: &str) -> Option<u64> {
 
 /// The process of every task an event tied to one: the sched sources carry
 /// `pid` beside the task, the profile does not.
+/// Each process's parent, by pid, from the events that carry both `pid` and
+/// `ppid`: empty until a source says it.
+fn parents(run: &Run) -> BTreeMap<u64, u64> {
+    let mut parents = BTreeMap::new();
+    for event in &run.events {
+        let (Some(pid), Some(ppid)) = (attr(event, "pid"), attr(event, "ppid")) else {
+            continue;
+        };
+        if pid > 0.0 && ppid > 0.0 {
+            parents.entry(pid as u64).or_insert(ppid as u64);
+        }
+    }
+    parents
+}
+
 fn pids(run: &Run) -> BTreeMap<String, u64> {
     let mut pids = BTreeMap::new();
     for event in &run.events {
@@ -1567,6 +1714,8 @@ struct Tasks<'a> {
     run: &'a Run,
     tables: &'a [Breakdown],
     pid_of: BTreeMap<String, u64>,
+    /// Each process's parent, where an event carried `ppid`.
+    parent_of: BTreeMap<u64, u64>,
     /// Tasks already read, which are never followed into again.
     seen: BTreeSet<String>,
     /// Processes already on the way, which a child is never one of.
@@ -1791,15 +1940,26 @@ impl Tasks<'_> {
 
     /// The busy tasks a source placed in a process off the way, other than
     /// `chosen`: the rest of the job a child was chosen from.
+    ///
+    /// When the run says whose parent each process is (`ppid`), only the
+    /// processes under the chosen child's parent -- the driver the wait
+    /// named (`gcc` above `cc1` and `as`), itself included -- are the job;
+    /// otherwise every busy task off the way, which may be more.
     fn job(&self, chosen: &str) -> Option<Job> {
+        let under = self
+            .pid_of
+            .get(chosen)
+            .and_then(|pid| self.parent_of.get(pid))
+            .copied();
         let mut busy_tasks: Vec<(&Breakdown, f64)> = self
             .tables
             .iter()
             .filter(|table| table.key != chosen && !self.seen.contains(&table.key))
             .filter(|table| {
-                self.pid_of
-                    .get(&table.key)
-                    .is_some_and(|pid| !self.processes.contains(pid))
+                self.pid_of.get(&table.key).is_some_and(|pid| {
+                    !self.processes.contains(pid)
+                        && under.is_none_or(|under| self.descends(*pid, under))
+                })
             })
             .map(|table| (table, busy(table)))
             .filter(|(_, busy)| *busy > 0.0)
@@ -1809,6 +1969,7 @@ impl Tasks<'_> {
         }
         busy_tasks.sort_by(|a, b| b.1.total_cmp(&a.1));
         Some(Job {
+            under,
             tasks: busy_tasks
                 .iter()
                 .map(|(table, _)| table.key.clone())
@@ -1822,6 +1983,21 @@ impl Tasks<'_> {
                 .map(|(table, _)| row_amount(table, RUNNABLE))
                 .sum(),
         })
+    }
+
+    /// Whether process `pid` is `root` or under it, by the parents the run
+    /// said.
+    fn descends(&self, mut pid: u64, root: u64) -> bool {
+        for _ in 0..64 {
+            if pid == root {
+                return true;
+            }
+            match self.parent_of.get(&pid) {
+                Some(parent) if *parent != pid => pid = *parent,
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// The busiest task no source placed in a process, not already read.
@@ -2536,6 +2712,64 @@ mod tests {
         assert_eq!(answer.slowest, Some(0));
     }
 
+    /// With `--program-stderr FILE` and several launches, each launch's
+    /// stderr is kept as `FILE.<n>` in the order they ran, the file itself
+    /// the last one's; a launch that wrote nothing takes no number; and a
+    /// process already running keeps nothing.
+    #[test]
+    fn each_launch_s_stderr_is_kept_under_its_number() {
+        let dir = std::env::temp_dir().join(format!("omn-launches-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("stderr.txt");
+        let mut launches = Launches::to(Some(file.clone()));
+        for said in ["first run\n", "second run\n"] {
+            launches.before();
+            assert!(!file.exists(), "the earlier launch's file is taken away");
+            std::fs::write(&file, said).unwrap();
+            launches.ran().unwrap();
+        }
+        // A launch that failed before it opened the file.
+        launches.before();
+        launches.ran().unwrap();
+        let first = format!("{}.1", file.display());
+        let second = format!("{}.2", file.display());
+        assert_eq!(launches.kept, [first.clone(), second.clone()]);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "first run\n");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "second run\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let attached = Target::Pid(vec![1]);
+        assert!(Launches::from_environment(&attached).file.is_none());
+    }
+
+    /// What a collector broke is carried by the answer and said in its text,
+    /// so a verdict read off a broken program never reads as a clean one.
+    #[test]
+    fn an_answer_says_what_the_tool_broke_and_where_each_stderr_went() {
+        let runs = vec![reading(
+            100e6,
+            vec![state("on-cpu", Limit::Cpu, Some(90e6))],
+            0.0,
+        )];
+        let mut answer = conclude(&ask(Objective::Latency, 1), runs, Vec::new());
+        assert!(!answer.text().contains("broken by the tool"));
+        answer.failures = vec!["the GPU collector stopped the program".to_owned()];
+        answer.program_stderr = vec!["err.txt.1".to_owned()];
+        let text = answer.text();
+        assert!(
+            text.contains("broken by the tool: the GPU collector stopped the program"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the program's stderr, run by run: err.txt.1"),
+            "{text}"
+        );
+        let json = serde_json::to_value(&answer).unwrap();
+        assert_eq!(json["failures"][0], "the GPU collector stopped the program");
+        let back: Answer = serde_json::from_value(json).unwrap();
+        assert_eq!(back, answer);
+    }
+
     fn followed(
         relation: Relation,
         wait: Option<&str>,
@@ -3235,6 +3469,67 @@ mod tests {
         );
         let json = serde_json::to_value(&reading).unwrap();
         assert_eq!(json["followed"]["job"]["tasks"][0], "task:300");
+    }
+
+    /// Once the events say whose parent each process is, the rest of the job
+    /// is only what runs under the chosen child's parent: a busy process the
+    /// program started beside the job (another make target's driver) is not
+    /// in it.
+    #[test]
+    fn with_ppid_the_job_is_what_runs_under_the_chosen_child_s_parent() {
+        let parented = |tid: i32, pid: u64, ppid: u64| {
+            event(
+                "sched.runqlat",
+                tid,
+                vec![Attr::uint("pid", pid), Attr::uint("ppid", ppid)],
+            )
+        };
+        let tables = || {
+            vec![
+                main_table(),
+                // The driver's busiest compiler, and its assembler.
+                table("task:200", 120.0 * MS, None, None),
+                table("task:210", 20.0 * MS, Some(5.0 * MS), None),
+                // The driver itself.
+                table("task:150", 5.0 * MS, None, None),
+                // Another driver's compiler, beside the job.
+                table("task:300", 90.0 * MS, None, None),
+            ]
+        };
+        let events = vec![
+            main_thread_asleep(300.0 * MS),
+            parented(200, 200, 150),
+            parented(210, 210, 150),
+            parented(150, 150, 100),
+            parented(300, 300, 160),
+            parented(160, 160, 100),
+        ];
+        let reading = read_launched(&run_of(tables(), events, false));
+        let followed = reading.followed.as_deref().expect("followed");
+        assert_eq!(followed.reading.task, "task:200");
+        let job = followed.job.as_ref().expect("the rest of the job");
+        assert_eq!(job.under, Some(150));
+        assert_eq!(job.tasks, ["task:210", "task:150"]);
+        assert!((job.on_cpu - 25.0 * MS).abs() < 1.0, "{job:?}");
+        let mut text = String::new();
+        write_reading(&mut text, &reading, "", "");
+        assert!(
+            text.contains("under process 150, the child's parent"),
+            "{text}"
+        );
+
+        // Without `ppid`, every busy task off the way, as before.
+        let unparented = vec![
+            main_thread_asleep(300.0 * MS),
+            placing(200, 200),
+            placing(210, 210),
+            placing(150, 150),
+            placing(300, 300),
+        ];
+        let reading = read_launched(&run_of(tables(), unparented, false));
+        let job = reading.followed.as_deref().unwrap().job.clone().unwrap();
+        assert_eq!(job.under, None);
+        assert_eq!(job.tasks, ["task:300", "task:210", "task:150"]);
     }
 
     /// A child process a source placed, with no wait on the stack: followed
