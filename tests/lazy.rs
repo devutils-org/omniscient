@@ -207,6 +207,10 @@ fn what_cannot_mean_anything_beside_a_family_is_refused_by_name() {
             &["nosuchfamily", "--", "true"],
             "neither a source nor a family",
         ),
+        (
+            &["-d", "1s", "--system", "nosuchfamily"],
+            "neither a source nor a family",
+        ),
         (&["power", "--", "true"], "--system"),
         (&["power", "--system"], "--duration"),
         (
