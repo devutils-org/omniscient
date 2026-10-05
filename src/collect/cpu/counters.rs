@@ -45,6 +45,7 @@ const TICK: StdDuration = StdDuration::from_millis(10);
 
 const CYCLES: Counter = Counter::hardware("cycles", perf::PERF_COUNT_HW_CPU_CYCLES);
 const INSTRUCTIONS: Counter = Counter::hardware("instructions", perf::PERF_COUNT_HW_INSTRUCTIONS);
+const BRANCHES: Counter = Counter::hardware("branches", perf::PERF_COUNT_HW_BRANCH_INSTRUCTIONS);
 const BRANCH_MISSES: Counter =
     Counter::hardware("branch_misses", perf::PERF_COUNT_HW_BRANCH_MISSES);
 const CACHE_MISSES: Counter = Counter::hardware("cache_misses", perf::PERF_COUNT_HW_CACHE_MISSES);
@@ -58,6 +59,11 @@ const MIGRATIONS: Counter = Counter::software("migrations", perf::PERF_COUNT_SW_
 /// cpu has no hardware PMU -- most cloud VMs -- and says so: a nanosecond of
 /// cpu is a cycle only at one gigahertz, and never through a frequency change.
 const CPU_CLOCK: Counter = Counter::software("cpu_clock_ns", perf::PERF_COUNT_SW_CPU_CLOCK);
+/// The kernel's task clock: nanoseconds the task's threads held a cpu, by the
+/// scheduler's clock -- `perf stat`'s `task-clock`. What `cpu.oncpu_time`
+/// counts with on `pmu:sw`, the one backend of that source that serves a
+/// counted window over a launched program without tracefs.
+const TASK_CLOCK: Counter = Counter::software("task_clock_ns", perf::PERF_COUNT_SW_TASK_CLOCK);
 
 // The cache descriptors. These are the `mem.cache_*` sources, and they are
 // here rather than under `src/collect/mem/` because the mechanism decides who
@@ -167,6 +173,14 @@ pub const SPECS: &[Spec] = &[
         counters: &[INSTRUCTIONS],
         value: Value::Count,
     },
+    // Retired branch instructions: `perf stat`'s default `branches` line, and
+    // the denominator of its branch-miss ratio.
+    Spec {
+        source: "cpu.branches",
+        backend: "pmu",
+        counters: &[BRANCHES],
+        value: Value::Count,
+    },
     Spec {
         source: "cpu.branch_misses",
         backend: "pmu",
@@ -177,6 +191,15 @@ pub const SPECS: &[Spec] = &[
         source: "cpu.cache_misses",
         backend: "pmu",
         counters: &[CACHE_MISSES],
+        value: Value::Count,
+    },
+    // Task-clock as a source (perfstat 4): the same nanoseconds
+    // `cpu.oncpu_time` reads elsewhere from the scheduler, counted over the
+    // window by the kernel's own software counter.
+    Spec {
+        source: "cpu.oncpu_time",
+        backend: "pmu:sw",
+        counters: &[TASK_CLOCK],
         value: Value::Count,
     },
     Spec {
@@ -1433,6 +1456,70 @@ mod tests {
             "the counter varies by {:.2} % between identical runs ({counted:?}), so this \
              machine cannot resolve the differences this family exists to measure",
             cv * 100.0
+        );
+    }
+
+    /// `cpu.branches` against a loop of known shape: `known_loop` retires
+    /// exactly one branch per iteration (the `jnz` or `b.ne` that closes it),
+    /// so the user-mode count is the iteration count plus the few branches of
+    /// the enable and read around it.
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn branches_match_a_loop_with_one_branch_per_iteration() {
+        const ITERATIONS: u64 = 50_000_000;
+        let Ok(group) = crate::perf::CounterGroup::open_user_mode(&[BRANCHES], Scope::Process(0))
+        else {
+            eprintln!("skipped: this machine refuses unprivileged perf counting");
+            return;
+        };
+        group.enable().expect("enable");
+        known_loop(ITERATIONS);
+        let readings = group.read_final().expect("read");
+        let count = readings[0].value as f64;
+        let error = (count - ITERATIONS as f64).abs() / ITERATIONS as f64;
+        assert!(
+            error < 0.01,
+            "counted {count} user-mode branches where the loop retires {ITERATIONS}: \
+             {:.2} % off",
+            error * 100.0
+        );
+    }
+
+    /// Task-clock against the kernel's own per-thread cpu clock, read by
+    /// `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` around the same work: the two
+    /// are one scheduler figure read two ways, and they agree to well under a
+    /// percent of a 200 ms spin.
+    #[test]
+    fn task_clock_counts_the_cpu_time_the_thread_ran() {
+        fn thread_cpu_ns() -> u64 {
+            let mut now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: a valid clock id and a timespec this frame owns.
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+            now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+        }
+        let Ok(group) = crate::perf::CounterGroup::open(&[TASK_CLOCK], Scope::Process(0)) else {
+            eprintln!("skipped: this machine refuses perf counting");
+            return;
+        };
+        group.enable().expect("enable");
+        let before = thread_cpu_ns();
+        let mut spun = 0u64;
+        while thread_cpu_ns() - before < 200_000_000 {
+            spun = spun.wrapping_add(1);
+        }
+        std::hint::black_box(spun);
+        let after = thread_cpu_ns();
+        let readings = group.read_final().expect("read");
+        assert_eq!(readings[0].name, "task_clock_ns");
+        let counted = readings[0].value as f64;
+        let ran = (after - before) as f64;
+        let error = (counted - ran).abs() / ran;
+        assert!(
+            error < 0.01,
+            "task-clock counted {counted} ns where the thread's own cpu clock read {ran} ns"
         );
     }
 

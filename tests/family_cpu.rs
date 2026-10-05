@@ -318,11 +318,14 @@ fn utilisation_of_a_cpu_that_is_not_online_is_refused_rather_than_reported_as_id
 /// whose counter does not exist on this cpu never reaches the table at all.
 #[test]
 fn every_counting_source_produces_one_value_for_a_program_that_runs() {
-    const SOURCES: [&str; 7] = [
+    const SOURCES: [&str; 9] = [
         "cpu.cycles",
         "cpu.instructions",
         "cpu.ipc",
+        "cpu.branches",
         "cpu.branch_misses",
+        // Counted, it is task-clock on `pmu:sw`.
+        "cpu.oncpu_time",
         "cpu.cache_misses",
         "cpu.context_switches",
         "cpu.migrations",
@@ -359,6 +362,46 @@ fn every_counting_source_produces_one_value_for_a_program_that_runs() {
         // A counter nobody counted is a loss, and a loss is never silent.
         assert_eq!(results["losses"]["failed_reads"], 0, "{source}");
     }
+}
+
+/// `cpu.oncpu_time -m count` is `perf stat`'s task-clock (perfstat 4): one
+/// total over a launched program and the children it starts, against the
+/// reap's own `cpu_ns` (`wait4`'s rusage, the kernel's other account of the
+/// same time, children included) in the same run. The two are read by
+/// different clocks -- the reap's is tick-sampled utime and stime -- so they
+/// are held to 10 % of a spin of a few hundred milliseconds, with a floor for
+/// a machine that ran the spin fast.
+#[test]
+fn counted_oncpu_time_is_task_clock_and_agrees_with_the_reap() {
+    let Some(document) = measured(&[
+        "cpu.oncpu_time",
+        "-m",
+        "count",
+        "-e",
+        "summary",
+        "--format",
+        "json",
+        "--",
+        "/bin/sh",
+        "-c",
+        &format!("{} ; {}", counting_loop(200_000), counting_loop(200_000)),
+    ]) else {
+        return;
+    };
+    let results = &document["results"][0];
+    assert_eq!(results["backend"], "pmu:sw");
+    assert_eq!(results["value_attr"], "count");
+    let counted = results["outputs"][0]["series"][0]["last"]
+        .as_f64()
+        .expect("a total");
+    let reaped = results["lifetime"]["cpu_ns"].as_f64().expect("the reap");
+    assert!(reaped > 50e6, "the spin ran only {reaped} ns of cpu");
+    let error = (counted - reaped).abs() / reaped;
+    assert!(
+        error < 0.10,
+        "task-clock counted {counted} ns where the reap read {reaped} ns ({:.1} % off)",
+        error * 100.0
+    );
 }
 
 /// Several sources over one window is the point of a session file: run one
