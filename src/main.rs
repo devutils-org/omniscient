@@ -343,7 +343,32 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
 
     let report = match validate::validate_session(&catalog, &session) {
         Ok(report) => report,
-        Err(rejections) => return Ok(reject(&rejections)),
+        Err(mut rejections) => {
+            // A program alone is the target; a source that cannot follow
+            // one is measured for its life beside a target it accepts, and
+            // the reader is told the spelling rather than left at "cannot".
+            if args.file.is_none() && !args.program.is_empty() && session.launch.is_empty() {
+                for rejection in &mut rejections {
+                    if rejection.message.contains("cannot be measured per launch") {
+                        let hint = format!(
+                            "to measure it for the program's life, name the target beside the \
+                             program: `omn trace {} --system -- {}`",
+                            args.source
+                                .iter()
+                                .map(|source| source.as_str())
+                                .collect::<Vec<_>>()
+                                .join(","),
+                            args.program.join(" ")
+                        );
+                        rejection.hint = Some(match rejection.hint.take() {
+                            Some(first) => format!("{first}\n  hint: {hint}"),
+                            None => hint,
+                        });
+                    }
+                }
+            }
+            return Ok(reject(&rejections));
+        }
     };
 
     // `-r` is refused before the machine is asked anything: a repetition
