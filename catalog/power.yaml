@@ -180,7 +180,12 @@
     - "A wakeup is counted as the end of a voluntary sleep: the kernel counts, per
        thread, the times it gave up the cpu of its own accord, and each such
        sleep ends in one wakeup. A thread that exits between two reads takes its
-       last interval with it; it is counted as dropped, not as zero."
+       last interval with it; it is counted as dropped, not as zero, and so is
+       each thread of a process found gone at a read (a launched program is
+       read as a zombie at the close, before it is reaped). A thread born and
+       gone between two reads is in neither listing: its wakeups are missed
+       and cannot be counted, so a program that spawns short-lived threads
+       faster than the poll reads low."
     - "These are the process's own wakeups, not the cpu wakeups it causes in
        other tasks: a timer it arms that wakes someone else is theirs. Every
        wakeup on the machine, with who woke whom, is `sched.wakeup`."

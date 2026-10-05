@@ -7,10 +7,13 @@ mod footprint;
 pub mod heap;
 mod ibs;
 mod numa;
+mod oom;
 mod page_faults;
 mod pressure;
 mod stall;
 mod swap;
+mod swapin;
+mod system;
 #[cfg(test)]
 mod testing;
 mod thp;
@@ -119,6 +122,9 @@ pub fn factories() -> Vec<Factory> {
                 resolved.request.mode,
             )?))
         }),
+        Factory::new("mem.swap", "perf:kprobe", |resolved| {
+            Ok(Box::new(swapin::Prepare::new(resolved.request.mode)?))
+        }),
         Factory::new("mem.thp", "fs:sys", |resolved| {
             Ok(Box::new(thp::Prepare::new(
                 thp::Source::Sys,
@@ -133,6 +139,24 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("mem.numa", "fs:proc", |resolved| {
             Ok(Box::new(numa::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("mem.oom", "fs:proc", |resolved| {
+            Ok(Box::new(oom::Prepare::new(
+                oom::Scope::Machine,
+                resolved.request.mode,
+            )?))
+        }),
+        Factory::new("mem.oom", "fs:cgroup", |resolved| {
+            Ok(Box::new(oom::Prepare::new(
+                oom::Scope::Cgroup,
+                resolved.request.mode,
+            )?))
+        }),
+        Factory::new("mem.system", "fs:proc", |resolved| {
+            Ok(Box::new(system::Prepare::new(resolved.request.mode)?))
+        }),
+        Factory::new("mem.numa", "fs:sys", |resolved| {
+            Ok(Box::new(system::NodePrepare::new(resolved.request.mode)?))
         }),
         Factory::new("mem.wss", "fs:proc:clear_refs", |resolved| {
             Ok(Box::new(wss::Prepare::new(resolved.request.mode)?))

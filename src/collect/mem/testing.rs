@@ -118,6 +118,28 @@ impl Scratch {
         Toucher::start(Some(&self.path.join("cgroup.procs")), bytes)
     }
 
+    /// A walker inside this cgroup: [`Toucher::walker`], charged here.
+    pub fn spawn_walker(&self, resident: u64, working: u64) -> Toucher {
+        Toucher::spawn(
+            Some(&self.path.join("cgroup.procs")),
+            resident,
+            Some(working),
+        )
+    }
+
+    /// A toucher that is not waited for, for a test that expects the kernel
+    /// to kill it: [`Toucher::wait_for_end`] says how it ended.
+    pub fn spawn_doomed_toucher(&self, bytes: u64) -> Toucher {
+        Toucher::spawn_within(
+            Some(&self.path.join("cgroup.procs")),
+            bytes,
+            None,
+            0xA5,
+            std::time::Duration::ZERO,
+            false,
+        )
+    }
+
     /// The same, but every page is left full of zeros.
     ///
     /// The kernel does not write a zero-filled page to a swap device: it
@@ -423,6 +445,25 @@ impl Toucher {
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+    }
+
+    /// Waits up to `within` for the child to end on its own, answering the
+    /// signal that ended it, or `None` when it is still running or exited.
+    pub fn wait_for_end(&mut self, within: std::time::Duration) -> Option<i32> {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            let mut status = 0;
+            // SAFETY: the child is ours; WNOHANG never blocks.
+            let reaped = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+            if reaped == self.pid {
+                self.stopped = true;
+                // SAFETY: our own mapping, no longer written by anyone.
+                unsafe { libc::munmap(self.handshake, page_size()) };
+                return libc::WIFSIGNALED(status).then(|| libc::WTERMSIG(status));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        None
     }
 
     /// Kills the child and waits for it, so that a cgroup holding it can be

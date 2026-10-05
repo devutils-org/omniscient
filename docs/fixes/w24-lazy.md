@@ -188,3 +188,20 @@ the listing or a copied catalog: `runner the_json_listing_carries`,
 an_input_this_machine_cannot_serve`, `scenario_proc a_machine_that_cannot_
 serve` (1 each, all passed). `cargo clippy --workspace --all-targets -- -D
 warnings` and `cargo fmt --check` clean.
+
+## Review
+
+- **A flag before the family** (gap, `src/lazy.rs`): `spell_family` looked
+  only at `argv[2]`, so `omn trace --pid 1 -d 1s cpu` sent `cpu` to the
+  source parser, which refused it without naming the families. Fixed:
+  the word rewritten is now the first positional of `trace` wherever it
+  stands. The flags before it, and the values they take, are skipped by
+  asking clap's own `trace` command which flags take a value (long,
+  `--flag=value`, short, `-d1s` and clusters), so the list cannot drift
+  from `src/cli.rs`. `--` or an unknown flag stops the search and leaves
+  the line to the parser. Shown: `omn trace -d 1s --system cpu` composes
+  the cpu default, and `omn trace -d 1s --system nosuchfamily` is refused
+  naming the families. Unit cases in `lazy::tests`, one refusal case in
+  `tests/lazy.rs`. Tests after the fix: `cargo test --lib lazy` (5),
+  `cargo test --test lazy` (12), `cargo test --test cli` (33), clippy and
+  fmt clean.

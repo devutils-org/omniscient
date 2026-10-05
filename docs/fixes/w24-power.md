@@ -119,10 +119,68 @@ stream's key keeps both variants and sums the `ALL` length.
   refuses `--system` and names `sched.wakeup`.
 - **The per-process energy estimate** (powertop's other column): not started;
   the catalog's caveat stands (a share of cycles, labelled as an estimate).
-- `power.wakeups` misses the last partial interval of a launched program (the
-  final read finds it gone): the runner's close happens after the exit. A
-  stop-time read through the reaped child's rusage would recover it
-  (`ru_nvcsw` covers the whole process); filed, not done.
+- ~~`power.wakeups` misses the last partial interval of a launched
+  program~~: recovered once `main` was merged (see "Review", 1).
+
+## Review
+
+The fix round, after `git merge main` (lazy, run, triage, unwind and the
+others in).
+
+1. **`power.wakeups`: uncounted loss at the exit** (`wakeups.rs`). Two halves.
+   - *The launched program's last interval.* Once `main` was merged, it is no
+     longer lost: `8193889` (`fix(launch)`, not in this branch when the
+     handoff above was measured) sees the exit with `WNOWAIT` and keeps the
+     program a zombie until the collectors' closing round, and that round
+     reads the zombie leader's `voluntary_ctxt_switches`. The reviewer's
+     command, `omn power.wakeups -m poll@100ms -e summary -- python3 -c '300
+     sleeps of 2 ms'`, now gives 7 events, mean 43, 301 wakeups (raw: 43 49
+     48 49 48 49 15; the 15 is the partial interval). So its "no loss" is
+     true there now. The scenario's lower bound goes from 150 to 285, so a
+     lost last interval (about 15 % of that run) fails it.
+   - *Wherever a read still finds the process gone* (a `--pid` reaped by its
+     own parent, a launched program whose zombie is already reaped): `sample`
+     now counts every thread of the previous read as `dropped`, noting "the
+     process was gone at a read, and its wakeups since the previous one are
+     not counted", before it returns `TargetGone`. Gone before any read
+     measured nothing and stays clean. Test:
+     `a_process_gone_after_a_read_counts_its_last_interval_as_lost`.
+   - *A thread born and gone between two reads* is in neither listing. procfs
+     keeps no running total of a process's dead threads' switches (the
+     signal struct's `nvcsw` reaches userspace only through the reap's
+     rusage), so it cannot be counted. The catalog caveat and
+     `docs/scenarios/power.md` now say so.
+2. **`power.freq` through `pmu`: a dropped interval** (`freq_pmu.rs`).
+   `Interval::between` returns `Result<Interval, Undivided>`. A counter read
+   lower than before, or no time passing (clock or TSC), is
+   `Undivided::Backwards` / `NoTime`: `failed_reads += 1` with the cpu
+   named. A cpu whose MPERF did not move is a measurement now: an event with
+   `busy=0`, `idle=1`, `avg_hz`, `measures=idle` and a basis that says so,
+   and **no `hz`**, since it ran at no clock. Summary, hist and stack count
+   such an event as unmeasured (`emit::measured`). Timeline and rate read
+   the value through `emit::value_of`, which refuses an event without it.
+   That refusal is wrong for this case, but emit is a shared layer and not
+   this stream's to change (see "Needs from another stream"). Over 120
+   events of `power.freq --system -m poll@100ms -d 500ms -e timeline` on
+   this machine no cpu had a zero-MPERF interval, so the timeline was not
+   refused here. Test:
+   `an_idle_cpu_is_a_measurement_and_a_backwards_counter_is_a_fault`.
+3. **`power.energy --keys domain`: the `cores` series vanishing**
+   (`energy_pmu.rs`). `per_core_domain` returns `Result<Option<Opened>,
+   String>`. `Ok(None)` means only that the part has no `power_core` unit.
+   Each of these is an `Err` naming the file, cpu or counter: an unreadable
+   or unparsable cpumask, a core whose counter will not open or enable, no
+   scale, no cpu of the package in the mask, and an unreadable
+   `physical_package_id`. The last one no longer means package 0. The `Err`
+   reaches the output through `Collector::notes` ("package N's `cores`
+   domain is not read, though the part counts it per core: ..."). The rest
+   of the run still measures. Not shown failing on this machine, where every
+   core opens: `-k domain` still prints `domain:cores` and `domain:package`.
+
+Tests, fix round: `cargo test --lib collect::power` 55 passed; `cargo test
+--test scenario_power --test family_power` 21 + 15 passed; `cargo test --lib
+catalog` 63 passed (the caveat changed); `cargo clippy --workspace
+--all-targets -- -D warnings` and `cargo fmt --check` clean.
 
 ## Privileged runs wanted
 
@@ -157,6 +215,12 @@ cd /home/moha/repos/omniscient && make && cargo test --test reference pairs_powe
   (`busy`, `avg_hz` attributes), `power_core/energy-core/` against `perf stat
   -a` (`--keys domain`, `series[key=domain:cores]`), `pidstat -w` cswch/s
   against `power.wakeups`.
+- **emit**: `timeline_by` and `rate_by` read the value through `value_of`,
+  which refuses the whole output (as "`hz` is not a numeric attribute") when
+  one event lacks it. Summary, hist and stack count such an event as
+  unmeasured. `power.freq` through `pmu` now leaves `hz` off a cpu that
+  never left idle over an interval (Review, 2). Timeline should skip and
+  count it the same way.
 - **emit**: the summary is over `hz` only; `busy`, `idle` and `avg_hz` reach
   the reader through `raw` and the JSON events. A summary over a named
   attribute would let `-e summary` print turbostat's three columns.
