@@ -330,6 +330,167 @@ pub fn major_minor(kernel_dev: u32) -> (u32, u32) {
     (kernel_dev >> 20, kernel_dev & 0xf_ffff)
 }
 
+// ---------------------------------------------------------------------------
+// `io.vfs`: every call into the VFS, counted by function.
+
+/// The VFS entry points `io.vfs` counts, each named by its function: what
+/// `vfsstat` counts (read, write, fsync, open, create) and the directory
+/// operations beside them. Every one is counted where it exists; a function
+/// this kernel does not declare is named in the run's notes, not guessed at.
+///
+/// `do_fsync` beside `vfs_fsync_range`: on this machine the compiler inlined
+/// `vfs_fsync` and `vfs_fsync_range` into `do_fsync`, so an `fsync(2)` reaches
+/// neither out-of-line copy (`catalog/io.yaml`, `io.fsync`), and counting
+/// both counts each sync once -- `msync` and the in-kernel callers reach the
+/// range function, the two syscalls `do_fsync`.
+pub const VFS_CALLS: [&str; 12] = [
+    "vfs_read",
+    "vfs_write",
+    "vfs_readv",
+    "vfs_writev",
+    "vfs_open",
+    "vfs_create",
+    "vfs_fsync_range",
+    "do_fsync",
+    "vfs_unlink",
+    "vfs_mkdir",
+    "vfs_rmdir",
+    "vfs_rename",
+];
+
+/// The stack slots of a counting program.
+const CALLS_IDS_SCRATCH: i16 = -8;
+const CALLS_KEY: i16 = -16;
+
+/// One program per function on its entry: the target's filter, then one
+/// atomic add to the function's slot of a per-cpu array. Any file type: a
+/// pipe's read is a `vfs_read` as a file's is, which is what `vfsstat`
+/// counts and what `io.fs`, regular files only, does not.
+pub fn calls_instructions(
+    followed: &crate::bpf::sched_common::Followed,
+    counts_fd: i32,
+    slot: u32,
+) -> Vec<Insn> {
+    let mut program = Program::new();
+    crate::bpf::sched_common::push_current_followed_filter(
+        &mut program,
+        followed,
+        6,
+        CALLS_IDS_SCRATCH,
+        SKIP,
+        "calls_kept",
+    );
+    program.push(Insn::st_imm(BPF_W, R10, CALLS_KEY, slot as i32));
+    program.extend(Insn::load_map_fd(1, counts_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, CALLS_KEY as i32));
+    program.push(Insn::call(crate::bpf::insn::helper::MAP_LOOKUP_ELEM));
+    program.jump_to(SKIP, Insn::jeq_imm(0, 0, 0));
+    // Atomic although the array is per-cpu: a tracing program runs with
+    // migration disabled, not preemption, so two calls on one cpu can
+    // interleave a load and a store.
+    program.push(Insn::mov64_imm(1, 1));
+    program.push(Insn::atomic_add(BPF_DW, 0, 0, 1));
+    program.label(SKIP);
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    program.build()
+}
+
+/// The counting programs, attached, and the array they count into.
+pub struct VfsCalls {
+    counts: crate::bpf::map::Counters,
+    /// `(slot, function)` of every function attached.
+    links: Vec<(u32, fentry::Link)>,
+    /// The functions this kernel does not declare, or would not attach, and
+    /// why.
+    pub absent: Vec<String>,
+    descendants: Option<crate::bpf::sched_common::Descendants>,
+}
+
+impl VfsCalls {
+    pub fn load(whose: crate::bpf::Whose) -> Result<Self, String> {
+        use crate::bpf::sched_common::{Descendants, Followed};
+        let index = fentry::index()?;
+        let descendants = match whose {
+            crate::bpf::Whose::Process(root) => Some(Descendants::follow(root)?),
+            _ => None,
+        };
+        let followed = descendants
+            .as_ref()
+            .map_or(Followed::only(whose), |descendants| {
+                descendants.followed(whose)
+            });
+        let counts = crate::bpf::map::Counters::create(VFS_CALLS.len() as u32, "omn_vfs_calls")
+            .map_err(|error| crate::bpf::map::map_failure("VFS call counters", error))?;
+        let mut links = Vec::new();
+        let mut absent = Vec::new();
+        for (slot, name) in VFS_CALLS.iter().enumerate() {
+            let function = match index.function(name) {
+                Ok(function) => function,
+                Err(reason) => {
+                    absent.push(format!("`{name}`: {reason}"));
+                    continue;
+                }
+            };
+            let instructions = calls_instructions(&followed, counts.as_raw_fd(), slot as u32);
+            crate::bpf::insn::audit(&instructions)?;
+            match fentry::attach(
+                &function,
+                fentry::Side::Entry,
+                &instructions,
+                "omn_vfs_call",
+            ) {
+                Ok(link) => links.push((slot as u32, link)),
+                // The first function refused is the machine's answer for all
+                // of them (a permission, a kernel with no trampolines); a later
+                // one alone is a function ftrace will not patch, named.
+                Err(reason) if links.is_empty() => return Err(reason),
+                Err(reason) => absent.push(format!("`{name}`: {reason}")),
+            }
+        }
+        if links.is_empty() {
+            return Err(format!(
+                "none of the VFS functions `io.vfs` counts is in this kernel: {}",
+                absent.join("; ")
+            ));
+        }
+        Ok(Self {
+            counts,
+            links,
+            absent,
+            descendants,
+        })
+    }
+
+    /// Every attached function's count so far, cumulative.
+    pub fn read(&self) -> Vec<(&'static str, u64)> {
+        self.links
+            .iter()
+            .map(|(slot, _)| (VFS_CALLS[*slot as usize], self.counts.read(*slot)))
+            .collect()
+    }
+
+    /// Runs the kernel skipped: calls never counted.
+    pub fn missed(&self) -> u64 {
+        self.links
+            .iter()
+            .map(|(_, link)| link.misses())
+            .sum::<u64>()
+            + self
+                .descendants
+                .as_ref()
+                .map_or(0, crate::bpf::sched_common::Descendants::skipped)
+    }
+
+    /// Processes the target started that the map had no room for.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants
+            .as_ref()
+            .map_or(0, crate::bpf::sched_common::Descendants::missed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -51,6 +51,9 @@ pub enum Metric {
     Iops,
     Merges,
     Inflight,
+    /// The share of the window the device had a request outstanding: the
+    /// io-ticks column, what `iostat -x` prints as `%util`.
+    Util,
 }
 
 impl Metric {
@@ -58,7 +61,7 @@ impl Metric {
     ///
     /// `None` for a gauge, which has no increase to report: a queue depth is
     /// read at an instant and the difference between two depths is not a depth.
-    fn attrs(self, delta: &DeviceCounters) -> Option<Vec<Attr>> {
+    fn attrs(self, delta: &DeviceCounters, interval_ns: u64) -> Option<Vec<Attr>> {
         let mut attrs = match self {
             Metric::Bytes => {
                 let mut attrs = vec![
@@ -93,6 +96,27 @@ impl Metric {
                 Attr::uint("read_merges", delta.reads_merged),
                 Attr::uint("write_merges", delta.writes_merged),
             ],
+            // The kernel counts the time in milliseconds of jiffies -- a
+            // request outstanding at a tick charges the whole tick -- so the
+            // share is as coarse as that, which is iostat's coarseness too.
+            Metric::Util => {
+                let busy_ns = delta.io_ticks_ms * 1_000_000;
+                let weighted_ns = delta.weighted_ms * 1_000_000;
+                let share = |ns: u64| {
+                    if interval_ns == 0 {
+                        0.0
+                    } else {
+                        ns as f64 / interval_ns as f64
+                    }
+                };
+                vec![
+                    Attr::float("util", share(busy_ns).min(1.0)),
+                    Attr::uint("busy_ns", busy_ns),
+                    // The time every request spent outstanding, summed: over
+                    // the window, the average queue `iostat` calls `aqu-sz`.
+                    Attr::float("queue", share(weighted_ns)),
+                ]
+            }
             Metric::Inflight => return None,
         };
         attrs.shrink_to_fit();
@@ -116,7 +140,7 @@ impl Metric {
                 (Direction::Read, delta.reads_merged),
                 (Direction::Write, delta.writes_merged),
             ],
-            Metric::Inflight => return Vec::new(),
+            Metric::Inflight | Metric::Util => return Vec::new(),
         };
         match self {
             Metric::Bytes => split.extend(
@@ -139,6 +163,7 @@ impl Metric {
             Metric::Iops => "io.iops",
             Metric::Merges => "io.merges",
             Metric::Inflight => "io.inflight",
+            Metric::Util => "io.util",
         }
     }
 
@@ -150,6 +175,7 @@ impl Metric {
             Metric::Iops => "ops",
             Metric::Merges => "merges",
             Metric::Inflight => "inflight",
+            Metric::Util => "util",
         }
     }
 
@@ -412,7 +438,7 @@ impl Diskstats {
                 }
                 continue;
             }
-            let Some(mut attrs) = self.metric.attrs(&delta) else {
+            let Some(mut attrs) = self.metric.attrs(&delta, interval_ns) else {
                 return Vec::new();
             };
             attrs.push(Attr::uint("interval_ns", interval_ns));
@@ -709,6 +735,10 @@ struct DeviceCounters {
     writes_merged: u64,
     sectors_written: u64,
     in_flight: u64,
+    /// Milliseconds with at least one request outstanding, and milliseconds
+    /// of every request's time outstanding summed (columns 10 and 11).
+    io_ticks_ms: u64,
+    weighted_ms: u64,
     /// Discards arrived in 4.18 and flushes in 5.5. `None` means this kernel
     /// does not report them.
     discards: Option<u64>,
@@ -736,6 +766,8 @@ impl DeviceCounters {
             // A gauge has no meaningful difference; the later value is kept so
             // the field says what it said.
             in_flight: self.in_flight,
+            io_ticks_ms: self.io_ticks_ms.checked_sub(before.io_ticks_ms)?,
+            weighted_ms: self.weighted_ms.checked_sub(before.weighted_ms)?,
             discards: difference(self.discards, before.discards),
             sectors_discarded: difference(self.sectors_discarded, before.sectors_discarded),
             flushes: difference(self.flushes, before.flushes),
@@ -756,6 +788,8 @@ impl DeviceCounters {
             writes_merged: numbers[5],
             sectors_written: numbers[6],
             in_flight: numbers[8],
+            io_ticks_ms: numbers[9],
+            weighted_ms: numbers[10],
             discards: numbers.get(11).copied(),
             sectors_discarded: numbers.get(13).copied(),
             flushes: numbers.get(15).copied(),
@@ -1029,6 +1063,40 @@ mod tests {
         assert_eq!(events[0].attr("ops").unwrap().as_f64(), Some(70.0));
         assert_eq!(events[0].attr("reads").unwrap().as_f64(), Some(30.0));
         assert_eq!(events[0].attr("writes").unwrap().as_f64(), Some(40.0));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `%util` is the io-ticks column's increase over the window, as `iostat
+    /// -x` computes it, and `queue` the weighted column's: `aqu-sz`.
+    #[test]
+    fn utilization_is_the_busy_time_over_the_window() {
+        let Some(device) = a_leaf_device() else {
+            return;
+        };
+        let path = scratch("util");
+        let busy = |ticks: u64, weighted: u64| {
+            format!("   8       0 {device} 1 0 8 0 1 0 8 0 0 {ticks} {weighted}")
+        };
+        write_stats(&path, &[busy(1_000, 5_000)]);
+        let mut collector = Diskstats::new(Metric::Util, Mode::Count, path.clone());
+        collector.start().expect("the fake file reads");
+        let opened = std::time::Instant::now();
+        // A quarter of a second of busy time over at least as long a window,
+        // and four requests outstanding on average over that quarter.
+        write_stats(&path, &[busy(1_250, 6_000)]);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let events = collector.stop();
+        let window = opened.elapsed().as_nanos() as f64;
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        let interval = event.attr("interval_ns").unwrap().as_f64().unwrap();
+        assert!(interval >= 500e6 && interval <= window + 50e6, "{interval}");
+        assert_eq!(event.attr("busy_ns").unwrap().as_f64(), Some(250e6));
+        let util = event.attr("util").unwrap().as_f64().unwrap();
+        assert!((util - 250e6 / interval).abs() < 1e-9, "{util}");
+        let queue = event.attr("queue").unwrap().as_f64().unwrap();
+        assert!((queue - 1_000e6 / interval).abs() < 1e-9, "{queue}");
+        assert!(Prepare::new(Metric::Util, Mode::Snapshot).is_err());
         std::fs::remove_file(&path).ok();
     }
 

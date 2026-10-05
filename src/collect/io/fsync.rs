@@ -54,6 +54,7 @@ impl Prepared for Prepare {
             dropped_ring: 0,
             orphaned: 0,
             missed: 0,
+            unfollowed_said: false,
             seen: 0,
             failed: 0,
             filtered_out: 0,
@@ -75,6 +76,8 @@ pub struct FsyncCollector {
     dropped_ring: u64,
     orphaned: u64,
     missed: u64,
+    /// Whether the run has said that the descendants map overflowed.
+    unfollowed_said: bool,
     seen: u64,
     failed: u64,
     filtered_out: u64,
@@ -220,6 +223,17 @@ impl FsyncCollector {
             );
             self.dropped_ring = ring;
         }
+        let unfollowed = program.unfollowed();
+        if unfollowed > 0 && !self.unfollowed_said {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so {} syncs are in no event",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "its" } else { "their" },
+            ));
+            self.unfollowed_said = true;
+        }
         let missed = program.missed();
         if missed > self.missed {
             self.losses.dropped += missed - self.missed;
@@ -268,7 +282,16 @@ impl Collector for FsyncCollector {
                 self.losses.note(super::histogram::ORPHANED);
             }
         }
-        self.program = None;
+        // The programs stay attached until the collector is dropped, after
+        // the run has closed its accounts. Unlinking a trampoline walks every
+        // ftrace record in the kernel, and six of them cost about 69 ms of
+        // cpu: dropped here, inside the window, that was the whole of the
+        // backends bench's 142 % and 144 % against a 25 ms target (perf:
+        // `bpf_trampoline_unlink_prog` 12.95 % of the run's samples, beside
+        // the link's 13.22 % at the attach, which falls before the window).
+        // Kept, the window's cpu is 1 to 1.7 ms. The attach is said as cpu
+        // before the window opened; the unlink is after it closed, and
+        // nothing reads it (`docs/fixes/w24-io.md`, a request to stream run).
         trailing
     }
 
@@ -367,6 +390,7 @@ mod tests {
             dropped_ring: 0,
             orphaned: 0,
             missed: 0,
+            unfollowed_said: false,
             seen: 0,
             failed: 0,
             filtered_out: 0,

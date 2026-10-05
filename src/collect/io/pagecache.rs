@@ -104,6 +104,7 @@ impl Prepared for Prepare {
             PageCacheNarrowing {
                 tgid: narrowed.tgid,
                 tid: narrowed.tid,
+                descendants: None,
             },
             self.filter,
         )))
