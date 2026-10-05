@@ -2381,3 +2381,36 @@ fn a_repeated_run_reports_each_value_s_spread_across_the_runs() {
         stderr(&refused)
     );
 }
+
+/// Exit 1 says which of its two answers it is, on the last line of stderr:
+/// the machine refused (nothing ran), or the run failed after it started.
+#[test]
+fn exit_one_says_whether_the_machine_refused_or_the_run_failed() {
+    // A pid that cannot exist: the counter is refused before anything runs.
+    let output = run(&[
+        "trace",
+        "cpu.oncpu_time",
+        "-m",
+        "poll@100ms",
+        "-e",
+        "summary",
+        "--backend",
+        "force:fs:proc",
+        "--pid",
+        "2147483",
+        "-d",
+        "100ms",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_UNAVAILABLE),
+        "{}",
+        stderr(&output)
+    );
+    let complaint = stderr(&output);
+    assert_eq!(
+        complaint.lines().last(),
+        Some("exit 1: the machine refused the run; nothing was measured"),
+        "{complaint}"
+    );
+}

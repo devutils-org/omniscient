@@ -52,8 +52,54 @@ fn exit_for(whose: omn::collect::Whose) -> u8 {
     use omn::collect::Whose;
     match whose {
         Whose::Request => EXIT_REJECTED,
-        Whose::Machine => EXIT_UNAVAILABLE,
+        Whose::Machine => {
+            said_which(Unavailable::Machine);
+            EXIT_UNAVAILABLE
+        }
         Whose::Build => EXIT_NOT_IMPLEMENTED,
+    }
+}
+
+/// Which of the two answers exit 1 gives: the machine refused the run, or
+/// the run failed. A caller deciding whether a pair is a skip (the machine
+/// cannot) or a failure (it could, and something broke) reads it from the
+/// last line of stderr, which is one of [`Unavailable::line`]'s, rather than
+/// guess it from whether results were written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unavailable {
+    /// Refused before anything ran: no backend here, a counter that would
+    /// not open, a target that is not there. Nothing was measured.
+    Machine,
+    /// The run started and failed before it wrote its results.
+    FailedUnwritten,
+    /// The run reached its end and wrote its results, and a collector broke
+    /// the program it measured on the way.
+    FailedWritten,
+}
+
+impl Unavailable {
+    fn line(self) -> &'static str {
+        match self {
+            Unavailable::Machine => "exit 1: the machine refused the run; nothing was measured",
+            Unavailable::FailedUnwritten => {
+                "exit 1: the run failed after it started, before writing its results"
+            }
+            Unavailable::FailedWritten => {
+                "exit 1: the run failed after it started; what it read is written above"
+            }
+        }
+    }
+}
+
+/// Whether a run has started: the collectors attached and the program
+/// released. An error after it is a run that failed, not a refusal.
+static RUN_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Says which exit 1 this is, once per process.
+fn said_which(which: Unavailable) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !SAID.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        eprintln!("{}", which.line());
     }
 }
 
@@ -163,7 +209,14 @@ fn main() -> ExitCode {
             // validator, has always exited 2, and the two are the same answer.
             match error.downcast_ref::<omn::error::ParseError>() {
                 Some(_) => ExitCode::from(EXIT_REJECTED),
-                None => ExitCode::from(EXIT_UNAVAILABLE),
+                None => {
+                    said_which(if RUN_STARTED.load(std::sync::atomic::Ordering::SeqCst) {
+                        Unavailable::FailedUnwritten
+                    } else {
+                        Unavailable::Machine
+                    });
+                    ExitCode::from(EXIT_UNAVAILABLE)
+                }
             }
         }
     }
@@ -379,6 +432,7 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
                 }
                 Err(reason) => {
                     eprintln!("error: {reason}");
+                    said_which(Unavailable::Machine);
                     return Ok(ExitCode::FAILURE);
                 }
             },
@@ -1511,6 +1565,7 @@ fn measure(
         Ok(collections) => collections,
         Err(error) => return Ok(refused_at_collect(catalog, &error, resolved)),
     };
+    RUN_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
     let failures = failures(&collections);
     attached_late(resolved, &collections);
     let (run, costs, served_by) = assemble(catalog, session, &ladder, resolved, collections)?;
@@ -1576,6 +1631,7 @@ fn measure_repeated(
                 return Ok(refused_at_collect(catalog, &error, resolved));
             }
         };
+        RUN_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
         for failure in failures(&collections) {
             if !broke.contains(&failure) {
                 broke.push(failure);
@@ -1657,6 +1713,7 @@ fn outcome(failures: &[String]) -> ExitCode {
     if failures.is_empty() {
         ExitCode::SUCCESS
     } else {
+        said_which(Unavailable::FailedWritten);
         ExitCode::FAILURE
     }
 }
@@ -1835,6 +1892,7 @@ fn record(
             Ok(done) => done,
             Err(error) => return Ok(refused_at_collect(catalog, &error, resolved)),
         };
+    RUN_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
     drop(recorder);
     let failures = failures(&collections);
 
