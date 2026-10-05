@@ -18,22 +18,68 @@ use crate::request::{Mode, Target};
 const RX_ERRORS: usize = 2;
 const RX_DROPPED: usize = 3;
 const RX_FIFO: usize = 4;
+const RX_MULTICAST: usize = 7;
 const TX_ERRORS: usize = 10;
 const TX_DROPPED: usize = 11;
 const TX_FIFO: usize = 12;
 const COLLISIONS: usize = 13;
 const CARRIER: usize = 14;
+/// Not a column of the file: `rx_missed_errors`, read from sysfs and appended
+/// to the interface's columns (`with_missed`). `/proc/net/dev`'s receive drop
+/// column already adds it in, so `missed` is the part of `drops` the card
+/// counted for want of a buffer, apart, as `ip -s link` prints it.
+const MISSED: usize = 16;
 
 /// The kinds of counter a series is kept for, each a different failure, with
 /// the receive and transmit columns that make it up. `collisions` and
-/// `carrier` are transmit-side only: the file has no receive column for them.
-const KINDS: [(&str, Option<usize>, Option<usize>); 5] = [
+/// `carrier` are transmit-side only: the file has no receive column for them;
+/// `mcast` (multicast frames received, which is not a failure but is what
+/// `ip -s link` prints beside them) and `missed` are receive-side only.
+const KINDS: [(&str, Option<usize>, Option<usize>); 7] = [
     ("errors", Some(RX_ERRORS), Some(TX_ERRORS)),
     ("drops", Some(RX_DROPPED), Some(TX_DROPPED)),
     ("fifo", Some(RX_FIFO), Some(TX_FIFO)),
     ("collisions", None, Some(COLLISIONS)),
     ("carrier", None, Some(CARRIER)),
+    ("mcast", Some(RX_MULTICAST), None),
+    ("missed", Some(MISSED), None),
 ];
+
+/// The kinds an interface has a reading for: `missed` only when sysfs gave
+/// one, since a counter that could not be read is not a zero.
+fn kinds_of(
+    interface: &procfs::Interface,
+) -> impl Iterator<Item = (&'static str, Option<usize>, Option<usize>)> + '_ {
+    KINDS
+        .into_iter()
+        .filter(|(kind, _, _)| *kind != "missed" || interface.columns.len() > MISSED)
+}
+
+/// Appends `rx_missed_errors` from sysfs as column `MISSED`, or leaves the
+/// interface without it, noted, when sysfs has no such file for it.
+fn with_missed(
+    mut interfaces: Vec<procfs::Interface>,
+    losses: &mut Losses,
+) -> Vec<procfs::Interface> {
+    for interface in &mut interfaces {
+        let path = format!(
+            "/sys/class/net/{}/statistics/rx_missed_errors",
+            interface.name
+        );
+        match std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+        {
+            Some(missed) if interface.columns.len() == MISSED => interface.columns.push(missed),
+            Some(_) => {}
+            None => losses.note(format!(
+                "{path} could not be read, so `{}` has no `missed` series",
+                interface.name
+            )),
+        }
+    }
+    interfaces
+}
 
 /// The series one counter of one interface is kept under.
 ///
@@ -105,6 +151,7 @@ impl Collector for IfaceCollector {
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         let interfaces = procfs::interfaces(self.only.as_deref(), &mut self.losses)?;
+        let interfaces = with_missed(interfaces, &mut self.losses);
         let ts_ns = monotonic_ns();
         let mut events = Vec::new();
         let mut index = seq;
@@ -130,7 +177,7 @@ impl Collector for IfaceCollector {
             // sight of the interface, and every column becomes its baseline.
             let mut increments = Vec::new();
             let mut first_sight = false;
-            for (kind, rx, tx) in KINDS {
+            for (kind, rx, tx) in kinds_of(&interface) {
                 let rx = rx.map(|column| delta(column, "rx", kind));
                 let tx = tx.map(|column| delta(column, "tx", kind));
                 if rx == Some(None) || tx == Some(None) {
@@ -181,7 +228,7 @@ impl Collector for IfaceCollector {
     fn notes(&self) -> Vec<String> {
         vec![
             "each interface is one series per counter kind -- `<iface>/errors`, `/drops`, \
-             `/fifo`, `/collisions`, `/carrier` -- because a bad frame and a full queue are \
+             `/fifo`, `/collisions`, `/carrier`, `/mcast`, `/missed` -- because a bad frame and a full queue are \
              different failures; `iface` on each event is the interface alone"
                 .to_owned(),
         ]
@@ -202,8 +249,7 @@ impl IfaceCollector {
     /// of a saturated link is zero. The totals since boot are a different number
     /// and carry different names, so a reader cannot mistake one for the other.
     fn standing_events(&self, interface: &procfs::Interface, ts_ns: u64, seq: u64) -> Vec<Event> {
-        KINDS
-            .iter()
+        kinds_of(interface)
             .enumerate()
             .map(|(offset, (kind, rx, tx))| {
                 let rx = rx.map(|column| interface.column(column));
@@ -218,7 +264,7 @@ impl IfaceCollector {
                 if let Some(tx) = tx {
                     attrs.push(Attr::uint("tx_since_boot", tx));
                 }
-                attrs.push(Attr::text("counter", *kind));
+                attrs.push(Attr::text("counter", kind));
                 attrs.push(Attr::text("iface", interface.name.clone()));
                 attrs.push(Attr::text(
                     "basis",
@@ -331,6 +377,42 @@ mod tests {
             of(&events, "collisions").attr("rx").is_none(),
             "the file has no receive column for collisions, and zero would claim one"
         );
+    }
+
+    /// `mcast` and `missed` are what `ip -s link` prints beside the errors;
+    /// a snapshot gives them as they stand. Ground truth from another file
+    /// than the one `mcast` is read from: sysfs's statistics, for every
+    /// interface of the machine.
+    #[test]
+    fn multicast_and_missed_frames_are_the_counters_sysfs_reports() {
+        let mut collector = Box::new(Prepare(Mode::Snapshot))
+            .attach(&Target::System)
+            .expect("the machine is readable");
+        let events = collector.sample(0).expect("one read");
+        let mut checked = 0;
+        for (kind, file) in [("mcast", "multicast"), ("missed", "rx_missed_errors")] {
+            for event in events
+                .iter()
+                .filter(|event| event.attr("counter").unwrap().to_string() == kind)
+            {
+                let name = event.attr("iface").unwrap().to_string();
+                let Ok(text) =
+                    std::fs::read_to_string(format!("/sys/class/net/{name}/statistics/{file}"))
+                else {
+                    continue;
+                };
+                let truth: f64 = text.trim().parse().unwrap();
+                let read = event.attr("rx_since_boot").unwrap().as_f64().unwrap();
+                // A busy interface moves between the two reads.
+                assert!(
+                    read <= truth && truth - read <= truth * 0.01 + 16.0,
+                    "`{name}` {kind}: {read} against sysfs's {truth}"
+                );
+                assert!(event.attr("tx_since_boot").is_none(), "receive only");
+                checked += 1;
+            }
+        }
+        assert!(checked >= 2, "loopback has both: {checked}");
     }
 
     /// A snapshot of a counter source reports the counter, not an increment
