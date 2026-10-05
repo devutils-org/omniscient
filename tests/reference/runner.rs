@@ -942,8 +942,21 @@ fn judge_omn(pair: &Pair, side: &Side, results: Option<&str>) -> Option<Outcome>
     if side.timed_out {
         return Some(Outcome::Fail("omn did not finish in time".into()));
     }
+    // Since the twenty-fourth wave `omn` says which half of exit 1 it
+    // means, on its last line; the heuristics below are for a line it did
+    // not print.
+    let said = tail(&side.stderr, 1).pop().unwrap_or_default();
     match side.status.code() {
         Some(0) => None,
+        Some(1) if said.contains(OMN_RUN_FAILED) => Some(Outcome::Fail(format!(
+            "omn failed while running: {}",
+            tail(&side.stderr, 3).join(" | ")
+        ))),
+        Some(1) if said.contains(OMN_MACHINE_REFUSED) => {
+            Some(workload_fails_alone(pair).unwrap_or_else(|| {
+                Outcome::Skip("omn cannot run this here".into(), tail(&side.stderr, 8))
+            }))
+        }
         Some(1) if results.is_some_and(|r| !r.trim().is_empty()) => Some(Outcome::Fail(format!(
             "omn wrote its results and exited 1, so something failed while running: {}",
             tail(&side.stderr, 3).join(" | ")
@@ -965,6 +978,11 @@ fn judge_omn(pair: &Pair, side: &Side, results: Option<&str>) -> Option<Outcome>
         ))),
     }
 }
+
+/// `omn`'s last line on exit 1 (`src/main.rs`, `Unavailable::line`): the
+/// machine refused the run, or the run failed once started.
+const OMN_MACHINE_REFUSED: &str = "exit 1: the machine refused the run";
+const OMN_RUN_FAILED: &str = "exit 1: the run failed after it started";
 
 /// The workload run once with no observer, asked before a skip is granted.
 ///
@@ -2238,6 +2256,28 @@ compare: {omn: a, omn_jq: ".a", tolerance: {abs: 0, side: above, band: 2}, why: 
             Outcome::Fail(why) => {
                 assert!(why.contains("`setup`") && why.contains("broken"), "{why}")
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Exit 1's last line decides: "the machine refused" skips, "the run
+    /// failed after it started" fails, with or without results written.
+    #[test]
+    fn omns_last_line_says_which_exit_1_it_is() {
+        let mut p = pair(BASE);
+        p.omn[1] = "echo 'cannot open: has no viable backend' >&2; \
+                    echo 'exit 1: the machine refused the run; nothing was measured' >&2; exit 1"
+            .into();
+        assert!(matches!(
+            run_pair(&p, &parsers(), Path::new(SH)),
+            Outcome::Skip(..)
+        ));
+        p.omn[1] = "echo 'has no viable backend' >&2; \
+                    echo 'exit 1: the run failed after it started, before writing its results' >&2; \
+                    exit 1"
+            .into();
+        match run_pair(&p, &parsers(), Path::new(SH)) {
+            Outcome::Fail(why) => assert!(why.contains("failed while running"), "{why}"),
             other => panic!("{other:?}"),
         }
     }

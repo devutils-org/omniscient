@@ -244,7 +244,7 @@ or not. `known_defect` and `gap` do not go together.
 | a `requires_setting` file cannot be read | `` `<file>` cannot be read here (<error>), and this pair needs it `` |
 | `privileged: true` and `sudo -n -l <tool>` fails (the tool itself is asked, since a sudoers file may grant the witnesses one by one) | `` `sudo -n` does not grant root here for `<tool>` `` |
 | the tool exits non-zero with a refusal on stderr (`perf_event_paranoid`, `Permission denied`, `Operation not permitted`, `must be run as root`, `requires root`, or the pair's `refused_when`) | `` `<tool>` was refused on this machine ``, quoting those lines |
-| `omn` exits 1 (this machine cannot serve it) | `omn cannot run this here`, quoting `omn`'s stderr |
+| `omn` exits 1 (this machine cannot serve it): its last line `exit 1: the machine refused the run`, or, from an `omn` that does not say, no results written | `omn cannot run this here`, quoting `omn`'s stderr |
 | `omn_launches_tool` and the kernel cannot tell how the tool exited (before Linux 6.15) | `` the exit status of `<tool>` launched by omn cannot be seen here ``, quoting why |
 
 Checked in that order, `requires` and `requires_setting` before anything
@@ -256,7 +256,7 @@ Under `omn_launches_tool` what runs alone is the program `omn` launches,
 workload there is the tool's argument (a job file) rather than a program:
 failing alone with a refusal wording keeps the skip, failing otherwise
 fails the pair.
-`omn` exiting 2 (the request means nothing) fails the pair; exiting 3
+`omn` exiting 1 with the last line `exit 1: the run failed after it started` fails the pair, results written or not. `omn` exiting 2 (the request means nothing) fails the pair; exiting 3
 (nothing in this build collects it) fails it too, because that is a gap the
 pair should declare with `gap:`. The skip lines are what
 `.github/expected-skips.txt` matches on the CI's cells, which install none
