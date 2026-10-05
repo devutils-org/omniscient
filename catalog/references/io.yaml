@@ -197,3 +197,56 @@
       65 us: the band is that rounding (5 us) and the queue time omn leaves
       out (up to 5 us more). Seen through the runner: 56.9 and 56.0 us
       against 0.06 ms"
+
+- id: fio-clat-p50
+  source: io.latency
+  tool: fio
+  use: "fio --rw=randread --direct=1: clat's 50th percentile"
+  workload: []
+  omn: [trace, io.latency, -m, trace, -e, hist, --format, json, -o, "{out}"]
+  run: omn_launches_tool
+  setup: [fio, --create_only=1, --output=/dev/null, tests/reference/workloads/io/randread.fio]
+  reference:
+    command: [fio, --output-format=json, tests/reference/workloads/io/randread.fio]
+    parse: fio_json
+    requires: [fio]
+  compare:
+    key: read.clat_p50_ns
+    omn_parse: omn_hist_as_fio
+    tolerance: {log2_buckets: 1}
+    why: "the same run, the median of the two spans fio-clat compares by
+      their means: omn's log2 histogram of issue to completion at the
+      device, every device merged, its median read as the low edge of its
+      bucket; fio's clat p50, from submission to return. omn's span is
+      inside fio's, so its bucket is fio's or the one below: [32768, 65536)
+      against fio's 78336 ns under the wave's load (2026-10-05), the same
+      bucket on a quiet machine, where fio's mean is 68 us. Two buckets
+      apart would be fio's share above the block layer doubling the
+      device's, which fio-clat bounds at half"
+
+- id: iostat-w-per-s
+  source: io.iops
+  tool: iostat
+  use: "iostat -dx 4: w/s, the writes a device completed per second"
+  workload: [fio, --output=/dev/null, tests/reference/workloads/io/randwrite.fio]
+  omn: [trace, io.iops, --system, -m, count, -e, rate, -k, dir, -d, 4s, --format, json, -o, "{out}"]
+  run: alongside
+  settle_ms: 1000
+  setup: [fio, --create_only=1, --output=/dev/null, tests/reference/workloads/io/randwrite.fio]
+  reference:
+    command: [iostat, -d, -x, -y, -o, JSON, "4", "1"]
+    parse: iostat_json
+    requires: [iostat, fio]
+  compare:
+    key: all.w/s
+    omn: results.0.outputs[emit=rate].series[key=dir:write].per_second
+    tolerance: {rel: 0.02}
+    why: "iostat-r-per-s's shape over writes: both read /proc/diskstats'
+      completed-writes column over four seconds holding the whole 2 s
+      random direct write job, iostat per whole disk, fs:proc per device
+      nothing is stacked on. The filesystem's own writes (btrfs metadata,
+      its log commits) land in both windows alike, end_fsync keeping them
+      inside the job; the band is the windows' ends, as for reads. Seen
+      through the runner at a load of 12 to 23 (2026-10-05): six of six
+      within 1.8 %, five within 0.3 %. Without end_fsync, 3.4 % below and
+      7.7 % above on two runs"

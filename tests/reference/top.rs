@@ -42,7 +42,60 @@ pub fn parsers() -> Vec<Parser> {
             name: "omn_cpu_share",
             parse: omn_cpu_share,
         },
+        Parser {
+            name: "omn_cpu_util_polls",
+            parse: omn_cpu_util_polls,
+        },
     ]
+}
+
+/// One tick of the kernel's cpu accounting (`USER_HZ`, 100 wherever
+/// `/proc/stat` is read), in ns.
+const TICK_NS: f64 = 10_000_000.0;
+
+/// `cpu.util --system`'s raw events in `omn`'s JSON: the mean `busy` over
+/// the reads that cover an interval, keyed `busy` as `top`'s `%Cpu(s)`.
+///
+/// A read less than one tick after the window opened is left out: it is
+/// `omn`'s first poll, taken at once after the baseline read, and its share
+/// is a few ticks over a fraction of a millisecond -- 0, 0.5 or 1 -- which a
+/// summary's mean then weighs like a whole second. Stream cpu fixed it in
+/// the twenty-fourth wave (`c13eb51`), so on today's `omn` nothing is left
+/// out; the capture below is from before the fix. Every other read covers
+/// one poll interval, so their plain mean is the share over their span.
+fn omn_cpu_util_polls(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let doc: Value =
+        serde_json::from_str(stdout).map_err(|e| format!("omn's output is not JSON: {e}"))?;
+    let result = doc["results"]
+        .as_array()
+        .and_then(|r| r.iter().find(|r| r["source"] == "cpu.util"))
+        .ok_or("no cpu.util result in omn's output")?;
+    let opened = result["window"]["opened_ns"]
+        .as_f64()
+        .ok_or("no window.opened_ns in omn's cpu.util result")?;
+    let events = result["outputs"]
+        .as_array()
+        .and_then(|o| o.iter().find(|o| o["emit"] == "raw"))
+        .and_then(|o| o["events"].as_array())
+        .ok_or("no raw events in omn's cpu.util result")?;
+    let busy: Vec<f64> = events
+        .iter()
+        .filter(|e| e["ts_ns"].as_f64().is_some_and(|ts| ts - opened >= TICK_NS))
+        .map(|e| {
+            e["attrs"]
+                .as_array()
+                .and_then(|a| a.iter().find(|a| a["name"] == "busy"))
+                .and_then(|a| a["value"].as_f64())
+                .ok_or_else(|| format!("a cpu.util event with no busy: {e}"))
+        })
+        .collect::<Result<_, _>>()?;
+    if busy.is_empty() {
+        return Err("no cpu.util read covering an interval in omn's output".into());
+    }
+    Ok(vec![(
+        "busy".into(),
+        busy.iter().sum::<f64>() / busy.len() as f64,
+    )])
 }
 
 /// `cpu.oncpu_time`'s summary in `omn`'s JSON: the sum over its series of
@@ -386,6 +439,17 @@ mod tests {
         let empty = r#"{"results": [{"source": "cpu.oncpu_time", "observed_ns": 0,
             "outputs": [{"emit": "summary", "series": [{"count": 1, "mean": 5}]}]}]}"#;
         assert!(omn_cpu_share(empty, "").is_err());
+    }
+
+    #[test]
+    fn omn_cpu_util_polls_leaves_out_the_read_at_the_windows_opening() {
+        // A real `omn trace cpu.util --system -m poll -e raw -d 3s --window
+        // 1s..3s` (2026-10-05): reads at +0.3 ms (busy 1.0, a few ticks),
+        // +1.0004 s (0.846) and +1.9998 s (0.814) past the window's opening.
+        let values = omn_cpu_util_polls(&capture("omn-cpu-util-raw-window.json"), "").unwrap();
+        let busy = get(&values, "busy");
+        assert!((busy - (0.846 + 0.814) / 2.0).abs() < 0.001, "{busy}");
+        assert!(omn_cpu_util_polls("{\"results\": []}", "").is_err());
     }
 
     #[test]

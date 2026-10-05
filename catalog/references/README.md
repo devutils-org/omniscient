@@ -56,6 +56,7 @@ family reads one table across them.
   settle_ms: 500                          # attach, alongside: the observers' head start
   timeout_s: 120                          # per command
   setup: [sh, -c, "..."]                  # optional: an argv run before each side
+  teardown: [sh, -c, "..."]               # optional: an argv run after each side, always
   reference:
     command: [perf, stat, -x, ",", -e, instructions, --]
     report: []                            # optional second command, parsed instead
@@ -146,11 +147,15 @@ argv run before each side under `separate` and before the one run in the
 other modes, with the placeholders below; it must exit 0, or the pair fails
 quoting its stderr. It is for state the workload needs and does not make
 itself (a file, a directory); a process that must outlive it belongs in the
-workload.
+workload. **`teardown`** is its mirror: an argv run after each side (after
+the one run), whatever the side came to -- a failure, a skip, a setup that
+failed half-way -- for what `setup` made and must not leave behind (a
+cgroup, say). It must exit 0, or the pair fails quoting it, after the
+side's own failure when there was one.
 
 ### Placeholders
 
-In `omn`, `command`, `report` and `setup`: `{tmp}` is the run's scratch
+In `omn`, `command`, `report`, `setup` and `teardown`: `{tmp}` is the run's scratch
 directory (`perf record -o {tmp}/perf.data`, then `perf report -i
 {tmp}/perf.data`), `{pid}` the workload under `attach` (and nowhere else),
 and `{out}` the directory for `omn -o {out}` -- whose `results.json` is then
@@ -234,18 +239,24 @@ or not. `known_defect` and `gap` do not go together.
 | The pair skips when | The line says |
 |---|---|
 | a binary in `requires` is not installed | `` `<binary>` is not installed here `` |
+| a path in `requires` (a device node, a driver's file) is absent | `` `<path>` does not exist here `` |
 | a `requires_setting` file's value is past its bound | `` `<file>` is <value> here, and this pair needs it at most <bound> `` (or `at least`) |
 | a `requires_setting` file cannot be read | `` `<file>` cannot be read here (<error>), and this pair needs it `` |
 | `privileged: true` and `sudo -n -l <tool>` fails (the tool itself is asked, since a sudoers file may grant the witnesses one by one) | `` `sudo -n` does not grant root here for `<tool>` `` |
 | the tool exits non-zero with a refusal on stderr (`perf_event_paranoid`, `Permission denied`, `Operation not permitted`, `must be run as root`, `requires root`, or the pair's `refused_when`) | `` `<tool>` was refused on this machine ``, quoting those lines |
-| `omn` exits 1 (this machine cannot serve it) | `omn cannot run this here`, quoting `omn`'s stderr |
+| `omn` exits 1 (this machine cannot serve it): its last line `exit 1: the machine refused the run`, or, from an `omn` that does not say, no results written | `omn cannot run this here`, quoting `omn`'s stderr |
 | `omn_launches_tool` and the kernel cannot tell how the tool exited (before Linux 6.15) | `` the exit status of `<tool>` launched by omn cannot be seen here ``, quoting why |
 
 Checked in that order, `requires` and `requires_setting` before anything
 runs. A `requires_setting` file holding something other than an integer
 fails the pair. Before a refusal or an `omn` exit 1 is granted as a skip,
 the workload runs once alone: a workload that fails alone fails the pair.
-`omn` exiting 2 (the request means nothing) fails the pair; exiting 3
+Under `omn_launches_tool` what runs alone is the program `omn` launches,
+`<command> <workload>` (through `sudo -n` when privileged), since the
+workload there is the tool's argument (a job file) rather than a program:
+failing alone with a refusal wording keeps the skip, failing otherwise
+fails the pair.
+`omn` exiting 1 with the last line `exit 1: the run failed after it started` fails the pair, results written or not. `omn` exiting 2 (the request means nothing) fails the pair; exiting 3
 (nothing in this build collects it) fails it too, because that is a gap the
 pair should declare with `gap:`. The skip lines are what
 `.github/expected-skips.txt` matches on the CI's cells, which install none

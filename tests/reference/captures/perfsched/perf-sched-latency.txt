@@ -1,10 +1,71 @@
 
  -------------------------------------------------------------------------------------------------------------------------------------------
-  Task                  |   Runtime ms  | Count   | Avg delay ms    | Max delay ms    | Max delay start           | Max delay end          |
+  Task                  |   Runtime ms  |  Count   | Avg delay ms    | Max delay ms    | Max delay start           | Max delay end          |
  -------------------------------------------------------------------------------------------------------------------------------------------
-  python3:2924040       |     14.823 ms |       23 | avg:    0.018 ms | max:    0.102 ms | max start: 71527.474102 s | max end: 71527.474204 s
-  perf-exec:2924039     |      0.412 ms |        2 | avg:    0.006 ms | max:    0.009 ms | max start: 71527.471020 s | max end: 71527.471029 s
-  kworker/3:1:212       |      0.051 ms |        4 | avg:    0.004 ms | max:    0.007 ms | max start: 71527.480011 s | max end: 71527.480018 s
+  gh:(10)               |     15.377 ms |       27 | avg:   0.548 ms | max:  14.352 ms | max start:  1320.527842 s | max end:  1320.542194 s
+  migration/13:100      |      0.017 ms |        3 | avg:   0.408 ms | max:   1.217 ms | max start:  1320.527801 s | max end:  1320.529018 s
+  migration/17:124      |      0.033 ms |        3 | avg:   0.317 ms | max:   0.941 ms | max start:  1320.528311 s | max end:  1320.529251 s
+  migration/21:148      |      0.020 ms |        3 | avg:   0.225 ms | max:   0.667 ms | max start:  1320.528806 s | max end:  1320.529473 s
+  rustc:(4)             |    438.015 ms |       10 | avg:   0.165 ms | max:   1.485 ms | max start:  1320.527471 s | max end:  1320.528957 s
+  migration/9:74        |      0.027 ms |        3 | avg:   0.126 ms | max:   0.371 ms | max start:  1320.528370 s | max end:  1320.528741 s
+  migration/7:62        |      0.021 ms |        3 | avg:   0.099 ms | max:   0.285 ms | max start:  1320.528318 s | max end:  1320.528603 s
+  opt cgu.07:107896     |      4.646 ms |        1 | avg:   0.069 ms | max:   0.069 ms | max start:  1320.528425 s | max end:  1320.528495 s
+  migration/20:142      |      0.013 ms |        2 | avg:   0.053 ms | max:   0.101 ms | max start:  1320.529316 s | max end:  1320.529417 s
+  opt cgu.08:(2)        |    430.135 ms |        8 | avg:   0.044 ms | max:   0.182 ms | max start:  1320.527344 s | max end:  1320.527526 s
+  migration/6:56        |      0.011 ms |        2 | avg:   0.039 ms | max:   0.073 ms | max start:  1320.528478 s | max end:  1320.528550 s
+  migration/22:154      |      0.013 ms |        2 | avg:   0.029 ms | max:   0.053 ms | max start:  1320.529486 s | max end:  1320.529538 s
+  kworker/10:1-mm:288   |      0.006 ms |        2 | avg:   0.029 ms | max:   0.048 ms | max start:  1320.608398 s | max end:  1320.608446 s
+  tailscaled:(5)        |      7.109 ms |      455 | avg:   0.020 ms | max:   3.578 ms | max start:  1320.527592 s | max end:  1320.531170 s
+  ksoftirqd/4:45        |      0.000 ms |        1 | avg:   0.018 ms | max:   0.018 ms | max start:  1320.546250 s | max end:  1320.546267 s
+  Bun Pool 5:3688       |      0.010 ms |        1 | avg:   0.012 ms | max:   0.012 ms | max start:  1320.613312 s | max end:  1320.613323 s
+  renderer:2045         |      0.181 ms |        1 | avg:   0.011 ms | max:   0.011 ms | max start:  1320.738838 s | max end:  1320.738849 s
+  Hyprland:(2)          |      0.680 ms |        3 | avg:   0.011 ms | max:   0.015 ms | max start:  1320.741820 s | max end:  1320.741834 s
+  rcu_preempt:16        |      0.160 ms |       18 | avg:   0.010 ms | max:   0.017 ms | max start:  1320.651236 s | max end:  1320.651253 s
+  perf:108025           |      1.586 ms |        2 | avg:   0.010 ms | max:   0.014 ms | max start:  1320.746477 s | max end:  1320.746491 s
+  irq/97-iwlwifi::773   |      0.005 ms |        1 | avg:   0.010 ms | max:   0.010 ms | max start:  1320.625433 s | max end:  1320.625443 s
+  mi-scavenger:3678     |      1.530 ms |       47 | avg:   0.009 ms | max:   0.015 ms | max start:  1320.549669 s | max end:  1320.549685 s
+  Bun Pool 6:3689       |      0.009 ms |        1 | avg:   0.009 ms | max:   0.009 ms | max start:  1320.613292 s | max end:  1320.613302 s
+  HTTP Client:3683      |      0.896 ms |       18 | avg:   0.009 ms | max:   0.012 ms | max start:  1320.727541 s | max end:  1320.727554 s
+  irq/85-iwlwifi::758   |      0.022 ms |        8 | avg:   0.009 ms | max:   0.011 ms | max start:  1320.549533 s | max end:  1320.549544 s
+  psimon:505            |      0.014 ms |        1 | avg:   0.009 ms | max:   0.009 ms | max start:  1320.643231 s | max end:  1320.643240 s
+  kworker/u98:6-e:4524  |      0.074 ms |        1 | avg:   0.009 ms | max:   0.009 ms | max start:  1320.742750 s | max end:  1320.742759 s
+  claude:3676           |      4.069 ms |       23 | avg:   0.008 ms | max:   0.011 ms | max start:  1320.634138 s | max end:  1320.634148 s
+  kworker/4:2-eve:87596 |      0.000 ms |        1 | avg:   0.008 ms | max:   0.008 ms | max start:  1320.546246 s | max end:  1320.546253 s
+  containerd:(3)        |      0.063 ms |        5 | avg:   0.007 ms | max:   0.010 ms | max start:  1320.691628 s | max end:  1320.691638 s
+  ghostty:2009          |      2.870 ms |        4 | avg:   0.007 ms | max:   0.012 ms | max start:  1320.739021 s | max end:  1320.739033 s
+  2.1.289:(3)           |      0.573 ms |       66 | avg:   0.007 ms | max:   0.013 ms | max start:  1320.626404 s | max end:  1320.626417 s
+  irq/95-iwlwifi::771   |      0.038 ms |        8 | avg:   0.007 ms | max:   0.008 ms | max start:  1320.662371 s | max end:  1320.662379 s
+  irq/88-iwlwifi::764   |      0.003 ms |        1 | avg:   0.007 ms | max:   0.007 ms | max start:  1320.561383 s | max end:  1320.561390 s
+  coordinator:106990    |      1.649 ms |        3 | avg:   0.007 ms | max:   0.010 ms | max start:  1320.740934 s | max end:  1320.740944 s
+  migration/0:20        |      0.019 ms |        2 | avg:   0.006 ms | max:   0.009 ms | max start:  1320.665339 s | max end:  1320.665348 s
+  nvidia-drm/time:(2)   |      0.012 ms |        5 | avg:   0.006 ms | max:   0.014 ms | max start:  1320.747460 s | max end:  1320.747474 s
+  nvidia-modeset/:309   |      0.104 ms |       32 | avg:   0.006 ms | max:   0.015 ms | max start:  1320.743055 s | max end:  1320.743070 s
+  migration/15:112      |      0.024 ms |        2 | avg:   0.006 ms | max:   0.006 ms | max start:  1320.686338 s | max end:  1320.686344 s
+  kcompactd0:178        |      0.003 ms |        1 | avg:   0.006 ms | max:   0.006 ms | max start:  1320.707229 s | max end:  1320.707234 s
+  migration/3:38        |      0.026 ms |        3 | avg:   0.005 ms | max:   0.007 ms | max start:  1320.670336 s | max end:  1320.670344 s
+  io:2046               |      0.018 ms |        1 | avg:   0.005 ms | max:   0.005 ms | max start:  1320.702597 s | max end:  1320.702603 s
+  irq/98-iwlwifi::774   |      0.002 ms |        1 | avg:   0.005 ms | max:   0.005 ms | max start:  1320.634013 s | max end:  1320.634019 s
+  migration/10:80       |      0.015 ms |        2 | avg:   0.005 ms | max:   0.005 ms | max start:  1320.528806 s | max end:  1320.528811 s
+  irq/84-iwlwifi::757   |      0.044 ms |       26 | avg:   0.005 ms | max:   0.010 ms | max start:  1320.542371 s | max end:  1320.542382 s
+  irq/90-iwlwifi::766   |      0.008 ms |        3 | avg:   0.005 ms | max:   0.007 ms | max start:  1320.612362 s | max end:  1320.612369 s
+  migration/12:92       |      0.013 ms |        2 | avg:   0.005 ms | max:   0.006 ms | max start:  1320.683336 s | max end:  1320.683341 s
+  migration/1:26        |      0.021 ms |        2 | avg:   0.005 ms | max:   0.005 ms | max start:  1320.668337 s | max end:  1320.668343 s
+  migration/2:32        |      0.043 ms |        3 | avg:   0.005 ms | max:   0.007 ms | max start:  1320.529027 s | max end:  1320.529033 s
+  migration/23:160      |      0.012 ms |        2 | avg:   0.005 ms | max:   0.005 ms | max start:  1320.695461 s | max end:  1320.695466 s
+  migration/8:68        |      0.014 ms |        2 | avg:   0.005 ms | max:   0.006 ms | max start:  1320.676336 s | max end:  1320.676341 s
+  migration/11:86       |      0.018 ms |        2 | avg:   0.005 ms | max:   0.005 ms | max start:  1320.679336 s | max end:  1320.679341 s
+  migration/16:118      |      0.014 ms |        2 | avg:   0.005 ms | max:   0.005 ms | max start:  1320.687336 s | max end:  1320.687341 s
+  migration/5:50        |      0.018 ms |        2 | avg:   0.005 ms | max:   0.005 ms | max start:  1320.672335 s | max end:  1320.672340 s
+  omnref-sleep:108131   |     11.180 ms |      102 | avg:   0.005 ms | max:   0.012 ms | max start:  1320.529722 s | max end:  1320.529735 s
+  migration/14:106      |      0.012 ms |        2 | avg:   0.005 ms | max:   0.006 ms | max start:  1320.685336 s | max end:  1320.685342 s
+  kworker/14:2-ev:297   |      0.008 ms |        1 | avg:   0.005 ms | max:   0.005 ms | max start:  1320.747227 s | max end:  1320.747232 s
+  cargo:105630          |      0.015 ms |        1 | avg:   0.005 ms | max:   0.005 ms | max start:  1320.550636 s | max end:  1320.550641 s
+  migration/4:44        |      0.011 ms |        2 | avg:   0.004 ms | max:   0.005 ms | max start:  1320.671336 s | max end:  1320.671341 s
+  migration/18:130      |      0.014 ms |        2 | avg:   0.004 ms | max:   0.005 ms | max start:  1320.690335 s | max end:  1320.690339 s
+  ksoftirqd/0:15        |      0.000 ms |        2 | avg:   0.004 ms | max:   0.004 ms | max start:  1320.533259 s | max end:  1320.533263 s
+  migration/19:136      |      0.011 ms |        2 | avg:   0.004 ms | max:   0.004 ms | max start:  1320.529356 s | max end:  1320.529360 s
+  omn:108135            |    217.183 ms |        2 | avg:   0.003 ms | max:   0.006 ms | max start:  1320.690339 s | max end:  1320.690345 s
  -----------------------------------------------------------------------------------------------------------------
-  TOTAL:                |     15.286 ms |       29 |
+  TOTAL:                |   1138.735 ms |      949 |
  ---------------------------------------------------
+

@@ -343,17 +343,24 @@ mod tests {
 
     #[test]
     fn cpupower_mperf_reads_the_frequency_column() {
+        // A real `sudo -n cpupower monitor -m Mperf sleep 2` beside `spin.py 3
+        // 24` (2026-10-05): 24 cpus, the powercap lines and `sleep took` that
+        // cpupower prints on stdout before its table, and C0 rounded past 100.
         let v = cpupower_monitor(&capture("cpupower_mperf.txt"), "").unwrap();
-        assert_eq!(get(&v, "cpu1/Freq"), 4071.0);
-        assert_eq!(get(&v, "cpu1/Freq_Hz"), 4.071e9);
+        assert_eq!(get(&v, "cpu1/Freq"), 4006.0);
+        assert_eq!(get(&v, "cpu1/Freq_Hz"), 4.006e9);
         assert!(v.iter().all(|(k, _)| !k.starts_with("cpu:")), "{v:?}");
-        assert_eq!(get(&v, "Freq"), (4078.0 + 4071.0) / 2.0);
+        assert!((get(&v, "Freq") - 4005.375).abs() < 1e-9);
     }
 
     #[test]
     fn rapl_window_converts_microjoules_and_one_wrap() {
+        // A real `rapl_window.sh sleep 2` (2026-10-05; energy_uj is readable
+        // by everyone on this machine). The wrapped capture is composed: a
+        // wrap of the 65.5 kJ range is not something a run waits for.
         let v = rapl_window("{}", &capture("rapl_window.txt")).unwrap();
-        assert_eq!(v, vec![(String::new(), 90.0)]);
+        assert_eq!(v.len(), 1);
+        assert!((v[0].1 - 293.039472).abs() < 1e-6, "{v:?}");
         let v = rapl_window(&capture("rapl_window_wrapped.txt"), "").unwrap();
         let joules = v[0].1;
         assert!((joules - 87.734443).abs() < 1e-6, "{joules}");

@@ -10,16 +10,16 @@
           "emit": "raw",
           "events": [
             {
-              "ts_ns": 2964799178487,
+              "ts_ns": 2926204072106,
               "kind": "cpu.util",
               "attrs": [
                 {
                   "name": "busy",
-                  "value": 0.4078838174273859
+                  "value": 0.6661122661122661
                 },
                 {
                   "name": "user",
-                  "value": 0.3203319502074689
+                  "value": 0.6012474012474013
                 },
                 {
                   "name": "nice",
@@ -27,23 +27,23 @@
                 },
                 {
                   "name": "system",
-                  "value": 0.08091286307053942
+                  "value": 0.05488565488565489
                 },
                 {
                   "name": "idle",
-                  "value": 0.5601659751037344
+                  "value": 0.29313929313929316
                 },
                 {
                   "name": "iowait",
-                  "value": 0.031950207468879666
+                  "value": 0.04074844074844075
                 },
                 {
                   "name": "irq",
-                  "value": 0.004979253112033195
+                  "value": 0.008316008316008316
                 },
                 {
                   "name": "softirq",
-                  "value": 0.0016597510373443983
+                  "value": 0.0016632016632016633
                 },
                 {
                   "name": "steal",
@@ -58,16 +58,16 @@
               "seq": 0
             },
             {
-              "ts_ns": 2965799161792,
+              "ts_ns": 2927203950734,
               "kind": "cpu.util",
               "attrs": [
                 {
                   "name": "busy",
-                  "value": 0.11637572734829593
+                  "value": 0.7128589263420724
                 },
                 {
                   "name": "user",
-                  "value": 0.10099750623441396
+                  "value": 0.6637536412817312
                 },
                 {
                   "name": "nice",
@@ -75,23 +75,23 @@
                 },
                 {
                   "name": "system",
-                  "value": 0.012468827930174564
+                  "value": 0.03953391593841032
                 },
                 {
                   "name": "idle",
-                  "value": 0.813383208645054
+                  "value": 0.22846441947565543
                 },
                 {
                   "name": "iowait",
-                  "value": 0.07024106400665005
+                  "value": 0.05867665418227216
                 },
                 {
                   "name": "irq",
-                  "value": 0.0020781379883624274
+                  "value": 0.008322929671244279
                 },
                 {
                   "name": "softirq",
-                  "value": 0.0008312551953449709
+                  "value": 0.0012484394506866417
                 },
                 {
                   "name": "steal",
@@ -104,64 +104,16 @@
               ],
               "collector_id": "cpu.util/fs:proc",
               "seq": 1
-            },
-            {
-              "ts_ns": 2966799062692,
-              "kind": "cpu.util",
-              "attrs": [
-                {
-                  "name": "busy",
-                  "value": 0.23035343035343037
-                },
-                {
-                  "name": "user",
-                  "value": 0.120997920997921
-                },
-                {
-                  "name": "nice",
-                  "value": 0.0
-                },
-                {
-                  "name": "system",
-                  "value": 0.0997920997920998
-                },
-                {
-                  "name": "idle",
-                  "value": 0.7056133056133056
-                },
-                {
-                  "name": "iowait",
-                  "value": 0.06403326403326404
-                },
-                {
-                  "name": "irq",
-                  "value": 0.007484407484407485
-                },
-                {
-                  "name": "softirq",
-                  "value": 0.002079002079002079
-                },
-                {
-                  "name": "steal",
-                  "value": 0.0
-                },
-                {
-                  "name": "window",
-                  "value": "since the previous read"
-                }
-              ],
-              "collector_id": "cpu.util/fs:proc",
-              "seq": 2
             }
           ]
         }
       ],
-      "events_seen": 3,
-      "observed_ns": 3000329789,
+      "events_seen": 2,
+      "observed_ns": 2000453340,
       "window": {
-        "run_opened_ns": 2963798751753,
-        "opened_ns": 2963798751753,
-        "closed_ns": 2966799081542,
+        "run_opened_ns": 2925203522445,
+        "opened_ns": 2925203522445,
+        "closed_ns": 2927203975785,
         "attached": true
       },
       "stopped_because": "the requested duration elapsed",
@@ -173,35 +125,35 @@
         "throttled": 0
       },
       "notes": [
-        "over the window, `cpu` counted 7221 ticks: user 18.1 %, nice 0.0 %, system 6.4 %, idle 69.3 %, iowait 5.5 %, irq 0.5 %, softirq 0.2 %, steal 0.0 %"
+        "over the window, `cpu` counted 4808 ticks: user 63.2 %, nice 0.0 %, system 4.7 %, idle 26.1 %, iowait 5.0 %, irq 0.8 %, softirq 0.1 %, steal 0.0 %"
       ],
       "overhead": {
-        "collector_cpu_ns": 1234000,
-        "attributed_cpu_ns": 1234000,
-        "observed_cpu_ns": 18180000000,
+        "collector_cpu_ns": 1200000,
+        "attributed_cpu_ns": 1200000,
+        "observed_cpu_ns": 33160000000,
         "observed_from": "everything but idle on every cpu (/proc/stat)",
-        "wall_ns": 3000429570,
-        "measurement_ns": 92040,
+        "wall_ns": 2000586352,
+        "measurement_ns": 115240,
         "measurements": 2,
         "in_target_cpu_ns": 0,
         "in_target_from": "nothing of this collector runs in the target's context: it reads the kernel's account, or a file, from its own",
-        "before_window_cpu_ns": 72211000,
-        "after_window_cpu_ns": 157000
+        "before_window_cpu_ns": 73306000,
+        "after_window_cpu_ns": 193000
       },
       "served_by": [
         "fs:proc"
       ],
       "value_attr": "busy",
       "fields": {
-        "idle_ticks": 5004,
-        "iowait_ticks": 400,
-        "irq_ticks": 35,
+        "idle_ticks": 1254,
+        "iowait_ticks": 239,
+        "irq_ticks": 40,
         "nice_ticks": 0,
-        "softirq_ticks": 11,
+        "softirq_ticks": 7,
         "steal_ticks": 0,
-        "system_ticks": 465,
-        "ticks": 7221,
-        "user_ticks": 1306
+        "system_ticks": 227,
+        "ticks": 4808,
+        "user_ticks": 3041
       }
     }
   ]

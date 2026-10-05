@@ -1,0 +1,128 @@
+{
+  "results": [
+    {
+      "label": "io.latency",
+      "source": "io.latency",
+      "unit": "ns",
+      "backend": "bpf:raw_tp",
+      "outputs": [
+        {
+          "emit": "hist",
+          "layout": "log2",
+          "series": [
+            {
+              "key": "dev:259+6",
+              "count": 19212,
+              "min": 4096.0,
+              "max": 4669040.0,
+              "sum": 1100759808.0,
+              "buckets": [
+                {
+                  "low": 4096,
+                  "high": 8192,
+                  "count": 3
+                },
+                {
+                  "low": 8192,
+                  "high": 16384,
+                  "count": 4
+                },
+                {
+                  "low": 16384,
+                  "high": 32768,
+                  "count": 1
+                },
+                {
+                  "low": 32768,
+                  "high": 65536,
+                  "count": 19073
+                },
+                {
+                  "low": 65536,
+                  "high": 131072,
+                  "count": 90
+                },
+                {
+                  "low": 131072,
+                  "high": 262144,
+                  "count": 28
+                },
+                {
+                  "low": 262144,
+                  "high": 524288,
+                  "count": 12
+                },
+                {
+                  "low": 524288,
+                  "high": 1048576,
+                  "count": 0
+                },
+                {
+                  "low": 1048576,
+                  "high": 2097152,
+                  "count": 0
+                },
+                {
+                  "low": 2097152,
+                  "high": 4194304,
+                  "count": 0
+                },
+                {
+                  "low": 4194304,
+                  "high": 8388608,
+                  "count": 1
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "events_seen": 8,
+      "observed_ns": 2500761341,
+      "window": {
+        "run_opened_ns": 1491260131573,
+        "opened_ns": 1491260131573,
+        "closed_ns": 1493760892914,
+        "attached": true
+      },
+      "stopped_because": "the launched program exited with exit status 0",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "lifetime": {
+        "released_ns": 1491259857859,
+        "exited_ns": 1493760880884,
+        "exited_err_ns": 381995,
+        "cpu_ns": 424869000
+      },
+      "degradations": [
+        "a process target sees the requests submitted in its own context, which is reads; a write leaves through writeback in a kworker minutes later and carries no submitter at all, so it is absent here rather than counted as zero",
+        "36 block_rq_complete events had no opening this run recorded and were not measured: they belong to another process, or were already in flight when the programs attached. Nothing was dropped -- there was nothing to subtract from"
+      ],
+      "notes": [
+        "the histogram was built in the kernel: 19212 requests counted into 8 rows of (device, log2 bucket), read once at the end, and no record per request crossed to userspace; `latency_ns` on a row is its bucket's low bound and `total_ns` the exact sum. Rows carry `dev` and no `blk`, `task` or `req` key -- ask for another emit beside `hist` to have the requests one at a time"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 32278000,
+        "attributed_cpu_ns": 32278000,
+        "observed_cpu_ns": 424649030,
+        "observed_from": "the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 126883 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)",
+        "wall_ns": 2511342846,
+        "measurement_ns": 44870,
+        "measurements": 2,
+        "in_target_cpu_ns": null,
+        "in_target_from": "the kernel is not timing eBPF programs on this run: `kernel.bpf_stats_enabled` is 0, and BPF_ENABLE_STATS was refused (EPERM: it needs CAP_SYS_ADMIN); `sysctl kernel.bpf_stats_enabled=1` before the run makes what the programs spend inside the target measurable",
+        "before_window_cpu_ns": 277383000,
+        "after_window_cpu_ns": 111000
+      },
+      "served_by": [
+        "bpf:raw_tp"
+      ],
+      "value_attr": "latency_ns"
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+/usr/share/bpftrace/tools/killsnoop.bt:94:3-22: WARNING: Return value discarded.
+  delete(@tpid, tid);
+  ~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/killsnoop.bt:85:1-13: WARNING: expanded from
+/@tpid[tid]/
+~~~~~~~~~~~~
+/usr/share/bpftrace/tools/killsnoop.bt:95:3-21: WARNING: Return value discarded.
+  delete(@tsig, tid);
+  ~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/killsnoop.bt:85:1-13: WARNING: expanded from
+/@tpid[tid]/
+~~~~~~~~~~~~
+/usr/share/bpftrace/tools/killsnoop.bt:94:3-22: WARNING: Return value discarded.
+  delete(@tpid, tid);
+  ~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/killsnoop.bt:85:1-13: WARNING: expanded from
+/@tpid[tid]/
+~~~~~~~~~~~~
+/usr/share/bpftrace/tools/killsnoop.bt:95:3-21: WARNING: Return value discarded.
+  delete(@tsig, tid);
+  ~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/killsnoop.bt:85:1-13: WARNING: expanded from
+/@tpid[tid]/
+~~~~~~~~~~~~
+/usr/share/bpftrace/tools/killsnoop.bt:94:3-22: WARNING: Return value discarded.
+  delete(@tpid, tid);
+  ~~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/killsnoop.bt:85:1-13: WARNING: expanded from
+/@tpid[tid]/
+~~~~~~~~~~~~
+/usr/share/bpftrace/tools/killsnoop.bt:95:3-21: WARNING: Return value discarded.
+  delete(@tsig, tid);
+  ~~~~~~~~~~~~~~~~~~
+/usr/share/bpftrace/tools/killsnoop.bt:85:1-13: WARNING: expanded from
+/@tpid[tid]/
+~~~~~~~~~~~~
+Tracing kill(),tkill(),tgkill() signals... Hit Ctrl-C to end.
+TIME                 PID COMM                    SIG     TPID RESULT
+20:13:19.353570    92147 omnref              SIGUSR2    92147      0
+20:13:19.353783    92147 omnref              SIGUSR2    92147      0
+20:13:19.353836    92147 omnref              SIGUSR2    92147      0
+20:13:19.353886    92147 omnref              SIGUSR2    92147      0
+20:13:19.353935    92147 omnref              SIGUSR2    92147      0
+20:13:19.353984    92147 omnref              SIGUSR2    92147      0
+20:13:19.354033    92147 omnref              SIGUSR2    92147      0
+20:13:19.354081    92147 omnref              SIGUSR2    92147      0
+20:13:19.354130    92147 omnref              SIGUSR2    92147      0
+20:13:19.354178    92147 omnref              SIGUSR2    92147      0
+20:13:19.354226    92147 omnref              SIGUSR2    92147      0
+20:13:19.354252    92147 omnref              SIGUSR2    92147      0
+20:13:19.354254    92147 omnref              SIGUSR2    92147      0
+20:13:19.354256    92147 omnref              SIGUSR2    92147      0
+20:13:19.354258    92147 omnref              SIGUSR2    92147      0
+20:13:19.354260    92147 omnref              SIGUSR2    92147      0
+20:13:19.354262    92147 omnref              SIGUSR2    92147      0
+20:13:19.354263    92147 omnref              SIGUSR2    92147      0
+20:13:19.354265    92147 omnref              SIGUSR2    92147      0
+20:13:19.354267    92147 omnref              SIGUSR2    92147      0
+20:13:19.354269    92147 omnref              SIGUSR2    92147      0
+20:13:19.354271    92147 omnref              SIGUSR2    92147      0
+20:13:19.354273    92147 omnref              SIGUSR2    92147      0
+20:13:19.354275    92147 omnref              SIGUSR2    92147      0
+20:13:19.354276    92147 omnref              SIGUSR2    92147      0
+20:13:19.354278    92147 omnref              SIGUSR2    92147      0
+20:13:19.354280    92147 omnref              SIGUSR2    92147      0
+20:13:19.354282    92147 omnref              SIGUSR2    92147      0
+20:13:19.354284    92147 omnref              SIGUSR2    92147      0
+20:13:19.354286    92147 omnref              SIGUSR2    92147      0
+20:13:19.354288    92147 omnref              SIGUSR2    92147      0
+20:13:19.354289    92147 omnref              SIGUSR2    92147      0
+20:13:19.354291    92147 omnref              SIGUSR2    92147      0
+20:13:19.354293    92147 omnref              SIGUSR2    92147      0
+20:13:19.354295    92147 omnref              SIGUSR2    92147      0
+20:13:19.354297    92147 omnref              SIGUSR2    92147      0
+20:13:19.354299    92147 omnref              SIGUSR2    92147      0
+20:13:19.354301    92147 omnref              SIGUSR2    92147      0
+20:13:19.354303    92147 omnref              SIGUSR2    92147      0
+20:13:19.354304    92147 omnref              SIGUSR2    92147      0
+20:13:19.354306    92147 omnref              SIGUSR2    92147      0
+20:13:19.354308    92147 omnref              SIGUSR2    92147      0
+20:13:19.354310    92147 omnref              SIGUSR2    92147      0
+20:13:19.354312    92147 omnref              SIGUSR2    92147      0
+20:13:19.354314    92147 omnref              SIGUSR2    92147      0
+20:13:19.354316    92147 omnref              SIGUSR2    92147      0
+20:13:19.354317    92147 omnref              SIGUSR2    92147      0
+20:13:19.354319    92147 omnref              SIGUSR2    92147      0
+20:13:19.354321    92147 omnref              SIGUSR2    92147      0
+20:13:19.354323    92147 omnref              SIGUSR2    92147      0
+20:13:19.431013    90643 coordinator         SIGUSR1    91498      0
+
+

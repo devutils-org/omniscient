@@ -100,7 +100,7 @@
   use: top -b -n 2 -d 2, the busy share of the %Cpu(s) line
   run: alongside
   workload: []
-  omn: [trace, cpu.util, --system, -m, poll, -e, summary, -d, 3s, --window, 1s..3s,
+  omn: [trace, cpu.util, --system, -m, poll, -e, raw, -d, 3s, --window, 1s..3s,
     --format, json]
   reference:
     command: [sh, tests/reference/workloads/top/at.sh, '1', '0', top, -b, -n,
@@ -109,7 +109,7 @@
     requires: [top]
   compare:
     key: busy
-    omn: results[source=cpu.util].outputs[emit=summary].series[key=system].mean
+    omn_parse: omn_cpu_util_polls
     tolerance: {abs: 0.05}
     why: >-
       The machine is the target, so only the same seconds compare: both start
@@ -117,7 +117,16 @@
       start, omn's mean its two 1 s polls of /proc/stat over its window 1s..3s.
       Busy is one less idle and iowait on both sides. The windows are offset by
       omn's startup (50-200 ms), which on a machine whose load changes by the
-      second is the band.
+      second is the band. omn's summary mean was the twenty-third wave's
+      bias, omn below top by about a third (0.140 against 0.204, 0.076
+      against 0.120): cpu.util polls once at once after its baseline read, a
+      share of a few ticks over a fraction of a millisecond (0 on a quiet
+      machine, 0.5 or 1 on a busy one) that a summary weighs like a whole
+      second among two. omn_cpu_util_polls reads the raw polls and leaves out
+      a read less than a tick after the window opened; stream cpu fixed the
+      poll in the same wave (its first sample is the baseline, c13eb51), so
+      the parser now leaves out nothing, and guards the pair if the read
+      comes back.
 
 - id: pmap-x-rss
   source: mem.rss

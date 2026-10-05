@@ -403,11 +403,11 @@ fn raw_events(json: &serde_json::Value) -> Result<&Vec<serde_json::Value>, Strin
 }
 
 /// `omn <source> --system -m poll@1s -e raw --format json`: each numeric
-/// attribute's mean over the raw events, keyed by its name. Every event covers
-/// a full period -- a poll's first read is its baseline, defect 2 of
-/// `docs/fixes/w22-sysstat.md`, fixed in the twenty-fourth wave and held by
-/// `poll_has_no_leading_event` -- so with equal windows the mean of the
-/// shares is the share of the whole, which is what the tools print.
+/// attribute's mean over the raw events, keyed by its name. With equal
+/// windows, the mean of the shares is the share of the whole, which is what
+/// the tools print. Every event covers a period: the leading event of a few
+/// ms (defect 2 of `docs/fixes/w22-sysstat.md`) was fixed in the
+/// twenty-fourth wave, and `no_poll_source_emits_a_leading_event` holds it.
 fn raw_means(stdout: &str) -> Result<Values, String> {
     let json: serde_json::Value =
         serde_json::from_str(stdout).map_err(|e| format!("omn's JSON: {e}"))?;
@@ -589,10 +589,11 @@ mod tests {
     }
 
     #[test]
-    fn omn_cpu_util_means_every_raw_event() {
-        // Three events, the first a full second after the window opened.
+    fn omn_cpu_util_means_every_event() {
+        // Recaptured 2026-10-05, after stream cpu's fix of defect 2: the
+        // first event is a period in (+1.0005 s), the second +2.0004 s.
         let v = omn_cpu_util(&capture("omn-cpu-util-raw.json"), "").unwrap();
-        let want = (0.4078838174273859 + 0.11637572734829593 + 0.23035343035343037) / 3.0;
+        let want = (0.6661122661122661 + 0.7128589263420724) / 2.0;
         assert!(close(get(&v, "busy"), want));
         assert!(close(get(&v, "all"), want));
     }
@@ -605,10 +606,13 @@ mod tests {
     }
 
     #[test]
-    fn omn_psi_maps_the_pressure_names() {
+    fn omn_psi_reads_the_psi_readers_names() {
+        // cpu.pressure recaptured 2026-10-05: it says `stall_ratio` and
+        // `full_stall_ratio` like io.pressure since the twenty-fourth wave.
         let cpu = omn_psi(&capture("omn-cpu-pressure-raw.json"), "").unwrap();
-        let want = (0.012417910601538748 + 0.010016625949137182 + 0.013626182273969722) / 3.0;
+        let want = (0.0086121411222452 + 0.01599125056407298) / 2.0;
         assert!(close(get(&cpu, "some"), want));
+        assert!(close(get(&cpu, "full"), 0.0));
         let io = omn_psi(&capture("omn-io-pressure-raw.json"), "").unwrap();
         assert!(close(
             get(&io, "some"),
@@ -659,15 +663,23 @@ mod defect_hold {
         })
     }
 
+    /// Defect 2, fixed in the twenty-fourth wave (stream cpu, `c13eb51`): a
+    /// polled source's first event was a share over the few ms between its
+    /// baseline and the first sample. None of the four may bring it back.
     #[test]
-    fn poll_has_no_leading_event() {
+    fn no_poll_source_emits_a_leading_event() {
         let mut failed = Vec::new();
-        for source in ["cpu.util", "cpu.pressure", "mem.pressure", "io.pressure"] {
-            for _ in 0..10 {
+        for (source, runs) in [
+            ("cpu.util", 10),
+            ("cpu.pressure", 10),
+            ("mem.pressure", 5),
+            ("io.pressure", 5),
+        ] {
+            for _ in 0..runs {
                 match leading_event(source) {
                     Ok(Some(true)) => {
                         failed.push(format!(
-                            "{source}: a leading event within half a period (defect 2 is back)"
+                            "{source}: a leading event within half a period (defect 2)"
                         ));
                         break;
                     }

@@ -1,0 +1,21 @@
+; The io family's write workload, beside randread.fio: 4 KiB random direct
+; writes for two seconds, one thread, synchronous, to its own file under
+; target/. Direct, so every write is a block request when it is issued
+; rather than when the page cache is flushed; the filesystem adds its own
+; writes (btrfs' metadata and checksums), which both sides of a
+; machine-wide pair see alike, and end_fsync makes the job wait for them
+; before it ends, so they fall inside both windows rather than at their edges.
+[global]
+directory=target
+filename=omn-reference-io-write.dat
+size=64M
+bs=4k
+direct=1
+ioengine=psync
+thread
+time_based
+runtime=2
+end_fsync=1
+
+[randwrite]
+rw=randwrite
