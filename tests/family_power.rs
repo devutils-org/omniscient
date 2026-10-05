@@ -293,7 +293,11 @@ fn every_source_this_machine_can_serve_runs_and_reports_no_loss() {
         ]);
         let out = stdout(&attempt);
         assert!(attempt.status.success(), "{source}: {}", stderr(&attempt));
-        assert!(out.contains("via fs:sys"), "{source}: {out}");
+        // `power.freq` prefers APERF/MPERF through the `msr` unit where it opens.
+        assert!(
+            out.contains("via fs:sys") || (source == "power.freq" && out.contains("via pmu")),
+            "{source}: {out}"
+        );
         assert!(
             out.contains("no loss"),
             "{source}: reading sysfs on an idle machine loses nothing: {out}"
@@ -318,7 +322,8 @@ fn every_source_this_machine_can_serve_runs_and_reports_no_loss() {
 
 /// The distinction the source exists for has to survive all the way to the
 /// output: a number that does not say whether it is the effective or the
-/// requested frequency cannot be compared with anything.
+/// requested frequency cannot be compared with anything. Through sysfs, where
+/// the file decides it -- and where an idle cpu's file holds a setpoint.
 #[test]
 fn a_frequency_run_says_which_frequency_it_measured() {
     if !usable("power.freq") {
@@ -333,11 +338,15 @@ fn a_frequency_run_says_which_frequency_it_measured() {
         "raw",
         "-d",
         "250ms",
+        "--backend",
+        "force:fs:sys",
     ]);
     assert!(attempt.status.success(), "{}", stderr(&attempt));
     let out = stdout(&attempt);
     assert!(
-        out.contains("measures=effective") || out.contains("measures=requested"),
+        out.contains("measures=effective")
+            || out.contains("measures=requested")
+            || out.contains("measures=setpoint"),
         "every event says which of the two it is: {out}"
     );
     assert!(

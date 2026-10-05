@@ -176,6 +176,12 @@ pub enum KeyValue {
     Dir {
         dir: Direction,
     },
+    /// An energy domain (`package`, `cores`, `dram`): domains nest -- the
+    /// cores are inside their package -- so a sum across them counts the same
+    /// joules twice, and each is its own series.
+    Domain {
+        name: String,
+    },
 }
 
 /// Which way a counted byte or operation went. A closed set: a block device
@@ -313,6 +319,10 @@ impl KeyValue {
         KeyValue::Dir { dir }
     }
 
+    pub fn domain(name: impl Into<String>) -> Self {
+        KeyValue::Domain { name: name.into() }
+    }
+
     pub fn task(tid: i32) -> Self {
         KeyValue::Task { tid }
     }
@@ -357,6 +367,7 @@ impl KeyValue {
             KeyValue::Cpu { .. } => KeyKind::Cpu,
             KeyValue::Node { .. } => KeyKind::Node,
             KeyValue::Dir { .. } => KeyKind::Dir,
+            KeyValue::Domain { .. } => KeyKind::Domain,
         }
     }
 }
@@ -389,6 +400,7 @@ impl fmt::Display for KeyValue {
             KeyValue::Cpu { cpu } => write!(f, "cpu:{cpu}"),
             KeyValue::Node { node } => write!(f, "node:{node}"),
             KeyValue::Dir { dir } => write!(f, "dir:{dir}"),
+            KeyValue::Domain { name } => write!(f, "domain:{name}"),
         }
     }
 }

@@ -136,6 +136,65 @@ pub fn attribute_name(chip: &str, label: &str) -> String {
     format!("{}.{}", clean(chip), clean(label))
 }
 
+/// One cpu's time as `/proc/stat` accounts it, in jiffies since boot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CpuTime {
+    /// user, nice, system, irq, softirq and steal: the cpu was running
+    /// something. Guest time is already inside user and nice.
+    pub busy: u64,
+    /// idle and iowait: the cpu had nothing to run.
+    pub idle: u64,
+}
+
+impl CpuTime {
+    /// The share of the interval since `before` this cpu spent busy and idle,
+    /// or nothing when no jiffy passed -- an interval shorter than one tick
+    /// has no share to give, and zero would read as an idle cpu.
+    pub fn shares_since(self, before: CpuTime) -> Option<(f64, f64)> {
+        let busy = self.busy.checked_sub(before.busy)?;
+        let idle = self.idle.checked_sub(before.idle)?;
+        let total = busy + idle;
+        if total == 0 {
+            return None;
+        }
+        Some((busy as f64 / total as f64, idle as f64 / total as f64))
+    }
+}
+
+/// Every cpu's line of `/proc/stat`, keyed by cpu number. The machine's own
+/// line, `cpu` with no number, is left out.
+pub fn cpu_times(path: &Path) -> Result<std::collections::BTreeMap<u32, CpuTime>, ReadError> {
+    let content = text(path)?;
+    let mut times = std::collections::BTreeMap::new();
+    for line in content.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(cpu) = fields
+            .next()
+            .and_then(|name| name.strip_prefix("cpu"))
+            .and_then(|digits| digits.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let values: Vec<u64> = fields.filter_map(|field| field.parse().ok()).collect();
+        if values.len() < 8 {
+            return Err(ReadError::Unparsable {
+                path: path.to_path_buf(),
+                content: line.to_owned(),
+            });
+        }
+        let [user, nice, system, idle, iowait, irq, softirq, steal] =
+            [0, 1, 2, 3, 4, 5, 6, 7].map(|index| values[index]);
+        times.insert(
+            cpu,
+            CpuTime {
+                busy: user + nice + system + irq + softirq + steal,
+                idle: idle + iowait,
+            },
+        );
+    }
+    Ok(times)
+}
+
 /// A throwaway directory tree standing in for `/sys`, so the parsing of files
 /// this machine does not have -- an Intel throttle counter, a wrapped RAPL
 /// domain, an offline cpu -- can be exercised anywhere.
@@ -206,6 +265,26 @@ mod tests {
                 other => panic!("expected a value or a refusal, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_cpu_line_of_proc_stat_splits_into_busy_and_idle() {
+        let root = scratch::tree("procstat");
+        scratch::write(
+            &root,
+            "stat",
+            "cpu  10 0 10 100 0 0 0 0 0 0\ncpu0 1 2 3 40 5 6 7 8 0 0\ncpu3 0 0 0 9 1 0 0 0 0 0\nintr 1",
+        );
+        let times = cpu_times(&root.join("stat")).expect("a parsable file");
+        assert_eq!(times.len(), 2, "the machine's own line is not a cpu");
+        assert_eq!(times[&0], CpuTime { busy: 27, idle: 45 });
+        assert_eq!(times[&3], CpuTime { busy: 0, idle: 10 });
+        let (busy, idle) = CpuTime { busy: 37, idle: 75 }
+            .shares_since(times[&0])
+            .expect("jiffies passed");
+        assert!((busy - 0.25).abs() < 1e-12 && (idle - 0.75).abs() < 1e-12);
+        assert_eq!(times[&0].shares_since(times[&0]), None);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

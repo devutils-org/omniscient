@@ -1181,10 +1181,15 @@ pub enum KeyKind {
     /// `results.json` keeps the split the views draw live
     /// (`DECISIONS.md`, the twenty-first wave).
     Dir,
+    /// `domain:package`, `domain:cores`, `domain:dram`: an energy domain.
+    ///
+    /// Domains nest -- RAPL's cores are inside their package -- so one
+    /// series across them counts the cores' joules twice.
+    Domain,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 14] = [
+    pub const ALL: [KeyKind; 15] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -1199,6 +1204,7 @@ impl KeyKind {
         KeyKind::Cpu,
         KeyKind::Node,
         KeyKind::Dir,
+        KeyKind::Domain,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -1217,6 +1223,7 @@ impl KeyKind {
             KeyKind::Cpu => "cpu",
             KeyKind::Node => "node",
             KeyKind::Dir => "dir",
+            KeyKind::Domain => "domain",
         }
     }
 }
@@ -2150,6 +2157,14 @@ mod tests {
             assert_eq!(serde_json::from_str::<KeyValue>(&json).unwrap(), key);
         }
         assert_eq!(KeyValue::dir(Direction::Rx).to_string(), "dir:rx");
+    }
+
+    #[test]
+    fn an_energy_domain_is_a_key_spelled_domain() {
+        assert_eq!("domain".parse::<KeyKind>().unwrap(), KeyKind::Domain);
+        let key = crate::event::KeyValue::domain("cores");
+        assert_eq!(key.kind(), KeyKind::Domain);
+        assert_eq!(key.to_string(), "domain:cores");
     }
 
     #[test]
