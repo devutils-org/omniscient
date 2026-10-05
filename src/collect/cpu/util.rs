@@ -92,6 +92,21 @@ impl Times {
         ))
     }
 
+    /// The states by the names the events carry them under, in the file's
+    /// order.
+    fn states(&self) -> [(&'static str, u64); 8] {
+        [
+            ("user", self.user),
+            ("nice", self.nice),
+            ("system", self.system),
+            ("idle", self.idle),
+            ("iowait", self.iowait),
+            ("irq", self.irq),
+            ("softirq", self.softirq),
+            ("steal", self.steal),
+        ]
+    }
+
     fn since(&self, previous: &Times) -> Times {
         // A counter that went backwards means the file was re-read across a cpu
         // going offline and coming back. Saturating rather than wrapping keeps
@@ -172,6 +187,11 @@ pub struct UtilCollector {
     /// tenth of the cadence they asked for.
     reads: u64,
     unmoved: u64,
+    /// Each label's baseline, the poll's first read: with `previous`, the
+    /// whole window's per-state split, which is `top`'s and `mpstat`'s
+    /// `us`/`sy`/`wa`/`st` over the run, in ticks rather than as a mean of
+    /// per-tick shares (gap 7 of `docs/fixes/w22-top.md`).
+    first: BTreeMap<String, Times>,
 }
 
 impl UtilCollector {
@@ -183,6 +203,7 @@ impl UtilCollector {
             previous: BTreeMap::new(),
             reads: 0,
             unmoved: 0,
+            first: BTreeMap::new(),
         }
     }
 
@@ -241,6 +262,7 @@ impl Collector for UtilCollector {
         // snapshot has no window, and reports since boot.
         if self.mode != Mode::Snapshot && self.previous.is_empty() {
             self.previous = readings.into_iter().collect();
+            self.first = self.previous.clone();
             return Ok(Vec::new());
         }
         let mut events = Vec::with_capacity(readings.len());
@@ -264,6 +286,50 @@ impl Collector for UtilCollector {
     /// which is the same disclosure with the number in it. Both are needed: two
     /// readers of one tick reporting it two ways is how a reader comes to trust
     /// a series that has a tenth of the cadence it claims.
+    /// The window's ticks per state, per label: `user_ticks`, `system_ticks`,
+    /// `iowait_ticks`, `steal_ticks` and the rest for the machine, the same
+    /// prefixed `cpu<N>.` for each cpu asked for, and `ticks` the total they
+    /// divide by. Integers the kernel counted, so the split over the whole run
+    /// is exact where a mean of per-tick shares weighs a short tick like a
+    /// long one.
+    fn fields(&self) -> crate::emit::Fields {
+        let mut fields = crate::emit::Fields::new();
+        for (label, delta) in self.window_split() {
+            let prefix = if label == MACHINE {
+                String::new()
+            } else {
+                format!("{label}.")
+            };
+            for (state, ticks) in delta.states() {
+                fields.insert(format!("{prefix}{state}_ticks"), ticks);
+            }
+            fields.insert(format!("{prefix}ticks"), delta.total());
+        }
+        fields
+    }
+
+    /// The window's per-state split in a sentence, a fact about the run
+    /// rather than a concession.
+    fn facts(&self) -> Vec<String> {
+        self.window_split()
+            .into_iter()
+            .filter(|(_, delta)| delta.total() > 0)
+            .map(|(label, delta)| {
+                let total = delta.total() as f64;
+                let shares: Vec<String> = delta
+                    .states()
+                    .into_iter()
+                    .map(|(state, ticks)| format!("{state} {:.1} %", ticks as f64 * 100.0 / total))
+                    .collect();
+                format!(
+                    "over the window, `{label}` counted {} ticks: {}",
+                    delta.total(),
+                    shares.join(", ")
+                )
+            })
+            .collect()
+    }
+
     fn notes(&self) -> Vec<String> {
         if self.unmoved == 0 {
             return Vec::new();
@@ -291,6 +357,21 @@ impl Collector for UtilCollector {
 }
 
 impl UtilCollector {
+    /// Each label's ticks between the poll's first read and its last, in the
+    /// order the request named them. Empty for a snapshot and before the
+    /// baseline.
+    fn window_split(&self) -> Vec<(String, Times)> {
+        self.which
+            .labels()
+            .into_iter()
+            .filter_map(|label| {
+                let first = self.first.get(&label)?;
+                let last = self.previous.get(&label)?;
+                Some((label, last.since(first)))
+            })
+            .collect()
+    }
+
     /// Turns a reading into an event, against whatever was read before it.
     ///
     /// Separate from `sample` so that the arithmetic can be checked against
@@ -758,6 +839,47 @@ mod tests {
         assert_eq!((collector.reads, collector.unmoved), (0, 0));
         assert!(collector.notes().is_empty());
         assert!(collector.previous.contains_key(MACHINE));
+    }
+
+    /// Gap 7 of `docs/fixes/w22-top.md`: the window's per-state split, from
+    /// the baseline and the last read, as ticks under `fields` and as shares
+    /// in a fact.
+    #[test]
+    fn the_windows_split_is_the_ticks_between_the_first_read_and_the_last() {
+        let mut collector = UtilCollector::new(
+            Mode::Poll {
+                interval: Mode::DEFAULT_POLL_INTERVAL,
+            },
+            Which::Machine,
+        );
+        let first = Times {
+            user: 100,
+            system: 50,
+            idle: 800,
+            iowait: 10,
+            ..Times::default()
+        };
+        let last = Times {
+            user: 160,
+            system: 70,
+            idle: 910,
+            iowait: 20,
+            steal: 0,
+            ..Times::default()
+        };
+        collector.first.insert(MACHINE.to_owned(), first);
+        collector.previous.insert(MACHINE.to_owned(), last);
+
+        let fields = collector.fields();
+        assert_eq!(fields["user_ticks"], 60);
+        assert_eq!(fields["system_ticks"], 20);
+        assert_eq!(fields["idle_ticks"], 110);
+        assert_eq!(fields["iowait_ticks"], 10);
+        assert_eq!(fields["ticks"], 200);
+        let facts = collector.facts();
+        assert_eq!(facts.len(), 1);
+        assert!(facts[0].contains("user 30.0 %"), "{}", facts[0]);
+        assert!(facts[0].contains("iowait 5.0 %"), "{}", facts[0]);
     }
 
     #[test]
