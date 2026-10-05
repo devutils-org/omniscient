@@ -458,12 +458,19 @@ pub struct Followed {
 /// The rest of a job: the processes the program started, other than the
 /// child decomposed in a wait's place, and how long they were busy.
 ///
-/// The run does not say which of them ran within the wait, nor which is
-/// whose parent: these are every busy task a source placed in a process off
-/// the way, so for a program that waits for its job most of its life they
-/// are the rest of the wait, and for one that does not they may be more.
+/// The run does not say which of them ran within the wait. Where it says
+/// whose parent each process is (`ppid`), they are the processes under the
+/// chosen child's parent ([`Job::under`]); where it does not, every busy
+/// task a source placed in a process off the way, so for a program that
+/// waits for its job most of its life they are the rest of the wait, and
+/// for one that does not they may be more.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Job {
+    /// The process the job was restricted to, the chosen child's parent and
+    /// everything under it, when the run said whose parent each process is;
+    /// absent, the tasks are every busy one off the way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub under: Option<u64>,
     /// The tasks, busiest first.
     pub tasks: Vec<String>,
     /// Their time on a cpu, added up.
@@ -713,9 +720,13 @@ fn write_reading(out: &mut String, run: &Reading, title: &str, indent: &str) {
         );
         write_reading(out, &followed.reading, "", &format!("{indent}  "));
         if let Some(job) = &followed.job {
+            let whose = match job.under {
+                Some(under) => format!("under process {under}, the child's parent"),
+                None => "off the way".to_owned(),
+            };
             let _ = writeln!(
                 out,
-                "{indent}  the rest of the job, {} other busy task(s) off the way: on a cpu {}, \
+                "{indent}  the rest of the job, {} other busy task(s) {whose}: on a cpu {}, \
                  runnable {} ({})",
                 job.tasks.len(),
                 span(job.on_cpu),
@@ -1378,6 +1389,7 @@ pub fn read(run: &Run, target: &Target) -> Result<Reading, TriageError> {
         run,
         tables: &output.tables,
         pid_of: pids(run),
+        parent_of: parents(run),
         seen: BTreeSet::from([task.clone()]),
         processes: BTreeSet::new(),
     };
@@ -1597,6 +1609,21 @@ fn task_number(task: &str) -> Option<u64> {
 
 /// The process of every task an event tied to one: the sched sources carry
 /// `pid` beside the task, the profile does not.
+/// Each process's parent, by pid, from the events that carry both `pid` and
+/// `ppid`: empty until a source says it.
+fn parents(run: &Run) -> BTreeMap<u64, u64> {
+    let mut parents = BTreeMap::new();
+    for event in &run.events {
+        let (Some(pid), Some(ppid)) = (attr(event, "pid"), attr(event, "ppid")) else {
+            continue;
+        };
+        if pid > 0.0 && ppid > 0.0 {
+            parents.entry(pid as u64).or_insert(ppid as u64);
+        }
+    }
+    parents
+}
+
 fn pids(run: &Run) -> BTreeMap<String, u64> {
     let mut pids = BTreeMap::new();
     for event in &run.events {
@@ -1682,6 +1709,8 @@ struct Tasks<'a> {
     run: &'a Run,
     tables: &'a [Breakdown],
     pid_of: BTreeMap<String, u64>,
+    /// Each process's parent, where an event carried `ppid`.
+    parent_of: BTreeMap<u64, u64>,
     /// Tasks already read, which are never followed into again.
     seen: BTreeSet<String>,
     /// Processes already on the way, which a child is never one of.
@@ -1906,15 +1935,26 @@ impl Tasks<'_> {
 
     /// The busy tasks a source placed in a process off the way, other than
     /// `chosen`: the rest of the job a child was chosen from.
+    ///
+    /// When the run says whose parent each process is (`ppid`), only the
+    /// processes under the chosen child's parent -- the driver the wait
+    /// named (`gcc` above `cc1` and `as`), itself included -- are the job;
+    /// otherwise every busy task off the way, which may be more.
     fn job(&self, chosen: &str) -> Option<Job> {
+        let under = self
+            .pid_of
+            .get(chosen)
+            .and_then(|pid| self.parent_of.get(pid))
+            .copied();
         let mut busy_tasks: Vec<(&Breakdown, f64)> = self
             .tables
             .iter()
             .filter(|table| table.key != chosen && !self.seen.contains(&table.key))
             .filter(|table| {
-                self.pid_of
-                    .get(&table.key)
-                    .is_some_and(|pid| !self.processes.contains(pid))
+                self.pid_of.get(&table.key).is_some_and(|pid| {
+                    !self.processes.contains(pid)
+                        && under.is_none_or(|under| self.descends(*pid, under))
+                })
             })
             .map(|table| (table, busy(table)))
             .filter(|(_, busy)| *busy > 0.0)
@@ -1924,6 +1964,7 @@ impl Tasks<'_> {
         }
         busy_tasks.sort_by(|a, b| b.1.total_cmp(&a.1));
         Some(Job {
+            under,
             tasks: busy_tasks
                 .iter()
                 .map(|(table, _)| table.key.clone())
@@ -1937,6 +1978,21 @@ impl Tasks<'_> {
                 .map(|(table, _)| row_amount(table, RUNNABLE))
                 .sum(),
         })
+    }
+
+    /// Whether process `pid` is `root` or under it, by the parents the run
+    /// said.
+    fn descends(&self, mut pid: u64, root: u64) -> bool {
+        for _ in 0..64 {
+            if pid == root {
+                return true;
+            }
+            match self.parent_of.get(&pid) {
+                Some(parent) if *parent != pid => pid = *parent,
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// The busiest task no source placed in a process, not already read.
@@ -3409,6 +3465,64 @@ mod tests {
         );
         let json = serde_json::to_value(&reading).unwrap();
         assert_eq!(json["followed"]["job"]["tasks"][0], "task:300");
+    }
+
+    /// Once the events say whose parent each process is, the rest of the job
+    /// is only what runs under the chosen child's parent: a busy process the
+    /// program started beside the job (another make target's driver) is not
+    /// in it.
+    #[test]
+    fn with_ppid_the_job_is_what_runs_under_the_chosen_child_s_parent() {
+        let parented = |tid: i32, pid: u64, ppid: u64| {
+            event(
+                "sched.runqlat",
+                tid,
+                vec![Attr::uint("pid", pid), Attr::uint("ppid", ppid)],
+            )
+        };
+        let tables = || {
+            vec![
+                main_table(),
+                // The driver's busiest compiler, and its assembler.
+                table("task:200", 120.0 * MS, None, None),
+                table("task:210", 20.0 * MS, Some(5.0 * MS), None),
+                // The driver itself.
+                table("task:150", 5.0 * MS, None, None),
+                // Another driver's compiler, beside the job.
+                table("task:300", 90.0 * MS, None, None),
+            ]
+        };
+        let events = vec![
+            main_thread_asleep(300.0 * MS),
+            parented(200, 200, 150),
+            parented(210, 210, 150),
+            parented(150, 150, 100),
+            parented(300, 300, 160),
+            parented(160, 160, 100),
+        ];
+        let reading = read_launched(&run_of(tables(), events, false));
+        let followed = reading.followed.as_deref().expect("followed");
+        assert_eq!(followed.reading.task, "task:200");
+        let job = followed.job.as_ref().expect("the rest of the job");
+        assert_eq!(job.under, Some(150));
+        assert_eq!(job.tasks, ["task:210", "task:150"]);
+        assert!((job.on_cpu - 25.0 * MS).abs() < 1.0, "{job:?}");
+        let mut text = String::new();
+        write_reading(&mut text, &reading, "", "");
+        assert!(text.contains("under process 150, the child's parent"), "{text}");
+
+        // Without `ppid`, every busy task off the way, as before.
+        let unparented = vec![
+            main_thread_asleep(300.0 * MS),
+            placing(200, 200),
+            placing(210, 210),
+            placing(150, 150),
+            placing(300, 300),
+        ];
+        let reading = read_launched(&run_of(tables(), unparented, false));
+        let job = reading.followed.as_deref().unwrap().job.clone().unwrap();
+        assert_eq!(job.under, None);
+        assert_eq!(job.tasks, ["task:300", "task:210", "task:150"]);
     }
 
     /// A child process a source placed, with no wait on the stack: followed
