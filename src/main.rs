@@ -1400,10 +1400,11 @@ fn shared_stdout_warning(session: &Session) -> Option<String> {
     // person, who can see what came from where, and it is the format every run
     // launching a program in a terminal uses.
     let structured = session.format != OutputFormat::Text;
-    let launches = session
-        .requests
-        .iter()
-        .any(|request| matches!(request.target, omn::request::Target::Launch(_)));
+    let launches = !session.launch.is_empty()
+        || session
+            .requests
+            .iter()
+            .any(|request| matches!(request.target, omn::request::Target::Launch(_)));
     (structured && launches && session.out.is_none()).then(|| {
         format!(
             "`{}` is one document and the launched program writes to the same stdout, so \
