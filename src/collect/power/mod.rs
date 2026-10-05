@@ -8,15 +8,16 @@
 //! whether or not anyone asked, and that a throttled run is marked unusable
 //! rather than averaged in.
 //!
-//! Everything here reads sysfs. The `pmu` backends -- RAPL and the aperf/mperf
-//! pair through `perf_event_open` -- are the better instruments and wait for
-//! counting mode in the shared perf layer; `docs/families/power.md` says what
-//! they need.
+//! Most of it reads sysfs. The `pmu` backends -- RAPL, and APERF, MPERF and
+//! the TSC through the kernel's `msr` unit -- open the same counters as perf
+//! events, which an ordinary user may where the files and device nodes are
+//! root's.
 
 mod cstate;
 mod energy;
 mod energy_pmu;
 mod freq;
+mod freq_pmu;
 mod sysfs;
 mod temp;
 mod throttle;
@@ -34,6 +35,9 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("power.freq", "fs:sys", |resolved| {
             Ok(Box::new(freq::Prepare::new(resolved.request.mode)?))
+        }),
+        Factory::new("power.freq", "pmu", |resolved| {
+            Ok(Box::new(freq_pmu::Prepare::new(resolved.request.mode)?))
         }),
         Factory::new("power.cstate", "fs:sys", |resolved| {
             Ok(Box::new(cstate::Prepare::new(resolved.request.mode)?))

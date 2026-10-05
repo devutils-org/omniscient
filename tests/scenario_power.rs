@@ -2125,3 +2125,90 @@ fn the_raw_events_of_a_run_are_the_readings_its_timeline_is_drawn_from() {
         "the raw events hold {raw_total} J and the timeline drawn from them {timeline_total} J"
     );
 }
+
+/// `power.freq`'s busy share, through each backend this machine serves, against
+/// a load whose shape the test chose: a spin loop pinned to the last core, in
+/// C0 for the whole window. And the window is what is measured: a poll of one
+/// second over one second is one reading per core, taken at the close, not a
+/// second one at window open describing the machine before the load.
+///
+/// Shown against turbostat on this machine (`docs/scenarios/power.md`): Busy%
+/// 100.00 / 100.00 for the pinned core, Bzy_MHz 4084 / 4084 through `pmu`, and
+/// 50.2 / 50.9 % for a core held at half duty through `fs:sys`.
+#[test]
+fn a_core_held_busy_reads_busy_through_every_road_and_once_per_interval() {
+    if cores() < 2 || !have_taskset() {
+        eprintln!("skipped: needs two cores and `taskset` to pin a load");
+        return;
+    }
+    if !usable("power.freq") {
+        eprintln!("skipped: no backend of `power.freq` is usable here");
+        return;
+    }
+    let core = (cores() - 1).to_string();
+    let _alone = alone();
+    let mut checked = 0;
+    for backend in ["pmu", "fs:sys"] {
+        if lacks_here("power.freq", backend).is_some() {
+            eprintln!(
+                "skipped `{backend}`: {:?}",
+                missing_here("power.freq", backend)
+            );
+            continue;
+        }
+        let mut spin = Command::new("taskset")
+            .args(["-c", &core, "sh", "-c", "while :; do :; done"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("taskset runs");
+        let forced = format!("force:{backend}");
+        let output = run(&[
+            "power.freq",
+            "--cpu",
+            &core,
+            "-m",
+            "poll@1s",
+            "-d",
+            "1s",
+            "-e",
+            "raw",
+            "--backend",
+            &forced,
+        ]);
+        let _ = spin.kill();
+        let _ = spin.wait();
+        assert!(output.status.success(), "{}", stderr(&output));
+        let out = stdout(&output);
+        let readings: Vec<&str> = out
+            .lines()
+            .filter(|line| line.contains(&format!("cpu:{core} ")))
+            .collect();
+        assert_eq!(
+            readings.len(),
+            1,
+            "a one-second poll over one second is one reading, at the close, through \
+             `{backend}`: {out}"
+        );
+        let busy: f64 = field(readings[0], "busy=")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("`{backend}` carries a busy share: {out}"));
+        let idle: f64 = field(readings[0], "idle=").unwrap().parse().unwrap();
+        assert!(
+            busy >= 0.9,
+            "a core held by a spin loop read {busy} busy through `{backend}`: {out}"
+        );
+        assert!(
+            (busy + idle - 1.0).abs() < 1e-9,
+            "busy and idle share the window"
+        );
+        let hz: f64 = field(readings[0], "hz=").unwrap().parse().unwrap();
+        let avg: f64 = field(readings[0], "avg_hz=").unwrap().parse().unwrap();
+        assert!(
+            avg <= hz * 1.001 && avg >= hz * busy * 0.95,
+            "avg_hz {avg} is the busy frequency {hz} spread over the window"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "neither road of `power.freq` is open here");
+}

@@ -53,11 +53,16 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_frequency", "kernel>=5.8"], cost: free}
     - {id: "bpf:tp", requires: ["tracepoint:power:cpu_frequency", "bpf"], cost: free, equivalent: true}
+    # APERF, MPERF and the TSC as perf events of the kernel's `msr` unit, which
+    # an ordinary user may open where /dev/cpu/*/msr is root's. Every number
+    # covers the interval, an idle cpu's included: preferred over sysfs.
+    - {id: "pmu", requires: ["pmu:msr/aperf/", "pmu:msr/mperf/", "pmu:msr/tsc/"], cost: low, equivalent: true}
     - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/cpufreq"], cost: low,
        degraded: "which frequency sysfs gives depends on the driver: cpuinfo_avg_freq is the
-                  effective one, scaling_cur_freq may be the requested one. Every event names the
-                  file it read and whether that is effective or requested"}
-    - {id: "pmu", requires: ["msr:aperf", "msr:mperf"], cost: low, equivalent: true}
+                  effective one over the last scheduler tick, not the interval, and a setpoint on
+                  an idle cpu; scaling_cur_freq may be the requested one. Every event names the
+                  file it read and whether that is effective, requested or a setpoint; busy and
+                  idle are /proc/stat's shares, avg_hz busy times hz"}
   modes: [poll, trace]
   emits: [timeline, hist, raw, summary]
   targets: {system: native, cpu: native}
