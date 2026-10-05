@@ -319,7 +319,7 @@ mod tests {
             }
         }
         assert!(covered.iter().all(|byte| *byte));
-        assert!(DROP_KEY + 4 <= EVENT, "the drop key sits below the record");
+        const { assert!(DROP_KEY + 4 <= EVENT, "the drop key sits below the record") };
     }
 
     #[test]
