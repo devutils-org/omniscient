@@ -316,7 +316,12 @@ mod tests {
             .iter()
             .find(|event| number(event, "sport") == address.port() as f64)
             .expect("the server's end");
-        assert_eq!(number(client_side, "bytes_sent"), VOLUME as f64);
+        // `bytes_sent` counts retransmissions too, which a loaded machine's
+        // loopback does make.
+        assert_eq!(
+            number(client_side, "bytes_sent") - number(client_side, "bytes_retrans"),
+            VOLUME as f64
+        );
         // RFC 4898's octets acked counts the SYN's sequence number too.
         assert_eq!(number(client_side, "bytes_acked"), VOLUME as f64 + 1.0);
         assert_eq!(number(server_side, "bytes_received"), VOLUME as f64);

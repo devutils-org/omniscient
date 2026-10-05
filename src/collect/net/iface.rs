@@ -112,6 +112,7 @@ impl Prepared for Prepare {
             mode: self.0,
             only,
             deltas: Deltas::default(),
+            pass_first_tick: false,
             losses: Losses::default(),
         }))
     }
@@ -132,6 +133,9 @@ pub struct IfaceCollector {
     mode: Mode,
     only: Option<String>,
     deltas: Deltas,
+    /// The first tick after the baseline taken at `start`, passed over: its
+    /// interval is the microseconds since the program's release.
+    pass_first_tick: bool,
     losses: Losses,
 }
 
@@ -149,7 +153,27 @@ impl Collector for IfaceCollector {
         }
     }
 
+    /// The baseline, before the observed program is released, so its first
+    /// frames are in the first interval; the runner's first tick, which
+    /// follows the release by microseconds, is then passed over.
+    fn start(&mut self) -> Result<(), String> {
+        if self.mode == Mode::Snapshot {
+            return Ok(());
+        }
+        match self.sample(0) {
+            Ok(_) => {}
+            // What is not there yet is the first tick's to say.
+            Err(SampleError::TargetGone(_)) => return Ok(()),
+            Err(error) => return Err(format!("the baseline read failed: {error:?}")),
+        }
+        self.pass_first_tick = self.mode != Mode::Count;
+        Ok(())
+    }
+
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+        if std::mem::take(&mut self.pass_first_tick) {
+            return Ok(Vec::new());
+        }
         let interfaces = procfs::interfaces(self.only.as_deref(), &mut self.losses)?;
         let interfaces = with_missed(interfaces, &mut self.losses);
         let ts_ns = monotonic_ns();
@@ -214,12 +238,12 @@ impl Collector for IfaceCollector {
         Ok(events)
     }
 
+    /// A count's closing read. A poll's last interval is the runner's last
+    /// tick (`DECISIONS.md`, "the runner closes the window"): a read here
+    /// covered the microseconds since and put a zero point at the previous
+    /// one's offset into every series. A snapshot has no window to close.
     fn stop(&mut self) -> Vec<Event> {
-        // A counter source closes its own window, or the last interval of every
-        // run is dropped. A snapshot has no window to close: its one read has
-        // already happened, and a second one here would replace the counters it
-        // reported with an increment over a few hundred microseconds.
-        if self.mode == Mode::Snapshot {
+        if self.mode != Mode::Count {
             return Vec::new();
         }
         self.sample(u64::MAX / 2).unwrap_or_default()
@@ -303,6 +327,18 @@ mod tests {
                     .is_some_and(|value| value.to_string() == kind)
             })
             .unwrap_or_else(|| panic!("no `{kind}` series"))
+    }
+
+    /// The baseline is read at `start`; the runner's first tick passes
+    /// over, the second measures, and a poll reads nothing at `stop`, whose
+    /// interval would be the microseconds since the last tick.
+    #[test]
+    fn a_poll_measures_from_the_start_and_reads_nothing_at_the_close() {
+        let mut collector = Box::new(Prepare(polling())).attach(&Target::Iface("lo".to_owned())).expect("readable");
+        collector.start().expect("the baseline");
+        assert!(collector.sample(0).unwrap().is_empty(), "the first tick passes over");
+        assert!(!collector.sample(1).unwrap().is_empty(), "the second measures");
+        assert!(collector.stop().is_empty());
     }
 
     #[test]
