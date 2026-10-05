@@ -351,9 +351,14 @@
   # not happened yet, and on receive it never happens in a process context at
   # all. What a captured frame does have is the interface it crossed.
   keys: [iface]
-  filter_fields: [iface, protocol, dport, daddr]
+  filter_fields: [iface, protocol, saddr, sport, dport, daddr, direction]
   determinism: high
   caveats:
+    - "Loopback hands a packet socket every frame twice, once leaving
+       (`direction` `outgoing`) and once arriving (`host`), and both are kept:
+       they are two real crossings of the device. A count of packets as
+       tcpdump gives it on `lo` keeps one, `--filter 'direction != \"outgoing\"'`."
+
     - "Watch buffer drops. A capture that loses packets under load silently
        produces wrong conclusions."
     - "The kernel is told to copy only the headers of each frame, through a
