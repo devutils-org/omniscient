@@ -62,14 +62,17 @@ stream sched (below).
     value fewer.
 
   The pair now reads the raw polls through the new parser
-  `omn_cpu_util_polls`, which leaves out a read less than one tick (10 ms)
+  `omn_cpu_util_polls`, which then left out a read less than one tick (10 ms)
   after the window opened. It is unit-tested on a real capture
   (`captures/top/omn-cpu-util-raw-window.json`). Three runs at a load of 12
   (not quiet) gave omn 0.525 / 0.501 / 0.607 against top 0.536 / 0.516 /
   0.595: omn below twice and above once, 0.011 to 0.015 apart. **Stream
   cpu fixed the poll in the same wave** (`c13eb51`: the first sample is
-  the baseline). After merging it, the parser leaves out nothing: 0.195
-  against 0.203, and 0.632 against 0.624. It stays as a guard.
+  the baseline). After merging it, the parser left out nothing: 0.195
+  against 0.203, and 0.632 against 0.624. In the fix round it stopped
+  leaving the read out and refuses it instead (see "Review"): leaving it
+  out would have masked the defect's return, the pair passing on the reads
+  around it.
 - **`load-latency`** held under load: omn 366.1 against perf mem 368.1
   cycles, medians of five. The twenty-third wave's quiet run held too, so
   no `known_defect` was added.
@@ -232,7 +235,8 @@ stream sched (below).
    merges sched, or for the coordinator. **Done for the other marker**
    (`d79d4c8`). Stream cpu's leading-event fix made sysstat's
    `poll_leading_event_is_held_as_a_known_defect` fail, as designed. It is
-   now `no_poll_source_emits_a_leading_event`, a guard over all four poll
+   now `poll_has_no_leading_event` (stream cpu's name, kept at the
+   fix round's merge, which took main's `sysstat.rs`), a guard over all four poll
    sources. `raw_means` no longer skips a first event. The two `omn`
    captures (cpu.util, cpu.pressure) are recaptured, and `omn_psi` drops
    the old `some` naming (stream cpu's request).
@@ -287,3 +291,22 @@ cargo test --test reference -- --test-threads=1 --nocapture
   - `cpu.ipc`'s separate-run spread under load.
 
   For `STATE.md`: no pair skips on this machine any more.
+
+## Review
+
+- **`omn_cpu_util_polls` hid the read it claimed to guard** (`top.rs`,
+  gap). The reviewer is right: it dropped a `cpu.util` event stamped less
+  than a tick after the window opened, counted nothing and reported
+  nothing, so the defect's return would have left `top-cpus` green. Fixed:
+  the parser now returns an error naming defect 2 of
+  `docs/fixes/w22-sysstat.md` when it finds such an event, and the pair
+  fails with it. Its unit test holds both sides on the real pre-fix
+  capture: the capture as taken is refused, the same capture without its
+  leading read gives (0.846 + 0.814) / 2. `top.yaml`'s `why`,
+  `docs/replaces/top.md` and this handoff say "refuses" in place of
+  "leaves out" and "stays as a guard". sysstat's `poll_has_no_leading_event`
+  remains the guard over all four poll sources; this is the pair's own.
+- **Merge of `main`**: `tests/reference/sysstat.rs` and its two `omn`
+  captures conflicted with stream cpu's `8e4d08b`, which made the same
+  change (hold to guard, `raw_means` keeping every event, captures
+  retaken). Main's side was taken whole; the handoff now names its test.

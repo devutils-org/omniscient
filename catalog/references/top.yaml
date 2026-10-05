@@ -122,11 +122,11 @@
       against 0.120): cpu.util polls once at once after its baseline read, a
       share of a few ticks over a fraction of a millisecond (0 on a quiet
       machine, 0.5 or 1 on a busy one) that a summary weighs like a whole
-      second among two. omn_cpu_util_polls reads the raw polls and leaves out
-      a read less than a tick after the window opened; stream cpu fixed the
-      poll in the same wave (its first sample is the baseline, c13eb51), so
-      the parser now leaves out nothing, and guards the pair if the read
-      comes back.
+      second among two. omn_cpu_util_polls reads the raw polls; stream cpu fixed
+      the poll in the same wave (its first sample is the baseline, c13eb51),
+      and the parser refuses a read less than a tick after the window opened,
+      so the pair fails naming defect 2 if the read comes back rather than
+      passing on the reads around it.
 
 - id: pmap-x-rss
   source: mem.rss
