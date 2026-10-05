@@ -130,6 +130,12 @@ impl Entry {
         backend.modes.as_deref().unwrap_or(&self.modes)
     }
 
+    /// The emits one backend of this chain produces: its own list when it
+    /// declares one, the entry's otherwise.
+    pub fn backend_emits<'a>(&'a self, backend: &'a Backend) -> &'a [EmitKind] {
+        backend.emits.as_deref().unwrap_or(&self.emits)
+    }
+
     /// The keys one backend of this chain attaches to its events: its own
     /// list when it declares one, the entry's otherwise.
     pub fn backend_keys<'a>(&'a self, backend: &'a Backend) -> &'a [KeyKind] {
@@ -304,6 +310,18 @@ pub struct Backend {
     /// nothing). [`Entry::backend_unit`] reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<Unit>,
+    /// The emits *this* backend can produce, when the chain does not agree.
+    ///
+    /// Absent means every emit the entry declares. Present, it replaces the
+    /// entry's list for this backend, as `modes` does: the preload shim
+    /// counts every allocation and captures no stack, so `mem.heap.alloc -e
+    /// stack` must not be handed to it because a sibling could unwind. The
+    /// resolver passes over a backend whose emits leave one of the request's
+    /// out, with that reason in the chain, so the refusal comes before the
+    /// run rather than after it; the loader checks the list is a non-empty
+    /// subset of the entry's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emits: Option<Vec<EmitKind>>,
 }
 
 /// How two events are tied together into one measurement.
@@ -686,6 +704,50 @@ fn check_backend_filter_fields(entry: &Entry) -> Result<(), ParseError> {
 /// The same two directions for `keys`: a backend cannot attach a key the entry
 /// never offers, and a key the entry offers has to be attached by some backend,
 /// or a request keyed on it is accepted and refused by every resolution.
+/// A backend's own `emits`: a non-empty subset of the entry's, and every emit
+/// the entry declares produced by some backend of the chain.
+fn check_backend_emits(entry: &Entry) -> Result<(), ParseError> {
+    for backend in &entry.backends {
+        let Some(emits) = &backend.emits else {
+            continue;
+        };
+        if emits.is_empty() {
+            return Err(ParseError::new(format!(
+                "catalog entry `{}`: backend `{}` declares an empty `emits` list, so no request \
+                 could ever reach it; leave the key out to mean the entry's emits",
+                entry.id, backend.id
+            )));
+        }
+        for emit in emits {
+            if !entry.emits.contains(emit) {
+                return Err(ParseError::new(format!(
+                    "catalog entry `{}`: backend `{}` emits `{}`, which the entry itself does \
+                     not declare, so no request could ever ask for it",
+                    entry.id,
+                    backend.id,
+                    emit.as_str()
+                )));
+            }
+        }
+    }
+    for emit in &entry.emits {
+        if !entry
+            .backends
+            .iter()
+            .any(|backend| entry.backend_emits(backend).contains(emit))
+        {
+            return Err(ParseError::new(format!(
+                "catalog entry `{}` declares the emit `{}`, which no backend in its chain \
+                 produces: a request for it would be accepted and then refused wherever it \
+                 resolved",
+                entry.id,
+                emit.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn check_backend_keys(entry: &Entry) -> Result<(), ParseError> {
     for backend in &entry.backends {
         let Some(keys) = &backend.keys else {
@@ -950,6 +1012,7 @@ impl Catalog {
             check_backend_targets(entry)?;
             check_backend_filter_fields(entry)?;
             check_backend_modes(entry)?;
+            check_backend_emits(entry)?;
             check_backend_keys(entry)?;
             check_backend_units(entry)?;
             check_equivalent_costs(entry)?;
@@ -1175,6 +1238,52 @@ mod tests {
         ] {
             assert!(families.contains(&expected), "missing family {expected}");
         }
+    }
+
+    /// A backend's own `emits` narrows the entry's and is read through
+    /// [`Entry::backend_emits`]; one wider than the entry, an empty one, and
+    /// an entry emit no backend produces are refused by the loader.
+    #[test]
+    fn a_backend_emits_list_is_a_non_empty_subset_the_chain_covers() {
+        let base = catalog()
+            .get(&"mem.heap.alloc".parse().unwrap())
+            .unwrap()
+            .clone();
+        let mut narrowed = base.clone();
+        narrowed.backends[0].emits = Some(vec![EmitKind::TopK, EmitKind::Summary]);
+        let loaded = Catalog::from_entries(vec![narrowed.clone()]).expect("a subset loads");
+        let entry = loaded.get(&base.id).unwrap();
+        assert_eq!(
+            entry.backend_emits(&entry.backends[0]),
+            &[EmitKind::TopK, EmitKind::Summary]
+        );
+        assert_eq!(entry.backend_emits(&entry.backends[1]), &entry.emits[..]);
+
+        let mut wider = base.clone();
+        wider.emits.retain(|emit| *emit != EmitKind::Raw);
+        wider.backends[0].emits = Some(vec![EmitKind::Raw]);
+        let error = Catalog::from_entries(vec![wider]).unwrap_err().to_string();
+        assert!(
+            error.contains("which the entry itself does not declare"),
+            "{error}"
+        );
+
+        let mut empty = base.clone();
+        empty.backends[0].emits = Some(Vec::new());
+        let error = Catalog::from_entries(vec![empty]).unwrap_err().to_string();
+        assert!(error.contains("an empty `emits` list"), "{error}");
+
+        let mut uncovered = base;
+        for backend in &mut uncovered.backends {
+            backend.emits = Some(vec![EmitKind::TopK]);
+        }
+        let error = Catalog::from_entries(vec![uncovered])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("which no backend in its chain produces"),
+            "{error}"
+        );
     }
 
     #[test]
