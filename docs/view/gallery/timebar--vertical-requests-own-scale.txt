@@ -8,10 +8,15 @@ omn top │ fixture vertical-requests │ 413ms                       view: snap
 │   holder tid 2619021, on 1 of its 1 event(s)                                                                         │
 │   decisive: ahead of the next state (54.2µs) and of what no row read (0ns) -- omn latency's rule, on the run's deco… │
 │                                                                                                                      │
+│                       │▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞┤                               │
 │ ▸ req:a001            ├▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 99.8% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞┤   40.8ms  ▶ lock 99.8%        │
+│                       │█▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄┤                               │
 │   req:a005            ├█▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ network 98.8% ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄┤   34.4ms  ▶ network 98.8%     │
+│                       │▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄┤                               │
 │   req:a004            ├▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ network 99.9% ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄┤   30.3ms  ▶ network 99.9%     │
+│                       │█▚▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▓▓▓▓▓▓▓┤                               │
 │   req:a003            ├█▚▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞ lock 85.9% ▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▞▓▓▓▓▓▓▓┤   23.6ms  ▶ lock 85.9%        │
+│                       │█████▚▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤                               │
 │   req:a002            ├█████▚▚▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ I/O 88.4% ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓┤   10.3ms  ▶ I/O 88.4%         │
 │                      0 ───────────────── each bar to its own whole ──────────────────┤ 100%                          │
 │                        █ on cpu   ▚ run queue   ▞ lock   ▓ I/O   ▄ network                                           │
@@ -28,11 +33,6 @@ omn top │ fixture vertical-requests │ 413ms                       view: snap
 │   residue: the whole less the rows                 0ns             0.00%   exact     within its resolution           │
 │                                                                                                                      │
 │ Trust: served by a fallback that says what it gives up (12).                                                         │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

@@ -4,10 +4,18 @@ omn top │ fixture http-server │ 2.85s                             view: snap
 │sched.switches 65 31 late ~low det degraded x2  sched.wakeup 210 31 late ~low det degraded  sched.offcpu 135 ~low det │
 │degraded  gpu.kernel 0 9 late degraded                                                                                │
 │34.3ms a cell          ╷0ns          ╷500ms         ╷1.00s        ╷1.50s         ╷2.00s        ╷2.50s      of the span│
-│python3        2618476│█▆              ▁             ▁              ▁              ▁             ▁      ▁ │awake 2.06%│
-│              off cpu │ ▃████████████████████████████████████████████████████████████████████████████████ │ blkd 96.7%│
-│Thread-1 (proc 2618479│ ▂███████████████████████████▃▁████████████████████████████▂▇█████████████████████▁│awake 93.4%│
-│              off cpu │     ▁  ▁       ▁            ▆█              ▁             ▇▂             ▁      ▁▂│ blkd 3.41%│
+│python3        2618476│█▁                                                                                 │awake 2.06%│
+│                      │██                                                                                 │           │
+│                      │██              ▁             ▁              ▁              ▁             ▁      ▁ │           │
+│              off cpu │  ████████████████████████████████████████████████████████████████████████████████ │ blkd 96.7%│
+│                      │  ████████████████████████████████████████████████████████████████████████████████ │           │
+│                      │ █████████████████████████████████████████████████████████████████████████████████ │           │
+│Thread-1 (proc 2618479│  ███████████████████████████  ████████████████████████████ ▄█████████████████████ │awake 93.4%│
+│                      │  ███████████████████████████▁ ████████████████████████████ ██████████████████████ │           │
+│                      │ ▅████████████████████████████▁████████████████████████████▆██████████████████████▁│           │
+│              off cpu │                              █                            ▃                       │ blkd 3.41%│
+│                      │                             ██                            █                       │           │
+│                      │     ▁  ▁       ▁            ██              ▁             █▅             ▁      ▁▅│           │
 │─────────────────────────────────────────────────────────────▲ 1.31s──────────────────────────────────────────────────│
 │python3 2618476 (pid 2618476) at 1.31s: blocked, sleeping 500ms, 1.06s → 1.56s, left cpu 13                           │
 │  woken by an interrupt (hardirq), then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone │
@@ -19,14 +27,6 @@ omn top │ fixture http-server │ 2.85s                             view: snap
 │    4.22ms 0.15% sleeping      1 blocks  __poll ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …                       │
 │     169µs 0.01% sleeping      2 blocks  libc.so.6 ← pthread_cond_timedwait ← libpython3.14.so.1.0 x2 ← …             │
 │    96.9µs 0.00% sleeping      1 blocks  libc.so.6 x2 ← _PySemaphore_Wait ← _PyParkingLot_Park ← …                    │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

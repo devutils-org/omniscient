@@ -13,9 +13,13 @@ omn top │ fixture vertical-requests │ 413ms                       view: snap
 │                                                                                                                      │
 │── a005 · 34.4ms from its first byte in to its last byte out · thread 2619020 ────────────────────────────────────────│
 │            ┊0                 ┊10.0ms            ┊20.0ms            ┊30.0ms                                          │
+│            ░                                                                                                         │
 │  net in    ░                                                                   18.7µs before start                   │
+│            █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░                                                  │
 │  serving   █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░            29.0ms from start to done             │
+│                                                                                                                      │
 │  on device                                                                     no block request                      │
+│                                                                   ░░░░░░░░░░░                                        │
 │  net out                                                          ░░░░░░░░░░░  5.39ms after done, 28.6ms in send     │
 │  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order                 │
 │                                                                                                                      │
@@ -24,16 +28,12 @@ omn top │ fixture vertical-requests │ 413ms                       view: snap
 │  █ on cpu        244µs   0.71% ▏    IDENTITY                                  off cpu 9 times, preempted 0           │
 │  ▓ run queue     152µs   0.44% ▏    IDENTITY                       disk       no block request issued                │
 │  ▀ lock/sleep        ·              IDENTITY                       network    in 18.7µs · out 33.9ms                 │
-│  ▄ disk              ·              IDENTITY                                                                         │
+│  ▄ disk              ·              IDENTITY                                  56B read · 128KiB queued               │
 │  ░ net out      33.9ms   98.8% ░░░░ KEY      by socket 196640                                                        │
 │  IDENTITY: read off the serving thread  KEY: joined by the socket                                                    │
 │                                                                                                                      │
 │                                                                                                                      │
 │  what sets it apart from the other 4 requests: ░ net out +33.9ms (theirs 0ns)                                        │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

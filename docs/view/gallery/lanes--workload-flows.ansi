@@ -4,8 +4,12 @@
 │[0m[1msched.switches [0m[2m42[0m [0m[33m10 late[0m [0m[36m~low det[0m [0m[33mdegraded x2[0m  [0m[1msched.wakeup [0m[2m114[0m [0m[33m10 late[0m [0m[36m~low det[0m [0m[33mdegraded[0m  [0m[1msched.offcpu [0m[2m22[0m [0m[36m~low det[0m  │[0m
 │[0m[33mdegraded x3[0m  [0m[1mgpu.kernel [0m0 [0m[33m7 late[0m [0m[33mdegraded[0m                                                                             │[0m
 │[0m[2m12.0ms a cell[0m          [0m[2m╷0ns[0m            [0m[2m╷200ms[0m           [0m[2m╷400ms[0m           [0m[2m╷600ms[0m          [0m[2m╷800ms[0m            [0m[2mof the span[0m│[0m
-│[0m[1;7mflows-main     2621407[0m[2m│[0m[2;32m██▃[0m[2m                        [0m[2;32m▂▃[0m[2m [0m[2;32m▁▁[0m[2m                        [0m[2;7m [0m[2m                          │awake 3.64%[0m│[0m
-│[0m[2m              off cpu │  [0m[2;34m▆████████████████████████▇▆███████████████████████████[0m[2;7;34m█[0m[2;34m████████████████████████▆[0m[2m │ blkd 94.8%[0m│[0m
+│[0m[1;7mflows-main     2621407[0m[2m│[0m[2;32m██[0m[2m                                                      [0m[2;7m [0m[2m                          │awake 3.64%[0m│[0m
+│                      [0m[2m│[0m[2;32m██[0m[2m                                                      [0m[2;7m [0m[2m                          │[0m           │[0m
+│                      [0m[2m│[0m[2;32m███[0m[2m                        [0m[2;32m▆█[0m[2m [0m[2;32m▂▃[0m[2m                        [0m[2;7m [0m[2m                          │[0m           │[0m
+│[0m[2m              off cpu │  [0m[2;34m▁████████████████████████▃▁█▇▆████████████████████████[0m[2;7;34m█[0m[2;34m████████████████████████▁[0m[2m │ blkd 94.8%[0m│[0m
+│                      [0m[2m│  [0m[2;34m██████████████████████████████████████████████████████[0m[2;7;34m█[0m[2;34m█████████████████████████[0m[2m │[0m           │[0m
+│                      [0m[2m│  [0m[2;34m██████████████████████████████████████████████████████[0m[2;7;34m█[0m[2;34m█████████████████████████[0m[2m │[0m           │[0m
 │[0m[2m───────────────────────────────────────────────────────────────────────────────[0m[2;32m▲ 677ms[0m[2m────────────────────────────────[0m│[0m
 │[0m[1mflows-main 2621407 (pid 2621407) at 677ms: [0m[2;34mblocked, sleeping[0m[2m 600ms, 377ms → 977ms, left cpu 2[0m                         │[0m
 │  woken by [0m[1man interrupt (hardirq)[0m[2m, then queued for a cpu: 0, or not stamped; its sched.offcpu row is this block alone[0m │[0m
@@ -16,10 +20,6 @@
 │  [0m[2m  29.0ms 3.08%[0m [0m[2;34msleeping  [0m[2m    1 blocks  accept4 ← _socket.cpython-314-x86_64-linux-gnu.so x2 ← …[0m                     │[0m
 │  [0m[2m  6.00ms 0.64%[0m [0m[2;33muninterr. [0m[2m   10 blocks  fsync ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m                        │[0m
 │  [0m[2m  4.95ms 0.53%[0m [0m[2;34msleeping  [0m[2m    1 blocks  wait4 ← libpython3.14.so.1.0 x2 ← PyEval_EvalCode ← …[0m                        │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

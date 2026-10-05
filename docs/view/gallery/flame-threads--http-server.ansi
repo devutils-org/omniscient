@@ -9,12 +9,12 @@
 [0m[32m│[0m                                                           [0m[2;30;46m▏libpython3.14+0x65c00 › ⋯12⋯ › __recv 47.6%            [0m[2;30;106m▏__[0m[32m│[0m
 [0m[32m│[0m                                                                                                                      [0m[32m│[0m
 [0m[32m│[0m[1mheaviest on their own[0m[2m (where it ends, every path summed)[0m                                                              [0m[32m│[0m
-[0m[32m│[0m[2m 50.1% [0m[36m████████████[0m[2m libc+0xa08f2[0m                                                                                      [0m[32m│[0m
-[0m[32m│[0m[2m 49.8% [0m[36m████████████[0m[2m __recv[0m                                                                                            [0m[32m│[0m
-[0m[32m│[0m[2m 0.08% [0m[36m▏           [0m[2m __poll[0m                                                                                            [0m[32m│[0m
-[0m[32m│[0m[2m 0.02% [0m[36m▏           [0m[2m clock_nanosleep[0m                                                                                   [0m[32m│[0m
-[0m[32m│[0m[2m 0.01% [0m[36m▏           [0m[2m __read[0m                                                                                            [0m[32m│[0m
-[0m[32m│[0m[2m 0.00% [0m[36m▏           [0m[2m libc+0x12071d[0m                                                                                     [0m[32m│[0m
+[0m[32m│[0m[2m 50.1% [0m[36m███████████████████████[0m[2m libc+0xa08f2[0m                                                                           [0m[32m│[0m
+[0m[32m│[0m[2m 49.8% [0m[36m███████████████████████[0m[2m __recv[0m                                                                                 [0m[32m│[0m
+[0m[32m│[0m[2m 0.08% [0m[36m▏                      [0m[2m __poll[0m                                                                                 [0m[32m│[0m
+[0m[32m│[0m[2m 0.02% [0m[36m▏                      [0m[2m clock_nanosleep[0m                                                                        [0m[32m│[0m
+[0m[32m│[0m[2m 0.01% [0m[36m▏                      [0m[2m __read[0m                                                                                 [0m[32m│[0m
+[0m[32m│[0m[2m 0.00% [0m[36m▏                      [0m[2m libc+0x12071d[0m                                                                          [0m[32m│[0m
 [0m[32m│[0m                                                                                                                      [0m[32m│[0m
 [0m[32m│[0m[33m‼ [0m[2mbpf:raw_tp: user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the[0m[32m│[0m
 [0m[32m│[0m[33m  [0m[2mtask state[0m                                                                                                          [0m[32m│[0m

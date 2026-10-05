@@ -155,3 +155,133 @@ fn every_view_after_a_click() {
         );
     }
 }
+
+/// The sizes every view is drawn at to be seen filling the terminal: a
+/// small one, a large one and a wide one.
+const SIZES: [(u16, u16); 3] = [(80, 24), (160, 48), (240, 60)];
+
+/// The views this file holds to the sizes, each on its own workload's
+/// recording. `system` is the model the others follow; it and `process`
+/// are held to the sizes by their own tests (`tests/view_top_*.rs`).
+const SIZED: [&str; 8] = [
+    "flame", "ledger", "request", "timebar", "heatmap", "lanes", "wake", "flows",
+];
+
+/// How far down and how far right a drawing reaches inside the frame, as
+/// a share of the rows between the tabs and the help line and of the
+/// columns: what is not a frame's border or a blank.
+fn reach(buffer: &omn_view::ratatui::buffer::Buffer) -> (f64, f64) {
+    let text = omn_view::snapshot::text(buffer);
+    let rows: Vec<&str> = text.lines().collect();
+    // The header and the tabs above, the help line below.
+    let body = &rows[2..rows.len() - 1];
+    let border = |c: char| matches!(c, '│' | '┃' | '─' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | ' ');
+    let mut lowest = 0;
+    let mut rightmost = 0;
+    for (index, row) in body.iter().enumerate() {
+        let cells: Vec<char> = row.chars().collect();
+        if let Some(last) = cells.iter().rposition(|c| !border(*c)) {
+            lowest = index + 1;
+            rightmost = rightmost.max(last + 1);
+        }
+    }
+    (
+        lowest as f64 / body.len() as f64,
+        rightmost as f64 / f64::from(buffer.area.width),
+    )
+}
+
+/// The user's remark (2026-10-05): every view fills the terminal the way
+/// `system` does, not drawn in a corner with the rest empty. Each view is
+/// drawn at the three sizes, held to a snapshot at each, and its drawing
+/// must reach the last quarter of the rows and of the columns.
+#[test]
+fn every_view_fills_the_terminal() {
+    for view in SIZED {
+        let recording = format!("workload-{view}");
+        for (width, height) in SIZES {
+            let buffer = draw(fixture(&recording), view, width, height);
+            let (down, right) = reach(&buffer);
+            assert!(
+                down >= 0.75 && right >= 0.75,
+                "{view} at {width}x{height} reaches {:.0}% of the rows and {:.0}% of the \
+                 columns: drawn in a corner\n{}",
+                down * 100.0,
+                right * 100.0,
+                omn_view::snapshot::text(&buffer)
+            );
+            assert_snapshot(&format!("{view}-{width}x{height}--{recording}"), &buffer);
+        }
+    }
+}
+
+/// The two runs the views that draw a difference are compared on: the same
+/// program, the second made heavier.
+const AGAINST: (&str, &str) = ("cpython-hot", "cpython-hot-heavier");
+
+/// `--against` in the standard set: each view that draws a difference,
+/// drawn on one run against the other, at the snapshot size and the wide
+/// one.
+#[test]
+fn every_view_against_another_run() {
+    use omn_view::snapshot::draw_with;
+    use omn_view::views::Focus;
+    for view in ["flame", "ledger"] {
+        for (width, height) in [(WIDTH, HEIGHT), (240, 60)] {
+            let buffer = draw_with(
+                fixture(AGAINST.0),
+                view,
+                Some(fixture(AGAINST.1)),
+                Focus::default(),
+                width,
+                height,
+            );
+            assert_snapshot(
+                &format!(
+                    "{view}-against-{width}x{height}--{}--{}",
+                    AGAINST.0, AGAINST.1
+                ),
+                &buffer,
+            );
+        }
+    }
+}
+
+/// A focus in the standard set: each view narrowed to one thread (or, for
+/// `request`, one request) of its own workload that is not the only one
+/// there, so what the focus leaves out is seen gone.
+#[test]
+fn every_view_focused() {
+    use omn_view::snapshot::draw_with;
+    use omn_view::views::Focus;
+    let thread = |tid| Focus {
+        tid: Some(tid),
+        ..Focus::default()
+    };
+    let focused: [(&str, Focus); 8] = [
+        ("flame", thread(2620698)),
+        ("ledger", thread(2621704)),
+        (
+            "request",
+            Focus {
+                request: Some("a003".to_owned()),
+                ..Focus::default()
+            },
+        ),
+        ("timebar", thread(2620839)),
+        ("heatmap", thread(2621526)),
+        ("lanes", thread(2621957)),
+        ("wake", thread(2621138)),
+        ("flows", thread(2621408)),
+    ];
+    for (view, focus) in focused {
+        let recording = format!("workload-{view}");
+        let name = focus
+            .tid
+            .map(|tid| format!("tid{tid}"))
+            .or(focus.request.clone())
+            .unwrap_or_default();
+        let buffer = draw_with(fixture(&recording), view, None, focus, WIDTH, HEIGHT);
+        assert_snapshot(&format!("{view}-focus-{name}--{recording}"), &buffer);
+    }
+}

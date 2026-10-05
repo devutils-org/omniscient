@@ -6,11 +6,13 @@
 │  [0m[1mblocked time    [0m[2;3mnot in this run: sched.offcpu was not asked for[0m                                                     │[0m
 │  [0m[1mmemory held     [0m[2;3mnot in this run: mem.rss was not asked for[0m                                                          │[0m
 │  [0m[1mmemory faulted  [0m[2;3mnot in this run: mem.faults was not asked for[0m                                                       │[0m
+│                                                                                                                      │[0m
 │  [0m[1mI/O syscalls    [0m[2m888 calls[0m        [0m[2m14.7ms inside them[0m        [0m[2m1.02µs [0m[2;32m▄▂▂▂█▁▁▁[0m[2m 262µs[0m    [0m[35m   ≥6.51ms[0m  [0m[36m~low det[0m [0m[33mdegraded x2[0m│[0m
 │    2620523 Thread… [0m[2m   13.2ms  ███████████  89.8%[0m                                                                     │[0m
 │    2620518 python3 [0m[2m   1.50ms  █            10.2%[0m                                                                     │[0m
 │    bytes           [0m[2m   112MiB[0m  [0m[2mread, 3.00MiB written[0m                                                                  │[0m
-│  [0m[1mnetwork         [0m[2m112MiB moved[0m     [0m[2m109MiB out, 3.00MiB in[0m    [0m[2;32m █ █▇█ █▁█ ██ ██ ██▁    [0m [0m[35m   ≥6.24ms[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m│[0m
+│                                                             [0m[2;32m█ █▆ █ █ ██ █ ███ █     [0m                                 │[0m
+│  [0m[1mnetwork         [0m[2m112MiB moved[0m     [0m[2m109MiB out, 3.00MiB in[0m    [0m[2;32m█ ██▃█ █▁██ █ ███ █▁    [0m [0m[35m   ≥6.24ms[0m  [0m[36m~low det[0m [0m[33mdegraded x3[0m│[0m
 │[0m[2;3m    568 socket calls[0m                                                                                                  │[0m
 │  [0m[1mretransmits     [0m[2;3mnot in this run: net.tcp.retransmit@system was not asked for[0m                                        │[0m
 │  [0m[1mGPU memory      [0m[2;3mnot in this run: gpu.mem was not asked for[0m                                                          │[0m
@@ -23,8 +25,6 @@
 │cpu.oncpu_time -- cpu time, per thread                                                                                │[0m
 │This run did not ask for it. `omn top` live asks for every line of the sheet; a recording made by another session     │[0m
 │holds what that session asked.                                                                                        │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m

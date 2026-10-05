@@ -4,17 +4,17 @@
 │[0m[1;2m  RESOURCE        AMOUNT           RATE                      OVER THE RUN             TO KNOW IT  TRUST[0m               │[0m
 │[0m[1;32m▸ cpu time        [0m[2m0ns on cpu[0m       [0m[2m0.00% of one cpu[0m          [0m[2;3mno series kept[0m           [0m[35mat the end[0m  [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegrad[0m│[0m
 │[0m[2;3m    user and system apart: on the raw events only, which this run did not keep[0m                                        │[0m
-│  [0m[1mblocked time    [0m[2m2.32s[0m            [0m[2m1.63 threads[0m              [0m[2;32m  ▁▂ ▂▂  ▂▇▂ ▂ ▂ ▂█ ▂ ▂▂[0m [0m[35mat the end[0m  [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegrad[0m│[0m
+│  [0m[1mblocked time    [0m[2m2.32s[0m            [0m[2m1.63 threads[0m              [0m[2;32m  ▁▂ ▂▂ ▂ ▇▂ ▂ ▂ ▂█ ▂ ▂▂[0m [0m[35mat the end[0m  [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegrad[0m│[0m
 │    2618477 python3 [0m[2m    1.32s  ███████      56.7%[0m                                                                     │[0m
 │    2618476 python3 [0m[2m    1.01s  █████        43.3%[0m                                                                     │[0m
 │    2618479 Thread… [0m[2m   1.58ms  ▏            0.07%[0m                                                                     │[0m
 │  [0m[1mmemory held     [0m[2m0B peak[0m                                    [0m[2;3mno series kept[0m           [0m[35mat the end[0m  [0m[3;34mlive[0m [0m[33mdegraded[0m       │[0m
 │  [0m[1mmemory faulted  [0m[2m0 faults[0m         [0m[2m0/s[0m                       [0m[2;3ma total only[0m             [0m[35mat the end[0m  [0m[3;34mlive[0m [0m[33mdegraded[0m       │[0m
-│  [0m[1mI/O syscalls    [0m[2m387 calls[0m        [0m[2m2.66ms inside them[0m        [0m[2;32m█ ▂ ▁▁▁  ▁ ▁ ▁ ▁ ▁▁ ▁ ▁▁[0m [0m[35mat the end[0m  [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegrad[0m│[0m
+│  [0m[1mI/O syscalls    [0m[2m387 calls[0m        [0m[2m2.66ms inside them[0m        [0m[2;32m█ ▂▁ ▁▁ ▁  ▁ ▁ ▁ ▁▁ ▁ ▁▁[0m [0m[35mat the end[0m  [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegrad[0m│[0m
 │    2618476 python3 [0m[2m   2.63ms  ████████████ 98.8%[0m                                                                     │[0m
 │    2618479 Thread… [0m[2m   33.2µs  ▏            1.25%[0m                                                                     │[0m
 │    bytes           [0m[2m  4.04MiB[0m  [0m[2mread, 768B written[0m                                                                     │[0m
-│  [0m[1mnetwork         [0m[2m13.6MiB moved[0m    [0m[2m13.6MiB out, 936B in[0m      [0m[2;32m  ▁ ██ █ █ █ █ █ ██ █ ██[0m [0m[35mat the end[0m  [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegrad[0m│[0m
+│  [0m[1mnetwork         [0m[2m13.6MiB moved[0m    [0m[2m13.6MiB out, 936B in[0m      [0m[2;32m  ▁█ █ ██  █ █ █ ██ █ ██[0m [0m[35mat the end[0m  [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegrad[0m│[0m
 │[0m[2;3m    85 socket calls[0m                                                                                                   │[0m
 │  [0m[1mretransmits     [0m[2m0 sent again[0m     [0m[3mmachine-wide[0m              [0m[2;3ma total only[0m             [0m[35mat the end[0m  [0m[36m~low det[0m [0m[3;34mlive[0m [0m[33mdegrad[0m│[0m
 │  [0m[1mGPU memory      [0m[2m0B peak[0m          [0m[2mof -0B on the device[0m      [0m[2;3mno series kept[0m           [0m[35mat the end[0m  [0m[3;34mlive[0m [0m[33mdegraded[0m       │[0m

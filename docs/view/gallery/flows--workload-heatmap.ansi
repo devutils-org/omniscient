@@ -17,7 +17,7 @@
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m                          │[0m
 │                                                                                 [0m[37m┃[0m[2;90m█████████┃[0m [0m[1mwlan0    [0m[2m   783B[0m [0m[2;37m ▄▄   █ [0m│[0m
-│[0m[2msockets 1.27KiB[0m -> [0m[2minterfaces 136KiB[0m[1;2m = 107.27x[0m[2m · 5 interfaces idle · lo counts a byte twice; sockets are not tied to i[0m│[0m
+│[0m[2msockets 1.27KiB[0m -> [0m[2minterfaces 136KiB[0m[1;2m = 107.27x[0m[2m · 5 interfaces idle · lo counts a byte twice; a socket is tied to the i[0m│[0m
 │[0m[1;37m storage [0m[37m· [0m[1;37mio.syscall[0m[37m bpf:fentry [0m[36m~low det[0m[37m [0m[33mdegraded x2[0m[37m · [0m[1;37mio.bytes[0m[37m fs:proc [0m[36m~low det[0m[37m [0m[33mdegraded[0m[37m ───────────────────────────[0m│[0m
 │[0m[2;3m         thread[0m             [0m[2;3mdescriptor[0m                                         [0m[2;3mcache[0m         [0m[2;3mdevice, the machine's[0m    │[0m
 │        python3 [0m[2;37m┃[0m[2;36m█████████[0m[2;37m┃[0m[1m fd 3          [0m[2;37m█       [0m[2;36m ←1.63MiB[0m            [0m[2;37m┃[0m[2;36m█████████[0m[37m┃[0m[2;90m█████████┃[0m [0m[1m259:0    [0m[2m2.48MiB[0m [0m[2;37m  █     [0m│[0m
