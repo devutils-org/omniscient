@@ -195,6 +195,26 @@ fn perf_trace_summary(stdout: &str, stderr: &str) -> Result<Values, String> {
     } else {
         stdout
     };
+    // `LOST N events!`: perf's ring buffer overflowed, and the summary is
+    // over the events that survived (2337 of 5000 getppid calls once under
+    // the twenty-fourth wave's load, the row missing entirely another time).
+    let lost: u64 = stdout
+        .lines()
+        .chain(stderr.lines())
+        .filter_map(|l| {
+            l.trim()
+                .strip_prefix("LOST ")?
+                .strip_suffix(" events!")?
+                .trim()
+                .parse::<u64>()
+                .ok()
+        })
+        .sum();
+    if lost > 0 {
+        return Err(format!(
+            "perf trace lost {lost} events: its summary counts the survivors only"
+        ));
+    }
     let mut acc = Acc::default();
     let mut in_table = false;
     for line in text.lines() {
@@ -440,6 +460,13 @@ mod tests {
         assert!(close(value(&v, "clock_nanosleep.total_ns"), 201_399_000.0));
         assert!(close(value(&v, "clock_nanosleep.mean_ns"), 10_069_950.0));
         assert!(close(value(&v, "clock_nanosleep.max_ns"), 10_086_000.0));
+    }
+
+    #[test]
+    fn perf_trace_summary_refuses_a_run_that_lost_events() {
+        let text = format!("LOST 628 events!\n{}", capture("perf-trace-s.txt"));
+        let e = perf_trace_summary("", &text).unwrap_err();
+        assert!(e.contains("lost 628 events"), "{e}");
     }
 
     #[test]
