@@ -337,7 +337,13 @@ pub fn major_minor(kernel_dev: u32) -> (u32, u32) {
 /// `vfsstat` counts (read, write, fsync, open, create) and the directory
 /// operations beside them. Every one is counted where it exists; a function
 /// this kernel does not declare is named in the run's notes, not guessed at.
-pub const VFS_CALLS: [&str; 11] = [
+///
+/// `do_fsync` beside `vfs_fsync_range`: on this machine the compiler inlined
+/// `vfs_fsync` and `vfs_fsync_range` into `do_fsync`, so an `fsync(2)` reaches
+/// neither out-of-line copy (`catalog/io.yaml`, `io.fsync`), and counting
+/// both counts each sync once -- `msync` and the in-kernel callers reach the
+/// range function, the two syscalls `do_fsync`.
+pub const VFS_CALLS: [&str; 12] = [
     "vfs_read",
     "vfs_write",
     "vfs_readv",
@@ -345,6 +351,7 @@ pub const VFS_CALLS: [&str; 11] = [
     "vfs_open",
     "vfs_create",
     "vfs_fsync_range",
+    "do_fsync",
     "vfs_unlink",
     "vfs_mkdir",
     "vfs_rmdir",

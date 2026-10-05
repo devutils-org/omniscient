@@ -268,7 +268,16 @@ impl Collector for FsyncCollector {
                 self.losses.note(super::histogram::ORPHANED);
             }
         }
-        self.program = None;
+        // The programs stay attached until the collector is dropped, after
+        // the run has closed its accounts. Unlinking a trampoline walks every
+        // ftrace record in the kernel, and six of them cost about 69 ms of
+        // cpu: dropped here, inside the window, that was the whole of the
+        // backends bench's 142 % and 144 % against a 25 ms target (perf:
+        // `bpf_trampoline_unlink_prog` 12.95 % of the run's samples, beside
+        // the link's 13.22 % at the attach, which falls before the window).
+        // Kept, the window's cpu is 1 to 1.7 ms. The attach is said as cpu
+        // before the window opened; the unlink is after it closed, and
+        // nothing reads it (`docs/fixes/w24-io.md`, a request to stream run).
         trailing
     }
 
