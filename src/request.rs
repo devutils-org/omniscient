@@ -1181,10 +1181,15 @@ pub enum KeyKind {
     /// `results.json` keeps the split the views draw live
     /// (`DECISIONS.md`, the twenty-first wave).
     Dir,
+    /// `domain:package`, `domain:cores`, `domain:dram`: an energy domain.
+    ///
+    /// Domains nest -- RAPL's cores are inside their package -- so one
+    /// series across them counts the cores' joules twice.
+    Domain,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 14] = [
+    pub const ALL: [KeyKind; 15] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -1199,6 +1204,7 @@ impl KeyKind {
         KeyKind::Cpu,
         KeyKind::Node,
         KeyKind::Dir,
+        KeyKind::Domain,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -1217,6 +1223,7 @@ impl KeyKind {
             KeyKind::Cpu => "cpu",
             KeyKind::Node => "node",
             KeyKind::Dir => "dir",
+            KeyKind::Domain => "domain",
         }
     }
 }
@@ -1717,6 +1724,14 @@ pub struct Session {
     /// its end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<Recording>,
+    /// A program the run launches, lasts as long as, and that no request
+    /// targets: the window of a machine, a core, a cgroup or a pid measured
+    /// for the program's life, as `perf stat -a -- prog` and `turbostat prog`
+    /// measure. Empty is a run bounded by its duration or by a request's
+    /// own launch; a request whose target is a launch beside it is refused,
+    /// since the program is launched once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch: Vec<String>,
 }
 
 /// A session's recording: the trigger, and the three bounds that make a run
@@ -1794,6 +1809,7 @@ impl Session {
             decompose: Vec::new(),
             escalate: None,
             record: None,
+            launch: Vec::new(),
         }
     }
 
@@ -2141,6 +2157,14 @@ mod tests {
             assert_eq!(serde_json::from_str::<KeyValue>(&json).unwrap(), key);
         }
         assert_eq!(KeyValue::dir(Direction::Rx).to_string(), "dir:rx");
+    }
+
+    #[test]
+    fn an_energy_domain_is_a_key_spelled_domain() {
+        assert_eq!("domain".parse::<KeyKind>().unwrap(), KeyKind::Domain);
+        let key = crate::event::KeyValue::domain("cores");
+        assert_eq!(key.kind(), KeyKind::Domain);
+        assert_eq!(key.to_string(), "domain:cores");
     }
 
     #[test]
