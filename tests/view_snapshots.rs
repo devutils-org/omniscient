@@ -214,3 +214,74 @@ fn every_view_fills_the_terminal() {
         }
     }
 }
+
+/// The two runs the views that draw a difference are compared on: the same
+/// program, the second made heavier.
+const AGAINST: (&str, &str) = ("cpython-hot", "cpython-hot-heavier");
+
+/// `--against` in the standard set: each view that draws a difference,
+/// drawn on one run against the other, at the snapshot size and the wide
+/// one.
+#[test]
+fn every_view_against_another_run() {
+    use omn_view::snapshot::draw_with;
+    use omn_view::views::Focus;
+    for view in ["flame", "ledger"] {
+        for (width, height) in [(WIDTH, HEIGHT), (240, 60)] {
+            let buffer = draw_with(
+                fixture(AGAINST.0),
+                view,
+                Some(fixture(AGAINST.1)),
+                Focus::default(),
+                width,
+                height,
+            );
+            assert_snapshot(
+                &format!(
+                    "{view}-against-{width}x{height}--{}--{}",
+                    AGAINST.0, AGAINST.1
+                ),
+                &buffer,
+            );
+        }
+    }
+}
+
+/// A focus in the standard set: each view narrowed to one thread (or, for
+/// `request`, one request) of its own workload that is not the only one
+/// there, so what the focus leaves out is seen gone.
+#[test]
+fn every_view_focused() {
+    use omn_view::snapshot::draw_with;
+    use omn_view::views::Focus;
+    let thread = |tid| Focus {
+        tid: Some(tid),
+        ..Focus::default()
+    };
+    let focused: [(&str, Focus); 8] = [
+        ("flame", thread(2620698)),
+        ("ledger", thread(2621704)),
+        (
+            "request",
+            Focus {
+                request: Some("a003".to_owned()),
+                ..Focus::default()
+            },
+        ),
+        ("timebar", thread(2620839)),
+        ("heatmap", thread(2621526)),
+        ("lanes", thread(2621957)),
+        ("wake", thread(2621138)),
+        ("flows", thread(2621408)),
+    ];
+    for (view, focus) in focused {
+        let recording = format!("workload-{view}");
+        let name = focus
+            .tid
+            .map(|tid| format!("tid{tid}"))
+            .or(focus.request.clone())
+            .unwrap_or_default();
+        let buffer = draw_with(fixture(&recording), view, None, focus, WIDTH, HEIGHT);
+        assert_snapshot(&format!("{view}-focus-{name}--{recording}"), &buffer);
+    }
+}

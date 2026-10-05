@@ -1,0 +1,40 @@
+omn top │ fixture workload-request │ 1.14s │ focus: request a003  view: snapshot │ collectors ≥12.8% │ target 0.98% cpu
+ 1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
+┌ request -- what one request costs ───────────────────────────────────────────────────────────────────────────────────┐
+│16 requests served by server (pid 2622175) · slowest a010 40.5ms · median 30.1ms · in order of arrival  14 late degrad│
+│                                                                                                                      │
+│  req      span  its life by state, to one scale: the slowest is 40.5ms             mostly                            │
+│  a001    153µs  ▏                                                                  net in 72.7% · on cpu 27.3%       │
+│  a002   30.3ms  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                  lock/sleep 99.4%                  │
+│▶ a003   8.76ms  █▓▄▄▄▄▄▄▄▄▄▄▄▄                                                     disk 83.1% · on cpu 9.96%         │
+│  a004   40.2ms  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  net in 99.9%                      │
+│  a005   34.6µs  ▏                                                                  on cpu 63.4% · net in 36.6%       │
+│  a006   30.1ms  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                   lock/sleep 99.8%                  │
+│  a007   7.26ms  █▄▄▄▄▄▄▄▄▄▄▄                                                       disk 90.3% · on cpu 7.05%         │
+│  a008   40.1ms  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   net in 99.9%                      │
+│  a009   30.8µs  ▏                                                                  on cpu 68.6% · net in 31.4%       │
+│  a00a   30.2ms  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                   lock/sleep 99.8%                  │
+│  a00b   7.20ms  █▄▄▄▄▄▄▄▄▄▄▄                                                       disk 91.2% · on cpu 6.35%  +5 more│
+│  ░░ net in   ██ on cpu   ▓▓ run queue   ▀▀ lock/sleep   ▄▄ disk   ░░ net out                                         │
+│                                                                                                                      │
+│── a003 · 8.76ms from its first byte in to its last byte out · thread 2622175 ────────────────────────────────────────│
+│            ┊0             ┊2.00ms        ┊4.00ms        ┊6.00ms                                                      │
+│  net in    ░                                                                   16.3µs before start                   │
+│  serving   ███████▓▓▓▓▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  8.74ms from start to done             │
+│  on device ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄  32 block requests, 140KiB             │
+│  net out                                                                       gone when done                        │
+│  inside `serving` the states are drawn by share: net.request sums them, it does not keep their order                 │
+│                                                                                                                      │
+│  where its 8.76ms went              evidence                       its share of each resource                        │
+│  ░ net in       16.3µs   0.19% ▏             by socket 139119      cpu        872µs: 6.29% of the 13.9ms server took │
+│  █ on cpu        872µs   9.96% ▏                                              off cpu 32 times, preempted 0          │
+│  ▓ run queue     596µs   6.80% ▏                                   disk       32 requests, 6.77ms on nvme0n1p6       │
+│  ▀ lock/sleep        ·                                                        6.70% of the run's device time         │
+│  ▄ disk         7.28ms   83.1% ▄▄▄                                            13 late ~low det degraded x3           │
+│  ░ net out           ·                                             network    in 16.3µs · out 0ns                    │
+│  no decomposition in this run: the evidence is not graded                                                            │
+│                                                                                                                      │
+│                                                                                                                      │
+│  what sets it apart from the other 15 requests: ▄ disk +7.28ms (theirs 0ns) · █ on cpu +831µs (theirs 41.7µs)        │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑/↓ request  s sort  enter focus it, then its lanes  l its thread
