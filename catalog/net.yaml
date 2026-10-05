@@ -183,6 +183,37 @@
        it."
 
 
+- id: net.snmp
+  family: net
+  summary: "Every protocol counter, by nstat's name"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/net/snmp", "/proc/net/netstat"], cost: free}
+  modes: [count, poll, snapshot]
+  emits: [raw]
+  targets: {system: native}
+  keys: []
+  filter_fields: [name, section]
+  determinism: medium
+  caveats:
+    - "Every counter of /proc/net/snmp, /proc/net/netstat and /proc/net/snmp6,
+       named as `nstat` names it, the section and the field run together:
+       `TcpRetransSegs`, `TcpExtListenOverflows`, `Ip6InReceives`. Each event
+       is one counter, `name` and `section` beside its `value`; ask for one
+       with `--filter 'name == \"TcpRetransSegs\"'`."
+    - "A poll or a count reports increments, and only of the counters that
+       moved, as `nstat` does: a counter absent from an interval moved by zero
+       in it. The baseline is read before the observed program starts. A
+       snapshot reports every counter as it stands, as `value_since_boot`."
+    - "A few fields are settings or gauges, not counters -- `TcpCurrEstab`,
+       `IpForwarding`, `IpDefaultTTL`, `TcpRtoAlgorithm`, `TcpRtoMin`,
+       `TcpRtoMax`, `TcpMaxConn` (-1 for no limit) -- and are reported as
+       they stand in every interval, marked `gauge`."
+    - "Only `raw`: a series per counter needs a key naming the counter, which
+       the tool does not have yet, and one series of every counter summed
+       would be a number about nothing."
+    - "The counters are the reading process's network namespace's."
+
 - id: net.socket
   family: net
   summary: "Socket read and write latency"

@@ -18,6 +18,7 @@ mod procfs;
 mod qdisc;
 mod request;
 mod retransmit;
+mod snmp;
 mod socket;
 mod softirq;
 mod softirqs;
@@ -77,6 +78,9 @@ pub fn factories() -> Vec<Factory> {
         }),
         Factory::new("net.backlog", "fs:proc", |resolved| {
             Ok(Box::new(backlog::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("net.snmp", "fs:proc", |resolved| {
+            Ok(Box::new(snmp::Prepare(resolved.request.mode)))
         }),
         Factory::new("net.tcp.lifetime", "bpf:raw_tp", |resolved| {
             Ok(Box::new(lifetime::Prepare {
