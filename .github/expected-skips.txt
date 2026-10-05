@@ -106,6 +106,9 @@ perf_event_max_sample_rate is [0-9]+, at or above the [0-9]+ asked
 # binary it lacks, the sudo it was refused, or the tool's own refusal. A pair
 # `omn` cannot serve here quotes omn's reason, which the lines above match.
 reference [a-z]+ .*: `[^`]+` is not installed here
+# ... or a device node or driver file a pair `requires` by path (the GPU's
+# `/dev/nvidiactl`), which a cell without the device does not have.
+reference [a-z]+ .*: `/[^`]+` does not exist here
 reference [a-z]+ .*: `sudo -n` does not grant root here
 reference [a-z]+ .*: `[^`]+` was refused on this machine
 # ... and a pair that needs a machine setting the cell's kernel sets otherwise
