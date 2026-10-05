@@ -1551,7 +1551,12 @@ compared as a constant first, any other thread group looked up in the map.
 
 Held by `a_launched_programs_forked_child_is_followed` (1024 direct reads in
 a forked child, counted one for one under the child's pid) and
-`the_syncs_of_a_forked_child_are_timed`. The first failed once, at its first
+`the_syncs_of_a_forked_child_are_timed`, and for the page cache by
+`the_page_cache_fills_of_a_forked_child_are_counted` (a 4 MiB file read cold
+in a forked child: 1024 pages filled, `mincore`'s count, for both
+`io.pagecache` and `io.readahead`; with the descendants map withheld the
+same run counts 0). A child the full descendants map leaves unfollowed is
+now said in `io.pagecache`'s notes, as it is in the other three. The first failed once, at its first
 run, and passed the next six; the failure's message was not kept. `io.syscall`
 and `io.fs` still compare the launched process alone: their entry program is
 `src/bpf/fentry.rs`'s, a shared layer, and the change is filed
@@ -1603,6 +1608,16 @@ declared `high` on one measurement: a 1-byte read/write loop of 6 M calls
 ran 1.36 s alone and 1.95 s counted, +45 %, under the wave's load. Held by
 `every_vfs_write_of_a_forked_child_is_counted` (20 000 writes from a forked
 child, counted exactly).
+
+Counting both functions counts a sync twice on a kernel that did not inline
+`vfs_fsync_range` into `do_fsync`, where an `fsync(2)` passes both (review of
+the wave; reasoned, no such kernel here). So `do_fsync` marks its thread on
+entry and clears the mark on exit, and a `vfs_fsync_range` on a marked
+thread is not counted. Held by `io_vfs_counts_each_sync_once`: 20 fsyncs and
+3 msyncs are 20 `do_fsync` and 3 `vfs_fsync_range` here; with the exit half's
+clear removed the msyncs read 0, so the mark is set and honoured. The double
+count itself cannot be shown on this kernel; the test would catch it on one
+that does not inline.
 
 ### Not done this wave
 

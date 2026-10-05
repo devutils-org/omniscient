@@ -22,6 +22,8 @@ as they are, called from io's own programs; nothing in that file changed.
 | `da67a80` | **fix(io)**: `io.fsync` follows forked children. |
 | `068f8ec` | **fix(io)**: `io.pagecache` and `io.readahead` follow forked children. |
 | `a12f7a1` | `docs/scenarios/io.md`, defects 25-26 and entries 27-29. |
+| `2d38298` | **review fix**: `io.pagecache`/`io.readahead` say a child the full descendants map left unfollowed; `the_page_cache_fills_of_a_forked_child_are_counted`. |
+| `19e0a1b` | **review fix**: `io.vfs` counts an `fsync(2)` once on a kernel that does not inline `vfs_fsync_range` into `do_fsync` (a per-thread mark); `io_vfs_counts_each_sync_once`. |
 
 ## Shown vs reasoned
 
@@ -78,6 +80,32 @@ average about 30).
   `io.latency`, not run against a forked workload.
 - `a_launched_programs_forked_child_is_followed` failed once, at its first
   run, and passed the next six; the message was not kept.
+
+## Review
+
+All three findings were right; each is fixed.
+
+1. **`io.pagecache` never reported `Descendants::missed`** (defect).
+   `PageCacheProgram::unfollowed()` now returns it and the collector notes
+   it, worded as block's, fsync's and vfs's are: those pages are in no row,
+   and every total is a lower bound (`2d38298`). Reasoned: no run fills the
+   descendants map.
+2. **`io.vfs` counted an fsync twice where `vfs_fsync_range` is not
+   inlined** (defect). Rather than a caveat, a guard: `do_fsync` sets a
+   per-thread mark on entry, its fexit half (attached first, so no mark is
+   ever set with nothing to clear it) deletes it, and `vfs_fsync_range` on a
+   marked thread is not counted. A mark the full map refuses (4096 threads in
+   a sync at once) is counted in an extra slot and noted as `calls` being an
+   upper bound; a skipped run of the exit half is counted in `missed`, since
+   the mark it leaves keeps that thread's next range call out. A caveat line
+   says it in `catalog/io.yaml` (`19e0a1b`). Shown: 20 fsyncs + 3 msyncs
+   count 20 `do_fsync` and 3 `vfs_fsync_range`; with the clear removed the
+   msyncs read 0, so the mark is set and honoured. Reasoned: the double
+   count it prevents, which this inlining kernel cannot show.
+3. **No test held the page cache's fork-following** (gap).
+   `the_page_cache_fills_of_a_forked_child_are_counted`: a forked child reads
+   a 4 MiB file cold, and both sources count `mincore`'s 1024 pages filled.
+   With `narrowing.descendants = None` forced, it fails (counted 0).
 
 ## Not done, and why (ranked)
 
