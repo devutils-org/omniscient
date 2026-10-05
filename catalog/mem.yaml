@@ -186,6 +186,9 @@
        the tool launches, not one already running."
     - "A statically linked program, or one with its own allocator, ignores the
        shim: the run reports no allocation rather than reporting none happened."
+    - "A free whose allocation the run saw carries `lifetime_ns`, from the
+       allocation's record to the free's: the block lifetimes dhat reports and
+       the short-lived temporaries heaptrack counts."
 
 - id: mem.heap.live
   family: mem
@@ -208,6 +211,11 @@
     - "A preloaded shim reaches a program only at exec, so this needs a program
        the tool launches, and a snapshot of one is refused: it would be taken
        before the program allocated anything."
+    - "A poll misses a peak shorter than its period; `peak_bytes` and
+       `peak_allocations` on every point do not. They are the most that was
+       live at once over every call so far, which the shim reports one by one:
+       a program that held 64 MiB for 2 ms read 0 bytes at every point of a
+       poll@100ms and a peak of exactly 64 MiB in 64 blocks."
 
 - id: mem.heap.retained
   family: mem
