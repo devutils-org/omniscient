@@ -180,7 +180,8 @@ fn a_live_run_s_batch_holds_the_program_s_own_cpu_clock() {
          end = time.process_time() + 0.8\n\
          while time.process_time() < end: sum(range(1000))\n\
          time.sleep(0.3)\n\
-         open({clock:?}, 'w').write(repr(time.process_time()))\n",
+         import os\n\
+         open({clock:?}, 'w').write(repr(time.process_time()) + ' ' + str(os.getpid()))\n",
         clock = clock.to_str().unwrap()
     );
     let output = Command::new(BINARY)
@@ -194,28 +195,27 @@ fn a_live_run_s_batch_holds_the_program_s_own_cpu_clock() {
         "omn top --headless failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let own: f64 = std::fs::read_to_string(&clock)
-        .expect("the program wrote its clock")
+    let written = std::fs::read_to_string(&clock).expect("the program wrote its clock");
+    let (own, pid) = written
         .trim()
-        .parse()
-        .expect("seconds");
+        .split_once(' ')
+        .expect("its clock and its pid");
+    let own: f64 = own.parse().expect("seconds");
     let data = Data::load(&out.join("run")).expect("the run loads");
     let text = system::batch(&data, "cpu").expect("the batch");
     let table = Table::parse(&text);
-    // A process's row is its own account; a thread's adds up to it. Every
-    // row is the program's: it is the run's only target.
-    let processes: f64 = table
-        .rows
-        .iter()
-        .filter(|row| row[table.column("KIND")] == "process")
-        .filter_map(|row| table.number(row, "ON_CPU_NS"))
-        .sum();
-    let threads: f64 = table
-        .rows
-        .iter()
-        .filter(|row| row[table.column("KIND")] == "thread")
-        .filter_map(|row| table.number(row, "ON_CPU_NS"))
-        .sum();
+    // The machine's processes are listed beside the program's: its rows are
+    // the ones of its pid, a process's row its own account, its threads'
+    // adding up to it.
+    let mine = |kind: &str| -> f64 {
+        table
+            .rows
+            .iter()
+            .filter(|row| row[table.column("KIND")] == kind && row[table.column("ID")] == pid)
+            .filter_map(|row| table.number(row, "ON_CPU_NS"))
+            .sum()
+    };
+    let (processes, threads) = (mine("process"), mine("thread"));
     let read = if processes > 0.0 { processes } else { threads } / 1e9;
     eprintln!("the program's own clock {own:.4} s, the batch {read:.4} s\n{text}");
     assert!(

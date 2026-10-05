@@ -104,6 +104,15 @@ pub const NEEDS: &[Need] = &[
         why: "the power panel: watts per RAPL domain",
     },
     Need {
+        source: "proc.tasks",
+        mode: "poll@1s",
+        emit: &["raw"],
+        keys: &[],
+        stack: None,
+        scope: Scope::System,
+        why: "the process list: the machine's processes, each its name, its cpu and its memory",
+    },
+    Need {
         source: "cpu.oncpu_time",
         mode: "poll@250ms",
         emit: &["timeline", "summary"],
