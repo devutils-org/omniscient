@@ -157,6 +157,45 @@ pub struct ProcessInfo {
     pub compute_instance_id: c_uint,
 }
 
+/// `nvmlFieldValue_t`: which field, the driver's read of it (a wall-clock
+/// timestamp in microseconds, how long the read took), the value's type and
+/// the field's own return code, then an 8-byte union read by that type.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FieldValue {
+    field_id: c_uint,
+    scope_id: c_uint,
+    timestamp_us: i64,
+    latency_us: i64,
+    value_type: c_int,
+    nvml_return: c_int,
+    value: u64,
+}
+
+/// One field as the driver answered it: the value, as an unsigned count, and
+/// the driver's timestamp of the read in microseconds of its wall clock --
+/// good for a difference between two reads of one field, never for placing
+/// an event on `CLOCK_MONOTONIC`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Field {
+    pub value: u64,
+    pub timestamp_us: i64,
+}
+
+/// `nvmlProcessUtilizationSample_t`: one process's share of the engines over
+/// one of the driver's sampling periods, in percent, stamped in the driver's
+/// microseconds.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProcessUtilization {
+    pub pid: c_uint,
+    pub timestamp_us: u64,
+    pub sm: c_uint,
+    pub memory: c_uint,
+    pub encoder: c_uint,
+    pub decoder: c_uint,
+}
+
 /// Which list a process appeared on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessKind {
@@ -191,6 +230,9 @@ type FnClockOfId = unsafe extern "C" fn(*mut c_void, c_int, c_int, *mut c_uint) 
 type FnEnableState = unsafe extern "C" fn(*mut c_void, *mut c_uint) -> c_int;
 type FnReasons = unsafe extern "C" fn(*mut c_void, *mut u64) -> c_int;
 type FnPerfModes = unsafe extern "C" fn(*mut c_void, *mut PerfModes) -> c_int;
+type FnProcessUtilization =
+    unsafe extern "C" fn(*mut c_void, *mut ProcessUtilization, *mut c_uint, u64) -> c_int;
+type FnFieldValues = unsafe extern "C" fn(*mut c_void, c_int, *mut FieldValue) -> c_int;
 type FnSamples =
     unsafe extern "C" fn(*mut c_void, c_int, u64, *mut c_int, *mut c_uint, *mut Sample) -> c_int;
 
@@ -237,6 +279,8 @@ pub struct Nvml {
     event_reasons: Option<FnReasons>,
     perf_modes: Option<FnPerfModes>,
     samples: Option<FnSamples>,
+    field_values: Option<FnFieldValues>,
+    process_utilization: Option<FnProcessUtilization>,
 }
 
 impl Nvml {
@@ -337,6 +381,8 @@ impl Nvml {
                     .or_else(|| optional(library, "nvmlDeviceGetCurrentClocksThrottleReasons")),
                 perf_modes: optional(library, "nvmlDeviceGetPerformanceModes"),
                 samples: optional(library, "nvmlDeviceGetSamples"),
+                field_values: optional(library, "nvmlDeviceGetFieldValues"),
+                process_utilization: optional(library, "nvmlDeviceGetProcessUtilization"),
             }
         };
         Ok(nvml)
@@ -424,6 +470,58 @@ impl Nvml {
 
     pub fn graphics_clock_mhz(&self, device: DeviceHandle) -> Result<u32, NvmlError> {
         self.clock_mhz(device, NVML_CLOCK_GRAPHICS)
+    }
+
+    /// Several fields in one call (`nvmlDeviceGetFieldValues`), each with
+    /// its own answer: a field this device or driver does not have is an
+    /// error for that field alone. A value the driver gives as a signed or a
+    /// floating number is refused rather than cast, since every field asked
+    /// here is a count.
+    pub fn fields(
+        &self,
+        device: DeviceHandle,
+        ids: &[u32],
+    ) -> Result<Vec<Result<Field, NvmlError>>, NvmlError> {
+        let entry = self
+            .field_values
+            .ok_or_else(|| self.missing("nvmlDeviceGetFieldValues"))?;
+        let mut values: Vec<FieldValue> = ids
+            .iter()
+            .map(|&field_id| FieldValue {
+                field_id,
+                ..FieldValue::default()
+            })
+            .collect();
+        // SAFETY: the handle came from this library; the buffer holds exactly
+        // `ids.len()` entries of the layout the call writes.
+        self.check(unsafe { entry(device.0, values.len() as c_int, values.as_mut_ptr()) })?;
+        Ok(values
+            .iter()
+            .map(|field| {
+                if field.nvml_return != NVML_SUCCESS {
+                    return Err(self.error(field.nvml_return));
+                }
+                let value = match field.value_type {
+                    // unsigned int: the low 32 bits of the union.
+                    1 => field.value & 0xffff_ffff,
+                    // unsigned long, unsigned long long.
+                    2 | 3 => field.value,
+                    other => {
+                        return Err(NvmlError {
+                            code: -1,
+                            message: format!(
+                                "field {} came back as value type {other}, not a count",
+                                field.field_id
+                            ),
+                        })
+                    }
+                };
+                Ok(Field {
+                    value,
+                    timestamp_us: field.timestamp_us,
+                })
+            })
+            .collect())
     }
 
     pub fn memory_clock_mhz(&self, device: DeviceHandle) -> Result<u32, NvmlError> {
@@ -634,6 +732,42 @@ impl Nvml {
             .map(|sample| sample.timestamp_us)
             .filter(|&ts| ts > after_us)
             .max())
+    }
+
+    /// Each process's newest engine-share sample the driver took after
+    /// `after_us` (its microseconds), one per process; empty when it took
+    /// none since.
+    pub fn process_utilization(
+        &self,
+        device: DeviceHandle,
+        after_us: u64,
+    ) -> Result<Vec<ProcessUtilization>, NvmlError> {
+        let entry = self
+            .process_utilization
+            .ok_or_else(|| self.missing("nvmlDeviceGetProcessUtilization"))?;
+        let mut count: c_uint = 0;
+        // SAFETY: a null buffer asks for the number of samples; `count` is a
+        // live local.
+        let code = unsafe { entry(device.0, std::ptr::null_mut(), &mut count, after_us) };
+        if code == NVML_ERROR_NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        if code != NVML_ERROR_INSUFFICIENT_SIZE {
+            self.check(code)?;
+        }
+        // The count can grow between the two calls, as the process lists'
+        // does: a few entries of room, and a short answer is truncated.
+        let mut buffer = vec![ProcessUtilization::default(); count as usize + 8];
+        let mut written = buffer.len() as c_uint;
+        // SAFETY: the buffer holds `written` entries of the layout the call
+        // writes, and `written` says so.
+        let code = unsafe { entry(device.0, buffer.as_mut_ptr(), &mut written, after_us) };
+        if code == NVML_ERROR_NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        self.check(code)?;
+        buffer.truncate((written as usize).min(buffer.len()));
+        Ok(buffer)
     }
 
     /// The processes holding memory on a device, compute and graphics both.

@@ -6,49 +6,29 @@
 //! waiting, in microseconds since boot, so the share of a window spent stalled
 //! is a difference of two readings over the time between them.
 //!
-//! The file also carries the kernel's own ten, sixty and three-hundred second
-//! averages. Those are percentages in the file and ratios here: one event, one
-//! unit, or the first reader to average two of these columns together gets a
-//! number that is off by a hundred.
+//! The file is read by the one PSI reader the families share
+//! (`crate::collect::psi`), so this source names its attributes the way
+//! `mem.pressure` and `io.pressure` do -- `stall_ratio`, `stalled_ns`,
+//! `interval_ns`, `some_avg10`, and the `full_` half where the kernel writes
+//! one -- rather than by names of its own (gap 3 of
+//! `docs/fixes/w22-sysstat.md`).
+//!
+//! The first read of a poll is its baseline and produces no event. The runner
+//! takes its first sample immediately after `start`, so a baseline taken in
+//! `start` was a few microseconds to a few milliseconds old when the first
+//! share was computed over it, and that share entered the summary's `min` and
+//! `mean` beside the full windows (defect 2 of the same handoff).
 
+use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
 use crate::clock::monotonic_ns;
-use crate::collect::{Collector, Prepared, SampleError};
+use crate::collect::psi::{Reading, POLL_BASIS, SNAPSHOT_BASIS};
+use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event};
 use crate::request::{Mode, Target};
 
 const PATH: &str = "/proc/pressure/cpu";
-
-/// One `some` or `full` line.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct Line {
-    avg10: f64,
-    avg60: f64,
-    avg300: f64,
-    total_us: u64,
-}
-
-impl Line {
-    fn parse(line: &str) -> Option<(String, Line)> {
-        let mut fields = line.split_whitespace();
-        let kind = fields.next()?.to_owned();
-        let mut parsed = Line::default();
-        for field in fields {
-            let (name, value) = field.split_once('=')?;
-            match name {
-                "avg10" => parsed.avg10 = value.parse().ok()?,
-                "avg60" => parsed.avg60 = value.parse().ok()?,
-                "avg300" => parsed.avg300 = value.parse().ok()?,
-                "total" => parsed.total_us = value.parse().ok()?,
-                // An unknown column is not a reason to discard the line, but it
-                // is also not something to guess the meaning of.
-                _ => {}
-            }
-        }
-        Some((kind, parsed))
-    }
-}
 
 /// Holds the mode until the target exists.
 pub struct Prepare(pub Mode);
@@ -56,7 +36,10 @@ pub struct Prepare(pub Mode);
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
         match target {
-            Target::System => Ok(Box::new(PressureCollector::new(self.0))),
+            Target::System => Ok(Box::new(PressureCollector::new(
+                self.0,
+                PathBuf::from(PATH),
+            ))),
             other => Err(format!(
                 "`{PATH}` is the machine's pressure, and a {} target is a different scope: \
                  the cgroup backend reads `cpu.pressure` in the cgroup and is not built yet",
@@ -70,35 +53,68 @@ impl Prepared for Prepare {
 pub struct PressureCollector {
     id: CollectorId,
     mode: Mode,
-    /// The previous reading and when it was taken, which is what turns a
-    /// microsecond counter into a share of a window.
-    previous: Option<(u64, u64)>,
+    path: PathBuf,
+    /// The previous reading, which is what turns a microsecond counter into a
+    /// share of a window.
+    previous: Option<Reading>,
+    losses: Losses,
 }
 
 impl PressureCollector {
-    pub fn new(mode: Mode) -> Self {
+    pub fn new(mode: Mode, path: PathBuf) -> Self {
         Self {
             id: CollectorId::new("cpu.pressure/fs:proc"),
             mode,
+            path,
             previous: None,
+            losses: Losses::default(),
         }
     }
 
-    fn read(&self) -> Result<(Line, Option<Line>), SampleError> {
-        let text = std::fs::read_to_string(PATH)
-            .map_err(|error| SampleError::Transient(format!("{PATH}: {error}")))?;
-        let mut some = None;
-        let mut full = None;
-        for line in text.lines() {
-            match Line::parse(line) {
-                Some((kind, parsed)) if kind == "some" => some = Some(parsed),
-                Some((kind, parsed)) if kind == "full" => full = Some(parsed),
-                _ => {}
+    fn read(&self) -> Result<Reading, SampleError> {
+        let text = std::fs::read_to_string(&self.path)
+            .map_err(|error| SampleError::Transient(format!("{}: {error}", self.path.display())))?;
+        Reading::parse(&text, monotonic_ns()).ok_or_else(|| {
+            SampleError::Transient(format!(
+                "{} did not hold a `some ... total=N` line",
+                self.path.display()
+            ))
+        })
+    }
+
+    /// The share of one tick that was spent stalled, or a counted loss when the
+    /// two reads measure no window.
+    fn stall_event(&mut self, before: &Reading, after: &Reading, seq: u64) -> Option<Event> {
+        let mut attrs = match after.stall_attrs(before) {
+            Ok(attrs) => attrs,
+            Err(unmeasured) => {
+                self.losses.undecoded += 1;
+                self.losses.note(unmeasured.explain(PATH));
+                return None;
             }
+        };
+        attrs.push(Attr::text("basis", POLL_BASIS));
+        Some(self.event(after.ts_ns, attrs, seq))
+    }
+
+    /// What one read can say: the kernel's own averages, which describe a
+    /// window this run did not choose.
+    fn snapshot_event(&self, reading: &Reading, seq: u64) -> Event {
+        let mut attrs = reading.snapshot_attrs();
+        attrs.push(Attr::text("basis", SNAPSHOT_BASIS));
+        self.event(reading.ts_ns, attrs, seq)
+    }
+
+    fn event(&self, ts_ns: u64, attrs: Vec<Attr>, seq: u64) -> Event {
+        Event {
+            ts_ns,
+            ts_err_ns: 0,
+            kind: "cpu.pressure".to_owned(),
+            keys: Vec::new(),
+            attrs,
+            collector_id: self.id.clone(),
+            seq,
         }
-        let some =
-            some.ok_or_else(|| SampleError::Transient(format!("no `some` line in {PATH}")))?;
-        Ok((some, full))
     }
 }
 
@@ -107,82 +123,41 @@ impl Collector for PressureCollector {
         &self.id
     }
 
+    /// A poll measures its own window; a snapshot can only repeat the kernel's.
+    /// They are different numbers, so they are not given the same name -- the
+    /// names `mem.pressure` and `io.pressure` give them.
     fn value_attr(&self) -> &'static str {
-        "some"
+        match self.mode {
+            Mode::Snapshot => "some_avg10",
+            _ => "stall_ratio",
+        }
     }
 
+    /// The file is read once to refuse a kernel without PSI before anything is
+    /// launched, and the reading is thrown away: the poll's baseline is its
+    /// first sample, taken by the runner as the window opens.
     fn start(&mut self) -> Result<(), String> {
-        if self.mode != Mode::Snapshot {
-            let (some, _) = self.read().map_err(|error| format!("{error:?}"))?;
-            self.previous = Some((monotonic_ns(), some.total_us));
-        }
-        Ok(())
+        self.read().map(|_| ()).map_err(|error| match error {
+            SampleError::Transient(reason) | SampleError::TargetGone(reason) => reason,
+        })
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        let (some, full) = self.read()?;
-        Ok(self.event_from(some, full, monotonic_ns(), seq))
+        let reading = self.read()?;
+        if self.mode == Mode::Snapshot {
+            return Ok(vec![self.snapshot_event(&reading, seq)]);
+        }
+        let before = self.previous.replace(reading.clone());
+        let event = before.and_then(|before| self.stall_event(&before, &reading, seq));
+        Ok(event.into_iter().collect())
     }
 
     fn tick(&self) -> Option<StdDuration> {
         None
     }
-}
 
-impl PressureCollector {
-    /// Turns a reading into an event, against whatever was read before it.
-    ///
-    /// Separate from `sample` so the share can be checked against a stall time
-    /// and a window chosen for the purpose, instead of against whatever the
-    /// machine was doing while the test ran.
-    fn event_from(&mut self, some: Line, full: Option<Line>, ts_ns: u64, seq: u64) -> Vec<Event> {
-        // A single read cannot be a share of anything: the counter is
-        // cumulative. What it does carry is the kernel's own ten-second
-        // average, which is a share, and saying which of the two is being
-        // reported is the whole point.
-        let (window, share) = match self.previous.replace((ts_ns, some.total_us)) {
-            Some((then_ns, then_us)) => {
-                let elapsed_us = ts_ns.saturating_sub(then_ns) / 1_000;
-                if elapsed_us == 0 {
-                    // Two reads inside one microsecond. There is no window to
-                    // take a share of, and zero would read as a machine where
-                    // nothing waited.
-                    return Vec::new();
-                }
-                let stalled_us = some.total_us.saturating_sub(then_us);
-                (
-                    "since the previous read",
-                    stalled_us as f64 / elapsed_us as f64,
-                )
-            }
-            None => ("the kernel's 10-second average", some.avg10 / 100.0),
-        };
-
-        let mut attrs = vec![
-            Attr::float("some", share),
-            Attr::float("avg10", some.avg10 / 100.0),
-            Attr::float("avg60", some.avg60 / 100.0),
-            Attr::float("avg300", some.avg300 / 100.0),
-            Attr::uint("total_us", some.total_us),
-            Attr::text("window", window),
-        ];
-        if let Some(full) = full {
-            // `full` means every task was stalled at once. The kernel does not
-            // define it for cpu at machine scope, and reports it inside a
-            // cgroup; it is carried when it is there and never invented.
-            attrs.push(Attr::float("full_avg10", full.avg10 / 100.0));
-            attrs.push(Attr::uint("full_total_us", full.total_us));
-        }
-
-        vec![Event {
-            ts_ns,
-            ts_err_ns: 0,
-            kind: "cpu.pressure".to_owned(),
-            keys: Vec::new(),
-            attrs,
-            collector_id: self.id.clone(),
-            seq,
-        }]
+    fn losses(&self) -> Losses {
+        self.losses.clone()
     }
 }
 
@@ -190,110 +165,122 @@ impl PressureCollector {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_pressure_line_parses_into_averages_and_a_total() {
-        let (kind, line) = Line::parse("some avg10=0.00 avg60=0.02 avg300=1.50 total=8942667")
-            .expect("a psi line");
-        assert_eq!(kind, "some");
-        assert_eq!(line.avg300, 1.5);
-        assert_eq!(line.total_us, 8_942_667);
-    }
-
-    fn line(avg10: f64, total_us: u64) -> Line {
-        Line {
-            avg10,
-            avg60: 0.0,
-            avg300: 0.0,
-            total_us,
+    fn poll() -> Mode {
+        Mode::Poll {
+            interval: Mode::DEFAULT_POLL_INTERVAL,
         }
     }
 
-    fn polling() -> PressureCollector {
-        PressureCollector::new(Mode::Poll {
-            interval: Mode::DEFAULT_POLL_INTERVAL,
-        })
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "omn-cpu-pressure-{}-{}-{name}",
+            std::process::id(),
+            monotonic_ns()
+        ))
     }
 
-    #[test]
-    fn a_malformed_line_is_refused_rather_than_guessed_at() {
-        // A column without a value is a file this reader does not understand,
-        // and a zero would be indistinguishable from an idle machine.
-        assert!(Line::parse("some avg10 0.00 total=5").is_none());
-        // A column it has no meaning for is skipped, not fatal: the kernel is
-        // free to add one.
-        let (_, parsed) = Line::parse("some avg10=1.00 avg600=2.00 total=5").expect("a psi line");
-        assert_eq!((parsed.avg10, parsed.total_us), (1.0, 5));
+    fn write_totals(path: &std::path::Path, some_us: u64, full_us: Option<u64>) {
+        let mut text = format!("some avg10=50.00 avg60=25.00 avg300=12.50 total={some_us}\n");
+        if let Some(full_us) = full_us {
+            text.push_str(&format!(
+                "full avg10=10.00 avg60=5.00 avg300=1.00 total={full_us}\n"
+            ));
+        }
+        std::fs::write(path, text).expect("writing the fake pressure file");
     }
 
+    /// Defect 2: the first read of a poll is a baseline, and a baseline
+    /// measures nothing. Before, `start` read the file and the runner's first
+    /// sample a few microseconds later computed a share over that.
     #[test]
-    fn the_share_is_the_stall_time_over_the_window_it_was_measured_in() {
-        let mut collector = polling();
-        collector.previous = Some((0, 1_000_000));
-        // Fifty milliseconds of stall in a hundred milliseconds of window.
-        let events = collector.event_from(line(0.0, 1_050_000), None, 100_000_000, 0);
+    fn the_first_read_of_a_poll_is_a_baseline_and_emits_nothing() {
+        let path = scratch("baseline");
+        write_totals(&path, 1_000_000, None);
+        let mut collector = PressureCollector::new(poll(), path.clone());
+        collector.start().expect("the fake file reads");
+        assert!(collector.sample(0).expect("the first read").is_empty());
+        write_totals(&path, 1_050_000, None);
+        std::thread::sleep(StdDuration::from_millis(20));
+        let events = collector.sample(1).expect("a second read");
+        assert_eq!(events.len(), 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Gap 3: the attributes are its siblings', and the share is the counter's
+    /// increase over the window.
+    #[test]
+    fn the_share_is_named_as_its_siblings_and_is_the_counters_increase() {
+        let path = scratch("names");
+        write_totals(&path, 1_000_000, Some(400_000));
+        let mut collector = PressureCollector::new(poll(), path.clone());
+        collector.start().expect("the fake file reads");
+        collector.sample(0).expect("the baseline");
+        write_totals(&path, 1_250_000, Some(500_000));
+        std::thread::sleep(StdDuration::from_millis(50));
+        let events = collector.sample(1).expect("a second read");
 
         let event = &events[0];
-        assert_eq!(event.attr("some").unwrap().as_f64().unwrap(), 0.5);
-        assert_eq!(
-            event.attr("window").unwrap().to_string(),
-            "since the previous read"
-        );
-        assert_eq!(
-            event.attr("total_us").unwrap().as_f64().unwrap(),
-            1_050_000.0
-        );
+        assert_eq!(collector.value_attr(), "stall_ratio");
+        assert_eq!(event.attr("stalled_ns").unwrap().as_f64(), Some(250e6));
+        assert_eq!(event.attr("full_stalled_ns").unwrap().as_f64(), Some(100e6));
+        let interval = event.attr("interval_ns").unwrap().as_f64().unwrap();
+        let ratio = event.attr("stall_ratio").unwrap().as_f64().unwrap();
+        assert!((ratio - 250e6 / interval).abs() < 1e-9);
+        let full = event.attr("full_stall_ratio").unwrap().as_f64().unwrap();
+        assert!((full - 100e6 / interval).abs() < 1e-9);
+        assert_eq!(event.attr("some_avg10").unwrap().as_f64(), Some(0.5));
+        // The old names are gone, so no reader can mix the two.
+        for old in ["some", "avg10", "total_us", "full_total_us", "window"] {
+            assert!(event.attr(old).is_none(), "`{old}` is still carried");
+        }
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn two_reads_in_the_same_instant_report_nothing() {
-        let mut collector = polling();
-        collector.previous = Some((100_000_000, 1_000_000));
-        assert!(collector
-            .event_from(line(0.0, 1_000_000), None, 100_000_500, 0)
-            .is_empty());
-    }
+    fn a_snapshot_reports_the_kernels_averages_as_ratios_and_says_so() {
+        let path = scratch("snapshot");
+        write_totals(&path, 7, None);
+        let mut collector = PressureCollector::new(Mode::Snapshot, path.clone());
+        collector.start().expect("the fake file reads");
+        let events = collector.sample(0).expect("one read");
 
-    #[test]
-    fn the_kernels_percentages_are_published_as_ratios() {
-        let mut collector = PressureCollector::new(Mode::Snapshot);
-        let events = collector.event_from(
-            Line {
-                avg10: 50.0,
-                avg60: 25.0,
-                avg300: 12.5,
-                total_us: 7,
-            },
-            None,
-            1,
-            0,
-        );
-
+        assert_eq!(collector.value_attr(), "some_avg10");
         let event = &events[0];
-        // The file writes percentages. One event, one unit, or the first reader
-        // to put two of these columns in the same average is out by a hundred.
-        assert_eq!(event.attr("avg10").unwrap().as_f64().unwrap(), 0.5);
-        assert_eq!(event.attr("avg60").unwrap().as_f64().unwrap(), 0.25);
-        assert_eq!(event.attr("avg300").unwrap().as_f64().unwrap(), 0.125);
-        assert_eq!(event.attr("some").unwrap().as_f64().unwrap(), 0.5);
-        assert_eq!(
-            event.attr("window").unwrap().to_string(),
-            "the kernel's 10-second average"
+        assert_eq!(event.attr("some_avg10").unwrap().as_f64(), Some(0.5));
+        assert_eq!(event.attr("some_avg60").unwrap().as_f64(), Some(0.25));
+        assert_eq!(event.attr("some_avg300").unwrap().as_f64(), Some(0.125));
+        assert_eq!(event.attr("some_total_ns").unwrap().as_f64(), Some(7000.0));
+        assert!(event.attr("stall_ratio").is_none());
+        assert!(
+            event.attr("full_avg10").is_none(),
+            "a full line was invented"
         );
+        assert!(event
+            .attr("basis")
+            .unwrap()
+            .to_string()
+            .contains("observes no window"));
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn a_full_line_is_carried_when_the_kernel_writes_one_and_never_invented() {
-        let mut collector = PressureCollector::new(Mode::Snapshot);
-        let without = collector.event_from(line(0.0, 0), None, 1, 0);
-        assert!(without[0].attr("full_avg10").is_none());
+    fn a_counter_that_goes_backwards_is_a_counted_loss() {
+        let path = scratch("backwards");
+        write_totals(&path, 900, None);
+        let mut collector = PressureCollector::new(poll(), path.clone());
+        collector.start().expect("the fake file reads");
+        collector.sample(0).expect("the baseline read");
+        write_totals(&path, 100, None);
+        assert!(collector.sample(1).expect("a read").is_empty());
+        assert_eq!(collector.losses().undecoded, 1);
+        std::fs::remove_file(&path).ok();
+    }
 
-        let mut collector = PressureCollector::new(Mode::Snapshot);
-        let with = collector.event_from(line(0.0, 0), Some(line(10.0, 42)), 1, 0);
-        assert_eq!(with[0].attr("full_avg10").unwrap().as_f64().unwrap(), 0.1);
-        assert_eq!(
-            with[0].attr("full_total_us").unwrap().as_f64().unwrap(),
-            42.0
-        );
+    #[test]
+    fn a_file_without_psi_is_refused_at_start() {
+        let path = scratch("absent");
+        let mut collector = PressureCollector::new(poll(), path);
+        assert!(collector.start().is_err());
     }
 
     #[test]
@@ -316,13 +303,12 @@ mod tests {
         let cpus = std::thread::available_parallelism()
             .map(|count| count.get())
             .unwrap_or(1);
-        let mut collector = PressureCollector::new(Mode::Poll {
-            interval: crate::request::Mode::DEFAULT_POLL_INTERVAL,
-        });
+        let mut collector = PressureCollector::new(poll(), PathBuf::from(PATH));
         if collector.start().is_err() {
             eprintln!("skipped: this kernel does not report PSI at {PATH}");
             return;
         }
+        collector.sample(0).expect("the baseline read");
 
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let threads: Vec<_> = (0..cpus * 2)
@@ -338,36 +324,20 @@ mod tests {
             })
             .collect();
         std::thread::sleep(StdDuration::from_millis(300));
-        let events = collector.sample(0).expect("a second read");
+        let events = collector.sample(1).expect("a second read");
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         for thread in threads {
             thread.join().expect("a spinner finished");
         }
 
-        let some = events[0].attr("some").unwrap().as_f64().unwrap();
+        let share = events[0].attr("stall_ratio").unwrap().as_f64().unwrap();
         assert!(
-            some > 0.0,
+            share > 0.0,
             "twice as many spinning threads as cpus produced no stall time at all"
         );
         assert!(
-            some <= 1.05,
-            "a share of a window cannot exceed it, yet {some} was reported"
+            share <= 1.05,
+            "a share of a window cannot exceed it, yet {share} was reported"
         );
-    }
-
-    #[test]
-    fn a_single_read_reports_the_kernels_own_average_and_says_so() {
-        let mut collector = PressureCollector::new(Mode::Snapshot);
-        let Ok(events) = collector.sample(0) else {
-            eprintln!("skipped: this kernel does not report PSI at {PATH}");
-            return;
-        };
-        assert_eq!(
-            events[0].attr("window").unwrap().to_string(),
-            "the kernel's 10-second average"
-        );
-        let some = events[0].attr("some").unwrap().as_f64().unwrap();
-        let avg10 = events[0].attr("avg10").unwrap().as_f64().unwrap();
-        assert_eq!(some, avg10);
     }
 }

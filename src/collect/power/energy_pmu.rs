@@ -66,6 +66,7 @@ impl Prepared for Prepare {
                 previous: BTreeMap::new(),
                 baseline: BTreeMap::new(),
                 losses: Losses::default(),
+                notes: Vec::new(),
             })),
             other => Err(format!(
                 "RAPL counts the energy of a whole package, so a {} target has no number here. \
@@ -123,39 +124,56 @@ const CORE_EVENT: &str = "energy-core";
 
 /// Package `package`'s cores domain through the per-core unit: one counter
 /// per cpu of the unit's cpumask (the kernel lists one thread per core) that
-/// lies in that package. None when the unit is absent or a counter refuses.
-fn per_core_domain(package: u32) -> Option<Opened> {
-    let counter = Counter::from_sysfs("cores", CORE_PMU, CORE_EVENT)?;
-    let mask =
-        std::fs::read_to_string(format!("{}/{CORE_PMU}/cpumask", crate::perf::PMU_DEVICES)).ok()?;
-    let cpus = crate::capabilities::parse_cpu_list(mask.trim())?;
+/// lies in that package.
+///
+/// `Ok(None)` only when the part has no such unit -- a domain it does not
+/// count. Every other way of not opening it is an `Err` naming why: the unit
+/// is there, so the domain exists, and a `cores` series that vanished without
+/// a word would read as a part that has none. A core whose package cannot be
+/// read is not guessed into package 0, where on a two-socket part it would be
+/// summed into the wrong socket's cores.
+fn per_core_domain(package: u32) -> Result<Option<Opened>, String> {
+    let Some(counter) = Counter::from_sysfs("cores", CORE_PMU, CORE_EVENT) else {
+        return Ok(None);
+    };
+    let mask_path = format!("{}/{CORE_PMU}/cpumask", crate::perf::PMU_DEVICES);
+    let mask = std::fs::read_to_string(&mask_path)
+        .map_err(|error| format!("{mask_path} is not readable: {error}"))?;
+    let cpus = crate::capabilities::parse_cpu_list(mask.trim())
+        .ok_or_else(|| format!("{mask_path} is not a cpu list: `{}`", mask.trim()))?;
     let mut groups = Vec::new();
     for cpu in cpus {
-        let in_package = std::fs::read_to_string(format!(
-            "/sys/devices/system/cpu/cpu{cpu}/topology/physical_package_id"
-        ))
-        .ok()
-        .and_then(|id| id.trim().parse::<u32>().ok())
-        .unwrap_or(0);
+        let topology = format!("/sys/devices/system/cpu/cpu{cpu}/topology/physical_package_id");
+        let in_package = std::fs::read_to_string(&topology)
+            .ok()
+            .and_then(|id| id.trim().parse::<u32>().ok())
+            .ok_or_else(|| {
+                format!("{topology} is not readable, so cpu{cpu}'s core has no package to sum into")
+            })?;
         if in_package != package {
             continue;
         }
-        let group = CounterGroup::open(&[counter], Scope::Cpu(cpu)).ok()?;
-        group.enable().ok()?;
+        let group = CounterGroup::open(&[counter], Scope::Cpu(cpu)).map_err(|error| {
+            format!("cannot open `{CORE_PMU}/{CORE_EVENT}/` on cpu{cpu}: {error}")
+        })?;
+        group.enable().map_err(|error| {
+            format!("cannot start `{CORE_PMU}/{CORE_EVENT}/` on cpu{cpu}: {error}")
+        })?;
         groups.push(group);
     }
     if groups.is_empty() {
-        return None;
+        return Err(format!("{mask_path} lists no cpu of package {package}"));
     }
-    let (scale, unit) = crate::perf::sysfs_scale(CORE_PMU, CORE_EVENT)?;
-    Some(Opened {
+    let (scale, unit) = crate::perf::sysfs_scale(CORE_PMU, CORE_EVENT)
+        .ok_or_else(|| format!("`{CORE_PMU}/{CORE_EVENT}/` publishes no scale or unit"))?;
+    Ok(Some(Opened {
         package,
         domain: CORE_EVENT,
         label: "cores",
         groups,
         scale,
         unit,
-    })
+    }))
 }
 
 struct Opened {
@@ -190,6 +208,8 @@ pub struct EnergyPmu {
     /// window is one difference, taken from here to the closing read.
     baseline: BTreeMap<(u32, &'static str), Reading>,
     losses: Losses,
+    /// A domain the part has and this run could not open, said once.
+    notes: Vec<String>,
 }
 
 impl EnergyPmu {
@@ -323,8 +343,13 @@ impl Collector for EnergyPmu {
                     .iter()
                     .any(|opened| opened.package == package && opened.label == "cores")
             {
-                if let Some(opened) = per_core_domain(package) {
-                    self.opened.push(opened);
+                match per_core_domain(package) {
+                    Ok(Some(opened)) => self.opened.push(opened),
+                    Ok(None) => {}
+                    Err(reason) => self.notes.push(format!(
+                        "package {package}'s `cores` domain is not read, though the part \
+                         counts it per core: {reason}"
+                    )),
                 }
             }
         }
@@ -414,6 +439,10 @@ impl Collector for EnergyPmu {
             }
         }
         events
+    }
+
+    fn notes(&self) -> Vec<String> {
+        self.notes.clone()
     }
 
     fn losses(&self) -> Losses {

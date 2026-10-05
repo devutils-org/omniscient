@@ -245,9 +245,21 @@ wave). `the_core_domain_is_every_cores_counter_summed_and_less_than_its_package`
 thread's `voluntary_ctxt_switches` over an interval. Each voluntary switch is a
 sleep and each sleep ends in one wakeup. Against a program that chose its
 count, 500 sleeps of 2 ms on one thread: 482 counted, 485 a second, where one
-sleep plus the loop is 2.06 ms; the 18 missing are the last 40 ms, between the
-last poll and the exit. A thread that exits between two reads is counted as
-dropped. `a_program_that_sleeps_three_hundred_times_wakes_three_hundred_times`.
+sleep plus the loop is 2.06 ms; the 18 missing were the last 40 ms, between the
+last poll and the exit. The run already keeps a launched program a zombie
+until the collectors' closing round (`launch.rs`, `WNOWAIT`), and that round
+reads the zombie leader's own count: after the fix round, 300 sleeps of 2 ms
+through `-m poll@100ms` were 301 wakeups over seven events, the last 15 or 16
+of them the partial interval. The scenario's lower bound is 285 now, not 150,
+so a lost last interval fails it.
+
+What is still lost is counted. A thread that exits between two reads is
+dropped, one per thread; a process found gone at a read (a `--pid` reaped by
+its own parent) drops every thread it had at the read before, with the
+reason. A thread born and gone between two reads is in neither listing and is
+missed without a count: the caveat says so, since procfs keeps no total of a
+process's dead threads' switches before the reap.
+`a_program_that_sleeps_three_hundred_times_wakes_three_hundred_times`.
 
 ## The four classes
 

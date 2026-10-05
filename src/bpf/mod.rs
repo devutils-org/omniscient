@@ -47,6 +47,7 @@ mod net_softirq;
 mod offcpu;
 // The `cpu` stream's: `cpu.oncpu_time` through `sched_switch`, per thread.
 mod oncpu;
+mod proc_calls;
 mod proc_events;
 mod proc_renames;
 mod proc_syscall;
@@ -84,6 +85,7 @@ pub use net_retransmit::{Retransmit, RetransmitProgram};
 pub use net_softirq::{SoftIrq, SoftIrqDrain, SoftIrqProgram};
 pub use offcpu::{DrainLosses, OffCpu, OffCpuProgram};
 pub use oncpu::{OnCpu, OnCpuProgram};
+pub use proc_calls::{Call, CallsNarrowing, CallsProgram};
 pub use proc_events::{Exec, ExecProgram, Exit, ExitProgram, Signal, SignalProgram};
 pub use proc_renames::Renames;
 pub use proc_syscall::{Narrowing, SyscallDrainLosses, SyscallProgram, SyscallRow};

@@ -2274,9 +2274,9 @@ fn the_combinations_these_sources_do_not_have_are_refused_with_the_reason() {
         stderr(&output)
     );
 
-    // A pid is not a target these two have: an exec is the moment a pid stops
-    // being one program and starts being another.
-    let output = omn(&["proc.exec", "--pid", "1", "--emit", "raw", "-d", "50ms"]);
+    // A pid is not a target `proc.exit` has. (`proc.exec` takes one since the
+    // twenty-fourth wave, as the process and its descendants.)
+    let output = omn(&["proc.exit", "--pid", "1", "--emit", "raw", "-d", "50ms"]);
     assert_eq!(
         output.status.code(),
         Some(EXIT_REJECTED),
@@ -2834,4 +2834,197 @@ fn a_cgroup_target_sees_the_forks_signals_and_calls_inside_it_and_none_beside_it
         "the workload inside asked for its parent {floor} times inside the window, less what \
          the run reports lost, and {ceiling} after omn started, and {calls} calls were kept"
     );
+}
+
+/// `proc.syscall`'s `comm` is the name each call was made under (the
+/// twenty-second wave's bpftrace gap 1, a defect until the twenty-fourth).
+///
+/// The row used to keep the name its window's first call saw, so a task that
+/// renamed itself kept its old name on every call it had made once in that
+/// window, and `comm == "<new name>"` dropped them: 500 opens after a
+/// `prctl(PR_SET_NAME)` counted 1. Ground truth is the workload's own
+/// choice: `N` failing opens under `python3`, the rename, `N` opens that
+/// succeed and `N` that fail, all under the new name. Keyed `comm,syscall`,
+/// the new name's series is exactly `2N` calls, and its rows' `errors` add
+/// up to exactly `N`.
+#[test]
+fn a_task_that_renames_itself_is_counted_under_each_name_with_its_errors() {
+    needs_python!();
+    const N: u64 = 300;
+    let program = format!(
+        "import ctypes, os, sys\n\
+         libc = ctypes.CDLL(None)\n\
+         def fail():\n    try: os.close(os.open('/nonexistent-omn-rename', os.O_RDONLY))\n    except OSError: pass\n\
+         for _ in range({N}): fail()\n\
+         libc.prctl(15, b'omn-renamed', 0, 0, 0)\n\
+         for _ in range({N}): os.close(os.open('/proc/self/stat', os.O_RDONLY))\n\
+         for _ in range({N}): fail()\n\
+         sys.stderr.write('CALLS {N}\\n')\n"
+    );
+    let output = omn(&[
+        "proc.syscall",
+        "--mode",
+        "count",
+        "--emit",
+        "raw",
+        "--keys",
+        "comm,syscall",
+        "--filter",
+        "syscall == \"openat\" && comm == \"omn-renamed\"",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        &program,
+    ]);
+    if skipped_without_bpf(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(reported(&output, "CALLS "), N);
+    let doc = document(&output);
+    let rows = events(&doc["results"][0]);
+    let calls: f64 = rows.iter().filter_map(|row| attr_f64(row, "count")).sum();
+    let errors: f64 = rows.iter().filter_map(|row| attr_f64(row, "errors")).sum();
+    assert_eq!(
+        calls as u64,
+        2 * N,
+        "the renamed task opened {} times; losses {}",
+        2 * N,
+        doc["results"][0]["losses"]
+    );
+    assert_eq!(errors as u64, N, "{N} of those opens failed");
+    for row in &rows {
+        let keys = row["keys"].to_string();
+        assert!(
+            keys.contains("omn-renamed"),
+            "a row of another name: {keys}"
+        );
+        assert!(
+            keys.contains("\"openat\""),
+            "a row of another syscall: {keys}"
+        );
+    }
+}
+
+/// `proc.exec` on a launched program is the program's execs and its
+/// descendants', and nothing else on the machine (the twenty-second wave's
+/// bpftrace gap 3: per launch, not only `--system`).
+///
+/// Ground truth is the script's own shape: the shell itself, five `echo`s, a
+/// subshell whose first `true` is forked and whose last is exec'd in place
+/// (so the forked child's exec comes before its parent's), and a two-command
+/// pipeline -- ten execs. A loop of `/bin/true` beside it, outside the tree,
+/// must add none.
+#[test]
+fn a_launched_programs_execs_are_its_tree_and_nothing_beside_it() {
+    let script = std::env::temp_dir().join(format!("omn-exec-tree-{}.sh", std::process::id()));
+    std::fs::write(
+        &script,
+        "for i in 1 2 3 4 5; do /bin/echo x >/dev/null; done\n\
+         ( /bin/true; /bin/true )\n\
+         /bin/true | /bin/cat >/dev/null\n",
+    )
+    .expect("a script");
+    let mut beside = Command::new("sh")
+        .args(["-c", "while :; do /bin/true; sleep 0.02; done"])
+        .spawn()
+        .expect("a loop beside");
+    let output = omn(&[
+        "proc.exec",
+        "--emit",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "sh",
+        script.to_str().unwrap(),
+    ]);
+    beside.kill().ok();
+    beside.wait().ok();
+    std::fs::remove_file(&script).ok();
+    if skipped_without_bpf(&output) || machine_cannot_trace(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let doc = document(&output);
+    let rows = events(&doc["results"][0]);
+    let mut names: Vec<String> = rows
+        .iter()
+        .filter_map(|row| attr_text(row, "comm"))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["cat", "echo", "echo", "echo", "echo", "echo", "sh", "true", "true", "true"],
+        "the script's ten execs, and none of the loop beside it"
+    );
+}
+
+/// `proc.calls` is one record per call, with `openat`'s path, its errno and
+/// the descriptor it returned (the twenty-second wave's perfsched gaps 3-4,
+/// bpftrace gap 6: `strace -T`'s and `opensnoop`'s lines).
+///
+/// Ground truth is the workload's choice: `N` opens of a path nothing else on
+/// the machine opens, which fail with ENOENT, and `N` of `/proc/self/stat`,
+/// which succeed. (Against `strace -f -e trace=openat` on the same kind of
+/// run, this machine read 648 opens and 406 ENOENT both ways.)
+#[test]
+fn every_open_is_one_record_with_its_path_its_errno_and_its_descriptor() {
+    needs_python!();
+    const N: u64 = 150;
+    let missing = format!("/nonexistent-omn-calls-{}", std::process::id());
+    let program = format!(
+        "import os, sys\n\
+         for _ in range({N}):\n    try: os.close(os.open('{missing}', os.O_RDONLY))\n    except OSError: pass\n\
+         for _ in range({N}): os.close(os.open('/proc/self/stat', os.O_RDONLY))\n\
+         sys.stderr.write('CALLS {N}\\n')\n"
+    );
+    let output = omn(&[
+        "proc.calls",
+        "--emit",
+        "raw",
+        "--filter",
+        "syscall == \"openat\"",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        &program,
+    ]);
+    if skipped_without_bpf(&output) || machine_cannot_trace(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(reported(&output, "CALLS "), N);
+    let doc = document(&output);
+    let rows = events(&doc["results"][0]);
+    let of = |path: &str| -> Vec<&serde_json::Value> {
+        rows.iter()
+            .filter(|row| attr_text(row, "path").as_deref() == Some(path))
+            .collect()
+    };
+    let failed = of(&missing);
+    assert_eq!(
+        failed.len() as u64,
+        N,
+        "losses {}",
+        doc["results"][0]["losses"]
+    );
+    assert!(failed
+        .iter()
+        .all(|row| attr_f64(row, "errno") == Some(libc_enoent()) && attr(row, "fd").is_none()));
+    let opened = of("/proc/self/stat");
+    assert_eq!(opened.len() as u64, N);
+    assert!(opened.iter().all(|row| {
+        attr_f64(row, "errno") == Some(0.0) && attr_f64(row, "fd").is_some_and(|fd| fd >= 0.0)
+    }));
+    assert!(rows.iter().all(|row| attr_f64(row, "lat_ns").is_some()));
+}
+
+/// ENOENT, which is 2 on every architecture Linux runs on.
+fn libc_enoent() -> f64 {
+    2.0
 }
