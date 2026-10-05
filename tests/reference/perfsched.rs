@@ -429,12 +429,17 @@ mod tests {
 
     #[test]
     fn perf_trace_summary_reads_the_table() {
+        // A real `sudo -n perf trace -s -o FILE -- python3 syscalls.py 5000
+        // 20 10` (2026-10-05, under the wave's load): two of the 5000 getppid
+        // calls are missing from perf's own table, which is why the pair's
+        // band lets omn read above only.
         let v = perf_trace_summary("", &capture("perf-trace-s.txt")).unwrap();
-        assert_eq!(value(&v, "getppid.calls"), 5000.0);
-        assert_eq!(value(&v, "newfstatat.errors"), 28.0);
-        assert!(close(value(&v, "clock_nanosleep.total_ns"), 201_112_000.0));
-        assert!(close(value(&v, "clock_nanosleep.mean_ns"), 10_055_600.0));
-        assert!(close(value(&v, "clock_nanosleep.max_ns"), 10_138_000.0));
+        assert_eq!(value(&v, "getppid.calls"), 4998.0);
+        assert_eq!(value(&v, "newfstatat.errors"), 19.0);
+        assert_eq!(value(&v, "clock_nanosleep.calls"), 20.0);
+        assert!(close(value(&v, "clock_nanosleep.total_ns"), 201_399_000.0));
+        assert!(close(value(&v, "clock_nanosleep.mean_ns"), 10_069_950.0));
+        assert!(close(value(&v, "clock_nanosleep.max_ns"), 10_086_000.0));
     }
 
     #[test]
@@ -446,14 +451,17 @@ mod tests {
 
     #[test]
     fn perf_sched_latency_reads_tasks_and_total() {
+        // A real `perf sched record -- python3 sleeper.py 100 2`, then `perf
+        // sched latency -f` (2026-10-05, through `sudo -n`): the machine's
+        // tasks beside the workload's, renamed `omnref-sleep`.
         let v = perf_sched_latency(&capture("perf-sched-latency.txt"), "").unwrap();
-        assert_eq!(value(&v, "python3.switches"), 23.0);
-        assert!(close(value(&v, "python3.runtime_ns"), 14_823_000.0));
-        assert!(close(value(&v, "python3.avg_delay_ns"), 18_000.0));
-        assert!(close(value(&v, "python3.max_delay_ns"), 102_000.0));
+        assert_eq!(value(&v, "omnref-sleep.switches"), 102.0);
+        assert!(close(value(&v, "omnref-sleep.runtime_ns"), 11_180_000.0));
+        assert!(close(value(&v, "omnref-sleep.avg_delay_ns"), 5_000.0));
+        assert!(close(value(&v, "omnref-sleep.max_delay_ns"), 12_000.0));
         // A command with a colon in it keeps it; only the pid is cut.
-        assert_eq!(value(&v, "kworker/3:1.switches"), 4.0);
-        assert_eq!(value(&v, "total.switches"), 29.0);
+        assert_eq!(value(&v, "kworker/10:1-mm.switches"), 2.0);
+        assert_eq!(value(&v, "total.switches"), 949.0);
     }
 
     #[test]
