@@ -255,7 +255,7 @@ mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream, UdpSocket};
 
-    fn find<'a>(events: &'a [Event], what: impl Fn(&Event) -> bool) -> Option<&'a Event> {
+    fn find(events: &[Event], what: impl Fn(&Event) -> bool) -> Option<&Event> {
         events.iter().find(|event| what(event))
     }
 
