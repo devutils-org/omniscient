@@ -931,6 +931,121 @@ fn perf_map_symbols(
     (symbols, stale)
 }
 
+/// What the agent reads of each task off the cpu from `sched.offcpu`'s raw
+/// events: the process it is in (the events' `pid`), and its blocked time
+/// whose stack goes through a send or a receive.
+#[derive(Default)]
+struct OnConnection {
+    pid: BTreeMap<String, u64>,
+    blocked: BTreeMap<String, f64>,
+}
+
+/// [`OnConnection`], from a run's read-back.
+fn blocked_on_connection(read_back: &Value) -> OnConnection {
+    let mut found = OnConnection::default();
+    for request in read_back["requests"].as_array().into_iter().flatten() {
+        let result = &request["result"];
+        if result["source"].as_str() != Some("sched.offcpu") {
+            continue;
+        }
+        for output in result["outputs"].as_array().into_iter().flatten() {
+            if output["emit"].as_str() != Some("raw") {
+                continue;
+            }
+            for event in output["events"].as_array().into_iter().flatten() {
+                let Some(tid) = event["keys"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find_map(|key| key["task"]["tid"].as_u64())
+                else {
+                    continue;
+                };
+                let key = format!("task:{tid}");
+                let attr = |name: &str| {
+                    event["attrs"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|attr| attr["name"] == name)
+                        .and_then(|attr| attr["value"].as_f64())
+                };
+                if let Some(pid) = attr("pid").filter(|pid| *pid > 0.0) {
+                    found.pid.entry(key.clone()).or_insert(pid as u64);
+                }
+                let Some(stack) = attr("stack_id") else {
+                    continue;
+                };
+                let through = result["stacks"][(stack as u64).to_string().as_str()]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .any(is_connection_frame);
+                if through {
+                    *found.blocked.entry(key).or_default() +=
+                        attr("total_ns").unwrap_or(0.0) - attr("queued_ns").unwrap_or(0.0);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Whether a frame is a send or a receive on a connection
+/// (`is_connection_frame` in `src/triage/latency.rs`): an `accept`, a
+/// `select` or a `poll` waits for a connection to begin, not on one.
+fn is_connection_frame(frame: &str) -> bool {
+    if frame.starts_with("_socket.") {
+        return true;
+    }
+    let name = frame
+        .split(['+', '@', ' ', '('])
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('_');
+    let name = name.strip_prefix("libc_").unwrap_or(name);
+    matches!(
+        name,
+        "send" | "sendto" | "sendmsg" | "sendmmsg" | "recv" | "recvfrom" | "recvmsg" | "recvmmsg"
+    ) || name.contains("sendall")
+}
+
+/// Whether a frame is the tool's own eBPF program, or the kernel code that
+/// runs one (`is_ebpf_frame` in `src/triage/diff.rs`).
+fn is_ebpf_frame(frame: &str) -> bool {
+    let name = frame.split(['+', ' ', '(']).next().unwrap_or("");
+    name.starts_with("bpf_prog_")
+        || name.starts_with("bpf_trace_run")
+        || name.starts_with("__bpf_trace_")
+        || name.starts_with("__bpf_prog_")
+        || name.starts_with("bpf_trampoline_")
+        || name == "trace_call_bpf"
+}
+
+/// The labels a perf map named in a result's stacks, from the provenance
+/// written beside them (`named_by`: for each stack id, each frame's namer, in
+/// the order of its labels); `None` for a result that carries none.
+fn provenance_symbols(result: &Value) -> Option<BTreeSet<String>> {
+    let named_by = result["named_by"].as_object()?;
+    let mut symbols = BTreeSet::new();
+    for (id, namers) in named_by {
+        let labels = result["stacks"][id.as_str()].as_array();
+        for (label, namer) in labels
+            .into_iter()
+            .flatten()
+            .zip(namers.as_array().into_iter().flatten())
+        {
+            if namer.as_str() == Some("perf-map") {
+                if let Some(label) = label.as_str() {
+                    symbols.insert(label.trim_end_matches(" [recovered]").to_owned());
+                }
+            }
+        }
+    }
+    Some(symbols)
+}
+
 /// A row's amount, by state before any qualifier.
 fn table_amount(table: &Value, state: &str) -> f64 {
     table["rows"]
@@ -996,6 +1111,10 @@ fn read_mcp(
     );
     let mut seen: BTreeSet<&str> = BTreeSet::from([table["key"].as_str().unwrap_or("")]);
     let mut followed = Vec::new();
+    let on_connection = blocked_on_connection(read_back);
+    // Whether the last step was to a thread waiting beside the block rather
+    // than one that ran in it: no job follows from it.
+    let mut beside = false;
     while followed.len() < MAX_FOLLOWED {
         let Some((block, state, _, resolution)) = table_top(table) else {
             break;
@@ -1004,23 +1123,69 @@ fn read_mcp(
             break;
         }
         let busy = |table: &Value| table_amount(table, "on-cpu") + table_amount(table, "runnable");
-        let Some(next) = tables
+        let ran = tables
             .iter()
             .filter(|other| !seen.contains(other["key"].as_str().unwrap_or("")))
             .max_by(|a, b| busy(a).total_cmp(&busy(b)))
-            .filter(|other| busy(other) >= RAN_IN_IT * block)
-        else {
-            break;
+            .filter(|other| busy(other) >= RAN_IN_IT * block);
+        // Nothing ran in the block: a thread of the same process blocked on
+        // a connection through a quarter of it is what the program waited
+        // on, named beside the block, its whole its own rows (the person's
+        // way's `waiting`).
+        let process = on_connection
+            .pid
+            .get(table["key"].as_str().unwrap_or(""))
+            .copied();
+        let waiting = || {
+            tables
+                .iter()
+                .filter(|other| !seen.contains(other["key"].as_str().unwrap_or("")))
+                .filter(|other| {
+                    process.is_some()
+                        && on_connection
+                            .pid
+                            .get(other["key"].as_str().unwrap_or(""))
+                            .copied()
+                            == process
+                })
+                .map(|other| {
+                    let key = other["key"].as_str().unwrap_or("");
+                    (other, on_connection.blocked.get(key).copied().unwrap_or(0.0))
+                })
+                .filter(|(_, amount)| *amount >= RAN_IN_IT * block)
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(other, _)| other)
         };
+        let (next, next_whole, how) = match ran {
+            Some(next) => (next, (block, resolution), "->"),
+            None => {
+                let Some(next) = waiting() else {
+                    break;
+                };
+                let rows = next["rows"].as_array();
+                let amount: f64 = rows
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| row["amount"].as_f64())
+                    .sum();
+                let resolution: f64 = rows
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| row["resolution"].as_f64())
+                    .sum();
+                (next, (amount, resolution), "beside, blocked on a connection:")
+            }
+        };
+        beside = ran.is_none();
         followed.push(format!(
-            "{} {state} {:.1} ms -> {}",
+            "{} {state} {:.1} ms {how} {}",
             table["key"].as_str().unwrap_or(""),
             block / 1e6,
             next["key"].as_str().unwrap_or("")
         ));
         seen.insert(next["key"].as_str().unwrap_or(""));
         table = next;
-        whole = (block, resolution);
+        whole = next_whole;
     }
     let task = table["key"].as_str().map(str::to_owned);
     // The rest of the job, as the person's way reads it: every busy task off
@@ -1030,7 +1195,7 @@ fn read_mcp(
     // A row that agrees once this is added agrees on a loosened comparison,
     // not because triage's decomposition changed.
     let mut job = BTreeMap::new();
-    if !followed.is_empty() {
+    if !followed.is_empty() && !beside {
         for state in ["on-cpu", "runnable"] {
             let rest: f64 = tables
                 .iter()
@@ -1186,12 +1351,29 @@ fn read_mcp(
         ));
     }
     if source == "cpu.profile" {
-        let (named, stale) = perf_map_symbols(&notes, since);
-        answer.how.unseen.extend(stale);
+        // The frames a perf map named, as the result says them beside its
+        // stacks (`named_by`); read back from the maps only for a result
+        // that does not, as the triage does (`PerfMapNames::of_run`).
+        let named = match provenance_symbols(result) {
+            Some(named) => named,
+            None => {
+                let (named, stale) = perf_map_symbols(&notes, since);
+                answer.how.unseen.extend(stale);
+                named
+            }
+        };
         let mut charged: BTreeMap<String, (f64, bool)> = BTreeMap::new();
         let (mut total, mut interpreted) = (0.0, 0.0);
+        let mut ebpf = 0.0;
         for (stack, weight) in &weighed {
             let frames = frames_of(*stack);
+            // A sample that ran the tool's own eBPF programs is the tool's
+            // cost on the program's cpu, never its suspect, as the person's
+            // way reads it (`diff::hottest`).
+            if frames.iter().any(|frame| is_ebpf_frame(frame)) {
+                ebpf += weight;
+                continue;
+            }
             total += weight;
             if frames.iter().any(|frame| {
                 frame
@@ -1200,7 +1382,11 @@ fn read_mcp(
             }) {
                 interpreted += weight;
             }
-            let (name, mapped) = match frames.iter().rev().find(|frame| named.contains(*frame)) {
+            let mapped_frame = frames
+                .iter()
+                .rev()
+                .find(|frame| named.contains(frame.trim_end_matches(" [recovered]")));
+            let (name, mapped) = match mapped_frame {
                 Some(frame) => (frame.clone(), true),
                 None => (
                     frames
@@ -1223,6 +1409,12 @@ fn read_mcp(
             if mapped || !interpreter || weight >= FLAT * total {
                 answer.leaf = Some(name);
             }
+        }
+        if ebpf > 0.0 {
+            answer.how.unseen.push(format!(
+                "{source}: {ebpf} sample(s) ran eBPF programs, the tool's own cost, and are \
+                 charged to no function"
+            ));
         }
         answer.frames = answer.leaf.iter().cloned().collect();
     } else {
@@ -2817,4 +3009,61 @@ fn the_agent_s_reading_follows_a_block_into_the_busy_task() {
         (answer.task.as_deref(), answer.state.as_str()),
         (Some("task:1"), "blocked")
     );
+}
+
+/// The slow client, the agent's way: the main thread's `select` block,
+/// nothing busy in it, and a thread of the same process blocked in the
+/// socket module's send for most of it -- that thread is named beside the
+/// block, its whole its own rows, and no job is added.
+#[test]
+fn the_agent_s_reading_names_a_thread_blocked_on_a_connection_beside_the_block() {
+    let block = |tid: u64, stack: u64, ns: f64| {
+        json!({"keys": [{"task": {"tid": tid}}],
+               "attrs": [{"name": "pid", "value": 10}, {"name": "stack_id", "value": stack},
+                         {"name": "total_ns", "value": ns}, {"name": "queued_ns", "value": 0}]})
+    };
+    let answer_doc = json!({
+        "read_back": {
+            "decompositions": [{"id": "where-the-time-went", "tables": [
+                {"key": "task:10", "whole": {"amount": 2.4e9, "resolution": 1e6}, "rows": [
+                    {"state": "on-cpu", "amount": 5e7, "source": "cpu.profile", "evidence": "sampled"},
+                    {"state": "blocked: sleeping", "amount": 2.3e9, "resolution": 1e6,
+                     "source": "sched.offcpu", "evidence": "exact"}]},
+                {"key": "task:11", "whole": {"amount": 1.4e9}, "rows": [
+                    {"state": "on-cpu", "amount": 6e7, "source": "cpu.profile", "evidence": "sampled"},
+                    {"state": "blocked: sleeping", "amount": 1.3e9, "resolution": 2e5,
+                     "source": "sched.offcpu", "evidence": "exact"}]},
+                {"key": "task:99", "whole": {"amount": 2.4e9}, "rows": [
+                    {"state": "on-cpu", "amount": 1e8, "source": "cpu.profile", "evidence": "sampled"}]}
+            ]}],
+            "requests": [{"label": "blocked", "result": {
+                "source": "sched.offcpu",
+                "stacks": {"1": ["main", "select.cpython-314-x86_64-linux-gnu.so+0x1a2b", "do_select"],
+                           "2": ["start_thread", "_socket.cpython-314-x86_64-linux-gnu.so+0x5c10",
+                                 "__libc_sendto", "sock_sendmsg"]},
+                "outputs": [{"emit": "raw", "events": [
+                    block(10, 1, 2.3e9), block(11, 2, 1.25e9), block(11, 1, 5e7)]}]}}]
+        }
+    });
+    let answer = read_mcp(&answer_doc, &["python3".to_owned()], None).unwrap();
+    assert_eq!(answer.task.as_deref(), Some("task:11"), "{:?}", answer.followed);
+    assert_eq!(answer.state, "blocked");
+    assert_eq!(answer.whole, (1.36e9, 2e5), "its whole is its own rows");
+    assert!(answer.followed[0].contains("beside"), "{:?}", answer.followed);
+    assert!(answer.job.is_empty(), "{:?}", answer.job);
+    assert_eq!(
+        answer.leaf.as_deref(),
+        Some("sock_sendmsg"),
+        "the block began in the send, not the select"
+    );
+
+    // A thread of another process blocked on a connection is not the
+    // program's wait.
+    let mut elsewhere = answer_doc.clone();
+    elsewhere["read_back"]["requests"][0]["result"]["outputs"][0]["events"][1]["attrs"][0]["value"] =
+        json!(20);
+    elsewhere["read_back"]["requests"][0]["result"]["outputs"][0]["events"][2]["attrs"][0]["value"] =
+        json!(20);
+    let answer = read_mcp(&elsewhere, &[], None).unwrap();
+    assert_eq!(answer.task.as_deref(), Some("task:10"));
 }
