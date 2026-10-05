@@ -182,6 +182,20 @@ pub struct Field {
     pub timestamp_us: i64,
 }
 
+/// `nvmlProcessUtilizationSample_t`: one process's share of the engines over
+/// one of the driver's sampling periods, in percent, stamped in the driver's
+/// microseconds.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProcessUtilization {
+    pub pid: c_uint,
+    pub timestamp_us: u64,
+    pub sm: c_uint,
+    pub memory: c_uint,
+    pub encoder: c_uint,
+    pub decoder: c_uint,
+}
+
 /// Which list a process appeared on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessKind {
@@ -216,6 +230,8 @@ type FnClockOfId = unsafe extern "C" fn(*mut c_void, c_int, c_int, *mut c_uint) 
 type FnEnableState = unsafe extern "C" fn(*mut c_void, *mut c_uint) -> c_int;
 type FnReasons = unsafe extern "C" fn(*mut c_void, *mut u64) -> c_int;
 type FnPerfModes = unsafe extern "C" fn(*mut c_void, *mut PerfModes) -> c_int;
+type FnProcessUtilization =
+    unsafe extern "C" fn(*mut c_void, *mut ProcessUtilization, *mut c_uint, u64) -> c_int;
 type FnFieldValues = unsafe extern "C" fn(*mut c_void, c_int, *mut FieldValue) -> c_int;
 type FnSamples =
     unsafe extern "C" fn(*mut c_void, c_int, u64, *mut c_int, *mut c_uint, *mut Sample) -> c_int;
@@ -264,6 +280,7 @@ pub struct Nvml {
     perf_modes: Option<FnPerfModes>,
     samples: Option<FnSamples>,
     field_values: Option<FnFieldValues>,
+    process_utilization: Option<FnProcessUtilization>,
 }
 
 impl Nvml {
@@ -365,6 +382,7 @@ impl Nvml {
                 perf_modes: optional(library, "nvmlDeviceGetPerformanceModes"),
                 samples: optional(library, "nvmlDeviceGetSamples"),
                 field_values: optional(library, "nvmlDeviceGetFieldValues"),
+                process_utilization: optional(library, "nvmlDeviceGetProcessUtilization"),
             }
         };
         Ok(nvml)
@@ -714,6 +732,42 @@ impl Nvml {
             .map(|sample| sample.timestamp_us)
             .filter(|&ts| ts > after_us)
             .max())
+    }
+
+    /// Each process's newest engine-share sample the driver took after
+    /// `after_us` (its microseconds), one per process; empty when it took
+    /// none since.
+    pub fn process_utilization(
+        &self,
+        device: DeviceHandle,
+        after_us: u64,
+    ) -> Result<Vec<ProcessUtilization>, NvmlError> {
+        let entry = self
+            .process_utilization
+            .ok_or_else(|| self.missing("nvmlDeviceGetProcessUtilization"))?;
+        let mut count: c_uint = 0;
+        // SAFETY: a null buffer asks for the number of samples; `count` is a
+        // live local.
+        let code = unsafe { entry(device.0, std::ptr::null_mut(), &mut count, after_us) };
+        if code == NVML_ERROR_NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        if code != NVML_ERROR_INSUFFICIENT_SIZE {
+            self.check(code)?;
+        }
+        // The count can grow between the two calls, as the process lists'
+        // does: a few entries of room, and a short answer is truncated.
+        let mut buffer = vec![ProcessUtilization::default(); count as usize + 8];
+        let mut written = buffer.len() as c_uint;
+        // SAFETY: the buffer holds `written` entries of the layout the call
+        // writes, and `written` says so.
+        let code = unsafe { entry(device.0, buffer.as_mut_ptr(), &mut written, after_us) };
+        if code == NVML_ERROR_NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        self.check(code)?;
+        buffer.truncate((written as usize).min(buffer.len()));
+        Ok(buffer)
     }
 
     /// The processes holding memory on a device, compute and graphics both.

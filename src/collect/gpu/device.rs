@@ -215,6 +215,11 @@ impl Prepared for Prepare {
     }
 }
 
+/// How far back a reading asks the driver for per-process engine samples, in
+/// its microseconds: it takes one about every second, so a second and a half
+/// always holds the newest one of a process still on the device.
+const PROCESS_SAMPLES_US: u64 = 1_500_000;
+
 /// The sequence number of the reading that closes a counted window.
 const CLOSING: u64 = u64::MAX / 2;
 
@@ -666,7 +671,7 @@ impl NvmlCollector {
         Ok((attrs, 0))
     }
 
-    fn engine_busy(&self, device: &Device) -> Result<(Vec<Attr>, u32), NvmlError> {
+    fn engine_busy(&self, device: &Device, tree: &[i32]) -> Result<(Vec<Attr>, u32), NvmlError> {
         let utilization = self.nvml.utilization(device.handle)?;
         let mut attrs = self.device_attrs(device, "device");
         attrs.push(float("ratio", utilization.gpu as f64 / 100.0));
@@ -675,7 +680,45 @@ impl NvmlCollector {
         // is: the whole device. The i915 and amdgpu PMUs do have one, and their
         // events will say which engine they came from.
         attrs.push(Attr::text("engine", "device"));
+        if self.pid.is_some() {
+            attrs.extend(self.process_busy(device, tree));
+        }
         Ok((attrs, UTILIZATION_WINDOW_NS))
+    }
+
+    /// The observed process tree's share of the engines, beside the device's,
+    /// what `nvidia-smi pmon` prints as `sm` and `mem`: the sum over the
+    /// tree's processes of each one's newest per-process sample, from the
+    /// driver's last second and a half (it samples about once a second).
+    /// Attributes, not the series: the device's occupancy stays the value, so
+    /// a process target does not change what the series means. Nothing when
+    /// the driver keeps no per-process samples; zeros, with `processes: 0`,
+    /// when it keeps some and none is the tree's.
+    fn process_busy(&self, device: &Device, tree: &[i32]) -> Vec<Attr> {
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_micros() as u64);
+        let Ok(samples) = self
+            .nvml
+            .process_utilization(device.handle, now_us.saturating_sub(PROCESS_SAMPLES_US))
+        else {
+            return Vec::new();
+        };
+        let mine: Vec<_> = samples
+            .iter()
+            .filter(|sample| tree.contains(&(sample.pid as i32)))
+            .collect();
+        let sum = |pick: fn(&super::nvml::ProcessUtilization) -> u32| -> f64 {
+            // Folded from +0.0: an empty `sum` of floats is -0.0.
+            mine.iter()
+                .fold(0.0, |total, sample| total + f64::from(pick(sample)))
+                / 100.0
+        };
+        vec![
+            float("process_ratio", sum(|sample| sample.sm).min(1.0)),
+            float("process_memory_ratio", sum(|sample| sample.memory).min(1.0)),
+            Attr::uint("processes", mine.len() as u64),
+        ]
     }
 
     /// VRAM held: by the process tree this run observes, or by the device when
@@ -856,7 +899,9 @@ impl Collector for NvmlCollector {
 
         // The observed process tree, walked once for every device's reading.
         let tree: Vec<i32> = match (self.metric, self.pid) {
-            (Metric::Mem, Some(pid)) => crate::collect::task::with_descendants(&[pid]),
+            (Metric::Mem | Metric::EngineBusy, Some(pid)) => {
+                crate::collect::task::with_descendants(&[pid])
+            }
             _ => Vec::new(),
         };
         let mut events = Vec::with_capacity(self.devices.len());
@@ -867,7 +912,7 @@ impl Collector for NvmlCollector {
                 Metric::Power => self.power(device),
                 Metric::Temp => self.temp(device),
                 Metric::Mem => self.mem(device, &tree),
-                Metric::EngineBusy => self.engine_busy(device),
+                Metric::EngineBusy => self.engine_busy(device, &tree),
                 Metric::MemFreq => self.mem_freq(device),
                 Metric::Throttle => {
                     let base = self.throttle_base.get(offset).cloned().unwrap_or_default();

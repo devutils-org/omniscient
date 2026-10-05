@@ -1046,3 +1046,16 @@ cumulative counters (`NVML_FI_DEV_PCIE_COUNT_RX_BYTES`, `..._TX_BYTES`) are
 32 bits here and wrap every 0.36 s at that rate, below any poll that is not
 itself a cost. **Not added: ECC.** `nvmlDeviceGetTotalEccErrors` answers
 "not supported" on this board (a consumer one); nothing here can be shown.
+
+**The launched tree's engine share** (`docs/fixes/w22-gpu.md`, gap 8,
+`nvidia-smi pmon`'s `sm` and `mem`). On a launch, every `gpu.engine_busy`
+NVML reading carries `process_ratio`, `process_memory_ratio` and `processes`:
+the tree's processes' newest per-process samples
+(`nvmlDeviceGetProcessUtilization`, the last 1.5 s), summed. Attributes: the
+series stays the device's occupancy. Shown: `sh -c 'python3
+tests/gpu_workload.py kernel 2500; :'` read 0, 0, 0.47, 0.47, 0.73, 0.99, 0
+with `processes` 1 while non-zero; `nvidia-smi pmon -s u` beside it printed
+47 and 73 for the child. As a value of its own (a series of the tree's
+share) it needs a request to name its value attribute, filed in
+`docs/fixes/w24-gpu.md`. Test:
+`a_launched_tree_s_engine_share_rides_beside_the_device_s`.

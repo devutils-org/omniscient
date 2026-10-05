@@ -2983,3 +2983,49 @@ fn the_held_clocks_share_separates_an_idle_board_from_a_running_kernel() {
         assert!(ratio >= largest, "the value is the largest limit: {event}");
     }
 }
+
+/// `gpu.engine_busy` on a launch carries the launched tree's own share,
+/// `nvidia-smi pmon`'s `sm`, beside the device's, and finds it under a
+/// wrapper. Ground truth is the workload's shape: a 2.5 s kernel run by a
+/// shell's child reaches a share near 1 by one process of the tree, and
+/// the tree's share never exceeds what a process can hold.
+#[test]
+fn a_launched_tree_s_engine_share_rides_beside_the_device_s() {
+    if let Err(reason) = device_and_workload() {
+        return eprintln!("skipped: {reason}");
+    }
+    let _alone = exclusive();
+    let events = raw_run(
+        "gpu.engine_busy",
+        "poll@500ms",
+        &["sh", "-c", "python3 tests/gpu_workload.py kernel 2500; :"],
+    );
+    let shares: Vec<(f64, u64)> = events
+        .iter()
+        .map(|event| {
+            (
+                attr(event, "process_ratio").as_f64().unwrap(),
+                attr(event, "processes").as_u64().unwrap(),
+            )
+        })
+        .collect();
+    let top = shares.iter().map(|(share, _)| *share).fold(0.0, f64::max);
+    assert!(
+        top > 0.6,
+        "a 2.5 s kernel under a shell reached a tree share of {top}: {shares:?}"
+    );
+    assert!(
+        shares
+            .iter()
+            .filter(|(share, _)| *share > 0.0)
+            .all(|(_, processes)| *processes == 1),
+        "the share is the child's, one process: {shares:?}"
+    );
+    for event in &events {
+        assert_eq!(
+            attr(event, "scope"),
+            "device",
+            "the series stays the device's"
+        );
+    }
+}
