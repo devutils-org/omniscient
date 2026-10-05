@@ -1099,6 +1099,42 @@ fn code_a_program_generated_is_named_by_the_perf_map_it_wrote() {
         "every anonymous frame was named: {:?}",
         unwinder.notes()
     );
+
+    // What a collector's provenance carries for this target, read from the
+    // unwinder itself: the map that named the frames, as the file the
+    // program wrote (its device and inode, by `stat` here), and the binary it
+    // executes.
+    use std::os::unix::fs::MetadataExt;
+    let written = std::fs::metadata(jit.map_path()).expect("the program wrote its map");
+    let file = unwinder
+        .perf_map_file()
+        .expect("the perf map named frames, so the unwinder reports it");
+    assert_eq!(file.path, jit.map_path().display().to_string());
+    assert_eq!(
+        (file.dev, file.ino),
+        (written.dev(), written.ino()),
+        "the map reported is the file the program wrote"
+    );
+    assert_eq!(unwinder.symbolizer().perf_map_file(), Some(file));
+    let binary = std::fs::canonicalize(binary).expect("the fixture exists");
+    assert_eq!(
+        unwinder.executable(),
+        Some(binary.display().to_string().as_str()),
+        "the executable is the fixture's, as /proc/<pid>/exe names it"
+    );
+}
+
+/// An unwinder whose frames no perf map named reports none, so a profile of a
+/// program with no JIT carries no `perf_maps`.
+#[test]
+fn an_unwinder_no_perf_map_named_reports_none() {
+    let unwinder = Unwinder::for_process(std::process::id() as i32);
+    assert_eq!(unwinder.perf_map_file(), None);
+    let own = std::fs::read_link("/proc/self/exe").expect("this test's binary");
+    assert_eq!(
+        unwinder.executable(),
+        Some(own.display().to_string().as_str())
+    );
 }
 
 /// A runtime that writes its map only when it exits leaves the frames
