@@ -359,7 +359,10 @@
        The addresses on the events tell them apart; the count cannot."
     - "A HITM taken by one task alone is a line it shares with something this
        run does not follow -- or its own line, left dirty on a core it migrated
-       away from. The run names the lines more than one task fought over."
+       away from. The run names the lines more than one task fought over,
+       each with what `perf c2c report`'s per-line table shows: the offsets in
+       the line, the instructions, loads against stores. Every event carries
+       its `offset` and `op`."
     - "The series is the cache line by default, because the line is what two
        cores fight over; `--key task` ranks the tasks instead."
 

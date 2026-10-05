@@ -543,6 +543,42 @@ fn rate_note(ops: u64, run_ns: Option<u64>, asked: Rate, clock: &str, filtered: 
     note
 }
 
+/// What `perf c2c report`'s per-line table shows of one cache line: who
+/// touched it, where in the line, from which instructions, loads or stores.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct LineStat {
+    hitm: u64,
+    tasks: BTreeSet<u32>,
+    offsets: BTreeSet<u64>,
+    ips: BTreeSet<u64>,
+    loads: u64,
+    stores: u64,
+}
+
+impl LineStat {
+    fn describe(&self, line: u64) -> String {
+        let offsets = self
+            .offsets
+            .iter()
+            .map(|offset| format!("+{offset}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "{line:#x} ({} HITM from {} tasks, {} load{} and {} store{}, at offset{} {offsets}, \
+             from {} instruction{})",
+            self.hitm,
+            self.tasks.len(),
+            self.loads,
+            if self.loads == 1 { "" } else { "s" },
+            self.stores,
+            if self.stores == 1 { "" } else { "s" },
+            if self.offsets.len() == 1 { "" } else { "s" },
+            self.ips.len(),
+            if self.ips.len() == 1 { "" } else { "s" },
+        )
+    }
+}
+
 pub struct IbsCollector {
     id: CollectorId,
     question: Question,
@@ -559,7 +595,7 @@ pub struct IbsCollector {
     tally: Tally,
     /// Which tasks took a `HITM` on each line, for the note that says which
     /// lines more than one task fought over.
-    contenders: BTreeMap<u64, (u64, BTreeSet<u32>)>,
+    contenders: BTreeMap<u64, LineStat>,
     /// How many events were opened, and on how many cpus.
     opened: (usize, usize),
     filter: Option<FilterExpr>,
@@ -750,9 +786,16 @@ impl IbsCollector {
         }
         if self.question == Question::Sharing {
             let line = sample.addr & !(self.line - 1);
-            let entry = self.contenders.entry(line).or_insert((0, BTreeSet::new()));
-            entry.0 += 1;
-            entry.1.insert(sample.tid);
+            let entry = self.contenders.entry(line).or_default();
+            entry.hitm += 1;
+            entry.tasks.insert(sample.tid);
+            entry.offsets.insert(sample.addr - line);
+            entry.ips.insert(sample.ip);
+            match op {
+                MemOp::Load => entry.loads += 1,
+                MemOp::Store => entry.stores += 1,
+                _ => {}
+            }
         }
         let mut event = event;
         if let Some(stack) = self
@@ -804,6 +847,17 @@ impl IbsCollector {
             Attr::text("level", access.source.level().as_str()),
             Attr::uint("addr", sample.addr),
             Attr::uint("line", line),
+            Attr::uint("offset", sample.addr - line),
+            Attr::text(
+                "op",
+                match access.source.op() {
+                    MemOp::Load => "load",
+                    MemOp::Store => "store",
+                    MemOp::Prefetch => "prefetch",
+                    MemOp::Exec => "exec",
+                    MemOp::None => "none",
+                },
+            ),
             Attr::uint("ip", sample.ip),
             Attr::uint("tlb_miss", u64::from(access.source.tlb_miss())),
         ]);
@@ -1010,10 +1064,11 @@ impl Collector for IbsCollector {
                 let mut contested: Vec<_> = self
                     .contenders
                     .iter()
-                    .filter(|(_, (_, tasks))| tasks.len() > 1)
+                    .filter(|(_, stat)| stat.tasks.len() > 1)
                     .collect();
-                contested
-                    .sort_by(|left, right| right.1 .0.cmp(&left.1 .0).then(left.0.cmp(right.0)));
+                contested.sort_by(|left, right| {
+                    right.1.hitm.cmp(&left.1.hitm).then(left.0.cmp(right.0))
+                });
                 if contested.is_empty() {
                     notes.push(
                         "no line was answered modified to more than one task: a HITM taken by a \
@@ -1025,9 +1080,7 @@ impl Collector for IbsCollector {
                     let lines = contested
                         .iter()
                         .take(5)
-                        .map(|(line, (count, tasks))| {
-                            format!("{line:#x} ({count} from {} tasks)", tasks.len())
-                        })
+                        .map(|(line, stat)| stat.describe(**line))
                         .collect::<Vec<_>>()
                         .join(", ");
                     notes.push(format!(
@@ -1186,6 +1239,29 @@ mod tests {
         assert!(
             (20_000_000..1_000_000_000).contains(&ran),
             "30 ms of spinning read as {ran} ns"
+        );
+    }
+
+    #[test]
+    fn a_contested_line_says_where_in_it_and_from_what() {
+        let mut stat = LineStat::default();
+        for (tid, offset, ip, store) in
+            [(1, 0, 0x10, true), (2, 8, 0x20, false), (2, 8, 0x20, false)]
+        {
+            stat.hitm += 1;
+            stat.tasks.insert(tid);
+            stat.offsets.insert(offset);
+            stat.ips.insert(ip);
+            if store {
+                stat.stores += 1;
+            } else {
+                stat.loads += 1;
+            }
+        }
+        assert_eq!(
+            stat.describe(0x1000),
+            "0x1000 (3 HITM from 2 tasks, 2 loads and 1 store, at offsets +0 +8, from 2 \
+             instructions)"
         );
     }
 
