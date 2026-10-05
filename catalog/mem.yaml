@@ -124,6 +124,10 @@
        user mode only: every fault its own code takes is there, and the ones the kernel
        takes on its behalf (a read() into a buffer never touched) are not. The run says
        when that happened."
+    - "A launched program's count starts a few faults earlier than `perf stat -e
+       page-faults`': the counter is opened on the child held at the gate, before the
+       exec, and perf's at the exec itself. `/bin/true` read 60-62 here against perf's
+       57-58, every run; a constant of a handful, not a share of the workload."
 
 - id: mem.page_alloc
   family: mem
