@@ -152,6 +152,5 @@ justified. The fix round leaves them as they are, for these reasons:
   in `cpu.profile`'s provenance still wanted from cpu". `DEVICE_STACKS` as
   data stays on the list, with the owners named above.
 
-No code changed in this round, so no test ran. The documents-only rule
-(`cargo test --test cli`) applies to `docs/` indexes and sessions, and this
-file is neither.
+No code changed in this round. Because the commit touches only documents,
+the documents-only check ran: `cargo test --test cli`, 28 passed.
