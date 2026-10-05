@@ -26,6 +26,12 @@
        this reads is the tool's: the shim's record ring -- 65 536 slots of 48
        bytes -- is mapped into the target and becomes resident as records are
        written, so a program that allocates a lot carries all of it."
+    - "Each event carries what `top` shows beside RES: `virt_bytes` (VIRT,
+       the whole address space, most of it never touched) and `shared_bytes`
+       (SHR, resident pages backed by a file or by shared memory, which other
+       processes may count too), from statm; and over smaps_rollup the
+       swapped, transparently huge and locked parts as `swap_bytes`,
+       `anon_huge_bytes` and `locked_bytes`."
 
 - id: mem.pss
   family: mem
@@ -118,6 +124,10 @@
        user mode only: every fault its own code takes is there, and the ones the kernel
        takes on its behalf (a read() into a buffer never touched) are not. The run says
        when that happened."
+    - "A launched program's count starts a few faults earlier than `perf stat -e
+       page-faults`': the counter is opened on the child held at the gate, before the
+       exec, and perf's at the exec itself. `/bin/true` read 60-62 here against perf's
+       57-58, every run; a constant of a handful, not a share of the workload."
 
 - id: mem.page_alloc
   family: mem
@@ -176,6 +186,9 @@
        the tool launches, not one already running."
     - "A statically linked program, or one with its own allocator, ignores the
        shim: the run reports no allocation rather than reporting none happened."
+    - "A free whose allocation the run saw carries `lifetime_ns`, from the
+       allocation's record to the free's: the block lifetimes dhat reports and
+       the short-lived temporaries heaptrack counts."
 
 - id: mem.heap.live
   family: mem
@@ -198,6 +211,11 @@
     - "A preloaded shim reaches a program only at exec, so this needs a program
        the tool launches, and a snapshot of one is refused: it would be taken
        before the program allocated anything."
+    - "A poll misses a peak shorter than its period; `peak_bytes` and
+       `peak_allocations` on every point do not. They are the most that was
+       live at once over every call so far, which the shim reports one by one:
+       a program that held 64 MiB for 2 ms read 0 bytes at every point of a
+       poll@100ms and a peak of exactly 64 MiB in 64 blocks."
 
 - id: mem.heap.retained
   family: mem
@@ -312,7 +330,14 @@
        workload whose loads are a small share of its ops yields few of them."
     - "`level` says which level answered. On AMD family 17h an L3 hit and a hit
        in a sibling core's cache are reported alike, as `peer`, because the
-       unit does not tell them apart."
+       unit does not tell them apart; `perf script` prints the same word as
+       \"core, same node Any cache hit\". The share of `peer` moves from run
+       to run with what else holds the L3, and a reference that counts cycles
+       between tags rather than ops times a different mix of loads."
+    - "A rate in Hz is a target the kernel adjusts the period towards, not a
+       promise. Counting ops with the kernel's accesses filtered out, the IBS
+       unit of family 17h settles at about 70 % of 4000 Hz; the run says the
+       rate it delivered over the time the followed tasks ran."
 
 - id: mem.sharing
   family: mem
@@ -334,7 +359,10 @@
        The addresses on the events tell them apart; the count cannot."
     - "A HITM taken by one task alone is a line it shares with something this
        run does not follow -- or its own line, left dirty on a core it migrated
-       away from. The run names the lines more than one task fought over."
+       away from. The run names the lines more than one task fought over,
+       each with what `perf c2c report`'s per-line table shows: the offsets in
+       the line, the instructions, loads against stores. Every event carries
+       its `offset` and `op`."
     - "The series is the cache line by default, because the line is what two
        cores fight over; `--key task` ranks the tasks instead."
 
@@ -365,6 +393,9 @@
     - {id: "fs:proc", requires: ["/proc/[pid]/numa_maps"], cost: med,
        targets: {pid: native, tid: native, launch: native}, filter_fields: [comm, node],
        degraded: "page placement, not accesses: a page on the wrong node that is never touched costs nothing, and this cannot tell the two apart"}
+    - {id: "fs:sys", requires: ["/sys/devices/system/node/node0/numastat"], cost: free,
+       targets: {system: native}, filter_fields: [node],
+       degraded: "allocations, not accesses, and the machine's rather than anyone's: each page is counted once, on the node it came from, as a hit when that was the node asked for and a miss when it was not"}
   modes: [sample, poll]
   emits: [topk, hist, raw, summary, timeline]
   targets: {system: native, cgroup: native, pid: native, cpu: native, launch: native, container: native}
@@ -377,6 +408,51 @@
        work from node 1, and one number would hide exactly that."
     - "numa_maps counts each mapping in its own page size, so a transparently
        promoted region is counted in 2 MiB pages and not in 4 KiB ones."
+
+- id: mem.oom
+  family: mem
+  summary: "OOM kills, for the machine or one cgroup"
+  unit: count
+  backends:
+    - {id: "fs:cgroup", requires: ["cgroup2:memory.events"], cost: free,
+       targets: {cgroup: native, container: native, pid: native, tid: native, launch: native}}
+    - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free, equivalent: true, targets: {system: native}}
+  modes: [count, poll]
+  emits: [summary, timeline, rate, raw]
+  targets: {system: native, cgroup: native, container: native, pid: native, tid: native, launch: native}
+  keys: [cgroup]
+  filter_fields: []
+  determinism: low
+  caveats:
+    - "Counts, not victims: which task died, what it held and the allocation
+       that triggered the kill are in the oom:mark_victim tracepoint, which no
+       backend here reads yet."
+    - "A pid names its cgroup: the kernel counts kills per cgroup, never per
+       process, and memory.events includes every cgroup below the one named.
+       Beside `kills` the cgroup backend carries `oom` (times it ran out,
+       which reclaim can end without a kill) and `max` (times it touched its
+       hard limit)."
+
+- id: mem.system
+  family: mem
+  summary: "The machine's memory: used, available, cache, slab, swap (what free prints)"
+  unit: bytes
+  backends:
+    - {id: "fs:proc", requires: ["/proc/meminfo"], cost: free}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native}
+  keys: []
+  filter_fields: []
+  determinism: low
+  caveats:
+    - "Used is total minus available, as free computes it since procps 4:
+       available is the kernel's estimate of what a new program could get
+       without swapping, cache and reclaimable slab included. Total minus free
+       would call every cached page used."
+    - "The slab is the machine's total, split into its reclaimable and
+       unreclaimable halves; the split per cache that slabtop prints is in
+       /proc/slabinfo, which only root can read."
 
 - id: mem.wss
   family: mem
@@ -506,6 +582,8 @@
     - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free, targets: {system: native}}
     - {id: "fs:cgroup", requires: ["cgroup2:memory.swap.current", "cgroup2:memory.stat:pswpout"], cost: free, equivalent: true,
        targets: {cgroup: native, container: native, pid: native, tid: native, launch: native}}
+    - {id: "perf:kprobe", requires: ["kprobe"], cost: low, targets: {pid: native, tid: native, launch: native},
+       degraded: "the process's own swap-ins, counted as reads of a folio from swap (`swapins`) and reported as one page each in `in_bytes`: a folio is one page in the common case and more where the kernel swaps a large one in whole; no swap-out, which the kernel does on behalf of no one"}
   modes: [poll, snapshot, count]
   emits: [timeline, rate, raw, summary]
   targets: {system: native, cgroup: native, container: native, pid: native, tid: native, launch: native}
@@ -527,7 +605,9 @@
        untouched grows swapped_bytes by a gigabyte with no traffic at all. The
        flow and the stock disagreeing is not a bug."
     - "A pid names a cgroup for the fs:cgroup backend: swap is accounted per
-       cgroup, never per process."
+       cgroup, never per process. `--backend perf:kprobe` counts the process's
+       own reads from swap instead, through a counting kprobe on the kernel's
+       swap_read_folio, readahead its faults started included."
 
 - id: mem.pressure
   family: mem
@@ -558,3 +638,17 @@
     - "A pid names a cgroup here: pressure is accounted per cgroup, never per
        process."
 
+# The family's default: what `omn trace mem -- PROGRAM` composes, per cost
+# band. See docs/lazy.md.
+- default:
+    family: mem
+    question: "How much memory does the program hold, and does it grow?"
+    low:
+      - {source: mem.rss, mode: "poll@100ms", emit: [timeline, summary], label: "resident memory"}
+    med:
+      - {source: mem.rss, mode: "poll@100ms", emit: [timeline, summary], label: "resident memory"}
+      - {source: mem.faults, mode: count, emit: [summary], label: "page faults"}
+    high:
+      - {source: mem.rss, mode: "poll@100ms", emit: [timeline, summary], label: "resident memory"}
+      - {source: mem.pss, mode: "poll@100ms", emit: [summary], label: "proportional memory"}
+      - {source: mem.faults, mode: count, emit: [summary], label: "page faults"}

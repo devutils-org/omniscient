@@ -18,6 +18,15 @@
   determinism: medium
   caveats:
     - "Frequency-dependent: lock the governor or the measurement is not comparable."
+    - "`-m sample@<hz> -e stack` is `perf record`'s default, a cycles profile:
+       one sample every so many cycles -- the cpu's highest frequency over the
+       rate asked for, so a sample per fixed number of cycles whatever the
+       clock does, and fewer samples a second than asked while the clock is
+       below its highest. A share of cycles, not of time: `cpu.profile` is the
+       on-cpu time profile. Every counting source of this family samples the
+       same way on its own counter (`perf record -e <event>`), in the kernel's
+       frequency mode where a fixed period has no natural unit, each sample
+       weighing one."
 
 - id: cpu.instructions
   family: cpu
@@ -68,6 +77,23 @@
   keys: [task, cgroup, cpu]
   filter_fields: [comm, cpu]
   determinism: medium
+
+- id: cpu.branches
+  family: cpu
+  summary: "Retired branch instructions"
+  unit: count
+  backends:
+    - {id: "pmu", requires: ["pmu:PERF_COUNT_HW_BRANCH_INSTRUCTIONS"], cost: low}
+  modes: [count, poll, sample]
+  emits: [summary, timeline, rate, topk, stack, raw]
+  targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
+  keys: [task, cgroup, cpu]
+  filter_fields: [comm, cpu]
+  determinism: high
+  caveats:
+    - "The denominator of a branch-miss ratio: `cpu.branch_misses` over this,
+       read over the same window, is what `perf stat` prints as the share of
+       all branches missed."
 
 - id: cpu.cache_misses
   family: cpu
@@ -133,6 +159,11 @@
        stack with every sample. Where perf_event_paranoid refuses the kernel
        (2, the kernel's default) the stacks are user-only, and time the task
        spent in the kernel is not sampled at all."
+    - "Each sample carries its thread as the `task` key, its process as `pid`
+       and the thread's name as `comm`, read from `/proc` at a bounded rate.
+       A cycles profile is `cpu.cycles -m sample -e stack`; the `pmu` row
+       here has no collector, because a sample of this source is a period of
+       on-cpu time that `omn latency` and `omn diff` read as nanoseconds."
     - "A time-based sample counts the time the task held its cpu, including the
        interrupts that ran on it meanwhile, and at high rates those interrupts
        are this profile's own. The kernel's own on-cpu figure leaves interrupt
@@ -158,7 +189,12 @@
     - {id: "fs:proc", requires: ["/proc/[pid]/stat"], modes: [poll], cost: free,
        targets: {pid: native, tid: native, launch: native},
        degraded: "tick granularity, no per-site attribution"}
-  modes: [trace, poll]
+    # `perf stat`'s task-clock: the kernel's software counter over the window,
+    # the one backend that counts a launched program without tracefs.
+    - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_TASK_CLOCK"], cost: low, modes: [count],
+       targets: {pid: native, tid: native, cgroup: native, launch: native},
+       degraded: "the target's threads in one total, read once when the window closes: no series and no per-thread split"}
+  modes: [trace, poll, count]
   emits: [summary, timeline, hist, rate, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, launch: native, container: native}
   keys: [task, cgroup]
@@ -185,6 +221,10 @@
        losses, as one failed read with that reason. The program's exit in the
        results carries the exact total, `cpu_ns`, from the reap (`wait4`),
        its waited-for children included."
+    - "`-m count` is `perf stat`'s task-clock, through `pmu:sw`: the
+       nanoseconds the target's threads held a cpu by the scheduler's clock,
+       one total under `count` (`counter=task_clock_ns`), inherited by the
+       children a launched program starts, as `perf stat` counts them."
 
 - id: cpu.context_switches
   family: cpu
@@ -247,6 +287,15 @@
   keys: [cgroup]
   filter_fields: []
   determinism: low
+  caveats:
+    - "Named as `mem.pressure` and `io.pressure` are: a poll reports
+       `stall_ratio`, the `some` counter's increase over its own window, with
+       `stalled_ns` and `interval_ns` beside it, and `full_stall_ratio` where
+       the kernel writes a `full` line (at machine scope it always reads 0 for
+       cpu). A snapshot observes no window and reports the kernel's decayed
+       averages under their own names, `some_avg10` first."
+    - "A poll's first read is its baseline and produces no event, so every
+       share in the series covers a full interval."
 
 - id: cpu.throttle
   family: cpu
@@ -280,3 +329,18 @@
   caveats:
     - "The kernel provides raw bytes; decoding (libipt, binary images, sideband)
        is a separate, late deliverable."
+
+# The family's default: what `omn trace cpu -- PROGRAM` composes, per cost
+# band (`--cost low|med|high`, the cheapest band when absent). Data, like the
+# entries above; the loader refuses a default naming a source, mode, emit or
+# key this family does not have. See docs/lazy.md.
+- default:
+    family: cpu
+    question: "Where does the program spend its CPU time?"
+    low:
+      - {source: cpu.profile, mode: "sample@99hz", emit: [stack], label: "where the cpu went"}
+    med:
+      - {source: cpu.profile, mode: "sample@997hz", emit: [stack], label: "where the cpu went"}
+    high:
+      - {source: cpu.profile, mode: "sample@997hz", emit: [stack], stack: dwarf,
+         label: "where the cpu went, every caller"}

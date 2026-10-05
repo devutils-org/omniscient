@@ -432,3 +432,15 @@
        measurements and are never given the same one."
     - "Pressure says time was lost waiting, not which device or which file lost
        it. It is where an investigation starts, not where it ends."
+
+# The family's default: what `omn trace io -- PROGRAM` composes, per cost
+# band. No `low`: every source that follows a program's I/O traces it, and
+# tracing declares `med` at best. See docs/lazy.md.
+- default:
+    family: io
+    question: "How long does the program wait on its reads and writes?"
+    med:
+      - {source: io.syscall, mode: trace, emit: [hist, summary], label: "read and write latency"}
+    high:
+      - {source: io.syscall, mode: trace, emit: [hist, summary], label: "read and write latency"}
+      - {source: io.latency, mode: trace, emit: [hist, summary], label: "device latency"}

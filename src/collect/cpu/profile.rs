@@ -61,6 +61,143 @@ fn period_for(hz: u64) -> u64 {
     (1_000_000_000 / hz).max(1)
 }
 
+/// What a profile samples on: the kernel's cpu clock for `cpu.profile`, or the
+/// counter of the counting source whose `sample` mode this serves --
+/// `cpu.cycles -m sample@997hz -e stack` is `perf record`'s default, and
+/// `cpu.branch_misses` sampled is `perf record -e branch-misses` (perfrecord
+/// 2 and 8). One collector for all of them, because what differs is one
+/// `perf_event_attr` and what a sample weighs; the rings, the unwinding and
+/// the symbols are the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sampled {
+    pub source: &'static str,
+    pub backend: &'static str,
+    /// `perf_event_attr.type` and `.config`.
+    kind: u32,
+    config: u64,
+    /// The event's name, as a sample's `event` attribute carries it.
+    pub name: &'static str,
+    weight: Weight,
+}
+
+/// What one sample stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Weight {
+    /// A period of cpu nanoseconds: `1e9 / hz` of on-cpu time each.
+    CpuTime,
+    /// A fixed number of cycles: the cpu's highest frequency over the rate,
+    /// so a sample per so many cycles whatever the clock does. The kernel's
+    /// frequency mode instead when that frequency is not published.
+    Cycles,
+    /// The kernel's frequency mode: about `hz` samples a second, each a
+    /// period the kernel adjusts and this does not see.
+    Adjusted,
+}
+
+const fn hardware(config: u32) -> (u32, u64) {
+    (perf::PERF_TYPE_HARDWARE, config as u64)
+}
+
+const fn software(config: u32) -> (u32, u64) {
+    (perf::PERF_TYPE_SOFTWARE, config as u64)
+}
+
+const fn sampled(
+    source: &'static str,
+    backend: &'static str,
+    (kind, config): (u32, u64),
+    name: &'static str,
+    weight: Weight,
+) -> Sampled {
+    Sampled {
+        source,
+        backend,
+        kind,
+        config,
+        name,
+        weight,
+    }
+}
+
+/// Every (source, backend) this collector samples for.
+pub const SAMPLED: &[Sampled] = &[
+    sampled(
+        "cpu.profile",
+        "pmu:sw",
+        software(perf::PERF_COUNT_SW_CPU_CLOCK),
+        "cpu-clock",
+        Weight::CpuTime,
+    ),
+    sampled(
+        "cpu.cycles",
+        "pmu",
+        hardware(perf::PERF_COUNT_HW_CPU_CYCLES),
+        "cycles",
+        Weight::Cycles,
+    ),
+    sampled(
+        "cpu.cycles",
+        "pmu:sw",
+        software(perf::PERF_COUNT_SW_CPU_CLOCK),
+        "cpu-clock",
+        Weight::CpuTime,
+    ),
+    sampled(
+        "cpu.instructions",
+        "pmu",
+        hardware(perf::PERF_COUNT_HW_INSTRUCTIONS),
+        "instructions",
+        Weight::Adjusted,
+    ),
+    sampled(
+        "cpu.branches",
+        "pmu",
+        hardware(perf::PERF_COUNT_HW_BRANCH_INSTRUCTIONS),
+        "branches",
+        Weight::Adjusted,
+    ),
+    sampled(
+        "cpu.branch_misses",
+        "pmu",
+        hardware(perf::PERF_COUNT_HW_BRANCH_MISSES),
+        "branch-misses",
+        Weight::Adjusted,
+    ),
+    sampled(
+        "cpu.cache_misses",
+        "pmu",
+        hardware(perf::PERF_COUNT_HW_CACHE_MISSES),
+        "cache-misses",
+        Weight::Adjusted,
+    ),
+    sampled(
+        "cpu.context_switches",
+        "pmu:sw",
+        software(perf::PERF_COUNT_SW_CONTEXT_SWITCHES),
+        "context-switches",
+        Weight::Adjusted,
+    ),
+];
+
+/// The event a (source, backend) samples on, or nothing when this collector
+/// does not sample for it.
+pub fn sampled_for(source: &str, backend: &str) -> Option<Sampled> {
+    SAMPLED
+        .iter()
+        .find(|sampled| sampled.source == source && sampled.backend == backend)
+        .copied()
+}
+
+/// The cpu's highest frequency in hertz, as the kernel publishes it.
+fn max_frequency_hz() -> Option<u64> {
+    let khz: u64 = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    (khz > 0).then_some(khz * 1_000)
+}
+
 /// The cpu time a task had used when it was found, from the first field of
 /// its `schedstat`: nanoseconds on a cpu, the kernel's own account.
 fn cpu_before(task: Found) -> u64 {
@@ -72,6 +209,8 @@ fn cpu_before(task: Found) -> u64 {
 
 pub struct Prepare {
     pub mode: Mode,
+    /// The event sampled, and the source and backend it serves.
+    pub sampled: Sampled,
     /// How the stacks are unwound, as [`crate::stack::choose`] decided.
     pub choice: StackChoice,
     /// Where a stripped file's names are fetched from, when a caller has a
@@ -84,6 +223,9 @@ impl Prepare {
     fn collector(&self, pid: i32, whole_process: bool) -> ProfileCollector {
         let mut collector =
             ProfileCollector::new(pid, self.mode, self.choice.callchain(), whole_process);
+        collector.id =
+            CollectorId::new(format!("{}/{}", self.sampled.source, self.sampled.backend));
+        collector.sampled = self.sampled;
         // A client handed in wins; otherwise the choice's own, which is what
         // `--symbols debuginfod` asked for (`StackChoice::debuginfod`).
         collector.debuginfod = self.debuginfod.clone().or_else(|| self.choice.debuginfod());
@@ -249,6 +391,16 @@ pub struct ProfileCollector {
     id: CollectorId,
     pid: i32,
     mode: Mode,
+    /// The event sampled; the cpu clock unless a counting source's `sample`
+    /// mode asked for its own counter.
+    sampled: Sampled,
+    /// The period a fixed-period event was opened with, in its own unit, or
+    /// `None` for the kernel's frequency mode: what the notes say a sample
+    /// weighs.
+    period: Option<u64>,
+    /// Each sampled task's name, re-read at a bounded rate: the `comm` the
+    /// catalog declares as a filter field (perfrecord 1).
+    comms: crate::collect::task::Comms,
     callchain: Callchain,
     event: Option<Sampler>,
     /// The cpus sampled, for a machine or a core target. `None` follows `pid`.
@@ -325,6 +477,9 @@ impl ProfileCollector {
             id: CollectorId::new("cpu.profile/pmu:sw"),
             pid,
             mode,
+            sampled: SAMPLED[0],
+            period: None,
+            comms: crate::collect::task::Comms::new(),
             callchain,
             event: None,
             cpus: None,
@@ -357,11 +512,25 @@ impl ProfileCollector {
     /// The paranoia refuses the kernel to the samples, not only to the
     /// stacks: with no stack at all (`--stack none`) there is no callchain
     /// whose kernel half drops it, so a user-only choice says so itself.
-    fn spec(&self, period: u64) -> SampleSpec {
-        let mut spec =
-            SampleSpec::software(perf::PERF_COUNT_SW_CPU_CLOCK as u64, period, self.callchain);
+    fn spec(&self, hz: u64) -> SampleSpec {
+        let mut spec = SampleSpec::software(self.sampled.config, period_for(hz), self.callchain);
+        spec.kind = self.sampled.kind;
+        spec.rate = match self.rate_period(hz) {
+            Some(period) => crate::perf::Rate::Period(period),
+            None => crate::perf::Rate::Hz(hz),
+        };
         spec.exclude_kernel = self.choice.as_ref().is_some_and(|choice| choice.user_only);
         spec
+    }
+
+    /// The fixed period a rate of `hz` is for this event, or `None` for the
+    /// kernel's frequency mode.
+    fn rate_period(&self, hz: u64) -> Option<u64> {
+        match self.sampled.weight {
+            Weight::CpuTime => Some(period_for(hz)),
+            Weight::Cycles => max_frequency_hz().map(|max| (max / hz.max(1)).max(1)),
+            Weight::Adjusted => None,
+        }
     }
 
     /// Reads what the rings hold and turns each sample into an event.
@@ -438,6 +607,8 @@ impl ProfileCollector {
         let cgroup_key = self.cgroup.as_ref().map(|cgroup| cgroup.key());
         let callchain = self.callchain;
         let debuginfod = &self.debuginfod;
+        let comms = &mut self.comms;
+        let kind = self.sampled.source;
         let mut dropped = 0u64;
         let mut undecoded = 0u64;
         for record in records {
@@ -446,7 +617,17 @@ impl ProfileCollector {
                 Record::Sample(sample) => {
                     seen.insert(sample.tid as i32);
                     processes.insert(sample.pid);
-                    let mut attrs = vec![Attr::uint("count", 1), Attr::uint("ip", sample.ip)];
+                    let mut attrs = vec![
+                        Attr::uint("count", 1),
+                        Attr::uint("ip", sample.ip),
+                        // The process beside the thread the key names, so a
+                        // profile of a machine or a cgroup can be read per
+                        // program without a join.
+                        Attr::uint("pid", u64::from(sample.pid)),
+                    ];
+                    if let Some(comm) = comms.get(sample.tid as i32) {
+                        attrs.push(Attr::text("comm", comm));
+                    }
                     // Symbolized here, while the target is alive, and stored once:
                     // the event carries the identity and the table travels beside
                     // the results.
@@ -491,7 +672,7 @@ impl ProfileCollector {
                     events.push(Event {
                         ts_ns: sample.time_ns,
                         ts_err_ns: 0,
-                        kind: "cpu.profile".to_owned(),
+                        kind: kind.to_owned(),
                         keys,
                         attrs,
                         collector_id: id.clone(),
@@ -587,8 +768,8 @@ impl Collector for ProfileCollector {
         if self.callchain.kernel() {
             crate::stack::prime_kernel_symbols();
         }
-        let period = match self.mode {
-            Mode::Sample { freq } => period_for(freq.as_hz()),
+        let hz = match self.mode {
+            Mode::Sample { freq } => freq.as_hz(),
             other => {
                 return Err(format!(
                     "`{other}` mode does not produce a profile: a profile is a sample rate, so \
@@ -597,7 +778,8 @@ impl Collector for ProfileCollector {
             }
         };
 
-        let spec = self.spec(period);
+        let spec = self.spec(hz);
+        self.period = self.rate_period(hz);
         if let (Some(cpus), Some(cgroup)) = (&self.cpus, &self.cgroup) {
             let event =
                 ThreadSampler::open_cgroup(&spec, &cgroup.directory, cpus, ROOT_RING_PAGES)?;
@@ -622,9 +804,9 @@ impl Collector for ProfileCollector {
         )
         .map_err(|error| {
             format!(
-                "perf_event_open for a cpu-clock profile of pid {} was refused ({error}); \
+                "perf_event_open for a {} profile of pid {} was refused ({error}); \
                  check /proc/sys/kernel/perf_event_paranoid",
-                self.pid
+                self.sampled.name, self.pid
             )
         })?;
         event.enable().map_err(|error| error.to_string())?;
@@ -718,6 +900,13 @@ impl Collector for ProfileCollector {
 
     fn facts(&self) -> Vec<String> {
         let mut facts: Vec<String> = Vec::new();
+        if let (Weight::Cycles, Some(period)) = (self.sampled.weight, self.period) {
+            facts.push(format!(
+                "sampled on `cycles`, one sample every {period} cycles (the cpu's highest \
+                 frequency over the rate asked for): a sample's share is a share of cycles, \
+                 not of time, and a phase at a reduced clock has fewer of them"
+            ));
+        }
         if let Some(choice) = &self.choice {
             facts.push(describe_choice(choice));
         }
@@ -779,6 +968,16 @@ impl Collector for ProfileCollector {
         // Each process's unwinder speaks for its own samples; the same
         // sentence from two of them is said once.
         let mut notes: Vec<String> = Vec::new();
+        match (self.sampled.weight, self.period) {
+            (Weight::CpuTime, _) | (Weight::Cycles, Some(_)) => {}
+            (_, _) => notes.push(format!(
+                "sampled on `{}` in the kernel's frequency mode: about the rate asked for, each \
+                 sample a period the kernel adjusts as it goes and this run does not see, so \
+                 every sample weighs one -- a share of samples over a steady phase, not a count \
+                 of `{}`; `--mode count` counts them exactly",
+                self.sampled.name, self.sampled.name
+            )),
+        }
         for note in self.unwinders.values().flat_map(Unwinder::notes) {
             if !notes.contains(&note) {
                 notes.push(note);
@@ -917,10 +1116,11 @@ mod tests {
                 choice.user_only = user_only;
                 let prepare = Prepare {
                     mode: "sample@99hz".parse().unwrap(),
+                    sampled: SAMPLED[0],
                     choice,
                     debuginfod: None,
                 };
-                let spec = prepare.collector(1, false).spec(1_000_000);
+                let spec = prepare.collector(1, false).spec(997);
                 assert_eq!(spec.exclude_kernel, user_only, "{mode:?}");
                 assert_eq!(
                     spec.callchain.kernel(),
@@ -968,6 +1168,7 @@ mod tests {
                 choice.user_only = user_only;
                 let prepare = Prepare {
                     mode: "sample@99hz".parse().unwrap(),
+                    sampled: SAMPLED[0],
                     choice,
                     debuginfod: None,
                 };
@@ -1063,6 +1264,95 @@ mod tests {
         // A frequency higher than a sample per nanosecond is not expressible;
         // it clamps rather than dividing to zero, which the kernel refuses.
         assert_eq!(period_for(4_000_000_000), 1);
+    }
+
+    /// Every event this collector samples on serves a source the catalog
+    /// declares, on a backend of its chain, with `sample` among its modes: a
+    /// row here no request can reach is dead, and a request the catalog
+    /// promises with no row here is refused at start.
+    #[test]
+    fn every_sampled_event_serves_a_declared_sample_mode() {
+        let catalog = crate::catalog::Catalog::embedded().expect("the embedded catalog");
+        for sampled in SAMPLED {
+            let id: crate::request::SourceId = sampled.source.parse().expect("an id");
+            let entry = catalog.get(&id).expect(sampled.source);
+            assert!(
+                entry.backend(sampled.backend).is_some(),
+                "{} has no backend {}",
+                sampled.source,
+                sampled.backend
+            );
+            assert!(
+                entry.modes.contains(&crate::request::ModeKind::Sample),
+                "{} does not declare sample",
+                sampled.source
+            );
+        }
+        assert_eq!(sampled_for("cpu.profile", "pmu:sw"), Some(SAMPLED[0]));
+        assert_eq!(sampled_for("cpu.profile", "pmu"), None);
+    }
+
+    /// A cycles profile (perfrecord 2) against a cycles counter over the same
+    /// spin: one sample per fixed period of cycles, so the samples times the
+    /// period are the cycles the counter counted, within the few periods the
+    /// edges and the user-only paranoia cost. Each sample names its process
+    /// and its task's name.
+    #[test]
+    fn a_cycles_profile_samples_one_period_of_cycles_at_a_time() {
+        let Some(sampled) = sampled_for("cpu.cycles", "pmu") else {
+            panic!("no cycles row");
+        };
+        let mut collector = ProfileCollector::new(
+            0,
+            Mode::Sample {
+                freq: crate::scalar::Frequency::from_hz(997),
+            },
+            Callchain::Off,
+            false,
+        );
+        collector.sampled = sampled;
+        collector.id = CollectorId::new("cpu.cycles/pmu");
+        let Ok(counter) = crate::perf::CounterGroup::open_user_mode(
+            &[crate::perf::Counter::hardware(
+                "cycles",
+                perf::PERF_COUNT_HW_CPU_CYCLES,
+            )],
+            crate::perf::Scope::Process(0),
+        ) else {
+            eprintln!("skipped: this machine refuses unprivileged perf counting");
+            return;
+        };
+        if collector.start().is_err() {
+            eprintln!("skipped: this machine refuses a cycles sampling event");
+            return;
+        }
+        let Some(period) = collector.period else {
+            eprintln!("skipped: this machine publishes no highest frequency");
+            return;
+        };
+        counter.enable().expect("enable");
+        let deadline = std::time::Instant::now() + StdDuration::from_millis(400);
+        let mut spin = 0u64;
+        while std::time::Instant::now() < deadline {
+            spin = spin.wrapping_mul(6364136223846793005).wrapping_add(1);
+        }
+        std::hint::black_box(spin);
+        let cycles = counter.read_final().expect("read")[0].value as f64;
+        let mut events = collector.sample(0).unwrap();
+        events.extend(collector.stop());
+
+        let expected = cycles / period as f64;
+        let got = events.len() as f64;
+        assert!(
+            (got - expected).abs() <= expected * 0.1 + 3.0,
+            "{got} samples of one per {period} cycles over {cycles} cycles counted"
+        );
+        let pid = u64::from(std::process::id());
+        let event = &events[0];
+        assert_eq!(event.kind, "cpu.cycles");
+        assert_eq!(event.attr("pid").and_then(|v| v.as_f64()), Some(pid as f64));
+        assert!(event.attr("comm").is_some(), "no comm on {event:?}");
+        assert!(collector.facts().iter().any(|fact| fact.contains("cycles")));
     }
 
     /// The whole chain in one test: burn cpu, sample it, and check that what
@@ -1201,6 +1491,7 @@ mod tests {
         choice.user_only = !crate::perf::kernel_callchain_allowed();
         let mut collector = Prepare {
             mode: "sample@997hz".parse().unwrap(),
+            sampled: SAMPLED[0],
             choice,
             debuginfod: None,
         }
@@ -1318,6 +1609,7 @@ mod tests {
             mode: Mode::Sample {
                 freq: Mode::DEFAULT_SAMPLE_FREQ,
             },
+            sampled: SAMPLED[0],
             choice: StackChoice::of(crate::request::StackMode::Fp),
             debuginfod: None,
         });
@@ -1336,6 +1628,7 @@ mod tests {
             mode: Mode::Sample {
                 freq: Mode::DEFAULT_SAMPLE_FREQ,
             },
+            sampled: SAMPLED[0],
             choice: StackChoice::of(crate::request::StackMode::None),
             debuginfod: None,
         });
@@ -1357,6 +1650,7 @@ mod tests {
             mode: Mode::Sample {
                 freq: crate::scalar::Frequency::from_hz(997),
             },
+            sampled: SAMPLED[0],
             choice: StackChoice::of(crate::request::StackMode::None),
             debuginfod: None,
         });

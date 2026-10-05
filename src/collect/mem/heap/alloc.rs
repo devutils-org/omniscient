@@ -45,10 +45,13 @@ impl AllocCollector {
                 // is the value every sum and mean of this source is taken over;
                 // the size a free gave back rides beside it.
                 let freed = if allocated {
-                    live.allocated(record.ptr, record.size);
+                    live.allocated_at(record.ptr, record.size, record.ts_ns);
                     None
                 } else {
-                    Some(live.freed(record.ptr).map(|(start, end)| end - start))
+                    Some(
+                        live.freed_at(record.ptr, record.ts_ns)
+                            .map(|((start, end), lifetime)| (end - start, lifetime)),
+                    )
                 };
                 let event = Event {
                     ts_ns: record.ts_ns,
@@ -71,7 +74,15 @@ impl AllocCollector {
                             Attr::uint("ptr", record.ptr),
                         ];
                         match freed {
-                            Some(Some(size)) => attrs.push(Attr::uint("freed_bytes", size)),
+                            Some(Some((size, lifetime))) => {
+                                attrs.push(Attr::uint("freed_bytes", size));
+                                // How long the block it ends lived: the pair
+                                // heaptrack's temporaries and dhat's lifetimes
+                                // are made of.
+                                if let Some(lifetime) = lifetime {
+                                    attrs.push(Attr::uint("lifetime_ns", lifetime));
+                                }
+                            }
                             // A free of something allocated before the shim was
                             // reporting, or whose record was lost: the size is
                             // unknown, and saying so beats a zero.

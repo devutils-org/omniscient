@@ -192,6 +192,75 @@ ships so that an Intel machine with `thermal_throttle` measures with it.
 
 ---
 
+### How busy was each core, and what does an idle one read?
+
+`power.freq` carries, per cpu and per interval, `busy` and `idle` (the shares
+of the interval), `avg_hz` (the clock spread over the whole interval) and `hz`
+(the clock while the core ran): turbostat's `Busy%`, `Avg_MHz` and `Bzy_MHz`.
+Two roads, preferred in this order:
+
+- **`pmu`**: APERF, MPERF and the TSC, opened as perf events of the kernel's
+  `msr` unit -- which an ordinary user may open, where `/dev/cpu/*/msr` is
+  root's. Exactly turbostat's arithmetic: `busy = dMPERF / dTSC`, `hz =
+  tsc_hz x dAPERF / dMPERF`, `avg_hz = dAPERF / dt`.
+- **`fs:sys`**: `cpuinfo_avg_freq` for `hz`, `/proc/stat` for the shares,
+  `avg_hz = busy x hz`. On this kernel `cpuinfo_avg_freq` is the APERF/MPERF
+  ratio of the **last scheduler tick**, not the poll interval; and on a cpu with
+  no tick in the last 20 ms -- an idle one -- the kernel falls back to the
+  policy's setpoint. Measured here: exactly 1745645 kHz, `scaling_min_freq`, on
+  every idle core. That reading now says `measures=setpoint` and names the file
+  it equals, instead of `effective`.
+
+Against turbostat, run beside omn through `sudo -n` over the same two seconds,
+with a spin loop pinned to cpu 2 and a half-duty loop (10 ms period) on cpu 1:
+
+| | omn `pmu` | turbostat | omn `fs:sys` | turbostat |
+|---|---|---|---|---|
+| cpu 2 Busy% | 99.996 | 100.00 | 100.0 | 100.00 |
+| cpu 2 Bzy_MHz | 4084.0 | 4084 | 4218.0 | 4261 |
+| cpu 1 Busy% | 65.6 | 63.27 | 50.2 | 50.89 |
+| cpu 1 Avg_MHz | 2678 | 2584 | 2119.5 | 2121 |
+
+The two pairs of columns are two runs under the other streams' load, so they
+differ from each other; each pair agrees within the windows' offset.
+`a_core_held_busy_reads_busy_through_every_road_and_once_per_interval` holds
+the pinned core at `busy >= 0.9` through both roads, and one reading per
+interval (defect 6).
+
+### What did the cores cost, inside their package?
+
+`power.energy --keys domain` gives one series per RAPL domain. AMD counts core
+energy per core (the `power_core` unit, cpumask 0-11 here): the `cores` domain
+is the twelve counters summed, and `counters=12` says so. Against `perf stat -a
+-e power/energy-pkg/,power_core/energy-core/ sleep 2` started together with omn
+over `-d 2s`: cores 226.89 J against 227.77 J, package 276.77 against 277.31 J.
+Unkeyed, the package alone is read: the domains nest, and one series across
+them counted the cores' joules twice (on Intel, where `energy-cores` and
+`energy-ram` were opened beside the package, that was the case before this
+wave). `the_core_domain_is_every_cores_counter_summed_and_less_than_its_package`.
+
+### How often does a process wake?
+
+`power.wakeups` (`--pid` or a launched program): the increase of every
+thread's `voluntary_ctxt_switches` over an interval. Each voluntary switch is a
+sleep and each sleep ends in one wakeup. Against a program that chose its
+count, 500 sleeps of 2 ms on one thread: 482 counted, 485 a second, where one
+sleep plus the loop is 2.06 ms; the 18 missing were the last 40 ms, between the
+last poll and the exit. The run already keeps a launched program a zombie
+until the collectors' closing round (`launch.rs`, `WNOWAIT`), and that round
+reads the zombie leader's own count: after the fix round, 300 sleeps of 2 ms
+through `-m poll@100ms` were 301 wakeups over seven events, the last 15 or 16
+of them the partial interval. The scenario's lower bound is 285 now, not 150,
+so a lost last interval fails it.
+
+What is still lost is counted. A thread that exits between two reads is
+dropped, one per thread; a process found gone at a read (a `--pid` reaped by
+its own parent) drops every thread it had at the read before, with the
+reason. A thread born and gone between two reads is in neither listing and is
+missed without a count: the caveat says so, since procfs keeps no total of a
+process's dead threads' switches before the reap.
+`a_program_that_sleeps_three_hundred_times_wakes_three_hundred_times`.
+
 ## The four classes
 
 | Class | Where it lives | What it found |
@@ -325,7 +394,7 @@ sees transitions one at a time — is where that becomes real.
 
 ## Defects found
 
-Four, none worked around, of which **one is fixed** -- defect 1, by stream E of
+Six, none worked around (defect 6 is fixed in the twenty-fourth wave) -- defect 1, by stream E of
 the fifth wave. Each is reproduced below with the session that shows it and the
 output it produced; the fixed one keeps its reproduction and names the scenario
 that now asserts what replaced it. `docs/fixes/mem.md` has what became of it.
@@ -623,6 +692,18 @@ have the child pin itself and assert against its own `getrusage`. Either keeps
 what the test is for -- that a budget cannot be built on a collector that
 under-reports its own cost -- without asking the machine for a core it may not
 have.
+
+### 6. `power.freq`'s first poll was taken at window open, before anything launched beside it
+
+Found by the reference pair `freq-turbostat` in the twenty-third wave: `-m
+poll@2s -d 2s` gave two readings, and the first, at window open, came before
+the runner launched the load -- the idle cpu's 1745.6 MHz beside the loaded
+3.9 GHz, and a mean of the two that described neither. Every reading of
+`cpuinfo_avg_freq` describes the moment before it, so the reading at window
+open describes the machine before the run. **Fixed**: the read at window open
+is the baseline, through both backends, and each event covers the interval
+since the previous read (`interval_ns`). A one-second poll over one second is
+one reading per cpu, at the close.
 
 ---
 

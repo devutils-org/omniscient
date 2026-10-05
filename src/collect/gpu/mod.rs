@@ -74,6 +74,18 @@ pub fn factories() -> Vec<Factory> {
         Factory::new("gpu.mem", "vendor:nvml", |resolved| {
             Ok(Box::new(Prepare::new(Metric::Mem, resolved.request.mode)))
         }),
+        Factory::new("gpu.mem_freq", "vendor:nvml", |resolved| {
+            Ok(Box::new(Prepare::new(
+                Metric::MemFreq,
+                resolved.request.mode,
+            )))
+        }),
+        Factory::new("gpu.throttle", "vendor:nvml", |resolved| {
+            Ok(Box::new(Prepare::new(
+                Metric::Throttle,
+                resolved.request.mode,
+            )))
+        }),
         // The mode reaches this one because `count` has no cadence of its own:
         // without it the run falls back to the default poll interval and a
         // program's exit is noticed a whole second late. See `device.rs`.
@@ -323,14 +335,7 @@ impl ClockState {
                 reason: error.to_string(),
             },
         };
-        let event_reasons = match nvml.clock_event_reasons(device) {
-            Ok(mask) => EventReasons::Read {
-                active: reason_names(mask),
-            },
-            Err(error) => EventReasons::Unreadable {
-                reason: error.to_string(),
-            },
-        };
+        let event_reasons = Self::event_reasons(nvml, device);
         Self {
             device: index,
             device_name: name.to_owned(),
@@ -339,6 +344,19 @@ impl ClockState {
             application_clocks,
             persistence,
             event_reasons,
+        }
+    }
+
+    /// Why the clocks are where they are now, alone: the one part of the
+    /// state that moves without anyone setting it.
+    pub(crate) fn event_reasons(nvml: &nvml::Nvml, device: nvml::DeviceHandle) -> EventReasons {
+        match nvml.clock_event_reasons(device) {
+            Ok(mask) => EventReasons::Read {
+                active: reason_names(mask),
+            },
+            Err(error) => EventReasons::Unreadable {
+                reason: error.to_string(),
+            },
         }
     }
 

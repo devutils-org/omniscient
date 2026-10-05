@@ -764,20 +764,38 @@ pub enum Emit {
     Timeline,
     /// A single aggregate per series.
     Summary,
+    /// A single aggregate per distinct value of one attribute, written
+    /// `summary@<attr>`: nsys's per-kernel average, minimum and maximum are
+    /// `gpu.kernel -e summary@kernel` (gpu 2). Each row is named
+    /// `<attr>=<value>`, as `topk:N@<attr>`'s are.
+    SummaryBy(AttrName),
+    /// A histogram per distinct value of one attribute, written
+    /// `hist@<attr>`, `hist:log2@<attr>` or `hist:linear:<width>@<attr>`.
+    HistBy(HistScale, AttrName),
 }
 
 impl Emit {
     pub const DEFAULT_TOPK: u32 = 10;
 
+    /// The attribute this emit groups by instead of the series' keys, for
+    /// `topk:N@<attr>`, `summary@<attr>` and `hist@<attr>`.
+    pub fn by(self) -> Option<AttrName> {
+        match self {
+            Emit::TopK { by, .. } => by,
+            Emit::SummaryBy(by) | Emit::HistBy(_, by) => Some(by),
+            _ => None,
+        }
+    }
+
     pub fn kind(self) -> EmitKind {
         match self {
             Emit::Raw => EmitKind::Raw,
-            Emit::Hist(_) => EmitKind::Hist,
+            Emit::Hist(_) | Emit::HistBy(..) => EmitKind::Hist,
             Emit::Rate => EmitKind::Rate,
             Emit::TopK { .. } => EmitKind::TopK,
             Emit::Stack => EmitKind::Stack,
             Emit::Timeline => EmitKind::Timeline,
-            Emit::Summary => EmitKind::Summary,
+            Emit::Summary | Emit::SummaryBy(_) => EmitKind::Summary,
         }
     }
 }
@@ -787,6 +805,19 @@ impl FromStr for Emit {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
+        // `summary@<attr>` and `hist[:<scale>]@<attr>`: the attribute is the
+        // last thing written, after the scale. `topk` reads its own `@`.
+        if let Some((head, attr)) = s.rsplit_once('@') {
+            let name = head.split(':').next().unwrap_or_default().trim();
+            if matches!(name, "summary" | "hist") {
+                let by = AttrName::new(attr.trim())?;
+                return match head.parse::<Emit>()? {
+                    Emit::Summary => Ok(Emit::SummaryBy(by)),
+                    Emit::Hist(scale) => Ok(Emit::HistBy(scale, by)),
+                    other => Err(ParseError::new(format!("`{other}` takes no `@<attr>`"))),
+                };
+            }
+        }
         let mut parts = s.split(':');
         let name = parts.next().unwrap_or_default().trim();
         let argument = parts.next().map(str::trim);
@@ -876,6 +907,11 @@ impl fmt::Display for Emit {
             Emit::Hist(HistScale::Linear { width }) => write!(f, "hist:linear:{width}"),
             Emit::TopK { k, by: None } => write!(f, "topk:{k}"),
             Emit::TopK { k, by: Some(attr) } => write!(f, "topk:{k}@{attr}"),
+            Emit::SummaryBy(attr) => write!(f, "summary@{attr}"),
+            Emit::HistBy(HistScale::Log2, attr) => write!(f, "hist:log2@{attr}"),
+            Emit::HistBy(HistScale::Linear { width }, attr) => {
+                write!(f, "hist:linear:{width}@{attr}")
+            }
         }
     }
 }
@@ -1181,10 +1217,30 @@ pub enum KeyKind {
     /// `results.json` keeps the split the views draw live
     /// (`DECISIONS.md`, the twenty-first wave).
     Dir,
+    /// `syscall:<name>`, the system call a `proc.syscall` row counted, so
+    /// one run keyed on it is a `strace -c` table (the twenty-fourth wave).
+    Syscall,
+    /// `comm:<name>`, the task's name when the event happened: what the
+    /// bpftrace and bcc tools aggregate by (the twenty-fourth wave).
+    Comm,
+    /// `domain:package`, `domain:cores`, `domain:dram`: an energy domain.
+    ///
+    /// Domains nest -- RAPL's cores are inside their package -- so one
+    /// series across them counts the cores' joules twice.
+    Domain,
+    /// `func:<name>`, the function a sample's leaf frame is in: what `perf
+    /// report` sorts by first, the self share (perfrecord 3).
+    ///
+    /// No collector attaches it. The emit layer reads it off the stack each
+    /// event carries, from the run's stack table, so it needs a source whose
+    /// events have stacks; an event without one is `func:?`. A frame with no
+    /// name is its object and offset, `libc.so.6+0x27781`, so unnamed code
+    /// is one row per address rather than one row for all of it.
+    Func,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 14] = [
+    pub const ALL: [KeyKind; 18] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -1199,7 +1255,17 @@ impl KeyKind {
         KeyKind::Cpu,
         KeyKind::Node,
         KeyKind::Dir,
+        KeyKind::Syscall,
+        KeyKind::Comm,
+        KeyKind::Domain,
+        KeyKind::Func,
     ];
+
+    /// The keys no collector attaches and the emit layer derives from what
+    /// an event carries: `func`, from its stack.
+    pub fn derived(self) -> bool {
+        matches!(self, KeyKind::Func)
+    }
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -1217,6 +1283,10 @@ impl KeyKind {
             KeyKind::Cpu => "cpu",
             KeyKind::Node => "node",
             KeyKind::Dir => "dir",
+            KeyKind::Syscall => "syscall",
+            KeyKind::Comm => "comm",
+            KeyKind::Domain => "domain",
+            KeyKind::Func => "func",
         }
     }
 }
@@ -1717,6 +1787,14 @@ pub struct Session {
     /// its end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<Recording>,
+    /// A program the run launches, lasts as long as, and that no request
+    /// targets: the window of a machine, a core, a cgroup or a pid measured
+    /// for the program's life, as `perf stat -a -- prog` and `turbostat prog`
+    /// measure. Empty is a run bounded by its duration or by a request's
+    /// own launch; a request whose target is a launch beside it is refused,
+    /// since the program is launched once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch: Vec<String>,
 }
 
 /// A session's recording: the trigger, and the three bounds that make a run
@@ -1794,6 +1872,7 @@ impl Session {
             decompose: Vec::new(),
             escalate: None,
             record: None,
+            launch: Vec::new(),
         }
     }
 
@@ -2144,6 +2223,14 @@ mod tests {
     }
 
     #[test]
+    fn an_energy_domain_is_a_key_spelled_domain() {
+        assert_eq!("domain".parse::<KeyKind>().unwrap(), KeyKind::Domain);
+        let key = crate::event::KeyValue::domain("cores");
+        assert_eq!(key.kind(), KeyKind::Domain);
+        assert_eq!(key.to_string(), "domain:cores");
+    }
+
+    #[test]
     fn a_memory_node_is_a_key_spelled_node() {
         assert_eq!("node".parse::<KeyKind>().unwrap(), KeyKind::Node);
         assert_eq!(KeyKind::Node.as_str(), "node");
@@ -2318,6 +2405,36 @@ requests:
             assert_eq!(emit.to_string(), text);
         }
         assert_eq!("hist".parse::<Emit>().unwrap(), Emit::Hist(HistScale::Log2));
+        // Per attribute (gpu 2): written after the scale, and read back.
+        for text in [
+            "summary@kernel",
+            "hist:log2@kernel",
+            "hist:linear:1000@kernel",
+        ] {
+            let emit: Emit = text.parse().unwrap();
+            assert_eq!(emit.to_string(), text);
+            assert_eq!(emit.by().map(AttrName::as_str), Some("kernel"));
+        }
+        assert_eq!(
+            "hist@op".parse::<Emit>().unwrap(),
+            Emit::HistBy(HistScale::Log2, AttrName::new("op").unwrap())
+        );
+        assert_eq!(
+            "summary@op".parse::<Emit>().unwrap().kind(),
+            EmitKind::Summary
+        );
+        assert!("summary@".parse::<Emit>().is_err());
+        assert!("summary@a b".parse::<Emit>().is_err());
+        assert!("rate@op".parse::<Emit>().is_err());
+        assert!("summary:x@op".parse::<Emit>().is_err());
+        assert_eq!(
+            "topk:3@op"
+                .parse::<Emit>()
+                .unwrap()
+                .by()
+                .map(AttrName::as_str),
+            Some("op")
+        );
         assert_eq!(
             "topk".parse::<Emit>().unwrap(),
             Emit::TopK {

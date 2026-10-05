@@ -149,3 +149,191 @@ fn a_count_without_its_limit_is_not_reported_as_a_measurement() {
         );
     }
 }
+
+/// Runs `omn` with `args` and returns its JSON results.
+fn run_json(args: &[&str]) -> (serde_json::Value, Output) {
+    let output = Command::new(BINARY)
+        .args(args)
+        .output()
+        .expect("omn should run");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let run = serde_json::from_str(&stdout(&output)).expect("json results");
+    (run, output)
+}
+
+fn attr(event: &serde_json::Value, name: &str) -> Option<serde_json::Value> {
+    event["attrs"]
+        .as_array()?
+        .iter()
+        .find(|attr| attr["name"] == name)
+        .map(|attr| attr["value"].clone())
+}
+
+/// `proc.tasks` on a launched program is one event per thread per poll: the
+/// fullest poll holds exactly the threads the program says it runs.
+#[test]
+fn every_thread_of_a_process_is_one_event_of_a_poll() {
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+    let program = "import sys, threading, time\n\
+                   stop = threading.Event()\n\
+                   workers = [threading.Thread(target=stop.wait) for _ in range(5)]\n\
+                   for worker in workers:\n\
+                   \x20   worker.start()\n\
+                   sys.stderr.write('THREADS %d\\n' % threading.active_count())\n\
+                   sys.stderr.flush()\n\
+                   time.sleep(0.5)\n\
+                   stop.set()\n";
+    let (run, output) = run_json(&[
+        "proc.tasks",
+        "--mode",
+        "poll@50ms",
+        "--emit",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        program,
+    ]);
+    let reported: usize = stderr(&output)
+        .lines()
+        .find_map(|line| line.strip_prefix("THREADS "))
+        .and_then(|value| value.trim().parse().ok())
+        .expect("the program reports its threads");
+    let events = run["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .expect("events")
+        .clone();
+    let mut per_poll = std::collections::BTreeMap::<u64, usize>::new();
+    for event in &events {
+        *per_poll
+            .entry(event["ts_ns"].as_u64().unwrap())
+            .or_default() += 1;
+    }
+    let fullest = per_poll.values().copied().max().unwrap_or(0);
+    assert_eq!(reported, 6, "five workers and the main thread");
+    assert_eq!(
+        fullest, reported,
+        "the program runs {reported} threads and the fullest poll listed {fullest}"
+    );
+    let pids: std::collections::BTreeSet<_> = events
+        .iter()
+        .filter_map(|event| attr(event, "pid"))
+        .map(|v| v.to_string())
+        .collect();
+    assert_eq!(
+        pids.len(),
+        1,
+        "every thread is of the one process: {pids:?}"
+    );
+}
+
+/// `busy` is the share of a cpu: a thread that spins reads one, a thread that
+/// waits reads zero, both against what the program chose to do.
+#[test]
+fn a_spinning_thread_is_busy_and_a_waiting_one_is_not() {
+    if !has_python() {
+        eprintln!("skipped: this machine has no python3 to launch");
+        return;
+    }
+    // The main thread spins for 800 ms; one worker waits the whole time.
+    let program = "import threading, time\n\
+                   stop = threading.Event()\n\
+                   worker = threading.Thread(target=stop.wait)\n\
+                   worker.start()\n\
+                   end = time.monotonic() + 0.8\n\
+                   while time.monotonic() < end:\n\
+                   \x20   pass\n\
+                   stop.set()\n";
+    let (run, _) = run_json(&[
+        "proc.tasks",
+        "--mode",
+        "poll@100ms",
+        "--emit",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        program,
+    ]);
+    let events = run["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .expect("events")
+        .clone();
+    let polled: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            attr(event, "since")
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .as_deref()
+                == Some("poll")
+        })
+        .collect();
+    let share = |main: bool| -> Vec<f64> {
+        polled
+            .iter()
+            .filter(|event| (attr(event, "tid") == attr(event, "pid")) == main)
+            .filter_map(|event| attr(event, "busy")?.as_f64())
+            .collect()
+    };
+    let spinning = share(true);
+    let waiting = share(false);
+    assert!(
+        spinning.len() >= 4,
+        "too few polls of the main thread: {spinning:?}"
+    );
+    // The first and the last interval may straddle the program's start and
+    // end, so the claim is on the median: within two ticks of a 100 ms poll.
+    let mut sorted = spinning.clone();
+    sorted.sort_by(f64::total_cmp);
+    let median = sorted[sorted.len() / 2];
+    assert!(
+        (0.8..=1.2).contains(&median),
+        "a spinning thread read a median share of {median}: {spinning:?}"
+    );
+    assert!(
+        waiting.iter().all(|share| *share <= 0.2),
+        "a waiting thread read {waiting:?}"
+    );
+}
+
+/// `proc.tasks --system` lists a process this test started, once, with the
+/// name, the parent and the state procfs gives it.
+#[test]
+fn the_machine_lists_a_process_this_test_started() {
+    let mut child = Command::new("sleep").arg("5").spawn().expect("sleep");
+    let filter = format!("pid == {}", child.id());
+    let (run, _) = run_json(&[
+        "proc.tasks",
+        "--system",
+        "--mode",
+        "snapshot",
+        "--emit",
+        "raw",
+        "--filter",
+        &filter,
+        "--format",
+        "json",
+    ]);
+    child.kill().ok();
+    child.wait().ok();
+    let events = run["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .expect("events")
+        .clone();
+    assert_eq!(events.len(), 1, "one event for the process: {events:?}");
+    let event = &events[0];
+    assert_eq!(attr(event, "comm").unwrap(), "sleep");
+    assert_eq!(
+        attr(event, "ppid").unwrap().as_u64(),
+        Some(std::process::id() as u64)
+    );
+    assert_eq!(attr(event, "state").unwrap(), "S");
+    assert_eq!(attr(event, "threads").unwrap().as_u64(), Some(1));
+}
