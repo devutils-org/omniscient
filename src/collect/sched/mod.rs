@@ -37,6 +37,25 @@ use super::Factory;
 use crate::bpf::Whose;
 use crate::request::Target;
 
+/// Whether an event passes the filter with `kind` naming what the row says
+/// it is -- a hard or soft interrupt, a spin or a mutex wait -- rather than
+/// the source.
+///
+/// The filter layer reads a field named `kind` as the event's own kind
+/// before it looks at the attributes, so `kind == "hard"` on `sched.irq`
+/// selected nothing while every row carried `kind` = `hard`
+/// (`docs/fixes/w22-bpftrace.md`, gap 2). The predicate is asked of the row
+/// with its kind set to the attribute for the length of the question.
+pub(crate) fn matches_as(
+    predicate: &crate::filter::FilterExpr,
+    event: &crate::event::Event,
+    kind: &str,
+) -> bool {
+    let mut asked = event.clone();
+    kind.clone_into(&mut asked.kind);
+    crate::filter::matches(predicate, &asked)
+}
+
 /// Each process's parent, for the `ppid` the family's rows carry.
 ///
 /// A launched or named process's descendants are told by the kernel: the

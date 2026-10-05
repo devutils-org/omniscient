@@ -270,7 +270,7 @@
   emits: [hist, topk, stack, raw, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
   keys: [task]
-  filter_fields: [comm, pid]
+  filter_fields: [comm, pid, kind]
   determinism: low
   caveats:
     - "On a contended program this source shortens what it measures: the bench

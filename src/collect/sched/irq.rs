@@ -274,19 +274,10 @@ impl IrqCollector {
     }
 }
 
-/// Whether a row passes the filter, with `kind` naming the row's half.
-///
-/// The filter layer reads a field named `kind` as the event's own kind --
-/// `sched.irq` on every row -- before it looks at the attributes, so
-/// `kind == "hard"` selected nothing while the rows carried `kind` = `hard`
-/// (`docs/fixes/w22-bpftrace.md`, gap 2): an empty series where the machine
-/// had taken a hundred interrupts. The predicate is asked of the row with its
-/// kind set to the half for the length of the question, which is what this
-/// source's declared filter field `kind` means.
+/// Whether a row passes the filter, with `kind` naming the row's half; see
+/// [`super::matches_as`].
 fn matches_half(predicate: &FilterExpr, event: &Event, kind: u32) -> bool {
-    let mut asked = event.clone();
-    half(kind).clone_into(&mut asked.kind);
-    crate::filter::matches(predicate, &asked)
+    super::matches_as(predicate, event, half(kind))
 }
 
 /// The half a row's `kind` names.

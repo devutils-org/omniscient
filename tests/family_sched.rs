@@ -2165,3 +2165,60 @@ fn time_slices_add_up_to_the_cpu_and_the_runnable_time() {
         "{threads} threads spinning 300 ms were runnable {runnable} ns of {wanted}"
     );
 }
+
+/// `sched.lock` ranked by `kind`, as `perf lock contention` groups by type:
+/// eight threads mapping and unmapping memory queue on their process's
+/// `mmap_lock` for writing, so `write` is where the time went; and a filter
+/// on `kind` keeps only that kind.
+#[test]
+fn lock_waits_rank_by_the_kind_of_lock() {
+    let workload = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/reference/workloads/perfsched/contend.py"
+    );
+    let output = run(&[
+        "trace",
+        "sched.lock",
+        "-e",
+        "topk:5@kind",
+        "--",
+        "python3",
+        workload,
+        "8",
+        "1",
+    ]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    if refused_for_capabilities(&text) || !output.status.success() {
+        eprintln!("skipped: sched.lock was not served: {text}");
+        return;
+    }
+    let first = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("1. "))
+        .unwrap_or_else(|| panic!("a ranking: {text}"));
+    assert!(first.contains("kind=write"), "{first}\n{text}");
+
+    let output = run(&[
+        "trace",
+        "sched.lock",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--filter",
+        r#"kind == "write""#,
+        "--",
+        "python3",
+        workload,
+        "8",
+        "1",
+    ]);
+    let events = raw_events(&output);
+    assert!(
+        !events.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(events.iter().all(|attrs| attrs["kind"] == "write"));
+}
