@@ -17,7 +17,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{one_of, ParseError};
-use crate::request::{EmitKind, KeyKind, ModeKind, SourceId, TargetKind};
+use crate::request::{Emit, EmitKind, KeyKind, Mode, ModeKind, SourceId, StackMode, TargetKind};
 use crate::scalar::Duration;
 
 /// The catalog files compiled into the binary.
@@ -894,16 +894,22 @@ fn is_false(value: &bool) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
     entries: Vec<Entry>,
+    /// Each family's default, the requests `omn trace <family>` composes:
+    /// read from the `- default:` item of the family's file.
+    defaults: Vec<FamilyDefault>,
 }
 
 impl Catalog {
     /// Loads the catalog compiled into the binary.
     pub fn embedded() -> Result<Self, ParseError> {
         let mut entries = Vec::new();
+        let mut defaults = Vec::new();
         for (name, text) in EMBEDDED {
-            entries.extend(parse_file(name, text)?);
+            let (file_entries, file_defaults) = parse_file_with_defaults(name, text)?;
+            entries.extend(file_entries);
+            defaults.extend(file_defaults);
         }
-        Self::from_entries(entries)
+        Self::from_entries(entries)?.with_defaults(defaults)
     }
 
     /// Loads a catalog from a directory of YAML files, for iterating on entries
@@ -934,6 +940,7 @@ impl Catalog {
             )));
         }
         let mut entries = Vec::new();
+        let mut defaults = Vec::new();
         for path in files {
             let text = std::fs::read_to_string(&path).map_err(|error| {
                 ParseError::new(format!("cannot read {}: {error}", path.display()))
@@ -943,9 +950,11 @@ impl Catalog {
                 .and_then(|n| n.to_str())
                 .unwrap_or("catalog")
                 .to_owned();
-            entries.extend(parse_file(&name, &text)?);
+            let (file_entries, file_defaults) = parse_file_with_defaults(&name, &text)?;
+            entries.extend(file_entries);
+            defaults.extend(file_defaults);
         }
-        Self::from_entries(entries)
+        Self::from_entries(entries)?.with_defaults(defaults)
     }
 
     /// Builds a catalog from entries, checking the invariants the rest of the
@@ -1018,7 +1027,10 @@ impl Catalog {
             check_equivalent_costs(entry)?;
             check_requirement_globs(entry)?;
         }
-        let catalog = Self { entries };
+        let catalog = Self {
+            entries,
+            defaults: Vec::new(),
+        };
         // What no build could keep, refused where the catalog is read rather
         // than found by a test of the embedded one: `--catalog <dir>` loads
         // through here too (`docs/open-findings.md`, "To catalog.rs").
@@ -1076,19 +1088,271 @@ impl Catalog {
     pub fn ids(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|entry| entry.id.as_str())
     }
+
+    /// The default of one family, what `omn trace <family>` composes, when
+    /// its file declares one.
+    pub fn default_of(&self, family: &str) -> Option<&FamilyDefault> {
+        self.defaults
+            .iter()
+            .find(|default| default.family == family)
+    }
+
+    /// Every family's default, in catalog order.
+    pub fn defaults(&self) -> &[FamilyDefault] {
+        &self.defaults
+    }
+
+    /// Adds the families' defaults, refusing one that names a source, a mode,
+    /// an emit, a key or a target its family does not have, or a band its
+    /// cheapest backend cannot keep: a default is a request written down in
+    /// advance, and is held to what a request would be.
+    pub fn with_defaults(mut self, defaults: Vec<FamilyDefault>) -> Result<Self, ParseError> {
+        for (at, default) in defaults.iter().enumerate() {
+            if defaults[..at]
+                .iter()
+                .any(|earlier| earlier.family == default.family)
+            {
+                return Err(ParseError::new(format!(
+                    "family `{}` declares two defaults: `omn trace {}` could only run one",
+                    default.family, default.family
+                )));
+            }
+            check_default(&self, default)?;
+        }
+        self.defaults = defaults;
+        Ok(self)
+    }
 }
 
+/// One family's default: what `omn trace <family>` composes, per cost band.
+///
+/// Either the requests of each band the family can keep, or `none`, the
+/// reason the family has no default that is safe to run without choosing.
+/// A family owns its default the way it owns its sources, so it is data in
+/// the family's own file, never code (`DECISIONS.md`, "the lazy mode").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FamilyDefault {
+    pub family: String,
+    /// The family's first question, the one the default answers, in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    /// Why this family has no safe default: the refusal says it, with the
+    /// sources to pick from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub none: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub low: Vec<DefaultRequest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub med: Vec<DefaultRequest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub high: Vec<DefaultRequest>,
+}
+
+impl FamilyDefault {
+    /// The bands a default may name: the cost words of the catalog's chains,
+    /// without the two that bound nothing a person would choose -- `free` is
+    /// a counter read, and `extreme` has no ceiling at all.
+    pub const BANDS: [Cost; 3] = [Cost::Low, Cost::Med, Cost::High];
+
+    /// The requests of one band, empty when the family declares none there.
+    pub fn band(&self, cost: Cost) -> &[DefaultRequest] {
+        match cost {
+            Cost::Low => &self.low,
+            Cost::Med => &self.med,
+            Cost::High => &self.high,
+            Cost::Free | Cost::Extreme => &[],
+        }
+    }
+
+    /// The bands this default declares, cheapest first.
+    pub fn bands(&self) -> impl Iterator<Item = (Cost, &[DefaultRequest])> + '_ {
+        Self::BANDS
+            .into_iter()
+            .map(|cost| (cost, self.band(cost)))
+            .filter(|(_, requests)| !requests.is_empty())
+    }
+}
+
+/// One request of a family's default: a request without its target, which
+/// the person gives, unless it is the machine's own (`target: system`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultRequest {
+    pub source: SourceId,
+    pub mode: Mode,
+    pub emit: Vec<Emit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<KeyKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<StackMode>,
+    /// `system` for a request that reads the machine during the run whatever
+    /// the person targets; absent, the request takes the person's target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<TargetKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// What the loader holds a default to: a request it composes has to be one
+/// the validator could accept, for the targets a person gives.
+fn check_default(catalog: &Catalog, default: &FamilyDefault) -> Result<(), ParseError> {
+    let family = default.family.as_str();
+    let refuse = |why: String| ParseError::new(format!("the default of family `{family}` {why}"));
+    if catalog.family(family).is_empty() {
+        return Err(refuse(
+            "names a family with no source in the catalog".to_owned(),
+        ));
+    }
+    let declared = default.bands().count();
+    match (&default.none, declared) {
+        (Some(reason), 0) if !reason.trim().is_empty() => return Ok(()),
+        (Some(_), 0) => {
+            return Err(refuse(
+                "says it has none and gives no reason: the refusal would say nothing".to_owned(),
+            ))
+        }
+        (Some(_), _) => {
+            return Err(refuse(
+                "both declares requests and says it has none: one of the two is wrong".to_owned(),
+            ))
+        }
+        (None, 0) => {
+            return Err(refuse(
+                "declares no band: give `low`, `med` or `high`, or `none` with the reason"
+                    .to_owned(),
+            ))
+        }
+        (None, _) => {}
+    }
+    for (band, requests) in default.bands() {
+        let mut machine_only = true;
+        for request in requests {
+            let source = &request.source;
+            let Some(entry) = catalog.get(source).filter(|entry| entry.family == family) else {
+                return Err(refuse(format!(
+                    "names `{source}` in its `{band}` band, which is not a source of the family"
+                )));
+            };
+            let mode = request.mode.kind();
+            if !entry.modes.contains(&mode) {
+                return Err(refuse(format!(
+                    "asks `{source}` for `{mode}` in its `{band}` band, a mode it does not have \
+                     (it has {})",
+                    one_of(entry.modes.iter().map(|mode| mode.as_str()))
+                )));
+            }
+            if request.emit.is_empty() {
+                return Err(refuse(format!(
+                    "asks `{source}` for no emit in its `{band}` band: the run would print nothing"
+                )));
+            }
+            for emit in &request.emit {
+                let kind = emit.kind();
+                if !entry.emits.contains(&kind) || !mode.valid_emits().contains(&kind) {
+                    return Err(refuse(format!(
+                        "asks `{source}` for `{emit}` in `{mode}` in its `{band}` band, an emit \
+                         it does not produce there"
+                    )));
+                }
+            }
+            if let Some(key) = request.keys.iter().find(|key| !entry.keys.contains(key)) {
+                return Err(refuse(format!(
+                    "keys `{source}` on `{key}` in its `{band}` band, a key it does not attach"
+                )));
+            }
+            if entry.best_cost() > band {
+                return Err(refuse(format!(
+                    "puts `{source}` in its `{band}` band, and its cheapest backend declares \
+                     `{}`: no machine could keep that band with it",
+                    entry.best_cost()
+                )));
+            }
+            match request.target {
+                Some(TargetKind::System) => {
+                    if entry.target_support(TargetKind::System) == TargetSupport::No {
+                        return Err(refuse(format!(
+                            "reads `{source}` for the whole machine in its `{band}` band, which \
+                             it does not serve"
+                        )));
+                    }
+                }
+                Some(other) => {
+                    return Err(refuse(format!(
+                        "fixes `{source}`'s target to `{other}` in its `{band}` band: a default \
+                         fixes only `system`, and takes every other target from the person"
+                    )))
+                }
+                None => {
+                    machine_only = false;
+                    for kind in [TargetKind::Launch, TargetKind::Pid] {
+                        if entry.target_support(kind) == TargetSupport::No {
+                            return Err(refuse(format!(
+                                "gives `{source}` the person's target in its `{band}` band, and \
+                                 it refuses a `{kind}`: `omn trace {family} -- PROGRAM` and                                  `--pid` must both mean something"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        // A band of machine-wide requests is a default too (`power`), but
+        // it cannot be beside one that follows a program: the run is one
+        // shape or the other, and a person cannot tell which it chose.
+        if machine_only
+            != default
+                .bands()
+                .all(|(_, all)| all.iter().all(|r| r.target.is_some()))
+        {
+            return Err(refuse(format!(
+                "follows the person's target in some bands and only the machine in others \
+                 (`{band}`): `omn trace {family}` would change what it measures with the cost"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The entries of one catalog file, its `default:` item set aside.
+#[cfg(test)]
 fn parse_file(name: &str, text: &str) -> Result<Vec<Entry>, ParseError> {
+    parse_file_with_defaults(name, text).map(|(entries, _)| entries)
+}
+
+fn parse_file_with_defaults(
+    name: &str,
+    text: &str,
+) -> Result<(Vec<Entry>, Vec<FamilyDefault>), ParseError> {
     let invalid = |error: serde_norway::Error| {
         ParseError::new(format!("catalog file {name} is invalid: {error}"))
     };
     let mut document: serde_norway::Value = serde_norway::from_str(text).map_err(invalid)?;
+    let mut defaults = Vec::new();
     if let serde_norway::Value::Sequence(entries) = &mut document {
+        // A family's default is an item of its file, `- default: {...}`,
+        // beside the entries rather than among them.
+        let mut kept = Vec::with_capacity(entries.len());
+        for item in entries.drain(..) {
+            match item.get("default") {
+                Some(default) => defaults.push(
+                    serde_norway::from_value::<FamilyDefault>(default.clone()).map_err(
+                        |error| {
+                            ParseError::new(format!(
+                                "catalog file {name} has an invalid `default:` block: {error}"
+                            ))
+                        },
+                    )?,
+                ),
+                None => kept.push(item),
+            }
+        }
+        *entries = kept;
         for entry in entries {
             move_refusals(entry);
         }
     }
-    serde_norway::from_value(document).map_err(invalid)
+    let entries = serde_norway::from_value(document).map_err(invalid)?;
+    Ok((entries, defaults))
 }
 
 /// Splits each `no: <reason>` of an entry's `targets:` line into the `no` the
