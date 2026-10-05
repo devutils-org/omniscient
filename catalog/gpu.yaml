@@ -49,6 +49,12 @@
   filter_fields: [engine, device]
   determinism: low
   caveats:
+    - "With a launch target, each NVML reading also carries the launched
+       tree's own share, what `nvidia-smi pmon` prints: `process_ratio` (the
+       shader engines) and `process_memory_ratio`, summed over the tree's
+       processes' newest per-process samples, with `processes` saying how
+       many had one. They are attributes: the series stays the device's, so
+       a launch target does not change what it means."
     - "NVML's utilization is the fraction of a driver-chosen window during which
        at least one kernel was resident. It is not SM occupancy: a kernel using
        one of 68 SMs and one using all of them both read 100 %."
@@ -101,6 +107,60 @@
        what the device did, never what it was allowed to do."
     - "A launch target sets the window, not the scope. The figure is the whole
        device's, shared with everything else that was using it."
+
+- id: gpu.mem_freq
+  family: gpu
+  summary: "GPU memory clock frequency"
+  unit: hz
+  backends:
+    - {id: "vendor:nvml", requires: ["nvml"], cost: med}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native, launch: native}
+  keys: []
+  filter_fields: [device]
+  determinism: low
+  caveats:
+    - "The memory clock as its own series, what `nvidia-smi dmon`'s `mclk`
+       is: `gpu.freq` carries it beside each shader-clock reading as
+       `memory_hz`, which no emit aggregates, because a memory clock averaged
+       with a shader clock is a number of nothing."
+    - "One NVML call a reading, 2.4 to 4.2 ms of the tool's cpu on an idle
+       board without persistence mode, spent spinning in the driver: at a
+       100 ms poll a few percent of a core."
+    - "A launch target sets the window, not the scope. The clock is the whole
+       device's, shared with everything else that was using it."
+
+- id: gpu.throttle
+  family: gpu
+  summary: "Share of the time the GPU clocks were held down, by reason"
+  unit: ratio
+  backends:
+    - {id: "vendor:nvml", requires: ["nvml"], cost: med}
+  modes: [poll, count]
+  emits: [timeline, raw, summary]
+  targets: {system: native, launch: native}
+  keys: []
+  filter_fields: [device]
+  determinism: low
+  caveats:
+    - "Read from the driver's counters of time held per reason
+       (`NVML_FI_DEV_PERF_POLICY_*`, `..._CLOCKS_EVENT_REASON_*`), one call a
+       reading: each reason's share of the time since the previous reading
+       is an attribute (`power_cap_ratio` is `nvidia-smi dmon -s v`'s
+       `pviol`; its `tviol` is a flag, where `thermal_ratio` is a share), and the value is the largest share
+       among the reasons that limit the clocks -- a lower bound on the time
+       held by any limit, since NVML gives no union, and the figure itself
+       when one limit is in play. `--mode count` gives one share over the
+       whole window."
+    - "Low utilisation, and running below the application or base clocks,
+       ride as attributes and are not limits: an idle board is below its
+       base clock all the time and limited by nothing."
+    - "The shares come from the driver's timestamps of its two reads; over a
+       short interval its two clocks disagree by up to 1.5 %, and a share
+       above 1 is reported as 1."
+    - "A launch target sets the window, not the scope. The counters are the
+       whole device's, shared with everything else that was using it."
 
 - id: gpu.power
   family: gpu
@@ -182,9 +242,11 @@
   filter_fields: [device, scope]
   determinism: medium
   caveats:
-    - "With a process target the figure is that process's own VRAM, from the
-       driver's process list, and the device totals ride along as separate
-       attributes. The two are never mixed into one series."
+    - "With a process target the figure is that process tree's VRAM: the
+       process and every descendant it has at each reading, summed from the
+       driver's process list, so a CUDA program under a wrapper is found;
+       `processes` says how many of the tree hold any. The device totals ride
+       along as separate attributes. The two are never mixed into one series."
     - "VRAM held is not VRAM used. A CUDA context reserves an arena the way an
        allocator does, and what the kernels touch inside it is invisible here."
     - "A process that holds no VRAM reports zero rather than nothing: an absent
