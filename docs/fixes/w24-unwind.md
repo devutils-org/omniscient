@@ -125,3 +125,32 @@ run above.
   walks through `Cfi`): 42 passed.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.
   `cargo fmt --check`: clean.
+
+## Review
+
+The reviewer filed one gap: `perf_maps` and `executables` are not wired into
+`cpu.profile`'s provenance, and `DEVICE_STACKS` is not catalog data. The
+reviewer is right that both are undone, and also agrees that filing them is
+justified. The fix round leaves them as they are, for these reasons:
+
+- **Nothing in this row can close them.** After `git merge main` (at
+  `63ebae6`), `src/collect/cpu/profile.rs:773` still reads
+  `perf_maps: Vec::new()` and `:473` still reads `executable_of(pid)`. The
+  change is the one under "Needs from another stream", and it goes in stream
+  cpu's file. `DEVICE_STACKS` (`src/collect/gpu/mod.rs:30`, read at
+  `src/validate.rs:782`) needs `catalog/gpu.yaml` (gpu), the loader in
+  `src/catalog.rs` (a shared layer, which the coordinator lands) and
+  `check_stack` (emit). None of those is in the unwind row, and this fix round
+  may change only that row and the seams.
+- **The open-findings item is half answered, not closed.** "To
+  `src/stack.rs`: `Unwinder::symbolizer`" (`docs/open-findings.md`) asked for
+  one accessor. The accessor exists (`b073113`) and is tested
+  (`tests/stack_capture.rs`). The consumer half stays open until cpu lands
+  the `provenance()` change above. The coordinator should note it that way
+  when it updates `docs/open-findings.md` and `STATE.md` (neither file is in
+  this row): "accessor landed in the twenty-fourth wave (unwind); `perf_maps`
+  in `cpu.profile`'s provenance still wanted from cpu". `DEVICE_STACKS` as
+  data stays on the list, with the owners named above.
+
+No code changed in this round. Because the commit touches only documents,
+the documents-only check ran: `cargo test --test cli`, 28 passed.
