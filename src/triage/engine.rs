@@ -66,6 +66,12 @@ pub struct Run {
     pub caveats: Vec<String>,
     /// What each request cost the target, in the order of `served`.
     pub costs: Vec<Cost>,
+    /// What the collectors said they broke in the program they measured
+    /// ([`collect::Collection::failure`]), each sentence once: `omn -f`
+    /// writes its results and exits 1 with these, and a triage answer
+    /// carries them the same way, so a verdict read off a broken program is
+    /// never mistaken for a clean one.
+    pub failures: Vec<String>,
 }
 
 /// What one request cost, as the runner measured it: the collectors' cpu and
@@ -231,6 +237,7 @@ pub fn run(
             whose: error.whose(),
             message: error.to_string(),
         })?;
+    let failures = failures(&collections);
 
     let mut output = RunOutput {
         results: Vec::new(),
@@ -284,5 +291,53 @@ pub fn run(
         warnings: report.warnings().map(str::to_owned).collect(),
         caveats: report.caveats().map(str::to_owned).collect(),
         costs,
+        failures,
     })
+}
+
+/// What the collectors said they broke, each sentence once, in the order the
+/// requests ran: what `main.rs` reads off the same collections for `omn -f`.
+pub fn failures(collections: &[collect::Collection]) -> Vec<String> {
+    let mut failures: Vec<String> = Vec::new();
+    for failure in collections.iter().filter_map(|c| c.failure.as_ref()) {
+        if !failures.contains(failure) {
+            failures.push(failure.clone());
+        }
+    }
+    failures
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A collection as a run leaves it, carrying `failure` when given.
+    fn collection(failure: Option<&str>) -> collect::Collection {
+        let mut collection: collect::Collection = serde_json::from_value(serde_json::json!({
+            "events": [],
+            "value_attr": "value",
+            "losses": collect::Losses::default(),
+            "observed_ns": 0,
+            "stopped_because": "the test",
+        }))
+        .expect("a bare collection deserializes");
+        collection.failure = failure.map(str::to_owned);
+        collection
+    }
+
+    /// A collector that broke its program reaches the triage's run as it
+    /// reaches `omn -f`'s outcome: each sentence once, however many of the
+    /// collections carry it, and nothing when none does.
+    #[test]
+    fn what_a_collector_broke_reaches_the_run_once() {
+        let killed = "the program was stopped by the GPU collector";
+        let collections = [
+            collection(None),
+            collection(Some(killed)),
+            collection(Some(killed)),
+            collection(Some("another")),
+        ];
+        assert_eq!(failures(&collections), [killed, "another"]);
+        assert!(failures(&[collection(None)]).is_empty());
+    }
 }

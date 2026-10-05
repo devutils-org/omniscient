@@ -556,6 +556,18 @@ pub struct Answer {
     /// the first pass had named. The answer is the second pass's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub second_pass: Option<String>,
+    /// What the collectors said they broke in the program, each sentence
+    /// once, over every run of both passes ([`engine::Run::failures`]). Not
+    /// empty, the verdict is read off a program the tool broke: the text
+    /// says so, and `omn -f`'s exit 1 is wanted beside it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<String>,
+    /// Where each launch's standard error was kept, in the order the
+    /// launches ran (both passes), when `--program-stderr` (or
+    /// `OMN_PROGRAM_STDERR`) named a file: `FILE.1`, `FILE.2`, ... -- the
+    /// file itself holds the last launch's, as it would after one run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub program_stderr: Vec<String>,
 }
 
 impl Answer {
@@ -622,6 +634,16 @@ impl Answer {
                 "  without `{}` ({}): {}",
                 dropped.label, dropped.source, dropped.reason
             );
+        }
+        if !self.program_stderr.is_empty() {
+            let _ = writeln!(
+                out,
+                "  the program's stderr, run by run: {}",
+                self.program_stderr.join(", ")
+            );
+        }
+        for failure in &self.failures {
+            let _ = writeln!(out, "  broken by the tool: {failure}");
         }
         out
     }
@@ -754,11 +776,11 @@ pub fn answer(
     first
         .requests
         .retain(|request| request.label.as_deref() != Some(MUTEX));
-    let answer = conclude(
-        ask,
-        run_all(catalog, capabilities, &first, ask)?,
-        dropped.clone(),
-    );
+    let mut launches = Launches::from_environment(&ask.target);
+    let (runs, failures) = run_all(catalog, capabilities, &first, ask, &mut launches)?;
+    let mut answer = conclude(ask, runs, dropped.clone());
+    answer.failures = failures;
+    answer.program_stderr = launches.kept.clone();
     if !mutex {
         return Ok(answer);
     }
@@ -771,7 +793,15 @@ pub fn answer(
     else {
         return Ok(answer);
     };
-    let mut second = conclude(ask, run_all(catalog, capabilities, &full, ask)?, dropped);
+    let (runs, failures) = run_all(catalog, capabilities, &full, ask, &mut launches)?;
+    let mut second = conclude(ask, runs, dropped);
+    second.failures = answer.failures.clone();
+    for failure in failures {
+        if !second.failures.contains(&failure) {
+            second.failures.push(failure);
+        }
+    }
+    second.program_stderr = launches.kept;
     let window = match ask.target {
         Target::Launch(_) => format!("a second pass of {} run(s)", ask.runs),
         _ => "a second window as long as the first".to_owned(),
@@ -784,18 +814,101 @@ pub fn answer(
     Ok(second)
 }
 
+/// Every run of one pass, read, and what the collectors said they broke in
+/// any of them, each sentence once.
 fn run_all(
     catalog: &Catalog,
     capabilities: &Capabilities,
     session: &Session,
     ask: &Ask,
-) -> Result<Vec<Reading>, TriageError> {
+    launches: &mut Launches,
+) -> Result<(Vec<Reading>, Vec<String>), TriageError> {
     let mut runs = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
     for _ in 0..ask.runs {
-        let run = engine::run(catalog, capabilities, session)?;
+        launches.before();
+        let run = engine::run(catalog, capabilities, session);
+        // Kept whether or not the run could be read: a launch that failed
+        // is the one whose stderr says why.
+        launches.ran()?;
+        let run = run?;
+        for failure in &run.failures {
+            if !failures.contains(failure) {
+                failures.push(failure.clone());
+            }
+        }
         runs.push(read(&run, &ask.target)?);
     }
-    Ok(runs)
+    Ok((runs, failures))
+}
+
+/// The launches of one answer, and where each one's standard error was
+/// kept.
+///
+/// The launch writes the program's stderr to the file `--program-stderr`
+/// names, created or truncated (`OMN_PROGRAM_STDERR`, which the flag sets):
+/// with `--runs N`, or a second pass, each launch truncated the one before
+/// it, and only the last run's was left. So after each launch the file is
+/// copied to `FILE.<n>`, `n` counting the launches from 1 in the order they
+/// ran, and the file itself is left holding the last one's, as after a
+/// single run. Nothing is copied for a process already running, whose
+/// stderr is not the tool's to keep.
+#[derive(Debug, Default)]
+pub struct Launches {
+    file: Option<std::path::PathBuf>,
+    /// The copies made, in order.
+    pub kept: Vec<String>,
+}
+
+impl Launches {
+    /// The file the launch writes to, from the environment the launch reads
+    /// it from; none for a target that is not launched.
+    pub fn from_environment(target: &Target) -> Self {
+        let file = std::env::var_os(crate::collect::PROGRAM_STDERR_VARIABLE)
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from);
+        Self::to(matches!(target, Target::Launch(_)).then_some(file).flatten())
+    }
+
+    /// The launches of an answer whose program writes its stderr to `file`.
+    pub fn to(file: Option<std::path::PathBuf>) -> Self {
+        Self {
+            file,
+            kept: Vec::new(),
+        }
+    }
+
+    /// A launch is about to start: an earlier launch's file is taken away,
+    /// so one that fails before it writes any is not kept under its number.
+    pub fn before(&self) {
+        if let Some(file) = &self.file {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
+    /// One launch ended: its stderr copied beside the file, numbered. A
+    /// launch that wrote no file -- it failed before it started -- keeps
+    /// nothing and takes no number.
+    pub fn ran(&mut self) -> Result<(), TriageError> {
+        let Some(file) = &self.file else {
+            return Ok(());
+        };
+        if !file.exists() {
+            return Ok(());
+        }
+        let mut copy = file.clone().into_os_string();
+        copy.push(format!(".{}", self.kept.len() + 1));
+        let copy = std::path::PathBuf::from(copy);
+        std::fs::copy(file, &copy).map_err(|error| engine::Failure {
+            whose: crate::collect::Whose::Machine,
+            message: format!(
+                "the program's stderr could not be kept as {}: {error}",
+                copy.display()
+            ),
+        })?;
+        self.kept.push(copy.display().to_string());
+        Ok(())
+    }
 }
 
 /// Why the run the verdict reads needs `sched.mutex` to split a sleep, if it
@@ -846,6 +959,8 @@ pub fn conclude(ask: &Ask, runs: Vec<Reading>, dropped: Vec<Dropped>) -> Answer 
         runs,
         dropped,
         second_pass: None,
+        failures: Vec::new(),
+        program_stderr: Vec::new(),
     }
 }
 
@@ -2536,6 +2651,64 @@ mod tests {
         assert_eq!(answer.slowest, Some(0));
     }
 
+    /// With `--program-stderr FILE` and several launches, each launch's
+    /// stderr is kept as `FILE.<n>` in the order they ran, the file itself
+    /// the last one's; a launch that wrote nothing takes no number; and a
+    /// process already running keeps nothing.
+    #[test]
+    fn each_launch_s_stderr_is_kept_under_its_number() {
+        let dir = std::env::temp_dir().join(format!("omn-launches-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("stderr.txt");
+        let mut launches = Launches::to(Some(file.clone()));
+        for said in ["first run\n", "second run\n"] {
+            launches.before();
+            assert!(!file.exists(), "the earlier launch's file is taken away");
+            std::fs::write(&file, said).unwrap();
+            launches.ran().unwrap();
+        }
+        // A launch that failed before it opened the file.
+        launches.before();
+        launches.ran().unwrap();
+        let first = format!("{}.1", file.display());
+        let second = format!("{}.2", file.display());
+        assert_eq!(launches.kept, [first.clone(), second.clone()]);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "first run\n");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "second run\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let attached = Target::Pid(vec![1]);
+        assert!(Launches::from_environment(&attached).file.is_none());
+    }
+
+    /// What a collector broke is carried by the answer and said in its text,
+    /// so a verdict read off a broken program never reads as a clean one.
+    #[test]
+    fn an_answer_says_what_the_tool_broke_and_where_each_stderr_went() {
+        let runs = vec![reading(
+            100e6,
+            vec![state("on-cpu", Limit::Cpu, Some(90e6))],
+            0.0,
+        )];
+        let mut answer = conclude(&ask(Objective::Latency, 1), runs, Vec::new());
+        assert!(!answer.text().contains("broken by the tool"));
+        answer.failures = vec!["the GPU collector stopped the program".to_owned()];
+        answer.program_stderr = vec!["err.txt.1".to_owned()];
+        let text = answer.text();
+        assert!(
+            text.contains("broken by the tool: the GPU collector stopped the program"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the program's stderr, run by run: err.txt.1"),
+            "{text}"
+        );
+        let json = serde_json::to_value(&answer).unwrap();
+        assert_eq!(json["failures"][0], "the GPU collector stopped the program");
+        let back: Answer = serde_json::from_value(json).unwrap();
+        assert_eq!(back, answer);
+    }
+
     fn followed(
         relation: Relation,
         wait: Option<&str>,
@@ -2944,6 +3117,7 @@ mod tests {
             warnings: Vec::new(),
             caveats: Vec::new(),
             costs: Vec::new(),
+            failures: Vec::new(),
         }
     }
 

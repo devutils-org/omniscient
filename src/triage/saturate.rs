@@ -425,6 +425,11 @@ pub struct Answer {
     pub dropped: Vec<Dropped>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// What the collectors said they broke in the workload, each sentence
+    /// once ([`engine::Run::failures`]): the uses above are read off a
+    /// workload the tool broke.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<String>,
 }
 
 pub fn answer(
@@ -847,6 +852,7 @@ pub fn read(ask: &Ask, run: &Run, dropped: Vec<Dropped>) -> Answer {
         energy,
         dropped,
         notes,
+        failures: run.failures.clone(),
     }
 }
 
@@ -1157,6 +1163,9 @@ impl Answer {
         }
         for note in &self.notes {
             let _ = writeln!(out, "  note: {note}");
+        }
+        for failure in &self.failures {
+            let _ = writeln!(out, "  broken by the tool: {failure}");
         }
         out
     }
