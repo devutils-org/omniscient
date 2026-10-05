@@ -2175,9 +2175,12 @@ fn a_target_that_exits_without_being_reaped_ends_the_run() {
     let run: Value = serde_json::from_str(&stdout(&output)).expect("json results");
     let result = &run["results"][0];
 
+    // Either this collector's own words (it reads the state letter) or the
+    // run's, which since the twenty-fourth wave ends a `--pid` run when its
+    // process exits, as `perf stat -p` does: both say the process exited.
     let stopped = result["stopped_because"].as_str().unwrap_or("");
     assert!(
-        stopped.contains("reaped"),
+        stopped.contains("exited"),
         "the run ended for `{stopped}`: an unreaped child has exited, and the run has to say \
          so rather than follow a process that is gone"
     );
@@ -2938,6 +2941,11 @@ fn the_held_clocks_share_separates_an_idle_board_from_a_running_kernel() {
     }
     let _alone = exclusive();
     let share = |event: &Value, name: &str| attr(event, name).as_f64().unwrap();
+    // A board just out of a kernel stays in P0 at its boost clock for a
+    // second or two, held by nothing: measured, `low_utilization_ratio` 0.0
+    // over `sleep 1.5` right after a 1 s kernel, then 0.99 and 1.0. So the
+    // idle window starts once the board is down.
+    settle();
     let idle = raw_run("gpu.throttle", "count", &["sleep", "1.5"]);
     assert_eq!(
         idle.len(),
