@@ -154,3 +154,14 @@
        AMD parts, on ARM and in most virtual machines, and its absence is not
        evidence that nothing throttled: it means throttling cannot be seen this
        way here. The backend refuses rather than reporting zeroes."
+
+# The family's default: what `omn trace power --system -d 5s` composes.
+# Every power source reads the whole machine, so this default reads it too,
+# and is run on the machine (`--system` and a duration), not on a program.
+# See docs/lazy.md.
+- default:
+    family: power
+    question: "How much energy does the machine draw, and at what clock?"
+    low:
+      - {source: power.energy, mode: count, emit: [summary], target: system, label: "energy"}
+      - {source: power.freq, mode: "poll@100ms", emit: [summary], target: system, label: "frequency"}

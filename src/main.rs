@@ -92,7 +92,7 @@ fn main() -> ExitCode {
     // still end them (`collect::adopt_orphans`). This process starts nothing
     // else that outlives the call that started it.
     omn::collect::adopt_orphans();
-    let cli = match Cli::try_parse_from(normalize(std::env::args_os())) {
+    let cli = match Cli::try_parse_from(omn::lazy::spell_family(normalize(std::env::args_os()))) {
         Ok(cli) => cli,
         Err(error) => {
             let _ = error.print();
@@ -195,6 +195,13 @@ fn catalog(explicit: Option<&Path>) -> anyhow::Result<Catalog> {
 
 fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
     let catalog = catalog(args.catalog.as_deref())?;
+    if let Some(refusal) = omn::lazy::cost_refusal(&args) {
+        eprintln!("error: {refusal}");
+        return Ok(ExitCode::from(EXIT_REJECTED));
+    }
+    // A family where a source is expected: its default's band, kept for what
+    // the backends turn out to declare once resolved.
+    let mut band = None;
 
     let (session, defaulted) = match &args.file {
         Some(path) => {
@@ -225,7 +232,19 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
             }
             (session, overridden)
         }
-        None => cli::to_session(&args, &catalog)?,
+        None => match &args.family {
+            Some(family) => {
+                let composed = omn::lazy::compose(&args, &catalog, family)?;
+                band = Some(composed.band);
+                // Said first, before anything is resolved: the long form is
+                // what the person reads to learn what was asked for them.
+                for note in composed.defaulted.iter() {
+                    eprintln!("note: {note}");
+                }
+                (composed.session, Defaulted::default())
+            }
+            None => cli::to_session(&args, &catalog)?,
+        },
     };
 
     let report = match validate::validate_session(&catalog, &session) {
@@ -369,6 +388,12 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
     for note in resolutions
         .iter()
         .filter_map(|resolved| budget_note(&catalog, resolved))
+    {
+        eprintln!("note: {note}");
+    }
+    for note in band
+        .map(|band| omn::lazy::band_notes(band, &resolutions))
+        .unwrap_or_default()
     {
         eprintln!("note: {note}");
     }
@@ -2185,13 +2210,14 @@ fn list(args: ListArgs) -> anyhow::Result<ExitCode> {
     let capabilities = Capabilities::detect();
     match args.format {
         OutputFormat::Text => print!(
-            "{}",
+            "{}{}",
             render::list(
                 &catalog,
                 args.selection.as_deref(),
                 &capabilities,
                 args.color.style(),
-            )
+            ),
+            omn::lazy::listing(&catalog, args.selection.as_deref())
         ),
         format if format.renders_documents() => {
             let selected: Vec<_> = match args.selection.as_deref() {
