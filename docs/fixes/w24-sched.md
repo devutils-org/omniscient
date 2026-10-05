@@ -22,6 +22,9 @@ per-switch program lives in `src/bpf/switch_count.rs`, reached through
 `SwitchCountProgram::load_stream`, so that no line of `src/bpf/mod.rs` had
 to change.
 
+| `f8833d3` | `fix(sched)`: **review 1 and 2** -- `sched.slices`' `off_ns` is the gap less the queue wait, and the wait adds what `run_delay` grew by while the task was away; a switch in with no stamp is flagged, never a zero. |
+| `dc2d66f` | `fix(sched)`: **review 3** -- `sched.interrupts` counts a counter that wrapped past 2^32, and a reset or a failed closing read as a loss. |
+
 ## Shown vs reasoned
 
 All shown on this machine (24 cpus, 7.2.8, fifteen other streams running),
@@ -151,6 +154,37 @@ sudo -n bpftrace -e 'tracepoint:sched:sched_wakeup /args.comm == "omnref-sleep"/
 - **coordinator**: `CATALOG.md` and `man/omn.1` for `sched.interrupts`,
   `sched.runqueue`, `sched.slices`, and `sched.lock`'s `kind` filter field.
 
+## Review
+
+1. **`off_ns` held the queue wait** (defect): right. `off_ns` is now
+   `in - left - queue_ns`, saturating; the unit test reads 3 700 where it
+   read 4 000, and the facts and caveat say the two add up to the gap.
+2. **A missing queue stamp read as `queue_ns = 0`** (defect): right that it
+   was uncounted, but on this machine the zeros were mostly not missing
+   stamps. With the stamp flagged in the record (`matched`'s bit 4), 48
+   spinning threads on 24 cpus gave no switch in without a stamp; the 73
+   zero waits among 7 241 preempted slices, and the ms of `off_ns` beside
+   them, were tasks the balancer moved while runnable: the first cpu's
+   `sched_info_dequeue` closes that part of the wait into `run_delay` and
+   clears the stamp, and the second cpu's stamp is the rest only (what
+   `sched_common::push_run_delay` already says of `sched.runqlat`). The
+   record now carries both ends' `run_delay` and the wait adds its growth
+   since the switch out: 5 zeros left, `off_ns` 3.3 ms against 0.52 s. A
+   switch in with neither a stamp nor a switch out to measure from carries
+   no `queue_ns` or `off_ns` and is counted in the facts. The 5 left are
+   slices handed to `migration/N`, the stopper's move, not chased.
+3. **`sched.interrupts` dropped a backwards counter** (gap): right, the
+   kernel's counts are `unsigned int`. A count that went backwards from the
+   upper half of 2^32 is counted across the wrap, and the wraps are a fact;
+   any other backwards count resets (a line freed and taken again under its
+   name), counts from zero, and is a failed read with a note. The failed
+   closing read in count mode is a failed read with a note too. Not shown
+   live: no counter here is near 2^32; the unit test holds it.
+
+Tests of the round: `cargo test --lib sched` 141 passed, `cargo test --lib
+catalog` 66, `cargo test --test family_sched -- slices interrupt` 4 (after
+`make`, privileged; `time_slices_*` three times), clippy and fmt clean.
+
 ## Decision lines for `DECISIONS.md`
 
 - A counted `sched.switches` rate on a task is per second of the run; the
@@ -162,3 +196,6 @@ sudo -n bpftrace -e 'tracepoint:sched:sched_wakeup /args.comm == "omnref-sleep"/
   `sched_info` account; the tracepoints' wakeup-to-switch figure is a
   different quantity and, where it is carried, has its own name
   (`wake_to_run_ns`).
+- `sched.slices`' `off_ns` and `queue_ns` add up to the gap between a
+  switch out and the next switch in; the wait counts the part the kernel
+  closed into `run_delay` on a cpu the task was moved from.
