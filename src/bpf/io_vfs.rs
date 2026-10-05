@@ -340,9 +340,14 @@ pub fn major_minor(kernel_dev: u32) -> (u32, u32) {
 ///
 /// `do_fsync` beside `vfs_fsync_range`: on this machine the compiler inlined
 /// `vfs_fsync` and `vfs_fsync_range` into `do_fsync`, so an `fsync(2)` reaches
-/// neither out-of-line copy (`catalog/io.yaml`, `io.fsync`), and counting
-/// both counts each sync once -- `msync` and the in-kernel callers reach the
-/// range function, the two syscalls `do_fsync`.
+/// neither out-of-line copy (`catalog/io.yaml`, `io.fsync`) -- `msync` and the
+/// in-kernel callers reach the range function, the two syscalls `do_fsync`.
+/// Where the compiler did not inline them, an `fsync(2)` passes `do_fsync`,
+/// then `vfs_fsync`, then `vfs_fsync_range`, and counting both functions would
+/// count it twice. So `do_fsync` marks its thread on entry and clears the mark
+/// on exit, and a `vfs_fsync_range` on a marked thread is the same sync and is
+/// not counted again ([`Guard`]): one sync is one count on a kernel that
+/// inlines and on one that does not.
 pub const VFS_CALLS: [&str; 12] = [
     "vfs_read",
     "vfs_write",
@@ -361,6 +366,28 @@ pub const VFS_CALLS: [&str; 12] = [
 /// The stack slots of a counting program.
 const CALLS_IDS_SCRATCH: i16 = -8;
 const CALLS_KEY: i16 = -16;
+const CALLS_TID: i16 = -24;
+const CALLS_MARK: i16 = -32;
+
+/// The slot after the functions' own: `do_fsync` calls whose thread could not
+/// be marked because the map of marks was full, each a sync that a
+/// non-inlining kernel may count twice.
+pub const UNGUARDED: u32 = VFS_CALLS.len() as u32;
+
+/// Threads inside `do_fsync` at once, at most, before a mark is refused.
+const MAX_INSIDE: u32 = 4096;
+
+/// What a counting program does beside counting: the guard that keeps one
+/// `fsync(2)` from being counted by both `do_fsync` and `vfs_fsync_range`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Guard {
+    /// Count, and nothing else.
+    Plain,
+    /// `do_fsync`: count, then mark the thread in the map of marks.
+    Marks(i32),
+    /// `vfs_fsync_range`: count only on a thread no `do_fsync` has marked.
+    Unless(i32),
+}
 
 /// One program per function on its entry: the target's filter, then one
 /// atomic add to the function's slot of a per-cpu array. Any file type: a
@@ -370,7 +397,9 @@ pub fn calls_instructions(
     followed: &crate::bpf::sched_common::Followed,
     counts_fd: i32,
     slot: u32,
+    guard: Guard,
 ) -> Vec<Insn> {
+    use crate::bpf::insn::helper;
     let mut program = Program::new();
     crate::bpf::sched_common::push_current_followed_filter(
         &mut program,
@@ -380,18 +409,61 @@ pub fn calls_instructions(
         SKIP,
         "calls_kept",
     );
+    // The thread id, the low half, as the key of the map of marks.
+    program.push(Insn::stx(BPF_W, R10, CALLS_TID, 6));
+    if let Guard::Unless(inside_fd) = guard {
+        program.extend(Insn::load_map_fd(1, inside_fd));
+        program.push(Insn::mov64_reg(2, R10));
+        program.push(Insn::add64_imm(2, CALLS_TID as i32));
+        program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+        program.jump_to(SKIP, Insn::jne_imm(0, 0, 0));
+    }
+    count_slot(&mut program, counts_fd, slot, "counted");
+    program.label("counted");
+    if let Guard::Marks(inside_fd) = guard {
+        program.push(Insn::st_imm(BPF_DW, R10, CALLS_MARK, 0));
+        program.extend(Insn::load_map_fd(1, inside_fd));
+        program.push(Insn::mov64_reg(2, R10));
+        program.push(Insn::add64_imm(2, CALLS_TID as i32));
+        program.push(Insn::mov64_reg(3, R10));
+        program.push(Insn::add64_imm(3, CALLS_MARK as i32));
+        program.push(Insn::mov64_imm(4, 0));
+        program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+        program.jump_to(SKIP, Insn::jeq_imm(0, 0, 0));
+        count_slot(&mut program, counts_fd, UNGUARDED, SKIP);
+    }
+    program.label(SKIP);
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    program.build()
+}
+
+/// One atomic add to `slot` of the counters, then on to `next`.
+fn count_slot(program: &mut Program, counts_fd: i32, slot: u32, next: &'static str) {
     program.push(Insn::st_imm(BPF_W, R10, CALLS_KEY, slot as i32));
     program.extend(Insn::load_map_fd(1, counts_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, CALLS_KEY as i32));
     program.push(Insn::call(crate::bpf::insn::helper::MAP_LOOKUP_ELEM));
-    program.jump_to(SKIP, Insn::jeq_imm(0, 0, 0));
+    program.jump_to(next, Insn::jeq_imm(0, 0, 0));
     // Atomic although the array is per-cpu: a tracing program runs with
     // migration disabled, not preemption, so two calls on one cpu can
     // interleave a load and a store.
     program.push(Insn::mov64_imm(1, 1));
     program.push(Insn::atomic_add(BPF_DW, 0, 0, 1));
-    program.label(SKIP);
+}
+
+/// `do_fsync`'s exit half: the thread's mark, cleared. Unfiltered, since
+/// clearing a mark nobody set is a failed delete and nothing more.
+pub fn unmark_instructions(inside_fd: i32) -> Vec<Insn> {
+    use crate::bpf::insn::helper;
+    let mut program = Program::new();
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_W, R10, CALLS_TID, 0));
+    program.extend(Insn::load_map_fd(1, inside_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, CALLS_TID as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
     program.push(Insn::mov64_imm(0, 0));
     program.push(Insn::exit());
     program.build()
@@ -402,6 +474,9 @@ pub struct VfsCalls {
     counts: crate::bpf::map::Counters,
     /// `(slot, function)` of every function attached.
     links: Vec<(u32, fentry::Link)>,
+    /// `do_fsync`'s exit half, which clears the marks, and the map of them.
+    unmark: Option<fentry::Link>,
+    _inside: Option<crate::bpf::map::Hash>,
     /// The functions this kernel does not declare, or would not attach, and
     /// why.
     pub absent: Vec<String>,
@@ -421,10 +496,37 @@ impl VfsCalls {
             .map_or(Followed::only(whose), |descendants| {
                 descendants.followed(whose)
             });
-        let counts = crate::bpf::map::Counters::create(VFS_CALLS.len() as u32, "omn_vfs_calls")
+        let counts = crate::bpf::map::Counters::create(VFS_CALLS.len() as u32 + 1, "omn_vfs_calls")
             .map_err(|error| crate::bpf::map::map_failure("VFS call counters", error))?;
         let mut links = Vec::new();
         let mut absent = Vec::new();
+        // The guard, where `do_fsync` exists and its exit half attaches. The
+        // exit half goes first, so that no mark is ever set with nothing to
+        // clear it.
+        let mut inside = None;
+        let mut unmark = None;
+        if let Ok(function) = index.function("do_fsync") {
+            let map = crate::bpf::map::Hash::create(4, 8, MAX_INSIDE, "omn_vfs_inside")
+                .map_err(|error| crate::bpf::map::map_failure("VFS sync marks", error))?;
+            let instructions = unmark_instructions(map.as_raw_fd());
+            crate::bpf::insn::audit(&instructions)?;
+            match fentry::attach(
+                &function,
+                fentry::Side::Exit,
+                &instructions,
+                "omn_vfs_unmark",
+            ) {
+                Ok(link) => {
+                    unmark = Some(link);
+                    inside = Some(map);
+                }
+                Err(reason) => absent.push(format!(
+                    "`do_fsync`'s exit half: {reason}; without it a kernel that does not inline \
+                     `vfs_fsync_range` into `do_fsync` counts an `fsync(2)` under both"
+                )),
+            }
+        }
+        let inside_fd = inside.as_ref().map(crate::bpf::map::Hash::as_raw_fd);
         for (slot, name) in VFS_CALLS.iter().enumerate() {
             let function = match index.function(name) {
                 Ok(function) => function,
@@ -433,7 +535,13 @@ impl VfsCalls {
                     continue;
                 }
             };
-            let instructions = calls_instructions(&followed, counts.as_raw_fd(), slot as u32);
+            let guard = match (*name, inside_fd) {
+                ("do_fsync", Some(fd)) => Guard::Marks(fd),
+                ("vfs_fsync_range", Some(fd)) => Guard::Unless(fd),
+                _ => Guard::Plain,
+            };
+            let instructions =
+                calls_instructions(&followed, counts.as_raw_fd(), slot as u32, guard);
             crate::bpf::insn::audit(&instructions)?;
             match fentry::attach(
                 &function,
@@ -458,6 +566,8 @@ impl VfsCalls {
         Ok(Self {
             counts,
             links,
+            unmark,
+            _inside: inside,
             absent,
             descendants,
         })
@@ -471,16 +581,25 @@ impl VfsCalls {
             .collect()
     }
 
-    /// Runs the kernel skipped: calls never counted.
+    /// Runs the kernel skipped: calls never counted. A skipped run of
+    /// `do_fsync`'s exit half is one too, since the mark it left keeps the
+    /// thread's next `vfs_fsync_range` out of the count.
     pub fn missed(&self) -> u64 {
         self.links
             .iter()
             .map(|(_, link)| link.misses())
             .sum::<u64>()
+            + self.unmark.as_ref().map_or(0, fentry::Link::misses)
             + self
                 .descendants
                 .as_ref()
                 .map_or(0, crate::bpf::sched_common::Descendants::skipped)
+    }
+
+    /// `do_fsync` calls whose thread could not be marked, each a sync a
+    /// kernel that does not inline `vfs_fsync_range` counts twice.
+    pub fn unguarded(&self) -> u64 {
+        self.counts.read(UNGUARDED)
     }
 
     /// Processes the target started that the map had no room for.
