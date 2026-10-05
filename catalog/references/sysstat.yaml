@@ -74,9 +74,6 @@
           times a second; pidstat reads nvcsw and nivcsw, omn a perf software
           counter. Two separate runs of a deterministic count; 0.15 for the
           sleep's overshoot, which differs between the runs."
-  known_defect: "sched.switches' counted-window rate divides the run's total
-                 by a window of 12 to 22 ms instead of the run's seconds
-                 (docs/fixes/w22-sysstat.md, defect 1)"
 
 # --- system pairs: the machine, observed in the same seconds ----------------
 

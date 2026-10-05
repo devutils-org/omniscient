@@ -31,7 +31,7 @@ separate`) are two runs of a deterministic workload.
 | `iostat -c` | `omn cpu.util --system -m poll@1s -e raw` | yes | within 0.03: seen 0.007, `iostat-c` | nothing |
 | `iostat -d`, `iostat -x` | `io.iops`, `io.bytes`, `io.latency`, ... | see `docs/replaces/io.md` | no pair: the device columns are the io family's pairs | |
 | `pidstat -r` | `omn mem.rss -m poll -- prog` | yes | within 3 %: seen 0.45 %, `pidstat-r` | minflt/s, majflt/s per process as a rate |
-| `pidstat -w` | `omn sched.switches -m count -e rate -- prog` | in part | **no**: omn 77 135/s against 931/s, `pidstat-w` (known defect) | the rate's window (handoff); voluntary vs involuntary needs `force:bpf:raw_tp` |
+| `pidstat -w` | `omn sched.switches -m count -e rate -- prog` | in part | within 15 %: seen 0.2 % (933.7/s against 936/s), `pidstat-w` | voluntary vs involuntary needs `force:bpf:raw_tp` |
 | `pidstat -u` | `omn cpu.oncpu_time -m poll -- prog` | in part | no pair: omn gives cumulative ns, pidstat a %CPU per interval, and `poll` cannot produce `rate` | a `rate` emit on poll, and the tail after the last poll (the last second of a run is lost) |
 | `pidstat -d` | `omn io.bytes --pid` (bpf only) | in part | no pair yet | a pair under the capabilities |
 | `sar -u` (live) | `omn cpu.util --system -m poll@1s -e raw` | yes | within 0.03: seen 0.012, `sar-u` | nothing |
