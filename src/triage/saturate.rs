@@ -200,6 +200,7 @@ impl Ask {
             decompose: Vec::new(),
             escalate: None,
             record: None,
+            launch: Vec::new(),
         }
     }
 }
@@ -425,6 +426,11 @@ pub struct Answer {
     pub dropped: Vec<Dropped>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// What the collectors said they broke in the workload, each sentence
+    /// once ([`engine::Ran::failures`]): the uses above are read off a
+    /// workload the tool broke.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<String>,
 }
 
 pub fn answer(
@@ -435,8 +441,10 @@ pub fn answer(
     ask.check()?;
     let mut session = ask.session();
     let dropped = engine::prune(catalog, capabilities, &mut session, &OPTIONAL)?;
-    let run = engine::run(catalog, capabilities, &session)?;
-    Ok(read(ask, &run, dropped))
+    let ran = engine::run(catalog, capabilities, &session)?;
+    let mut answer = read(ask, &ran.run, dropped);
+    answer.failures = ran.failures;
+    Ok(answer)
 }
 
 fn attr(event: &Event, name: &str) -> Option<f64> {
@@ -847,6 +855,7 @@ pub fn read(ask: &Ask, run: &Run, dropped: Vec<Dropped>) -> Answer {
         energy,
         dropped,
         notes,
+        failures: Vec::new(),
     }
 }
 
@@ -1157,6 +1166,9 @@ impl Answer {
         }
         for note in &self.notes {
             let _ = writeln!(out, "  note: {note}");
+        }
+        for failure in &self.failures {
+            let _ = writeln!(out, "  broken by the tool: {failure}");
         }
         out
     }

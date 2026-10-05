@@ -2143,6 +2143,21 @@ pub fn run_all_within_unserved(
     cheaper: &mut dyn Cheaper,
     unserved: &[Unserved],
 ) -> Result<Vec<Collection>, CollectError> {
+    run_all_bounded(resolved, cheaper, unserved, None)
+}
+
+/// The same run, lasting as long as `bound` -- a program it launches and no
+/// request targets -- when one is given: the window of a machine, a core, a
+/// cgroup or a pid measured for a program's life, as `perf stat -a -- prog`
+/// and `turbostat prog` measure. A request whose target is a launch beside
+/// it is refused: the program is launched once, and is either the run's
+/// bound or a request's target.
+pub fn run_all_bounded(
+    resolved: &[ResolvedRequest],
+    cheaper: &mut dyn Cheaper,
+    unserved: &[Unserved],
+    bound: Option<&[String]>,
+) -> Result<Vec<Collection>, CollectError> {
     let mut escalation = escalation_for(resolved, unserved)?;
     run_core(
         resolved,
@@ -2151,6 +2166,7 @@ pub fn run_all_within_unserved(
             .as_deref_mut()
             .map(|escalation| escalation as &mut dyn Escalate),
         None,
+        bound,
     )
     .map(|(collections, _)| collections)
 }
@@ -2167,8 +2183,19 @@ pub fn record_within(
     cheaper: &mut dyn Cheaper,
     recorder: &mut Recorder<'_>,
 ) -> Result<(Vec<Collection>, Recorded), CollectError> {
+    record_bounded(resolved, cheaper, recorder, None)
+}
+
+/// [`record_within`], bounded by a launched program as [`run_all_bounded`]
+/// is.
+pub fn record_bounded(
+    resolved: &[ResolvedRequest],
+    cheaper: &mut dyn Cheaper,
+    recorder: &mut Recorder<'_>,
+    bound: Option<&[String]>,
+) -> Result<(Vec<Collection>, Recorded), CollectError> {
     recording_holds(resolved, recorder)?;
-    run_core(resolved, cheaper, None, Some(recorder))
+    run_core(resolved, cheaper, None, Some(recorder), bound)
         .map(|(collections, recorded)| (collections, recorded.unwrap_or_default()))
 }
 
@@ -2246,7 +2273,7 @@ pub fn run_all_escalating(
     cheaper: &mut dyn Cheaper,
     escalation: Option<&mut dyn Escalate>,
 ) -> Result<Vec<Collection>, CollectError> {
-    run_core(resolved, cheaper, escalation, None).map(|(collections, _)| collections)
+    run_core(resolved, cheaper, escalation, None, None).map(|(collections, _)| collections)
 }
 
 /// The one runner behind every entry point: an ordinary run, an escalating
@@ -2256,9 +2283,11 @@ fn run_core(
     cheaper: &mut dyn Cheaper,
     escalation: Option<&mut dyn Escalate>,
     recorder: Option<&mut Recorder<'_>>,
+    bound: Option<&[String]>,
 ) -> Result<(Vec<Collection>, Option<Recorded>), CollectError> {
     assert!(!resolved.is_empty(), "a run needs at least one request");
     let workload = workload_of(resolved)?;
+    let bound = bound.filter(|argv| !argv.is_empty());
     // Whether each request is about the workload, which decides what it is
     // bound to, what its overhead is a percentage of, and whether its target
     // going away ends the run. With no workload in the session every target
@@ -2267,8 +2296,24 @@ fn run_core(
         .iter()
         .map(|resolved| workload.is_none_or(|workload| &resolved.request.target == workload))
         .collect();
-    let launched_argv = match workload {
-        Some(Target::Launch(argv)) => Some(argv),
+    let launched_argv: Option<&[String]> = match (workload, bound) {
+        (Some(Target::Launch(argv)), None) => Some(argv),
+        (Some(Target::Launch(argv)), Some(bound)) => {
+            return Err(CollectError::MixedTargets {
+                first: format!("a run bounded by `{}`", bound.join(" ")),
+                second: Target::Launch(argv.clone()).to_string(),
+            })
+        }
+        (_, bound) => bound,
+    };
+    // A process the run did not start, whose exit ends it as a launched
+    // program's does: `--pid` alone, as `perf stat -p` ends with its
+    // process. Not beside a bound, which is then the run's end.
+    let exits = match (workload, launched_argv) {
+        (Some(Target::Pid(pids)), None) => {
+            let exits = launch::Exits::of(pids);
+            exits.watches_all(pids).then_some(exits)
+        }
         _ => None,
     };
 
@@ -2379,7 +2424,12 @@ fn run_core(
             .window
             .is_some_and(|window| window.stop.is_some())
     });
-    if duration_ns.is_none() && launched_argv.is_none() && !snapshot && !every_window_closes {
+    if duration_ns.is_none()
+        && launched_argv.is_none()
+        && exits.is_none()
+        && !snapshot
+        && !every_window_closes
+    {
         return Err(CollectError::NoStopCondition);
     }
     if let Some(duration_ns) = duration_ns {
@@ -2540,7 +2590,10 @@ fn run_core(
     spending.deadline_ns = deadline_ns;
     spending.sheddable = plans.iter().map(|plan| plan.held).collect();
     let started_ns = spending.opened_ns;
-    let wake = child.as_ref().and_then(|child| child.exit_fd());
+    let wake = child
+        .as_ref()
+        .and_then(|child| child.exit_fd())
+        .or_else(|| exits.as_ref().and_then(launch::Exits::wake_fd));
     // A recording weighs its budget over a rolling span rather than the
     // whole run, which has no fixed end to be a share of.
     let budget_interval_ns = recorder.as_ref().map(|recorder| {
@@ -2573,6 +2626,9 @@ fn run_core(
                 if let Some(status) = child.finished() {
                     return Some(format!("the launched program exited with {status}"));
                 }
+            }
+            if let Some(reason) = exits.as_ref().and_then(launch::Exits::all_exited) {
+                return Some(reason);
             }
             match deadline_ns {
                 Some(deadline_ns) if monotonic_ns() >= deadline_ns => {

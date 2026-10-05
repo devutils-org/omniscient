@@ -638,3 +638,17 @@
     - "A pid names a cgroup here: pressure is accounted per cgroup, never per
        process."
 
+# The family's default: what `omn trace mem -- PROGRAM` composes, per cost
+# band. See docs/lazy.md.
+- default:
+    family: mem
+    question: "How much memory does the program hold, and does it grow?"
+    low:
+      - {source: mem.rss, mode: "poll@100ms", emit: [timeline, summary], label: "resident memory"}
+    med:
+      - {source: mem.rss, mode: "poll@100ms", emit: [timeline, summary], label: "resident memory"}
+      - {source: mem.faults, mode: count, emit: [summary], label: "page faults"}
+    high:
+      - {source: mem.rss, mode: "poll@100ms", emit: [timeline, summary], label: "resident memory"}
+      - {source: mem.pss, mode: "poll@100ms", emit: [summary], label: "proportional memory"}
+      - {source: mem.faults, mode: count, emit: [summary], label: "page faults"}
