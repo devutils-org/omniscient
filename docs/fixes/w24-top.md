@@ -1,7 +1,8 @@
 # The twenty-fourth wave, stream top
 
 Branch `feat/w24-top`, from `main` at `067db07` (the brief), `main` merged
-once at `d7cc7a2` (streams run, lazy, triage, unwind). Files:
+at `d7cc7a2` (streams run, lazy, triage, unwind) and again once stream
+proc's `proc.tasks` landed (`172a033`). Files:
 `view/src/views/system.rs`, `view/src/views/process.rs`, the new
 `tests/view_top_batch.rs`, and the `system--*`, `process--*` and two
 `frame--*` snapshots in `docs/view/gallery/` those views draw. Measured
@@ -17,6 +18,7 @@ average 12 to 18).
 | `390c2b7` | **the batch output**: `omn_view::views::system::batch(data, sort)`. It prints the machine's panels as one `machine SOURCE KEY mean= peak= last= total= [part=]` line per series, then every task as a whitespace-separated table (`ID KIND NAME CPU ON_CPU_NS RSS_BYTES FAULTS RUN_QUEUE_NS IO_CALLS IN_IO_NS LOCK_NS GPU_MEM_BYTES`). The numbers are raw, `-` marks a column not measured, and each column's losses, time errors and refusals go on `#` lines. `tests/view_top_batch.rs`. The `--batch` flag is stream run's (below). |
 | `f9027ec` | **`system` lists the machine's processes from `proc.tasks`** (stream proc's source, `feat/w24-proc` `25789e3`). Each process is a row by its name. Its cpu within the run is each poll's share over its interval, plus a first reading over a life only when the task started inside the run. The row also carries a sparkline of its share of one cpu and its resident size at the last poll, on the same rows as the run's other per-task sources. The view's **need** for `proc.tasks` (`poll@1s`, `raw`, `@system`) is not on this branch: it is added when the source is on `main` (see "Not done"). |
 | `42b073b`, `f0e5511` | the fill test live as well as replayed, and the `process-run` snapshot |
+| `585b8ee` | **the `proc.tasks` need**, after the merge of `main` with stream proc: `poll@1s`, `raw`, `@system`, so the list is the machine's beside any target. The live batch test reads the program's rows by its pid (0.7800 s against its own clock's 0.8154 s). |
 
 ## Shown versus reasoned
 
@@ -60,11 +62,12 @@ Shown, on this machine:
   "memory held" figure, the CPU line names `flame::hottest`, and the CPU
   line's mean over the life is the ledger's cpu time within 2 %.
 
-Reasoned, not shown:
+- **On a full live `omn top` of the machine** (after `585b8ee`), the list
+  names the machine's processes, e.g. `322509 rustc 149% ... 18.7s
+  2.65GiB`. But finding 1 held again: 2174 `proc.tasks` events (about four
+  polls of some 540 processes in a 12.6 s window), and 2 `cpu.util` events.
 
-- How `system` looks with `proc.tasks` on a full live `omn top` of the
-  machine. The run below starved every poller, so the process table had
-  one poll of each process: names and RSS, and no cpu.
+Reasoned, not shown:
 - The 256-colour gradient on a real terminal: unchanged here, and stream
   views' item.
 
@@ -95,24 +98,14 @@ Reasoned, not shown:
 
 ## Not done, and why
 
-1. **The `proc.tasks` need in `system`'s `NEEDS`**: the source is on
-   `feat/w24-proc`, not yet on `main` when this was written. Adding the need
-   before the source would have every `omn top` ask for a source the catalog
-   does not have. It is nine lines after `power.energy`'s need:
-   `Need { source: "proc.tasks", mode: "poll@1s", emit: &["raw"], keys: &[],
-   stack: None, scope: Scope::System, why: "the process list: the machine's
-   processes, each its name, its cpu and its memory" }`. Then the
-   `system--*` snapshots are blessed again (`OMN_VIEW_BLESS=1 cargo test
-   --test view_snapshots -- system`). If this stream's fix round runs after
-   proc merges, it lands it. Otherwise the coordinator does, at the merge.
-2. **`omn top --batch`** (the flag): `src/cli.rs` and `src/main.rs` are
+1. **`omn top --batch`** (the flag): `src/cli.rs` and `src/main.rs` are
    stream run's. The library half is landed and tested. Request below.
-3. **`Capacity::of` reading the recording's capacity** (stream run's
+2. **`Capacity::of` reading the recording's capacity** (stream run's
    request to this stream): it needs the `Beside::capacity` field in
    `view/src/model.rs` (stream views'), which is not on `main`. Once it is,
    it is one arm in `Capacity::of`: `data.capacity` (or wherever `Beside`
    lands) in place of `Capacity::default()` for a replay.
-4. **The suspect's reading of the lock in the sched collectors**: the view
+3. **The suspect's reading of the lock in the sched collectors**: the view
    splits what the timebar gives. That the suspect is the sleep on this
    workload is right by the manifest (0.9 s of sleep against 0.25 s on the
    lock). Nothing to change in `process`.
