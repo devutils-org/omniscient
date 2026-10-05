@@ -6374,7 +6374,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
 /// `omn trace io.latency -- fio <job>` without `thread` reported 0 requests
 /// for 28 807 reads fio completed, and "29678 block_rq_complete events had no
 /// opening", because the programs compared the submitter with the launched
-/// process alone (`docs/scenarios/io.md`, defect 27). Here the launched
+/// process alone (`docs/scenarios/io.md`, defect 25). Here the launched
 /// process forks and the child makes every read, so a filter on the launched
 /// process alone keeps none of them; the child's are counted one for one,
 /// under the child's pid.

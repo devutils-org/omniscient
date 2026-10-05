@@ -150,7 +150,7 @@ impl Submitter {
 ///
 /// A launched `fio` forks its job, and the job submits every read: compared
 /// with the launched process alone, `io.latency` reported 0 requests for
-/// 28 807 reads (`docs/scenarios/io.md`, defect 27). The root is compared as a
+/// 28 807 reads (`docs/scenarios/io.md`, defect 25). The root is compared as a
 /// constant first, so a program that starts nothing costs its own requests no
 /// lookup; any other thread group is looked up in the map
 /// [`super::sched_common::Descendants`] keeps from `sched_process_fork`.
