@@ -1148,3 +1148,11 @@ run, and the veth scenario removes one and stops instead.
 **The window.** `events over 600.4ms` on a run that asked for two seconds is the
 run telling you its target went away. The number of events is not the thing to
 read; the window is.
+
+**An unknown owner is not a zero.** Two defects the twenty-fourth wave's
+review found, of one kind: `net.sockets --pid` on a process whose descriptors
+this user cannot read listed no socket and said "no loss", and
+`net.tcp.lifetime --pid` sorted a connection no process was seen acting on
+(`at_close`) in or out of the tree by whichever task its close interrupted.
+The first is now refused with the reason (and a failed read if it becomes
+unreadable mid-run); the second is a counted loss under a process target.

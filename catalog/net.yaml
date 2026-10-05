@@ -86,9 +86,11 @@
        `owner`. One no process acted on -- a reset, a timer -- carries the
        task current at its close, `attributed` `at_close`."
     - "A --pid or launched target keeps the connections of its process tree:
-       its descendants are followed through /proc at each drain (10 ms), and
+       its descendants are followed through /proc at each drain (20 ms), and
        a child that exited before it was ever seen is counted as a loss, not
-       placed in the tree or out of it."
+       placed in the tree or out of it. So is an `at_close` connection: the
+       task its close interrupted says nothing about who held it, so it is
+       neither kept nor left out as another process's."
 
 - id: net.tcp.rtt
   family: net
@@ -281,7 +283,9 @@
     - "The owner is found by matching socket inodes against /proc/<pid>/fd,
        which another user's processes do not open to an unprivileged reader:
        their sockets carry no `pid`, and the run's notes say how many
-       processes were unreadable. A connection still in an accept queue, and
+       processes were unreadable. Under --pid an unreadable process is
+       refused at attach, and one that becomes unreadable (a setuid exec)
+       is a failed read, never an empty inventory. A connection still in an accept queue, and
        a socket in TIME-WAIT, belong to no process."
     - "Each poll lists the sockets alive at that tick; one opened and closed
        between two ticks is never seen."
