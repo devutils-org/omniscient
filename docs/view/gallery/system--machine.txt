@@ -25,7 +25,7 @@ omn top │ fixture machine │ 20.0s                                           
 │          +5 moved nothing: br-bf6c2e1afced br-cb843b6eb1dd docker0 enp38s0 lo                                        │
 │          └0s──────────────────────────────10.0s───────────────────────────20.0s┘ a cell is 282ms, drawn at its peak  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌ processes the target's, by cpu ────────────────────────────────────────────────────┐┌ cost, share of one cpu ────────┐
+┌ processes every task measured, by cpu ─────────────────────────────────────────────┐┌ cost, share of one cpu ────────┐
 │       ID    CPU cpu over the run  ON CPU  GPU MEM                                  ││cpu.oncpu_time   ███████ ≥1.61% │
 │  2619032  2.95% ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▇   591ms        ·                                  ││gpu.engine_busy  █████    1.07% │
 │     3085  0.86% ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁   171ms        ·                                  ││cpu.util         ▏        0.06% │

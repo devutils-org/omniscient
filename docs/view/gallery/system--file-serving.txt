@@ -9,11 +9,11 @@ omn top │ fixture file-serving │ 2.56s                            view: snap
 │          not in this run                                                                                             │
 ├ power ───────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │          not in this run                                                                                             │
-├ disk bytes moved, per device, speed unknown so one hue; read apart from written: in the events o…─ ~low det degraded ┤
+├ disk bytes moved, per device, speed unknown so one hue; read apart from written needs the `dir` …─ ~low det degraded ┤
 │259:0           ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁████████▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▂▂▂▂▁▁▁▁▁▁▁·· 15.5MiB  peak 33.1MiB/s             │
 │253:0           ··············▁▁▁▁▁▁▁▁··········································· 8.00KiB  peak 38.0KiB/s             │
 │          +1 moved nothing: 7:0                                                                                       │
-├ network bytes moved, per interface, speed unknown so one hue; in apart from out: in the events o…─ ~low det degraded ┤
+├ network bytes moved, per interface, speed unknown so one hue; in apart from out needs the `dir` …─ ~low det degraded ┤
 │lo              ▆▆▆▆▆▆▆▆▃▃▃▃▃▃████████▃▃▃▃▃▃▇▇▇▇▇▇▇▇▃▃▃▃▃▃▄▄▄▄▄▄▄▆▆▆▆▆▆▆▁▁▁▁▁▁▁·· 224MiB  peak 177MiB/s               │
 │wlan0           ··············▁▁▁▁▁▁▁▁······▁▁▁▁▁▁▁▁······▁▁▁▁▁▁▁▁▁▁▁▁▁▁·······▁· 2.34KiB  peak 3.75KiB/s             │
 │          +5 moved nothing: br-bf6c2e1afced br-cb843b6eb1dd docker0 enp38s0 tailscale0                                │

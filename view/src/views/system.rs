@@ -34,7 +34,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::{Action, Ctx, Focus, Need, Region, Scope, View};
-use crate::model::{Data, Event, Output, Refusal, Results};
+use crate::model::{Data, Event, Key, Output, Refusal, Results};
 use crate::trust::{self, palette, usage, Trust};
 use crate::units;
 
@@ -62,19 +62,19 @@ pub const NEEDS: &[Need] = &[
         source: "io.bytes",
         mode: "poll@250ms",
         emit: &["raw", "timeline", "summary"],
-        keys: &[],
+        keys: &["dev", "dir"],
         stack: None,
         scope: Scope::System,
-        why: "the disk panel: bytes read and written per device, apart, from the events",
+        why: "the disk panel: bytes read and written per device, apart, by the `dir` key",
     },
     Need {
         source: "net.bytes",
         mode: "poll@250ms",
         emit: &["raw", "timeline", "summary"],
-        keys: &[],
+        keys: &["iface", "dir"],
         stack: None,
         scope: Scope::System,
-        why: "the network panel: bytes in and out per interface, apart, from the events",
+        why: "the network panel: bytes in and out per interface, apart, by the `dir` key",
     },
     Need {
         source: "gpu.engine_busy",
@@ -492,7 +492,7 @@ fn tracks(data: &Data, results: &Results) -> Vec<Track> {
     });
     let raw = results.events();
     if !raw.is_empty() || timeline.is_none() {
-        return from_events(data, raw, &reading);
+        return fold_dirs(from_events(data, raw, &reading), &reading);
     }
     let timeline = timeline.map(Vec::as_slice).unwrap_or_default();
     let offsets: Vec<u64> = timeline
@@ -538,7 +538,121 @@ fn tracks(data: &Data, results: &Results) -> Vec<Track> {
             }),
         }
     }
-    tracks
+    fold_dirs(tracks, &reading)
+}
+
+/// The parts of a series key. `omn` joins a timeline's axes with a space
+/// (`dev:259+0 dir:read`, `src/emit.rs`'s series key) and this view joins an
+/// event's keys with a comma; a space inside a part that is not a key (a
+/// RAPL domain's `package 1`) keeps the part whole.
+fn key_parts(key: &str) -> Vec<&str> {
+    key.split(',')
+        .flat_map(|piece| {
+            let words: Vec<&str> = piece.split(' ').filter(|word| !word.is_empty()).collect();
+            if words.len() > 1 && words.iter().all(|word| word.contains(':')) {
+                words
+            } else {
+                vec![piece]
+            }
+        })
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+/// Each direction a `dir` key names, as the part of the bytes it is: the
+/// two the device's own total adds up (`/proc/diskstats`' read and written
+/// sectors, `/proc/net/dev`'s received and sent). A discard or a flush is
+/// not in that total, so it is not folded into it.
+const DIRS: &[(&str, &str)] = &[
+    ("read", "read"),
+    ("write", "written"),
+    ("rx", "in"),
+    ("tx", "out"),
+];
+
+/// Series split by a `dir` key folded back into one per device, each
+/// direction one of its parts: a recording that kept only its timeline says
+/// read apart from written as its events would. Series with no `dir` part
+/// are kept as they are.
+fn fold_dirs(tracks: Vec<Track>, reading: &Reading) -> Vec<Track> {
+    if reading.parts.is_empty()
+        || !tracks
+            .iter()
+            .any(|track| key_parts(&track.key).iter().any(|part| part.starts_with("dir:")))
+    {
+        return tracks;
+    }
+    let names: Vec<&'static str> = reading.parts.iter().map(|(name, _)| *name).collect();
+    let mut kept = Vec::new();
+    // By the key without its direction: each part's points by instant.
+    let mut folded: BTreeMap<String, (Option<String>, BTreeMap<u64, Vec<Point>>)> =
+        BTreeMap::new();
+    for track in tracks {
+        let parts = key_parts(&track.key);
+        let Some(dir) = parts.iter().find_map(|part| part.strip_prefix("dir:")) else {
+            kept.push(track);
+            continue;
+        };
+        let rest: Vec<&str> = parts
+            .iter()
+            .copied()
+            .filter(|part| !part.starts_with("dir:"))
+            .collect();
+        let rest = if rest.is_empty() {
+            "system".to_owned()
+        } else {
+            rest.join(",")
+        };
+        let entry = folded.entry(rest).or_default();
+        if entry.0.is_none() {
+            entry.0.clone_from(&track.name);
+        }
+        let Some(index) = DIRS
+            .iter()
+            .find(|(named, _)| *named == dir)
+            .and_then(|(_, part)| names.iter().position(|name| name == part))
+        else {
+            // A discard or a flush: the device is listed, its bytes are not
+            // in the total.
+            continue;
+        };
+        for point in track.points {
+            let slots = entry.1.entry(point.at_ns).or_insert_with(|| {
+                vec![
+                    Point {
+                        at_ns: point.at_ns,
+                        read: 0.0,
+                        shown: 0.0,
+                    };
+                    names.len()
+                ]
+            });
+            slots[index] = point;
+        }
+    }
+    for (key, (name, instants)) in folded {
+        let mut points = Vec::with_capacity(instants.len());
+        let mut parts: Vec<(&'static str, Vec<f64>)> =
+            names.iter().map(|name| (*name, Vec::new())).collect();
+        for (at_ns, slots) in instants {
+            points.push(Point {
+                at_ns,
+                read: slots.iter().map(|slot| slot.read).sum(),
+                shown: slots.iter().map(|slot| slot.shown).sum(),
+            });
+            for ((_, values), slot) in parts.iter_mut().zip(&slots) {
+                values.push(slot.read);
+            }
+        }
+        kept.push(Track {
+            key,
+            points,
+            parts,
+            name,
+            ..Track::default()
+        });
+    }
+    kept
 }
 
 /// Where a finished run's timeline starts, on the run's axis.
@@ -631,7 +745,7 @@ fn lanes(points: Vec<Point>) -> Lanes {
 
 /// Whether a result is a task's: its series are keyed by one.
 fn names_a_task(results: &Results) -> bool {
-    let keyed = |key: &str| key.split(',').any(|part| part.starts_with("task:"));
+    let keyed = |key: &str| key_parts(key).iter().any(|part| part.starts_with("task:"));
     results.outputs.iter().any(|output| match output {
         Output::Timeline { series, .. } => series.iter().any(|series| keyed(&series.key)),
         Output::Summary { series } => series.iter().any(|series| keyed(&series.key)),
@@ -774,9 +888,25 @@ fn series_key(event: &Event) -> String {
     event
         .keys
         .iter()
-        .map(ToString::to_string)
+        .map(key_text)
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// A key as a series names it. A key this side's mirror does not know is
+/// kept as its JSON; a direction is spelled as `omn` spells it in a
+/// timeline (`dir:read`), so an event and a series of one direction agree.
+fn key_text(key: &Key) -> String {
+    if let Key::Other(value) = key {
+        if let Some(dir) = value
+            .get("dir")
+            .and_then(|dir| dir.get("dir").or(Some(dir)))
+            .and_then(|dir| dir.as_str())
+        {
+            return format!("dir:{dir}");
+        }
+    }
+    key.to_string()
 }
 
 /// Turns amounts since the last read into amounts per second: by the
@@ -1772,7 +1902,7 @@ impl<'a> Strips<'a> {
             format!("{}; speed unknown, so one hue", what.note)
         } else {
             format!(
-                "{}, speed unknown so one hue; {} apart from {}: in the events only",
+                "{}, speed unknown so one hue; {} apart from {} needs the `dir` key",
                 what.note, what.parts.0, what.parts.1
             )
         };
@@ -1936,7 +2066,8 @@ const NETWORK: Devices = Devices {
 /// A series key as a row's label: its values without their kinds
 /// (`gpu:0,engine:gr` is `0/gr`), and a timeline's lane as it is (`#2`).
 fn key_name(key: &str) -> String {
-    key.split(',')
+    key_parts(key)
+        .into_iter()
         .map(|part| part.split_once(':').map_or(part, |(_, value)| value))
         .collect::<Vec<_>>()
         .join("/")
@@ -2055,7 +2186,8 @@ struct Procs {
 
 /// The task a series key names, if it names one.
 fn task_of(key: &str) -> Option<i32> {
-    key.split(',')
+    key_parts(key)
+        .into_iter()
         .find_map(|part| part.strip_prefix("task:"))
         .and_then(|tid| tid.parse().ok())
 }
@@ -2209,11 +2341,14 @@ impl System {
         procs: &Procs,
     ) {
         let sort = SORTS[self.sort];
-        let block = panel(
-            "processes",
-            &format!("the target's, by {}", sort.words()),
-            None,
-        );
+        // A launched program's run is the program's; any other lists every
+        // task it measured, which on the machine is not one target's.
+        let whose = if ctx.data.has_target() {
+            "the target's"
+        } else {
+            "every task measured"
+        };
+        let block = panel("processes", &format!("{whose}, by {}", sort.words()), None);
         let inner = block.inner(area);
         self.shown.clear();
         if procs.rows.is_empty() {

@@ -5,7 +5,7 @@
 │[0m[2mmade it asked for:[0m                                                                                                    │[0m
 │sched.wakeup                                                                                                          │[0m
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m
-┌[0m[1m processes [0m[2mthe target's, by cpu [0m────────────────────────────────────────────────────┐[0m[35m┌ cost, share of one cpu ────────┐[0m
+┌[0m[1m processes [0m[2mevery task measured, by cpu [0m─────────────────────────────────────────────┐[0m[35m┌ cost, share of one cpu ────────┐[0m
 │[0m[2mno process in this run: nothing in it is measured per task[0m                          │[0m[35m│[0m[2;35mnone of this view's collectors[0m  [0m[35m│[0m
 │                                                                                    │[0m[35m│[0m[2;35mis in this run[0m                  [0m[35m│[0m
 │                                                                                    │[0m[35m│[0m                                [0m[35m│[0m
