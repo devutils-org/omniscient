@@ -115,16 +115,28 @@ pub const SUBCOMMANDS: [&str; 10] = [
 
 #[derive(Debug, Args)]
 pub struct TraceArgs {
-    /// Source to measure, as <family>.<metric>, for instance io.latency.
-    /// Several, separated by spaces or commas, are measured over one window
-    /// and one launch, each with the same target and axes: what `perf stat
-    /// -e a,b -- prog` asks, and a session file of one request each.
+    /// Source to measure, as <family>.<metric>, for instance io.latency; or a
+    /// family alone (cpu, mem, io, ...), whose default composes the rest.
+    /// Several sources, separated by spaces or commas, are measured over one
+    /// window and one launch, each with the same target and axes: what `perf
+    /// stat -e a,b -- prog` asks, and a session file of one request each.
     #[arg(
-        value_name = "SOURCE",
-        required_unless_present = "file",
+        value_name = "SOURCE|FAMILY",
+        required_unless_present_any = ["file", "family"],
         value_delimiter = ','
     )]
     pub source: Vec<SourceId>,
+
+    /// The family a bare word named where a source is expected, carried
+    /// here by `omn::lazy::spell_family`: `omn trace cpu` is `omn trace
+    /// --family cpu`, and the parser keeps its positional for a source.
+    #[arg(long, hide = true, value_name = "FAMILY", conflicts_with_all = ["source", "file"])]
+    pub family: Option<String>,
+
+    /// Beside a family: the cost band of its default to compose, low, med or
+    /// high (the cheapest it has, when absent).
+    #[arg(long, value_name = "BAND", value_parser = crate::lazy::parse_band)]
+    pub cost: Option<crate::catalog::Cost>,
 
     /// Read the session from a file, or from standard input with `-`.
     #[arg(short = 'f', long, value_name = "PATH", conflicts_with = "source")]
@@ -786,7 +798,8 @@ fn target_given(args: &TraceArgs) -> bool {
         || args.system
 }
 
-fn target_from(args: &TraceArgs) -> Option<Target> {
+/// The target the flags name, if any.
+pub fn target_from(args: &TraceArgs) -> Option<Target> {
     if !args.program.is_empty() && !target_given(args) {
         return Some(Target::Launch(args.program.clone()));
     }

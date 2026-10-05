@@ -3432,10 +3432,12 @@ fn each_refusal_names_the_thing_that_is_missing() {
 
 /// A mode the catalog offers and this build does not serve exits 3, not 1.
 ///
-/// `cpu.cycles -m sample` is a valid request -- the catalog declares the mode,
-/// the machine has the counter -- that this build cannot serve because no
-/// collector implements sampling for a counting source. That is the same
-/// statement as "no collector is written", and it now carries the same code.
+/// `mem.cache_l1 -m sample` is a valid request -- the catalog declares the
+/// mode, the machine has the counter -- that this build cannot serve because
+/// no collector samples on a cache descriptor. That is the same statement as
+/// "no collector is written", and it now carries the same code. (It was
+/// `cpu.cycles -m sample` until the twenty-fourth wave, when the counting
+/// sources of this family came to sample on their own counters.)
 ///
 /// It used to exit 1, which is what a caller reads as a run that went wrong,
 /// and that was defect 4 of `docs/scenarios/cpu.md`. What decides it is where
@@ -3445,11 +3447,11 @@ fn each_refusal_names_the_thing_that_is_missing() {
 #[test]
 fn a_mode_the_build_does_not_implement_exits_as_unimplemented() {
     let (code, message) = run(&[
-        "cpu.cycles",
+        "mem.cache_l1",
         "-m",
         "sample@99hz",
         "-e",
-        "hist",
+        "raw",
         "--",
         "/bin/true",
     ])

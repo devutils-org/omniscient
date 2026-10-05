@@ -155,7 +155,7 @@ pub fn spread(runs: &[omn::encode::RunOutput], launched: &[String]) -> Vec<Sprea
 
 /// The spread as a terminal reads it: one line per series' mean, the other
 /// fields being in the structured formats.
-pub fn text(repeat: u32, spread: &[Spread]) -> String {
+pub fn text(repeat: u32, spread: &[Spread], lossy: &[usize]) -> String {
     use std::fmt::Write;
     let mut out = format!(
         "over {repeat} runs of the same session, each value's mean +- its spread (a launched \
@@ -181,7 +181,70 @@ pub fn text(repeat: u32, spread: &[Spread]) -> String {
             number(one.max),
         );
     }
+    if !lossy.is_empty() {
+        let runs: Vec<String> = lossy.iter().map(usize::to_string).collect();
+        let _ = writeln!(
+            out,
+            "  LOSS in run {} of {repeat}: those runs' values are in the means above; what each \
+             lost is said under its `run i of {repeat}:` line",
+            runs.join(", ")
+        );
+    }
     out
+}
+
+/// What one run lost and degraded, for stderr after its `run i of N:` line:
+/// per request, the loss headline a single run prints (`no loss`, or every
+/// counted kind), each reason, and each degradation. A spread is a mean over
+/// the runs, and a run that dropped events feeds its values into it like any
+/// other, so each run's account is said where the run is, not only in the
+/// document or under `-o`.
+pub fn losses(run: &omn::encode::RunOutput) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for results in &run.results {
+        let losses = &results.losses;
+        if losses.is_clean() {
+            let _ = writeln!(
+                out,
+                "  `{}`: no loss: every read succeeded and no tick ran late",
+                results.label
+            );
+        } else {
+            let _ = write!(
+                out,
+                "  `{}`: LOSS: {} dropped, {} failed reads, {} late ticks, {} undecoded, {} throttled",
+                results.label,
+                losses.dropped,
+                losses.failed_reads,
+                losses.late_ticks,
+                losses.undecoded,
+                losses.throttled
+            );
+            if losses.evicted > 0 {
+                let _ = write!(out, ", {} evicted by the retention", losses.evicted);
+            }
+            out.push('\n');
+        }
+        for (reason, count) in &losses.reasons {
+            let _ = writeln!(out, "    {count}x {reason}");
+        }
+        for degradation in &results.degradations {
+            let _ = writeln!(out, "  `{}` degraded: {degradation}", results.label);
+        }
+    }
+    out
+}
+
+/// The runs, numbered from 1, in which some request lost something: the line
+/// the spread ends with when there are any, so a mean that has a lossy run
+/// in it does not read as clean.
+pub fn lossy(runs: &[omn::encode::RunOutput]) -> Vec<usize> {
+    runs.iter()
+        .enumerate()
+        .filter(|(_, run)| run.results.iter().any(|results| !results.losses.is_clean()))
+        .map(|(index, _)| index + 1)
+        .collect()
 }
 
 /// One value of one series: its request's label and source, its key, and
@@ -238,6 +301,38 @@ mod tests {
         assert_eq!((mean.min, mean.max), (10.0, 14.0));
         let rel = mean.rel_stderr_percent.expect("a relative error");
         assert!((rel - 100.0 * 2.0 / 3f64.sqrt() / 12.0).abs() < 1e-9);
-        assert!(text(3, &spread).contains("cpu.instructions task:#1  mean 12"));
+        assert!(text(3, &spread, &[]).contains("cpu.instructions task:#1  mean 12"));
+    }
+
+    #[test]
+    fn a_run_that_lost_says_so_and_the_spread_names_it() {
+        let mut lost = run(12.0);
+        lost.results[0].losses.dropped = 7;
+        lost.results[0]
+            .losses
+            .reasons
+            .insert("the ring was full".to_owned(), 7);
+        lost.results[0]
+            .degradations
+            .push("no per-cpu split".to_owned());
+        let runs = [run(10.0), lost, run(14.0)];
+
+        assert!(losses(&runs[0]).contains("`cpu.instructions`: no loss"));
+        let said = losses(&runs[1]);
+        assert!(
+            said.contains("`cpu.instructions`: LOSS: 7 dropped"),
+            "{said}"
+        );
+        assert!(said.contains("7x the ring was full"), "{said}");
+        assert!(
+            said.contains("`cpu.instructions` degraded: no per-cpu split"),
+            "{said}"
+        );
+
+        assert_eq!(lossy(&runs), vec![2]);
+        let spread = spread(&runs, &["cpu.instructions".to_owned()]);
+        let text = text(3, &spread, &lossy(&runs));
+        assert!(text.contains("LOSS in run 2 of 3"), "{text}");
+        assert!(!super::text(3, &spread, &[]).contains("LOSS"));
     }
 }

@@ -46,6 +46,7 @@ pub mod event;
 pub mod filter;
 pub mod format;
 pub mod join;
+pub mod lazy;
 pub mod perf;
 pub mod render;
 pub mod request;
