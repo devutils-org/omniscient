@@ -343,12 +343,12 @@ fn summary_fields(
         ("wait_total_ns".to_owned(), wait_total_ns),
         ("wake_to_run_total_ns".to_owned(), wake_to_run_total_ns),
     ]);
-    if waits > 0 {
-        fields.insert("wait_mean_ns".to_owned(), wait_total_ns / waits);
-        fields.insert(
-            "wake_to_run_mean_ns".to_owned(),
-            wake_to_run_total_ns / waits,
-        );
+    if let (Some(wait), Some(wake)) = (
+        wait_total_ns.checked_div(waits),
+        wake_to_run_total_ns.checked_div(waits),
+    ) {
+        fields.insert("wait_mean_ns".to_owned(), wait);
+        fields.insert("wake_to_run_mean_ns".to_owned(), wake);
     }
     fields
 }

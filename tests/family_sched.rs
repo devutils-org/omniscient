@@ -1821,3 +1821,242 @@ fn a_stripped_blocks_stack_is_named_from_debuginfod_only_when_asked() {
     assert!(refused.contains("DEBUGINFOD_URLS"), "{refused}");
     let _ = std::fs::remove_dir_all(&cache);
 }
+
+/// The `fields` object of a JSON run's first result.
+fn fields_of(output: &Output) -> Option<serde_json::Value> {
+    let results: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    results["results"][0].get("fields").cloned()
+}
+
+/// Every raw event of a JSON run's first result, its attributes by name.
+fn raw_events(output: &Output) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    let Ok(results) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    for out in results["results"][0]["outputs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        for event in out["events"].as_array().into_iter().flatten() {
+            let mut attrs = serde_json::Map::new();
+            for attr in event["attrs"].as_array().into_iter().flatten() {
+                if let Some(name) = attr["name"].as_str() {
+                    attrs.insert(name.to_owned(), attr["value"].clone());
+                }
+            }
+            events.push(attrs);
+        }
+    }
+    events
+}
+
+/// A counted `sched.switches` is a rate per second of the run. A task that
+/// sleeps a hundred times for 10 ms is on a cpu for a few milliseconds of its
+/// second, and the rate used to divide by those (`pidstat -w`'s 945/s came
+/// out as 60 000/s, `docs/fixes/w22-sysstat.md` defect 1).
+#[test]
+fn a_counted_switch_rate_is_per_second_of_the_run() {
+    let script = sleeper(100);
+    let output = run(&[
+        "trace",
+        "sched.switches",
+        "-m",
+        "count",
+        "-e",
+        "rate",
+        "--",
+        "/bin/sh",
+        "-c",
+        &script,
+    ]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() && text.contains("kernel mode") {
+        eprintln!("skipped: this process may not count kernel mode");
+        return;
+    }
+    assert!(output.status.success(), "{text}");
+    let line = text
+        .lines()
+        .find(|line| line.contains("count/s"))
+        .unwrap_or_else(|| panic!("a rate line: {text}"));
+    assert!(!line.contains("the counter was enabled"), "{line}");
+    let per_second: f64 = line
+        .split_whitespace()
+        .rev()
+        .nth(1)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("a rate: {line}"));
+    // A hundred sleeps of 10 ms and a hundred `sleep` processes: at most a
+    // few hundred switches over at least one second, never thousands.
+    assert!(
+        (50.0..1_000.0).contains(&per_second),
+        "{per_second}/s for a hundred 10 ms sleeps: {line}"
+    );
+}
+
+/// `kind` in a filter on `sched.irq` selects the half, and the hard rows'
+/// count is the machine's `/proc/interrupts` count over the same second, to
+/// the edges of the window (`docs/fixes/w22-bpftrace.md`, gap 2).
+#[test]
+fn a_filter_on_the_interrupt_half_keeps_that_half() {
+    let output = run(&[
+        "trace",
+        "sched.irq",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "--system",
+        "-d",
+        "1s",
+        "--format",
+        "json",
+        "--filter",
+        r#"kind == "hard""#,
+    ]);
+    let text = String::from_utf8_lossy(&output.stderr).into_owned();
+    if refused_for_capabilities(&text) || !output.status.success() {
+        eprintln!("skipped: sched.irq was not served: {text}");
+        return;
+    }
+    let events = raw_events(&output);
+    assert!(
+        !events.is_empty(),
+        "a second of a machine has hard interrupts: {text}"
+    );
+    assert!(
+        events.iter().all(|attrs| attrs["kind"] == "hard"),
+        "the filter kept only hard rows"
+    );
+}
+
+/// `sched.runqlat` says its run's mean wakeup-to-run by name, and a program
+/// that sleeps a hundred times has about a hundred waits in it.
+#[test]
+fn the_run_queue_summary_is_over_the_waits_kept() {
+    let script = sleeper(100);
+    let output = run(&[
+        "trace",
+        "sched.runqlat",
+        "-e",
+        "summary",
+        "--format",
+        "json",
+        "--",
+        "/bin/sh",
+        "-c",
+        &script,
+    ]);
+    let text = String::from_utf8_lossy(&output.stderr).into_owned();
+    if refused_for_capabilities(&text) || !output.status.success() {
+        eprintln!("skipped: sched.runqlat was not served: {text}");
+        return;
+    }
+    let fields = fields_of(&output).unwrap_or_else(|| panic!("fields: {text}"));
+    let waits = fields["waits"].as_u64().expect("waits");
+    assert!(
+        waits >= 100,
+        "a hundred sleeps are a hundred waits: {fields}"
+    );
+    let mean = fields["wake_to_run_mean_ns"].as_u64().expect("a mean");
+    let total = fields["wake_to_run_total_ns"].as_u64().expect("a total");
+    assert_eq!(mean, total / waits);
+}
+
+/// Four threads that only spin are four runnable tasks `sched.runqueue`
+/// reads, whatever else the machine runs.
+#[test]
+fn spinners_are_in_the_machines_run_queue() {
+    let Some(spin) = compiled(
+        "spin4",
+        "#include <pthread.h>\n#include <unistd.h>\nstatic void *s(void *a){for(;;);return a;}\n\
+         int main(void){pthread_t t;for(int i=0;i<4;i++)pthread_create(&t,0,s,0);sleep(3);return 0;}\n",
+        &["-pthread"],
+    ) else {
+        eprintln!("skipped: no C compiler");
+        return;
+    };
+    let mut child = Command::new(&spin).spawn().expect("the spinners start");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let output = run(&[
+        "trace",
+        "sched.runqueue",
+        "-m",
+        "poll@200ms",
+        "-e",
+        "raw",
+        "--system",
+        "-d",
+        "1s",
+        "--format",
+        "json",
+    ]);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let most = raw_events(&output)
+        .iter()
+        .filter_map(|attrs| attrs["running"].as_u64())
+        .max()
+        .expect("readings");
+    assert!(most >= 5, "four spinners and the reader: {most}");
+}
+
+/// `sched.interrupts` counts what `/proc/stat`'s `intr` total counts over
+/// the same window, to the reads at its edges.
+#[test]
+fn the_interrupt_counts_are_the_machines() {
+    let intr = || -> u64 {
+        std::fs::read_to_string("/proc/stat")
+            .ok()
+            .and_then(|stat| {
+                stat.lines()
+                    .find(|line| line.starts_with("intr "))?
+                    .split_whitespace()
+                    .nth(1)?
+                    .parse()
+                    .ok()
+            })
+            .expect("/proc/stat has intr")
+    };
+    let before = intr();
+    let output = run(&[
+        "trace",
+        "sched.interrupts",
+        "-m",
+        "count",
+        "-e",
+        "raw",
+        "--system",
+        "-d",
+        "1s",
+        "--format",
+        "json",
+    ]);
+    let after = intr();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let hard: u64 = raw_events(&output)
+        .iter()
+        .filter(|attrs| attrs["kind"] == "hard")
+        .filter_map(|attrs| attrs["count"].as_u64())
+        .sum();
+    let machine = after - before;
+    assert!(hard > 0, "a second of a machine has interrupts");
+    // The machine's window is the run's and its start-up: wider, never
+    // narrower; the run's is most of it.
+    assert!(
+        hard <= machine && hard * 10 >= machine * 5,
+        "{hard} hard interrupts counted against /proc/stat's {machine}"
+    );
+}

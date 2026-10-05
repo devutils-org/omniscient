@@ -384,6 +384,48 @@
        outside the state. `window_ns` beside the value says how wide the window
        was."
 
+- id: sched.interrupts
+  family: sched
+  summary: "Interrupt counts per cpu, line and softirq vector"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/interrupts", "/proc/softirqs"], cost: free}
+  modes: [poll, count]
+  emits: [rate, topk, timeline, raw, summary]
+  targets: {system: native, cpu: native}
+  keys: [cpu]
+  filter_fields: [cpu, irq, line, name]
+  determinism: low
+  caveats:
+    - "A count, not a time: how many interrupts each cpu took between two reads
+       of `/proc/interrupts` and `/proc/softirqs`, as vmstat's `in` and `mpstat
+       -I` report them. `sched.irq` is how long they ran. A row carries `kind`
+       (`hard` or `soft`), `line` (the label the file gives it: a number, or
+       `LOC`, `RES`, `TIMER`) and `name` (the handler's, or the label); a row
+       that did not move in a window is not reported. `kind` is not a filter
+       field yet: the filter reads it as the source's own kind; `line` and
+       `name` tell the halves apart."
+
+- id: sched.runqueue
+  family: sched
+  summary: "Runnable and blocked tasks, and the load averages"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/stat", "/proc/loadavg"], cost: free}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native}
+  keys: []
+  filter_fields: []
+  determinism: low
+  caveats:
+    - "One look at the machine's run queue per read, as vmstat's `r` and `b`
+       and `uptime` report it: `running` is `procs_running` (runnable tasks,
+       this tool's reading thread among them), `blocked` is `procs_blocked`
+       (uninterruptible sleep), `load1`, `load5` and `load15` the kernel's
+       damped averages. The machine's sum: the per-cpu queue length is not
+       exported outside debugfs."
+
 - id: sched.numa_balance
   family: sched
   summary: "Automatic NUMA balancing decisions"

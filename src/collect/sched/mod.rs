@@ -18,6 +18,7 @@
 //! uncontended acquisitions that never reach a futex.
 
 mod futex;
+mod interrupts;
 mod irq;
 mod lock;
 mod migrations;
@@ -26,6 +27,7 @@ mod mutex_usdt;
 mod numa_balance;
 mod offcpu;
 mod runqlat;
+mod runqueue;
 mod switch_count;
 mod switches;
 mod wakeup;
@@ -169,6 +171,12 @@ pub fn factories() -> Vec<Factory> {
                 filter: resolved.request.filter.clone(),
                 emits: resolved.request.emit.clone(),
             }))
+        }),
+        Factory::new("sched.interrupts", "fs:proc", |resolved| {
+            Ok(Box::new(interrupts::Prepare(resolved.request.mode)))
+        }),
+        Factory::new("sched.runqueue", "fs:proc", |_| {
+            Ok(Box::new(runqueue::Prepare))
         }),
         Factory::new("sched.switches", "bpf:raw_tp", |resolved| {
             Ok(Box::new(switch_count::Prepare {
