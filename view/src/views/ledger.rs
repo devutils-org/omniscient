@@ -34,7 +34,9 @@ pub const NEEDS: &[Need] = &[
     Need {
         source: "cpu.oncpu_time",
         mode: "poll@250ms",
-        emit: &["timeline", "summary"],
+        // `raw` for user and system apart, which only the events carry, and
+        // so a live run draws the line from its events as they arrive.
+        emit: &["raw", "timeline", "summary"],
         keys: &["task"],
         stack: None,
         scope: Scope::Target,
@@ -1117,6 +1119,7 @@ impl Context<'_> {
         // The split is carried on the events only: the aggregated emits add
         // up the one value a poll is.
         let (mut user, mut system, mut split) = (0.0, 0.0, false);
+        let kept_events = results.iter().any(|one| !one.events().is_empty());
         for one in results {
             for event in one.events() {
                 if !keeps(&event_key(&event.keys), self.focus) {
@@ -1143,6 +1146,14 @@ impl Context<'_> {
                 system / whole,
                 style,
             ));
+        } else if kept_events {
+            let backend = results
+                .first()
+                .map(|one| one.backend.as_str())
+                .unwrap_or("its backend");
+            subs.push(aside(format!(
+                "user and system apart: {backend} does not split them; fs:proc does"
+            )));
         } else {
             subs.push(aside(
                 "user and system apart: on the raw events only, which this run did not keep".into(),
@@ -2850,6 +2861,34 @@ mod tests {
         ] {
             assert!(text.contains(wanted), "{wanted:?} missing from\n{text}");
         }
+    }
+
+    /// Events kept from a backend that does not split user and system: the
+    /// line says which backend, not that the run kept no events.
+    #[test]
+    fn a_backend_without_the_split_is_named() {
+        let data = Data {
+            run: Run {
+                results: vec![Results {
+                    label: "cpu.oncpu_time".into(),
+                    source: "cpu.oncpu_time".into(),
+                    backend: "bpf:raw_tp".into(),
+                    events_seen: 1,
+                    outputs: vec![Output::Raw {
+                        events: vec![event(250_000_000, 7, vec![("ns", AttrValue::Uint(9))])],
+                    }],
+                    ..Results::default()
+                }],
+                ..Run::default()
+            },
+            ..Data::default()
+        };
+        let sheet = Sheet::of(&data, &Focus::default());
+        let said = words(&line(&sheet, "cpu time").subs);
+        assert!(
+            said.contains("bpf:raw_tp does not split them; fs:proc does"),
+            "{said}"
+        );
     }
 
     #[test]
