@@ -108,6 +108,13 @@ pub struct RunqLatCollector {
     waits: u64,
     /// How many rows those waits were reported as, which is the event count.
     rows: u64,
+    /// The exact sums of the kept waits, by the kernel's `sched_info` and by
+    /// the tracepoints: the run's summary over `wake_to_run_ns`, which is the
+    /// quantity `perf sched latency` and `runqlat.bt` report.
+    wait_total_ns: u64,
+    wake_to_run_total_ns: u64,
+    /// Each process's parent, for the rows' `ppid`.
+    parents: super::Parents,
     /// The request's predicate, applied to each row as it is drained.
     predicate: Option<FilterExpr>,
     /// Waits the predicate removed, and waits it kept. Counted in waits rather
@@ -134,6 +141,9 @@ impl RunqLatCollector {
             window_opened_ns: 0,
             waits: 0,
             rows: 0,
+            wait_total_ns: 0,
+            wake_to_run_total_ns: 0,
+            parents: super::Parents::default(),
             predicate,
             filtered_out: 0,
             filtered_in: 0,
@@ -158,6 +168,7 @@ impl RunqLatCollector {
             }
         };
         self.window_opened_ns = closed_ns;
+        self.parents.absorb(program.parents());
         // A task that exec'd in this window is named what it became, not what
         // it was when its row was made; see `bpf::Renames`.
         if let Some(renames) = self.renames.as_mut() {
@@ -188,7 +199,7 @@ impl RunqLatCollector {
                 self.off_target += row.count;
                 continue;
             }
-            let event = Event {
+            let mut event = Event {
                 // Stamped where the row's first wait began rather than at the
                 // drain that read it, which is finding 44: a join that opens on
                 // a bucketed source would otherwise open at the window's close.
@@ -213,6 +224,9 @@ impl RunqLatCollector {
                 collector_id: self.id.clone(),
                 seq: seq + index as u64,
             };
+            if let Some(ppid) = self.parents.of(row.tgid) {
+                event.attrs.push(Attr::uint("ppid", u64::from(ppid)));
+            }
             if let Some(predicate) = &self.predicate {
                 if !crate::filter::matches(predicate, &event) {
                     self.filtered_out += row.count;
@@ -222,6 +236,8 @@ impl RunqLatCollector {
             }
             self.waits += row.count;
             self.rows += 1;
+            self.wait_total_ns += row.total_ns;
+            self.wake_to_run_total_ns += row.wake_to_run_ns;
             events.push(event);
         }
     }
@@ -323,6 +339,27 @@ fn attributes(row: &RunqLat, window_ns: u64) -> Vec<Attr> {
     ]
 }
 
+/// The run's waits and their two sums, and the means, by name.
+fn summary_fields(
+    waits: u64,
+    wait_total_ns: u64,
+    wake_to_run_total_ns: u64,
+) -> crate::emit::Fields {
+    let mut fields = crate::emit::Fields::from([
+        ("waits".to_owned(), waits),
+        ("wait_total_ns".to_owned(), wait_total_ns),
+        ("wake_to_run_total_ns".to_owned(), wake_to_run_total_ns),
+    ]);
+    if let (Some(wait), Some(wake)) = (
+        wait_total_ns.checked_div(waits),
+        wake_to_run_total_ns.checked_div(waits),
+    ) {
+        fields.insert("wait_mean_ns".to_owned(), wait);
+        fields.insert("wake_to_run_mean_ns".to_owned(), wake);
+    }
+    fields
+}
+
 impl Collector for RunqLatCollector {
     fn id(&self) -> &CollectorId {
         &self.id
@@ -404,6 +441,31 @@ impl Collector for RunqLatCollector {
         self.losses.clone()
     }
 
+    /// The run's totals by both accounts, by name: `wake_to_run_mean_ns` is
+    /// `perf sched latency`'s average delay and `runqlat.bt`'s mean, which no
+    /// emit gives per key yet (`docs/fixes/w22-perfsched.md`, gap 8).
+    fn fields(&self) -> crate::emit::Fields {
+        summary_fields(self.waits, self.wait_total_ns, self.wake_to_run_total_ns)
+    }
+
+    /// The same summary in a sentence, which a reader without `results.json`
+    /// sees.
+    fn facts(&self) -> Vec<String> {
+        if self.waits == 0 {
+            return Vec::new();
+        }
+        let mean = |total: u64| total as f64 / self.waits as f64 / 1e3;
+        vec![format!(
+            "over the {} waits kept, the mean wait from wakeup (or preemption) to running \
+             was {:.1} us by the tracepoints (`wake_to_run_ns`, what `perf sched latency` \
+             averages) and {:.1} us by the kernel's `sched_info` (`total_ns`, what the \
+             buckets hold)",
+            self.waits,
+            mean(self.wake_to_run_total_ns),
+            mean(self.wait_total_ns),
+        )]
+    }
+
     fn notes(&self) -> Vec<String> {
         let mut notes = self.notes.clone();
         if self.unstamped > 0 {
@@ -454,6 +516,19 @@ impl Collector for RunqLatCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The run's summary over `wake_to_run_ns` is its exact sum over the
+    /// waits, and a run with none has no mean rather than a zero one.
+    #[test]
+    fn the_summary_fields_are_the_sums_over_the_waits() {
+        let fields = summary_fields(4, 4_000, 10_000);
+        assert_eq!(fields["wake_to_run_mean_ns"], 2_500);
+        assert_eq!(fields["wait_mean_ns"], 1_000);
+        assert_eq!(fields["waits"], 4);
+        let empty = summary_fields(0, 0, 0);
+        assert!(!empty.contains_key("wake_to_run_mean_ns"));
+        assert_eq!(empty["waits"], 0);
+    }
 
     fn row() -> RunqLat {
         RunqLat {
