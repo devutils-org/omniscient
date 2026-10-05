@@ -10,6 +10,8 @@
 │                                                                                                                      │[0m
 │                       [0m[2m│[0m[2;34m▓▓▓▓▓[0m[2m·························································┤[0m                               │[0m
 │                       [0m[2m│[0m[2;34m▓▓▓▓▓[0m[2m·························································┤[0m                               │[0m
+│                       [0m[2m│[0m[2;34m▓▓▓▓▓[0m[2m·························································┤[0m                               │[0m
+│                       [0m[2m│[0m[2;34m▓▓▓▓▓[0m[2m·························································┤[0m                               │[0m
 │ [0m[1;32m▸ 2618623 sqlite3     [0m[2m├[0m[2;34m▓▓▓▓▓[0m[2m·······················[0m[1;2;7m not read [0m[2m························┤    2.55s  ≈ no single state [0m  │[0m
 │ [0m[2m                     0 ───────────────────────────┼ 1.28s ───────────────────────────┤ 2.55s                        [0m │[0m
 │                        [0m[35m▚[0m run queue   [0m[34m▓[0m I/O   [0m[2m·[0m not read                                                              │[0m
@@ -27,8 +29,6 @@
 │ [0m[2m  latency --objective latency --dump-session -- PROG > s.yml`, then `omn top -f s.yml`.[0m                              │[0m
 │ [0m[2mTrust: the source is not reproducible between two runs of the same workload; the run is still going: losses, cost[0m    │[0m
 │ [0m[2m  and stack names are known at its end; served by a fallback that says what it gives up (3).[0m                         │[0m
-│                                                                                                                      │[0m
-│                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
 │                                                                                                                      │[0m
