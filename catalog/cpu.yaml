@@ -18,6 +18,15 @@
   determinism: medium
   caveats:
     - "Frequency-dependent: lock the governor or the measurement is not comparable."
+    - "`-m sample@<hz> -e stack` is `perf record`'s default, a cycles profile:
+       one sample every so many cycles -- the cpu's highest frequency over the
+       rate asked for, so a sample per fixed number of cycles whatever the
+       clock does, and fewer samples a second than asked while the clock is
+       below its highest. A share of cycles, not of time: `cpu.profile` is the
+       on-cpu time profile. Every counting source of this family samples the
+       same way on its own counter (`perf record -e <event>`), in the kernel's
+       frequency mode where a fixed period has no natural unit, each sample
+       weighing one."
 
 - id: cpu.instructions
   family: cpu
@@ -150,6 +159,11 @@
        stack with every sample. Where perf_event_paranoid refuses the kernel
        (2, the kernel's default) the stacks are user-only, and time the task
        spent in the kernel is not sampled at all."
+    - "Each sample carries its thread as the `task` key, its process as `pid`
+       and the thread's name as `comm`, read from `/proc` at a bounded rate.
+       A cycles profile is `cpu.cycles -m sample -e stack`; the `pmu` row
+       here has no collector, because a sample of this source is a period of
+       on-cpu time that `omn latency` and `omn diff` read as nanoseconds."
     - "A time-based sample counts the time the task held its cpu, including the
        interrupts that ran on it meanwhile, and at high rates those interrupts
        are this profile's own. The kernel's own on-cpu figure leaves interrupt

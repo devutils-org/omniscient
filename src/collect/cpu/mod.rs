@@ -36,6 +36,17 @@ pub fn factories() -> Vec<Factory> {
             // backend) is unique by the catalog's own rule, which is what makes
             // that lookup exact.
             Factory::new(spec.source, spec.backend, |resolved| {
+                // A counting source's `sample` mode is a profile on its own
+                // counter (`profile::SAMPLED`): `perf record -e <event>`.
+                if let (crate::request::Mode::Sample { .. }, Some(sampled)) = (
+                    resolved.request.mode,
+                    profile::sampled_for(
+                        resolved.request.source.as_str(),
+                        resolved.backend.id.as_str(),
+                    ),
+                ) {
+                    return profiled(resolved, sampled);
+                }
                 let spec = counters::spec_for(
                     resolved.request.source.as_str(),
                     resolved.backend.id.as_str(),
@@ -84,16 +95,27 @@ pub fn factories() -> Vec<Factory> {
             // file says. A request resolved without one (a file written before
             // the field) is chosen here.
             Factory::new("cpu.profile", "pmu:sw", |resolved| {
-                let choice = match &resolved.stack {
-                    Some(choice) => choice.clone(),
-                    None => crate::stack::choose(&resolved.request, &resolved.environment)?,
-                };
-                Ok(Box::new(profile::Prepare {
-                    mode: resolved.request.mode,
-                    choice,
-                    debuginfod: None,
-                }))
+                let sampled = profile::sampled_for("cpu.profile", "pmu:sw")
+                    .ok_or("no sampled event is declared for `cpu.profile` on `pmu:sw`")?;
+                profiled(resolved, sampled)
             }),
         ])
         .collect()
+}
+
+/// A profile of `sampled`, unwound the way the resolved file says.
+fn profiled(
+    resolved: &crate::resolve::ResolvedRequest,
+    sampled: profile::Sampled,
+) -> Result<Box<dyn super::Prepared>, String> {
+    let choice = match &resolved.stack {
+        Some(choice) => choice.clone(),
+        None => crate::stack::choose(&resolved.request, &resolved.environment)?,
+    };
+    Ok(Box::new(profile::Prepare {
+        mode: resolved.request.mode,
+        sampled,
+        choice,
+        debuginfod: None,
+    }))
 }

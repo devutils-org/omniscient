@@ -168,33 +168,6 @@ fn a_ratio_is_published_with_the_counters_it_came_from() {
     );
 }
 
-/// Counting mode is not a cheap sampling mode, and the refusal has to say which
-/// mechanism is missing rather than return a count labelled as a sample.
-#[test]
-fn sampling_a_counter_is_refused_with_the_mechanism_it_would_need() {
-    let output = run(&[
-        "cpu.cycles",
-        "-m",
-        "sample",
-        "-e",
-        "hist",
-        "--",
-        "/bin/true",
-    ]);
-    assert!(!output.status.success(), "{}", stdout(&output));
-    let message = stderr(&output);
-    // The collector's refusal is reached only through a backend the machine
-    // offers; `perf_event_paranoid` above 2 withholds every counter.
-    if message.contains("has no viable backend on this machine")
-        || written_backend_withheld(&message)
-    {
-        eprintln!("skipped: {message}");
-        return;
-    }
-    assert!(message.contains("sampling path"), "{message}");
-    assert!(message.contains("--mode count"), "{message}");
-}
-
 /// The record kept beside the numbers has to name the counter that produced
 /// them: two runs through different backends are not comparable.
 #[test]
@@ -401,6 +374,92 @@ fn counted_oncpu_time_is_task_clock_and_agrees_with_the_reap() {
         error < 0.10,
         "task-clock counted {counted} ns where the reap read {reaped} ns ({:.1} % off)",
         error * 100.0
+    );
+}
+
+/// A counting source's `sample` mode samples on its own counter (perfrecord
+/// 2 and 8): `cpu.cycles -m sample` is `perf record`'s default and
+/// `cpu.branches` sampled is `perf record -e branches`. Each sample is an
+/// event of that source from its own collector, carrying its process as
+/// `pid` -- the launched shell's, whatever thread it ran on.
+#[test]
+fn a_counting_source_samples_on_its_own_counter() {
+    for source in ["cpu.cycles", "cpu.branches"] {
+        let Some(document) = measured(&[
+            source,
+            "-m",
+            "sample@997hz",
+            "-e",
+            "raw",
+            "--stack",
+            "none",
+            "--format",
+            "json",
+            "--",
+            "/bin/sh",
+            "-c",
+            &counting_loop(300_000),
+        ]) else {
+            continue;
+        };
+        let results = &document["results"][0];
+        let backend = results["backend"].as_str().expect("a backend");
+        let events = results["outputs"][0]["events"]
+            .as_array()
+            .expect("raw events");
+        assert!(!events.is_empty(), "{source} on {backend}: no sample");
+        for event in events {
+            assert_eq!(event["kind"], source);
+            assert_eq!(
+                event["collector_id"],
+                format!("{source}/{backend}"),
+                "{event}"
+            );
+            assert!(attr(event, "pid").is_some(), "{event}");
+        }
+    }
+}
+
+/// One attribute of a raw event, by name.
+fn attr<'a>(event: &'a serde_json::Value, name: &str) -> Option<&'a serde_json::Value> {
+    event["attrs"]
+        .as_array()?
+        .iter()
+        .find(|attr| attr["name"] == name)
+        .map(|attr| &attr["value"])
+}
+
+/// `comm` on `cpu.profile` is filled per sample (perfrecord 1): a filter on
+/// the launched program's name keeps its samples, where it used to keep none
+/// and name `comm` among the fields the backend never filled.
+#[test]
+fn a_profile_filtered_on_the_programs_name_keeps_its_samples() {
+    let Some(document) = measured(&[
+        "cpu.profile",
+        "-m",
+        "sample@997hz",
+        "-e",
+        "raw",
+        "--stack",
+        "none",
+        "--filter",
+        "comm == \"sh\"",
+        "--format",
+        "json",
+        "--",
+        "/bin/sh",
+        "-c",
+        &counting_loop(300_000),
+    ]) else {
+        return;
+    };
+    let results = &document["results"][0];
+    let filtered = &results["filtered"];
+    let kept = filtered["kept"].as_u64().expect("a kept count");
+    assert!(kept > 0, "the filter kept nothing: {filtered}");
+    assert!(
+        filtered["unseen_fields"].is_null(),
+        "comm is still unseen: {filtered}"
     );
 }
 
