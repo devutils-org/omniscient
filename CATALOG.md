@@ -308,11 +308,11 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `mem.latency` | load latency | `pmu` PEBS load-latency · AMD IBS | sample | all | med | low |
 | `mem.sharing` | **false sharing** (HITM) | `pmu` PEBS HITM · IBS | sample | all | med | low |
 | `mem.bandwidth` | DRAM throughput | `pmu` uncore IMC · Intel RDT/MBM | count | **system only** (MBM: cgroup) | free | low |
-| `mem.numa` | access locality | `pmu` PEBS data-source · `fs:proc` numa_maps | sample, poll | all | med | low |
+| `mem.numa` | access locality | `pmu` PEBS data-source · `fs:proc` numa_maps · `fs:sys` numastat (system) | sample, poll | all | med / free | low |
 | `mem.wss` | real working set | `fs:sys` DAMON · page_idle | poll | pid, cgroup, system | low / high | medium |
 | `mem.reclaim` | direct reclaim | `bpf:tp` vmscan:mm_vmscan_direct_reclaim_* | trace | system, cgroup | low | medium |
 | `mem.compaction` / `.thp` | defrag, huge pages | `bpf:tp` compaction:* · `fs:sys` | trace, poll | system | low | low |
-| `mem.swap` | swap in/out | `fs:proc` vmstat · `fs:cgroup` memory.swap.current | poll | system, cgroup | free | low |
+| `mem.swap` | swap in/out | `fs:proc` vmstat · `fs:cgroup` memory.swap.current · `perf:kprobe` swap_read_folio (pid) | poll, count | system, cgroup, pid | free / low | low |
 | `mem.pressure` | PSI memory | `fs:proc` /proc/pressure/memory | poll | system, cgroup | free | low |
 
 **Caveats**
