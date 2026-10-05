@@ -1051,10 +1051,12 @@ fn a_snapshot_beside_a_poll_is_still_a_single_read() {
     };
 
     // One read of one interface, which is one event per counter kind -- the
-    // five series `net.iface` keeps apart.
+    // seven series `net.iface` keeps apart, `missed` among them on a machine
+    // whose sysfs has it for lo.
+    let missed = std::path::Path::new("/sys/class/net/lo/statistics/rx_missed_errors").exists();
     assert_eq!(
         seen("snapshotted"),
-        5,
+        if missed { 7 } else { 6 },
         "`snapshot` means one read, and the request beside it does not change that"
     );
     assert!(
@@ -2577,7 +2579,11 @@ fn the_pairs_these_entries_imply_and_the_matrix_refuses_are_the_ones_recorded() 
         recorded.push(("net.tcp.retransmit", "count", "topk"));
         recorded.push(("net.drops", "count", "topk"));
     }
+    // The stacks of drops are each drop's, which a counted window of totals
+    // does not keep: `-e stack` goes with `trace`.
+    recorded.push(("net.drops", "count", "stack"));
     recorded.push(("net.softirq", "count", "hist"));
+    recorded.sort();
 
     for (source, mode, emit) in &recorded {
         let outcome = omn(&[
@@ -2630,6 +2636,7 @@ fn the_pairs_these_entries_imply_and_the_matrix_refuses_are_the_ones_recorded() 
         .iter()
         .map(|(source, mode, emit)| (*source, (*mode).to_owned(), (*emit).to_owned()))
         .collect();
+    refused.sort();
     assert_eq!(
         refused, recorded,
         "the set of pairs these entries imply and the matrix refuses changed; \
@@ -3509,19 +3516,16 @@ fn the_three_answers_an_ebpf_net_request_can_be_refused_with() {
         "a target the catalog never offered is a request that cannot mean anything: {complaint}"
     );
 
-    // Still 2, and it is the seventh wave that moved it there. Asking
-    // `net.tcp.lifetime` for one process used to resolve, attach and be refused
-    // by the collector with exit 3 -- because both ends of a connection become
-    // established in softirq context, so the task current at that moment is
-    // whichever one the interrupt landed on, and the catalog offered a `pid`
-    // target anyway. The entry no longer offers it, so the request is refused
-    // before the machine is touched. A collector refusing what the catalog
-    // promised is a gap somebody can close; a catalog that stops promising it
-    // is the gap closed.
+    // Still 2 for a target the entry does not offer. The seventh wave took
+    // `pid` off `net.tcp.lifetime`, the task current when a connection is
+    // established being whichever one softirq landed on; the twenty-fourth
+    // gave it back, attributed to the process that connected or closed it
+    // first, so a pid now runs and a cgroup is the target refused before the
+    // machine is touched.
     let outcome = omn(&[
         "net.tcp.lifetime",
-        "--pid",
-        &std::process::id().to_string(),
+        "--cgroup",
+        "/sys/fs/cgroup",
         "--mode",
         "trace",
         "--duration",
@@ -3536,7 +3540,7 @@ fn the_three_answers_an_ebpf_net_request_can_be_refused_with() {
         "a target the catalog never offers is a request that cannot mean anything: {complaint}"
     );
     assert!(
-        complaint.contains("declares no `pid` support") && complaint.contains("system"),
+        complaint.contains("declares no `cgroup` support") && complaint.contains("system"),
         "the refusal should say what the source does accept: {complaint}"
     );
 

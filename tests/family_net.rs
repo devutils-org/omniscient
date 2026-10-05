@@ -800,3 +800,237 @@ fn a_polled_hardware_clock_keeps_step_with_ours_over_a_known_window() {
         );
     }
 }
+
+/// The JSON a run wrote, or a panic naming what it said instead.
+fn document(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("{error}: {}", stderr(output)))
+}
+
+/// Every raw event of a run's first result, as `name -> value` maps.
+fn raw_events(document: &serde_json::Value) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    document["results"][0]["outputs"]
+        .as_array()
+        .expect("outputs")
+        .iter()
+        .filter(|output| output["emit"] == "raw")
+        .flat_map(|output| output["events"].as_array().cloned().unwrap_or_default())
+        .map(|event| {
+            event["attrs"]
+                .as_array()
+                .expect("attrs")
+                .iter()
+                .map(|attr| {
+                    (
+                        attr["name"].as_str().expect("a name").to_owned(),
+                        attr["value"].clone(),
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Whether the build carries the eBPF capabilities (`make`), by asking.
+fn ebpf_granted() -> bool {
+    let output = Command::new(BINARY)
+        .args(["list", "net.tcp.lifetime"])
+        .output()
+        .expect("omn list");
+    stdout(&output).contains("usable through `bpf:raw_tp`")
+}
+
+/// `nstat`'s counters by its names: a known number of refused connects,
+/// made while a counted run is open, is at least that many
+/// `TcpAttemptFails` and `TcpOutRsts`.
+#[test]
+fn a_known_number_of_refused_connects_moves_the_counters_nstat_names() {
+    const REFUSED: usize = 40;
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let measuring = Command::new(BINARY)
+        .args([
+            "net.snmp",
+            "--system",
+            "--mode",
+            "count",
+            "--duration",
+            "2s",
+            "--emit",
+            "raw",
+            "--format",
+            "json",
+            "--filter",
+            "section == \"Tcp\"",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    for _ in 0..REFUSED {
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    }
+    let output = measuring.wait_with_output().expect("omn finishes");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let events = raw_events(&document(&output));
+    let moved = |name: &str| {
+        events
+            .iter()
+            .find(|event| event["name"] == name)
+            .and_then(|event| event["value"].as_f64())
+            .unwrap_or(0.0)
+    };
+    assert!(moved("TcpAttemptFails") >= REFUSED as f64, "{events:?}");
+    assert!(moved("TcpOutRsts") >= REFUSED as f64, "{events:?}");
+    assert!(
+        events.iter().all(|event| event["section"] == "Tcp"),
+        "the filter names the section"
+    );
+}
+
+/// The socket inventory lists a listener this test holds, with the
+/// connection waiting in its accept queue and this process as its owner.
+#[test]
+fn the_socket_inventory_lists_a_listener_with_its_queue_and_owner() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let _waiting = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let output = Command::new(BINARY)
+        .args([
+            "net.sockets",
+            "--system",
+            "--mode",
+            "snapshot",
+            "--emit",
+            "raw",
+            "--format",
+            "json",
+            "--filter",
+            &format!("sport == {port}"),
+        ])
+        .output()
+        .expect("omn should run");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let events = raw_events(&document(&output));
+    let listening = events
+        .iter()
+        .find(|event| event["state"] == "LISTEN")
+        .unwrap_or_else(|| panic!("the listener: {events:?}"));
+    assert_eq!(listening["recv_q"], 1, "one connection waits");
+    assert_eq!(listening["pid"], std::process::id());
+    assert_eq!(listening["protocol"], "tcp");
+}
+
+/// A program launched under `net.tcp.lifetime` makes a known number of
+/// connections and its run reports both ends of each, every one attributed
+/// to its owner -- and no connection of this test's own, made at the same
+/// time, from outside the launched tree.
+#[test]
+fn a_launched_program_s_connections_are_its_own_and_no_one_else_s() {
+    if !ebpf_granted() {
+        eprintln!("skipped: net.tcp.lifetime needs CAP_BPF and CAP_PERFMON (run `make`)");
+        return;
+    }
+    const MADE: usize = 6;
+    let script = format!(
+        "import socket,threading,time\n\
+         time.sleep(0.4)\n\
+         l=socket.socket();l.bind(('127.0.0.1',0));l.listen(16);p=l.getsockname()[1]\n\
+         def serve():\n\
+         \x20   for _ in range({MADE}):\n\
+         \x20       s,_=l.accept();s.recv(4);s.close()\n\
+         t=threading.Thread(target=serve);t.start()\n\
+         for _ in range({MADE}):\n\
+         \x20   c=socket.create_connection(('127.0.0.1',p));c.sendall(b'hi');c.recv(4);c.close()\n\
+         t.join();time.sleep(0.2)\n"
+    );
+    let measuring = Command::new(BINARY)
+        .args([
+            "trace",
+            "net.tcp.lifetime",
+            "-e",
+            "raw",
+            "--format",
+            "json",
+            "--",
+            "sh",
+            "-c",
+            &format!("python3 -c \"{script}\" > /dev/null"),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("omn should run");
+    // This test's own connections, beside the launched ones.
+    let started = std::time::Instant::now();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let ours = listener.local_addr().unwrap().port();
+    while started.elapsed() < std::time::Duration::from_millis(900) {
+        let client = TcpStream::connect(("127.0.0.1", ours)).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        drop((client, server));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let output = measuring.wait_with_output().expect("omn finishes");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let events = raw_events(&document(&output));
+    assert!(
+        events
+            .iter()
+            .all(|event| event["sport"] != ours && event["dport"] != ours),
+        "a connection of this test's is not the launched program's: {events:?}"
+    );
+    assert_eq!(events.len(), 2 * MADE, "both ends of each: {events:?}");
+    assert!(events.iter().all(|event| event["attributed"] == "owner"));
+}
+
+/// A launched server's accepts, one event per connection it took, against
+/// the number its client made.
+#[test]
+fn a_launched_server_s_accepts_are_counted_one_per_connection() {
+    if !ebpf_granted() {
+        eprintln!("skipped: net.tcp.accept needs CAP_BPF and CAP_PERFMON (run `make`)");
+        return;
+    }
+    const MADE: usize = 8;
+    let script = format!(
+        "import socket,threading,time\n\
+         l=socket.socket();l.bind(('127.0.0.1',0));l.listen(16);p=l.getsockname()[1]\n\
+         cs=[socket.create_connection(('127.0.0.1',p)) for _ in range({MADE})]\n\
+         time.sleep(0.1)\n\
+         for _ in range({MADE}):\n\
+         \x20   s,_=l.accept();s.close()\n"
+    );
+    let output = Command::new(BINARY)
+        .args([
+            "trace",
+            "net.tcp.accept",
+            "-m",
+            "trace",
+            "-e",
+            "raw",
+            "--format",
+            "json",
+            "--",
+            "python3",
+            "-c",
+            &script,
+        ])
+        .output()
+        .expect("omn should run");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let events = raw_events(&document(&output));
+    assert_eq!(events.len(), MADE, "{events:?}");
+    // Queued before the first accept, so the queue after each is one shorter.
+    let mut queues: Vec<u64> = events
+        .iter()
+        .map(|event| event["backlog"].as_u64().expect("a queue"))
+        .collect();
+    queues.sort_unstable();
+    assert_eq!(queues, (0..MADE as u64).collect::<Vec<_>>());
+    assert!(events.iter().all(|event| event["max_backlog"] == 16));
+}
