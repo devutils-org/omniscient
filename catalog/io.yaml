@@ -261,6 +261,38 @@
        `busy_ns` carries the time itself and `queue` the average number of
        requests outstanding over the window."
 
+- id: io.vfs
+  family: io
+  summary: "VFS calls by operation: reads, writes, opens, creates, syncs, of any file"
+  unit: count
+  backends:
+    # One fentry program per VFS entry point, an atomic add each, timed never:
+    # what `vfsstat` counts. `vfs_read` and `vfs_write` are required; the
+    # others are counted where this kernel declares them, and the run names
+    # any it does not. `high`, not measured by the bench yet: a 1-byte
+    # read/write loop (6 M calls) ran 1.36 s alone and 1.95 s counted, +45 %
+    # under the twenty-fourth wave's load -- a trampoline per call where the
+    # call itself does nothing; a call that does work dilates less.
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_read", "fentry:vfs_write"], cost: high}
+  modes: [count, poll]
+  emits: [rate, summary, timeline, raw]
+  targets: {system: native, pid: bpf_only, tid: bpf_only, launch: bpf_only, cgroup: bpf_only}
+  keys: []
+  filter_fields: [op]
+  determinism: medium
+  caveats:
+    - "One event per interval: `calls` is every function's calls summed, and
+       each function's count is beside it under its name (`vfs_read`,
+       `vfs_open`, `vfs_fsync_range`, ...). The aggregating emits answer with
+       the total, `--filter 'op == \"vfs_open\"'` keeps one function, and
+       `raw` is the split."
+    - "Any file type: a pipe's, a socket's or a terminal's read is a
+       `vfs_read` too, which is what `vfsstat` counts and what `io.fs`
+       (regular files only) leaves out. io_uring, sendfile, splice and a
+       mapping's page faults call none of these functions."
+    - "A process target and the processes it starts are followed from the
+       fork, as `io.latency` follows them."
+
 - id: io.syscall
   family: io
   summary: "I/O latency as the application sees it"

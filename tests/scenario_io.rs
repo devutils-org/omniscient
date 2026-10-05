@@ -732,7 +732,7 @@ fn something_this_source_does(source: &str) -> (&'static str, &'static str) {
 /// sweep covers both: a combination the catalog offers and the build cannot
 /// serve is a promise broken in the one place nobody looks, and that is as
 /// true of an eBPF backend as of a file.
-fn collected_sources() -> [&'static str; 15] {
+fn collected_sources() -> [&'static str; 16] {
     [
         "io.bytes",
         "io.iops",
@@ -749,6 +749,8 @@ fn collected_sources() -> [&'static str; 15] {
         "io.syscall",
         "io.fs",
         "io.fsync",
+        // The twenty-fourth wave's VFS call counter.
+        "io.vfs",
         // The ninth wave's two, over the page cache's raw tracepoints.
         "io.pagecache",
         "io.readahead",
@@ -6445,4 +6447,64 @@ fn a_launched_programs_forked_child_is_followed() {
          reporting {dropped} lost: the launched program's child is not followed. {}",
         stderr(&output)
     );
+}
+
+/// `io.vfs` counts every `vfs_write`, of any file type: a program that writes
+/// 20 000 times to `/dev/null` from a forked child is found 20 000 times, and
+/// the parent, which writes nothing, adds nothing. `/dev/null` is not a
+/// regular file, so `io.fs` would count none of them.
+#[test]
+fn every_vfs_write_of_a_forked_child_is_counted() {
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = lacks_here("io.vfs", "bpf:fentry") {
+        eprintln!("skipped: {reason:?}");
+        return;
+    }
+    const WRITES: u64 = 20_000;
+    let workload = script(
+        "io-vfs-writes.py",
+        r#"
+import os, sys
+count = int(sys.argv[1])
+child = os.fork()
+if child == 0:
+    fd = os.open(os.devnull, os.O_WRONLY)
+    for _ in range(count):
+        os.write(fd, b"x")
+    os._exit(0)
+os.waitpid(child, 0)
+"#,
+    );
+    let output = run(&[
+        "io.vfs",
+        "-m",
+        "count",
+        "-e",
+        "raw",
+        "--filter",
+        "op == \"vfs_write\"",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        workload.to_str().expect("a path"),
+        &WRITES.to_string(),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let document = json(&output);
+    let result = result(&document, "io.vfs");
+    let events = raw_events(result);
+    assert_eq!(events.len(), 1, "one counted event: {events:?}");
+    let calls = events[0]["calls"].as_u64().expect("calls");
+    let dropped = losses(result)["dropped"].as_u64().unwrap_or(0);
+    // Python writes nothing on its way in or out; a few calls of slack for
+    // an interpreter that one day does.
+    assert!(
+        calls + dropped >= WRITES && calls <= WRITES + 8,
+        "{WRITES} writes from a forked child, {calls} counted, {dropped} reported lost"
+    );
+    assert_eq!(events[0]["vfs_write"].as_u64(), Some(calls));
 }
