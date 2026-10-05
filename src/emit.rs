@@ -980,7 +980,13 @@ pub fn aggregate(
     // by its own ring's losses and by nothing else ([`Shortfalls`]).
     let mut collection = collection;
     if request.keys.contains(&KeyKind::Func) {
-        derive_func(&mut collection);
+        let stackless = derive_func(&mut collection);
+        if stackless > 0 {
+            degradations.push(format!(
+                "{stackless} of {} events carried no stack to name a function by, so `--keys func` holds them as `func:?`",
+                collection.events.len()
+            ));
+        }
     }
     let shorts = Shortfalls::of(&collection, &request.keys);
     let short = shorts.run.clone();
@@ -995,7 +1001,7 @@ pub fn aggregate(
         .iter()
         .any(|emit| matches!(emit, Emit::Summary | Emit::Hist(_)))
     {
-        groups_for(&collection.events, axes, value_attr, polled)?
+        groups_for(&collection.events, axes, value_attr, polled && adds_up)?
     } else {
         None
     };
@@ -1162,17 +1168,20 @@ pub fn aggregate(
 /// Puts `func`, the leaf frame of each event's stack, on the event, for a
 /// request keyed on it ([`KeyKind::Func`]): the stack table is the
 /// collector's when it interned one, and the frames on the events otherwise.
-/// Frames are stored root first, so the leaf is the last.
-fn derive_func(collection: &mut Collection) {
+/// Frames are stored root first, so the leaf is the last. Returns how many
+/// events had no stack to read one from, which the result says.
+fn derive_func(collection: &mut Collection) -> usize {
     let scanned = stack_table(&collection.events);
+    let mut stackless = 0;
     for event in &mut collection.events {
-        let Some(id) = stack_id(event) else { continue };
-        let Some(leaf) = collection
-            .stacks
-            .get(&id)
-            .or_else(|| scanned.get(&id))
-            .and_then(|frames| frames.last())
-        else {
+        let Some(leaf) = stack_id(event).and_then(|id| {
+            collection
+                .stacks
+                .get(&id)
+                .or_else(|| scanned.get(&id))
+                .and_then(|frames| frames.last())
+        }) else {
+            stackless += 1;
             continue;
         };
         let name = KeyKind::Func.as_str();
@@ -1181,6 +1190,7 @@ fn derive_func(collection: &mut Collection) {
             .attrs
             .push(crate::event::Attr::text(name, leaf.clone()));
     }
+    stackless
 }
 
 /// Says how many events carried no `by`, for an `@<attr>` emit that holds
@@ -1440,13 +1450,19 @@ fn tick((_, mut event, sum, readings): (u64, Event, f64, usize), attr: &str) -> 
 
 /// The groups a reducing emit reads: by `axes`, and for a poll regrouped by
 /// fewer keys than its events carry, one event per tick ([`folded_ticks`]).
+///
+/// `fold` is a poll of a source whose values add up ([`values_add_up`]):
+/// only then is the sum of one tick's readings a measurement. Three
+/// connections' round-trip times read at once are three times, and their sum
+/// is no connection's; a level regrouped by fewer keys keeps its readings
+/// apart, and the summary is over all of them.
 fn groups_for(
     events: &[Event],
     axes: &[KeyKind],
     attr: &str,
-    polled: bool,
+    fold: bool,
 ) -> Result<Option<BTreeMap<SeriesKey, Vec<Event>>>, EmitError> {
-    if !polled || axes.is_empty() {
+    if !fold || axes.is_empty() {
         return Ok(None);
     }
     folded_ticks(grouped(events, axes), attr).map(Some)
@@ -3230,6 +3246,15 @@ mod tests {
                 ("func:light".into(), 1.0),
             ]
         );
+        // The stackless one is counted, not only held as `func:?`.
+        assert!(
+            results
+                .degradations
+                .iter()
+                .any(|note| note.starts_with("1 of 6 events carried no stack")),
+            "{:?}",
+            results.degradations
+        );
     }
 
     /// A poll regrouped by fewer keys than its events carry adds the readings
@@ -3249,7 +3274,15 @@ mod tests {
             with_file(5, 11, 0),
             with_file(9, 10, 6),
         ];
-        let resolved = rss_request(
+        // `mem.rss` resolves the poll; the source is then one whose values
+        // add up, as `io.bytes` is, since only those are folded.
+        let additive = |emit: Vec<Emit>, keys: Vec<KeyKind>| {
+            let mut resolved = rss_request(emit, keys);
+            resolved.request.source = "net.packets".parse().unwrap();
+            assert!(values_add_up(resolved.request.source.as_str()));
+            resolved
+        };
+        let resolved = additive(
             vec![Emit::Summary, Emit::Hist(BucketLayout::Log2)],
             vec![KeyKind::Task],
         );
@@ -3274,13 +3307,38 @@ mod tests {
         assert_eq!(series[0].sum, 20.0);
 
         // Keyed as the events are, nothing is folded.
-        let resolved = rss_request(vec![Emit::Summary], vec![KeyKind::Task, KeyKind::File]);
-        let results = aggregate(&resolved, quiet(events, 1_000), Unit::Bytes, "bytes").unwrap();
+        let resolved = additive(vec![Emit::Summary], vec![KeyKind::Task, KeyKind::File]);
+        let results = aggregate(
+            &resolved,
+            quiet(events.clone(), 1_000),
+            Unit::Bytes,
+            "bytes",
+        )
+        .unwrap();
         let Output::Summary { series } = &results.outputs[0] else {
             panic!("a summary");
         };
         let counts: Vec<usize> = series.iter().map(|one| one.count).collect();
         assert_eq!(counts, [3, 2]);
+
+        // A level is never folded: two readings of one tick are two
+        // measurements -- two connections' round-trip times, not their sum.
+        let resolved = rss_request(
+            vec![Emit::Summary, Emit::Hist(BucketLayout::Log2)],
+            vec![KeyKind::Task],
+        );
+        assert!(!values_add_up(resolved.request.source.as_str()));
+        let results = aggregate(&resolved, quiet(events, 1_000), Unit::Bytes, "bytes").unwrap();
+        let Output::Summary { series } = &results.outputs[0] else {
+            panic!("a summary");
+        };
+        let one = &series[0];
+        assert_eq!((one.count, one.min, one.max), (5, 0.0, 8.0));
+        assert!((one.mean - 4.0).abs() < 1e-9, "{one:?}");
+        let Output::Hist { series, .. } = &results.outputs[1] else {
+            panic!("a histogram");
+        };
+        assert_eq!(series[0].count, 5);
     }
 
     /// An event with no value attribute is one the collector saw and could not
