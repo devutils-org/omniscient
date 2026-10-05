@@ -1184,6 +1184,21 @@ and is filed with stream cpu.
   `queue_ns` is the kernel's `sched_info` account: a task woken onto an idle
   cpu reads 0, where timehist's `sch delay` reads 3 to 11 us.
   `family_sched::time_slices_add_up_to_the_cpu_and_the_runnable_time`.
+  Two defects the review found, fixed in the round after: `off_ns` was the
+  whole gap from switch out to switch in, so it held the queue wait as well
+  and the two added up counted it twice; and the wait was only the stamp's
+  part, so a preempted task the balancer moved read a wait of 0 or a
+  fraction of its gap (the first cpu closes its part into `run_delay`). Under
+  48 threads spinning 1 s on 24 cpus, 7 241 preempted slices: before, 73
+  read `queue_ns` 0 and `off_ns` summed 0.52 s for tasks that were never off
+  a queue; after, 5 and 3.3 ms (the stopper's moves, `next_comm`
+  `migration/N`), runs and waits 48.06 s for 48 runnable seconds. The test
+  holds the preempted slices' `off_ns` under 1 % of their waits.
+- **`sched.interrupts`' wrap**: the kernel keeps the per-cpu counts in an
+  `unsigned int`, which `LOC` at 1 kHz wraps after about fifty days. A count
+  that went backwards from the upper half of that range is counted across
+  the wrap (a fact says how many); any other backwards count is a reset, a
+  failed read with a note (`interrupts::tests::a_wrap_is_counted_and_a_reset_is_a_loss`).
 - **`sched.runqlat`'s run summary**: `wake_to_run_mean_ns` and the sums, by
   name in `fields`, and a sentence. `sleeper.py 100 2`: 106 waits, 3.6 us,
   against a bpftrace `sched_wakeup`-to-`sched_switch` script's 100 waits,
