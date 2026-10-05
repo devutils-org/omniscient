@@ -12,6 +12,7 @@ mod page_faults;
 mod pressure;
 mod stall;
 mod swap;
+mod swapin;
 mod system;
 #[cfg(test)]
 mod testing;
@@ -120,6 +121,9 @@ pub fn factories() -> Vec<Factory> {
                 swap::Scope::Cgroup,
                 resolved.request.mode,
             )?))
+        }),
+        Factory::new("mem.swap", "perf:kprobe", |resolved| {
+            Ok(Box::new(swapin::Prepare::new(resolved.request.mode)?))
         }),
         Factory::new("mem.thp", "fs:sys", |resolved| {
             Ok(Box::new(thp::Prepare::new(

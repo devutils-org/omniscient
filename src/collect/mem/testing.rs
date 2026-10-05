@@ -118,6 +118,15 @@ impl Scratch {
         Toucher::start(Some(&self.path.join("cgroup.procs")), bytes)
     }
 
+    /// A walker inside this cgroup: [`Toucher::walker`], charged here.
+    pub fn spawn_walker(&self, resident: u64, working: u64) -> Toucher {
+        Toucher::spawn(
+            Some(&self.path.join("cgroup.procs")),
+            resident,
+            Some(working),
+        )
+    }
+
     /// A toucher that is not waited for, for a test that expects the kernel
     /// to kill it: [`Toucher::wait_for_end`] says how it ended.
     pub fn spawn_doomed_toucher(&self, bytes: u64) -> Toucher {

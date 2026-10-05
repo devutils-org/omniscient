@@ -582,6 +582,8 @@
     - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free, targets: {system: native}}
     - {id: "fs:cgroup", requires: ["cgroup2:memory.swap.current", "cgroup2:memory.stat:pswpout"], cost: free, equivalent: true,
        targets: {cgroup: native, container: native, pid: native, tid: native, launch: native}}
+    - {id: "perf:kprobe", requires: ["kprobe"], cost: low, targets: {pid: native, tid: native, launch: native},
+       degraded: "the process's own swap-ins, counted as reads of a folio from swap (`swapins`) and reported as one page each in `in_bytes`: a folio is one page in the common case and more where the kernel swaps a large one in whole; no swap-out, which the kernel does on behalf of no one"}
   modes: [poll, snapshot, count]
   emits: [timeline, rate, raw, summary]
   targets: {system: native, cgroup: native, container: native, pid: native, tid: native, launch: native}
@@ -603,7 +605,9 @@
        untouched grows swapped_bytes by a gigabyte with no traffic at all. The
        flow and the stock disagreeing is not a bug."
     - "A pid names a cgroup for the fs:cgroup backend: swap is accounted per
-       cgroup, never per process."
+       cgroup, never per process. `--backend perf:kprobe` counts the process's
+       own reads from swap instead, through a counting kprobe on the kernel's
+       swap_read_folio, readahead its faults started included."
 
 - id: mem.pressure
   family: mem
