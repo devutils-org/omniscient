@@ -55,6 +55,12 @@ const RING_PAGES: usize = 64;
 /// The line size, when the kernel does not say.
 const DEFAULT_LINE: u64 = 64;
 
+/// How often the followed tasks' run time is read, for the delivered rate.
+const CLOCK_INTERVAL: StdDuration = StdDuration::from_millis(100);
+
+/// Below this share of the rate asked, the note says the run fell short.
+const SHORT_OF_RATE: f64 = 0.9;
+
 /// Which of the two questions a collector answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Question {
@@ -309,6 +315,234 @@ struct Tally {
     hitm: u64,
 }
 
+/// How long what the events follow actually ran.
+///
+/// A rate in frequency mode is a rate of the time an event is scheduled in,
+/// which for a task is the time it runs: a program asleep half the run is
+/// sampled half as often, and that is not a shortfall. So the delivered rate
+/// is tagged ops over this clock, never over the wall. Read from `/proc`
+/// rather than from the events, so that it says what the tasks did whatever
+/// the unit made of it.
+#[derive(Debug)]
+enum RunClock {
+    /// Per thread, the run time `/proc/<tid>/schedstat` reports, first and
+    /// last seen. A thread that exits keeps the last value read, so up to one
+    /// read interval of its run is missing from the clock.
+    Tasks {
+        first: BTreeMap<i32, u64>,
+        last: BTreeMap<i32, u64>,
+    },
+    /// Busy time of these cpus, from `/proc/stat`.
+    Cpus {
+        cpus: Vec<u32>,
+        first: Option<u64>,
+        last: Option<u64>,
+    },
+    /// The cgroup's own `cpu.stat`, which counts every task it ever held.
+    Cgroup {
+        stat: std::path::PathBuf,
+        first: Option<u64>,
+        last: Option<u64>,
+    },
+}
+
+impl RunClock {
+    fn for_reach(reach: &Reach) -> Self {
+        match reach {
+            Reach::Processes { .. } | Reach::Threads { .. } => RunClock::Tasks {
+                first: BTreeMap::new(),
+                last: BTreeMap::new(),
+            },
+            Reach::Cpus(cpus) => RunClock::Cpus {
+                cpus: cpus.clone(),
+                first: None,
+                last: None,
+            },
+            Reach::Cgroup { cgroup, .. } => RunClock::Cgroup {
+                stat: cgroup.directory.join("cpu.stat"),
+                first: None,
+                last: None,
+            },
+        }
+    }
+
+    /// The reading the delivered rate starts from: every thread the target
+    /// has now, at the run time it already had.
+    fn start(&mut self, reach: &Reach) {
+        match self {
+            RunClock::Tasks { first, last } => {
+                let tids: Vec<i32> = match reach {
+                    Reach::Processes { pids, .. } => pids
+                        .iter()
+                        .flat_map(|pid| threads_of(*pid).unwrap_or_default())
+                        .collect(),
+                    Reach::Threads { tids, .. } => tids.clone(),
+                    _ => Vec::new(),
+                };
+                for tid in tids {
+                    if let Some(ns) = task_run_ns(tid) {
+                        first.insert(tid, ns);
+                        last.insert(tid, ns);
+                    }
+                }
+            }
+            RunClock::Cpus { cpus, first, last } => {
+                *first = cpus_busy_ns(cpus);
+                *last = *first;
+            }
+            RunClock::Cgroup { stat, first, last } => {
+                *first = cgroup_usage_ns(stat);
+                *last = *first;
+            }
+        }
+    }
+
+    /// A thread the rings delivered a sample of. One that appeared after the
+    /// start began at zero, which is what a thread started under the events is.
+    fn saw(&mut self, tid: i32) {
+        if let RunClock::Tasks { first, last } = self {
+            first.entry(tid).or_insert(0);
+            last.entry(tid).or_insert(0);
+        }
+    }
+
+    fn refresh(&mut self) {
+        match self {
+            RunClock::Tasks { last, .. } => {
+                for (tid, ns) in last.iter_mut() {
+                    if let Some(now) = task_run_ns(*tid) {
+                        *ns = (*ns).max(now);
+                    }
+                }
+            }
+            RunClock::Cpus { cpus, last, .. } => {
+                if let Some(now) = cpus_busy_ns(cpus) {
+                    *last = Some(now);
+                }
+            }
+            RunClock::Cgroup { stat, last, .. } => {
+                if let Some(now) = cgroup_usage_ns(stat) {
+                    *last = Some(now);
+                }
+            }
+        }
+    }
+
+    /// The run time between the start and the last reading, when one exists.
+    fn elapsed_ns(&self) -> Option<u64> {
+        match self {
+            RunClock::Tasks { first, last } => {
+                let total: u64 = last
+                    .iter()
+                    .map(|(tid, ns)| ns.saturating_sub(first.get(tid).copied().unwrap_or(0)))
+                    .sum();
+                (total > 0).then_some(total)
+            }
+            RunClock::Cpus { first, last, .. } | RunClock::Cgroup { first, last, .. } => {
+                Some(last.as_ref()?.saturating_sub(*first.as_ref()?)).filter(|ns| *ns > 0)
+            }
+        }
+    }
+
+    fn what(&self) -> &'static str {
+        match self {
+            RunClock::Tasks { .. } => "the followed threads ran",
+            RunClock::Cpus { .. } => "the sampled cpus were busy",
+            RunClock::Cgroup { .. } => "the cgroup's tasks ran",
+        }
+    }
+}
+
+/// A thread's run time so far: the first field of its schedstat.
+fn task_run_ns(tid: i32) -> Option<u64> {
+    let text = std::fs::read_to_string(format!("/proc/{tid}/schedstat")).ok()?;
+    text.split_whitespace().next()?.parse().ok()
+}
+
+/// The time these cpus spent not idle, from `/proc/stat`.
+fn cpus_busy_ns(cpus: &[u32]) -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/stat").ok()?;
+    busy_ns_of(&text, cpus, clock_ticks())
+}
+
+fn busy_ns_of(stat: &str, cpus: &[u32], ticks_per_second: u64) -> Option<u64> {
+    let mut busy = 0u64;
+    let mut found = 0;
+    for line in stat.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(name) = fields.next() else { continue };
+        let Some(cpu) = name.strip_prefix("cpu").and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        if !cpus.contains(&cpu) {
+            continue;
+        }
+        let values: Vec<u64> = fields.filter_map(|field| field.parse().ok()).collect();
+        // user nice system idle iowait irq softirq steal: idle and iowait are
+        // the time nothing ran; guest time is already inside user.
+        let total: u64 = values.iter().take(8).sum();
+        let idle = values.get(3).copied().unwrap_or(0) + values.get(4).copied().unwrap_or(0);
+        busy += total.saturating_sub(idle);
+        found += 1;
+    }
+    (found > 0).then(|| busy * (1_000_000_000 / ticks_per_second.max(1)))
+}
+
+/// `USER_HZ`, which `/proc/stat` counts in.
+fn clock_ticks() -> u64 {
+    // SAFETY: sysconf reads a constant of the running system.
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks > 0 {
+        ticks as u64
+    } else {
+        100
+    }
+}
+
+/// A cgroup's `usage_usec`, in nanoseconds.
+fn cgroup_usage_ns(stat: &std::path::Path) -> Option<u64> {
+    let text = std::fs::read_to_string(stat).ok()?;
+    text.lines()
+        .find_map(|line| line.strip_prefix("usage_usec "))
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|usec| usec * 1000)
+}
+
+/// The note that says what rate the unit delivered against the one asked.
+fn rate_note(ops: u64, run_ns: Option<u64>, asked: Rate, clock: &str, filtered: bool) -> String {
+    let Rate::Hz(hz) = asked else {
+        return format!("IBS tagged {ops} ops at a fixed period");
+    };
+    let Some(run_ns) = run_ns.filter(|ns| *ns >= 10_000_000) else {
+        return format!(
+            "IBS tagged {ops} ops at a requested {hz} Hz; how long {clock} could not be read, \
+             so the rate it delivered is not known"
+        );
+    };
+    let seconds = run_ns as f64 / 1e9;
+    let delivered = ops as f64 / seconds;
+    let share = delivered / hz as f64;
+    let mut note = format!(
+        "IBS delivered {ops} tagged ops over the {seconds:.2} s {clock}: {delivered:.0} a \
+         second, {:.0} % of the {hz} Hz asked",
+        share * 100.0
+    );
+    if share < SHORT_OF_RATE {
+        note.push_str(&format!(
+            ". In frequency mode the kernel sets the period itself, and on this unit, counting \
+             ops{}, it settles short of the rate: a count read off these events is a sample of \
+             the ops, scaled by nothing, and a distribution over them is as good as its {ops} \
+             ops",
+            if filtered {
+                " with the kernel's own accesses filtered out after tagging"
+            } else {
+                ""
+            }
+        ));
+    }
+    note
+}
+
 pub struct IbsCollector {
     id: CollectorId,
     question: Question,
@@ -329,6 +563,8 @@ pub struct IbsCollector {
     /// How many events were opened, and on how many cpus.
     opened: (usize, usize),
     filter: Option<FilterExpr>,
+    clock: RunClock,
+    clock_read: Option<std::time::Instant>,
 }
 
 impl IbsCollector {
@@ -341,6 +577,7 @@ impl IbsCollector {
         keys: &[KeyKind],
         callchain: Callchain,
     ) -> Self {
+        let clock = RunClock::for_reach(&reach);
         Self {
             id: CollectorId::new(format!("{}/pmu:ibs", question.source())),
             question,
@@ -348,6 +585,8 @@ impl IbsCollector {
             rate,
             reach,
             keys: key_order(question, keys),
+            clock,
+            clock_read: None,
             callchain,
             line: line_size(),
             rings: Vec::new(),
@@ -455,6 +694,13 @@ impl IbsCollector {
             );
         }
         self.losses.undecoded += undecoded;
+        let due = self
+            .clock_read
+            .is_none_or(|read| read.elapsed() >= CLOCK_INTERVAL);
+        if due {
+            self.clock.refresh();
+            self.clock_read = Some(std::time::Instant::now());
+        }
     }
 
     /// Counts a sample and returns the event it is, when this question keeps it.
@@ -466,6 +712,7 @@ impl IbsCollector {
     /// asked about.
     fn keep(&mut self, sample: &Sample, seq: u64) -> Option<Event> {
         self.tally.ops += 1;
+        self.clock.saw(sample.tid as i32);
         let access = sample.access?;
         let op = access.source.op();
         let hitm = access.source.hitm();
@@ -627,6 +874,8 @@ impl Collector for IbsCollector {
             crate::stack::prime_kernel_symbols();
         }
         self.open()?;
+        self.clock.start(&self.reach);
+        self.clock_read = Some(std::time::Instant::now());
         for ring in &self.rings {
             ring.enable().map_err(|error| error.to_string())?;
         }
@@ -648,6 +897,7 @@ impl Collector for IbsCollector {
         }
         let mut trailing = Vec::new();
         self.drain_into(&mut trailing, u64::MAX / 2);
+        self.clock.refresh();
         // The perf map's lines flushed after the last tick (see
         // `Unwinder::finish`).
         if let Some(unwinder) = self.unwinder.as_mut() {
@@ -691,6 +941,13 @@ impl Collector for IbsCollector {
         let mut notes = Vec::new();
         let tally = &self.tally;
         let (events, cpus) = self.opened;
+        notes.push(rate_note(
+            tally.ops,
+            self.clock.elapsed_ns(),
+            self.rate,
+            self.clock.what(),
+            self.ibs.can_exclude_kernel(),
+        ));
         notes.push(format!(
             "IBS tagged {} ops over {events} event{} on {cpus} cpu{}, one in every so many {}: {} \
              were loads{}, {} of them timed, and {} were answered by a line another core held \
@@ -861,6 +1118,75 @@ mod tests {
                 "the leader is followed too"
             );
         }
+    }
+
+    /// The data-source words `perf script -F data_src` printed for a pointer
+    /// chase on this machine (a Ryzen 9 3900X, family 17h), beside the level
+    /// perf decoded each to. `peer` is what perf calls "core, same node Any
+    /// cache hit": the same word, the same reading.
+    #[test]
+    fn the_levels_read_the_words_the_way_perf_does() {
+        use crate::perf::{DataSource, MemLevel};
+        for (word, level) in [
+            (0x0229080142u64, MemLevel::L1),
+            (0x0429080442, MemLevel::L2),
+            (0x081629808842, MemLevel::Peer),
+            (0x081649808842, MemLevel::Peer),
+            (0x1a29081042, MemLevel::Ram),
+            (0x1a49081042, MemLevel::Ram),
+        ] {
+            let source = DataSource(word);
+            assert_eq!(source.level(), level, "{word:#x}");
+            assert_eq!(source.op(), MemOp::Load, "{word:#x}");
+        }
+    }
+
+    #[test]
+    fn busy_time_is_every_state_but_idle_and_iowait_on_the_cpus_named() {
+        let stat = "cpu  1000 0 0 0 0 0 0 0 0 0\n\
+                    cpu0 10 1 4 100 5 2 3 0 0 0\n\
+                    cpu1 50 0 0 50 0 0 0 0 0 0\n\
+                    intr 1 2 3\n";
+        assert_eq!(busy_ns_of(stat, &[0], 100), Some(20 * 10_000_000));
+        assert_eq!(busy_ns_of(stat, &[0, 1], 100), Some(70 * 10_000_000));
+        assert_eq!(busy_ns_of(stat, &[7], 100), None);
+    }
+
+    #[test]
+    fn the_rate_note_says_the_share_of_the_rate_asked_and_why_when_short() {
+        let full = rate_note(4000, Some(1_000_000_000), Rate::Hz(4000), "they ran", true);
+        assert!(full.contains("100 % of the 4000 Hz asked"), "{full}");
+        assert!(!full.contains("settles short"), "{full}");
+        let short = rate_note(2320, Some(1_000_000_000), Rate::Hz(4000), "they ran", true);
+        assert!(short.contains("58 % of the 4000 Hz asked"), "{short}");
+        assert!(short.contains("settles short"), "{short}");
+        let unknown = rate_note(10, None, Rate::Hz(4000), "they ran", false);
+        assert!(unknown.contains("not known"), "{unknown}");
+    }
+
+    #[test]
+    fn a_threads_clock_counts_what_it_ran_after_the_start() {
+        // SAFETY: gettid has no preconditions.
+        let tid = unsafe { libc::gettid() };
+        let mut clock = RunClock::Tasks {
+            first: BTreeMap::new(),
+            last: BTreeMap::new(),
+        };
+        clock.start(&Reach::Threads {
+            tids: vec![tid],
+            cpus: vec![0],
+        });
+        let deadline = std::time::Instant::now() + StdDuration::from_millis(30);
+        let mut spin = 0u64;
+        while std::time::Instant::now() < deadline {
+            spin = std::hint::black_box(spin.wrapping_add(1));
+        }
+        clock.refresh();
+        let ran = clock.elapsed_ns().expect("this thread ran");
+        assert!(
+            (20_000_000..1_000_000_000).contains(&ran),
+            "30 ms of spinning read as {ran} ns"
+        );
     }
 
     #[test]

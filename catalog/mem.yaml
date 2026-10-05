@@ -312,7 +312,14 @@
        workload whose loads are a small share of its ops yields few of them."
     - "`level` says which level answered. On AMD family 17h an L3 hit and a hit
        in a sibling core's cache are reported alike, as `peer`, because the
-       unit does not tell them apart."
+       unit does not tell them apart; `perf script` prints the same word as
+       \"core, same node Any cache hit\". The share of `peer` moves from run
+       to run with what else holds the L3, and a reference that counts cycles
+       between tags rather than ops times a different mix of loads."
+    - "A rate in Hz is a target the kernel adjusts the period towards, not a
+       promise. Counting ops with the kernel's accesses filtered out, the IBS
+       unit of family 17h settles at about 70 % of 4000 Hz; the run says the
+       rate it delivered over the time the followed tasks ran."
 
 - id: mem.sharing
   family: mem
