@@ -14,12 +14,13 @@
     # counter is root-only on current kernels -- so requiring the directory
     # would let the resolver promise a measurement that the collector then
     # cannot take.
-    - {id: "fs:sys", requires: ["/sys/class/powercap/intel-rapl:0/energy_uj"], cost: free,
-       degraded: "polled: a spike between two reads is averaged into the interval that contains it"}
+    - {id: "fs:sys", requires: ["/sys/class/powercap/intel-rapl:0/energy_uj"], cost: free, keys: [],
+       degraded: "polled: a spike between two reads is averaged into the interval that contains it;
+                  the top-level domains are summed into one series, with no domain key"}
   modes: [count, poll]
   emits: [summary, rate, timeline, raw]
   targets: {system: native}
-  keys: []
+  keys: [domain]
   filter_fields: [domain]
   determinism: medium
   caveats:
@@ -30,9 +31,12 @@
     - "What one tick is worth is read from the kernel, not assumed: RAPL counts
        in units of 2^-32 joules. A collector that assumed microjoules would be
        wrong by ten orders of magnitude."
-    - "A part with several domains -- package, cores, dram -- reports one event
-       per domain per tick, and they share one series because there is no key
-       for a package. Read the `domain` attribute until that key exists."
+    - "The domains nest -- the cores are inside their package -- so one series
+       across them counts the same joules twice. Unkeyed, the package alone is
+       read; `--keys domain` reads every domain the part publishes (package,
+       cores, dram), one series each. AMD counts core energy per core
+       (`power_core`): the `cores` domain is every core's counter summed, and
+       `counters` says how many."
     - "RAPL is per package: --pid is invalid. Per-process attribution is a derived
        estimate (share of cycles) and must be labelled as such."
     - "`energy_uj` is readable only by root on current kernels: the counter was

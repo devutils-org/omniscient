@@ -2212,3 +2212,63 @@ fn a_core_held_busy_reads_busy_through_every_road_and_once_per_interval() {
     }
     assert!(checked > 0, "neither road of `power.freq` is open here");
 }
+
+/// The core energy domain, where the part counts it per core (AMD's
+/// `power_core` unit): one counter per core the unit lists, summed, and less
+/// than the package that contains those cores. Asked for by `--keys domain`,
+/// which gives each domain its own series; unkeyed, the package alone is read,
+/// because the domains nest and one series across them double-counts.
+///
+/// Shown against `perf stat -a -e power_core/energy-core/` over the same two
+/// seconds on this machine: 226.89 J against 227.77 J, and the package 276.77
+/// against 277.31 J (`docs/scenarios/power.md`).
+#[test]
+fn the_core_domain_is_every_cores_counter_summed_and_less_than_its_package() {
+    let mask = Path::new("/sys/bus/event_source/devices/power_core/cpumask");
+    let Ok(mask) = std::fs::read_to_string(mask) else {
+        eprintln!("skipped: this part publishes no per-core energy unit");
+        return;
+    };
+    let Some(cores) = omn::capabilities::parse_cpu_list(mask.trim()) else {
+        panic!("the kernel's cpumask `{mask}` does not parse");
+    };
+    if !usable("power.energy") || lacks_here("power.energy", "pmu").is_some() {
+        eprintln!("skipped: `power.energy` through `pmu` is not open here");
+        return;
+    }
+    let output = run(&[
+        "power.energy",
+        "--system",
+        "-m",
+        "count",
+        "-d",
+        "1s",
+        "-e",
+        "raw",
+        "-k",
+        "domain",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    let joules = |domain: &str| -> Option<(f64, usize)> {
+        let line = out
+            .lines()
+            .find(|line| line.contains(&format!("domain={domain} ")))?;
+        Some((
+            field(line, "joules=")?.parse().ok()?,
+            field(line, "counters=")?.parse().ok()?,
+        ))
+    };
+    let (package, _) = joules("package").unwrap_or_else(|| panic!("a package domain: {out}"));
+    let (core_joules, counters) =
+        joules("cores").unwrap_or_else(|| panic!("a cores domain: {out}"));
+    assert_eq!(
+        counters,
+        cores.len(),
+        "one counter per core the unit lists: {out}"
+    );
+    assert!(
+        core_joules > 0.0 && core_joules < package,
+        "the cores ({core_joules} J) sit inside their package ({package} J): {out}"
+    );
+}

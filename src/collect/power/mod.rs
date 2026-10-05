@@ -28,7 +28,14 @@ use super::Factory;
 pub fn factories() -> Vec<Factory> {
     vec![
         Factory::new("power.energy", "pmu", |resolved| {
-            Ok(Box::new(energy_pmu::Prepare::new(resolved.request.mode)?))
+            let by_domain = resolved
+                .request
+                .keys
+                .contains(&crate::request::KeyKind::Domain);
+            Ok(Box::new(energy_pmu::Prepare::new(
+                resolved.request.mode,
+                by_domain,
+            )?))
         }),
         Factory::new("power.energy", "fs:sys", |resolved| {
             Ok(Box::new(energy::Prepare::new(resolved.request.mode)?))
