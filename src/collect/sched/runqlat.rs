@@ -113,6 +113,8 @@ pub struct RunqLatCollector {
     /// quantity `perf sched latency` and `runqlat.bt` report.
     wait_total_ns: u64,
     wake_to_run_total_ns: u64,
+    /// Each process's parent, for the rows' `ppid`.
+    parents: super::Parents,
     /// The request's predicate, applied to each row as it is drained.
     predicate: Option<FilterExpr>,
     /// Waits the predicate removed, and waits it kept. Counted in waits rather
@@ -141,6 +143,7 @@ impl RunqLatCollector {
             rows: 0,
             wait_total_ns: 0,
             wake_to_run_total_ns: 0,
+            parents: super::Parents::default(),
             predicate,
             filtered_out: 0,
             filtered_in: 0,
@@ -165,6 +168,7 @@ impl RunqLatCollector {
             }
         };
         self.window_opened_ns = closed_ns;
+        self.parents.absorb(program.parents());
         // A task that exec'd in this window is named what it became, not what
         // it was when its row was made; see `bpf::Renames`.
         if let Some(renames) = self.renames.as_mut() {
@@ -195,7 +199,7 @@ impl RunqLatCollector {
                 self.off_target += row.count;
                 continue;
             }
-            let event = Event {
+            let mut event = Event {
                 // Stamped where the row's first wait began rather than at the
                 // drain that read it, which is finding 44: a join that opens on
                 // a bucketed source would otherwise open at the window's close.
@@ -220,6 +224,9 @@ impl RunqLatCollector {
                 collector_id: self.id.clone(),
                 seq: seq + index as u64,
             };
+            if let Some(ppid) = self.parents.of(row.tgid) {
+                event.attrs.push(Attr::uint("ppid", u64::from(ppid)));
+            }
             if let Some(predicate) = &self.predicate {
                 if !crate::filter::matches(predicate, &event) {
                     self.filtered_out += row.count;

@@ -636,6 +636,14 @@ impl RunqLatProgram {
         self.descendants.as_ref().map_or(0, Descendants::missed)
     }
 
+    /// The parents of the processes the target started, as `(tgid, ppid)`;
+    /// see [`Descendants::parents`]. Empty for any other target.
+    pub fn parents(&self) -> Vec<(u32, u32)> {
+        self.descendants
+            .as_ref()
+            .map_or_else(Vec::new, Descendants::parents)
+    }
+
     /// Why the wait is not the kernel's own account, on a kernel that does
     /// not expose it.
     pub fn clock_missing(&self) -> Option<&str> {

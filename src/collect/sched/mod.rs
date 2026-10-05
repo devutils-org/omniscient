@@ -36,6 +36,48 @@ use super::Factory;
 use crate::bpf::Whose;
 use crate::request::Target;
 
+/// Each process's parent, for the `ppid` the family's rows carry.
+///
+/// A launched or named process's descendants are told by the kernel: the
+/// fork program writes each child's parent as it is born, and keeps it until
+/// a drain has read it after the child is gone (`bpf::Descendants::parents`).
+/// Any other process is looked up once in `/proc/<tgid>/stat`, which a process
+/// already gone does not answer: such a row has no `ppid` rather than a
+/// wrong one.
+#[derive(Debug, Default)]
+pub(crate) struct Parents {
+    known: std::collections::BTreeMap<u32, Option<u32>>,
+}
+
+impl Parents {
+    /// Takes what the kernel said, which wins over an earlier `/proc` read.
+    pub(crate) fn absorb(&mut self, pairs: impl IntoIterator<Item = (u32, u32)>) {
+        for (tgid, parent) in pairs {
+            self.known.insert(tgid, Some(parent));
+        }
+    }
+
+    /// The parent of `tgid`, if it is known or still in `/proc`.
+    pub(crate) fn of(&mut self, tgid: u32) -> Option<u32> {
+        if tgid == 0 {
+            return None;
+        }
+        *self.known.entry(tgid).or_insert_with(|| proc_parent(tgid))
+    }
+}
+
+/// The fourth field of `/proc/<tgid>/stat`, read past the `comm` in
+/// parentheses, which may itself hold spaces and parentheses.
+fn proc_parent(tgid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{tgid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
 /// Whose tasks one of this family's programs narrows to, or the refusal.
 ///
 /// Every eBPF collector here compares a task in the kernel, and until the

@@ -2060,3 +2060,43 @@ fn the_interrupt_counts_are_the_machines() {
         "{hard} hard interrupts counted against /proc/stat's {machine}"
     );
 }
+
+/// Every row of a launched shell's children names the shell as its `ppid`,
+/// including children gone long before the run ended: the kernel writes the
+/// parent at the fork, and keeps it past the child's exit until a drain has
+/// read it.
+#[test]
+fn a_launched_shells_children_name_it_as_their_parent() {
+    let script = sleeper(5);
+    for source in ["sched.offcpu", "sched.runqlat"] {
+        let output = run(&[
+            "trace", source, "-e", "raw", "--format", "json", "--", "/bin/sh", "-c", &script,
+        ]);
+        let text = String::from_utf8_lossy(&output.stderr).into_owned();
+        if refused_for_capabilities(&text) || !output.status.success() {
+            eprintln!("skipped: {source} was not served: {text}");
+            return;
+        }
+        let events = raw_events(&output);
+        let shell: Vec<u64> = events
+            .iter()
+            .filter(|attrs| attrs["comm"] == "sh")
+            .filter_map(|attrs| attrs["pid"].as_u64())
+            .collect();
+        let shell = *shell
+            .first()
+            .unwrap_or_else(|| panic!("{source}: the shell waits"));
+        let children: Vec<_> = events
+            .iter()
+            .filter(|attrs| attrs["comm"] == "sleep")
+            .collect();
+        assert!(!children.is_empty(), "{source}: five sleeps wait");
+        for child in children {
+            assert_eq!(
+                child.get("ppid").and_then(|ppid| ppid.as_u64()),
+                Some(shell),
+                "{source}: a sleep the shell forked names it: {child:?}"
+            );
+        }
+    }
+}
