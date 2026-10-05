@@ -987,9 +987,8 @@ fn a_program_under_a_wrapper_holds_the_video_memory_its_child_allocated() {
         .iter()
         .map(|event| attr(event, "bytes").as_i64().expect("bytes is an integer"))
         .collect();
-    let rise = last_rise(&held).unwrap_or_else(|| {
-        panic!("the wrapped workload allocates, so the series rises: {held:?}")
-    });
+    let rise = last_rise(&held)
+        .unwrap_or_else(|| panic!("the wrapped workload allocates, so the series rises: {held:?}"));
     assert_eq!(
         held[rise] - held[rise - 1],
         ARENA_BYTES,
@@ -1420,7 +1419,9 @@ fn a_temperature_poll_costs_its_program_its_readings_not_the_clock_state() {
     assert!(output.status.success(), "{}", stderr(&output));
     let run: Value = serde_json::from_str(&stdout(&output)).expect("json results");
     let overhead = &run["results"][0]["overhead"];
-    let inside = overhead["collector_cpu_ns"].as_u64().expect("the cost is read");
+    let inside = overhead["collector_cpu_ns"]
+        .as_u64()
+        .expect("the cost is read");
     assert!(
         inside < 15_000_000,
         "two or three temperature readings cost the program {:.1} ms of cpu: {overhead}",
@@ -2864,4 +2865,121 @@ fn gpu_api_on_a_running_process_is_rejected_for_its_target() {
         complaint.contains("pid") && complaint.contains("launch"),
         "the refusal must name the target it refused and the one it accepts: {complaint}"
     );
+}
+
+// ===========================================================================
+// The twenty-fourth wave: the memory clock and the held clocks as values
+// ===========================================================================
+
+/// One raw run of `source` in `mode` on `program`, its events.
+fn raw_run(source: &str, mode: &str, program: &[&str]) -> Vec<Value> {
+    let mut args = vec![
+        source, "--mode", mode, "--emit", "raw", "--format", "json", "--",
+    ];
+    args.extend_from_slice(program);
+    let output = omn(&args);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let run: Value = serde_json::from_str(&stdout(&output)).expect("json results");
+    events(&run["results"][0], "raw").clone()
+}
+
+/// `gpu.mem_freq` is the memory clock as its own series, `dmon`'s `mclk`.
+/// Ground truth is the shape and the vendor's bound: an idle board parks its
+/// memory clock at its floor and a kernel lifts it, and no reading is above
+/// the maximum `nvidia-smi` states.
+#[test]
+fn the_memory_clock_is_a_series_that_a_kernel_lifts_and_the_maximum_bounds() {
+    if let Err(reason) = device_and_workload() {
+        return eprintln!("skipped: {reason}");
+    }
+    let _alone = exclusive();
+    let hz = |events: &[Value]| -> Vec<f64> {
+        events
+            .iter()
+            .map(|event| attr(event, "hz").as_f64().expect("hz is a number"))
+            .collect()
+    };
+    let busy = hz(&raw_run(
+        "gpu.mem_freq",
+        "poll@200ms",
+        &["python3", "tests/gpu_workload.py", "kernel", "1500"],
+    ));
+    assert!(busy.len() >= 5, "a 1.5 s kernel polled at 200 ms: {busy:?}");
+    let top = busy.iter().copied().fold(0.0, f64::max);
+    if let Some(max_mem) = nvidia_smi("clocks.max.mem") {
+        assert!(
+            top <= max_mem * 1e6,
+            "the memory clock read {} MHz against a maximum of {max_mem} MHz",
+            top / 1e6
+        );
+    }
+    settle();
+    let idle = hz(&raw_run("gpu.mem_freq", "poll@200ms", &["sleep", "1"]));
+    let floor = idle.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        top > floor,
+        "a kernel left the memory clock at {} MHz, where an idle board reads {} MHz",
+        top / 1e6,
+        floor / 1e6
+    );
+}
+
+/// `gpu.throttle` reads the driver's counters of time the clocks were held,
+/// per reason. Ground truth is the shape: an idle board is held below its
+/// clocks for low utilisation the whole window and by no limit, and a 1.5 s
+/// kernel takes most of its window out of low utilisation. No limit can be
+/// provoked here (that is a power limit or a clock lock, the user's), so the
+/// value is held to what every share must be: between 0 and 1, and the
+/// largest of the limiting shares.
+#[test]
+fn the_held_clocks_share_separates_an_idle_board_from_a_running_kernel() {
+    if let Err(reason) = device_and_workload() {
+        return eprintln!("skipped: {reason}");
+    }
+    let _alone = exclusive();
+    let share = |event: &Value, name: &str| attr(event, name).as_f64().unwrap();
+    let idle = raw_run("gpu.throttle", "count", &["sleep", "1.5"]);
+    assert_eq!(
+        idle.len(),
+        1,
+        "a counted window is one reading at its close"
+    );
+    assert!(
+        share(&idle[0], "low_utilization_ratio") > 0.9,
+        "an idle board is held for low utilisation: {}",
+        idle[0]
+    );
+    let busy = raw_run(
+        "gpu.throttle",
+        "count",
+        &["python3", "tests/gpu_workload.py", "kernel", "1500"],
+    );
+    assert!(
+        share(&busy[0], "low_utilization_ratio") < 0.5,
+        "a 1.5 s kernel in a window of about 2 s left most of it held for low utilisation: {}",
+        busy[0]
+    );
+    for event in idle.iter().chain(&busy) {
+        let ratio = share(event, "ratio");
+        assert!((0.0..=1.0).contains(&ratio), "{event}");
+        let limits = [
+            "power_cap_ratio",
+            "thermal_ratio",
+            "sync_boost_ratio",
+            "board_limit_ratio",
+            "reliability_ratio",
+        ];
+        let largest = limits
+            .iter()
+            .filter_map(|name| {
+                // A board without one of the counters has no attribute for it.
+                event["attrs"]
+                    .as_array()?
+                    .iter()
+                    .find(|attr| attr["name"] == *name)?["value"]
+                    .as_f64()
+            })
+            .fold(0.0, f64::max);
+        assert!(ratio >= largest, "the value is the largest limit: {event}");
+    }
 }

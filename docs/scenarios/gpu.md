@@ -1007,3 +1007,42 @@ reading one needs a variable-offset read of the record that this eBPF layer
 does not have. On every driver with a DRM scheduler those threads are named
 after the ring they serve, so the string is right for the wrong reason, and
 every run says so in its own notes rather than leaving it here.
+
+## The twenty-fourth wave: the memory clock and the held clocks as values
+
+Two NVML sources the comparison against `nvidia-smi dmon` asked for
+(`docs/fixes/w22-gpu.md`, gaps 7 and 9).
+
+**`gpu.mem_freq`**, the memory clock as its own series (`dmon`'s `mclk`).
+`gpu.freq` keeps carrying it as `memory_hz` beside the shader clock, which no
+emit aggregates. Shown: idle the board reads 405 MHz (`nvidia-smi
+--query-gpu=clocks.mem` the same); during `gpu_workload.py kernel 2500` the
+series read 6869 to 7069 MHz, mean 6906 MHz, and `nvidia-smi dmon -s c`
+beside it printed 7069, 6869, 6869. Test:
+`the_memory_clock_is_a_series_that_a_kernel_lifts_and_the_maximum_bounds`.
+
+**`gpu.throttle`**, the share of the time the clocks were held, per reason,
+from the driver's counters of held time (`NVML_FI_DEV_PERF_POLICY_*` and
+`..._CLOCKS_EVENT_REASON_*`, one `nvmlDeviceGetFieldValues` call a reading,
+1.8 to 6.7 ms of cpu). The value is the largest share among the limiting
+reasons (power cap, thermal, sync boost, board limit, reliability, the
+slowdowns); low utilisation and running below the application or base
+clocks ride as attributes, not limits. Shown, `--mode count`: `sleep 1.5`
+gives `low_utilization_ratio` 1.0 and every limit 0; a 1.5 s kernel in a
+2.09 s window gives 0.19 (the context's creation and teardown are the rest);
+`nvidia-smi dmon -s v` printed `pviol` 0 and `tviol` 0 beside a 2 s idle
+poll whose summary was 0. **Not shown**: a non-zero limit share. Provoking
+one needs a lowered power limit or a clock lock, which are root and the
+user's. Test:
+`the_held_clocks_share_separates_an_idle_board_from_a_running_kernel`.
+
+**Not added: PCIe throughput.** `nvmlDeviceGetPcieThroughput` answers in
+KB/s over a 20 ms window (shown: during a host-to-device copy loop measured
+by the workload at 11.34 GB/s, `dmon -s t` printed 11697 to 12046 MB/s rx
+and NVML itself 10.0 to 11.2 GB/s rx, the protocol's bytes beside the
+payload), and the catalog has no rate unit to declare it in: a `bytes` series
+of a rate would be summed by `rate` and `stack` as if it were a quantity. The
+cumulative counters (`NVML_FI_DEV_PCIE_COUNT_RX_BYTES`, `..._TX_BYTES`) are
+32 bits here and wrap every 0.36 s at that rate, below any poll that is not
+itself a cost. **Not added: ECC.** `nvmlDeviceGetTotalEccErrors` answers
+"not supported" on this board (a consumer one); nothing here can be shown.
