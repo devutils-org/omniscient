@@ -92,7 +92,7 @@ impl Prepared for Prepare {
 /// thousands, with the program's narrowing reported as though it had worked.
 /// Rewritten here once, the kernel's half and this half answer the same
 /// question in every position a comparison can sit in, `||` and `!` included.
-fn numbers_read_as_nr(filter: FilterExpr) -> FilterExpr {
+pub(super) fn numbers_read_as_nr(filter: FilterExpr) -> FilterExpr {
     match filter {
         FilterExpr::And(left, right) => FilterExpr::And(
             Box::new(numbers_read_as_nr(*left)),
@@ -155,7 +155,7 @@ fn numbers_read_as_nr(filter: FilterExpr) -> FilterExpr {
 /// the point: `syscall == 'wriet'` would otherwise push nothing down, match
 /// nothing in userspace, and report an empty series, which reads exactly like a
 /// process that made no syscalls.
-fn pushed_down_syscall(filter: &FilterExpr) -> Result<Option<u32>, String> {
+pub(super) fn pushed_down_syscall(filter: &FilterExpr) -> Result<Option<u32>, String> {
     match filter {
         FilterExpr::And(left, right) => match pushed_down_syscall(left)? {
             Some(number) => Ok(Some(number)),

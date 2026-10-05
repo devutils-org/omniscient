@@ -32,6 +32,35 @@
        in `[-4095, -1]`), `strace -c`'s `errors` column. It is per row (`-e
        raw`); no aggregating emit sums it yet."
 
+- id: proc.calls
+  family: proc
+  summary: "One record per syscall: when, how long, what it returned, and openat's path"
+  unit: ns
+  backends:
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "kernel>=5.8"], cost: extreme,
+       filter_in_program: [syscall]}
+  modes: [trace]
+  emits: [raw, timeline, hist, summary, topk]
+  targets: {pid: native, tid: native, cgroup: bpf_only, launch: native, system: native}
+  keys: [task, syscall, comm]
+  filter_fields: [comm, syscall, pid, tid, ret, errno, error, path, fd, lat_ns]
+  determinism: low
+  caveats:
+    - "Each call that returns is one event, stamped where it began: `lat_ns`, the
+       raw `ret`, `errno` (the error a return in `[-4095, -1]` carries, zero
+       otherwise), `error`, the task, its name and the syscall -- the line
+       `strace -T` and `perf trace` print. `openat` also carries `path`, read out
+       of the caller's memory when the call returns, up to 127 bytes, and `fd`
+       when it succeeded: `opensnoop`'s line. `proc.syscall` is the cheap
+       aggregate of the same calls."
+    - "Every call is a ring write, so a target making hundreds of thousands of
+       calls a second fills the ring and the program counts what it could not
+       publish. A predicate naming one syscall (`syscall == \"openat\"`) is
+       pushed into the program, which then records nothing else."
+    - "A call the run never saw begin -- the thread was already inside it at the
+       attach -- is in no record, and one still running at the end is said, not
+       recorded."
+
 - id: proc.exec
   family: proc
   summary: "Process execution events"

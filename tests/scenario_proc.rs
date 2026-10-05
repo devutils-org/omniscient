@@ -2961,3 +2961,70 @@ fn a_launched_programs_execs_are_its_tree_and_nothing_beside_it() {
         "the script's ten execs, and none of the loop beside it"
     );
 }
+
+/// `proc.calls` is one record per call, with `openat`'s path, its errno and
+/// the descriptor it returned (the twenty-second wave's perfsched gaps 3-4,
+/// bpftrace gap 6: `strace -T`'s and `opensnoop`'s lines).
+///
+/// Ground truth is the workload's choice: `N` opens of a path nothing else on
+/// the machine opens, which fail with ENOENT, and `N` of `/proc/self/stat`,
+/// which succeed. (Against `strace -f -e trace=openat` on the same kind of
+/// run, this machine read 648 opens and 406 ENOENT both ways.)
+#[test]
+fn every_open_is_one_record_with_its_path_its_errno_and_its_descriptor() {
+    needs_python!();
+    const N: u64 = 150;
+    let missing = format!("/nonexistent-omn-calls-{}", std::process::id());
+    let program = format!(
+        "import os, sys\n\
+         for _ in range({N}):\n    try: os.close(os.open('{missing}', os.O_RDONLY))\n    except OSError: pass\n\
+         for _ in range({N}): os.close(os.open('/proc/self/stat', os.O_RDONLY))\n\
+         sys.stderr.write('CALLS {N}\\n')\n"
+    );
+    let output = omn(&[
+        "proc.calls",
+        "--emit",
+        "raw",
+        "--filter",
+        "syscall == \"openat\"",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        "-c",
+        &program,
+    ]);
+    if skipped_without_bpf(&output) || machine_cannot_trace(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(reported(&output, "CALLS "), N);
+    let doc = document(&output);
+    let rows = events(&doc["results"][0]);
+    let of = |path: &str| -> Vec<&serde_json::Value> {
+        rows.iter()
+            .filter(|row| attr_text(row, "path").as_deref() == Some(path))
+            .collect()
+    };
+    let failed = of(&missing);
+    assert_eq!(
+        failed.len() as u64,
+        N,
+        "losses {}",
+        doc["results"][0]["losses"]
+    );
+    assert!(failed
+        .iter()
+        .all(|row| attr_f64(row, "errno") == Some(libc_enoent()) && attr(row, "fd").is_none()));
+    let opened = of("/proc/self/stat");
+    assert_eq!(opened.len() as u64, N);
+    assert!(opened.iter().all(|row| {
+        attr_f64(row, "errno") == Some(0.0) && attr_f64(row, "fd").is_some_and(|fd| fd >= 0.0)
+    }));
+    assert!(rows.iter().all(|row| attr_f64(row, "lat_ns").is_some()));
+}
+
+/// ENOENT, which is 2 on every architecture Linux runs on.
+fn libc_enoent() -> f64 {
+    2.0
+}
