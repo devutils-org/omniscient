@@ -11,7 +11,13 @@
 //!
 //! What this does not see: a thread that exits between two reads takes its
 //! last interval's switches with it. Those threads are counted as dropped and
-//! named, never folded into a smaller number silently. And the wakeups are the
+//! named, never folded into a smaller number silently. A process that is gone
+//! at a read (reaped by a parent that is not omn, or a `--pid` the run does
+//! not own) takes the interval since the last read with it the same way: each
+//! thread it had then is counted as dropped. A launched program is not reaped
+//! before the closing round, so its zombie's leader is still read there. A
+//! thread born and gone between two reads is in neither listing, so it can be
+//! neither counted nor dropped: the caveat says so. And the wakeups are the
 //! process's own, not the cpu wakeups it causes in others -- a timer it arms
 //! that wakes another task is that task's.
 
@@ -143,7 +149,21 @@ impl Collector for Wakeups {
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        let threads = self.read()?;
+        let threads = match self.read() {
+            Ok(threads) => threads,
+            Err(gone) => {
+                // The interval since the last read is lost with the process:
+                // every thread it then had is a series that ends unread.
+                if let Some((_, before)) = self.previous.take() {
+                    self.losses.dropped += before.len() as u64;
+                    self.losses.note(
+                        "the process was gone at a read, and its wakeups since the previous one \
+                         are not counted",
+                    );
+                }
+                return Err(gone);
+            }
+        };
         let ts_ns = monotonic_ns();
         if self.proc_key.is_none() {
             self.proc_key = KeyValue::proc_of(self.pid);
@@ -225,6 +245,26 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A process that vanishes after the baseline loses the interval since
+    /// it, and says so: one dropped per thread it had, never a clean run.
+    #[test]
+    fn a_process_gone_after_a_read_counts_its_last_interval_as_lost() {
+        let root = scratch::tree("wakeups-lost");
+        status(&root, 20, 20, 5);
+        status(&root, 20, 21, 5);
+        let mut collector = Wakeups::new(root.clone(), 20);
+        assert!(collector.sample(0).expect("the baseline").is_empty());
+        std::fs::remove_dir_all(root.join("20")).unwrap();
+        assert!(matches!(
+            collector.sample(1),
+            Err(SampleError::TargetGone(_))
+        ));
+        let losses = collector.losses();
+        assert_eq!(losses.dropped, 2);
+        assert!(losses.reasons.keys().any(|r| r.contains("gone at a read")));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn a_process_that_is_gone_ends_the_run() {
         let root = scratch::tree("wakeups-gone");
@@ -233,6 +273,10 @@ mod tests {
             collector.sample(0),
             Err(SampleError::TargetGone(_))
         ));
+        assert!(
+            collector.losses().is_clean(),
+            "gone before any read: nothing was measured, so nothing was lost"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -16,7 +16,11 @@
 //! Unlike `cpuinfo_avg_freq`, which is the last scheduler tick's ratio and a
 //! setpoint on an idle cpu, every number here covers the interval between two
 //! reads, and an idle cpu's busy frequency is still the one it ran at when it
-//! woke. The read at window open is the baseline and produces no event.
+//! woke. A cpu that never left idle over an interval (MPERF did not move) is
+//! still an event -- busy 0, idle 1, `measures=idle` -- without `hz`, since it
+//! ran at no clock. Two reads that cannot be divided (a counter read lower,
+//! or no time passed) are a failed read, counted with the cpu named. The read
+//! at window open is the baseline and produces no event.
 
 use std::collections::BTreeMap;
 
@@ -83,8 +87,9 @@ pub struct Counts {
 /// What one interval of one cpu measures.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Interval {
-    /// The frequency while the cpu was in C0 (turbostat's `Bzy_MHz`).
-    pub hz: f64,
+    /// The frequency while the cpu was in C0 (turbostat's `Bzy_MHz`), or
+    /// nothing when it never was: no MPERF tick, so no clock it ran at.
+    pub hz: Option<f64>,
     /// The cpu's cycles over the whole interval (`Avg_MHz`).
     pub avg_hz: f64,
     /// The share of the interval in C0 (`Busy%`).
@@ -95,23 +100,56 @@ pub struct Interval {
     pub interval_ns: u64,
 }
 
+/// Why two reads of one cpu measure no interval: each is a fault of the
+/// measurement, and counted as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Undivided {
+    /// A counter read lower than before: a reset, a wrap or a migrated
+    /// counter, and no difference that means anything.
+    Backwards,
+    /// No time passed between the two reads, by the clock or by the TSC.
+    NoTime,
+}
+
+impl Undivided {
+    fn reason(self, cpu: u32) -> String {
+        match self {
+            Undivided::Backwards => format!(
+                "cpu{cpu}: APERF, MPERF or the TSC read lower than at the previous read, so \
+                 that interval measured nothing"
+            ),
+            Undivided::NoTime => format!(
+                "cpu{cpu}: no time passed between two reads (by the clock or the TSC), so \
+                 that interval measured nothing"
+            ),
+        }
+    }
+}
+
 impl Interval {
-    /// The interval between two reads, or nothing when it cannot be divided:
-    /// no time passed, a counter went backwards, or the cpu never left idle
-    /// (no MPERF tick: there is no frequency it ran at).
-    pub fn between(before: Counts, after: Counts) -> Option<Interval> {
-        let aperf = after.aperf.checked_sub(before.aperf)?;
-        let mperf = after.mperf.checked_sub(before.mperf)?;
-        let tsc = after.tsc.checked_sub(before.tsc)?;
-        let interval_ns = after.ts_ns.checked_sub(before.ts_ns)?;
-        if tsc == 0 || interval_ns == 0 || mperf == 0 {
-            return None;
+    /// The interval between two reads. A cpu that never left idle is a
+    /// measurement -- busy 0, idle 1, no frequency; a counter that went
+    /// backwards or no time passing is not.
+    pub fn between(before: Counts, after: Counts) -> Result<Interval, Undivided> {
+        let (Some(aperf), Some(mperf), Some(tsc)) = (
+            after.aperf.checked_sub(before.aperf),
+            after.mperf.checked_sub(before.mperf),
+            after.tsc.checked_sub(before.tsc),
+        ) else {
+            return Err(Undivided::Backwards);
+        };
+        let interval_ns = after
+            .ts_ns
+            .checked_sub(before.ts_ns)
+            .ok_or(Undivided::Backwards)?;
+        if tsc == 0 || interval_ns == 0 {
+            return Err(Undivided::NoTime);
         }
         let seconds = interval_ns as f64 / 1e9;
         let tsc_hz = tsc as f64 / seconds;
         let busy = (mperf as f64 / tsc as f64).min(1.0);
-        Some(Interval {
-            hz: tsc_hz * aperf as f64 / mperf as f64,
+        Ok(Interval {
+            hz: (mperf > 0).then(|| tsc_hz * aperf as f64 / mperf as f64),
             avg_hz: aperf as f64 / seconds,
             busy,
             idle: 1.0 - busy,
@@ -211,30 +249,55 @@ impl Collector for Clocks {
             let Some(before) = self.previous.insert(cpu, after) else {
                 continue;
             };
-            let Some(interval) = Interval::between(before, after) else {
-                continue;
+            let interval = match Interval::between(before, after) {
+                Ok(interval) => interval,
+                Err(undivided) => {
+                    self.losses.failed_reads += 1;
+                    self.losses.note(undivided.reason(cpu));
+                    continue;
+                }
             };
+            let mut attrs = Vec::with_capacity(9);
+            // No hz when the cpu was never in C0: there is no clock it ran
+            // at, and the emits count the event as unmeasured.
+            if let Some(hz) = interval.hz {
+                attrs.push(Attr::float("hz", hz));
+            }
+            attrs.extend([
+                Attr::uint("cpu", u64::from(cpu)),
+                Attr::float("avg_hz", interval.avg_hz),
+                Attr::float("busy", interval.busy),
+                Attr::float("idle", interval.idle),
+                Attr::float("tsc_hz", interval.tsc_hz),
+                Attr::uint("interval_ns", interval.interval_ns),
+            ]);
+            attrs.push(match interval.hz {
+                Some(_) => Attr::text(
+                    "basis",
+                    "APERF/MPERF over the interval: hz is the frequency while in C0 \
+                     (turbostat's Bzy_MHz), avg_hz the cycles over the whole interval \
+                     (Avg_MHz), busy MPERF over the TSC (Busy%)",
+                ),
+                None => Attr::text(
+                    "basis",
+                    "APERF/MPERF over the interval: MPERF did not move, so the cpu never \
+                     left idle; busy 0, idle 1, and no hz, since it ran at no clock",
+                ),
+            });
+            attrs.push(Attr::text(
+                "measures",
+                if interval.hz.is_some() {
+                    "effective"
+                } else {
+                    "idle"
+                },
+            ));
             events.push(Event {
                 ts_ns: after.ts_ns,
                 ts_err_ns: 0,
                 kind: "power.freq".to_owned(),
                 keys: vec![KeyValue::cpu(cpu)],
-                attrs: vec![
-                    Attr::float("hz", interval.hz),
-                    Attr::uint("cpu", u64::from(cpu)),
-                    Attr::float("avg_hz", interval.avg_hz),
-                    Attr::float("busy", interval.busy),
-                    Attr::float("idle", interval.idle),
-                    Attr::float("tsc_hz", interval.tsc_hz),
-                    Attr::uint("interval_ns", interval.interval_ns),
-                    Attr::text(
-                        "basis",
-                        "APERF/MPERF over the interval: hz is the frequency while in C0 \
-                         (turbostat's Bzy_MHz), avg_hz the cycles over the whole interval \
-                         (Avg_MHz), busy MPERF over the TSC (Busy%)",
-                    ),
-                    Attr::text("measures", "effective"),
-                ],
+                attrs,
                 collector_id: self.id.clone(),
                 seq: seq + events.len() as u64,
             });
@@ -277,23 +340,34 @@ mod tests {
         assert!((interval.tsc_hz - 3.8e9).abs() < 1.0);
         assert!((interval.busy - 0.25).abs() < 1e-12);
         assert!((interval.idle - 0.75).abs() < 1e-12);
-        assert!((interval.hz - 4.56e9).abs() < 1.0, "{}", interval.hz);
+        let hz = interval.hz.expect("a cpu in C0 has a frequency");
+        assert!((hz - 4.56e9).abs() < 1.0, "{hz}");
         assert!((interval.avg_hz - 1.14e9).abs() < 1.0);
     }
 
-    /// A cpu that never left idle ran at no frequency, and a counter that
-    /// went backwards measured no interval: neither is a number.
+    /// A cpu that never left idle is measured -- busy 0, idle 1 -- and ran
+    /// at no frequency; a counter that went backwards or no time passing
+    /// measured no interval.
     #[test]
-    fn an_interval_with_nothing_to_divide_by_has_no_frequency() {
+    fn an_idle_cpu_is_a_measurement_and_a_backwards_counter_is_a_fault() {
         let at = |aperf, mperf, tsc, ts_ns| Counts {
             aperf,
             mperf,
             tsc,
             ts_ns,
         };
-        assert!(Interval::between(at(5, 5, 5, 1), at(5, 5, 100, 2)).is_none());
-        assert!(Interval::between(at(5, 5, 5, 1), at(4, 6, 100, 2)).is_none());
-        assert!(Interval::between(at(5, 5, 5, 1), at(9, 9, 9, 1)).is_none());
+        let idle = Interval::between(at(5, 5, 5, 1), at(5, 5, 100, 2)).expect("idle is measured");
+        assert_eq!(idle.hz, None);
+        assert_eq!(idle.busy, 0.0);
+        assert_eq!(idle.idle, 1.0);
+        assert_eq!(
+            Interval::between(at(5, 5, 5, 1), at(4, 6, 100, 2)),
+            Err(Undivided::Backwards)
+        );
+        assert_eq!(
+            Interval::between(at(5, 5, 5, 1), at(9, 9, 9, 1)),
+            Err(Undivided::NoTime)
+        );
     }
 
     #[test]
