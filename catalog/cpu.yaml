@@ -329,3 +329,18 @@
   caveats:
     - "The kernel provides raw bytes; decoding (libipt, binary images, sideband)
        is a separate, late deliverable."
+
+# The family's default: what `omn trace cpu -- PROGRAM` composes, per cost
+# band (`--cost low|med|high`, the cheapest band when absent). Data, like the
+# entries above; the loader refuses a default naming a source, mode, emit or
+# key this family does not have. See docs/lazy.md.
+- default:
+    family: cpu
+    question: "Where does the program spend its CPU time?"
+    low:
+      - {source: cpu.profile, mode: "sample@99hz", emit: [stack], label: "where the cpu went"}
+    med:
+      - {source: cpu.profile, mode: "sample@997hz", emit: [stack], label: "where the cpu went"}
+    high:
+      - {source: cpu.profile, mode: "sample@997hz", emit: [stack], stack: dwarf,
+         label: "where the cpu went, every caller"}

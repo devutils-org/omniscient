@@ -2332,8 +2332,6 @@ pub struct Unwinder {
     /// used to ask at the end whatever it had collected -- a second of wall
     /// clock, flat, for an answer about frames it did not have.
     kernel_frames: u64,
-    /// The target's own executable, as its maps name it.
-    executable: Option<String>,
 }
 
 impl Unwinder {
@@ -2373,7 +2371,6 @@ impl Unwinder {
             depth_limit: 0,
             empty: 0,
             kernel_frames: 0,
-            executable: executable(pid),
         }
     }
 
@@ -2545,9 +2542,6 @@ impl Unwinder {
             if let Some(cfi) = self.cfi.as_mut() {
                 cfi.refresh();
             }
-            if let Some(name) = executable(self.symbols.pid) {
-                self.executable = Some(name);
-            }
         }
         fresh
     }
@@ -2580,6 +2574,26 @@ impl Unwinder {
 
     pub fn into_table(self) -> StackTable {
         self.table
+    }
+
+    /// The symbolizer that names this unwinder's frames: its target's maps,
+    /// perf map and executable, as last read while the target lived.
+    pub fn symbolizer(&self) -> &Symbolizer {
+        &self.symbols
+    }
+
+    /// The perf map that named at least one of this unwinder's frames, with
+    /// the device and inode of the file read: what a collector's
+    /// [`Provenance::perf_maps`] holds for this target.
+    pub fn perf_map_file(&self) -> Option<PerfMapFile> {
+        self.symbols.perf_map_file()
+    }
+
+    /// The file the target executes, read when the unwinder was built and
+    /// again at each [`Unwinder::refresh_symbols`] that found fresh maps, so
+    /// an `execve` after the first sample is followed.
+    pub fn executable(&self) -> Option<&str> {
+        self.symbols.executable()
     }
 
     /// Frames, over the distinct stacks, that fell in anonymous executable
@@ -2637,7 +2651,7 @@ impl Unwinder {
 
     /// Whether most frameless leaves are in the target's own executable.
     fn target_is_frameless(&self) -> bool {
-        let Some(executable) = self.executable.as_deref().map(basename) else {
+        let Some(executable) = self.symbols.executable().map(basename) else {
             return false;
         };
         let own = self.frameless.get(executable).copied().unwrap_or(0);
@@ -2660,8 +2674,8 @@ impl Unwinder {
         match self.callchain {
             Callchain::FramePointers { .. } if frameless * 2 > known && known > 0 => {
                 let keeps = self
-                    .executable
-                    .as_deref()
+                    .symbols
+                    .executable()
                     .and_then(|path| unwind::inspect(Path::new(path)).ok())
                     .and_then(|image| image.frame_pointers)
                     .is_some_and(|(keeps, _)| keeps);
@@ -2882,18 +2896,6 @@ fn unversioned(name: String) -> String {
         Some((base, _)) if !base.is_empty() => base.to_owned(),
         _ => name,
     }
-}
-
-/// The target's executable as its maps name it, while it is alive.
-fn executable(pid: i32) -> Option<String> {
-    let who = if pid <= 0 {
-        "self".to_owned()
-    } else {
-        pid.to_string()
-    };
-    std::fs::read_link(format!("/proc/{who}/exe"))
-        .ok()
-        .map(|path| path.display().to_string())
 }
 
 #[cfg(test)]

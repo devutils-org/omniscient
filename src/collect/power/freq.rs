@@ -11,16 +11,28 @@
 //! Which one sysfs gives depends on the driver, so the file is chosen at the
 //! start and every event says which it read:
 //!
-//! - `cpuinfo_avg_freq`, where the driver provides it, is an average over the
-//!   interval since the previous read, computed by the processor's own
-//!   performance counters. That is the effective frequency, and it is the only
-//!   one of the three that describes a window rather than an instant.
+//! - `cpuinfo_avg_freq`, where the driver provides it, is the processor's own
+//!   APERF/MPERF ratio over the **last scheduler tick** before the read -- a
+//!   few milliseconds, not the poll interval. That is the effective frequency
+//!   while the core was running. On a cpu with no tick in the last 20 ms (an
+//!   idle one, under NOHZ) the kernel has no ratio and falls back to the
+//!   driver's current setpoint, which is not a frequency the core ran at; the
+//!   event says `measures=setpoint` when the number it read is exactly one of
+//!   the setpoints the driver declares.
 //! - `cpuinfo_cur_freq` is read back from the hardware at the instant of the
 //!   read.
 //! - `scaling_cur_freq` is what the kernel believes the frequency is. With
 //!   some drivers that is a hardware reading and with others it is the last
 //!   setpoint, so the driver's name travels with the number.
+//!
+//! Each event covers the interval since the previous read: the read at window
+//! open is a baseline and produces no event, because it describes the machine
+//! before anything launched beside the run. Beside the frequency it carries
+//! the interval's `busy` and `idle` shares of that cpu from `/proc/stat` and
+//! `avg_hz`, busy times the frequency -- turbostat's `Busy%` and `Avg_MHz`,
+//! estimated. The `pmu` backend measures the same three exactly.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::clock::monotonic_ns;
@@ -31,6 +43,19 @@ use crate::request::{Mode, Target};
 use super::sysfs;
 
 const CPU_ROOT: &str = "/sys/devices/system/cpu";
+const PROC_STAT: &str = "/proc/stat";
+
+/// The files a driver declares a setpoint in. `cpuinfo_avg_freq` on an idle
+/// cpu falls back to the policy's current setpoint, which is one of these.
+const SETPOINTS: [&str; 7] = [
+    "scaling_min_freq",
+    "scaling_max_freq",
+    "cpuinfo_min_freq",
+    "cpuinfo_max_freq",
+    "amd_pstate_lowest_nonlinear_freq",
+    "amd_pstate_max_freq",
+    "base_frequency",
+];
 
 /// Which file a cpu's frequency is read from, best first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,8 +78,10 @@ impl Source {
 
     fn basis(self, driver: &str) -> String {
         match self {
-            Source::Average => "cpuinfo_avg_freq: the effective frequency, averaged over the \
-                                interval by the processor's own performance counters"
+            Source::Average => "cpuinfo_avg_freq: the effective frequency, the processor's \
+                                APERF/MPERF over the last scheduler tick before the read (a few \
+                                milliseconds, not the poll interval); busy, idle and avg_hz are \
+                                the interval's, from /proc/stat"
                 .to_owned(),
             Source::Hardware => {
                 "cpuinfo_cur_freq: the frequency read back from the hardware at this instant"
@@ -126,6 +153,12 @@ pub struct Frequencies {
     /// never mixes an effective frequency with a requested one.
     source: Option<Source>,
     driver: String,
+    /// Where each cpu's time is accounted, `/proc/stat` outside the tests.
+    stat: PathBuf,
+    /// The previous read: each event covers the interval since it.
+    previous: Option<(u64, BTreeMap<u32, sysfs::CpuTime>)>,
+    /// Per cpu, the setpoints its driver declares, in kHz, by file.
+    setpoints: BTreeMap<u32, Vec<(&'static str, u64)>>,
     losses: Losses,
 }
 
@@ -138,8 +171,29 @@ impl Frequencies {
             cpus,
             source: None,
             driver: "unknown".to_owned(),
+            stat: PathBuf::from(PROC_STAT),
+            previous: None,
+            setpoints: BTreeMap::new(),
             losses: Losses::default(),
         }
+    }
+
+    /// Reads cpu time from `path` instead of `/proc/stat`.
+    #[cfg(test)]
+    fn with_stat(mut self, path: PathBuf) -> Self {
+        self.stat = path;
+        self
+    }
+
+    /// The declared setpoint `kilohertz` is exactly equal to, if any: a ratio
+    /// of two counters times the base clock lands on one to the kilohertz
+    /// essentially never, so equality is the kernel's fallback showing.
+    fn setpoint(&self, cpu: u32, kilohertz: u64) -> Option<&'static str> {
+        self.setpoints
+            .get(&cpu)?
+            .iter()
+            .find(|(_, value)| *value == kilohertz)
+            .map(|(file, _)| *file)
     }
 
     fn cpufreq(&self, cpu: u32) -> PathBuf {
@@ -173,6 +227,16 @@ impl Collector for Frequencies {
         self.source = Source::ORDER
             .into_iter()
             .find(|source| sysfs::number(&directory.join(source.file())).is_ok());
+        if self.source == Some(Source::Average) {
+            for &cpu in &self.cpus {
+                let directory = self.cpufreq(cpu);
+                let declared = SETPOINTS
+                    .into_iter()
+                    .filter_map(|file| Some((file, sysfs::number(&directory.join(file)).ok()?)))
+                    .collect();
+                self.setpoints.insert(cpu, declared);
+            }
+        }
         match self.source {
             Some(_) => Ok(()),
             None => Err(format!(
@@ -189,11 +253,10 @@ impl Collector for Frequencies {
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         let source = self.source.expect("start chose a source");
-        let mut per_cpu: Vec<(u32, f64)> = Vec::new();
+        let mut per_cpu: Vec<(u32, u64)> = Vec::new();
         for &cpu in &self.cpus {
             match sysfs::number(&self.cpufreq(cpu).join(source.file())) {
-                // cpufreq counts in kilohertz.
-                Ok(kilohertz) => per_cpu.push((cpu, kilohertz as f64 * 1_000.0)),
+                Ok(kilohertz) => per_cpu.push((cpu, kilohertz)),
                 Err(error) => {
                     self.losses.failed_reads += 1;
                     self.losses.note(format!("cpu{cpu}: {error}"));
@@ -206,17 +269,30 @@ impl Collector for Frequencies {
             ));
         }
         let ts_ns = monotonic_ns();
+        let times = match sysfs::cpu_times(&self.stat) {
+            Ok(times) => times,
+            Err(error) => {
+                self.losses.failed_reads += 1;
+                self.losses
+                    .note(format!("the busy and idle shares are missing: {error}"));
+                BTreeMap::new()
+            }
+        };
+
+        // The read at window open describes the machine before the run: before
+        // a program launched beside it started, before the load it was asked
+        // about. It is the baseline the first interval is measured from, and
+        // nothing else.
+        let Some((before_ns, before)) = self.previous.replace((ts_ns, times.clone())) else {
+            return Ok(Vec::new());
+        };
+        let interval_ns = ts_ns.saturating_sub(before_ns);
 
         let float = |name: &str, value: f64| Attr {
             name: name.to_owned(),
             value: AttrValue::Float(value),
         };
         let basis = source.basis(&self.driver);
-        let measures = if source.is_effective() {
-            "effective"
-        } else {
-            "requested"
-        };
 
         // One event per cpu, keyed on it. The mean of twenty-four cores
         // describes none of them -- one boosted core among twenty-three idle
@@ -227,20 +303,52 @@ impl Collector for Frequencies {
         Ok(per_cpu
             .iter()
             .enumerate()
-            .map(|(offset, (cpu, hertz))| Event {
-                ts_ns,
-                ts_err_ns: 0,
-                kind: "power.freq".to_owned(),
-                keys: vec![KeyValue::cpu(*cpu)],
-                attrs: vec![
-                    float("hz", *hertz),
-                    Attr::uint("cpu", u64::from(*cpu)),
+            .map(|(offset, &(cpu, kilohertz))| {
+                // cpufreq counts in kilohertz.
+                let hertz = kilohertz as f64 * 1_000.0;
+                let fallback = match source {
+                    Source::Average => self.setpoint(cpu, kilohertz),
+                    _ => None,
+                };
+                let (measures, basis) = match fallback {
+                    Some(file) => (
+                        "setpoint",
+                        format!(
+                            "cpuinfo_avg_freq fell back to the driver's setpoint: it holds \
+                             {kilohertz} kHz, exactly {file}, which is what the kernel returns \
+                             when this cpu had no scheduler tick in the last 20 ms -- it was \
+                             idle -- so this is not a frequency the core ran at"
+                        ),
+                    ),
+                    None if source.is_effective() => ("effective", basis.clone()),
+                    None => ("requested", basis.clone()),
+                };
+                let mut attrs = vec![
+                    float("hz", hertz),
+                    Attr::uint("cpu", u64::from(cpu)),
                     Attr::text("driver", self.driver.clone()),
-                    Attr::text("basis", basis.clone()),
+                    Attr::text("basis", basis),
                     Attr::text("measures", measures),
-                ],
-                collector_id: self.id.clone(),
-                seq: seq + offset as u64,
+                    Attr::uint("interval_ns", interval_ns),
+                ];
+                let shares = times
+                    .get(&cpu)
+                    .zip(before.get(&cpu))
+                    .and_then(|(after, before)| after.shares_since(*before));
+                if let Some((busy, idle)) = shares {
+                    attrs.push(float("busy", busy));
+                    attrs.push(float("idle", idle));
+                    attrs.push(float("avg_hz", busy * hertz));
+                }
+                Event {
+                    ts_ns,
+                    ts_err_ns: 0,
+                    kind: "power.freq".to_owned(),
+                    keys: vec![KeyValue::cpu(cpu)],
+                    attrs,
+                    collector_id: self.id.clone(),
+                    seq: seq + offset as u64,
+                }
             })
             .collect())
     }
@@ -298,7 +406,8 @@ mod tests {
         );
         let mut collector = Frequencies::new(poll(), root.clone(), vec![0, 1]);
         collector.start().expect("a cpufreq directory");
-        let events = collector.sample(0).expect("a read");
+        assert!(collector.sample(0).expect("the baseline").is_empty());
+        let events = collector.sample(1).expect("a read");
 
         assert_eq!(
             events[0].attr("hz").unwrap().as_f64(),
@@ -322,7 +431,8 @@ mod tests {
         );
         let mut collector = Frequencies::new(poll(), root.clone(), vec![0, 1]);
         collector.start().expect("a cpufreq directory");
-        let events = collector.sample(0).expect("a read");
+        assert!(collector.sample(0).expect("the baseline").is_empty());
+        let events = collector.sample(1).expect("a read");
 
         assert_eq!(
             events[0].attr("hz").unwrap().as_f64(),
@@ -357,7 +467,8 @@ mod tests {
 
         let mut collector = Frequencies::new(poll(), root.clone(), vec![0, 1]);
         collector.start().expect("a cpufreq directory");
-        let events = collector.sample(0).expect("a read");
+        assert!(collector.sample(0).expect("the baseline").is_empty());
+        let events = collector.sample(1).expect("a read");
 
         assert_eq!(events.len(), 2, "one event per cpu");
         assert_eq!(events[0].keys[0].to_string(), "cpu:0");
@@ -399,7 +510,8 @@ mod tests {
 
         let mut collector = Frequencies::new(poll(), root.clone(), vec![2, 3]);
         collector.start().expect("a cpufreq directory");
-        let events = collector.sample(0).expect("a read");
+        assert!(collector.sample(0).expect("the baseline").is_empty());
+        let events = collector.sample(1).expect("a read");
 
         assert_eq!(events.len(), 2, "two cpus were asked for");
         assert_eq!(events[0].keys[0].to_string(), "cpu:2");
@@ -426,9 +538,10 @@ mod tests {
         );
         let mut collector = Frequencies::new(poll(), root.clone(), vec![0, 1]);
         collector.start().expect("a cpufreq directory");
+        assert!(collector.sample(0).expect("the baseline").is_empty());
 
         std::fs::remove_file(root.join("cpu1/cpufreq/cpuinfo_avg_freq")).expect("cpu1 goes away");
-        let events = collector.sample(0).expect("cpu0 still answers");
+        let events = collector.sample(1).expect("cpu0 still answers");
 
         assert_eq!(events.len(), 1, "only cpu0 still answers");
         assert_eq!(events[0].keys[0].to_string(), "cpu:0");
@@ -440,7 +553,7 @@ mod tests {
         // And when the last one goes, the run ends rather than reporting a
         // frequency nobody read.
         std::fs::remove_file(root.join("cpu0/cpufreq/cpuinfo_avg_freq")).expect("cpu0 goes away");
-        match collector.sample(1) {
+        match collector.sample(2) {
             Err(SampleError::TargetGone(_)) => {}
             other => panic!("expected the run to end, got {other:?}"),
         }
@@ -468,6 +581,79 @@ mod tests {
         assert!(refused.contains("poll it"), "{refused}");
     }
 
+    /// The read at window open is taken before anything launched beside the
+    /// run has started, so it is a baseline and not a reading: the first event
+    /// is the first interval's, and it carries that interval's busy and idle
+    /// shares from the kernel's own cpu-time accounting.
+    #[test]
+    fn the_read_at_window_open_is_a_baseline_and_each_event_carries_its_intervals_shares() {
+        let root = cpu_tree(
+            "freq-shares",
+            "amd-pstate-epp",
+            &[("cpuinfo_avg_freq", "4000000")],
+        );
+        scratch::write(
+            &root,
+            "stat",
+            "cpu0 0 0 0 100 0 0 0 0 0 0\ncpu1 0 0 0 100 0 0 0 0 0 0",
+        );
+        let mut collector =
+            Frequencies::new(poll(), root.clone(), vec![0, 1]).with_stat(root.join("stat"));
+        collector.start().expect("a cpufreq directory");
+        assert!(
+            collector.sample(0).expect("the opening read").is_empty(),
+            "the opening read describes the machine before the run"
+        );
+
+        // cpu0 busy for 75 of 100 jiffies, cpu1 for none.
+        scratch::write(
+            &root,
+            "stat",
+            "cpu0 50 0 25 125 0 0 0 0 0 0\ncpu1 0 0 0 150 50 0 0 0 0 0",
+        );
+        let events = collector.sample(1).expect("a read");
+        assert_eq!(events.len(), 2);
+        let get = |index: usize, name: &str| events[index].attr(name).unwrap().as_f64().unwrap();
+        assert!((get(0, "busy") - 0.75).abs() < 1e-12);
+        assert!((get(0, "idle") - 0.25).abs() < 1e-12);
+        assert!((get(0, "avg_hz") - 3e9).abs() < 1.0);
+        assert_eq!(get(1, "busy"), 0.0);
+        assert_eq!(get(1, "idle"), 1.0, "iowait is idle time");
+        assert!(get(0, "interval_ns") > 0.0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// What `cpuinfo_avg_freq` holds on an idle cpu, measured here: exactly
+    /// `scaling_min_freq`, 1745645 kHz, on every idle core, while turbostat
+    /// says the same cores ran at 4 GHz when they ran. The event has to say
+    /// it read a setpoint rather than present it as the core's clock.
+    #[test]
+    fn an_idle_cpus_fallback_to_a_setpoint_is_named_as_one() {
+        let root = cpu_tree(
+            "freq-idle",
+            "amd-pstate-epp",
+            &[
+                ("scaling_min_freq", "1745645"),
+                ("scaling_max_freq", "4673823"),
+                ("cpuinfo_avg_freq", "1745645"),
+            ],
+        );
+        scratch::write(&root, "cpu1/cpufreq/cpuinfo_avg_freq", "4198535");
+        let mut collector = Frequencies::new(poll(), root.clone(), vec![0, 1]);
+        collector.start().expect("a cpufreq directory");
+        collector.sample(0).expect("the baseline");
+        let events = collector.sample(1).expect("a read");
+
+        assert_eq!(events[0].attr("measures").unwrap().to_string(), "setpoint");
+        let basis = events[0].attr("basis").unwrap().to_string();
+        assert!(
+            basis.contains("scaling_min_freq") && basis.contains("idle"),
+            "{basis}"
+        );
+        assert_eq!(events[1].attr("measures").unwrap().to_string(), "effective");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// Ground truth against the kernel's own declaration: whatever this machine
     /// reports, it has to lie inside the range the driver publishes for that
     /// cpu. A unit error -- kilohertz left as hertz -- fails this by three
@@ -482,17 +668,18 @@ mod tests {
         if collector.start().is_err() {
             return;
         }
-        let events = collector.sample(0).expect("a read");
-        for cpu in cpus {
+        assert!(collector.sample(0).expect("the baseline").is_empty());
+        let events = collector.sample(1).expect("a read");
+        assert_eq!(events.len(), cpus.len(), "one event per online cpu");
+        for event in &events {
+            let cpu = event.attr("cpu").and_then(|v| v.as_f64()).expect("a cpu") as u32;
             let Some((min, max)) = declared_range(&root, cpu) else {
                 continue;
             };
-            let Some(hertz) = events[0]
-                .attr(&format!("cpu{cpu}"))
+            let hertz = event
+                .attr("hz")
                 .and_then(|v| v.as_f64())
-            else {
-                continue;
-            };
+                .expect("a frequency");
             assert!(
                 hertz >= min * 0.9 && hertz <= max * 1.15,
                 "cpu{cpu} reported {hertz} Hz, outside the declared {min}..{max}"

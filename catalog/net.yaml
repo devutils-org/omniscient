@@ -463,3 +463,14 @@
        4 GiB in one request. `holder_since_ns` is when the longest sleep began.
        The run's counts by name -- `never_ended`, `unborn`, `replaced`,
        `filtered_out` -- are the result's `fields`, the numbers its notes say."
+
+# The family's default: what `omn trace net -- PROGRAM` composes, per cost
+# band. See docs/lazy.md.
+- default:
+    family: net
+    question: "How long does the program wait on its sockets and connections?"
+    low:
+      - {source: net.socket, mode: trace, emit: [hist, summary], label: "socket latency"}
+    med:
+      - {source: net.socket, mode: trace, emit: [hist, summary], label: "socket latency"}
+      - {source: net.tcp.connect, mode: trace, emit: [hist, summary], label: "connect latency"}
