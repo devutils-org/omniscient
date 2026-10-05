@@ -1888,8 +1888,22 @@ mod tests {
     /// figures leave, and the lines share the height.
     #[test]
     fn the_screen_fills_the_terminal() {
-        for (width, height) in [(80u16, 24u16), (160, 48), (240, 60)] {
-            let mut app = App::new(recording());
+        let sizes = [(80u16, 24u16), (160, 48), (240, 60)];
+        for ((width, height), live) in sizes
+            .into_iter()
+            .flat_map(|size| [(size, false), (size, true)])
+        {
+            let mut data = recording();
+            if live {
+                // Live, half way: the same lines, provisional.
+                let opened = data.opened_ns();
+                data.live = Some(Live {
+                    opened_ns: opened,
+                    now_ns: opened + (data.closed_ns() - opened) / 2,
+                });
+            }
+            let mut app = App::new(data);
+            app.open("process").expect("the process view");
             app.cost = Cost::Snapshot;
             let buffer = snapshot::draw_app(&mut app, width, height);
             let text = snapshot::text(&buffer);
@@ -1910,7 +1924,7 @@ mod tests {
             // at most a row or two left over from the division.
             assert!(
                 last + 2 + 7 >= usize::from(height) || height <= 24,
-                "{width}x{height}: the notes end at row {last}"
+                "{width}x{height} live {live}: the notes end at row {last}"
             );
             assert!(time > cpu, "{width}x{height}");
             if height > 24 {
