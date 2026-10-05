@@ -10,120 +10,168 @@
           "emit": "raw",
           "events": [
             {
-              "ts_ns": 2065008162848,
+              "ts_ns": 2967895864600,
               "kind": "cpu.pressure",
               "attrs": [
                 {
-                  "name": "some",
+                  "name": "stall_ratio",
+                  "value": 0.012417910601538748
+                },
+                {
+                  "name": "stalled_ns",
+                  "value": 12419000
+                },
+                {
+                  "name": "interval_ns",
+                  "value": 1000087728
+                },
+                {
+                  "name": "full_stall_ratio",
                   "value": 0.0
                 },
                 {
-                  "name": "avg10",
-                  "value": 0.0761
+                  "name": "full_stalled_ns",
+                  "value": 0
                 },
                 {
-                  "name": "avg60",
-                  "value": 0.2391
+                  "name": "some_avg10",
+                  "value": 0.0371
                 },
                 {
-                  "name": "avg300",
-                  "value": 0.1583
+                  "name": "some_avg60",
+                  "value": 0.04769999999999999
                 },
                 {
-                  "name": "total_us",
-                  "value": 212969908
-                },
-                {
-                  "name": "window",
-                  "value": "since the previous read"
+                  "name": "some_avg300",
+                  "value": 0.09820000000000001
                 },
                 {
                   "name": "full_avg10",
                   "value": 0.0
                 },
                 {
-                  "name": "full_total_us",
-                  "value": 0
+                  "name": "full_avg60",
+                  "value": 0.0
+                },
+                {
+                  "name": "full_avg300",
+                  "value": 0.0
+                },
+                {
+                  "name": "basis",
+                  "value": "the stall counter's increase over this tick"
                 }
               ],
               "collector_id": "cpu.pressure/fs:proc",
               "seq": 0
             },
             {
-              "ts_ns": 2066008269208,
+              "ts_ns": 2968895901943,
               "kind": "cpu.pressure",
               "attrs": [
                 {
-                  "name": "some",
-                  "value": 0.014840426914747037
+                  "name": "stall_ratio",
+                  "value": 0.010016625949137182
                 },
                 {
-                  "name": "avg10",
-                  "value": 0.0623
+                  "name": "stalled_ns",
+                  "value": 10017000
                 },
                 {
-                  "name": "avg60",
-                  "value": 0.23129999999999998
+                  "name": "interval_ns",
+                  "value": 1000037343
                 },
                 {
-                  "name": "avg300",
-                  "value": 0.1573
+                  "name": "full_stall_ratio",
+                  "value": 0.0
                 },
                 {
-                  "name": "total_us",
-                  "value": 212984750
+                  "name": "full_stalled_ns",
+                  "value": 0
                 },
                 {
-                  "name": "window",
-                  "value": "since the previous read"
+                  "name": "some_avg10",
+                  "value": 0.0371
+                },
+                {
+                  "name": "some_avg60",
+                  "value": 0.04769999999999999
+                },
+                {
+                  "name": "some_avg300",
+                  "value": 0.09820000000000001
                 },
                 {
                   "name": "full_avg10",
                   "value": 0.0
                 },
                 {
-                  "name": "full_total_us",
-                  "value": 0
+                  "name": "full_avg60",
+                  "value": 0.0
+                },
+                {
+                  "name": "full_avg300",
+                  "value": 0.0
+                },
+                {
+                  "name": "basis",
+                  "value": "the stall counter's increase over this tick"
                 }
               ],
               "collector_id": "cpu.pressure/fs:proc",
               "seq": 1
             },
             {
-              "ts_ns": 2067008157059,
+              "ts_ns": 2969895741790,
               "kind": "cpu.pressure",
               "attrs": [
                 {
-                  "name": "some",
-                  "value": 0.006944784760677956
+                  "name": "stall_ratio",
+                  "value": 0.013626182273969722
                 },
                 {
-                  "name": "avg10",
-                  "value": 0.0623
+                  "name": "stalled_ns",
+                  "value": 13624000
                 },
                 {
-                  "name": "avg60",
-                  "value": 0.23129999999999998
+                  "name": "interval_ns",
+                  "value": 999839847
                 },
                 {
-                  "name": "avg300",
-                  "value": 0.1573
+                  "name": "full_stall_ratio",
+                  "value": 0.0
                 },
                 {
-                  "name": "total_us",
-                  "value": 212991694
+                  "name": "full_stalled_ns",
+                  "value": 0
                 },
                 {
-                  "name": "window",
-                  "value": "since the previous read"
+                  "name": "some_avg10",
+                  "value": 0.0322
+                },
+                {
+                  "name": "some_avg60",
+                  "value": 0.04650000000000001
+                },
+                {
+                  "name": "some_avg300",
+                  "value": 0.09759999999999999
                 },
                 {
                   "name": "full_avg10",
                   "value": 0.0
                 },
                 {
-                  "name": "full_total_us",
-                  "value": 0
+                  "name": "full_avg60",
+                  "value": 0.0
+                },
+                {
+                  "name": "full_avg300",
+                  "value": 0.0
+                },
+                {
+                  "name": "basis",
+                  "value": "the stall counter's increase over this tick"
                 }
               ],
               "collector_id": "cpu.pressure/fs:proc",
@@ -133,11 +181,11 @@
         }
       ],
       "events_seen": 3,
-      "observed_ns": 2000123971,
+      "observed_ns": 3000124940,
       "window": {
-        "run_opened_ns": 2065008046758,
-        "opened_ns": 2065008046758,
-        "closed_ns": 2067008170729,
+        "run_opened_ns": 2966895660451,
+        "opened_ns": 2966895660451,
+        "closed_ns": 2969895785391,
         "attached": true
       },
       "stopped_because": "the requested duration elapsed",
@@ -149,22 +197,22 @@
         "throttled": 0
       },
       "overhead": {
-        "collector_cpu_ns": 321000,
-        "attributed_cpu_ns": 321000,
-        "observed_cpu_ns": 6470000000,
+        "collector_cpu_ns": 494000,
+        "attributed_cpu_ns": 494000,
+        "observed_cpu_ns": 18850000000,
         "observed_from": "everything but idle on every cpu (/proc/stat)",
-        "wall_ns": 2000223041,
-        "measurement_ns": 91790,
+        "wall_ns": 3000226841,
+        "measurement_ns": 94760,
         "measurements": 2,
         "in_target_cpu_ns": 0,
         "in_target_from": "nothing of this collector runs in the target's context: it reads the kernel's account, or a file, from its own",
-        "before_window_cpu_ns": 39953000,
-        "after_window_cpu_ns": 112000
+        "before_window_cpu_ns": 46913000,
+        "after_window_cpu_ns": 119000
       },
       "served_by": [
         "fs:proc"
       ],
-      "value_attr": "some"
+      "value_attr": "stall_ratio"
     }
   ]
 }
