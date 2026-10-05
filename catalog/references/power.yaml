@@ -97,11 +97,11 @@
     omn: results.0.outputs[emit=summary].series[key=cpu:1].last
     tolerance: {rel: 0.03}
     why: "both are APERF/MPERF over the cpu's busy time: turbostat's Bzy_MHz over the
-          window through perf, omn's cpuinfo_avg_freq over the last scheduler tick. Every
-          cpu is kept busy across the window, so the frequency is one plateau; omn's
-          `last` is its reading at the window's end, because the one at its start comes
-          before the load (and on an idle cpu cpuinfo_avg_freq is neither figure:
-          docs/replaces/power.md)"
+          window through perf, omn's through the msr perf unit (pmu, since the
+          twenty-fourth wave; cpuinfo_avg_freq's last tick before it), its window-open
+          read a baseline and its one reading at the close the interval's. Every cpu is
+          kept busy across the window, so the frequency is one plateau and `last` is
+          that reading (3956 MHz against 3967, 2026-10-05)"
 
 - id: freq-cpupower-mperf
   source: power.freq
@@ -120,8 +120,9 @@
     key: cpu1/Freq_Hz
     omn: results.0.outputs[emit=summary].series[key=cpu:1].last
     tolerance: {rel: 0.03}
-    why: "Mperf is APERF/MPERF read from /dev/cpu/*/msr, which needs root; the same ratio
-          cpuinfo_avg_freq exposes, every cpu held busy as in freq-turbostat"
+    why: "Mperf is APERF/MPERF read from /dev/cpu/*/msr, which needs root; omn reads the
+          same ratio through the msr perf unit over the same window, every cpu held busy
+          as in freq-turbostat (3951 MHz against 3950, 2026-10-05)"
 
 - id: cstate-cpupower-idle-stats
   source: power.cstate
