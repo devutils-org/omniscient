@@ -54,6 +54,7 @@ impl Prepared for Prepare {
             dropped_ring: 0,
             orphaned: 0,
             missed: 0,
+            unfollowed_said: false,
             seen: 0,
             failed: 0,
             filtered_out: 0,
@@ -75,6 +76,8 @@ pub struct FsyncCollector {
     dropped_ring: u64,
     orphaned: u64,
     missed: u64,
+    /// Whether the run has said that the descendants map overflowed.
+    unfollowed_said: bool,
     seen: u64,
     failed: u64,
     filtered_out: u64,
@@ -219,6 +222,17 @@ impl FsyncCollector {
                  run's count of them is short",
             );
             self.dropped_ring = ring;
+        }
+        let unfollowed = program.unfollowed();
+        if unfollowed > 0 && !self.unfollowed_said {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so {} syncs are in no event",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "its" } else { "their" },
+            ));
+            self.unfollowed_said = true;
         }
         let missed = program.missed();
         if missed > self.missed {
@@ -376,6 +390,7 @@ mod tests {
             dropped_ring: 0,
             orphaned: 0,
             missed: 0,
+            unfollowed_said: false,
             seen: 0,
             failed: 0,
             filtered_out: 0,

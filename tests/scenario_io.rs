@@ -6508,3 +6508,70 @@ os.waitpid(child, 0)
     );
     assert_eq!(events[0]["vfs_write"].as_u64(), Some(calls));
 }
+
+/// `io.fsync` follows the launched program's forked children: a parent that
+/// syncs nothing and a child that syncs three files is three syncs, under the
+/// child's pid. The filter compared the launched process alone before.
+#[test]
+fn the_syncs_of_a_forked_child_are_timed() {
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = lacks_here("io.fsync", "bpf:fentry") {
+        eprintln!("skipped: {reason:?}");
+        return;
+    }
+    let directory = scratch("io-forked-syncs");
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let workload = script(
+        "io-forked-syncs.py",
+        r#"
+import json, os, sys
+directory, account = sys.argv[1], sys.argv[2]
+child = os.fork()
+if child == 0:
+    for index in range(3):
+        fd = os.open(os.path.join(directory, f"sync-{index}"), os.O_WRONLY | os.O_CREAT, 0o644)
+        os.write(fd, b"x" * 4096)
+        os.fsync(fd)
+        os.close(fd)
+    json.dump({"pid": os.getpid()}, open(account, "w"))
+    os._exit(0)
+os.waitpid(child, 0)
+"#,
+    );
+    let account_path = scratch("io-forked-syncs.json");
+    let _ = std::fs::remove_file(&account_path);
+    let output = run(&[
+        "io.fsync",
+        "-m",
+        "trace",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        workload.to_str().expect("a path"),
+        directory.to_str().expect("a path"),
+        account_path.to_str().expect("a path"),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let child = account(&account_path)["pid"]
+        .as_u64()
+        .expect("the child's pid");
+    let document = json(&output);
+    let result = result(&document, "io.fsync");
+    let syncs = raw_events(result)
+        .into_iter()
+        .filter(|attrs| attrs["pid"].as_u64() == Some(child))
+        .count();
+    let dropped = losses(result)["dropped"].as_u64().unwrap_or(0) as usize;
+    assert!(
+        syncs <= 3 && syncs + dropped >= 3,
+        "the child synced 3 files, {syncs} were timed under its pid and {dropped} reported \
+         lost: {}",
+        stderr(&output)
+    );
+}
