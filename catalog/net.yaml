@@ -74,6 +74,14 @@
        drives its own decisions."
     - "Polling sees the connections alive at each tick. One opened and closed
        between two ticks is never seen -- a property of polling, not a loss."
+    - "Beside the round trip, each event carries the rest of `tcp_info` that
+       `ss -ti` prints, under names that carry their unit: `rto_ns`,
+       `min_rtt_ns`, `busy_ns`, `pacing_rate_bytes_per_s` and
+       `delivery_rate_bytes_per_s` (bytes, where `ss` prints bits),
+       `bytes_acked`, `bytes_received`, `bytes_sent`, `unacked`, `lost`,
+       `segs_out`, `snd_wnd` and more, and `congestion`, the algorithm's
+       name. Through `netlink` only; a field the kernel's `tcp_info` ends
+       before is absent, not zero."
     - "Narrowing to a process matches socket inodes against /proc/[pid]/fd, so a
        socket passed to another process over a unix socket is attributed to
        whoever holds the descriptor now."

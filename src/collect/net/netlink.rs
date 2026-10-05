@@ -30,6 +30,8 @@ const DIAG_MSG_LEN: usize = 72;
 
 /// The extension carrying `struct tcp_info`.
 const INET_DIAG_INFO: u16 = 2;
+/// The extension carrying the congestion control algorithm's name.
+const INET_DIAG_CONG: u16 = 4;
 
 /// One socket as `sock_diag` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +50,8 @@ pub struct Socket {
     pub send_queue: u32,
     /// From `tcp_info`, when the kernel supplied it.
     pub info: Option<TcpInfo>,
+    /// The congestion control algorithm (`cubic`, `bbr`), when supplied.
+    pub congestion: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +95,92 @@ pub struct TcpInfo {
     pub retransmits: u8,
     /// Congestion control state: 0 open, 1 disorder, 2 cwr, 3 recovery, 4 loss.
     pub congestion_state: u8,
+    /// What `ss -ti` prints beside the round trip, each `None` on a kernel
+    /// whose `tcp_info` ends before it (fields are only ever appended).
+    pub extra: TcpInfoExtra,
+}
+
+/// The rest of `struct tcp_info` that `ss -ti` prints, by name and offset.
+///
+/// Times are microseconds as the kernel reports them, rates bytes per
+/// second; the collector converts and names the units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TcpInfoExtra {
+    pub rto_us: Option<u32>,
+    pub ato_us: Option<u32>,
+    pub snd_mss: Option<u32>,
+    pub rcv_mss: Option<u32>,
+    pub unacked: Option<u32>,
+    pub sacked: Option<u32>,
+    pub lost: Option<u32>,
+    pub retrans: Option<u32>,
+    pub pmtu: Option<u32>,
+    pub rcv_rtt_us: Option<u32>,
+    pub rcv_space: Option<u32>,
+    pub total_retrans: Option<u32>,
+    pub pacing_rate: Option<u64>,
+    pub bytes_acked: Option<u64>,
+    pub bytes_received: Option<u64>,
+    pub segs_out: Option<u32>,
+    pub segs_in: Option<u32>,
+    pub notsent_bytes: Option<u32>,
+    pub min_rtt_us: Option<u32>,
+    pub delivery_rate: Option<u64>,
+    pub busy_time_us: Option<u64>,
+    pub rwnd_limited_us: Option<u64>,
+    pub sndbuf_limited_us: Option<u64>,
+    pub delivered: Option<u32>,
+    pub bytes_sent: Option<u64>,
+    pub bytes_retrans: Option<u64>,
+    pub snd_wnd: Option<u32>,
+    pub rcv_wnd: Option<u32>,
+}
+
+impl TcpInfoExtra {
+    /// Offsets from `include/uapi/linux/tcp.h`: eight bytes of u8 fields,
+    /// then u32s from 8, u64s from 104.
+    fn parse(bytes: &[u8]) -> Self {
+        let u32_at = |offset: usize| {
+            bytes
+                .get(offset..offset + 4)
+                .map(|slice| u32::from_ne_bytes(slice.try_into().expect("4 bytes")))
+        };
+        let u64_at = |offset: usize| {
+            bytes
+                .get(offset..offset + 8)
+                .map(|slice| u64::from_ne_bytes(slice.try_into().expect("8 bytes")))
+        };
+        Self {
+            rto_us: u32_at(8),
+            ato_us: u32_at(12),
+            snd_mss: u32_at(16),
+            rcv_mss: u32_at(20),
+            unacked: u32_at(24),
+            sacked: u32_at(28),
+            lost: u32_at(32),
+            retrans: u32_at(36),
+            pmtu: u32_at(60),
+            rcv_rtt_us: u32_at(92),
+            rcv_space: u32_at(96),
+            total_retrans: u32_at(100),
+            pacing_rate: u64_at(104),
+            bytes_acked: u64_at(120),
+            bytes_received: u64_at(128),
+            segs_out: u32_at(136),
+            segs_in: u32_at(140),
+            notsent_bytes: u32_at(144),
+            min_rtt_us: u32_at(148),
+            delivery_rate: u64_at(160),
+            busy_time_us: u64_at(168),
+            rwnd_limited_us: u64_at(176),
+            sndbuf_limited_us: u64_at(184),
+            delivered: u32_at(192),
+            bytes_sent: u64_at(200),
+            bytes_retrans: u64_at(208),
+            snd_wnd: u32_at(228),
+            rcv_wnd: u32_at(232),
+        }
+    }
 }
 
 impl TcpInfo {
@@ -113,6 +203,7 @@ impl TcpInfo {
             rtt_var_us: u32_at(Self::RTT_VAR)?,
             send_slow_start_threshold: u32_at(Self::SSTHRESH)?,
             send_congestion_window: u32_at(Self::CWND)?,
+            extra: TcpInfoExtra::parse(bytes),
         })
     }
 }
@@ -159,7 +250,7 @@ impl Diag {
         message[17] = libc::IPPROTO_TCP as u8;
         // Ask for `tcp_info`, which is where the round-trip time lives. The
         // extension bitmask is one-based.
-        message[18] = 1 << (INET_DIAG_INFO - 1);
+        message[18] = (1 << (INET_DIAG_INFO - 1)) | (1 << (INET_DIAG_CONG - 1));
         message[19] = 0;
         // Every state: a connection closing is still a connection that existed.
         message[20..24].copy_from_slice(&u32::MAX.to_ne_bytes());
@@ -281,6 +372,7 @@ fn parse_socket(body: &[u8]) -> Option<Socket> {
         receive_queue: ne32(56),
         send_queue: ne32(60),
         info: None,
+        congestion: None,
     };
 
     // Attributes follow the fixed part.
@@ -294,6 +386,13 @@ fn parse_socket(body: &[u8]) -> Option<Socket> {
         }
         if kind == INET_DIAG_INFO {
             socket.info = TcpInfo::parse(&body[offset + 4..offset + length]);
+        }
+        if kind == INET_DIAG_CONG {
+            let name = &body[offset + 4..offset + length];
+            let name = name.split(|byte| *byte == 0).next().unwrap_or_default();
+            if !name.is_empty() {
+                socket.congestion = Some(String::from_utf8_lossy(name).into_owned());
+            }
         }
         offset += (length + 3) & !3;
     }
