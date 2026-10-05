@@ -140,7 +140,7 @@ withheld, never wrong.
   `a_function_key_is_the_leaf_frame_of_the_stack` (emit); the `@<attr>`
   round trips (request).
 - Integration tests that read the results layer: `aggregation` 17,
-  `join_engine` 15, `encoders` 26 (+1 ignored), `cli` 28, `recorder` 8. In
+  `join_engine` 15, `encoders` 26 (+1 ignored), `cli` 28 (33 after merging main, green), `recorder` 8. In
   `recorder`, `two_bursts_write_exactly_two_documents_each_holding_its_burst`
   failed once under the wave's load and passed when rerun alone (a timing
   test; noted, not widened).
