@@ -34,7 +34,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::{Action, Ctx, Focus, Need, Region, Scope, View};
-use crate::model::{Data, Event, Output, Refusal, Results};
+use crate::model::{Data, Event, Key, Output, Refusal, Results};
 use crate::trust::{self, palette, usage, Trust};
 use crate::units;
 
@@ -62,19 +62,19 @@ pub const NEEDS: &[Need] = &[
         source: "io.bytes",
         mode: "poll@250ms",
         emit: &["raw", "timeline", "summary"],
-        keys: &[],
+        keys: &["dev", "dir"],
         stack: None,
         scope: Scope::System,
-        why: "the disk panel: bytes read and written per device, apart, from the events",
+        why: "the disk panel: bytes read and written per device, apart, by the `dir` key",
     },
     Need {
         source: "net.bytes",
         mode: "poll@250ms",
         emit: &["raw", "timeline", "summary"],
-        keys: &[],
+        keys: &["iface", "dir"],
         stack: None,
         scope: Scope::System,
-        why: "the network panel: bytes in and out per interface, apart, from the events",
+        why: "the network panel: bytes in and out per interface, apart, by the `dir` key",
     },
     Need {
         source: "gpu.engine_busy",
@@ -102,6 +102,15 @@ pub const NEEDS: &[Need] = &[
         stack: None,
         scope: Scope::System,
         why: "the power panel: watts per RAPL domain",
+    },
+    Need {
+        source: "proc.tasks",
+        mode: "poll@1s",
+        emit: &["raw"],
+        keys: &[],
+        stack: None,
+        scope: Scope::System,
+        why: "the process list: the machine's processes, each its name, its cpu and its memory",
     },
     Need {
         source: "cpu.oncpu_time",
@@ -492,7 +501,7 @@ fn tracks(data: &Data, results: &Results) -> Vec<Track> {
     });
     let raw = results.events();
     if !raw.is_empty() || timeline.is_none() {
-        return from_events(data, raw, &reading);
+        return fold_dirs(from_events(data, raw, &reading), &reading);
     }
     let timeline = timeline.map(Vec::as_slice).unwrap_or_default();
     let offsets: Vec<u64> = timeline
@@ -538,7 +547,126 @@ fn tracks(data: &Data, results: &Results) -> Vec<Track> {
             }),
         }
     }
-    tracks
+    fold_dirs(tracks, &reading)
+}
+
+/// The parts of a series key. `omn` joins a timeline's axes with a space
+/// (`dev:259+0 dir:read`, `src/emit.rs`'s series key) and this view joins an
+/// event's keys with a comma; a space inside a part that is not a key (a
+/// RAPL domain's `package 1`) keeps the part whole.
+fn key_parts(key: &str) -> Vec<&str> {
+    key.split(',')
+        .flat_map(|piece| {
+            let words: Vec<&str> = piece.split(' ').filter(|word| !word.is_empty()).collect();
+            if words.len() > 1 && words.iter().all(|word| word.contains(':')) {
+                words
+            } else {
+                vec![piece]
+            }
+        })
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+/// Each direction a `dir` key names, as the part of the bytes it is: the
+/// two the device's own total adds up (`/proc/diskstats`' read and written
+/// sectors, `/proc/net/dev`'s received and sent). A discard or a flush is
+/// not in that total, so it is not folded into it.
+const DIRS: &[(&str, &str)] = &[
+    ("read", "read"),
+    ("write", "written"),
+    ("rx", "in"),
+    ("tx", "out"),
+];
+
+/// A device's directions being folded: its name, and each instant's point
+/// per part.
+type Folded = (Option<String>, BTreeMap<u64, Vec<Point>>);
+
+/// Series split by a `dir` key folded back into one per device, each
+/// direction one of its parts: a recording that kept only its timeline says
+/// read apart from written as its events would. Series with no `dir` part
+/// are kept as they are.
+fn fold_dirs(tracks: Vec<Track>, reading: &Reading) -> Vec<Track> {
+    if reading.parts.is_empty()
+        || !tracks.iter().any(|track| {
+            key_parts(&track.key)
+                .iter()
+                .any(|part| part.starts_with("dir:"))
+        })
+    {
+        return tracks;
+    }
+    let names: Vec<&'static str> = reading.parts.iter().map(|(name, _)| *name).collect();
+    let mut kept = Vec::new();
+    // By the key without its direction: each part's points by instant.
+    let mut folded: BTreeMap<String, Folded> = BTreeMap::new();
+    for track in tracks {
+        let parts = key_parts(&track.key);
+        let Some(dir) = parts.iter().find_map(|part| part.strip_prefix("dir:")) else {
+            kept.push(track);
+            continue;
+        };
+        let rest: Vec<&str> = parts
+            .iter()
+            .copied()
+            .filter(|part| !part.starts_with("dir:"))
+            .collect();
+        let rest = if rest.is_empty() {
+            "system".to_owned()
+        } else {
+            rest.join(",")
+        };
+        let entry = folded.entry(rest).or_default();
+        if entry.0.is_none() {
+            entry.0.clone_from(&track.name);
+        }
+        let Some(index) = DIRS
+            .iter()
+            .find(|(named, _)| *named == dir)
+            .and_then(|(_, part)| names.iter().position(|name| name == part))
+        else {
+            // A discard or a flush: the device is listed, its bytes are not
+            // in the total.
+            continue;
+        };
+        for point in track.points {
+            let slots = entry.1.entry(point.at_ns).or_insert_with(|| {
+                vec![
+                    Point {
+                        at_ns: point.at_ns,
+                        read: 0.0,
+                        shown: 0.0,
+                    };
+                    names.len()
+                ]
+            });
+            slots[index] = point;
+        }
+    }
+    for (key, (name, instants)) in folded {
+        let mut points = Vec::with_capacity(instants.len());
+        let mut parts: Vec<(&'static str, Vec<f64>)> =
+            names.iter().map(|name| (*name, Vec::new())).collect();
+        for (at_ns, slots) in instants {
+            points.push(Point {
+                at_ns,
+                read: slots.iter().map(|slot| slot.read).sum(),
+                shown: slots.iter().map(|slot| slot.shown).sum(),
+            });
+            for ((_, values), slot) in parts.iter_mut().zip(&slots) {
+                values.push(slot.read);
+            }
+        }
+        kept.push(Track {
+            key,
+            points,
+            parts,
+            name,
+            ..Track::default()
+        });
+    }
+    kept
 }
 
 /// Where a finished run's timeline starts, on the run's axis.
@@ -631,7 +759,7 @@ fn lanes(points: Vec<Point>) -> Lanes {
 
 /// Whether a result is a task's: its series are keyed by one.
 fn names_a_task(results: &Results) -> bool {
-    let keyed = |key: &str| key.split(',').any(|part| part.starts_with("task:"));
+    let keyed = |key: &str| key_parts(key).iter().any(|part| part.starts_with("task:"));
     results.outputs.iter().any(|output| match output {
         Output::Timeline { series, .. } => series.iter().any(|series| keyed(&series.key)),
         Output::Summary { series } => series.iter().any(|series| keyed(&series.key)),
@@ -774,9 +902,25 @@ fn series_key(event: &Event) -> String {
     event
         .keys
         .iter()
-        .map(ToString::to_string)
+        .map(key_text)
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// A key as a series names it. A key this side's mirror does not know is
+/// kept as its JSON; a direction is spelled as `omn` spells it in a
+/// timeline (`dir:read`), so an event and a series of one direction agree.
+fn key_text(key: &Key) -> String {
+    if let Key::Other(value) = key {
+        if let Some(dir) = value
+            .get("dir")
+            .and_then(|dir| dir.get("dir").or(Some(dir)))
+            .and_then(|dir| dir.as_str())
+        {
+            return format!("dir:{dir}");
+        }
+    }
+    key.to_string()
 }
 
 /// Turns amounts since the last read into amounts per second: by the
@@ -1772,7 +1916,7 @@ impl<'a> Strips<'a> {
             format!("{}; speed unknown, so one hue", what.note)
         } else {
             format!(
-                "{}, speed unknown so one hue; {} apart from {}: in the events only",
+                "{}, speed unknown so one hue; {} apart from {} needs the `dir` key",
                 what.note, what.parts.0, what.parts.1
             )
         };
@@ -1936,7 +2080,8 @@ const NETWORK: Devices = Devices {
 /// A series key as a row's label: its values without their kinds
 /// (`gpu:0,engine:gr` is `0/gr`), and a timeline's lane as it is (`#2`).
 fn key_name(key: &str) -> String {
-    key.split(',')
+    key_parts(key)
+        .into_iter()
         .map(|part| part.split_once(':').map_or(part, |(_, value)| value))
         .collect::<Vec<_>>()
         .join("/")
@@ -2055,7 +2200,8 @@ struct Procs {
 
 /// The task a series key names, if it names one.
 fn task_of(key: &str) -> Option<i32> {
-    key.split(',')
+    key_parts(key)
+        .into_iter()
         .find_map(|part| part.strip_prefix("task:"))
         .and_then(|tid| tid.parse().ok())
 }
@@ -2161,6 +2307,7 @@ fn processes(data: &Data, sort: Sort) -> Procs {
         }
         columns.push((col, Trust::joined(data, held.iter().copied())));
     }
+    machine_tasks(data, &mut rows, &mut columns);
     let span_ns = Axis::of(data).span_ns as f64;
     for row in rows.values_mut() {
         if let Some(cpu_ns) = row.cells.get(&Col::CpuTime).copied() {
@@ -2188,6 +2335,100 @@ fn processes(data: &Data, sort: Sort) -> Procs {
     }
 }
 
+/// The source that lists the machine's processes, `top`'s and `ps`'s table:
+/// one event per process each poll, with its name, its share of one cpu
+/// since the poll before, its cpu time and its resident size.
+const TASKS: &str = "proc.tasks";
+
+/// The machine's processes, from [`TASKS`], into the list: each its name,
+/// its cpu over the run as a sparkline and a total, and its resident size
+/// at the last poll. Its columns join the ones the run's other sources fill,
+/// on the same rows: a process's id is the same whichever source read it.
+fn machine_tasks(
+    data: &Data,
+    rows: &mut BTreeMap<(i32, bool), Proc>,
+    columns: &mut Vec<(Col, Trust)>,
+) {
+    let held: Vec<&Results> = data.of_source(TASKS).collect();
+    if held.is_empty() {
+        return;
+    }
+    let opened = data.opened_ns();
+    // Per task, in the order read: each poll's share and when it was.
+    let mut polls: BTreeMap<(i32, bool), Vec<&Event>> = BTreeMap::new();
+    for results in &held {
+        for event in results.events() {
+            let Some(tid) = event
+                .tid()
+                .or_else(|| event.number("tid").map(|tid| tid as i32))
+            else {
+                continue;
+            };
+            let process = event.number("pid").is_none_or(|pid| pid as i32 == tid);
+            polls.entry((tid, process)).or_default().push(event);
+        }
+    }
+    for ((tid, process), events) in polls {
+        let row = row_of(rows, tid, process);
+        let last = events.last().expect("a task is listed by its events");
+        if let Some(name) = last.attr("comm").and_then(|value| value.as_str()) {
+            row.name = Some(name.to_owned());
+        }
+        if let Some(rss) = last.number("rss_bytes") {
+            row.cells.insert(Col::Rss, rss);
+        }
+        // What it ran within the run: each poll's share over its interval;
+        // a first reading is over the task's life, which is the run's only
+        // when the task started inside it.
+        let mut cpu_ns = 0.0;
+        let mut points = Vec::new();
+        for event in &events {
+            let busy = event.number("busy").unwrap_or(0.0);
+            let since_start = event
+                .attr("since")
+                .and_then(|value| value.as_str())
+                .is_some_and(|since| since == "start");
+            let at_ns = event.ts_ns.saturating_sub(opened);
+            if since_start {
+                let started = event
+                    .ts_ns
+                    .saturating_sub(event.number("age_ns").unwrap_or(f64::MAX) as u64);
+                if started >= opened {
+                    cpu_ns += event.number("cpu_ns").unwrap_or(0.0);
+                }
+                // A share over a whole life is not this instant's.
+                continue;
+            }
+            let over = event.number("over_ns").unwrap_or(0.0);
+            cpu_ns += busy * over;
+            points.push(Point {
+                at_ns,
+                read: busy * over,
+                // Drawn as the cpu's other sources are, in nanoseconds of
+                // cpu per second.
+                shown: busy * 1e9,
+            });
+        }
+        row.cells.entry(Col::CpuTime).or_insert(cpu_ns);
+        if row.cpu.is_none() && !points.is_empty() {
+            row.cpu = Some(Track {
+                key: format!("task:{tid}"),
+                points,
+                name: row.name.clone(),
+                ..Track::default()
+            });
+        }
+    }
+    let trust = Trust::joined(data, held.iter().copied());
+    for col in [Col::Cpu, Col::Spark, Col::CpuTime, Col::Rss] {
+        match columns.iter_mut().find(|(held, _)| *held == col) {
+            Some((_, joined)) => joined.merge(trust.clone()),
+            None => columns.push((col, trust.clone())),
+        }
+    }
+    columns.sort_by_key(|(col, _)| *col);
+}
+
 /// A column's cell, in its unit.
 fn cell_text(col: Col, value: f64) -> String {
     match col {
@@ -2209,11 +2450,14 @@ impl System {
         procs: &Procs,
     ) {
         let sort = SORTS[self.sort];
-        let block = panel(
-            "processes",
-            &format!("the target's, by {}", sort.words()),
-            None,
-        );
+        // A launched program's run is the program's; any other lists every
+        // task it measured, which on the machine is not one target's.
+        let whose = if ctx.data.has_target() {
+            "the target's"
+        } else {
+            "every task measured"
+        };
+        let block = panel("processes", &format!("{whose}, by {}", sort.words()), None);
         let inner = block.inner(area);
         self.shown.clear();
         if procs.rows.is_empty() {
@@ -2378,6 +2622,145 @@ impl System {
             frame.render_widget(Paragraph::new(Line::from(said)), foot);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The batch output.
+// ---------------------------------------------------------------------------
+
+/// The batch table's columns, in order: each heading and the list's column
+/// it prints, raw (nanoseconds, bytes, counts, a share of one cpu).
+const BATCH: &[(&str, Col)] = &[
+    ("CPU", Col::Cpu),
+    ("ON_CPU_NS", Col::CpuTime),
+    ("RSS_BYTES", Col::Rss),
+    ("FAULTS", Col::Faults),
+    ("RUN_QUEUE_NS", Col::RunQueue),
+    ("IO_CALLS", Col::IoCalls),
+    ("IN_IO_NS", Col::InIo),
+    ("LOCK_NS", Col::Lock),
+    ("GPU_MEM_BYTES", Col::GpuMem),
+];
+
+/// A number as the batch prints it: whole when it is whole, four
+/// significant decimals otherwise, never in a unit's words.
+fn batch_number(value: f64) -> String {
+    if !value.is_finite() {
+        return "-".to_owned();
+    }
+    if value.fract() == 0.0 && value.abs() < 1e15 {
+        return format!("{value:.0}");
+    }
+    format!("{value:.4}")
+}
+
+/// The `system` view as text a script parses, `top -b`'s use: what the
+/// machine's panels hold, one `machine` line per series, then every task,
+/// sorted as `sort` says (`cpu`, `memory`, `faults`, `io`, `runqueue`), a
+/// whitespace-separated table with `-` where a column was not measured for a
+/// task. Nothing is in a unit's words: shares are fractions, times
+/// nanoseconds, sizes bytes. What a column is not to be read at face value
+/// for (a loss, a time error, a refusal) is said on a `#` line, never left
+/// out.
+pub fn batch(data: &Data, sort: &str) -> Result<String, String> {
+    let sort = match sort {
+        "cpu" => Sort::Cpu,
+        "memory" => Sort::Memory,
+        "faults" => Sort::Faults,
+        "io" => Sort::Io,
+        "runqueue" => Sort::RunQueue,
+        other => {
+            return Err(format!(
+                "there is no sort `{other}`; the sorts are cpu, memory, faults, io, runqueue"
+            ))
+        }
+    };
+    let mut out = String::new();
+    let axis = Axis::of(data);
+    // One line: a launched program's own text may hold newlines.
+    let origin: String = data
+        .origin
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    out.push_str(&format!("# omn top --batch: {origin}\n"));
+    out.push_str(&format!("# span_ns {}\n", axis.span_ns));
+    out.push_str("# machine SOURCE KEY mean=PER_SECOND_OR_SHARE peak=... last=... total=SOURCE_UNIT [PART=SOURCE_UNIT ...]\n");
+    for (label, source) in MACHINE {
+        match served(data, label, source) {
+            None => {}
+            Some(Held::Refused(refusal)) => {
+                out.push_str(&format!("# {source} refused: {}\n", refusal.reason));
+            }
+            Some(Held::Served(results, trust, _)) => {
+                for sentence in trust.sentences() {
+                    out.push_str(&format!("# {source}: {sentence}\n"));
+                }
+                let mut all: Vec<Track> = results
+                    .iter()
+                    .flat_map(|results| tracks(data, results))
+                    .collect();
+                all.sort_by(|one, other| one.key.cmp(&other.key));
+                for track in all.iter().filter(|track| track.tangled.is_none()) {
+                    let key = key_name(&track.key).replace(char::is_whitespace, "_");
+                    let mut line = format!(
+                        "machine {source} {key} mean={} peak={} last={} total={}",
+                        batch_number(track.mean()),
+                        batch_number(track.peak()),
+                        batch_number(track.last().unwrap_or(f64::NAN)),
+                        batch_number(track.total()),
+                    );
+                    for (part, total) in track.part_totals() {
+                        line.push_str(&format!(" {part}={}", batch_number(total)));
+                    }
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    let procs = processes(data, sort);
+    if let Some(refusal) = &procs.refused {
+        out.push_str(&format!(
+            "# {} refused: {}\n",
+            refusal.source, refusal.reason
+        ));
+    }
+    for (col, trust) in &procs.columns {
+        let Some((head, _)) = BATCH.iter().find(|(_, held)| held == col) else {
+            continue;
+        };
+        for sentence in trust.sentences() {
+            out.push_str(&format!("# {head}: {sentence}\n"));
+        }
+    }
+    let mut head = vec!["ID", "KIND", "NAME"];
+    head.extend(BATCH.iter().map(|(head, _)| *head));
+    out.push_str(&head.join(" "));
+    out.push('\n');
+    for row in &procs.rows {
+        let name = row
+            .name
+            .as_deref()
+            .map(|name| name.replace(char::is_whitespace, "_"))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "-".to_owned());
+        let mut line = vec![
+            row.tid.to_string(),
+            if row.process { "process" } else { "thread" }.to_owned(),
+            name,
+        ];
+        for (_, col) in BATCH {
+            line.push(
+                row.cells
+                    .get(col)
+                    .map_or_else(|| "-".to_owned(), |value| batch_number(*value)),
+            );
+        }
+        out.push_str(&line.join(" "));
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -3013,6 +3396,125 @@ mod tests {
         // faulted more.
         let order = |procs: &Procs| procs.rows.iter().map(Proc::key).collect::<Vec<_>>();
         assert_ne!(order(&by_cpu), order(&by_faults));
+    }
+
+    /// The machine's processes, as `proc.tasks` lists them each poll: one
+    /// row each, by name, sorted, with its cpu over the run and its
+    /// resident size; a task first seen at the run's opening counts only
+    /// what it ran inside the run.
+    #[test]
+    fn the_machine_s_processes_are_listed_from_proc_tasks() {
+        let tick = 1_000_000_000u64;
+        // The run opens at 10 s; poll n is at 10 + n s.
+        let opened = 10 * tick;
+        let task = |n: u64, pid: i32, comm: &str, busy: f64, since: &str, age: u64, rss: u64| {
+            event(
+                opened + n * tick,
+                vec![Key::Task { tid: pid }],
+                &[
+                    ("busy", AttrValue::Float(busy)),
+                    ("since", AttrValue::Text(since.into())),
+                    ("over_ns", AttrValue::Uint(tick)),
+                    ("pid", AttrValue::Uint(pid as u64)),
+                    ("tid", AttrValue::Uint(pid as u64)),
+                    ("comm", AttrValue::Text(comm.into())),
+                    ("cpu_ns", AttrValue::Uint(5 * tick)),
+                    ("age_ns", AttrValue::Uint(age)),
+                    ("rss_bytes", AttrValue::Uint(rss)),
+                ],
+            )
+        };
+        let mut events = Vec::new();
+        // `old` ran 5 s before the run; it spins one core, then half.
+        events.push(task(0, 10, "old", 0.9, "start", 100 * tick, 1 << 20));
+        events.push(task(1, 10, "old", 1.0, "poll", 0, 1 << 20));
+        events.push(task(2, 10, "old", 0.5, "poll", 0, 2 << 20));
+        // `young` is born half a second into the run and has run 0.25 s
+        // when first seen.
+        let mut first = task(1, 20, "young", 0.5, "start", tick / 2, 4 << 20);
+        first.attrs.retain(|attr| attr.name != "cpu_ns");
+        first.attrs.push(Attr {
+            name: "cpu_ns".into(),
+            value: AttrValue::Uint(tick / 4),
+        });
+        events.push(first);
+        events.push(task(2, 20, "young", 0.25, "poll", 0, 4 << 20));
+        let results = Results {
+            label: "proc.tasks@system".into(),
+            source: "proc.tasks".into(),
+            backend: "fs:proc".into(),
+            outputs: vec![Output::Raw { events }],
+            ..Results::default()
+        };
+        let mut data = data_of(vec![results], 2 * tick);
+        data.live = Some(Live {
+            opened_ns: opened,
+            now_ns: opened + 2 * tick,
+        });
+        let procs = processes(&data, Sort::Cpu);
+        let names: Vec<&str> = procs
+            .rows
+            .iter()
+            .map(|row| row.name.as_deref().unwrap_or("-"))
+            .collect();
+        assert_eq!(names, ["old", "young"]);
+        let old = &procs.rows[0];
+        assert!(old.process);
+        assert_eq!(old.cells[&Col::CpuTime], 1.5e9, "two polls, not its life");
+        assert_eq!(old.cells[&Col::Rss], (2 << 20) as f64, "the last poll's");
+        assert_eq!(old.cpu.as_ref().unwrap().points.len(), 2);
+        let young = &procs.rows[1];
+        assert_eq!(young.cells[&Col::CpuTime], 0.25e9 + 0.25e9, "born inside");
+        assert!(procs.columns.iter().any(|(col, _)| *col == Col::Spark));
+        let by_memory = processes(&data, Sort::Memory);
+        assert_eq!(by_memory.rows[0].name.as_deref(), Some("young"));
+        let drawn = screen(data);
+        assert!(drawn.contains("old "), "{drawn}");
+        assert!(drawn.contains("every task measured"), "{drawn}");
+    }
+
+    /// A timeline split by `dir` is one row per device, read apart from
+    /// written; a discard is not in the bytes, as `/proc/diskstats`' own
+    /// total does not hold it.
+    #[test]
+    fn a_timeline_split_by_dir_is_one_row_per_device_its_parts_apart() {
+        use crate::model::{Point as Reading, Series};
+        let series = |dir: &str, value: f64| Series {
+            key: format!("dev:259+0 dir:{dir}"),
+            points: (0..4)
+                .map(|n| Reading {
+                    offset_ns: n * 250_000_000,
+                    value,
+                })
+                .collect(),
+        };
+        let results = Results {
+            label: "io.bytes@system".into(),
+            source: "io.bytes".into(),
+            backend: "fs:proc".into(),
+            outputs: vec![Output::Timeline {
+                series: vec![
+                    series("read", 1000.0),
+                    series("write", 3000.0),
+                    series("discard", 50_000.0),
+                ],
+                first_ts_ns: None,
+            }],
+            ..Results::default()
+        };
+        let data = data_of(vec![results.clone()], 1_000_000_000);
+        let all = tracks(&data, &results);
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert_eq!(all[0].key, "dev:259+0");
+        assert_eq!(all[0].total(), 16_000.0);
+        assert_eq!(
+            all[0].part_totals(),
+            vec![("read", 4000.0), ("written", 12_000.0)]
+        );
+        assert_eq!(device_name(&all[0].key), "259:0");
+        assert_eq!(key_parts("task:7 cpu:2"), ["task:7", "cpu:2"]);
+        assert_eq!(task_of("cpu:2 task:7"), Some(7));
+        assert_eq!(key_parts("package 1"), ["package 1"]);
     }
 
     fn event(ts_ns: u64, keys: Vec<Key>, attrs: &[(&str, AttrValue)]) -> Event {

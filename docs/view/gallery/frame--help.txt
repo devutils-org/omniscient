@@ -2,39 +2,39 @@ omn top │ fixture http-server │ 2.85s                             view: snap
  1 system  2 flame  3 ledger  4 request  5 timebar  6 heatmap  7 lanes  8 wake  9 flows  0 process
  python3  pid 2618476 · 4 threads · 2.84s · omn costs ≥19.9% cpu
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- CPU     ▇█▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▆   0.890 cores    avg 0.982   peak 1.21  ~low det
- Memory  ▅▅██████████████████████   25.2MiB        +3.16MiB/s   peak 26.2MiB
- Disk       ┌ help ────────────────────────────────────────────────────────────────────────────────────────┐
- Network ▁█▇│Keys                                                                                          │
- GPU        │  q          quit                                                                             │
- Energy  ▇█▇│  ←/→ tab    view                                                                             │
- Time    █░░│  1-9        jump                                                                             │aded x2
-────────────│  f          clear focus                                                                      │────────────
-▶ suspect: s│  ?          help                                                                             │ick → detail
-            │  0          the tenth view                                                                   │
-CPU in one h│  ⌫          back where enter came from                                                       │
-Memory in on│  M          mouse on/off                                                                     │
-Network in o│  ↑↓ jk      move between lines                                                               │
-Energy in on│  enter      open the line's page                                                             │
-            │  Mouse: a click selects, a click on the selection goes in, the wheel scrolls (or zooms where │
-            │the view zooms), a right click goes back; M gives the terminal its own text selection back.   │
-            │                                                                                              │
-            │How far a figure can be trusted                                                               │
-            │  dimmed     not to be read at face value; its badge says why                                 │
-            │  -12 lost   12 records were lost: every figure built from them is a lower bound              │
-            │  3 late     3 rounds of reads came late: nothing is missing, but the series is not spaced as │
-            │asked                                                                                         │
-            │  ±2.50µs    timestamps were converted from another clock and may be off by up to 2.50µs      │
-            │  ±?         how far the timestamps may be off is unknown: the result holds aggregates only,  │
-            │and the recording does not carry its events' time error                                       │
-            │  ~low det   the source is not reproducible between two runs of the same workload             │
-            │  live       the run is still going: losses, cost and stack names are known at its end        │
-            │  degraded   served by a fallback that says what it gives up (1)                              │
-            │  ███▒▒      an error bar: what is certain solid, what is uncertain shaded                    │
-            │  refused    a source that was not served shows why where its panel would be                  │
+ CPU      ██▃            ▁▁                    0.845 cores    avg 0.982   peak 1.21   hottest link_path_walk 5.51%  ~low
+         ▄█████████▇▇▇▆▆▇███▇▇▇█████████▇▇▇▂
+         ███┌ help ────────────────────────────────────────────────────────────────────────────────────────┐
+         ███│Keys                                                                                          │
+         ███│  q          quit                                                                             │
+         ███│  ←/→ tab    view                                                                             │
+ Memory     │  1-9        jump                                                                             │
+            │  f          clear focus                                                                      │
+         ▆▆▆│  ?          help                                                                             │
+         ███│  0          the tenth view                                                                   │
+         ███│  ⌫          back where enter came from                                                       │
+         ███│  M          mouse on/off                                                                     │
+ Disk       │  ↑↓ jk      move between lines                                                               │
+ Network   █│  enter      open the line's page                                                             │graded x3
+           █│  Mouse: a click selects, a click on the selection goes in, the wheel scrolls (or zooms where │
+           █│the view zooms), a right click goes back; M gives the terminal its own text selection back.   │
+           █│                                                                                              │
+          ▂█│How far a figure can be trusted                                                               │
+         ▁██│  dimmed     not to be read at face value; its badge says why                                 │
+ GPU        │  -12 lost   12 records were lost: every figure built from them is a lower bound              │
+ Energy  ▁▆▆│  3 late     3 rounds of reads came late: nothing is missing, but the series is not spaced as │
+         ███│asked                                                                                         │
+         ███│  ±2.50µs    timestamps were converted from another clock and may be off by up to 2.50µs      │
+         ███│  ±?         how far the timestamps may be off is unknown: the result holds aggregates only,  │
+         ███│and the recording does not carry its events' time error                                       │
+         ███│  ~low det   the source is not reproducible between two runs of the same workload             │
+ Time    █░░│  live       the run is still going: losses, cost and stack names are known at its end        │ow det degra
+         █░░│  degraded   served by a fallback that says what it gives up (1)                              │
+────────────│  ███▒▒      an error bar: what is certain solid, what is uncertain shaded                    │────────────
+▶ suspect: s│  refused    a source that was not served shows why where its panel would be                  │ick → detail
             └──────────────────────────────────────────────────────────────────────────────────────────────┘
-
-
-
-
+CPU in one hue: the machine's cores are not in the recording
+Memory in one hue: the machine's memory is not in the recording
+Network in one hue: a link's speed is not known
+Energy in one hue: energy has no capacity
 q quit  ←/→ tab view  1-9 jump  f clear focus  ? help  ↑↓ jk move between lines  enter open the line's page
