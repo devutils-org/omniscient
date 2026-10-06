@@ -13627,3 +13627,85 @@ are carried as measurements with nothing saying the driver no longer
 defines them; `src/collect/gpu/` (stream gpu) should drop them, or carry
 them as unknown with the driver's answer, on a driver that deprecates
 application clocks. Limit put back to 300 W by the user.
+
+## The runs after the twenty-fourth wave, alone on an idle machine (2026-10-06)
+
+`STATE.md`'s items 1 and 3 at `e1f9de9`, nothing else running (the user away;
+an editor held a GPU context through the GPU bench).
+
+### The backends bench (`target/bench/backends-1791242370`)
+
+4816 s, test green, **23 pairs flagged over their band** (16 at the last
+run). What moved:
+
+- **The NVML pollers are fixed**: 25 to 36 % of the target's cpu at the last
+  run, now within their bands except `gpu.engine_busy` 9.93 % (`med`) and
+  `gpu.mem_freq` 5.03 % (`med`, new).
+- **`io.fsync` is no longer flagged** (144 % before): the fentry unlink moved
+  after the window. Its reason in `docs/bench.md` is now stale.
+- **`net.tcp.connect` through `bpf:fentry` 41.62 %** against `low`, as before
+  (40 %).
+- **New sources over their band**: `net.sockets` through `netlink` 17.01 %
+  (`low`), `net.tcp.accept` through `bpf:fentry` 5.59 % (`low`), and three
+  `free` pollers at 0.17 to 0.32 % (`net.snmp`, `sched.interrupts`,
+  `sched.runqueue`).
+- **Worse**: `net.tcp.rtt` through `netlink` 11.09 % (5.7 % before, `med`);
+  `mem.rss` through `fs:proc:smaps_rollup` 5.29 % (`med`).
+- Small, as before: `sched.wakeup` 6.69 % (`med`), `power.freq` 2.82 % (`pmu`)
+  and 1.78 % (`fs:sys`), `power.temp` 2.38 %, `sched.migrations` 2.09 %,
+  `io.readahead` 1.67 %, `proc.signals` 1.01 %, and the `free` sources
+  `cpu.oncpu_time`, `cpu.pressure`, `mem.cgroup`, `net.bytes`, `net.hwts`,
+  `net.packets` at 0.10 to 0.16 %.
+
+The bands are not moved here: each is the catalog owner's (net for the four
+net pollers and probes, gpu for the two NVML ones).
+
+### The GPU bench (`target/bench/gpu-1791243643`)
+
+1272 s, **`bench_gpu` green**. `gpu.freq` lost **0 of 180** records (2 of 190
+at the last run): the end-of-run clock read moved out of the window fixed it.
+`gpu.profile` still over its `med` on every regime (+45 to +170 % process
+cpu; `extreme` would hold it). The new `gpu.mem_freq` and `gpu.throttle`
+within their bands.
+
+### The matrix, every cell swept again
+
+20 guest cells (5.15.221, 6.1.188, 6.6.157 and 7.2.8 by five configurations)
+and both `here` cells (`here-nocaps` with the binary's capabilities removed by
+the user, then `make`); the 7.2.7 cells of 2026-10-04 deleted, the guest being
+7.2.8 now. `every_cell_covers_the_whole_catalog` green. **`every_cell_on_disk_
+holds_the_invariants` red on three defects, all the twenty-fourth wave's mem
+sources** ("listed usable, refused at the run"):
+
+- **`mem.numa` (`--system`) through `fs:sys`, in all 22 cells**: refused with
+  code 3, "the per-node allocation counters are counters that are read:
+  `sample` cannot be served from /sys/devices/system/node; poll them". The
+  catalog lets the default mode resolve onto a backend that serves only
+  `poll`; the backend's modes should exclude `sample`, or the source's default
+  mode be `poll`.
+- **`mem.oom` (launch) through `fs:cgroup`, in all 20 guest cells**: "cannot
+  read /sys/fs/cgroup/memory.events: No such file or directory". The guests
+  run the target in the root cgroup, which has no `memory.events`; the probe
+  does not check the file the collector reads. Served in `here-caps`, where
+  the target sits in a user slice.
+- **`mem.swap` (launch) through `perf:kprobe`, in the three guest `nocaps`
+  cells**: "the kernel refused a counting kprobe on `swap_readpage` ... a
+  kprobe needs CAP_PERFMON whatever kernel.perf_event_paranoid says". The
+  backend's requirements lack the capability its own refusal names.
+
+### The full suite after the matrix
+
+`make check` stopped in the lib tests on
+`collect::mem::footprint::tests::the_rollup_agrees_with_the_per_mapping_walk`
+(in the tally; passed alone). Then `cargo test --workspace --no-fail-fast`:
+**3050 passed, 11 failed, 15 ignored**. Rerun alone once each, all held but
+the known one: `task_clock_counts_the_cpu_time_the_thread_ran`,
+the footprint rollup,
+`a_run_over_its_ceiling_with_nowhere_cheaper_to_go_stops_and_says_which`
+(new to the tally), `scenario_gpu`'s
+`a_target_that_exits_before_the_duration_ends_the_run_and_names_it`,
+`scenario_net`'s `every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`
+(new to the tally), and the reference families `bpftrace`, `perfsched`,
+`power` (red only inside the parallel workspace run, as filed). Still red
+alone: `cpu.cycles.system`, omn 457 M cycles below `perf stat -a`, the same
+fixed deficit as on 2026-10-05; and portability, the three defects above.

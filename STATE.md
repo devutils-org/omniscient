@@ -2026,7 +2026,7 @@ build or test.
 
 ### Still to run, after the twenty-fourth wave
 
-**Items 11 to 14 ran on 2026-10-05**, one at a time after the merge (`docs/open-findings.md`, "The runs after the twenty-fourth wave"): the root `bpftrace` stopped; the reference pairs 169 of 171 (`cpu.cycles.system` a fixed 470 M-cycle deficit, `hot-functions` noise); `omn top` keeps its cadence alone; the power limit is not counted as capping by this board's driver, and `gpu.throttle`'s below-clocks shares are a defect. Still to run alone, on an idle machine: item 1 (the matrix) and item 3 (the GPU and backends benches).
+**Items 11 to 14 ran on 2026-10-05**, one at a time after the merge (`docs/open-findings.md`, "The runs after the twenty-fourth wave"): the root `bpftrace` stopped; the reference pairs 169 of 171 (`cpu.cycles.system` a fixed 470 M-cycle deficit, `hot-functions` noise); `omn top` keeps its cadence alone; the power limit is not counted as capping by this board's driver, and `gpu.throttle`'s below-clocks shares are a defect. Items 1 and 3 ran on 2026-10-06, alone (`docs/open-findings.md`, "alone on an idle machine"): both benches green (23 bands flagged, the NVML pollers and `io.fsync` fixed, `gpu.freq` loses nothing), every matrix cell swept again, and three mem sources listed usable that refuse at the run (`mem.numa`, `mem.oom`, `mem.swap`).
 
 **Added by the twenty-fourth wave**: items 11 to 14 below, and item 10 done
 (every reference pair that wanted root ran through `sudo -n` in the wave and
