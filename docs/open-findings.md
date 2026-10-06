@@ -13709,3 +13709,13 @@ the footprint rollup,
 `power` (red only inside the parallel workspace run, as filed). Still red
 alone: `cpu.cycles.system`, omn 457 M cycles below `perf stat -a`, the same
 fixed deficit as on 2026-10-05; and portability, the three defects above.
+
+**Fixed on 2026-10-06** (coordinator, inline): the three mem defects above
+-- `mem.numa`'s `fs:sys` backend declares `modes: [poll]`; `mem.oom` reads
+`/proc/vmstat` for a target in the root cgroup and says so in a note;
+the `kprobe` requirement is missing without `CAP_PERFMON` or
+`CAP_SYS_ADMIN` -- each with a unit test, and `here-caps` swept again with 0
+broken. The guest cells still hold the old runs: the judge is green only
+after the next `make matrix`. Also fixed: `omn-mcp`'s `refuse_to_run`
+ignored a session's own `launch:` (`CODE-REVIEW.md` finding 1), so any
+program could run through `run_session` without `--allow-launch`.
