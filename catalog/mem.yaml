@@ -393,7 +393,7 @@
     - {id: "fs:proc", requires: ["/proc/[pid]/numa_maps"], cost: med,
        targets: {pid: native, tid: native, launch: native}, filter_fields: [comm, node],
        degraded: "page placement, not accesses: a page on the wrong node that is never touched costs nothing, and this cannot tell the two apart"}
-    - {id: "fs:sys", requires: ["/sys/devices/system/node/node0/numastat"], cost: free,
+    - {id: "fs:sys", requires: ["/sys/devices/system/node/node0/numastat"], cost: free, modes: [poll],
        targets: {system: native}, filter_fields: [node],
        degraded: "allocations, not accesses, and the machine's rather than anyone's: each page is counted once, on the node it came from, as a hit when that was the node asked for and a miss when it was not"}
   modes: [sample, poll]

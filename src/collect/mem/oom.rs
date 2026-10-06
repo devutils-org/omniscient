@@ -12,7 +12,10 @@
 //! the kernel would read; that backend is not built, and these name no victim.
 //!
 //! `memory.events` is hierarchical: a cgroup's counts include every cgroup
-//! below it, which is what a target that names a service wants.
+//! below it, which is what a target that names a service wants. The root has
+//! no `memory.events`, and being the top of that hierarchy its kills are the
+//! machine's: a target in the root cgroup is read from `/proc/vmstat`, and
+//! says so, with `oom` and `max` not counted.
 
 use std::path::PathBuf;
 
@@ -68,6 +71,8 @@ impl Prepare {
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
+        let mut note = None;
+        let mut scope = self.scope;
         let (path, keys) = match self.scope {
             Scope::Machine => match target {
                 Target::System => (PathBuf::from(VMSTAT), Vec::new()),
@@ -82,25 +87,37 @@ impl Prepared for Prepare {
             },
             Scope::Cgroup => {
                 let cgroup = Cgroup::resolve(target)?;
-                let file = cgroup.file("memory.events");
-                let text = std::fs::read_to_string(&file)
-                    .map_err(|error| format!("cannot read {}: {error}", file.display()))?;
-                if stat_field(&stat_fields(&text), "oom_kill").is_none() {
-                    return Err(format!(
-                        "{} carries no `oom_kill` line, so this kernel does not count kills \
-                         per cgroup",
-                        file.display()
+                if cgroup.is_root() {
+                    scope = Scope::Machine;
+                    note = Some(format!(
+                        "the {} target sits in the root cgroup, which has no `memory.events`: its \
+                         kills are the machine's, read from {VMSTAT}'s `oom_kill`, and `oom`, \
+                         `oom_group_kill` and `max` are not counted",
+                        target.kind()
                     ));
+                    (PathBuf::from(VMSTAT), vec![cgroup.key()])
+                } else {
+                    let file = cgroup.file("memory.events");
+                    let text = std::fs::read_to_string(&file)
+                        .map_err(|error| format!("cannot read {}: {error}", file.display()))?;
+                    if stat_field(&stat_fields(&text), "oom_kill").is_none() {
+                        return Err(format!(
+                            "{} carries no `oom_kill` line, so this kernel does not count kills \
+                         per cgroup",
+                            file.display()
+                        ));
+                    }
+                    (file, vec![cgroup.key()])
                 }
-                (file, vec![cgroup.key()])
             }
         };
         Ok(Box::new(Oom {
             id: CollectorId::new(format!("mem.oom/{}", self.scope.backend())),
             mode: self.mode,
-            scope: self.scope,
+            scope,
             path,
             keys,
+            note,
             previous: None,
             opened: None,
             losses: Losses::default(),
@@ -121,6 +138,8 @@ pub struct Oom {
     scope: Scope,
     path: PathBuf,
     keys: Vec<KeyValue>,
+    /// Said once per run when the cgroup asked for is read another way.
+    note: Option<String>,
     previous: Option<Reading>,
     opened: Option<Reading>,
     losses: Losses,
@@ -239,6 +258,10 @@ impl Collector for Oom {
     fn losses(&self) -> Losses {
         self.losses.clone()
     }
+
+    fn notes(&self) -> Vec<String> {
+        self.note.iter().cloned().collect()
+    }
 }
 
 #[cfg(test)]
@@ -254,10 +277,32 @@ mod tests {
             scope,
             path,
             keys: Vec::new(),
+            note: None,
             previous: None,
             opened: None,
             losses: Losses::default(),
         }
+    }
+
+    /// The root cgroup has no `memory.events`; a target placed there (a
+    /// launched program on a machine where nothing moved it) is the machine's
+    /// kills, read from `/proc/vmstat`, and the run says the cgroup's other
+    /// counters are not there.
+    #[test]
+    fn a_target_in_the_root_cgroup_reads_the_machine_s_kills_and_says_so() {
+        let prepared = Box::new(Prepare {
+            mode: Mode::Count,
+            scope: Scope::Cgroup,
+        });
+        let collector = prepared
+            .attach(&Target::Cgroup(PathBuf::from("/")))
+            .expect("the root cgroup is served");
+        let notes = collector.notes();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("root cgroup") && notes[0].contains(VMSTAT),
+            "{notes:?}"
+        );
     }
 
     #[test]

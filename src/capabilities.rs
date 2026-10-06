@@ -456,6 +456,22 @@ fn withheld_reason(
     Some(format!("{carried}: {why}"))
 }
 
+/// Why a perf kprobe would be refused to a process holding `privileges`, or
+/// `None` when the kernel lets it open one. Privileges that cannot be read
+/// answer nothing here: the type probe still runs, and the attach says the rest.
+fn kprobe_not_permitted(privileges: Option<&Privileges>) -> Option<String> {
+    let privileges = privileges?;
+    let holds = |name: &str| privileges.effective.iter().any(|held| held == name);
+    if privileges.uid == 0 || holds("CAP_PERFMON") || holds("CAP_SYS_ADMIN") {
+        return None;
+    }
+    Some(
+        "a kprobe needs CAP_PERFMON (or CAP_SYS_ADMIN) whatever kernel.perf_event_paranoid \
+         says, and this process holds neither"
+            .to_owned(),
+    )
+}
+
 /// This process's privileges, as the kernel reports them.
 fn privileges() -> Option<Privileges> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
@@ -890,6 +906,16 @@ impl Capabilities {
         // fail -- it counts something else. Until this was asked, both read
         // `unverified`, which the resolver treats as a reason to prefer a
         // backend it could check.
+        // The `kprobe` PMU existing is not the process being let in: the kernel
+        // refuses a perf kprobe to anyone not `perfmon_capable()` --
+        // `CAP_PERFMON` or `CAP_SYS_ADMIN` -- whatever `perf_event_paranoid`
+        // says. The eBPF kprobe backends also ask `bpf`, which hid this until
+        // `mem.swap`'s counting kprobe was listed usable without either.
+        if requirement == "kprobe" {
+            if let Some(missing) = kprobe_not_permitted(privileges().as_ref()) {
+                return Probe::Missing(missing);
+            }
+        }
         if let Some(support) = crate::bpf::attach::probe_type_support(requirement) {
             return Probe::from(support);
         }
@@ -1759,6 +1785,34 @@ pub fn parse_cpu_list(list: &str) -> Option<Vec<u32>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A perf kprobe is let in by `CAP_PERFMON`, `CAP_SYS_ADMIN` or root, and
+    /// refused with that reason otherwise: the `kprobe` PMU existing is not
+    /// enough, which is how `mem.swap` was listed usable on the nocaps cells.
+    #[test]
+    fn a_kprobe_is_missing_without_perfmon_whatever_the_pmu_says() {
+        let holding = |uid: u32, effective: &[&str]| Privileges {
+            uid,
+            effective: effective.iter().map(|name| (*name).to_owned()).collect(),
+            no_new_privs: false,
+            withheld: None,
+        };
+        let refused = kprobe_not_permitted(Some(&holding(1000, &["CAP_BPF"])))
+            .expect("CAP_BPF alone does not open a kprobe");
+        assert!(refused.contains("CAP_PERFMON"), "{refused}");
+        assert_eq!(
+            kprobe_not_permitted(Some(&holding(1000, &["CAP_PERFMON"]))),
+            None
+        );
+        assert_eq!(
+            kprobe_not_permitted(Some(&holding(1000, &["CAP_SYS_ADMIN"]))),
+            None
+        );
+        assert_eq!(kprobe_not_permitted(Some(&holding(0, &[]))), None);
+        assert_eq!(kprobe_not_permitted(None), None);
+    }
+
     /// `writable:` asks the question a control file is used by. This process's
     /// own `clear_refs` is write-only for its owner, and is what the probe was
     /// written for; a file nobody but root may write, and one that is not
@@ -2152,8 +2206,6 @@ mod tests {
             other => panic!("unexpected exit status {other}"),
         }
     }
-
-    use super::*;
 
     #[test]
     fn kernel_versions_parse_from_a_release_string() {
