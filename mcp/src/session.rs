@@ -396,8 +396,12 @@ pub struct RunLimit {
 /// and put in the `--allow-launch` directory: its program, arguments and
 /// working directory are theirs, as the file states them, and what a model
 /// chooses is which of those sessions runs and when -- never what runs.
+///
+/// A program is launched two ways, and both are counted: a request whose
+/// target is a launch, and the session's own `launch:`, which bounds a
+/// machine-wide window by a program no request targets.
 pub fn refuse_to_run(session: &Session, source: &Source, launch_allowed: bool) -> Option<String> {
-    let launching: Vec<String> = session
+    let mut launching: Vec<String> = session
         .requests
         .iter()
         .filter(|request| request.target.kind() == TargetKind::Launch)
@@ -408,6 +412,9 @@ pub fn refuse_to_run(session: &Session, source: &Source, launch_allowed: bool) -
                 .unwrap_or_else(|| request.source.as_str().to_owned())
         })
         .collect();
+    if let Some(program) = session.launch.first() {
+        launching.push(format!("the session's `launch:` of `{program}`"));
+    }
     if launching.is_empty() || (source.is_approved() && launch_allowed) {
         return None;
     }
@@ -861,6 +868,50 @@ mod tests {
         assert_eq!(known["run_spent_ns"], 50);
         assert_eq!(known["run_spent_percent_of_window_on_one_cpu"], 5.0);
         assert!(known.get("run_spent_at_least_ns").is_none());
+    }
+
+    /// A session's own `launch:` runs a program as surely as a request's
+    /// launch target does, so it is refused the same way: unless the session
+    /// is approved and the server was started with `--allow-launch`.
+    #[test]
+    fn a_session_s_own_launch_is_refused_like_a_request_s() {
+        let text = |launch: &str| Source::Text {
+            text: format!(
+                "requests:\n\
+                 \x20 - source: cpu.util\n\
+                 \x20   target: system\n\
+                 \x20   mode: poll@50ms\n\
+                 \x20   emit: [summary]\n\
+                 {launch}"
+            ),
+            format: InputFormat::Yaml,
+        };
+        let launching = text("launch: [sh, -c, 'touch /tmp/owned']\n");
+        let session = launching.load().unwrap();
+        for allowed in [false, true] {
+            let reason = refuse_to_run(&session, &launching, allowed)
+                .expect("a caller's session that launches a program is refused");
+            assert!(reason.contains("`launch:` of `sh`"), "{reason}");
+        }
+        let approved = Source::Approved {
+            name: "bounded".into(),
+            path: PathBuf::from("/approved/bounded.yml"),
+            text: "requests:\n\
+                   \x20 - source: cpu.util\n\
+                   \x20   target: system\n\
+                   \x20   mode: poll@50ms\n\
+                   \x20   emit: [summary]\n\
+                   launch: [sleep, '1']\n"
+                .into(),
+            format: InputFormat::Yaml,
+        };
+        let session = approved.load().unwrap();
+        assert!(refuse_to_run(&session, &approved, false).is_some());
+        assert_eq!(refuse_to_run(&session, &approved, true), None);
+
+        let observing = text("");
+        let session = observing.load().unwrap();
+        assert_eq!(refuse_to_run(&session, &observing, false), None);
     }
 
     #[test]
