@@ -255,8 +255,16 @@ and timelines `folded` (flamegraph.pl, inferno), `speedscope`, `pprof`,
 `chrome` (Perfetto). A format that cannot carry the emit is refused. `omn
 formats` lists them.
 
+A launched program shares `omn`'s stdout and stderr. To pipe `omn`'s document
+into `jq` or `yq`, send the program's output elsewhere:
+
+```console
+omn trace cpu.cycles -m count -e summary --format yaml --program-stdout ls.out -- ls -R | yq
+omn trace cpu.cycles -m count -e summary --format json --program-stdout prog.log --program-stderr prog.log -- ./prog | jq
+```
+
 `-o DIR` writes the results and the resolved file (machine, kernel, backend,
-every choice) beside them. Keep both: a number without the resolved file
+every choice) beside them, and then `omn`'s stdout is free for the program. Keep both: a number without the resolved file
 cannot be compared with another machine's.
 
 Sessions as files: anything on the command line can be a YAML, JSON or TOML

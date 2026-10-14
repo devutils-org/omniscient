@@ -55,14 +55,29 @@ pub struct Cli {
     /// file that may launch one.
     #[arg(long, value_name = "FILE", global = true)]
     pub program_stderr: Option<PathBuf>,
+
+    /// Write the launched program's standard output to this file, created or
+    /// truncated, instead of omn's own, so that omn's stdout holds its
+    /// document alone: what OMN_PROGRAM_STDOUT sets, which this flag
+    /// overrides. The same file as --program-stderr holds both. Only beside a
+    /// program to launch, or a session file that may launch one.
+    #[arg(long, value_name = "FILE", global = true)]
+    pub program_stdout: Option<PathBuf>,
 }
 
 impl Cli {
-    /// Why `--program-stderr` cannot mean anything beside this command, when
-    /// it cannot: a command that launches nothing has no program whose
-    /// standard error to write, and the flag is refused rather than dropped.
-    pub fn program_stderr_refusal(&self) -> Option<String> {
-        self.program_stderr.as_ref()?;
+    /// Why `--program-stderr` or `--program-stdout` cannot mean anything
+    /// beside this command, when it cannot: a command that launches nothing
+    /// has no program whose output to write, and the flag is refused rather
+    /// than dropped.
+    pub fn program_output_refusal(&self) -> Option<String> {
+        let flag = if self.program_stderr.is_some() {
+            "--program-stderr"
+        } else if self.program_stdout.is_some() {
+            "--program-stdout"
+        } else {
+            return None;
+        };
         let launches = match &self.command {
             Command::Trace(args) => args.file.is_some() || !args.program.is_empty(),
             Command::Top(args) => {
@@ -79,9 +94,10 @@ impl Cli {
             | Command::Join(_) => false,
         };
         (!launches).then(|| {
-            "--program-stderr names where a launched program's standard error goes, and this \
-             command launches no program: give one after `--`, or a session file that does"
-                .to_owned()
+            format!(
+                "{flag} names where a launched program's output goes, and this command \
+                 launches no program: give one after `--`, or a session file that does"
+            )
         })
     }
 }

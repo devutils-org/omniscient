@@ -2418,6 +2418,48 @@ fn the_program_s_stderr_goes_to_the_file_the_flag_names() {
     let _ = std::fs::remove_file(&flagged);
 }
 
+/// `--program-stdout FILE` writes the launched program's standard output to
+/// the file, so that `omn`'s stdout is its document alone and parses as one:
+/// `omn trace ... --format json -- ls | jq` with `ls`'s lines elsewhere.
+#[test]
+fn the_program_s_stdout_goes_to_the_file_and_omn_s_stdout_is_its_document() {
+    let flagged = scratch("program-stdout-flag");
+    let _ = std::fs::remove_file(&flagged);
+    let output = Command::new(BINARY)
+        .args(["mem.rss", "-m", "poll", "-e", "summary", "--format", "json"])
+        .arg("--program-stdout")
+        .arg(&flagged)
+        .args(["--", "/bin/sh", "-c", "echo from-the-program"])
+        .output()
+        .expect("omn should run");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let written = std::fs::read_to_string(&flagged).expect("the flag's file is written");
+    let _ = std::fs::remove_file(&flagged);
+    assert_eq!(written, "from-the-program\n");
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "omn's stdout is not one JSON document ({error}): {}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        });
+    assert!(document["results"].is_array(), "{document}");
+}
+
+/// Beside a command that launches nothing the flag cannot mean anything, and
+/// is refused with the reason rather than dropped.
+#[test]
+fn the_program_s_stdout_flag_without_a_program_is_refused() {
+    let output = run(&["list", "--program-stdout", "x"]);
+    assert_eq!(output.status.code(), Some(EXIT_REJECTED));
+    assert!(
+        stderr(&output).contains("--program-stdout")
+            && stderr(&output).contains("launches no program"),
+        "{}",
+        stderr(&output)
+    );
+}
+
 /// Beside a command that launches nothing the flag cannot mean anything, and
 /// is refused with the reason rather than dropped.
 #[test]

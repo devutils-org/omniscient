@@ -605,9 +605,18 @@ fn describe(status: i32) -> String {
 /// line is. The variable is `omn`'s and is not passed on to the program.
 pub const PROGRAM_STDERR_VARIABLE: &str = "OMN_PROGRAM_STDERR";
 
-/// Opens the file [`PROGRAM_STDERR_VARIABLE`] names, created or truncated,
-/// close-on-exec in this process; `None` when the variable is not set.
-fn program_stderr(path: Option<&std::ffi::OsStr>) -> io::Result<Option<RawFd>> {
+/// The variable naming a file the launched program's stdout is written to,
+/// rather than the stdout it would share with `omn`.
+///
+/// `omn trace ... --format yaml -- ls -R | yq` hands `yq` the program's lines
+/// and `omn`'s document in one stream. A file of the program's own leaves
+/// `omn`'s stdout holding its document alone. Like the stderr one, it is
+/// `omn`'s and is not passed on to the program.
+pub const PROGRAM_STDOUT_VARIABLE: &str = "OMN_PROGRAM_STDOUT";
+
+/// Opens the file `variable` names, created or truncated, close-on-exec in
+/// this process; `None` when the variable is not set.
+fn program_output(variable: &str, path: Option<&std::ffi::OsStr>) -> io::Result<Option<RawFd>> {
     let Some(path) = path.filter(|path| !path.is_empty()) else {
         return Ok(None);
     };
@@ -626,7 +635,7 @@ fn program_stderr(path: Option<&std::ffi::OsStr>) -> io::Result<Option<RawFd>> {
         return Err(io::Error::new(
             error.kind(),
             format!(
-                "{PROGRAM_STDERR_VARIABLE}={}: {error}",
+                "{variable}={}: {error}",
                 std::path::Path::new(&path).display()
             ),
         ));
@@ -674,14 +683,17 @@ pub fn gated(argv: &[String], environment: &[(String, String)]) -> io::Result<Ga
         argv,
         environment,
         std::env::var_os(PROGRAM_STDERR_VARIABLE).as_deref(),
+        std::env::var_os(PROGRAM_STDOUT_VARIABLE).as_deref(),
     )
 }
 
-/// [`gated`], with the program's stderr written to `stderr` when one is given.
+/// [`gated`], with the program's stderr and stdout written to the files
+/// given, when they are.
 fn gated_with(
     argv: &[String],
     environment: &[(String, String)],
     stderr: Option<&std::ffi::OsStr>,
+    stdout: Option<&std::ffi::OsStr>,
 ) -> io::Result<Gated> {
     let (program, _) = argv
         .split_first()
@@ -719,7 +731,7 @@ fn gated_with(
     let mut variables: Vec<CString> = std::env::vars()
         .filter(|(name, _)| !environment.iter().any(|(added, _)| added == name))
         .chain(environment.iter().cloned())
-        .filter(|(name, _)| name != PROGRAM_STDERR_VARIABLE)
+        .filter(|(name, _)| name != PROGRAM_STDERR_VARIABLE && name != PROGRAM_STDOUT_VARIABLE)
         .map(|(name, value)| {
             CString::new(format!("{name}={value}")).unwrap_or_else(|_| CString::new("").unwrap())
         })
@@ -729,10 +741,32 @@ fn gated_with(
         variables.iter().map(|variable| variable.as_ptr()).collect();
     environment_pointers.push(std::ptr::null());
 
-    let stderr_fd = program_stderr(stderr)?;
-    let close_stderr = || {
+    let stderr_fd = program_output(PROGRAM_STDERR_VARIABLE, stderr)?;
+    // One file named for both is opened once: two descriptors of one file,
+    // each truncating it and each with its own offset, would write over each
+    // other's lines.
+    let shared = stdout.is_some() && stdout == stderr;
+    let stdout_fd = if shared {
+        stderr_fd
+    } else {
+        match program_output(PROGRAM_STDOUT_VARIABLE, stdout) {
+            Ok(fd) => fd,
+            Err(error) => {
+                if let Some(fd) = stderr_fd {
+                    // SAFETY: a descriptor `program_output` opened, closed once.
+                    unsafe { libc::close(fd) };
+                }
+                return Err(error);
+            }
+        }
+    };
+    let close_outputs = || {
         if let Some(fd) = stderr_fd {
-            // SAFETY: a descriptor `program_stderr` opened, closed once.
+            // SAFETY: a descriptor `program_output` opened, closed once.
+            unsafe { libc::close(fd) };
+        }
+        if let Some(fd) = stdout_fd.filter(|_| !shared) {
+            // SAFETY: as above, and not the stderr one.
             unsafe { libc::close(fd) };
         }
     };
@@ -740,7 +774,7 @@ fn gated_with(
     let mut pipe_fds = [0i32; 2];
     // SAFETY: `pipe` fills two file descriptors into an array we own.
     if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
-        close_stderr();
+        close_outputs();
         return Err(io::Error::last_os_error());
     }
     let (read_fd, write_fd) = (pipe_fds[0], pipe_fds[1]);
@@ -754,7 +788,7 @@ fn gated_with(
             libc::close(read_fd);
             libc::close(write_fd);
         }
-        close_stderr();
+        close_outputs();
         return Err(error);
     }
 
@@ -782,6 +816,9 @@ fn gated_with(
             if let Some(fd) = stderr_fd {
                 libc::dup2(fd, 2);
             }
+            if let Some(fd) = stdout_fd {
+                libc::dup2(fd, 1);
+            }
             libc::execve(
                 c_program.as_ptr(),
                 argv_pointers.as_ptr(),
@@ -802,7 +839,7 @@ fn gated_with(
 
     // SAFETY: closing the end of the pipe this process does not use.
     unsafe { libc::close(read_fd) };
-    close_stderr();
+    close_outputs();
     // SAFETY: `pidfd_open` on a child of this process that cannot have been
     // reaped yet, so the pid still names it. Refused only on a kernel older
     // than 5.3, below this project's floor, and then the run falls back to its
@@ -1243,6 +1280,7 @@ mod tests {
             ],
             &[(PROGRAM_STDERR_VARIABLE.to_owned(), "set".to_owned())],
             Some(file.as_os_str()),
+            None,
         );
         let mut child = launched.expect("fork");
         child.release();
@@ -1253,6 +1291,56 @@ mod tests {
         let written = std::fs::read_to_string(&file).expect("the file was created");
         let _ = std::fs::remove_file(&file);
         assert_eq!(written, "the program said this\n[]\n");
+    }
+
+    /// Runs `script` under `sh -c` with its outputs sent to the files given,
+    /// and waits for it.
+    fn run_to(script: &str, stderr: Option<&std::path::Path>, stdout: Option<&std::path::Path>) {
+        let mut child = gated_with(
+            &["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
+            &[],
+            stderr.map(std::path::Path::as_os_str),
+            stdout.map(std::path::Path::as_os_str),
+        )
+        .expect("fork");
+        child.release();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while child.finished().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// The program's stdout goes to its own file, its stderr where it was,
+    /// and the variable is not passed on to it.
+    #[test]
+    fn a_program_given_a_stdout_of_its_own_writes_there_and_is_not_told_about_it() {
+        let out = std::env::temp_dir().join(format!("omn-launch-stdout-{}", std::process::id()));
+        let err =
+            std::env::temp_dir().join(format!("omn-launch-stdout-err-{}", std::process::id()));
+        run_to(
+            &format!("echo to stdout; echo \"[${PROGRAM_STDOUT_VARIABLE}]\"; echo to stderr >&2"),
+            Some(&err),
+            Some(&out),
+        );
+        let (written, said) = (std::fs::read_to_string(&out), std::fs::read_to_string(&err));
+        let _ = (std::fs::remove_file(&out), std::fs::remove_file(&err));
+        assert_eq!(written.expect("the stdout file"), "to stdout\n[]\n");
+        assert_eq!(said.expect("the stderr file"), "to stderr\n");
+    }
+
+    /// One file named for both holds both, in the order they were written,
+    /// rather than one stream written over the other.
+    #[test]
+    fn one_file_for_both_outputs_keeps_every_line_in_order() {
+        let both = std::env::temp_dir().join(format!("omn-launch-both-{}", std::process::id()));
+        run_to(
+            "echo one; echo two >&2; echo three",
+            Some(&both),
+            Some(&both),
+        );
+        let written = std::fs::read_to_string(&both);
+        let _ = std::fs::remove_file(&both);
+        assert_eq!(written.expect("the file"), "one\ntwo\nthree\n");
     }
 
     #[test]

@@ -411,6 +411,23 @@ numbered in the order the launches ran, the file itself holding the last
 one's; a launch that wrote nothing takes no number. Refused, with exit 2, beside a command
 that launches nothing; a file that cannot be opened stops the launch with the
 reason.
+.TP
+.BI \-\-program\-stdout " FILE"
+Write the launched program's standard output to
+.IR FILE ,
+created or truncated, instead of the standard output it would share with
+.BR omn ,
+so that
+.BR omn 's
+standard output holds its document alone:
+.B "omn trace cpu.cycles \-m count \-e summary \-\-format yaml \-\-program\-stdout ls.out \-\- ls \-R | yq"
+parses. What
+.B OMN_PROGRAM_STDOUT
+sets, and it wins over the variable. Naming the same file as
+.B \-\-program\-stderr
+writes both into it, in the order the program wrote them. With several
+launches the file holds the last one's. Refused, with exit 2, beside a command
+that launches nothing.
 .SS Measurement
 .TP
 .BI \-m ", " \-\-mode " MODE"
@@ -1147,6 +1164,11 @@ sets, which wins over it. The variable is
 .BR omn 's
 own and is not passed on to the program; a file that cannot be opened stops
 the launch with the reason.
+.TP
+.B OMN_PROGRAM_STDOUT
+The same for the launched program's standard output; what
+.B \-\-program\-stdout
+sets, which wins over it.
 .TP
 .B OMN_CONTAINER_RUNTIME
 The one container runtime to ask for

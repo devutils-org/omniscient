@@ -23,7 +23,7 @@ pub mod gpu;
 pub(crate) mod io;
 mod launch;
 pub(crate) use launch::helper_output;
-pub use launch::{adopt_orphans, PROGRAM_STDERR_VARIABLE};
+pub use launch::{adopt_orphans, PROGRAM_STDERR_VARIABLE, PROGRAM_STDOUT_VARIABLE};
 pub mod mem;
 /// Public for its probes: `net::probe` answers the PTP-clock and ethtool
 /// requirements, which the capability layer asks.
