@@ -306,6 +306,29 @@ pub fn run(
     })
 }
 
+/// How the launched program of a run failed, when it did: `exited with
+/// status 2`, or `died of signal 11`. The signals the run itself stops a
+/// program with at the end of its duration (`SIGKILL`, `SIGTERM`) are the
+/// run's, not the program's failure; a run that launched nothing has none.
+///
+/// A verdict read off a program that exited on its usage message, or
+/// crashed, decomposes a run nobody asked about, and reads exactly like one
+/// that succeeded unless the answer says so.
+pub fn program_failure(run: &Run) -> Option<String> {
+    let lifetime = run
+        .output
+        .results
+        .iter()
+        .find_map(|result| result.lifetime.as_ref())?;
+    match (lifetime.exit_code, lifetime.signal) {
+        (Some(code), _) if code != 0 => Some(format!("exited with status {code}")),
+        (_, Some(signal)) if signal != libc::SIGKILL && signal != libc::SIGTERM => {
+            Some(format!("died of signal {signal}"))
+        }
+        _ => None,
+    }
+}
+
 /// What the collectors said they broke, each sentence once, in the order the
 /// requests ran: what `main.rs` reads off the same collections for `omn -f`.
 pub fn failures(collections: &[collect::Collection]) -> Vec<String> {

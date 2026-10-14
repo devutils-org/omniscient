@@ -431,6 +431,10 @@ pub struct Answer {
     /// workload the tool broke.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<String>,
+    /// How the launched workload failed, when it did
+    /// ([`engine::program_failure`]): the uses above are of a run that failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_failed: Option<String>,
 }
 
 pub fn answer(
@@ -444,6 +448,7 @@ pub fn answer(
     let ran = engine::run(catalog, capabilities, &session)?;
     let mut answer = read(ask, &ran.run, dropped);
     answer.failures = ran.failures;
+    answer.program_failed = engine::program_failure(&ran.run);
     Ok(answer)
 }
 
@@ -856,6 +861,7 @@ pub fn read(ask: &Ask, run: &Run, dropped: Vec<Dropped>) -> Answer {
         dropped,
         notes,
         failures: Vec::new(),
+        program_failed: None,
     }
 }
 
@@ -1099,6 +1105,13 @@ impl Answer {
             span(self.window_ns)
         );
         let _ = writeln!(out, "\n  {}\n", self.verdict.sentence);
+        if let Some(failed) = &self.program_failed {
+            let _ = writeln!(
+                out,
+                "  warning: the program {failed}: these uses are of a run that failed, which is \
+                 rarely the one the question was about\n"
+            );
+        }
         for resource in &self.resources {
             let _ = writeln!(out, "  {}", resource.resource.as_str());
             for (column, reading) in [

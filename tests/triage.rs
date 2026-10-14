@@ -2215,3 +2215,39 @@ fn an_escalation_that_cannot_decide_anything_is_refused_before_the_launch() {
     assert_eq!(output.status.code(), Some(2), "{}", spoken(&output));
     assert!(spoken(&output).contains("held for an escalation"));
 }
+
+/// A launched program that failed -- a usage error, a crash -- is said above
+/// the verdict, which otherwise reads exactly like one of a run that worked.
+#[test]
+fn a_program_that_failed_is_said_beside_the_answer_read_off_it() {
+    for (method, objective) in [("latency", "latency"), ("saturate", "throughput")] {
+        let output = omn(&[
+            method,
+            "--objective",
+            objective,
+            "--format",
+            "json",
+            "--",
+            "sh",
+            "-c",
+            "exit 3",
+        ]);
+        let Ok(answer) = serde_json::from_slice::<Value>(&output.stdout) else {
+            eprintln!(
+                "skipped: `omn {method}` gave no answer here: {}",
+                spoken(&output)
+            );
+            continue;
+        };
+        let failed = match &answer["program_failed"] {
+            Value::Array(runs) => runs.first().cloned().unwrap_or(Value::Null),
+            other => other.clone(),
+        };
+        assert!(
+            failed
+                .as_str()
+                .is_some_and(|said| said.contains("exited with status 3")),
+            "`omn {method}` on a program that exited 3: {answer}"
+        );
+    }
+}

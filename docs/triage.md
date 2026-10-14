@@ -86,6 +86,13 @@ asked as a question. The session has five requests — `cpu.profile` (on-cpu),
 `sched.futex` and `sched.mutex` (optional: what a sleep was waiting on) — and
 one `decompose:` over the program's lifetime, or the window for `--pid`.
 
+A launched program that failed -- exited with a status other than zero, or
+died of a signal the run did not send it -- is said as a warning under the
+verdict, and carried as `program_failed` (one line per run; `omn saturate`
+carries one). A verdict read off a program that printed its usage and exited
+2 decomposes two milliseconds of startup, and read exactly like a real answer
+until it said so.
+
 Three things the table alone does not say, all read off the same run:
 
 - **Which task.** A program's latency is its main thread's life — the thread

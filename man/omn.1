@@ -1000,6 +1000,13 @@ innermost in its executable, symlinks followed): at least four frames, at
 most sixteen. The verdict's notes carry each profile's \fInames came from\fR
 line under its request's label.
 .PP
+A launched program that failed \(em an exit status other than zero, or a
+signal it died of rather than the one the run stopped it with \(em is said
+under the verdict, as a warning naming the run, and carried as
+\fIprogram_failed\fR: a verdict read off a usage error or a crash decomposes a
+run nobody asked about, and would otherwise read like one that worked.
+\fBomn saturate\fR says the same of its workload.
+.PP
 \fBomn saturate\fR reads, per resource, the workload's side: cpus busy with it
 and tasks waiting for a cpu; requests in flight at the device, tasks blocked on
 it, and requests that failed; a mutex's hold time and its waiters; its

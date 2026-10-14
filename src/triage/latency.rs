@@ -583,6 +583,14 @@ pub struct Answer {
     /// says so, and `omn -f`'s exit 1 is wanted beside it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<String>,
+    /// How each launched run that did not succeed ended, in the order they
+    /// ran: an exit status other than zero, or a signal the program died of
+    /// rather than the one the run stopped it with. Not empty, the verdict
+    /// decomposes a program that failed -- a usage error, a crash, a missing
+    /// file -- which is rarely the run the question was about: the text says
+    /// so above everything else.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub program_failed: Vec<String>,
     /// Where each launch's standard error was kept, in the order the
     /// launches ran (both passes), when `--program-stderr` (or
     /// `OMN_PROGRAM_STDERR`) named a file: `FILE.1`, `FILE.2`, ... -- the
@@ -603,6 +611,13 @@ impl Answer {
             self.objective, self.target
         );
         let _ = writeln!(out, "\n  {}\n", self.verdict.sentence);
+        for failed in &self.program_failed {
+            let _ = writeln!(
+                out,
+                "  warning: {failed}: this answer decomposes a run that failed, which is rarely \
+                 the one the question was about\n"
+            );
+        }
         let read = &self.runs[self.slowest.unwrap_or(self.median)];
         for costly in &read.costly {
             let _ = writeln!(out, "  cost: {costly}");
@@ -813,9 +828,10 @@ pub fn answer(
         .requests
         .retain(|request| request.label.as_deref() != Some(MUTEX));
     let mut launches = Launches::from_environment(&ask.target);
-    let (runs, failures) = run_all(catalog, capabilities, &first, ask, &mut launches)?;
+    let (runs, failures, failed) = run_all(catalog, capabilities, &first, ask, &mut launches)?;
     let mut answer = conclude(ask, runs, dropped.clone());
     answer.failures = failures;
+    answer.program_failed = failed;
     answer.program_stderr = launches.kept.clone();
     if !mutex {
         return Ok(answer);
@@ -829,9 +845,11 @@ pub fn answer(
     else {
         return Ok(answer);
     };
-    let (runs, failures) = run_all(catalog, capabilities, &full, ask, &mut launches)?;
+    let (runs, failures, failed) = run_all(catalog, capabilities, &full, ask, &mut launches)?;
     let mut second = conclude(ask, runs, dropped);
     second.failures = answer.failures.clone();
+    second.program_failed = answer.program_failed.clone();
+    second.program_failed.extend(failed);
     for failure in failures {
         if !second.failures.contains(&failure) {
             second.failures.push(failure);
@@ -852,15 +870,20 @@ pub fn answer(
 
 /// Every run of one pass, read, and what the collectors said they broke in
 /// any of them, each sentence once.
+/// One pass's runs, what the collectors broke in them, and how each launched
+/// program that failed ended ([`engine::program_failure`]).
+type Pass = (Vec<Reading>, Vec<String>, Vec<String>);
+
 fn run_all(
     catalog: &Catalog,
     capabilities: &Capabilities,
     session: &Session,
     ask: &Ask,
     launches: &mut Launches,
-) -> Result<(Vec<Reading>, Vec<String>), TriageError> {
+) -> Result<Pass, TriageError> {
     let mut runs = Vec::new();
     let mut failures: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
     for _ in 0..ask.runs {
         launches.before();
         let run = engine::run(catalog, capabilities, session);
@@ -873,9 +896,12 @@ fn run_all(
                 failures.push(failure);
             }
         }
+        if let Some(how) = engine::program_failure(&ran.run) {
+            failed.push(format!("run {}: the program {how}", runs.len() + 1));
+        }
         runs.push(read(&ran.run, &ask.target)?);
     }
-    Ok((runs, failures))
+    Ok((runs, failures, failed))
 }
 
 /// The launches of one answer, and where each one's standard error was
@@ -1000,6 +1026,7 @@ pub fn conclude(ask: &Ask, runs: Vec<Reading>, dropped: Vec<Dropped>) -> Answer 
         dropped,
         second_pass: None,
         failures: Vec::new(),
+        program_failed: Vec::new(),
         program_stderr: Vec::new(),
     }
 }
@@ -2804,6 +2831,15 @@ mod tests {
         )];
         let mut answer = conclude(&ask(Objective::Latency, 1), runs, Vec::new());
         assert!(!answer.text().contains("broken by the tool"));
+        assert!(!answer.text().contains("warning:"));
+        answer.program_failed = vec!["run 1: the program exited with status 2".to_owned()];
+        assert!(
+            answer
+                .text()
+                .contains("warning: run 1: the program exited with status 2: this answer decomposes a run that failed"),
+            "{}",
+            answer.text()
+        );
         answer.failures = vec!["the GPU collector stopped the program".to_owned()];
         answer.program_stderr = vec!["err.txt.1".to_owned()];
         let text = answer.text();
