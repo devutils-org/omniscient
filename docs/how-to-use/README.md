@@ -22,6 +22,7 @@ right and this page is stale. `CATALOG.md` is the vocabulary in full,
 | `proc` | syscalls, process life, descriptors, threads, signals | [proc.md](proc.md) |
 | `runtime` | GC pauses, JIT, runtime allocations, your own probes | [runtime.md](runtime.md) |
 
+To show `omn` to someone, follow [demo.md](demo.md): ten minutes, six acts.
 To check `omn` against programs of known shape -- before a demo, after a change, on a new
 machine -- run the application suite: [apps.md](apps.md), `make apps`.
 
