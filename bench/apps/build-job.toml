@@ -1,0 +1,13 @@
+# A build's shape: a driver starts its steps one after the other, each a
+# process of its own, and the program waits for the driver.
+kind = "build"
+about = "a driver runs three steps in turn, each spinning 80 ms in its own process"
+needs = ["triage-fixture"]
+command = ["{fixture}", "job", "80", "3"]
+truth = "omn-truth"
+known = { any = "a job is a chain of processes, and the triage follows one link of it: STATE.md, phase 12" }
+
+[latency]
+# The steps compute: the job is cpu-bound, through a driver it waits for.
+limit = "cpu"
+says = ["that child"]

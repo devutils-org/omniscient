@@ -11,6 +11,7 @@
 #   make check      test, clippy and fmt, the way CI would
 #   make demo       the guided tour, against this machine (about seven seconds)
 #   make demo-all   the tour and then all 145 sessions
+#   make apps       the application suite: bench/apps/, each archetype against its own truth
 #   make matrix     the tool under other kernels in KVM (about 70 minutes)
 #   make man        the manual page
 #   make release    the same for an optimised build
@@ -32,7 +33,7 @@ CAPS       = cap_bpf,cap_perfmon$(if $(CAPTURE),$(comma)cap_net_raw,)+ep
 CAPCHECK   = $(if $(CAPTURE),cap_net_raw,cap_bpf)
 CARGOFLAGS = $(if $(filter release,$(PROFILE)),--release,)
 
-.PHONY: vertical-server triage-fixture all build release caps test check demo demo-all matrix man fmt clippy clean \
+.PHONY: vertical-server triage-fixture all build release caps test check demo demo-all apps matrix man fmt clippy clean \
         install uninstall install-check dist dist-verify
 
 all: build
@@ -143,6 +144,9 @@ demo: build
 
 demo-all: build
 	@scripts/demo.sh --all
+
+apps: build
+	@scripts/apps.py
 
 # The portability matrix: docs/portability.md. Boots prebuilt kernels in KVM
 # under virtme-ng; about 70 minutes and 2 GB of kernels under target/matrix/.

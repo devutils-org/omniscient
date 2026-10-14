@@ -1,0 +1,23 @@
+# A network client and server in one process, on loopback: 30 requests, each
+# on a connection of its own. Every connection is one handshake and one
+# accept.
+kind = "network"
+about = "python3: an HTTP server thread and 30 GETs, one connection each"
+requires = ["python3"]
+command = ["python3", "{apps}/http_roundtrips.py", "30"]
+truth = "static"
+values = { connections = 30 }
+
+[[trace]]
+label = "connects"
+args = ["net.tcp.connect", "-m", "trace", "-e", "summary"]
+value = "events"
+truth = "connections"
+tolerance = 0.0
+
+[[trace]]
+label = "accepts"
+args = ["net.tcp.accept", "-m", "trace", "-e", "summary"]
+value = "events"
+truth = "connections"
+tolerance = 0.0

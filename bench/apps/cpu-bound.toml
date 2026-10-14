@@ -1,0 +1,15 @@
+# A program that only computes: the cpu is its limit, and its own clock says
+# how long it ran on one.
+kind = "compute"
+about = "spins 300 ms of its own cpu time; nothing else"
+needs = ["triage-fixture"]
+command = ["{fixture}", "cpu", "300"]
+truth = "omn-truth"
+
+[latency]
+limit = "cpu"
+says = ["cpu-bound"]
+check = [
+  { row = "on-cpu", truth = "oncpu_ns", tolerance = 0.05 },
+  { row = "whole", truth = "wall_ns", tolerance = 0.05 },
+]

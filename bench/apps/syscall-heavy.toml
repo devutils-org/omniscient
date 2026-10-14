@@ -1,0 +1,14 @@
+# A program that lives in the kernel's entry path: 200 000 getppid() calls.
+# The count is exact: the predicate is pushed into the program.
+kind = "syscall-bound"
+about = "200 000 getppid() calls in a loop"
+needs = ["bench-workload"]
+command = ["{bench}", "syscall", "200000"]
+truth = "bench-report"
+
+[[trace]]
+label = "syscalls"
+args = ["proc.syscall", "-m", "count", "-e", "summary", "--filter", "syscall == {nr:getppid}"]
+value = "count"
+truth = "ops"
+tolerance = 0.0

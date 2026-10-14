@@ -1,0 +1,14 @@
+# Four threads that want one cpu: each spends most of its life runnable,
+# waiting for the others to leave the core.
+kind = "cpu-saturated"
+about = "four threads spin 150 ms each, all pinned to one cpu"
+needs = ["triage-fixture"]
+command = ["{fixture}", "queue", "4", "150"]
+truth = "omn-truth"
+
+[latency]
+limit = "cpu-queue"
+check = [
+  { row = "runnable", truth = "runq_ns", tolerance = 0.10 },
+  { row = "on-cpu", truth = "oncpu_ns", tolerance = 0.10 },
+]

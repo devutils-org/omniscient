@@ -1,0 +1,16 @@
+# Launch-bound: fifty processes started and reaped one after another, as a
+# shell script or a test runner does. Each is one exec, and so is the
+# workload's own.
+kind = "launch-bound"
+about = "fork and exec a trivial program 50 times in turn"
+needs = ["bench-workload"]
+command = ["{bench}", "spawn", "50"]
+truth = "bench-report"
+
+[[trace]]
+label = "execs"
+args = ["proc.exec", "-m", "trace", "-e", "summary"]
+value = "events"
+truth = "ops"
+offset = 1
+tolerance = 0.0

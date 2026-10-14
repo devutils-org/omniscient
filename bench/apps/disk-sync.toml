@@ -1,0 +1,15 @@
+# Durable writes: every 4 KiB write waits for the device to say it is on
+# stable storage. The time is blocked uninterruptibly, in the disk.
+kind = "io-bound"
+about = "100 x (write 4 KiB, fdatasync) on real storage"
+needs = ["triage-fixture"]
+storage = true
+command = ["{fixture}", "io", "100", "{work}"]
+truth = "omn-truth"
+
+[latency]
+limit = "disk"
+says = ["I/O-bound"]
+check = [
+  { row = "blocked: uninterruptible", truth = "sync_ns", tolerance = 0.25 },
+]

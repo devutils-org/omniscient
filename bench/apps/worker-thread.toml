@@ -1,0 +1,12 @@
+# The main thread waits on a pipe for a worker thread that computes.
+kind = "multi-thread"
+about = "a worker thread spins 200 ms while the main thread waits in read(2)"
+needs = ["triage-fixture"]
+command = ["{fixture}", "thread", "200"]
+truth = "omn-truth"
+
+[latency]
+# The main thread only waits: the answer is the busiest thread beside it, and
+# its limit, the cpu.
+limit = "cpu"
+says = ["busiest", "cpu-bound"]

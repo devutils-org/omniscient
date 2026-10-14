@@ -1,0 +1,13 @@
+# A program whose work is done by a grandchild: the parent and the child only
+# wait. The answer must follow the wait into the process that ran.
+kind = "multi-process"
+about = "starts a child that starts one that spins 200 ms; the others wait"
+needs = ["triage-fixture"]
+command = ["{fixture}", "child", "200", "2"]
+truth = "omn-truth"
+
+[latency]
+# The program only waits: the answer is the child it followed, and that
+# child's limit, the cpu.
+limit = "cpu"
+says = ["that child", "cpu-bound"]

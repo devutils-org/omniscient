@@ -1,0 +1,16 @@
+# A thread that waits for a mutex a helper holds: blocked, asleep, while the
+# helper runs. The answer must name the holder beside the waiter.
+kind = "lock-bound"
+about = "150 acquisitions of a mutex a helper thread holds 2 ms at a time"
+needs = ["triage-fixture"]
+command = ["{fixture}", "lock", "150", "2000"]
+truth = "omn-truth"
+# glibc's mutex probes are read on x86-64 only (src/bpf/usdt.rs), so on
+# aarch64 the wait is not named a mutex and the answer follows the holder.
+known = { aarch64 = "the pthread mutex is not named on aarch64: USDT operands are decoded for x86-64 only (docs/open-findings.md)" }
+
+[latency]
+limit = "lock"
+check = [
+  { row = "whole", truth = "wall_ns", tolerance = 0.05 },
+]

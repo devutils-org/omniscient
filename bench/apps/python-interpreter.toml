@@ -1,0 +1,9 @@
+# An interpreted program: CPython spinning in a loop of its own bytecode.
+kind = "interpreted"
+about = "python3 spinning 400 ms in a while loop"
+requires = ["python3"]
+command = ["python3", "-c", "import time\nt = time.monotonic()\nwhile time.monotonic() - t < 0.4: pass"]
+
+[latency]
+limit = "cpu"
+says = ["cpu-bound"]

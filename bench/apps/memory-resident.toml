@@ -1,0 +1,14 @@
+# A program that makes 256 MiB resident and chases pointers through it: its
+# resident footprint is what it allocated and touched.
+kind = "memory-bound"
+about = "a dependent pointer chase over 256 MiB it allocated and touched"
+needs = ["bench-workload"]
+command = ["{bench}", "memory", "256", "20000000"]
+truth = "bench-report"
+
+[[trace]]
+label = "rss"
+args = ["mem.rss", "-m", "poll@50ms", "-e", "summary"]
+value = "max"
+truth = "bytes"
+tolerance = 0.10
