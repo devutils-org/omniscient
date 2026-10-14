@@ -6,7 +6,8 @@ about = "python3: an HTTP server thread and 30 GETs, one connection each"
 requires = ["python3"]
 command = ["python3", "{apps}/http_roundtrips.py", "30"]
 truth = "static"
-values = { connections = 30 }
+# Each connection has two ends, both in this process: 60 sockets close.
+values = { connections = 30, sockets = 60 }
 
 [[trace]]
 label = "connects"
@@ -20,4 +21,11 @@ label = "accepts"
 args = ["net.tcp.accept", "-m", "trace", "-e", "summary"]
 value = "events"
 truth = "connections"
+tolerance = 0.0
+
+[[trace]]
+label = "lifetimes"
+args = ["net.tcp.lifetime", "-m", "trace", "-e", "summary"]
+value = "events"
+truth = "sockets"
 tolerance = 0.0

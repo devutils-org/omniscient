@@ -281,7 +281,11 @@ impl LifetimeCollector {
             );
             return false;
         }
-        match tree.holds(closed.pid) {
+        // The program wrote the kernel's id, and the tree is read from
+        // `/proc` in this namespace's: the same process under two numbers
+        // inside a container, and nothing kept until this.
+        let pid = crate::bpf::pidns::ours(closed.pid);
+        match pid.and_then(|pid| tree.holds(pid)) {
             Some(true) => true,
             Some(false) => {
                 self.outside += 1;
@@ -641,16 +645,20 @@ mod tests {
     #[test]
     fn an_unowned_connection_under_a_process_target_is_a_loss_not_a_placement() {
         let me = std::process::id();
+        // The program writes the kernel's ids, which inside a container are
+        // not the ones this test reads its own pid as.
+        let kernel = |pid: u32| crate::bpf::pidns::kernel_tgid(pid).expect("a running process");
+        let parent = kernel(std::os::unix::process::parent_id());
         let mut collector = LifetimeCollector::new(None);
         collector.tree = Some(Tree::new(&[me as i32]));
 
         let mut inside_by_chance = closed();
-        inside_by_chance.pid = me;
+        inside_by_chance.pid = kernel(me);
         inside_by_chance.owned = 0;
         assert!(!collector.in_target(&inside_by_chance));
 
         let mut stranger_by_chance = closed();
-        stranger_by_chance.pid = std::os::unix::process::parent_id();
+        stranger_by_chance.pid = parent;
         stranger_by_chance.owned = 0;
         assert!(!collector.in_target(&stranger_by_chance));
 
@@ -663,10 +671,10 @@ mod tests {
             .contains("2 connections were left out, as a loss"));
 
         let mut owned = closed();
-        owned.pid = me;
+        owned.pid = kernel(me);
         owned.owned = 1;
         assert!(collector.in_target(&owned));
-        owned.pid = std::os::unix::process::parent_id();
+        owned.pid = parent;
         assert!(!collector.in_target(&owned));
         assert_eq!(collector.outside, 1);
 

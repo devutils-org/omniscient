@@ -13788,9 +13788,11 @@ workload's own count: `sched.offcpu --pid` 85 blocks of 11.66 ms in 1 s
 suite: 234 red on this machine before, 187 with the first half, 151 with both,
 and none red that is green on a clean `main` but for timing tests that hold alone.
 
-**Still open**: `net.tcp.lifetime` filters a launched tree in the collector by
-`/proc/<pid>/stat` with the kernel's pid, and keeps nothing here; the
-collector should read the tree from the events, as `proc.exec` does.
+**Fixed after**: `net.tcp.lifetime` placed a connection in a launched tree by
+`/proc/<pid>/stat` with the kernel's pid, and kept nothing here. The
+collector now reads the pid in this namespace first (`pidns::ours`, the same
+table the run's translation keeps): `http_roundtrips.py 30` closes its 60
+sockets, 60 events, a check of `bench/apps/http-roundtrips.toml`.
 
 ### Open: what is still x86-64's
 

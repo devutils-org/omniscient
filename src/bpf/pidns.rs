@@ -439,6 +439,36 @@ pub fn translate(events: &mut [crate::event::Event]) -> usize {
     missed
 }
 
+/// One kernel id in `omn`'s namespace, for a collector that reads `/proc` by
+/// an id its program wrote: the same table [`translate`] keeps, refreshed
+/// once when the id is not in it. `None` for a task that exited before an
+/// iteration saw it, or one outside the namespace. The id itself in the
+/// initial namespace, and where this process may not iterate.
+pub fn ours(kernel: u32) -> Option<u32> {
+    if in_initial_pid_namespace() || kernel == 0 {
+        return Some(kernel);
+    }
+    let mut back = BACK.lock().expect("the translation table");
+    let table = back.get_or_insert_with(Default::default);
+    if let Some(id) = table.get(&kernel) {
+        return Some(*id);
+    }
+    match iterate() {
+        Ok(Some(tasks)) => {
+            for task in tasks {
+                if let Some(id) = task.ns_tid {
+                    table.insert(task.tid, id);
+                }
+            }
+        }
+        // Refused for permission: the ids are as named, as `kernel_ids`
+        // leaves them (`iterate`).
+        Ok(None) => return Some(kernel),
+        Err(_) => {}
+    }
+    table.get(&kernel).copied()
+}
+
 /// The note a run carries for the ids [`translate`] left as the kernel's.
 pub fn untranslated_note(missed: usize) -> String {
     format!(
