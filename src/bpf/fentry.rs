@@ -545,6 +545,17 @@ fn load(
     instructions: &[Insn],
     name: &str,
 ) -> Result<OwnedFd, LoadError> {
+    load_tracing(function, side.attach_type(), instructions, name)
+}
+
+/// Loads a tracing program of any attach type against the `FUNC` it names:
+/// one half of a function, or a `bpf_iter_<target>` iterator.
+pub(crate) fn load_tracing(
+    function: &Function,
+    attach_type: u32,
+    instructions: &[Insn],
+    name: &str,
+) -> Result<OwnedFd, LoadError> {
     let license = CString::new("Dual MIT/GPL").expect("no interior NUL");
     let mut log = vec![0u8; LOG_BYTES];
     let mut attr = TracingLoadAttr {
@@ -556,7 +567,7 @@ fn load(
         log_size: log.len() as u32,
         log_buf: log.as_mut_ptr() as u64,
         prog_name: kernel_name(name),
-        expected_attach_type: side.attach_type(),
+        expected_attach_type: attach_type,
         attach_btf_id: function.id,
         ..Default::default()
     };

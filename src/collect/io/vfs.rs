@@ -16,6 +16,7 @@ use super::histogram::{HistogramCollector, Rows, Source};
 use super::underneath;
 use crate::bpf::attach::fentry::{self, Narrowing, Row};
 use crate::bpf::attach::io_vfs::{self, Layer, Op, VfsProgram};
+use crate::bpf::pidns;
 use crate::collect::{not_built, Collector, Prepared};
 use crate::event::{Attr, KeyValue};
 use crate::filter::FilterExpr;
@@ -85,12 +86,12 @@ pub(in crate::collect) fn narrowing(source: &str, target: &Target) -> Result<Nar
     match target {
         Target::System => Ok(Narrowing::default()),
         Target::Pid(pids) => Ok(Narrowing {
-            tgid: Some(first(source, pids, "pid")? as u32),
+            tgid: Some(pidns::kernel_tgid(first(source, pids, "pid")? as u32)?),
             tid: None,
         }),
         Target::Tid(tids) => Ok(Narrowing {
             tgid: None,
-            tid: Some(first(source, tids, "tid")? as u32),
+            tid: Some(pidns::kernel_tid(first(source, tids, "tid")? as u32)?),
         }),
         Target::Cgroup(_) | Target::Container(_) => Err(not_built(format!(
             "`{source}` can be scoped to a cgroup -- the catalog says so -- but this build \

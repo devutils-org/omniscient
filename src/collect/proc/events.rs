@@ -202,6 +202,8 @@ impl Prepared for PrepareExec {
         // collector keeps by parentage (`Tree`).
         if let Target::Pid(_) = target {
             let root = target.first_pid().expect("a pid target names a pid") as u32;
+            // The events carry the kernel's ids, so the tree is rooted at it.
+            let root = crate::bpf::pidns::kernel_tgid(root)?;
             let mut collector = ExecCollector::new(self.filter);
             collector.tree = Some(Tree::rooted_at(root));
             return Ok(Box::new(collector));

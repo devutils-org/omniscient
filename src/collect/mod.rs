@@ -960,6 +960,19 @@ fn loads_programs(backend: &str) -> bool {
     backend == "bpf" || backend.starts_with("bpf:")
 }
 
+/// An eBPF collector's task ids, written by the kernel in its own numbering,
+/// rewritten into the one every other collector uses (`bpf::pidns`), and what
+/// could not be said so.
+fn into_our_ids(serving: Option<&ResolvedRequest>, events: &mut [Event], losses: &mut Losses) {
+    if !serving.is_some_and(|serving| loads_programs(&serving.backend.id)) {
+        return;
+    }
+    let missed = crate::bpf::pidns::translate(events);
+    if missed > 0 {
+        losses.note(crate::bpf::pidns::untranslated_note(missed));
+    }
+}
+
 /// The eBPF programs this process holds a descriptor to, by descriptor, with
 /// their id and what the kernel has counted of each.
 ///
@@ -2658,6 +2671,11 @@ fn run_core(
             Slot::Attached(collector) => {
                 watched[index].closed_ns = closing_ns;
                 let mut trailing = collector.stop();
+                into_our_ids(
+                    spending.serving.get(index),
+                    &mut trailing,
+                    &mut losses[index],
+                );
                 events[index].append(&mut trailing);
                 let collector_losses = collector.losses();
                 losses[index].absorb(collector_losses);
@@ -3630,6 +3648,7 @@ impl<'a> Spending<'a> {
         let _ = self.inside[index].read();
         let mut trailing = current.stop();
         let overlap_to_ns = monotonic_ns();
+        into_our_ids(self.serving.get(index), &mut trailing, &mut losses[index]);
         events[index].append(&mut trailing);
         losses[index].absorb(current.losses());
 
@@ -4365,6 +4384,11 @@ impl Ledger {
         let entered_ns = if self.attributing { monotonic_ns() } else { 0 };
         match collector.sample(self.sequences[index]) {
             Ok(mut sampled) => {
+                into_our_ids(
+                    spending.serving.get(index),
+                    &mut sampled,
+                    &mut self.losses[index],
+                );
                 self.sequences[index] += sampled.len() as u64;
                 self.events[index].append(&mut sampled);
                 // A drained collector's count is read at each drain, which is
@@ -4534,6 +4558,11 @@ impl Ledger {
         // drops its programs leaves them nothing to report afterwards.
         let _ = spending.inside[index].read();
         let mut trailing = collector.stop();
+        into_our_ids(
+            spending.serving.get(index),
+            &mut trailing,
+            &mut self.losses[index],
+        );
         self.events[index].append(&mut trailing);
         self.losses[index].absorb(collector.losses());
         self.drains[index].grew_to(self.losses[index].dropped, closed_ns);

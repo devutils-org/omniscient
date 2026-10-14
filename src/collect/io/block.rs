@@ -35,7 +35,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
-use crate::bpf::{BlockEvent, BlockProgram, Stage, Submitter};
+use crate::bpf::{pidns, BlockEvent, BlockProgram, Stage, Submitter};
 use crate::clock::monotonic_ns;
 use crate::collect::{not_built, Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Direction, Event, KeyValue};
@@ -172,8 +172,10 @@ impl Prepared for Prepare {
 
         let submitter = match target {
             Target::System => Submitter::Any,
-            Target::Pid(pids) => Submitter::Process(first(pids, "pid")? as u32),
-            Target::Tid(tids) => Submitter::Thread(first(tids, "tid")? as u32),
+            Target::Pid(pids) => {
+                Submitter::Process(pidns::kernel_tgid(first(pids, "pid")? as u32)?)
+            }
+            Target::Tid(tids) => Submitter::Thread(pidns::kernel_tid(first(tids, "tid")? as u32)?),
             Target::Cgroup(_) | Target::Container(_) => {
                 return Err(not_built(format!(
                     "`{}` can be scoped to a cgroup -- the catalog says so -- but this build \

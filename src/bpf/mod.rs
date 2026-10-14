@@ -47,6 +47,8 @@ mod net_softirq;
 mod offcpu;
 // The `cpu` stream's: `cpu.oncpu_time` through `sched_switch`, per thread.
 mod oncpu;
+// The kernel's ids for what `omn` names, when it runs in a container.
+pub mod pidns;
 mod proc_calls;
 mod proc_events;
 mod proc_renames;

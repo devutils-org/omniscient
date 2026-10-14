@@ -115,6 +115,8 @@ pub mod helper {
     /// carries this program's own stack contents to userspace.
     pub const PROBE_READ_KERNEL_STR: i32 = 115;
     pub const RINGBUF_OUTPUT: i32 = 130;
+    /// `bpf_seq_write(seq, data, len)`: an iterator program's output.
+    pub const SEQ_WRITE: i32 = 127;
     /// `bpf_task_storage_get(map, task, value, flags)`.
     pub const TASK_STORAGE_GET: i32 = 156;
     /// `bpf_task_storage_delete(map, task)`.
@@ -683,10 +685,8 @@ impl Cgroup {
     ///
     /// The level is the path's depth below the mount. Inside a cgroup
     /// namespace the mount's root is the namespace's, so the depth read here is
-    /// short by the namespace's own depth and the comparison would ask about
-    /// the wrong level: the kernel keeps nothing a process can read to correct
-    /// that, which is why `docs/families/kernel.md` names it as the one case
-    /// this does not serve.
+    /// short by the namespace's own depth, which `pidns::cgroup_namespace_depth`
+    /// asks the kernel for and adds.
     pub fn resolve(path: &std::path::Path) -> Result<Self, String> {
         use std::os::unix::fs::MetadataExt;
         use std::path::{Component, Path};
@@ -712,6 +712,9 @@ impl Cgroup {
                 }
             }
         }
+        // Inside a cgroup namespace the mount's root is the namespace's, and
+        // the kernel compares levels in the whole hierarchy.
+        level += super::pidns::cgroup_namespace_depth()?;
         let directory = root.join(relative);
         let metadata = std::fs::metadata(&directory)
             .map_err(|error| format!("cannot stat the cgroup {}: {error}", directory.display()))?;
@@ -734,12 +737,14 @@ impl Whose {
     /// `Err` names what the target is and why a task comparison cannot mean
     /// it; each collector puts its own sentence in front, because only it
     /// knows what it attributes per task. A launched program arrives here as
-    /// the pid it was bound to.
+    /// the pid it was bound to. The ids are the kernel's, which outside the
+    /// initial pid namespace are not the ones the target was named by
+    /// (`pidns`).
     pub fn of(target: &crate::request::Target) -> Result<Self, String> {
         use crate::request::Target;
         match target {
             Target::System => Ok(Self::Any),
-            Target::Tid(tids) => Ok(Self::Thread(tids[0] as u32)),
+            Target::Tid(tids) => super::pidns::kernel_tid(tids[0] as u32).map(Self::Thread),
             Target::Cgroup(path) => Cgroup::resolve(path).map(Self::Cgroup),
             Target::Container(name) => Err(format!(
                 "the container `{name}` would have to be resolved to its cgroup first, which \
@@ -747,8 +752,9 @@ impl Whose {
             )),
             other => other
                 .first_pid()
-                .map(|pid| Self::Process(pid as u32))
-                .ok_or_else(|| format!("a {} target names no task", other.kind())),
+                .ok_or_else(|| format!("a {} target names no task", other.kind()))
+                .and_then(|pid| super::pidns::kernel_tgid(pid as u32))
+                .map(Self::Process),
         }
     }
 
