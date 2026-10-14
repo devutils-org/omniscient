@@ -13719,3 +13719,70 @@ broken. The guest cells still hold the old runs: the judge is green only
 after the next `make matrix`. Also fixed: `omn-mcp`'s `refuse_to_run`
 ignored a session's own `launch:` (`CODE-REVIEW.md` finding 1), so any
 program could run through `run_session` without `--allow-launch`.
+
+## The first aarch64 machine: an OrbStack VM on Apple silicon (2026-10-14)
+
+Not the development machine: aarch64, kernel `7.2.9-orbstack` **built with
+clang 22**, 7 cpus, no hardware PMU (the event sources are `software`,
+`tracepoint`, `kprobe`, `uprobe`, `breakpoint`), no GPU, no RAPL, no PSI, no
+NUMA, tracefs root-only, `perf_event_paranoid` 2. `omn list` with the
+capabilities on the binary: **74 of 118 usable** before the fixes below,
+**83 after**. The rest out of reach is the hardware (the PMU counters, the
+GPU, power) and is honest.
+
+### Fixed: a clang-built kernel's integers did not match any prototype
+
+BTF names an integer as its compiler did: gcc writes `long int` and `long
+unsigned int`, clang `long` and `unsigned long`. Every prototype a program
+is written for uses gcc's spelling, and both `Btf::describe` and
+`fentry.rs`'s own index compared the kernel's text against it, so this
+kernel's `sys_enter(pt_regs *, long)` was "another prototype" and eight
+sources were refused here whose slots it holds exactly as they read them:
+`proc.syscall`, `proc.calls`, `sched.futex`, `mem.kmalloc`, `mem.reclaim`,
+`mem.compaction`, `io.pagecache`, `io.readahead`. An integer is now read in
+gcc's spelling in both (`btf::gcc_integer_name`). 22 of the 41 `bpf::` unit
+tests red on this machine went green with it.
+
+### Fixed: `io.syscall` named x86-64's syscall wrappers
+
+The catalog required `fentry:__x64_sys_read` and the program read `pt_regs.di`.
+The requirement is `fentry:__{arch}_sys_read` now, `{arch}` read as `x64` or
+`arm64` by the fentry probe (`fentry::syscall_arch`), and a syscall argument's
+place in `pt_regs` is `Btf::syscall_argument`, per architecture, used by
+`io.syscall`, `sched.futex` and `proc.calls` -- `sched.futex` had an aarch64
+syscall number and read x86's registers, which the spelling defect above had
+hidden. Checked here system-wide: `dd bs=4k count=5000` is 10006 calls.
+
+### Open: a per-target eBPF source collects nothing outside the initial pid namespace
+
+**A defect against "never degraded silently".** An OrbStack machine is a
+container: `/proc/self/ns/pid` is not the initial namespace. Every eBPF
+source on a target -- a launch, `--pid` -- reports **0 events and "no
+loss"** here (`sched.offcpu -- sleep 0.2`, `proc.syscall -- dd`), and the same
+sources with `--system` collect. A `--cgroup` target is no better:
+`tests/cli.rs`'s `a_container_is_measured_as_the_cgroup_its_runtime_names` is
+red here on a clean `main` with the capabilities ("blocked 262 times inside
+the window and the run kept 0, reporting 0 lost"). The programs compare
+`bpf_get_current_pid_tgid`, the initial namespace's ids, against the ids `omn`
+sees (`docs/keys.md`, "the only place it is tested"). The fix is the shared
+layer's: `bpf_get_ns_current_pid_tgid` with the device and inode of
+`/proc/self/ns/pid` wherever a program narrows to a target, or at least a
+refusal with the reason when `omn` is not in the initial namespace.
+
+### Open: what is still x86-64's
+
+- **USDT and `net.request`'s uprobes** decode x86 register names
+  (`src/bpf/usdt.rs`, `src/bpf/request.rs` read `pt_regs.di`, `bp`), yet
+  `runtime.custom` and `net.request` list usable here: they would refuse at
+  the run. Either an aarch64 operand decoder (`x0`..`x30`, `sp`) or a
+  requirement that says it.
+- **Tests that assume the development machine's kernel**, red here and not
+  defects of the tool: `io_fsync` (`do_fsync` is inlined on this kernel),
+  `sched_numa` (no `sched_stick_numa` without NUMA), `usdt`'s libc notes
+  (an aarch64 libc). They should skip with the reason, as the eBPF tests do
+  without the capabilities.
+- `clippy` on aarch64: `src/capabilities.rs:1730` casts a `c_char` to `u8`,
+  which is `u8` already here and `i8` on x86-64.
+- `make`'s `setcap` names `target/debug/omn`, and a `build.target-dir` in
+  `~/.cargo/config.toml` (this machine's) puts the binary elsewhere: the
+  capability step then reports none and the eBPF layer reads as missing.
