@@ -66,8 +66,13 @@ collectors (`src/collect/**`). It is how every mechanism names whose event it
 was, so it is what an `eq` between two families usually uses, and the only
 key the `wakeup` chain can follow. The eBPF programs read the kernel's own id
 (the initial pid namespace). The procfs sources use the id their target was
-named by. The two agree when `omn` runs in the initial pid namespace, which is
-the only place it is tested. The key survives migration between cpus,
+named by. The two agree when `omn` runs in the initial pid namespace. In a
+container they do not, and `src/bpf/pidns.rs` makes them agree: a target's ids
+are translated into the kernel's before a program compares them, and every id
+an eBPF collector reports is translated back before the run keeps it, through
+a task iterator that reads each task's number in `omn`'s namespace. An id it
+could not translate -- a task that exited before an iteration saw it, or one
+outside the namespace -- stays the kernel's, and the run's notes count them. The key survives migration between cpus,
 blocking, syscalls, and exec. An exec that replaces a multithreaded process
 gives the exec'ing thread the leader's id, which is the kernel's rule. It does
 not survive exit, because the kernel reuses ids. And it does not follow work a

@@ -13753,21 +13753,44 @@ place in `pt_regs` is `Btf::syscall_argument`, per architecture, used by
 syscall number and read x86's registers, which the spelling defect above had
 hidden. Checked here system-wide: `dd bs=4k count=5000` is 10006 calls.
 
-### Open: a per-target eBPF source collects nothing outside the initial pid namespace
+### Fixed: a per-target eBPF source collected nothing outside the initial pid namespace
 
 **A defect against "never degraded silently".** An OrbStack machine is a
-container: `/proc/self/ns/pid` is not the initial namespace. Every eBPF
-source on a target -- a launch, `--pid` -- reports **0 events and "no
-loss"** here (`sched.offcpu -- sleep 0.2`, `proc.syscall -- dd`), and the same
-sources with `--system` collect. A `--cgroup` target is no better:
-`tests/cli.rs`'s `a_container_is_measured_as_the_cgroup_its_runtime_names` is
-red here on a clean `main` with the capabilities ("blocked 262 times inside
-the window and the run kept 0, reporting 0 lost"). The programs compare
-`bpf_get_current_pid_tgid`, the initial namespace's ids, against the ids `omn`
-sees (`docs/keys.md`, "the only place it is tested"). The fix is the shared
-layer's: `bpf_get_ns_current_pid_tgid` with the device and inode of
-`/proc/self/ns/pid` wherever a program narrows to a target, or at least a
-refusal with the reason when `omn` is not in the initial namespace.
+container: `/proc/self/ns/pid` and `/proc/self/ns/cgroup` are not the initial
+namespaces. Every eBPF source on a target -- a launch, `--pid`, `--cgroup` --
+reported **0 events and "no loss"** here (`sched.offcpu -- sleep 0.2`,
+`proc.syscall -- dd`), while the same sources with `--system` collected: the
+programs compare the kernel's ids, and the target was named in the
+container's. `tests/cli.rs`'s
+`a_container_is_measured_as_the_cgroup_its_runtime_names` was red here on a
+clean `main`.
+
+`src/bpf/pidns.rs` translates both ways, through a task iterator
+(`iter/task`) that reads each task's `struct pid` level by level and the
+namespace of each level, and its cgroup's level in the whole hierarchy:
+
+- **Into the kernel's ids**: `Whose::of`, `io::vfs::narrowing`, the block
+  layer's submitter and `proc.exec`'s tree root, and a `--cgroup` level raised
+  by the depth of the cgroup namespace's root.
+- **Back into `omn`'s**: every event of a `bpf:*` collector, its `task` key and
+  its `pid`, `tid`, `ppid`, `*_tid` and `*_pid` attributes, at each read and
+  each stop (`collect::into_our_ids`). Without that half the filters worked
+  and the joins did not: the triage put a cpu-bound program's eBPF rows under
+  the kernel's tid and its profile under the container's, and answered
+  "undecided".
+
+In the initial namespaces nothing is loaded and nothing changes. An iterator
+refused for permission leaves the ids as named: the collectors are refused at
+their own load with the capability. Measured here after it, against the
+workload's own count: `sched.offcpu --pid` 85 blocks of 11.66 ms in 1 s
+(`task:` the container's pid), `proc.syscall -- dd count=1000` 1003 `read` and
+1003 `write`, `io.latency -- dd oflag=direct count=200` 200 requests. The full
+suite: 234 red on this machine before, 187 with the first half, 151 with both,
+and none red that is green on a clean `main` but for timing tests that hold alone.
+
+**Still open**: `net.tcp.lifetime` filters a launched tree in the collector by
+`/proc/<pid>/stat` with the kernel's pid, and keeps nothing here; the
+collector should read the tree from the events, as `proc.exec` does.
 
 ### Open: what is still x86-64's
 
@@ -13781,6 +13804,19 @@ refusal with the reason when `omn` is not in the initial namespace.
   `sched_numa` (no `sched_stick_numa` without NUMA), `usdt`'s libc notes
   (an aarch64 libc). They should skip with the reason, as the eBPF tests do
   without the capabilities.
+- **`io.fs` and `io.fsync` count nothing on this kernel, and say "no loss".**
+  `vfs_write`, `ksys_write` and `vfs_fsync_range` are in its BTF and in
+  `/proc/kallsyms`, and a root kprobe on each counted 0 calls for 500 `dd`
+  writes: the clang build inlines them into `__arm64_sys_write`, and the
+  out-of-line copy a trampoline reaches is off the syscall path -- the
+  `ksys_pread64` finding of `src/bpf/io_vfs.rs`, here for the plain calls. A
+  `FUNC` in BTF does not say a function is on the path; a self-check after the
+  attach (one write `omn` makes, counted or refused with the reason) would.
+- **`proc.syscall` names a syscall by number on aarch64** (`syscall_63` is
+  `read`): `src/collect/proc/syscall_names.rs` has x86-64's table only.
+- **`tests/unwind.rs`'s `each_mode_copies_what_it_declares...`** is red here on
+  a clean `main` three runs of three: a `dwarf` sample's user stack is 48 bytes
+  short of `stack top - sp` on almost every sample.
 - `clippy` on aarch64: `src/capabilities.rs:1730` casts a `c_char` to `u8`,
   which is `u8` already here and `i8` on x86-64.
 - `make`'s `setcap` names `target/debug/omn`, and a `build.target-dir` in
