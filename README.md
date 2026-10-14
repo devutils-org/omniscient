@@ -277,6 +277,7 @@ They found 63 defects in the fourth wave alone, none worked around, and
 | | |
 |---|---|
 | `docs/install.md` | installing, the two capabilities, what a stock distribution serves |
+| `docs/how-to-use/` | per family: which source for which question, and how to choose its target, mode, cost and backend |
 | `man/omn.1` | the manual page — `make man` |
 | `CATALOG.md` | the vocabulary: axes, backends, families, caveats |
 | `STATE.md` | what works today, and what is left |

@@ -20,6 +20,7 @@
 | `STATE.md` | what works today, measured, and what remains |
 | `docs/contributing.md` | what a family owns, and what ground truth means |
 | `GUIDE.md` | how to run the demonstrations, and what each session shows |
+| `docs/how-to-use/` | the user's guide, per family: which source, target, mode and cost for which question |
 | `docs/scenarios/*.md` | per family: what is worth measuring, and the defects the scenarios found |
 | `BRIEF.md` | the current wave of work, one section per stream; the only brief -- what comes after it is `STATE.md`'s "What remains" |
 | `docs/briefs/` | every earlier wave's brief, because `BRIEF.md` is overwritten each time and dozens of documents cite it |
