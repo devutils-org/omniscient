@@ -1385,8 +1385,11 @@ mod tests {
             eprintln!("skipped: no cgroup2 hierarchy is mounted at {CGROUP2_ROOT}");
             return;
         }
+        // Inside a cgroup namespace the mount's root is the namespace's, which
+        // the kernel places this many levels down (`pidns`); zero outside one.
+        let above = super::super::pidns::cgroup_namespace_depth().expect("the namespace's depth");
         let at_root = Cgroup::resolve(root).expect("the root is a cgroup");
-        assert_eq!(at_root.level, 0);
+        assert_eq!(at_root.level, above);
         assert_eq!(at_root.id, std::fs::metadata(root).expect("the root").ino());
         assert_eq!(Cgroup::resolve(std::path::Path::new("/")), Ok(at_root));
 
@@ -1400,7 +1403,7 @@ mod tests {
         let rooted = Cgroup::resolve(std::path::Path::new(own)).expect("our own cgroup");
         let mounted = Cgroup::resolve(&root.join(own.trim_start_matches('/'))).expect("the same");
         assert_eq!(rooted, mounted);
-        assert_eq!(rooted.level, depth);
+        assert_eq!(rooted.level, above + depth);
 
         let Err(error) = Cgroup::resolve(std::path::Path::new("/user.slice/../system.slice"))
         else {

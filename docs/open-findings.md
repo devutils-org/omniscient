@@ -13804,7 +13804,14 @@ collector should read the tree from the events, as `proc.exec` does.
   `sched_numa` (no `sched_stick_numa` without NUMA), `usdt`'s libc notes
   (an aarch64 libc). They should skip with the reason, as the eBPF tests do
   without the capabilities.
-- **`io.fs` and `io.fsync` count nothing on this kernel, and say "no loss".**
+- ~~**`io.fs` and `io.fsync` count nothing on this kernel, and say "no loss".**~~
+  **Fixed**: the probe of `fentry:vfs_read`, `vfs_write`, `vfs_fsync` and
+  `vfs_fsync_range` now asks whether a call this process makes reaches the
+  function (`fentry::on_the_path`): a counting kprobe on its own thread, a
+  `read`, `write`, `fsync` or `msync(MS_SYNC)` made three times, and none
+  counted is `missing` with the reason. Here `io.fs`, `io.fsync` and
+  `io.vfs` are refused with it; `omn list` costs 0.44 to 0.71 s against
+  0.30 s without the check (a trampoline per function cost 1 s). As found:
   `vfs_write`, `ksys_write` and `vfs_fsync_range` are in its BTF and in
   `/proc/kallsyms`, and a root kprobe on each counted 0 calls for 500 `dd`
   writes: the clang build inlines them into `__arm64_sys_write`, and the
@@ -13812,6 +13819,14 @@ collector should read the tree from the events, as `proc.exec` does.
   `ksys_pread64` finding of `src/bpf/io_vfs.rs`, here for the plain calls. A
   `FUNC` in BTF does not say a function is on the path; a self-check after the
   attach (one write `omn` makes, counted or refused with the reason) would.
+- **A program on a kprobe is not scoped by the perf event's task.**
+  `Scope::Task` opens the event on one thread, and the kernel runs the
+  kprobe's program at every hit anyway (`kprobe_perf_func` calls the program
+  array before the event's task check): the ground-truth test counted 1146 to
+  1292 hits for its 1000 reads while the other tests of its binary read too.
+  No collector attaches a program through `kprobe()` today; the test lost its
+  ceiling and `Scope::Task` says it. A counting kprobe with no program -- the
+  path check's, `mem.swap`'s -- is scoped.
 - **`proc.syscall` names a syscall by number on aarch64** (`syscall_63` is
   `read`): `src/collect/proc/syscall_names.rs` has x86-64's table only.
 - **`tests/unwind.rs`'s `each_mode_copies_what_it_declares...`** is red here on

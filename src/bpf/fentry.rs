@@ -448,7 +448,7 @@ fn exists(function: &str) -> Support {
     }
     let probe = [Insn::mov64_imm(0, 0), Insn::exit()];
     let answer = match load(&found, Side::Entry, &probe, "omn_fentry_prb") {
-        Ok(_) => Support::Yes,
+        Ok(_) => on_the_path(&found),
         // Not privileged enough to ask: the BTF answer stands, and the `bpf`
         // requirement beside this one is what reports the privilege.
         Err(error) if error.is_permission() => Support::Yes,
@@ -462,6 +462,146 @@ fn exists(function: &str) -> Support {
         .expect("the probe cache")
         .insert(function.to_owned(), answer.clone());
     answer
+}
+
+/// What this process can do itself to reach a function, for the functions a
+/// source times as the place a syscall passes.
+///
+/// A function in BTF has an out-of-line copy a trampoline can patch, and that
+/// is all its presence says. A compiler may also inline it into a caller, and
+/// then the caller that matters never calls the copy: a clang build of 7.2
+/// for aarch64 inlines `vfs_write` and `vfs_read` into their syscalls and
+/// `vfs_fsync` into `fsync(2)`'s, and a root kprobe on each counted no call
+/// while `__arm64_sys_write` counted every one. `io.fs`, `io.fsync` and
+/// `io.vfs` then loaded, attached, saw nothing and said "no loss".
+fn trigger(function: &str) -> Option<fn(RawFd)> {
+    fn write(fd: RawFd) {
+        unsafe { libc::pwrite(fd, b"o".as_ptr() as *const libc::c_void, 1, 0) };
+    }
+    fn read(fd: RawFd) {
+        let mut byte = [0u8; 1];
+        unsafe { libc::read(fd, byte.as_mut_ptr() as *mut libc::c_void, 1) };
+    }
+    fn fsync(fd: RawFd) {
+        unsafe { libc::fsync(fd) };
+    }
+    // `msync(MS_SYNC)` calls `vfs_fsync_range` itself, so a kernel that
+    // inlined it into `vfs_fsync` and left the copy on msync's path is not
+    // refused for what it does serve.
+    fn msync(fd: RawFd) {
+        unsafe {
+            let page = libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if page != libc::MAP_FAILED {
+                *(page as *mut u8) = b'o';
+                libc::msync(page, 4096, libc::MS_SYNC);
+                libc::munmap(page, 4096);
+            }
+        }
+    }
+    match function {
+        "vfs_write" => Some(write),
+        "vfs_read" => Some(read),
+        "vfs_fsync" => Some(fsync),
+        "vfs_fsync_range" => Some(msync),
+        _ => None,
+    }
+}
+
+/// Whether a call this process makes reaches `function`, for a function
+/// [`trigger`] knows how to reach; `Yes` for any other.
+///
+/// Asked of a counting kprobe on this thread alone (`perf_event_open` with
+/// pid 0): a kprobe sits on the same out-of-line copy a trampoline patches,
+/// costs no trampoline to build -- about 170 ms each, four of which made
+/// `omn list` three times slower -- and counts this thread's calls with no
+/// id to translate. The trigger runs three times on a scratch file a page
+/// long. None counted is `No`, with the reason: the source would attach and
+/// count nothing, which is the one answer worse than a refusal. A kprobe this
+/// process may not open leaves the BTF answer standing, as a load it may not
+/// make does.
+fn on_the_path(function: &Function) -> Support {
+    let Some(trigger) = trigger(&function.name) else {
+        return Support::Yes;
+    };
+    match count_own_calls(&function.name, trigger) {
+        Ok(0) => Support::No(format!(
+            "`{name}` is in this kernel's BTF and a trampoline attaches to it, but a call this \
+             process made that passes `{name}` never reached it: the kernel was built with the \
+             function inlined into the syscall that calls it, and the out-of-line copy a \
+             trampoline patches is off that path, so a source timed here would count nothing",
+            name = function.name
+        )),
+        Ok(_) | Err(_) => Support::Yes,
+    }
+}
+
+fn count_own_calls(function: &str, trigger: fn(RawFd)) -> io::Result<u64> {
+    use perf_event_open_sys as sys;
+    let kind = crate::bpf::attach::kprobe_type().map_err(io::Error::other)?;
+    let name = CString::new(function).map_err(io::Error::other)?;
+    let mut attr = sys::bindings::perf_event_attr {
+        type_: kind,
+        size: std::mem::size_of::<sys::bindings::perf_event_attr>() as u32,
+        ..Default::default()
+    };
+    attr.__bindgen_anon_3.kprobe_func = name.as_ptr() as u64;
+    attr.set_disabled(1);
+    // SAFETY: a complete attribute, and `name` outlives the call.
+    let fd = unsafe {
+        sys::perf_event_open(
+            &mut attr,
+            0,
+            -1,
+            -1,
+            sys::bindings::PERF_FLAG_FD_CLOEXEC as _,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a descriptor the kernel just handed us, owned by nothing else.
+    let counter = unsafe { OwnedFd::from_raw_fd(fd) };
+    let path = std::env::temp_dir().join(format!("omn-path-probe-{}", std::process::id()));
+    let c_path = CString::new(path.as_os_str().as_encoded_bytes()).map_err(io::Error::other)?;
+    // SAFETY: a NUL-terminated path this frame owns; the file is unlinked at
+    // once and closed below.
+    let file = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o600,
+        )
+    };
+    if file < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe {
+        libc::unlink(c_path.as_ptr());
+        libc::ftruncate(file, 4096);
+        sys::ioctls::ENABLE(counter.as_raw_fd(), 0);
+    }
+    for _ in 0..3 {
+        unsafe { libc::lseek(file, 0, libc::SEEK_SET) };
+        trigger(file);
+    }
+    let mut value = 0u64;
+    // SAFETY: eight bytes into a u64, the read format of a lone counter.
+    let read = unsafe {
+        sys::ioctls::DISABLE(counter.as_raw_fd(), 0);
+        libc::close(file);
+        libc::read(counter.as_raw_fd(), (&mut value as *mut u64).cast(), 8)
+    };
+    if read != 8 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(value)
 }
 
 #[repr(C)]
@@ -1501,6 +1641,29 @@ pub fn function_count() -> usize {
 mod tests {
     use super::*;
 
+    /// The check counts a call that does reach its function: the syscall
+    /// wrapper `write(2)` enters, which nothing inlines, sees the trigger's
+    /// three writes. A kprobe this process may not open skips, loudly.
+    #[test]
+    fn a_function_on_the_syscall_path_counts_the_calls_that_pass_it() {
+        let Some(arch) = syscall_arch() else { return };
+        match count_own_calls(
+            &format!("__{arch}_sys_pwrite64"),
+            trigger("vfs_write").unwrap(),
+        ) {
+            Ok(seen) => assert_eq!(seen, 3, "three pwrites, each through the wrapper"),
+            Err(error) => eprintln!("skipped: a counting kprobe needs CAP_PERFMON here: {error}"),
+        }
+    }
+
+    #[test]
+    fn only_the_functions_a_source_times_at_a_syscall_have_a_trigger() {
+        for function in ["vfs_read", "vfs_write", "vfs_fsync", "vfs_fsync_range"] {
+            assert!(trigger(function).is_some(), "{function}");
+        }
+        assert!(trigger("tcp_v4_connect").is_none());
+    }
+
     fn maps() -> ExitMaps {
         ExitMaps {
             pending: 3,
@@ -1610,20 +1773,25 @@ mod tests {
     #[test]
     fn a_requirement_with_a_prototype_is_missing_when_the_kernel_declares_another() {
         let Some(index) = functions() else { return };
-        let read = index.function("vfs_read").expect("vfs_read");
-        let declared = format!("vfs_read({})", read.params.join(", "));
+        // A syscall wrapper: the dispatcher calls it from another unit, so no
+        // kernel inlines it, and its presence is not one the path check doubts
+        // (`vfs_read` was, until a clang build put it off the path).
+        let Some(arch) = syscall_arch() else { return };
+        let name = format!("__{arch}_sys_read");
+        let read = index.function(&name).expect("the read syscall's wrapper");
+        let declared = format!("{name}({})", read.params.join(", "));
         assert!(
             matches!(support(&declared), Support::Yes),
             "the kernel's own prototype must be accepted: {declared}"
         );
-        let two = format!("vfs_read(int)|({})", read.params.join(", "));
+        let two = format!("{name}(int)|({})", read.params.join(", "));
         assert!(matches!(support(&two), Support::Yes), "{two}");
-        let Support::No(reason) = support("vfs_read(int)") else {
+        let Support::No(reason) = support(&format!("{name}(int)")) else {
             panic!("a prototype the kernel does not declare is missing");
         };
-        assert!(reason.contains("`vfs_read(int)`"), "{reason}");
-        assert!(reason.contains("file *"), "{reason}");
-        let Support::Unchecked(reason) = support("vfs_read(int") else {
+        assert!(reason.contains(&format!("`{name}(int)`")), "{reason}");
+        assert!(reason.contains("pt_regs *"), "{reason}");
+        let Support::Unchecked(reason) = support(&format!("{name}(int")) else {
             panic!("a malformed requirement cannot be checked");
         };
         assert!(reason.contains("fentry:"), "{reason}");

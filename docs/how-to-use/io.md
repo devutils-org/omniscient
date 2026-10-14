@@ -84,6 +84,8 @@ writer's, and the source falls back to the file key (`file:dev+ino`, `KEY`).
   partitions; a filter on one `dev` undercounts it.
 - `io.util` at 1.0 is busy, not saturated, on a device that serves many
   requests at once (NVMe); read `queue` beside it.
-- A function in the kernel's BTF is not always on the call path: on a kernel
-  that inlines `vfs_write` into the syscall (some clang builds), `io.fs` counts
-  nothing. Compare with `io.syscall` when a layer reads empty.
+- A function in the kernel's BTF is not always on the call path: a kernel
+  built with `vfs_write` inlined into the syscall (some clang builds) never
+  calls the copy a trampoline patches. The probe checks it with a call of its
+  own, and `io.fs`, `io.fsync` and `io.vfs` are then refused with the reason
+  rather than counting nothing; `io.syscall` still serves the syscall layer.

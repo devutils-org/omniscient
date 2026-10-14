@@ -83,6 +83,13 @@ const UPROBE_PMU: &str = "/sys/bus/event_source/devices/uprobe";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     /// One thread, on whichever cpu it runs on.
+    ///
+    /// For a kprobe this scopes the perf event and **not the program**: the
+    /// kernel keeps one program array per kprobe and runs it at every hit,
+    /// before the event's own task check (`kprobe_perf_func`). Measured: a
+    /// program counting the read wrapper on this thread counted 1146 to 1292
+    /// calls for 1000 reads while the other tests of its binary read too. A
+    /// program that must keep one task's hits compares the task itself.
     Task(i32),
     /// Every cpu, which is what a machine-wide measurement means here: a perf
     /// event is opened per cpu, because one event cannot span them.
@@ -896,8 +903,16 @@ mod ground_truth {
             }
         };
         let tid = unsafe { libc::syscall(libc::SYS_gettid) } as i32;
+        // The read syscall's wrapper, which every read(2) enters: `vfs_read`
+        // was the function here until a clang build inlined it into the
+        // syscall and its out-of-line copy counted nothing (fentry's
+        // `on_the_path`).
+        let Some(arch) = fentry::syscall_arch() else {
+            return;
+        };
+        let wrapper = format!("__{arch}_sys_read");
         let attachment = match kprobe(
-            "vfs_read",
+            &wrapper,
             0,
             false,
             &counting_program(counter.as_raw_fd()),
@@ -929,16 +944,11 @@ mod ground_truth {
 
         assert!(
             counted >= READS as u64,
-            "{READS} reads entered `vfs_read` {READS} times and the kprobe counted {counted}"
+            "{READS} reads entered `{wrapper}` {READS} times and the kprobe counted {counted}"
         );
-        // Opening the file and reading it are the only syscalls in the window,
-        // and only the reads go through `vfs_read`. A count far above the loop
-        // bound would mean the event is not scoped to this thread.
-        assert!(
-            counted <= READS as u64 + 16,
-            "the kprobe counted {counted} calls for {READS} reads, so it is counting more than \
-             this thread's"
-        );
+        // No ceiling: a program on a kprobe runs at every hit, whatever task
+        // the perf event names (`Scope::Task`), so the other tests of this
+        // binary reading at the same time are in the count too.
     }
 }
 
