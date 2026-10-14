@@ -273,8 +273,8 @@ fn enter_instructions(
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     check(btf, "sys_enter", &ENTER_SIGNATURE)?;
-    let di = btf.member_offset("pt_regs", "di")?;
-    let si = btf.member_offset("pt_regs", "si")?;
+    let di = btf.syscall_argument(0)?;
+    let si = btf.syscall_argument(1)?;
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));

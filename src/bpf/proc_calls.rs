@@ -150,18 +150,6 @@ pub struct CallsNarrowing {
     pub path_nr: Option<u32>,
 }
 
-/// Where the second syscall argument is in `pt_regs`.
-fn second_argument(btf: &Btf) -> Option<i32> {
-    if cfg!(target_arch = "x86_64") {
-        btf.member_offset("pt_regs", "si").ok()
-    } else if cfg!(target_arch = "aarch64") {
-        // `user_pt_regs.regs[1]`, at the head of `pt_regs`.
-        Some(8)
-    } else {
-        None
-    }
-}
-
 fn check_signature(btf: &Btf, tracepoint: &str, expected: &[&str]) -> Result<(), String> {
     let signature = btf.tracepoint_signature(tracepoint)?;
     if signature != expected {
@@ -182,7 +170,7 @@ fn enter_instructions(
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     check_signature(btf, "sys_enter", &ENTER_SIGNATURE)?;
-    let argument = second_argument(btf);
+    let argument = btf.syscall_argument(1).ok();
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));

@@ -22,9 +22,10 @@
 //!
 //! **Why the wrappers, and not the `ksys_*` functions one level in.** The
 //! wrappers take a `struct pt_regs *` and read their arguments out of it, which
-//! makes this layer x86-64's -- the requirement names `__x64_sys_read`, and on
-//! another architecture the probe reports it missing rather than this program
-//! reading the wrong registers. The architecture-neutral `ksys_read` family
+//! makes this layer the architecture's -- the requirement names
+//! `__{arch}_sys_read`, `__x64_sys_read` on x86-64 and `__arm64_sys_read` on
+//! aarch64, and on another architecture the probe reports it missing rather
+//! than this program reading the wrong registers. The architecture-neutral `ksys_read` family
 //! was the first choice and is what this file was written against, and it is
 //! **not on the path**: measured here, five hundred `read`s were counted and
 //! three hundred `pwrite64`s were not, because the compiler inlined
@@ -130,18 +131,19 @@ pub enum Layer {
 const WRAPPER: [&str; 1] = ["pt_regs *"];
 const VFS_RW: [&str; 4] = ["file *", "char *", "size_t", "loff_t *"];
 
-/// The syscall wrappers `io.syscall` times, and whether each is required. The
-/// four plain ones are the catalog's requirement; the vectored ones are timed
-/// where they exist.
+/// The syscalls whose wrappers `io.syscall` times, and whether each is
+/// required. The four plain ones are the catalog's requirement; the vectored
+/// ones are timed where they exist. The wrapper is `__<arch>_sys_<syscall>`,
+/// `fentry::syscall_arch`'s infix.
 const WRAPPERS: [(&str, Op, bool); 8] = [
-    ("__x64_sys_read", Op::Read, true),
-    ("__x64_sys_write", Op::Write, true),
-    ("__x64_sys_pread64", Op::Pread, true),
-    ("__x64_sys_pwrite64", Op::Pwrite, true),
-    ("__x64_sys_readv", Op::Readv, false),
-    ("__x64_sys_writev", Op::Writev, false),
-    ("__x64_sys_preadv", Op::Preadv, false),
-    ("__x64_sys_pwritev", Op::Pwritev, false),
+    ("read", Op::Read, true),
+    ("write", Op::Write, true),
+    ("pread64", Op::Pread, true),
+    ("pwrite64", Op::Pwrite, true),
+    ("readv", Op::Readv, false),
+    ("writev", Op::Writev, false),
+    ("preadv", Op::Preadv, false),
+    ("pwritev", Op::Pwritev, false),
 ];
 
 /// `S_IFMT` and `S_IFREG`, from the frozen `stat(2)` ABI.
@@ -169,18 +171,19 @@ impl VfsProgram {
         let btf = crate::bpf::kernel_btf()?;
         let timed = match layer {
             Layer::Syscall => {
-                if !cfg!(target_arch = "x86_64") {
+                let Some(arch) = fentry::syscall_arch() else {
                     return Err(format!(
                         "`io.syscall` is timed at the syscall table's entry points, which take \
-                         the saved registers, and this build reads x86-64's; on {} the \
-                         registers are laid out differently and reading them as x86-64's \
+                         the saved registers, and this build reads x86-64's and aarch64's; on \
+                         {} the registers are laid out differently and reading them as either \
                          would report another argument as the descriptor",
                         std::env::consts::ARCH
                     ));
-                }
+                };
                 let mut timed = Vec::new();
-                for (name, op, required) in WRAPPERS {
-                    match self::timed(name, &WRAPPER, op) {
+                for (syscall, op, required) in WRAPPERS {
+                    let name = format!("__{arch}_sys_{syscall}");
+                    match self::timed(&name, &WRAPPER, op) {
                         Ok(found) => timed.push(found),
                         Err(reason) if required => return Err(reason),
                         Err(_) => {}
@@ -202,8 +205,9 @@ impl VfsProgram {
         let fill = |program: &mut Program, _: &Timed| {
             match layer {
                 Layer::Syscall => {
-                    // The descriptor is the first argument, so it is in `di`
-                    // of the saved registers: a typed load through the
+                    // The descriptor is the first argument, so it is in the
+                    // saved registers' first argument slot (`di`, `regs[0]`):
+                    // a typed load through the
                     // wrapper's one argument. It is an `unsigned int` in a
                     // 64-bit register, and the word store keeps the low half,
                     // which is all of it.
@@ -256,7 +260,8 @@ fn timed(name: &str, shape: &[&str], op: Op) -> Result<Timed, String> {
 
 /// Where the fields a file's identity is made of sit on this kernel.
 struct FileOffsets {
-    /// The first argument's register, in the syscall wrappers' `pt_regs`.
+    /// The first argument's register, in the syscall wrappers' `pt_regs`:
+    /// `di` on x86-64, `regs[0]` on aarch64.
     di: i32,
     f_inode: i32,
     i_mode: i32,
@@ -268,7 +273,7 @@ struct FileOffsets {
 impl FileOffsets {
     fn read(btf: &Btf) -> Result<Self, String> {
         Ok(Self {
-            di: btf.member_offset("pt_regs", "di")?,
+            di: btf.syscall_argument(0)?,
             f_inode: btf.member_offset("file", "f_inode")?,
             i_mode: btf.member_offset("inode", "i_mode")?,
             i_ino: btf.member_offset("inode", "i_ino")?,

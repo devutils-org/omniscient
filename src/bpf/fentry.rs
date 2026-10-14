@@ -307,6 +307,11 @@ impl FunctionIndex {
             KIND_CONST | KIND_VOLATILE | KIND_RESTRICT | KIND_TYPE_TAG => {
                 self.describe(entry.size_or_type, depth + 1)
             }
+            // The compiler's spelling, read as the one `expect` compares.
+            KIND_INT => match self.name(entry.name_at) {
+                "" => "?".to_owned(),
+                name => crate::bpf::btf::gcc_integer_name(name).to_owned(),
+            },
             _ => match self.name(entry.name_at) {
                 "" => "?".to_owned(),
                 name => name.to_owned(),
@@ -374,8 +379,23 @@ pub fn expect(name: &str, accepted: &[&[&str]]) -> Result<Function, String> {
 /// 6.17 runner: `tcp_v4_connect` takes a `sockaddr *` there and a
 /// `sockaddr_unsized *` on 7.x, and a probe that asks only whether the function
 /// exists says yes on a kernel whose prototype the program has never seen.
+///
+/// `{arch}` in the name stands for this architecture's prefix on the syscall
+/// table's wrappers (`__x64_sys_read`, `__arm64_sys_read`): the catalog names
+/// one function, and each architecture spells it its own way.
 pub fn support(requirement: &str) -> Support {
-    let (function, prototypes) = match crate::bpf::parse_raw_tracepoint(requirement) {
+    let requirement = match syscall_arch() {
+        Some(arch) => requirement.replace("{arch}", arch),
+        None if requirement.contains("{arch}") => {
+            return Support::No(format!(
+                "`fentry:{requirement}` is a syscall wrapper, and this build knows the \
+                 wrappers' names and saved registers on x86_64 and aarch64, not on {}",
+                std::env::consts::ARCH
+            ))
+        }
+        None => requirement.to_owned(),
+    };
+    let (function, prototypes) = match crate::bpf::parse_raw_tracepoint(&requirement) {
         Ok(parsed) => parsed,
         Err(reason) => return Support::Unchecked(reason.replace("raw_tracepoint:", "fentry:")),
     };
@@ -391,6 +411,18 @@ pub fn support(requirement: &str) -> Support {
     match expect(function, &accepted) {
         Ok(_) => Support::Yes,
         Err(reason) => Support::No(reason),
+    }
+}
+
+/// This architecture's infix in the syscall table's wrapper names, the
+/// `x64` of `__x64_sys_read`; `None` where this build does not know them.
+pub fn syscall_arch() -> Option<&'static str> {
+    if cfg!(target_arch = "x86_64") {
+        Some("x64")
+    } else if cfg!(target_arch = "aarch64") {
+        Some("arm64")
+    } else {
+        None
     }
 }
 

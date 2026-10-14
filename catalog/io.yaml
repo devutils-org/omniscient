@@ -305,12 +305,13 @@
     # The syscall table's own entry points, timed at both halves and counted
     # in the kernel: the one layer the compiler cannot inline into the
     # dispatcher. They read their arguments out of the saved registers, so the
-    # names are x86-64's, and another architecture reports them missing. Not
+    # names are the architecture's: `{arch}` is `x64` or `arm64`, and another
+    # architecture reports them missing. Not
     # `ksys_read`: `ksys_pread64` and `ksys_pwrite64` are inlined into their
     # syscalls, and three hundred pwrites put no call through them. Not
     # `vfs_read` either: that is `io.fs`, and the descriptor is exactly what
     # this layer has and that one does not.
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:__x64_sys_read", "fentry:__x64_sys_write", "fentry:__x64_sys_pread64", "fentry:__x64_sys_pwrite64"], cost: med, drained: true}
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:__{arch}_sys_read", "fentry:__{arch}_sys_write", "fentry:__{arch}_sys_pread64", "fentry:__{arch}_sys_pwrite64"], cost: med, drained: true}
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter", "raw_tracepoint:sys_exit", "kernel>=5.8"], cost: med,
        degraded: "raw_syscalls fires on everything: filter by syscall number in-program"}
     - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: med,

@@ -196,6 +196,32 @@ impl Btf {
     /// through any qualifiers. Structs and unions of that name are searched
     /// first, so a name that is both (`typedef struct foo foo`) answers as it
     /// did before typedefs were followed.
+    /// Where a syscall's argument `index` (from zero) sits in the saved
+    /// registers a syscall wrapper or `sys_enter` is handed.
+    ///
+    /// The calling convention is the architecture's: x86-64 passes the six in
+    /// `di`, `si`, `dx`, `r10`, `r8` and `r9`; aarch64 in `regs[0]` to
+    /// `regs[5]`, the array that opens its `pt_regs`. Read from the running
+    /// kernel's BTF either way, so a layout this does not know is refused by
+    /// name rather than read as another argument.
+    pub fn syscall_argument(&self, index: usize) -> Result<i32, String> {
+        const X86_64: [&str; 6] = ["di", "si", "dx", "r10", "r8", "r9"];
+        if index >= X86_64.len() {
+            return Err(format!("a syscall has six arguments, not {}", index + 1));
+        }
+        if cfg!(target_arch = "x86_64") {
+            self.member_offset("pt_regs", X86_64[index])
+        } else if cfg!(target_arch = "aarch64") {
+            Ok(self.member_offset("pt_regs", "regs")? + 8 * index as i32)
+        } else {
+            Err(format!(
+                "this build knows where a syscall's arguments are saved on x86_64 and aarch64, \
+                 not on {}",
+                std::env::consts::ARCH
+            ))
+        }
+    }
+
     pub fn member_offset(&self, struct_name: &str, member: &str) -> Result<i32, String> {
         let candidates = self
             .by_name
@@ -420,6 +446,10 @@ impl Btf {
             KIND_CONST | KIND_VOLATILE | KIND_RESTRICT => {
                 self.describe(entry.size_or_type, depth + 1)
             }
+            KIND_INT => read_string(&self.buffer, self.string_offset + entry.name_at)
+                .filter(|name| !name.is_empty())
+                .map(|name| gcc_integer_name(&name).to_owned())
+                .unwrap_or_else(|| "?".to_owned()),
             _ => read_string(&self.buffer, self.string_offset + entry.name_at)
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| "?".to_owned()),
@@ -460,6 +490,27 @@ impl std::fmt::Debug for Btf {
 }
 
 /// Reads a NUL-terminated name out of the string section.
+/// An integer's name as gcc spells it, which is how every prototype a program
+/// is written for spells it.
+///
+/// The name of a BTF integer is the compiler's, not the C standard's: gcc
+/// writes `long int` and `long unsigned int`, clang writes `long` and
+/// `unsigned long`, and both are one type of one width. A clang-built kernel
+/// (OrbStack's, Android's, ChromeOS's) declares `sys_enter(pt_regs *, long)`,
+/// and compared as text against `long int` it refused eight sources whose
+/// slots it holds exactly as the program reads them.
+pub(crate) fn gcc_integer_name(name: &str) -> &str {
+    match name {
+        "long" => "long int",
+        "unsigned long" => "long unsigned int",
+        "long long" => "long long int",
+        "unsigned long long" => "long long unsigned int",
+        "short" => "short int",
+        "unsigned short" => "short unsigned int",
+        other => other,
+    }
+}
+
 fn read_string(buffer: &[u8], at: usize) -> Option<String> {
     let rest = buffer.get(at..)?;
     let end = rest.iter().position(|byte| *byte == 0)?;
@@ -779,6 +830,31 @@ mod tests {
                 "_Bool".to_owned(),
                 "task_struct *".to_owned(),
                 "task_struct *".to_owned(),
+                "unsigned int".to_owned(),
+            ])
+        );
+    }
+
+    /// A clang-built kernel names its integers as clang does; the prototype a
+    /// program is written for names them as gcc does, and they are one type.
+    #[test]
+    fn a_clang_kernel_s_integers_read_as_the_gcc_spelling_programs_are_written_for() {
+        let mut builder = BtfBuilder::new();
+        let regs = builder.opaque("pt_regs");
+        let regs_pointer = builder.pointer(regs);
+        let long = builder.scalar("long");
+        let unsigned_long = builder.scalar("unsigned long");
+        let unsigned = builder.scalar("unsigned int");
+        let blob = builder
+            .tracepoint("sys_enter", &[regs_pointer, long, unsigned_long, unsigned])
+            .build();
+        let btf = Btf::parse(blob).expect("a well-formed blob");
+        assert_eq!(
+            btf.tracepoint_signature("sys_enter"),
+            Ok(vec![
+                "pt_regs *".to_owned(),
+                "long int".to_owned(),
+                "long unsigned int".to_owned(),
                 "unsigned int".to_owned(),
             ])
         );

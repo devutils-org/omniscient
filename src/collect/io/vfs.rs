@@ -115,7 +115,7 @@ fn first(source: &str, ids: &[i32], kind: &str) -> Result<i32, String> {
 /// What the functions timed do not see, which is part of what the number is.
 fn coverage(layer: Layer) -> String {
     match layer {
-        Layer::Syscall => "timed at the x86-64 syscall entry points of read, write, pread64, \
+        Layer::Syscall => "timed at the syscall table's entry points of read, write, pread64, \
                            pwrite64 and their vectored forms: sendfile, splice, io_uring and \
                            page faults on a mapping are I/O this does not see"
             .to_owned(),
