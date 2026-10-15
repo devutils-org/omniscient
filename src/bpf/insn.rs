@@ -124,6 +124,9 @@ pub mod helper {
     /// `bpf_get_current_task_btf()`: the current task as a pointer whose type
     /// the verifier knows, which is what the storage helpers take.
     pub const GET_CURRENT_TASK_BTF: i32 = 158;
+    /// `bpf_task_pt_regs(task)` (5.15): the registers `task` entered the
+    /// kernel with, its user ones for a user task.
+    pub const TASK_PT_REGS: i32 = 175;
     /// `bpf_this_cpu_ptr(percpu_ptr)`: this cpu's copy of a per-cpu kernel
     /// variable, whose address a [`Insn::load_btf_id`] put in `r1`.
     pub const THIS_CPU_PTR: i32 = 154;

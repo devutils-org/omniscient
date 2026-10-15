@@ -35,8 +35,9 @@ use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::STACK_ID_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
+use crate::perf::UserRegs;
 use crate::request::{Mode, Target};
-use crate::stack::unwind::{Debuginfod, NameOrigin};
+use crate::stack::unwind::{Cfi, Debuginfod, NameOrigin};
 use crate::stack::{Frame, RawStack, Symbolizer};
 
 /// How often the totals are drained.
@@ -123,6 +124,19 @@ pub struct OffCpuCollector {
     /// One symbolizer per process seen, built lazily. A system-wide run sees
     /// many, and each carries that process's own mappings.
     symbolizers: HashMap<i32, Symbolizer>,
+    /// One unwinder over each process's call frame information, beside its
+    /// symbolizer, where the program reads the user link register: what says
+    /// whether the register is the leaf's caller (`bpf::offcpu`'s `KEY_LR`).
+    cfis: HashMap<i32, Cfi>,
+    /// Whether the program reads the user link register at all.
+    leaf_lr: bool,
+    /// The id each `(stack, link register)` pair was given: the kernel's own
+    /// where the register added no frame, a fresh one above every kernel id
+    /// where it put the leaf's caller back.
+    resolved: HashMap<(u32, u64), u64>,
+    /// Blocks whose stack had a frameless leaf's caller put back from the link
+    /// register.
+    leaf_callers: u64,
     /// Processes the target started that were no longer followed at the last
     /// tick: their symbolizers are dropped at this one, after the drain that
     /// held their last blocks has named them.
@@ -168,6 +182,10 @@ impl OffCpuCollector {
             window_opened_ns: 0,
             stacks: BTreeMap::new(),
             symbolizers: HashMap::new(),
+            cfis: HashMap::new(),
+            leaf_lr: false,
+            resolved: HashMap::new(),
+            leaf_callers: 0,
             leaving: BTreeSet::new(),
             left_origins: BTreeMap::new(),
             unwalkable: 0,
@@ -233,12 +251,15 @@ impl OffCpuCollector {
                 .filter(|entry| {
                     entry
                         .stack
-                        .is_some_and(|id| !self.stacks.contains_key(&u64::from(id)))
+                        .is_some_and(|id| !self.resolved.contains_key(&(id, entry.lr)))
                 })
                 .map(|entry| entry.tgid)
                 .collect();
             for tgid in unresolved {
                 self.symbolizer(tgid).refresh();
+                if let Some(cfi) = self.cfi(tgid) {
+                    cfi.refresh();
+                }
             }
         }
 
@@ -250,7 +271,7 @@ impl OffCpuCollector {
                 attrs.push(Attr::uint("ppid", u64::from(ppid)));
             }
             if let Some(id) = self.resolve_stack(&entry) {
-                attrs.push(Attr::uint(STACK_ID_ATTR, u64::from(id)));
+                attrs.push(Attr::uint(STACK_ID_ATTR, id));
             }
             let event = Event {
                 ts_ns: closed_ns,
@@ -316,6 +337,9 @@ impl OffCpuCollector {
             if !fresh {
                 symbolizer.refresh();
             }
+            if let Some(cfi) = self.cfi(tgid) {
+                cfi.refresh();
+            }
         }
     }
 
@@ -333,6 +357,7 @@ impl OffCpuCollector {
             if followed.contains(&(tgid as u32)) {
                 continue;
             }
+            self.cfis.remove(&tgid);
             if let Some(symbolizer) = self.symbolizers.remove(&tgid) {
                 for (path, origin) in symbolizer.origins() {
                     self.left_origins
@@ -357,6 +382,41 @@ impl OffCpuCollector {
             .or_insert_with(|| Symbolizer::with_debuginfod_kernel(tgid as i32, debuginfod))
     }
 
+    /// The call frame unwinder of one process, built the first time it is
+    /// asked for; `None` where the program reads no link register.
+    fn cfi(&mut self, tgid: u32) -> Option<&mut Cfi> {
+        if !self.leaf_lr {
+            return None;
+        }
+        // The kernel's id, read through this process's `/proc`: the two differ
+        // in a pid namespace.
+        let ours = crate::bpf::pidns::ours(tgid).map_or(tgid as i32, |id| id as i32);
+        Some(
+            self.cfis
+                .entry(tgid as i32)
+                .or_insert_with(|| Cfi::for_process(ours)),
+        )
+    }
+
+    /// The caller of the stack's leaf when the kernel's walk skipped it and
+    /// the link register holds it: the leaf's own unwind rule, given no stack
+    /// to read, finds a return address only where it is still in the
+    /// register, which is a function that set up no frame.
+    fn leaf_caller(&mut self, tgid: u32, addresses: &[u64], lr: u64) -> Option<u64> {
+        let leaf = *addresses.first()?;
+        if lr == 0 {
+            return None;
+        }
+        let regs = UserRegs {
+            ip: leaf,
+            sp: 0,
+            fp: 0,
+            lr,
+        };
+        let caller = self.cfi(tgid)?.caller(regs, &[])?;
+        (caller != 0 && addresses.get(1) != Some(&caller)).then_some(caller)
+    }
+
     /// Symbolizes the stack behind an entry, once per distinct id.
     ///
     /// Returns the id to put on the event, or `None` when there is nothing to
@@ -364,7 +424,7 @@ impl OffCpuCollector {
     /// walked is no longer in the map. Both are counted and reported; neither
     /// is an empty stack, which would read as a task that blocked at no call
     /// site at all.
-    fn resolve_stack(&mut self, entry: &OffCpu) -> Option<u32> {
+    fn resolve_stack(&mut self, entry: &OffCpu) -> Option<u64> {
         // Nothing downstream will read the frames, so there is no id worth
         // putting on the event either: an id whose table is empty points at
         // nothing. The kernel still walked the stack -- that happens in the
@@ -384,24 +444,43 @@ impl OffCpuCollector {
                 return None;
             }
         };
-        if self.stacks.contains_key(&u64::from(id)) {
-            return Some(id);
+        if let Some(resolved) = self.resolved.get(&(id, entry.lr)) {
+            if *resolved > u64::from(u32::MAX) {
+                self.leaf_callers += entry.blocks;
+            }
+            return Some(*resolved);
         }
         let program = self.program.as_ref()?;
-        let Some(addresses) = program.stack(id) else {
+        let Some(mut addresses) = program.stack(id) else {
             self.evicted_stacks += entry.blocks;
             return None;
         };
         let truncated = addresses.len() >= program.stack_depth();
+        let caller = self.leaf_caller(entry.tgid, &addresses, entry.lr);
+        let resolved = match caller {
+            Some(caller) => {
+                addresses.insert(1, caller);
+                self.leaf_callers += entry.blocks;
+                u64::from(u32::MAX) + 1 + self.resolved.len() as u64
+            }
+            None => u64::from(id),
+        };
+        self.resolved.insert((id, entry.lr), resolved);
+        if self.stacks.contains_key(&resolved) {
+            return Some(resolved);
+        }
         let symbolizer = self.symbolizer(entry.tgid);
         // User frames only: `BPF_F_USER_STACK` asked for the task's own, and
         // putting them through kernel symbols would name them after whatever
         // function lives at that offset in the kernel's tables.
-        let stack = symbolizer.symbolize(&RawStack {
+        let mut stack = symbolizer.symbolize(&RawStack {
             kernel: Vec::new(),
             user: addresses,
             elsewhere: Vec::new(),
         });
+        if caller.is_some() {
+            stack.frames[1].recovered = true;
+        }
         let mut frames: Vec<String> = stack.frames.iter().rev().map(Frame::label).collect();
         if truncated {
             // Root first, so the missing frames are the ones before the first
@@ -409,8 +488,8 @@ impl OffCpuCollector {
             // begins in the middle of a program.
             frames.insert(0, "[truncated]".to_owned());
         }
-        self.stacks.insert(u64::from(id), frames);
-        Some(id)
+        self.stacks.insert(resolved, frames);
+        Some(resolved)
     }
 
     /// Reads the program's own counters of what it could not record.
@@ -534,6 +613,9 @@ impl Collector for OffCpuCollector {
             .extend(program.clock_missing().map(str::to_owned));
         self.notes
             .extend(program.entries_missing().map(str::to_owned));
+        self.notes
+            .extend(program.leaf_lr_missing().map(str::to_owned));
+        self.leaf_lr = cfg!(target_arch = "aarch64") && program.leaf_lr_missing().is_none();
         self.program = Some(program);
         // Optional: without it a row keeps the name its task had when the row
         // was made, which for a launched program's first rows is this tool's.
@@ -675,6 +757,15 @@ impl Collector for OffCpuCollector {
                 self.evicted_stacks
             ));
         }
+        if self.leaf_callers > 0 {
+            notes.push(format!(
+                "{} blocks were made from a function that sets up no frame, whose caller the \
+                 kernel's walk skips: it was put back from the user link register, where the \
+                 function's own unwind rule says the return address still is, and is marked as \
+                 recovered",
+                self.leaf_callers
+            ));
+        }
         notes
     }
 }
@@ -759,6 +850,7 @@ mod tests {
             comm: "sleep".to_owned(),
             stack: None,
             stack_error: None,
+            lr: 0,
         };
         let attributes = attributes(&entry, 100_000);
         let catalog = crate::catalog::Catalog::embedded().expect("the built-in catalog");
@@ -796,6 +888,7 @@ mod tests {
             comm: "kworker".to_owned(),
             stack: None,
             stack_error: None,
+            lr: 0,
         };
         let attributes = attributes(&entry, 1);
         let named = attributes.iter().find(|attr| attr.name == "state");

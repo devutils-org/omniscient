@@ -126,27 +126,33 @@ const DROP_TOTALS: u32 = 1;
 /// reads and the map descriptors all come from the same place. Every byte of
 /// each is written before it is handed to a helper: an uninitialised byte in a
 /// key makes two identical blocks land in two different buckets.
-const TOTAL_VALUE: i16 = -136;
-/// Twenty bytes of key in a twenty-four-byte slot.
-const TOTAL_KEY: i16 = -72;
-const IN_FLIGHT_VALUE: i16 = -48;
+const TOTAL_VALUE: i16 = -152;
+const TOTAL_KEY: i16 = -88;
+const IN_FLIGHT_VALUE: i16 = -56;
 const IN_FLIGHT_KEY: i16 = -8;
-const DROP_KEY: i16 = -144;
+const DROP_KEY: i16 = -160;
 /// Where the program keeps the row map it looked up through the generation
 /// slot, once per run; see `map::select_rows`.
-const ROWS_SLOT: i16 = -152;
+const ROWS_SLOT: i16 = -168;
 /// Sixteen bytes for the target comparison, `insn::push_task_filter`, and
 /// the eight the scheduler's clock is read through.
-const FILTER_SCRATCH: i16 = -168;
+const FILTER_SCRATCH: i16 = -184;
 /// The scheduler's clock now and the task's queue stamp, held across the
 /// helper calls that read them; and the key of the per-cpu slot the
 /// `__schedule` entry stamp is in.
-const CLOCK_NOW: i16 = -176;
-const CLOCK_QUEUED: i16 = -184;
-const ENTRY_KEY: i16 = -192;
+const CLOCK_NOW: i16 = -192;
+const CLOCK_QUEUED: i16 = -200;
+const ENTRY_KEY: i16 = -208;
 /// `sched_info.run_delay` when the block began and when it ended.
-const CLOCK_DELAY_THEN: i16 = -200;
-const CLOCK_DELAY_NOW: i16 = -208;
+const CLOCK_DELAY_THEN: i16 = -216;
+const CLOCK_DELAY_NOW: i16 = -224;
+
+/// Where aarch64 keeps the link register in the user registers a task entered
+/// the kernel with: `x30` of `user_pt_regs.regs[31]`, the first member of the
+/// kernel's `struct pt_regs`. The layout is the ptrace ABI's, not an internal
+/// one.
+#[cfg(target_arch = "aarch64")]
+const PT_REGS_LR: i16 = 30 * 8;
 
 /// The layout of a totals key, as byte offsets within it.
 ///
@@ -181,7 +187,24 @@ const KEY_STACK: i16 = 12;
 /// row is inside its bucket now, so the row's mean is too, and the row weighs
 /// as many blocks as it counts.
 const KEY_BUCKET: i16 = 16;
-const TOTAL_KEY_BYTES: usize = 20;
+/// Four bytes of padding, written as zero: the kernel hashes them too.
+const KEY_PAD: i16 = 20;
+/// The user link register the task blocked with, on aarch64; zero elsewhere,
+/// and where this kernel cannot hand it over.
+///
+/// The kernel's walk of a user stack follows frame records, and a function
+/// that sets none up -- glibc enters every blocking syscall through one, its
+/// cancellation helper -- leaves its caller in the link register alone, so
+/// the walk skips straight to the caller's caller. The register is the only
+/// place the frame is, and it is only the caller when the leaf's own unwind
+/// rule says the return address is still in it; userspace asks that rule
+/// before it puts the frame back (`collect::sched::offcpu`).
+///
+/// In the key because a stack id says nothing about it: one id with two
+/// callers is two call sites. A leaf that does keep a frame leaves a stale
+/// register here, which splits its row by a value userspace then ignores.
+const KEY_LR: i16 = 24;
+const TOTAL_KEY_BYTES: usize = 32;
 
 /// The layout of a totals value, the same way.
 const VALUE_TOTAL_NS: i16 = 0;
@@ -245,8 +268,10 @@ const IN_FLIGHT_WOKEN: i16 = 24;
 /// `sched_info.run_delay` as the task left the cpu; see
 /// `sched_common::push_run_delay`.
 const IN_FLIGHT_RUN_DELAY: i16 = 32;
+/// The user link register as the task left the cpu; see `KEY_LR`.
+const IN_FLIGHT_LR: i16 = 40;
 const IN_FLIGHT_KEY_BYTES: usize = 4;
-const IN_FLIGHT_VALUE_BYTES: usize = 40;
+const IN_FLIGHT_VALUE_BYTES: usize = 48;
 
 /// One `(task, state)` pair's blocked time over one drain interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +317,10 @@ pub struct OffCpu {
     /// a stack the map had no room for, because the bucket it hashed to held
     /// another stack already.
     pub stack_error: Option<i32>,
+    /// The user link register the task blocked with, on aarch64, or zero; see
+    /// `KEY_LR`. Only a candidate for the leaf's caller: whether it is one is
+    /// the leaf's unwind rule's to say.
+    pub lr: u64,
 }
 
 impl OffCpu {
@@ -358,6 +387,7 @@ impl OffCpu {
                 let raw = word(key, KEY_STACK as usize) as i32;
                 (raw < 0).then_some(-raw)
             },
+            lr: long(key, KEY_LR as usize),
         })
     }
 }
@@ -376,6 +406,7 @@ fn instructions(
     totals_fd: i32,
     drops_fd: i32,
     stacks_fd: i32,
+    leaf_lr: bool,
 ) -> Result<Vec<Insn>, String> {
     let signature = btf.tracepoint_signature("sched_switch")?;
     if signature != SIGNATURE {
@@ -506,6 +537,7 @@ fn instructions(
     // user stack to walk, which is every kernel worker, is the ordinary case
     // and not an error to hide.
     program.push(Insn::stx(BPF_DW, R10, IN_FLIGHT_VALUE + IN_FLIGHT_STACK, 0));
+    push_user_lr(&mut program, IN_FLIGHT_VALUE + IN_FLIGHT_LR, leaf_lr);
     // The whole slot is cleared first: the key is four bytes in an eight-byte
     // slot, and the four the program does not write are still hashed.
     program.push(Insn::st_imm(BPF_DW, R10, IN_FLIGHT_KEY, 0));
@@ -547,6 +579,9 @@ fn instructions(
     // r1 through r5 and there is no callee-saved register left to hold it.
     program.push(Insn::ldx(BPF_W, 3, 0, IN_FLIGHT_STACK));
     program.push(Insn::stx(BPF_W, R10, TOTAL_KEY + KEY_STACK, 3));
+    program.push(Insn::ldx(BPF_DW, 3, 0, IN_FLIGHT_LR));
+    program.push(Insn::stx(BPF_DW, R10, TOTAL_KEY + KEY_LR, 3));
+    program.push(Insn::st_imm(BPF_W, R10, TOTAL_KEY + KEY_PAD, 0));
     program.push(Insn::ldx(BPF_DW, 3, 0, IN_FLIGHT_RUN_DELAY));
     program.push(Insn::stx(BPF_DW, R10, CLOCK_DELAY_THEN, 3));
     // The wakeup stamp, and the wait from it to here by the tracepoints. The
@@ -688,6 +723,31 @@ fn instructions(
     Ok(instructions)
 }
 
+/// Writes the current task's user link register to the stack at `slot`, or
+/// zero where it is not asked for or this architecture has none.
+///
+/// `bpf_task_pt_regs` (5.15) of the current task is the user registers the
+/// task entered the kernel with, which is what the kernel's own user stack
+/// walk starts from: the two agree about which frame is the leaf. Read with
+/// `bpf_probe_read_kernel`, which writes zero where the read fails.
+fn push_user_lr(program: &mut Program, slot: i16, leaf_lr: bool) {
+    #[cfg(target_arch = "aarch64")]
+    if leaf_lr {
+        program.push(Insn::call(helper::GET_CURRENT_TASK_BTF));
+        program.push(Insn::mov64_reg(1, 0));
+        program.push(Insn::call(helper::TASK_PT_REGS));
+        program.push(Insn::mov64_reg(3, 0));
+        program.push(Insn::add64_imm(3, i32::from(PT_REGS_LR)));
+        program.push(Insn::mov64_reg(1, R10));
+        program.push(Insn::add64_imm(1, i32::from(slot)));
+        program.push(Insn::mov64_imm(2, 8));
+        program.push(Insn::call(helper::PROBE_READ_KERNEL));
+        return;
+    }
+    let _ = leaf_lr;
+    program.push(Insn::st_imm(BPF_DW, R10, slot, 0));
+}
+
 /// The program on `sched_wakeup`: a blocked task has been made runnable.
 ///
 /// It writes the moment into the in-flight entry the `sched_switch` program
@@ -805,6 +865,9 @@ pub struct OffCpuProgram {
     /// Where `__schedule` was entered, per cpu, and why not when it is not.
     entries: Option<Entries>,
     entries_missing: Option<String>,
+    /// Why the program reads no user link register on an architecture that
+    /// has one.
+    leaf_lr_missing: Option<String>,
     in_flight: Hash,
     totals: Rows,
     drops: Counters,
@@ -877,6 +940,12 @@ impl OffCpuProgram {
         self.entries_missing.as_deref()
     }
 
+    /// Why a blocked task's user link register is not read, on aarch64 where
+    /// it is the only place a frameless leaf's caller is.
+    pub fn leaf_lr_missing(&self) -> Option<&str> {
+        self.leaf_lr_missing.as_deref()
+    }
+
     pub fn load(whose: Whose) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
         let descendants = match whose {
@@ -924,23 +993,50 @@ impl OffCpuProgram {
         let stacks = StackTraces::create(MAX_STACKS, MAX_STACK_DEPTH, "omn_offcpu_stk")
             .map_err(|error| map_failure("off-cpu stack map", error))?;
 
-        let instructions = instructions(
-            btf,
-            followed,
-            clock,
-            entries.as_ref().map(|entries| entries.stamps.as_raw_fd()),
-            in_flight.as_raw_fd(),
-            totals.as_raw_fd(),
-            drops.as_raw_fd(),
-            stacks.as_raw_fd(),
-        )?;
-        let program = syscall::prog_load(
-            syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
-            &instructions,
-            "omn_offcpu",
-            LICENSE,
-        )
-        .map_err(|error| {
+        let build = |leaf_lr: bool| {
+            instructions(
+                btf,
+                followed,
+                clock,
+                entries.as_ref().map(|entries| entries.stamps.as_raw_fd()),
+                in_flight.as_raw_fd(),
+                totals.as_raw_fd(),
+                drops.as_raw_fd(),
+                stacks.as_raw_fd(),
+                leaf_lr,
+            )
+        };
+        let load = |instructions: &[Insn]| {
+            syscall::prog_load(
+                syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+                instructions,
+                "omn_offcpu",
+                LICENSE,
+            )
+        };
+        // The link register where the architecture has one and the kernel
+        // hands it over; a kernel that refuses the read (before 5.15) loads
+        // the program without it, and the run says what that costs.
+        let mut leaf_lr_missing = None;
+        let loaded = if cfg!(target_arch = "aarch64") {
+            match load(&build(true)?) {
+                Ok(program) => Ok(program),
+                Err(error) if error.is_permission() => Err(error),
+                Err(error) => {
+                    leaf_lr_missing = Some(format!(
+                        "this kernel would not hand the off-cpu program a blocked task's user \
+                         link register ({error}), so a blocking call made from a function that \
+                         sets up no frame -- glibc's syscall wrappers -- is missing its caller \
+                         from every stack: the kernel's walk goes from the leaf to the caller's \
+                         caller"
+                    ));
+                    load(&build(false)?)
+                }
+            }
+        } else {
+            load(&build(false)?)
+        };
+        let program = loaded.map_err(|error| {
             if error.is_permission() {
                 super::permission_advice("loading a raw tracepoint program")
             } else {
@@ -973,6 +1069,7 @@ impl OffCpuProgram {
             clock_missing,
             entries,
             entries_missing,
+            leaf_lr_missing,
             in_flight,
             totals,
             drops,
@@ -1068,6 +1165,8 @@ mod tests {
             (KEY_STATE, 4),
             (KEY_STACK, 4),
             (KEY_BUCKET, 4),
+            (KEY_PAD, 4),
+            (KEY_LR, 8),
         ];
         let value = [
             (VALUE_TOTAL_NS, 8),
@@ -1136,6 +1235,36 @@ mod tests {
         }
     }
 
+    /// The user link register is read where it is a frameless leaf's only
+    /// record of its caller, aarch64, and written as zero everywhere else, so
+    /// the key's last eight bytes are never stack garbage; asked not to, the
+    /// program reads it nowhere (the fallback for a kernel before 5.15).
+    #[test]
+    fn the_link_register_is_read_on_aarch64_alone() {
+        let Some(btf) = kernel_btf() else { return };
+        let asked = built(&btf, Whose::Any).expect("a program");
+        assert_eq!(
+            helpers_called(&asked).contains(&helper::TASK_PT_REGS),
+            cfg!(target_arch = "aarch64")
+        );
+        let without = instructions(
+            &btf,
+            Followed::only(Whose::Any),
+            KernelClock::locate(&btf).ok(),
+            Some(7),
+            3,
+            4,
+            5,
+            6,
+            false,
+        )
+        .expect("a program");
+        assert!(!helpers_called(&without).contains(&helper::TASK_PT_REGS));
+        assert!(without.iter().any(|insn| insn.code == 0x7a
+            && insn.regs & 0x0f == R10
+            && insn.off == IN_FLIGHT_VALUE + IN_FLIGHT_LR));
+    }
+
     fn kernel_btf() -> Option<Btf> {
         match Btf::from_kernel() {
             Ok(btf) => Some(btf),
@@ -1157,6 +1286,7 @@ mod tests {
             4,
             5,
             6,
+            cfg!(target_arch = "aarch64"),
         )
     }
 

@@ -14011,12 +14011,17 @@ child's `voluntary_ctxt_switches` now bounds.
 
 Still open, each a defect or a question:
 
-- **A blocking syscall's caller is lost in eBPF user stacks on aarch64.**
-  glibc 2.43 enters the kernel from a frameless cancellation helper
-  (`libc.so.6+0x85094`); its caller, `clock_nanosleep`, is only in the user
-  LR, which the kernel's frame-pointer walk does not read. `fp+leaf` recovers
-  it for perf samples; the eBPF programs would need the user LR from
-  `bpf_task_pt_regs`. Three tests (`scenario_sched` two, `family_sched` one).
+- ~~**A blocking syscall's caller is lost in eBPF user stacks on aarch64.**~~
+  -- **fixed for `sched.offcpu`** (2026-10-15). glibc 2.43 enters the kernel
+  from a frameless cancellation helper (`libc.so.6+0x85094`); its caller,
+  `clock_nanosleep`, is only in the user LR, which the kernel's frame-pointer
+  walk does not read. The program now reads the LR through
+  `bpf_task_pt_regs` (5.15; a kernel that refuses it loads the program
+  without, and the run says so) and keeps it in the totals key; the
+  collector asks the leaf's own CFI, given no stack bytes, whether the
+  return address is still in the register, and puts the frame back marked
+  `[recovered]` only then. The three tests pass. `sched.futex` and
+  `sched.lock` walk user stacks the same way and do not read the LR yet.
 - **`net.request`'s network rows** (`net_rx`, `net_tx`) are empty here: six
   `vertical` tests and `view_workloads`' `a004`.
 - `join_engine`'s retained row is 104 KiB under the freed pages, against a
