@@ -1727,7 +1727,9 @@ fn arch() -> String {
         .machine
         .iter()
         .take_while(|byte| **byte != 0)
-        .map(|byte| *byte as u8)
+        // `c_char` is `i8` on x86-64 and `u8` on aarch64: the same bits
+        // either way, and the cast a no-op on one of the two.
+        .map(|byte| u8::from_ne_bytes(byte.to_ne_bytes()))
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
