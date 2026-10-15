@@ -13860,3 +13860,49 @@ sockets, 60 events, a check of `bench/apps/http-roundtrips.toml`.
   the binary elsewhere~~ -- **fixed**: `make` asks `cargo metadata` where it
   built and links `target/<profile>` there, so the capabilities, the sessions,
   `make demo` and `make apps` find the binary.
+
+### The suite on the aarch64 machine, sorted (2026-10-15)
+
+`cargo test --workspace --no-fail-fast` with the capabilities, after the
+fixes above: **91 red, from 234** on a clean `main` of 2026-10-14, none red
+that is green there. Since that run the symbolization fix (`5f1833a`) and the
+unwind copy's slack turned seven more green. What is left, by cause:
+
+**The machine cannot serve it, and the test should skip with the reason**
+(about 40). No PSI anywhere (`io.pressure`, `mem.pressure`, and through
+`mem.pressure` every `omn saturate` question: it names the cgroup's
+`memory.pressure` an input it cannot do without), no powercap, no readable
+hwmon, one NUMA node and no `sched_stick_numa`, no PTP clock (`net.hwts`),
+an unaccounted root cgroup, swap on zram (`swpout_zero` 0), and the checkout
+on virtiofs, which is no block device: the vertical case's O_DIRECT reads,
+the views' cold pages and `scenario_io`'s cold read issue no block request.
+The view gallery's snapshots were drawn on the development machine and
+differ here line for line (4).
+
+**The C library, not the tool** (3): the sleep tests expect a frame named
+`clock_nanosleep`; this glibc enters `nanosleep` through an internal
+cancellation helper that exports no symbol (`libc.so.6+0x85094`), and the
+stack names `__nanosleep` above it.
+
+**aarch64 or the VM, to investigate** -- each could be a defect:
+
+- `sched.migrations`: 200 affinity rewrites, 100 migrations counted, in
+  both modes (`scenario_sched`).
+- A timer interrupt's wakeup is credited to the idle task, never named
+  `interrupt (hardirq)` (`scenario_sched`, `join_engine`): the interrupt
+  context is read from `preempt_count`, which aarch64 keeps in
+  `thread_info` and x86-64 per cpu.
+- `proc.exec` under a cgroup target: 418 of 528 children have no exec event
+  and 0 are counted lost -- **a silent loss if it is the tool's**
+  (`scenario_proc`); `proc.exit` misses one exit; the signal storm's counted
+  plus dropped falls short of what was sent.
+- `net.socket` sees none of the server's receives, `net.tcp.connect` no
+  handshake outcome, `net.request` no network row (`scenario_net`,
+  `vertical`, the flows views): the receive and handshake functions may be
+  off the path here, as `vfs_write` was, and the path check covers only the
+  VFS functions.
+- `fp` and `fp+leaf` on aarch64 (`unwind`, 5): frame-pointer detection of
+  the test's leaf build and the leaf's caller recovery assume x86-64's
+  prologue.
+- `sched.switches` counts none of a forced program's voluntary switches;
+  a launched program's child's switches are not followed (`family_sched`).
