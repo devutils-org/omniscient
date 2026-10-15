@@ -14024,8 +14024,10 @@ Still open, each a defect or a question:
   held.
 - `triage`'s `lock-contended`, known: a 20 us sleep lasts 2.9 ms here.
 - Flaky under the suite's load and green alone: `cross_io` when its tests run
-  in parallel, `dwarf_counts_and_says_the_stacks_deeper_than_its_copy`, the
-  view gallery's `system` snapshots once.
+  in parallel, `dwarf_counts_and_says_the_stacks_deeper_than_its_copy`, and
+  `scenario_io`'s forked child, one block request over 1024 one run in two.
+  The view gallery's snapshots, which differed under `@netns`, are drawn as
+  the recorder would (`draw_as_recorded`).
 - A completion-to-wakeup `woke` join pairs a completion with the reader's next
   wakeup within its window even when the reader never slept for it: 401 ms
   later, here, where no read slept at all. The window is the session's; the
