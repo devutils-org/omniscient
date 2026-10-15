@@ -4098,6 +4098,8 @@ fn drive(
             Vec::new()
         };
         let mut read_now = vec![false; count];
+        // When each read of this round ended: a round can outlast its run.
+        let mut read_at_ns = vec![0u64; count];
         for (index, slot) in slots.iter_mut().enumerate() {
             let Slot::Attached(collector) = slot else {
                 continue;
@@ -4118,6 +4120,7 @@ fn drive(
             ) {
                 gone = Some(reason);
             }
+            read_at_ns[index] = monotonic_ns();
         }
         if let Some(reason) = gone {
             break reason;
@@ -4194,7 +4197,15 @@ fn drive(
                 // in `stop`, where it can wait for what an exited target's
                 // children fold into it, and a read here would take the
                 // interval from it and report nothing in its place.
-                if read_now[index]
+                // Read in this round, and not long ago: a collector read
+                // first in a round another collector's read made outlast the
+                // run -- a machine-wide `sched.offcpu` loading modules for
+                // seconds -- has its baseline alone otherwise, no event and
+                // nothing late. Read again, it is late, and counted.
+                let read_lately = read_now[index]
+                    && closing_ns.saturating_sub(read_at_ns[index]) < CLOSING_READ_SLACK_NS;
+                if read_lately
+                    || (read_now[index] && interval_ns == 0)
                     || collector.tick().is_some()
                     || pace.snapshot
                     || interval_ns == 0
@@ -7790,6 +7801,67 @@ mod tests {
                 seq,
             }])
         }
+    }
+
+    /// A collector whose read takes a known wall time, and emits nothing.
+    struct Stalling {
+        id: CollectorId,
+        stall: StdDuration,
+    }
+
+    impl Collector for Stalling {
+        fn id(&self) -> &CollectorId {
+            &self.id
+        }
+
+        fn value_attr(&self) -> &'static str {
+            "bytes"
+        }
+
+        fn sample(&mut self, _seq: u64) -> Result<Vec<Event>, SampleError> {
+            std::thread::sleep(self.stall);
+            Ok(Vec::new())
+        }
+    }
+
+    /// A poller read first in a round another collector's read made outlast
+    /// the run is read again at the close, late, and counted as late.
+    ///
+    /// The case is a live `omn top` of the aarch64 machine: `cpu.util` read
+    /// its baseline, `sched.offcpu`'s first read took three seconds, the run
+    /// ended in the same round, and `cpu.util` reported no event and nothing
+    /// lost. Ground truth is the stall, a sleep of a known length.
+    #[test]
+    fn a_poller_a_stalled_round_outlasted_is_read_at_the_close_and_counted_late() {
+        let reads = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let mut collectors: Vec<Box<dyn Collector>> = vec![
+            Box::new(Level {
+                id: CollectorId::new("poller"),
+                opened_ns: monotonic_ns(),
+                high_ms: Vec::new(),
+                reads: reads.clone(),
+            }),
+            Box::new(Stalling {
+                id: CollectorId::new("stalling"),
+                stall: StdDuration::from_millis(300),
+            }),
+        ];
+        let pace = Pace {
+            interval: StdDuration::from_millis(50),
+            snapshot: false,
+        };
+        let mut spending = Spending::unweighed(2);
+        let (events, losses, _) = drive_attached(
+            &mut collectors,
+            &[pace, pace],
+            &[true, true],
+            None,
+            &mut spending,
+            until(monotonic_ns() + 100_000_000),
+        );
+        assert_eq!(reads.get(), 2, "the baseline and the closing read");
+        assert_eq!(events[0].len(), 2);
+        assert!(losses[0].late_ticks >= 1, "{:?}", losses[0]);
     }
 
     struct RecordedRun {

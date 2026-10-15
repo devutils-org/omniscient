@@ -1720,8 +1720,10 @@ embedded catalog a second time. The decisions are in `DECISIONS.md`,
        MB for a Node.js single-file executable -- and the round reading it
        took seconds. Modules are mapped now and the leaf's rule is asked once
        per place in a file: 12 polls of 12, `sched.offcpu` 0.17 s. Whether
-       that is also the development machine's cause is for item 13 to say;
-       a round that never ran is still counted nowhere.
+       that is also the development machine's cause is for item 13 to say.
+       A poller read first in a round that outlasted the run is read again
+       at the close now, late and counted: it used to end with its baseline
+       alone, no event and nothing lost.
      - `src/bpf/fentry.rs`: `Narrowing` with a descendants map, so
        `io.syscall`, `io.fs` and `net.socket` follow forked children (io;
        lazy's io default names `io.syscall`, so `omn io -- ./script.sh`
