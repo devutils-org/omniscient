@@ -60,6 +60,16 @@ impl Prepared for Prepare {
             }
         };
         let symbol = swap_read_symbol()?;
+        let mut losses = Losses::default();
+        if let Some(kib) = largest_small_folio_kib() {
+            losses.note(format!(
+                "this kernel builds anonymous folios of up to {kib} KiB \
+                 (/sys/kernel/mm/transparent_hugepage/hugepages-{kib}kB), and swaps such a \
+                 folio in with one read: `swapins` counts reads, and `in_bytes`, one page a \
+                 read, may be short by up to {} times; the cgroup's memory.stat counts pages",
+                kib * 1024 / page_size()
+            ));
+        }
         Ok(Box::new(SwapIn {
             id: CollectorId::new("mem.swap/perf:kprobe"),
             mode: self.0,
@@ -68,15 +78,60 @@ impl Prepared for Prepare {
             key: pid.map(KeyValue::task),
             counters: Vec::new(),
             // SAFETY: sysconf reads a constant of the running system.
-            page_size: match unsafe { libc::sysconf(libc::_SC_PAGESIZE) } {
-                size if size > 0 => size as u64,
-                _ => 4096,
-            },
+            page_size: page_size(),
             previous: None,
             opened: None,
-            losses: Losses::default(),
+            losses,
         }))
     }
+}
+
+fn page_size() -> u64 {
+    // SAFETY: sysconf reads a constant of the running system.
+    match unsafe { libc::sysconf(libc::_SC_PAGESIZE) } {
+        size if size > 0 => size as u64,
+        _ => 4096,
+    }
+}
+
+/// The largest multi-page anonymous folio this kernel may build below the
+/// PMD size, in KiB, or `None` where every one of them is turned off.
+///
+/// Each size has its own switch, `hugepages-<n>kB/enabled`: `always` and
+/// `madvise` turn it on, `inherit` takes the top-level `enabled`, and
+/// `never` turns it off. The PMD size is a huge page, which swap splits.
+fn largest_small_folio_kib() -> Option<u64> {
+    let root = std::path::Path::new("/sys/kernel/mm/transparent_hugepage");
+    let chosen = |text: &str| {
+        text.split_whitespace()
+            .find_map(|word| word.strip_prefix('[')?.strip_suffix(']').map(str::to_owned))
+    };
+    let top = chosen(&std::fs::read_to_string(root.join("enabled")).ok()?)?;
+    let pmd_kib = std::fs::read_to_string(root.join("hpage_pmd_size"))
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?
+        / 1024;
+    std::fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let kib: u64 = name
+                .strip_prefix("hugepages-")?
+                .strip_suffix("kB")?
+                .parse()
+                .ok()?;
+            let mode = chosen(&std::fs::read_to_string(entry.path().join("enabled")).ok()?)?;
+            let on = match mode.as_str() {
+                "always" | "madvise" => true,
+                "inherit" => top != "never",
+                _ => false,
+            };
+            (on && kib < pmd_kib).then_some(kib)
+        })
+        .max()
 }
 
 /// The first of [`SWAP_READ`] this kernel has.

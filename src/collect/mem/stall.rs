@@ -79,7 +79,10 @@ impl Prepared for Prepare {
         match (self.stall, target) {
             (_, Target::System) => {}
             (Stall::Reclaim, Target::Pid(_) | Target::Tid(_)) => {
-                tgid = Some(target.first_pid().expect("a pid target names a pid") as u32);
+                // The program compares the kernel's thread group, which in a
+                // container is not the id the target was named by.
+                let named = target.first_pid().expect("a pid target names a pid") as u32;
+                tgid = Some(crate::bpf::pidns::kernel_tgid(named)?);
             }
             (Stall::Reclaim, Target::Cgroup(_)) => {
                 cgroups = Some(descendants(&Cgroup::resolve(target)?)?);

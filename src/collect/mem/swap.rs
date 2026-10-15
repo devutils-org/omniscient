@@ -139,6 +139,32 @@ impl Prepared for Prepare {
     }
 }
 
+/// Whether the kernel was booted with `cgroup.memory=nokmem`.
+///
+/// A zero-filled page swapped out or in is charged to its cgroup through the
+/// page's object cgroup (`swap_zeromap_folio_set`, `count_objcg_events`),
+/// which a kernel without kernel-memory accounting does not have: the
+/// machine's `/proc/vmstat` counts the page and every cgroup's `memory.stat`
+/// publishes `swpout_zero 0`. OrbStack's kernel is booted so.
+fn kmem_accounting_off() -> bool {
+    std::fs::read_to_string("/proc/cmdline").is_ok_and(|line| {
+        line.split_whitespace()
+            .filter_map(|word| word.strip_prefix("cgroup.memory="))
+            .any(|options| options.split(',').any(|option| option == "nokmem"))
+    })
+}
+
+/// Whether the zero-filled page counters of this scope count anything.
+fn zero_pages_counted(scope: Scope) -> bool {
+    scope == Scope::Machine || !kmem_accounting_off()
+}
+
+const NO_ZERO_PAGES_PER_CGROUP: &str = "this kernel was booted with `cgroup.memory=nokmem`, \
+     and a cgroup is charged its zero-filled pages through the kernel memory accounting that \
+     turns off: `memory.stat`'s `swpin_zero` and `swpout_zero` stay at zero whatever the cgroup \
+     swapped, so the zero-page bytes are left out rather than reported as none; `mem.swap \
+     --system` counts them for the machine";
+
 /// Reads one pair of swap counters.
 pub struct Swap {
     id: CollectorId,
@@ -164,6 +190,10 @@ impl Swap {
             // machine's free swap rather than anyone's residency. Absent.
             Scope::Machine => None,
         };
+        let mut losses = Losses::default();
+        if scope == Scope::Cgroup && kmem_accounting_off() {
+            losses.note(NO_ZERO_PAGES_PER_CGROUP);
+        }
         Self {
             id: CollectorId::new(format!("mem.swap/{}", scope.backend())),
             mode,
@@ -174,7 +204,7 @@ impl Swap {
             page_size: page_size(),
             previous: None,
             opened: None,
-            losses: Losses::default(),
+            losses,
         }
     }
 
@@ -200,8 +230,14 @@ impl Swap {
             ts_ns: monotonic_ns(),
             in_pages,
             out_pages,
-            in_zero_pages: stat_field(&fields, "swpin_zero"),
-            out_zero_pages: stat_field(&fields, "swpout_zero"),
+            // Published and always zero where the kernel charges a cgroup
+            // nothing of its own (`kmem_accounting_off`): absent, not zero.
+            in_zero_pages: zero_pages_counted(self.scope)
+                .then(|| stat_field(&fields, "swpin_zero"))
+                .flatten(),
+            out_zero_pages: zero_pages_counted(self.scope)
+                .then(|| stat_field(&fields, "swpout_zero"))
+                .flatten(),
         })
     }
 
@@ -776,7 +812,7 @@ mod tests {
         assert!(
             zeroed >= 0.5 * expected,
             "those pages were full of zeros, so the kernel should have counted about \
-             {expected} bytes as swapped-without-writing; it counted {zeroed}"
+             {expected} bytes as swapped-without-writing; it counted {zeroed} ({said})"
         );
         assert!(
             written < 0.25 * zeroed,

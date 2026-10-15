@@ -435,6 +435,7 @@ fn begin_instructions(
 fn end_instructions(
     stall: Stall,
     scope: u32,
+    target_tgid: Option<u32>,
     starts_fd: i32,
     rows_fd: i32,
     drops_fd: i32,
@@ -534,6 +535,14 @@ fn end_instructions(
     program.jump_to("done", Insn::ja());
 
     program.label("unpaired");
+    // Another process's ending found nothing because its beginning was never
+    // recorded, which is the filter working: not this run's loss. A targeted
+    // run compares the thread group here, and only here -- an ending the map
+    // pairs is already known to be the target's.
+    if let Some(tgid) = target_tgid {
+        program.push(Insn::ldx(BPF_W, 1, R10, PID_TGID + 4));
+        program.jump_to("done", Insn::jne_imm(1, tgid as i32, 0));
+    }
     count_drop(&mut program, drops_fd, DROP_KEY, DROP_UNPAIRED, "done");
 
     program.jump_to("done", Insn::ja());
@@ -643,6 +652,7 @@ impl StallProgram {
             let end = end_instructions(
                 stall,
                 site.scope,
+                target_tgid,
                 in_flight.as_raw_fd(),
                 rows.as_raw_fd(),
                 drops.as_raw_fd(),
@@ -836,7 +846,7 @@ mod tests {
                 ),
                 (
                     "the end program",
-                    end_instructions(stall, SCOPE_GLOBAL, 3, 4, 5).expect("a program"),
+                    end_instructions(stall, SCOPE_GLOBAL, None, 3, 4, 5).expect("a program"),
                 ),
             ] {
                 let called: Vec<i32> = instructions
@@ -866,7 +876,8 @@ mod tests {
     /// number.
     #[test]
     fn the_duration_is_a_difference_and_not_a_timestamp() {
-        let program = end_instructions(Stall::Reclaim, SCOPE_GLOBAL, 3, 4, 5).expect("a program");
+        let program =
+            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5).expect("a program");
         assert!(
             program.iter().any(|insn| *insn == Insn::sub64_reg(1, 7)),
             "the program must subtract the moment the thread entered from the moment it left"
@@ -874,9 +885,10 @@ mod tests {
     }
 
     /// A machine-wide run has no filter in it at all; a targeted one filters
-    /// where an episode begins, which is the only place it can.
+    /// where an episode begins, and where an ending finds no beginning, so
+    /// that another process's is not counted as this run's loss.
     #[test]
-    fn the_filter_is_present_only_where_an_episode_begins() {
+    fn the_filter_is_where_an_episode_begins_and_where_an_ending_goes_unpaired() {
         let plain = begin_instructions(None, 3, 4).expect("a program");
         assert!(!plain.iter().any(|insn| insn.imm == 4242));
 
@@ -887,9 +899,13 @@ mod tests {
             "where an episode ends the thread is already known, because only one this run \
              recorded can be found in the map"
         );
-        // And the end program never carries it.
-        let end = end_instructions(Stall::Reclaim, SCOPE_GLOBAL, 3, 4, 5).expect("a program");
+        // The end program carries it once, on the path of an ending the map
+        // could not pair: another process's is no loss of this run's.
+        let end = end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5).expect("a program");
         assert!(!end.iter().any(|insn| insn.imm == 4242));
+        let end =
+            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, Some(4242), 3, 4, 5).expect("a program");
+        assert_eq!(end.iter().filter(|insn| insn.imm == 4242).count(), 1);
     }
 
     /// Only the source whose `end` carries a quantity accumulates one, and it
@@ -897,7 +913,7 @@ mod tests {
     #[test]
     fn the_yield_is_accumulated_only_where_the_tracepoint_carries_one() {
         let atomics = |stall: Stall| {
-            end_instructions(stall, SCOPE_GLOBAL, 3, 4, 5)
+            end_instructions(stall, SCOPE_GLOBAL, None, 3, 4, 5)
                 .expect("a program")
                 .iter()
                 .filter(|insn| insn.code == 0xdb)
@@ -919,7 +935,8 @@ mod tests {
     /// duration measured from whatever was in the map slot.
     #[test]
     fn an_unpaired_end_is_counted_and_not_measured() {
-        let program = end_instructions(Stall::Reclaim, SCOPE_GLOBAL, 3, 4, 5).expect("a program");
+        let program =
+            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5).expect("a program");
         let slots: Vec<i32> = program
             .iter()
             .filter(|insn| insn.code == 0x62 && insn.off == DROP_KEY)
@@ -1038,7 +1055,8 @@ mod tests {
     /// the program, which is the episode's end.
     #[test]
     fn the_last_end_is_written_on_a_new_row_and_on_an_existing_one() {
-        let program = end_instructions(Stall::Reclaim, SCOPE_GLOBAL, 3, 4, 5).expect("a program");
+        let program =
+            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5).expect("a program");
         // BPF_STX | BPF_MEM | BPF_DW
         let stores: Vec<(u8, u8)> = program
             .iter()
@@ -1058,7 +1076,8 @@ mod tests {
     /// the drain's swap safe; see `map::Rows`.
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
-        let program = end_instructions(Stall::Reclaim, SCOPE_GLOBAL, 3, 4, 5).expect("a program");
+        let program =
+            end_instructions(Stall::Reclaim, SCOPE_GLOBAL, None, 3, 4, 5).expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

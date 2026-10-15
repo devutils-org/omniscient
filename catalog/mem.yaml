@@ -603,7 +603,10 @@
        that it was zero and counts it in swpout_zero, reported here as
        out_zero_bytes, so a process that allocates a gigabyte and leaves it
        untouched grows swapped_bytes by a gigabyte with no traffic at all. The
-       flow and the stock disagreeing is not a bug."
+       flow and the stock disagreeing is not a bug. A kernel booted with
+       cgroup.memory=nokmem charges no cgroup its zero-filled pages, and its
+       memory.stat says zero whatever was swapped: the cgroup's zero-page
+       bytes are then absent, with a note, and --system still counts them."
     - "A pid names a cgroup for the fs:cgroup backend: swap is accounted per
        cgroup, never per process. `--backend perf:kprobe` counts the process's
        own reads from swap instead, through a counting kprobe on the kernel's
