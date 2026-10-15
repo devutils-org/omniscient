@@ -624,7 +624,7 @@ fn ranked(
 // Call frame information: the unwinder `fp+leaf` and `dwarf` share.
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-type Native = framehop::UnwinderNative<Vec<u8>, framehop::MayAllocateDuringUnwind>;
+type Native = framehop::UnwinderNative<MappedSection, framehop::MayAllocateDuringUnwind>;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 type NativeCache = framehop::CacheNative<framehop::MayAllocateDuringUnwind>;
 
@@ -776,6 +776,20 @@ impl Cfi {
         }
     }
 
+    /// The file `addr` is mapped from and where in it, from the mappings
+    /// remembered or, where none are, read now: what a rule found at one
+    /// address of a file is the same rule in every process that maps it.
+    pub fn file_offset_of(&mut self, addr: u64) -> Option<(PathBuf, u64)> {
+        if self.remembered.is_empty() {
+            self.remember();
+        }
+        let region = self
+            .remembered
+            .iter()
+            .find(|region| region.start <= addr && addr < region.end)?;
+        Some((region.path.clone()?, addr - region.start + region.offset))
+    }
+
     /// Whether `addr` is in a module added.
     fn covers(&self, addr: u64) -> bool {
         self.loaded
@@ -900,11 +914,34 @@ impl Cfi {
     }
 }
 
+/// One section of a mapped file, as `framehop` reads it: the file shared by
+/// every section taken from it, and never read whole.
+///
+/// Mapped rather than read: an unwind reads the section headers, the
+/// `.eh_frame_hdr` table and the one entry it finds, and reading the whole
+/// file to get them read 267 MB for a Node.js single-file executable -- in a
+/// machine-wide `sched.offcpu`, about a second of one round per process that
+/// ran one, and a copy of its `.text` beside it, while no other collector in
+/// the run was read. The pages an unwind does not touch are never read.
+pub struct MappedSection {
+    file: std::sync::Arc<super::Mapped>,
+    start: usize,
+    len: usize,
+}
+
+impl std::ops::Deref for MappedSection {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.file.bytes()[self.start..self.start + self.len]
+    }
+}
+
 /// A mapping's unwind sections, for `framehop`.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn module(region: &Region, path: &Path) -> Option<framehop::Module<Vec<u8>>> {
-    let bytes = std::fs::read(path).ok()?;
-    let elf = Elf::parse(&bytes)?;
+fn module(region: &Region, path: &Path) -> Option<framehop::Module<MappedSection>> {
+    let file = std::sync::Arc::new(super::Mapped::of(path)?);
+    let bytes = file.bytes();
+    let elf = Elf::parse(bytes)?;
     // What the loader added to every virtual address of this file: the
     // mapping's start less the address its file offset has in the file.
     let bias = region
@@ -919,7 +956,11 @@ fn module(region: &Region, path: &Path) -> Option<framehop::Module<Vec<u8>>> {
         elf.section(name)
             .and_then(|section| elf.section_data(&section))
             .filter(|data| !data.is_empty())
-            .map(<[u8]>::to_vec)
+            .map(|data| MappedSection {
+                file: std::sync::Arc::clone(&file),
+                start: data.as_ptr() as usize - bytes.as_ptr() as usize,
+                len: data.len(),
+            })
     };
     let info = framehop::ExplicitModuleSectionInfo {
         base_svma: 0,
@@ -931,7 +972,11 @@ fn module(region: &Region, path: &Path) -> Option<framehop::Module<Vec<u8>>> {
         eh_frame_hdr_svma: range(".eh_frame_hdr"),
         eh_frame_hdr: data(".eh_frame_hdr"),
         debug_frame: data(".debug_frame"),
-        ..Default::default()
+        stubs_svma: None,
+        stub_helper_svma: None,
+        unwind_info: None,
+        text_segment_svma: None,
+        text_segment: None,
     };
     Some(framehop::Module::new(
         path.display().to_string(),

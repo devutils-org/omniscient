@@ -129,6 +129,13 @@ pub(crate) struct LeafCallers {
     enabled: bool,
     cfis: std::collections::HashMap<i32, crate::stack::unwind::Cfi>,
     resolved: std::collections::HashMap<(u32, u64), u64>,
+    /// Whether the leaf's rule at a place in a file keeps the return address
+    /// in the register, by the file and the place: the same in every process
+    /// that maps it, so each place is loaded and asked once. Loading the
+    /// module per process was 31 ms each in the debug build, and a
+    /// machine-wide run meets a hundred processes with a libc each: three
+    /// seconds of one round, in which nothing else in the run was read.
+    in_register: std::collections::HashMap<(std::path::PathBuf, u64), bool>,
     /// Occurrences whose stack had a caller put back.
     recovered: u64,
 }
@@ -218,10 +225,20 @@ impl LeafCallers {
             fp: 0,
             lr,
         };
-        let cfi = self.cfi(kernel_tgid)?;
-        cfi.load_covering(leaf);
-        let caller = cfi.caller(regs, &[])?;
-        (caller != 0 && addresses.get(1) != Some(&caller)).then_some(caller)
+        let place = self.cfi(kernel_tgid)?.file_offset_of(leaf)?;
+        let in_register = match self.in_register.get(&place) {
+            Some(known) => *known,
+            None => {
+                let cfi = self.cfi(kernel_tgid)?;
+                cfi.load_covering(leaf);
+                // Given no stack, the rule finds a return address only in the
+                // register.
+                let found = cfi.caller(regs, &[]) == Some(lr);
+                self.in_register.insert(place, found);
+                found
+            }
+        };
+        (in_register && addresses.get(1) != Some(&lr)).then_some(lr)
     }
 
     /// What the run says about it, with `what` naming an occurrence
