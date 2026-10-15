@@ -775,7 +775,64 @@ impl fmt::Display for Key {
 
 /// This process's network namespace inode, as `/proc/self/ns/net` names it;
 /// 0 where it cannot be read.
+/// The network namespace a fixture is drawn as if from, set by
+/// [`draw_as_recorded`]; zero for this process's own.
+static DRAWN_AS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Draws every recording from here on as the machine that recorded `data`
+/// would: its interfaces judged against the recorder's own network namespace
+/// rather than this process's. For the gallery's fixtures, recorded on one
+/// machine and drawn on every other, whose `@netns` would otherwise differ
+/// line for line.
+///
+/// The recording says which namespace was the recorder's: `omn` wrote an
+/// interface of its own namespace into a series key bare (`iface:lo`) and any
+/// other with `@netns:`, while every event's key carries the inode. An
+/// interface named bare in a series and carried by an event is the
+/// recorder's. A recording with no such pair leaves the judgement as it was.
+pub fn draw_as_recorded(data: &Data) {
+    fn keys(value: &Value, into: &mut BTreeSet<String>) {
+        match value {
+            Value::Object(map) => {
+                for (name, value) in map {
+                    match (name.as_str(), value) {
+                        ("key", Value::String(key)) => {
+                            into.insert(key.clone());
+                        }
+                        _ => keys(value, into),
+                    }
+                }
+            }
+            Value::Array(values) => values.iter().for_each(|value| keys(value, into)),
+            _ => {}
+        }
+    }
+    let mut bare = BTreeSet::new();
+    for results in &data.run.results {
+        if let Ok(outputs) = serde_json::to_value(&results.outputs) {
+            keys(&outputs, &mut bare);
+        }
+    }
+    let recorder = data.run.results.iter().flat_map(Results::events).find_map(|event| {
+        event.keys.iter().find_map(|key| match key {
+            Key::Iface { netns, name, .. }
+                if *netns != 0 && bare.contains(&format!("iface:{name}")) =>
+            {
+                Some(*netns)
+            }
+            _ => None,
+        })
+    });
+    if let Some(netns) = recorder {
+        DRAWN_AS.store(netns, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn own_netns() -> u64 {
+    let drawn_as = DRAWN_AS.load(std::sync::atomic::Ordering::Relaxed);
+    if drawn_as != 0 {
+        return drawn_as;
+    }
     static OWN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *OWN.get_or_init(|| {
         std::fs::read_link("/proc/self/ns/net")

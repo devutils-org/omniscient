@@ -472,6 +472,20 @@ fn network(ctx: &Ctx<'_>) -> Band {
 /// names the interface the machine's column measured, as a file's
 /// `blk_devs` names its device. A row with no route carries none, and ties
 /// nothing.
+/// The series key an interface was written under, as the recorder spelled
+/// it: with `@netns:` when the interface was not in the recorder's own
+/// namespace, bare when it was. Which of the two the recording holds says
+/// which, wherever the recording is drawn -- the viewer's own namespace,
+/// which `Key`'s spelling is relative to, is no part of it.
+fn sink_key(sinks: &[Sink], netns: u64, name: &str) -> String {
+    let qualified = format!("iface:{name}@netns:{netns}");
+    if netns == 0 || !sinks.iter().any(|sink| sink.key == qualified) {
+        format!("iface:{name}")
+    } else {
+        qualified
+    }
+}
+
 fn route(band: &mut Band, ctx: &Ctx<'_>, sockets: &[&Results]) {
     let mut fed: BTreeMap<String, (BTreeSet<u64>, u64)> = BTreeMap::new();
     for results in sockets {
@@ -498,7 +512,7 @@ fn route(band: &mut Band, ctx: &Ctx<'_>, sockets: &[&Results]) {
             // The key names the interface as the machine's source keys it,
             // its namespace included; the attribute is the bare name.
             let Some(iface) = event.keys.iter().find_map(|key| match key {
-                Key::Iface { .. } => Some(key.to_string()),
+                Key::Iface { netns, name, .. } => Some(sink_key(&band.sinks, *netns, name)),
                 _ => None,
             }) else {
                 continue;

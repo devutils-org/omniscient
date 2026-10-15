@@ -45,6 +45,9 @@ pub fn fixture(name: &str) -> Data {
     // The path a fixture was read from differs between checkouts; the
     // snapshot must not.
     data.origin = format!("fixture {name}");
+    // And the namespace it was recorded in differs between machines; the
+    // snapshot must not either.
+    crate::model::draw_as_recorded(&data);
     data
 }
 

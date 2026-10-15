@@ -2654,6 +2654,13 @@ fn batch_number(value: f64) -> String {
     format!("{value:.4}")
 }
 
+/// `text` as `#` lines, one per line of it: a refusal that lists what each
+/// backend lacked spans several, and a line without its `#` would read as a
+/// row of the table.
+fn commented(text: &str) -> String {
+    text.lines().map(|line| format!("# {line}\n")).collect()
+}
+
 /// The `system` view as text a script parses, `top -b`'s use: what the
 /// machine's panels hold, one `machine` line per series, then every task,
 /// sorted as `sort` says (`cpu`, `memory`, `faults`, `io`, `runqueue`), a
@@ -2690,7 +2697,7 @@ pub fn batch(data: &Data, sort: &str) -> Result<String, String> {
         match served(data, label, source) {
             None => {}
             Some(Held::Refused(refusal)) => {
-                out.push_str(&format!("# {source} refused: {}\n", refusal.reason));
+                out.push_str(&commented(&format!("{source} refused: {}", refusal.reason)));
             }
             Some(Held::Served(results, trust, _)) => {
                 for sentence in trust.sentences() {
@@ -2730,10 +2737,10 @@ pub fn batch(data: &Data, sort: &str) -> Result<String, String> {
     }
     let procs = processes(data, sort);
     if let Some(refusal) = &procs.refused {
-        out.push_str(&format!(
-            "# {} refused: {}\n",
+        out.push_str(&commented(&format!(
+            "{} refused: {}",
             refusal.source, refusal.reason
-        ));
+        )));
     }
     for (col, trust) in &procs.columns {
         let Some((head, _)) = BATCH.iter().find(|(_, held)| held == col) else {
@@ -2897,6 +2904,18 @@ fn draw_cost(frame: &mut Frame<'_>, area: Rect, data: &Data) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refusal listing what each backend lacked is several lines, and each
+    /// stays a comment: a script reading the table sees no row of it.
+    #[test]
+    fn a_refusal_of_several_lines_is_a_comment_on_each() {
+        let text = commented(
+            "mem.pressure refused: `mem.pressure` has no viable backend on this machine:\n  \
+             fs:proc: /proc/pressure/memory: missing\n  fs:cgroup: cannot attribute per system",
+        );
+        assert_eq!(text.lines().count(), 3, "{text}");
+        assert!(text.lines().all(|line| line.starts_with("# ")), "{text}");
+    }
     use crate::model::{Attr, AttrValue, Key, Live, Run};
     use crate::snapshot::{draw, fixture, text};
     use ratatui::crossterm::event::KeyModifiers;
