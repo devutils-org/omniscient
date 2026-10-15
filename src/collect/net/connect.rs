@@ -9,8 +9,8 @@
 
 use std::time::Duration as StdDuration;
 
-use crate::bpf::attach::fentry::Narrowing;
 use crate::bpf::attach::net_connect::{Connect, ConnectProgram, Outcome};
+use crate::bpf::Whose;
 use crate::collect::io::vfs::narrowing;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
@@ -36,7 +36,7 @@ impl Prepared for Prepare {
         }
         Ok(Box::new(ConnectCollector {
             id: CollectorId::new("net.tcp.connect/bpf:fentry"),
-            narrowing: narrowing("net.tcp.connect", target)?,
+            whose: whose(target)?,
             program: None,
             losses: Losses::default(),
             predicate: self.filter,
@@ -51,9 +51,25 @@ impl Prepared for Prepare {
     }
 }
 
+/// Whose handshakes the program keeps. A cgroup is compared in the program,
+/// against the task that called `connect`; every other target is narrowed as
+/// the other fentry sources narrow it, and refused where they refuse it.
+fn whose(target: &Target) -> Result<Whose, String> {
+    match target {
+        Target::Cgroup(_) => Whose::of(target),
+        _ => narrowing("net.tcp.connect", target).map(|narrowing| {
+            match (narrowing.tgid, narrowing.tid) {
+                (Some(tgid), _) => Whose::Process(tgid),
+                (None, Some(tid)) => Whose::Thread(tid),
+                (None, None) => Whose::Any,
+            }
+        }),
+    }
+}
+
 pub struct ConnectCollector {
     id: CollectorId,
-    narrowing: Narrowing,
+    whose: Whose,
     program: Option<ConnectProgram>,
     losses: Losses,
     predicate: Option<FilterExpr>,
@@ -180,7 +196,7 @@ impl Collector for ConnectCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = ConnectProgram::load(self.narrowing)?;
+        let program = ConnectProgram::load(self.whose)?;
         self.v6 = program.v6;
         self.program = Some(program);
         Ok(())

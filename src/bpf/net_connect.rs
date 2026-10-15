@@ -34,11 +34,12 @@ use std::os::fd::AsRawFd;
 #[path = "net_accept.rs"]
 pub mod accept;
 
-use crate::bpf::attach::fentry::{
-    self, Function, Link, Narrowing, Side, BPF_H, GET_SOCKET_COOKIE, SKIP,
-};
+use crate::bpf::attach::fentry::{self, Function, Link, Side, BPF_H, GET_SOCKET_COOKIE, SKIP};
 use crate::bpf::btf::Btf;
-use crate::bpf::insn::{self, count_drop, helper, read_field, Insn, Program, BPF_DW, BPF_W, R10};
+use crate::bpf::insn::{
+    self, count_drop, helper, push_current_filter, read_field, Insn, Program, Whose, BPF_DW, BPF_W,
+    R10,
+};
 use crate::bpf::map::{map_failure, Counters, Hash};
 use crate::bpf::ring::{ring_bytes, RingBuffer};
 use crate::bpf::syscall::{self, BPF_MAP_TYPE_RINGBUF};
@@ -234,26 +235,24 @@ impl Offsets {
 
 /// The entry half of `tcp_v4_connect` or `tcp_v6_connect`: stamp the socket
 /// with the moment and the task.
+///
+/// The connect call runs in the task that made it, so whose it is -- a
+/// process, a thread, a cgroup or anything below it -- is asked of the current
+/// task, here and only here: the closing halves run in softirq context, where
+/// the current task is whoever was interrupted, and they close only what this
+/// half stamped.
 fn open_instructions(
     function: &Function,
-    narrowing: Narrowing,
+    whose: Whose,
     pending_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
+    // The pending key's slot is the filter's scratch: it is written after.
+    push_current_filter(&mut program, whose, PEND_KEY, SKIP);
     program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
-    program.push(Insn::mov64_reg(7, 0));
-    if let Some(tgid) = narrowing.tgid {
-        program.push(Insn::mov64_reg(1, 7));
-        program.push(Insn::rsh64_imm(1, 32));
-        program.jump_to(SKIP, Insn::jne_imm(1, tgid as i32, 0));
-    }
-    program.push(Insn::stx(BPF_DW, R10, PEND_VALUE + PEND_WHO, 7));
-    if let Some(tid) = narrowing.tid {
-        program.push(Insn::ldx(BPF_W, 1, R10, PEND_VALUE + PEND_WHO));
-        program.jump_to(SKIP, Insn::jne_imm(1, tid as i32, 0));
-    }
+    program.push(Insn::stx(BPF_DW, R10, PEND_VALUE + PEND_WHO, 0));
     program.push(Insn::ldx(BPF_DW, 1, 6, function.arg(0)));
     program.push(Insn::stx(BPF_DW, R10, PEND_KEY, 1));
     program.push(Insn::st_imm(BPF_DW, R10, PEND_VALUE + PEND_COMM, 0));
@@ -430,7 +429,7 @@ pub struct ConnectProgram {
 }
 
 impl ConnectProgram {
-    pub fn load(narrowing: Narrowing) -> Result<Self, String> {
+    pub fn load(whose: Whose) -> Result<Self, String> {
         let btf = crate::bpf::kernel_btf()?;
         let offsets = Offsets::read(btf)?;
         let v4 = fentry::expect("tcp_v4_connect", &CONNECT_SIGNATURES)?;
@@ -466,14 +465,14 @@ impl ConnectProgram {
                 close_instructions(&v4, Close::Returned, &offsets, p, r, d)?,
             ),
         ];
-        let mut opens = vec![(&v4, open_instructions(&v4, narrowing, p, d)?)];
+        let mut opens = vec![(&v4, open_instructions(&v4, whose, p, d)?)];
         if let Some(v6) = v6.as_ref() {
             closes.push((
                 v6,
                 Side::Exit,
                 close_instructions(v6, Close::Returned, &offsets, p, r, d)?,
             ));
-            opens.push((v6, open_instructions(v6, narrowing, p, d)?));
+            opens.push((v6, open_instructions(v6, whose, p, d)?));
         }
         // Every close before any open, for the reason `HistogramProgram::load`
         // gives.
@@ -656,6 +655,30 @@ mod tests {
                 .iter()
                 .any(|insn| insn.code == 0x85 && insn.imm == GET_SOCKET_COOKIE));
         }
-        assert!(open_instructions(&v4, Narrowing::default(), 3, 5).is_ok());
+        assert!(open_instructions(&v4, Whose::Any, 3, 5).is_ok());
+    }
+
+    /// A cgroup target is compared in the opening half, by the current task's
+    /// ancestor at the cgroup's level, and a whole-machine one asks nothing.
+    #[test]
+    fn a_cgroup_target_is_compared_where_the_connect_call_runs() {
+        if crate::bpf::kernel_btf().is_err() {
+            eprintln!("skipped: no kernel BTF");
+            return;
+        }
+        let v4 = fentry::expect("tcp_v4_connect", &CONNECT_SIGNATURES).expect("tcp_v4_connect");
+        let calls = |whose| {
+            open_instructions(&v4, whose, 3, 5)
+                .expect("a program")
+                .iter()
+                .filter(|insn| {
+                    insn.code == 0x85 && insn.imm == helper::GET_CURRENT_ANCESTOR_CGROUP_ID
+                })
+                .count()
+        };
+        let cgroup = Whose::Cgroup(insn::Cgroup { id: 4242, level: 2 });
+        assert_eq!(calls(cgroup), 1);
+        assert_eq!(calls(Whose::Any), 0);
+        assert_eq!(calls(Whose::Process(7)), 0);
     }
 }

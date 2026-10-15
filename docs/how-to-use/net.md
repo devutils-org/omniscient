@@ -40,6 +40,9 @@ omn trace net.sockets -m snapshot -e raw --system
 ## Targets
 
 - `net.socket`, `net.tcp.connect` take a launch, `--pid`, `--tid` natively.
+  `net.tcp.connect` also takes `--cgroup`, compared in the program against the
+  task that called `connect`, the cgroup and every cgroup below it;
+  `net.socket` refuses a cgroup and says why.
   `net.tcp.accept` keeps the accepts of that one process, not of its children;
   `net.tcp.lifetime` follows the process tree.
 - `net.bytes` per process is **eBPF only**; from `/proc/net/dev` it is per

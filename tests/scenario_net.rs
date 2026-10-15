@@ -4305,8 +4305,8 @@ fn the_fentry_net_sources_refuse_with_the_reason_that_is_actually_missing() {
         "summary",
     ]);
     assert_eq!(code(&counted), 2, "{}", stderr(&counted));
-    for source in ["net.socket", "net.tcp.connect"] {
-        let cgroup = omn(&[
+    let on_cgroup = |source: &str| {
+        omn(&[
             source,
             "--cgroup",
             "/sys/fs/cgroup",
@@ -4316,17 +4316,27 @@ fn the_fentry_net_sources_refuse_with_the_reason_that_is_actually_missing() {
             "100ms",
             "--emit",
             "summary",
-        ]);
-        let complaint = stderr(&cgroup);
-        if code(&cgroup) == 1 {
-            eprintln!("skipped the cgroup refusal of {source}: {complaint}");
-        } else {
-            assert_eq!(code(&cgroup), 3, "{source}: {complaint}");
-            assert!(
-                complaint.contains("bpf_get_current_cgroup_id"),
-                "{complaint}"
-            );
-        }
+        ])
+    };
+    let cgroup = on_cgroup("net.socket");
+    let complaint = stderr(&cgroup);
+    if code(&cgroup) == 1 {
+        eprintln!("skipped the cgroup refusal of net.socket: {complaint}");
+    } else {
+        assert_eq!(code(&cgroup), 3, "net.socket: {complaint}");
+        assert!(
+            complaint.contains("bpf_get_current_cgroup_id"),
+            "{complaint}"
+        );
+    }
+    // `net.tcp.connect` compares the cgroup in its program, against the task
+    // that called `connect`, so the same target is served rather than refused.
+    let cgroup = on_cgroup("net.tcp.connect");
+    let said = stderr(&cgroup);
+    if code(&cgroup) == 1 {
+        eprintln!("skipped net.tcp.connect on a cgroup: {said}");
+    } else {
+        assert_eq!(code(&cgroup), 0, "net.tcp.connect: {said}");
     }
     let bare = fx_scratch("omn-net-without-capabilities");
     std::fs::copy(BINARY, &bare).expect("a copy of the binary");
