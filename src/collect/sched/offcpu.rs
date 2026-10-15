@@ -35,9 +35,8 @@ use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::STACK_ID_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
-use crate::perf::UserRegs;
 use crate::request::{Mode, Target};
-use crate::stack::unwind::{Cfi, Debuginfod, NameOrigin};
+use crate::stack::unwind::{Debuginfod, NameOrigin};
 use crate::stack::{Frame, RawStack, Symbolizer};
 
 /// How often the totals are drained.
@@ -124,19 +123,8 @@ pub struct OffCpuCollector {
     /// One symbolizer per process seen, built lazily. A system-wide run sees
     /// many, and each carries that process's own mappings.
     symbolizers: HashMap<i32, Symbolizer>,
-    /// One unwinder over each process's call frame information, beside its
-    /// symbolizer, where the program reads the user link register: what says
-    /// whether the register is the leaf's caller (`bpf::offcpu`'s `KEY_LR`).
-    cfis: HashMap<i32, Cfi>,
-    /// Whether the program reads the user link register at all.
-    leaf_lr: bool,
-    /// The id each `(stack, link register)` pair was given: the kernel's own
-    /// where the register added no frame, a fresh one above every kernel id
-    /// where it put the leaf's caller back.
-    resolved: HashMap<(u32, u64), u64>,
-    /// Blocks whose stack had a frameless leaf's caller put back from the link
-    /// register.
-    leaf_callers: u64,
+    /// The callers frameless leaves left in the user link register.
+    leaf: super::LeafCallers,
     /// Processes the target started that were no longer followed at the last
     /// tick: their symbolizers are dropped at this one, after the drain that
     /// held their last blocks has named them.
@@ -182,10 +170,7 @@ impl OffCpuCollector {
             window_opened_ns: 0,
             stacks: BTreeMap::new(),
             symbolizers: HashMap::new(),
-            cfis: HashMap::new(),
-            leaf_lr: false,
-            resolved: HashMap::new(),
-            leaf_callers: 0,
+            leaf: super::LeafCallers::default(),
             leaving: BTreeSet::new(),
             left_origins: BTreeMap::new(),
             unwalkable: 0,
@@ -251,15 +236,13 @@ impl OffCpuCollector {
                 .filter(|entry| {
                     entry
                         .stack
-                        .is_some_and(|id| !self.resolved.contains_key(&(id, entry.lr)))
+                        .is_some_and(|id| !self.leaf.placed(id, entry.lr))
                 })
                 .map(|entry| entry.tgid)
                 .collect();
             for tgid in unresolved {
                 self.symbolizer(tgid).refresh();
-                if let Some(cfi) = self.cfi(tgid) {
-                    cfi.refresh();
-                }
+                self.leaf.refresh(tgid);
             }
         }
 
@@ -337,9 +320,7 @@ impl OffCpuCollector {
             if !fresh {
                 symbolizer.refresh();
             }
-            if let Some(cfi) = self.cfi(tgid) {
-                cfi.refresh();
-            }
+            self.leaf.refresh(tgid);
         }
     }
 
@@ -357,7 +338,7 @@ impl OffCpuCollector {
             if followed.contains(&(tgid as u32)) {
                 continue;
             }
-            self.cfis.remove(&tgid);
+            self.leaf.retain(|kept| kept != tgid);
             if let Some(symbolizer) = self.symbolizers.remove(&tgid) {
                 for (path, origin) in symbolizer.origins() {
                     self.left_origins
@@ -380,41 +361,6 @@ impl OffCpuCollector {
         self.symbolizers
             .entry(tgid as i32)
             .or_insert_with(|| Symbolizer::with_debuginfod_kernel(tgid as i32, debuginfod))
-    }
-
-    /// The call frame unwinder of one process, built the first time it is
-    /// asked for; `None` where the program reads no link register.
-    fn cfi(&mut self, tgid: u32) -> Option<&mut Cfi> {
-        if !self.leaf_lr {
-            return None;
-        }
-        // The kernel's id, read through this process's `/proc`: the two differ
-        // in a pid namespace.
-        let ours = crate::bpf::pidns::ours(tgid).map_or(tgid as i32, |id| id as i32);
-        Some(
-            self.cfis
-                .entry(tgid as i32)
-                .or_insert_with(|| Cfi::for_process(ours)),
-        )
-    }
-
-    /// The caller of the stack's leaf when the kernel's walk skipped it and
-    /// the link register holds it: the leaf's own unwind rule, given no stack
-    /// to read, finds a return address only where it is still in the
-    /// register, which is a function that set up no frame.
-    fn leaf_caller(&mut self, tgid: u32, addresses: &[u64], lr: u64) -> Option<u64> {
-        let leaf = *addresses.first()?;
-        if lr == 0 {
-            return None;
-        }
-        let regs = UserRegs {
-            ip: leaf,
-            sp: 0,
-            fp: 0,
-            lr,
-        };
-        let caller = self.cfi(tgid)?.caller(regs, &[])?;
-        (caller != 0 && addresses.get(1) != Some(&caller)).then_some(caller)
     }
 
     /// Symbolizes the stack behind an entry, once per distinct id.
@@ -444,11 +390,8 @@ impl OffCpuCollector {
                 return None;
             }
         };
-        if let Some(resolved) = self.resolved.get(&(id, entry.lr)) {
-            if *resolved > u64::from(u32::MAX) {
-                self.leaf_callers += entry.blocks;
-            }
-            return Some(*resolved);
+        if let Some(resolved) = self.leaf.cached(id, entry.lr, entry.blocks) {
+            return Some(resolved);
         }
         let program = self.program.as_ref()?;
         let Some(mut addresses) = program.stack(id) else {
@@ -456,16 +399,9 @@ impl OffCpuCollector {
             return None;
         };
         let truncated = addresses.len() >= program.stack_depth();
-        let caller = self.leaf_caller(entry.tgid, &addresses, entry.lr);
-        let resolved = match caller {
-            Some(caller) => {
-                addresses.insert(1, caller);
-                self.leaf_callers += entry.blocks;
-                u64::from(u32::MAX) + 1 + self.resolved.len() as u64
-            }
-            None => u64::from(id),
-        };
-        self.resolved.insert((id, entry.lr), resolved);
+        let (resolved, recovered) =
+            self.leaf
+                .place(entry.tgid, id, entry.lr, entry.blocks, &mut addresses);
         if self.stacks.contains_key(&resolved) {
             return Some(resolved);
         }
@@ -478,7 +414,7 @@ impl OffCpuCollector {
             user: addresses,
             elsewhere: Vec::new(),
         });
-        if caller.is_some() {
+        if recovered {
             stack.frames[1].recovered = true;
         }
         let mut frames: Vec<String> = stack.frames.iter().rev().map(Frame::label).collect();
@@ -615,7 +551,7 @@ impl Collector for OffCpuCollector {
             .extend(program.entries_missing().map(str::to_owned));
         self.notes
             .extend(program.leaf_lr_missing().map(str::to_owned));
-        self.leaf_lr = cfg!(target_arch = "aarch64") && program.leaf_lr_missing().is_none();
+        self.leaf.enable(program.leaf_lr_missing().is_none());
         self.program = Some(program);
         // Optional: without it a row keeps the name its task had when the row
         // was made, which for a launched program's first rows is this tool's.
@@ -757,15 +693,7 @@ impl Collector for OffCpuCollector {
                 self.evicted_stacks
             ));
         }
-        if self.leaf_callers > 0 {
-            notes.push(format!(
-                "{} blocks were made from a function that sets up no frame, whose caller the \
-                 kernel's walk skips: it was put back from the user link register, where the \
-                 function's own unwind rule says the return address still is, and is marked as \
-                 recovered",
-                self.leaf_callers
-            ));
-        }
+        notes.extend(self.leaf.note("blocks"));
         notes
     }
 }

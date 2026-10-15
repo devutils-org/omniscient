@@ -90,6 +90,8 @@ pub struct FutexCollector {
     notes: Vec<String>,
     stacks: BTreeMap<u64, Vec<String>>,
     symbolizers: HashMap<i32, Symbolizer>,
+    /// The callers frameless leaves left in the user link register.
+    leaf: super::LeafCallers,
     /// Processes whose symbolizer outlived their place in the followed set
     /// at the last tick, dropped at the next one; see `retire_symbolizers`.
     leaving: Vec<i32>,
@@ -115,6 +117,7 @@ impl FutexCollector {
             notes: Vec::new(),
             stacks: BTreeMap::new(),
             symbolizers: HashMap::new(),
+            leaf: super::LeafCallers::default(),
             leaving: Vec::new(),
             wants_stacks,
             unwalkable: 0,
@@ -204,7 +207,7 @@ impl FutexCollector {
                 event.attrs.push(Attr::uint("ppid", u64::from(ppid)));
             }
             if let Some(id) = self.resolve_stack(&row) {
-                event.attrs.push(Attr::uint(STACK_ID_ATTR, u64::from(id)));
+                event.attrs.push(Attr::uint(STACK_ID_ATTR, id));
             }
             events.push(event);
         }
@@ -229,9 +232,14 @@ impl FutexCollector {
         followed.sort_unstable();
         followed.dedup();
         super::refresh_followed_symbols(&mut self.symbolizers, &mut self.leaving, &followed);
+        for &tgid in &followed {
+            self.leaf.refresh(tgid);
+        }
+        let symbolizers = &self.symbolizers;
+        self.leaf.retain(|tgid| symbolizers.contains_key(&tgid));
     }
 
-    fn resolve_stack(&mut self, row: &FutexWait) -> Option<u32> {
+    fn resolve_stack(&mut self, row: &FutexWait) -> Option<u64> {
         if !self.wants_stacks {
             return None;
         }
@@ -242,30 +250,39 @@ impl FutexCollector {
                 return None;
             }
         };
-        if self.stacks.contains_key(&u64::from(id)) {
-            return Some(id);
+        if let Some(resolved) = self.leaf.cached(id, row.lr, row.count) {
+            return Some(resolved);
         }
         let program = self.program.as_ref()?;
-        let Some(addresses) = program.stack(id) else {
+        let Some(mut addresses) = program.stack(id) else {
             self.evicted_stacks += row.count;
             return None;
         };
         let truncated = addresses.len() >= program.stack_depth();
+        let (resolved, recovered) =
+            self.leaf
+                .place(row.tgid, id, row.lr, row.count, &mut addresses);
+        if self.stacks.contains_key(&resolved) {
+            return Some(resolved);
+        }
         let symbolizer = self
             .symbolizers
             .entry(row.tgid as i32)
             .or_insert_with(|| Symbolizer::for_kernel_process(row.tgid as i32));
-        let stack = symbolizer.symbolize(&RawStack {
+        let mut stack = symbolizer.symbolize(&RawStack {
             kernel: Vec::new(),
             user: addresses,
             elsewhere: Vec::new(),
         });
+        if recovered {
+            stack.frames[1].recovered = true;
+        }
         let mut frames: Vec<String> = stack.frames.iter().rev().map(Frame::label).collect();
         if truncated {
             frames.insert(0, "[truncated]".to_owned());
         }
-        self.stacks.insert(u64::from(id), frames);
-        Some(id)
+        self.stacks.insert(resolved, frames);
+        Some(resolved)
     }
 
     fn absorb_drops(&mut self) {
@@ -388,7 +405,11 @@ impl Collector for FutexCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(FutexProgram::load(self.whose)?);
+        let program = FutexProgram::load(self.whose)?;
+        self.notes
+            .extend(program.leaf_lr_missing().map(str::to_owned));
+        self.leaf.enable(program.leaf_lr_missing().is_none());
+        self.program = Some(program);
         self.window_opened_ns = monotonic_ns();
         Ok(())
     }
@@ -455,6 +476,7 @@ impl Collector for FutexCollector {
                 self.evicted_stacks
             ));
         }
+        notes.extend(self.leaf.note("futex waits"));
         notes
     }
 }
@@ -471,6 +493,7 @@ mod tests {
             command: 9,
             bucket: 20,
             stack: None,
+            lr: 0,
             count: 4,
             total_ns: 3_000_000,
             first_ns: 0,

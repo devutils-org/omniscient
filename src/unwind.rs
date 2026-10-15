@@ -682,6 +682,9 @@ pub struct Cfi {
     fruitless_rereads: u32,
     /// Modules whose file could not be read, by path: not retried.
     unreadable: BTreeSet<PathBuf>,
+    /// The mappings last read by [`Cfi::remember`], for a module loaded only
+    /// when an address in it is asked about.
+    remembered: Vec<Region>,
 }
 
 impl Cfi {
@@ -695,6 +698,7 @@ impl Cfi {
             loaded: BTreeMap::new(),
             unreadable: BTreeSet::new(),
             fruitless_rereads: 0,
+            remembered: Vec::new(),
         };
         // Not read now: a launched target is still a fork of this process
         // waiting at the gate when its unwinder is built, and its maps are
@@ -737,6 +741,39 @@ impl Cfi {
             self.add(region);
         }
         changed || self.loaded.len() != before
+    }
+
+    /// Reads the process's mappings and keeps them, loading no module: the
+    /// cheap half of [`Cfi::refresh`], for a caller that asks about one
+    /// address in a while and must still have the mappings once the process
+    /// has exited. Keeps the last read that had any.
+    pub fn remember(&mut self) {
+        let regions = read_maps(self.pid);
+        if !regions.is_empty() {
+            self.remembered = regions;
+        }
+    }
+
+    /// Loads the one module `addr` falls in, from the mappings remembered or,
+    /// where none are, read now. A machine-wide run meets every process on the
+    /// machine, and loading every module each of them maps -- reading each
+    /// file and copying its text -- to ask about one leaf was most of what
+    /// asking for stacks cost under load.
+    pub fn load_covering(&mut self, addr: u64) {
+        if self.covers(addr) {
+            return;
+        }
+        if self.remembered.is_empty() {
+            self.remember();
+        }
+        let region = self
+            .remembered
+            .iter()
+            .find(|region| region.start <= addr && addr < region.end)
+            .cloned();
+        if let Some(region) = region {
+            self.add(&region);
+        }
     }
 
     /// Whether `addr` is in a module added.

@@ -114,6 +114,131 @@ pub(crate) fn whose(target: &Target, why: &str) -> Result<Whose, String> {
     })
 }
 
+/// The callers a frameless leaf left in the user link register, put back into
+/// the user stacks the kernel walked (`bpf::sched_common::push_user_lr`).
+///
+/// One call frame unwinder per process, built beside its symbolizer: given the
+/// leaf and the register and no stack to read, the leaf's own unwind rule
+/// finds a return address only where it is still in the register, which is a
+/// function that set up no frame. Only then is the frame put back, and it is
+/// marked recovered. A stack is given the kernel's id where the register added
+/// nothing and a fresh one above every kernel id where it did.
+#[derive(Default)]
+pub(crate) struct LeafCallers {
+    /// Whether the program reads the register at all.
+    enabled: bool,
+    cfis: std::collections::HashMap<i32, crate::stack::unwind::Cfi>,
+    resolved: std::collections::HashMap<(u32, u64), u64>,
+    /// Occurrences whose stack had a caller put back.
+    recovered: u64,
+}
+
+impl LeafCallers {
+    /// Recovering, or not, by what the loaded program reads.
+    pub(crate) fn enable(&mut self, program_reads_lr: bool) {
+        self.enabled = cfg!(target_arch = "aarch64") && program_reads_lr;
+    }
+
+    /// The unwinder of one process, by the kernel's id, built the first time
+    /// it is asked for; `None` where nothing is recovered.
+    fn cfi(&mut self, kernel_tgid: u32) -> Option<&mut crate::stack::unwind::Cfi> {
+        if !self.enabled {
+            return None;
+        }
+        // Read through this process's `/proc`, which numbers the task by its
+        // own namespace.
+        let ours = crate::bpf::pidns::ours(kernel_tgid).map_or(kernel_tgid as i32, |id| id as i32);
+        Some(
+            self.cfis
+                .entry(kernel_tgid as i32)
+                .or_insert_with(|| crate::stack::unwind::Cfi::for_process(ours)),
+        )
+    }
+
+    /// Reads a process's mappings again, while it still has some: kept, and
+    /// a module loaded from them only when a leaf in it is placed.
+    pub(crate) fn refresh(&mut self, kernel_tgid: u32) {
+        if let Some(cfi) = self.cfi(kernel_tgid) {
+            cfi.remember();
+        }
+    }
+
+    /// Keeps the unwinders of the processes `keep` answers for.
+    pub(crate) fn retain(&mut self, keep: impl Fn(i32) -> bool) {
+        self.cfis.retain(|tgid, _| keep(*tgid));
+    }
+
+    /// Whether a `(stack, register)` pair was placed already.
+    pub(crate) fn placed(&self, stack: u32, lr: u64) -> bool {
+        self.resolved.contains_key(&(stack, lr))
+    }
+
+    /// The id a pair placed before was given, counting its `count`
+    /// occurrences when it carried a recovered caller.
+    pub(crate) fn cached(&mut self, stack: u32, lr: u64, count: u64) -> Option<u64> {
+        let resolved = *self.resolved.get(&(stack, lr))?;
+        if resolved > u64::from(u32::MAX) {
+            self.recovered += count;
+        }
+        Some(resolved)
+    }
+
+    /// Places a pair the first time: puts the leaf's caller back into
+    /// `addresses`, leaf first, where the register holds it, and answers the
+    /// id to give the stack and whether a frame was put back (at position 1).
+    pub(crate) fn place(
+        &mut self,
+        kernel_tgid: u32,
+        stack: u32,
+        lr: u64,
+        count: u64,
+        addresses: &mut Vec<u64>,
+    ) -> (u64, bool) {
+        let caller = self.caller(kernel_tgid, addresses, lr);
+        let resolved = match caller {
+            Some(caller) => {
+                addresses.insert(1, caller);
+                self.recovered += count;
+                u64::from(u32::MAX) + 1 + self.resolved.len() as u64
+            }
+            None => u64::from(stack),
+        };
+        self.resolved.insert((stack, lr), resolved);
+        (resolved, caller.is_some())
+    }
+
+    fn caller(&mut self, kernel_tgid: u32, addresses: &[u64], lr: u64) -> Option<u64> {
+        let leaf = *addresses.first()?;
+        if lr == 0 {
+            return None;
+        }
+        let regs = crate::perf::UserRegs {
+            ip: leaf,
+            sp: 0,
+            fp: 0,
+            lr,
+        };
+        let cfi = self.cfi(kernel_tgid)?;
+        cfi.load_covering(leaf);
+        let caller = cfi.caller(regs, &[])?;
+        (caller != 0 && addresses.get(1) != Some(&caller)).then_some(caller)
+    }
+
+    /// What the run says about it, with `what` naming an occurrence
+    /// ("blocks", "waits").
+    pub(crate) fn note(&self, what: &str) -> Option<String> {
+        (self.recovered > 0).then(|| {
+            format!(
+                "{} {what} were made from a function that sets up no frame, whose caller the \
+                 kernel's walk skips: it was put back from the user link register, where the \
+                 function's own unwind rule says the return address still is, and is marked as \
+                 recovered",
+                self.recovered
+            )
+        })
+    }
+}
+
 /// Reads the mappings of every process a target's waits can come from, every
 /// tick, and drops the symbolizers of the ones that have left.
 ///

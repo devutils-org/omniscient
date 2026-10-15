@@ -14021,7 +14021,12 @@ Still open, each a defect or a question:
   collector asks the leaf's own CFI, given no stack bytes, whether the
   return address is still in the register, and puts the frame back marked
   `[recovered]` only then. The three tests pass. `sched.futex` and
-  `sched.lock` walk user stacks the same way and do not read the LR yet.
+  `sched.lock` read it too since (`bpf::sched_common::push_user_lr`,
+  `collect::sched::LeafCallers`): a contended python lock, 70 futex waits
+  with their caller put back. The unwinder loads only the module a leaf is
+  in, from the mappings remembered each tick: loading every module of every
+  process doubled `asking_for_stacks_costs_the_stacks_...` under the suite's
+  load (1.08 s against 0.58 s), and is in the noise alone.
 - ~~**`net.request`'s network rows** (`net_rx`, `net_tx`) are empty here: six
   `vertical` tests and `view_workloads`' `a004`.~~ -- **fixed** (2026-10-15).
   A defect, not the machine: this clang-built kernel inlined

@@ -35,9 +35,9 @@ use super::btf::Btf;
 use super::insn::{helper, Insn, Program, Whose, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows, StackTraces};
 use super::sched_common::{
-    bucket_low_ns, count_drop, count_update_failure, push_current_followed_filter,
-    push_log2_bucket, text_of, Descendants, Followed, Log2Labels, BPF_F_USER_STACK, BPF_NOEXIST,
-    E2BIG, EEXIST,
+    bucket_low_ns, count_drop, count_update_failure, load_reading_user_lr,
+    push_current_followed_filter, push_log2_bucket, push_user_lr, text_of, Descendants, Followed,
+    Log2Labels, BPF_F_USER_STACK, BPF_NOEXIST, E2BIG, EEXIST,
 };
 use super::syscall;
 
@@ -89,16 +89,16 @@ const DROP_BACKWARDS: u32 = 6;
 const COUNTER_SLOTS: u32 = 7;
 
 /// Where each map's key and value live on the program's stack.
-const ROW_VALUE: i16 = -120;
-const ROW_KEY: i16 = -80;
+const ROW_VALUE: i16 = -128;
+const ROW_KEY: i16 = -88;
 const WAIT_VALUE: i16 = -56;
 const WAIT_KEY: i16 = -40;
 const DROP_KEY: i16 = -32;
 /// Where the program keeps the row map it looked up through the generation
 /// slot, once per run; see `map::select_rows`.
-const ROWS_SLOT: i16 = -128;
+const ROWS_SLOT: i16 = -136;
 /// Eight bytes for a cgroup target's comparison, `insn::push_current_filter`.
-const FILTER_SCRATCH: i16 = -136;
+const FILTER_SCRATCH: i16 = -144;
 
 /// The layout of a row key, as byte offsets within it.
 const KEY_TID: i16 = 0;
@@ -115,7 +115,12 @@ const KEY_BUCKET: i16 = 12;
 /// kernel saying it could not walk the stack, which is the ordinary answer for
 /// a kernel worker and not an error to hide.
 const KEY_STACK: i16 = 16;
-const ROW_KEY_BYTES: usize = 20;
+/// Four bytes of padding, written as zero: the kernel hashes them too.
+const KEY_PAD: i16 = 20;
+/// The user link register the wait ended with, on aarch64, or zero; the
+/// caller a frameless leaf left there. See `sched_common::push_user_lr`.
+const KEY_LR: i16 = 24;
+const ROW_KEY_BYTES: usize = 32;
 
 /// The layout of a row value.
 const VALUE_COUNT: i16 = 0;
@@ -171,6 +176,9 @@ pub struct LockWait {
     pub bucket: u32,
     /// The stack the kernel interned, or none when it could not walk one.
     pub stack: Option<u32>,
+    /// The user link register the wait ended with, on aarch64, or zero; see
+    /// `KEY_LR`.
+    pub lr: u64,
     pub count: u64,
     pub total_ns: u64,
     /// When the first of this row's window began, which is what the event is
@@ -237,6 +245,7 @@ impl LockWait {
             // A negative id is the kernel's errno for a stack it could not
             // walk, and it must not be handed on as a stack number.
             stack: (stack >= 0).then_some(stack as u32),
+            lr: long(key, KEY_LR as usize),
             count: long(value, VALUE_COUNT as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
             first_ns: long(value, VALUE_FIRST_NS as usize),
@@ -369,6 +378,7 @@ fn end_instructions(
     rows_fd: i32,
     drops_fd: i32,
     stacks_fd: i32,
+    leaf_lr: bool,
 ) -> Result<Vec<Insn>, String> {
     check(btf, "contention_end", &END_SIGNATURE)?;
 
@@ -425,6 +435,8 @@ fn end_instructions(
     program.push(Insn::mov64_imm(3, BPF_F_USER_STACK));
     program.push(Insn::call(helper::GET_STACKID));
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_STACK, 0));
+    push_user_lr(&mut program, ROW_KEY + KEY_LR, leaf_lr);
+    program.push(Insn::st_imm(BPF_W, R10, ROW_KEY + KEY_PAD, 0));
 
     push_log2_bucket(&mut program, 9, &LOG2);
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
@@ -531,6 +543,9 @@ pub struct LockProgram {
     rows: Rows,
     drops: Counters,
     stacks: StackTraces,
+    /// Why the user link register is not read, where the architecture has
+    /// one.
+    leaf_lr_missing: Option<String>,
     begin_program: OwnedFd,
     _begin_link: OwnedFd,
     end_program: OwnedFd,
@@ -592,17 +607,22 @@ impl LockProgram {
             .map_err(|error| map_failure("lock stack map", error))?;
 
         let begin = begin_instructions(btf, &followed, waiting.as_raw_fd(), drops.as_raw_fd())?;
-        let end = end_instructions(
-            btf,
-            &followed,
-            waiting.as_raw_fd(),
-            rows.as_raw_fd(),
-            drops.as_raw_fd(),
-            stacks.as_raw_fd(),
-        )?;
-
         let begin_program = load(&begin, "omn_lock_begin")?;
-        let end_program = load(&end, "omn_lock_end")?;
+        let (end_program, leaf_lr_missing) = load_reading_user_lr(
+            "lock",
+            |leaf_lr| {
+                end_instructions(
+                    btf,
+                    &followed,
+                    waiting.as_raw_fd(),
+                    rows.as_raw_fd(),
+                    drops.as_raw_fd(),
+                    stacks.as_raw_fd(),
+                    leaf_lr,
+                )
+            },
+            |instructions| load(instructions, "omn_lock_end"),
+        )?;
 
         // Attached in this order on purpose. A wait recorded by a program whose
         // partner is not attached yet is a wait that is never closed -- it ages
@@ -625,6 +645,7 @@ impl LockProgram {
             rows,
             drops,
             stacks,
+            leaf_lr_missing,
             begin_program,
             _begin_link: begin_link,
             end_program,
@@ -660,6 +681,12 @@ impl LockProgram {
     /// How deep a stack this build asked the kernel to walk, so that a stack
     /// which came back exactly that deep can be reported as truncated rather
     /// than as complete.
+    /// Why the user link register is not read, on aarch64 where it is the
+    /// only place a frameless leaf's caller is.
+    pub fn leaf_lr_missing(&self) -> Option<&str> {
+        self.leaf_lr_missing.as_deref()
+    }
+
     pub fn stack_depth(&self) -> usize {
         self.stacks.depth() as usize
     }
@@ -716,7 +743,7 @@ mod tests {
     }
 
     fn end_program(btf: &Btf, target: Whose) -> Vec<Insn> {
-        end_instructions(btf, &Followed::only(target), 3, 4, 5, 6).expect("a program")
+        end_instructions(btf, &Followed::only(target), 3, 4, 5, 6, true).expect("a program")
     }
 
     /// A wait is the gap between two events, so both programs have to read the
@@ -819,6 +846,8 @@ mod tests {
             (KEY_FLAGS, 4),
             (KEY_BUCKET, 4),
             (KEY_STACK, 4),
+            (KEY_PAD, 4),
+            (KEY_LR, 8),
         ];
         let row_value = [
             (VALUE_COUNT, 8),
@@ -907,6 +936,7 @@ mod tests {
                 flags,
                 bucket: 3,
                 stack: None,
+                lr: 0,
                 count: 1,
                 total_ns: 4,
                 first_ns: 0,
@@ -929,8 +959,8 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program =
-            end_instructions(&btf, &Followed::only(Whose::Any), 3, 4, 5, 6).expect("a program");
+        let program = end_instructions(&btf, &Followed::only(Whose::Any), 3, 4, 5, 6, true)
+            .expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }
 }

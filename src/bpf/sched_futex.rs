@@ -35,9 +35,9 @@ use super::btf::Btf;
 use super::insn::{helper, Insn, Program, Whose, BPF_DW, BPF_W, R10};
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows, StackTraces};
 use super::sched_common::{
-    bucket_low_ns, count_drop, count_update_failure, push_current_followed_filter,
-    push_log2_bucket, read_field, text_of, Descendants, Followed, Log2Labels, BPF_F_USER_STACK,
-    BPF_NOEXIST, E2BIG, EEXIST,
+    bucket_low_ns, count_drop, count_update_failure, load_reading_user_lr,
+    push_current_followed_filter, push_log2_bucket, push_user_lr, read_field, text_of, Descendants,
+    Followed, Log2Labels, BPF_F_USER_STACK, BPF_NOEXIST, E2BIG, EEXIST,
 };
 use super::syscall;
 
@@ -109,14 +109,14 @@ const DROP_BACKWARDS: u32 = 5;
 const COUNTER_SLOTS: u32 = 6;
 
 /// Where each map's key and value live on the program's stack.
-const ROW_VALUE: i16 = -136;
-const ROW_KEY: i16 = -96;
+const ROW_VALUE: i16 = -144;
+const ROW_KEY: i16 = -104;
 const WAIT_VALUE: i16 = -64;
 const WAIT_KEY: i16 = -40;
 const DROP_KEY: i16 = -32;
 /// Where the program keeps the row map it looked up through the generation
 /// slot, once per run; see `map::select_rows`.
-const ROWS_SLOT: i16 = -144;
+const ROWS_SLOT: i16 = -152;
 /// Where the raw second syscall register is read before its flag bits are
 /// stripped. Its own slot, so that stripping does not overwrite a field the
 /// value map is about to carry.
@@ -133,7 +133,12 @@ const KEY_TGID: i16 = 12;
 const KEY_COMMAND: i16 = 16;
 const KEY_BUCKET: i16 = 20;
 const KEY_STACK: i16 = 24;
-const ROW_KEY_BYTES: usize = 28;
+/// Four bytes of padding, written as zero: the kernel hashes them too.
+const KEY_PAD: i16 = 28;
+/// The user link register the wait ended with, on aarch64, or zero; the
+/// caller a frameless leaf left there. See `sched_common::push_user_lr`.
+const KEY_LR: i16 = 32;
+const ROW_KEY_BYTES: usize = 40;
 
 /// The layout of a row value.
 const VALUE_COUNT: i16 = 0;
@@ -185,6 +190,9 @@ pub struct FutexWait {
     pub command: u32,
     pub bucket: u32,
     pub stack: Option<u32>,
+    /// The user link register the wait ended with, on aarch64, or zero; see
+    /// `KEY_LR`.
+    pub lr: u64,
     pub count: u64,
     pub total_ns: u64,
     /// When the first of this row's window began, which is what the event is
@@ -227,6 +235,7 @@ impl FutexWait {
             command: word(key, KEY_COMMAND as usize),
             bucket: word(key, KEY_BUCKET as usize),
             stack: (stack >= 0).then_some(stack as u32),
+            lr: long(key, KEY_LR as usize),
             count: long(value, VALUE_COUNT as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
             first_ns: long(value, VALUE_FIRST_NS as usize),
@@ -374,6 +383,7 @@ fn exit_instructions(
     rows_fd: i32,
     drops_fd: i32,
     stacks_fd: i32,
+    leaf_lr: bool,
 ) -> Result<Vec<Insn>, String> {
     check(btf, "sys_exit", &EXIT_SIGNATURE)?;
 
@@ -426,6 +436,8 @@ fn exit_instructions(
     program.push(Insn::mov64_imm(3, BPF_F_USER_STACK));
     program.push(Insn::call(helper::GET_STACKID));
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_STACK, 0));
+    push_user_lr(&mut program, ROW_KEY + KEY_LR, leaf_lr);
+    program.push(Insn::st_imm(BPF_W, R10, ROW_KEY + KEY_PAD, 0));
 
     push_log2_bucket(&mut program, 9, &LOG2);
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
@@ -515,6 +527,9 @@ pub struct FutexProgram {
     rows: Rows,
     drops: Counters,
     stacks: StackTraces,
+    /// Why the user link register is not read, where the architecture has
+    /// one.
+    leaf_lr_missing: Option<String>,
     enter_program: OwnedFd,
     _enter_link: OwnedFd,
     exit_program: OwnedFd,
@@ -584,17 +599,22 @@ impl FutexProgram {
             .map_err(|error| map_failure("futex stack map", error))?;
 
         let enter = enter_instructions(btf, &followed, waiting.as_raw_fd(), drops.as_raw_fd())?;
-        let exit = exit_instructions(
-            btf,
-            &followed,
-            waiting.as_raw_fd(),
-            rows.as_raw_fd(),
-            drops.as_raw_fd(),
-            stacks.as_raw_fd(),
-        )?;
-
         let enter_program = load(&enter, "omn_futex_in")?;
-        let exit_program = load(&exit, "omn_futex_out")?;
+        let (exit_program, leaf_lr_missing) = load_reading_user_lr(
+            "futex",
+            |leaf_lr| {
+                exit_instructions(
+                    btf,
+                    &followed,
+                    waiting.as_raw_fd(),
+                    rows.as_raw_fd(),
+                    drops.as_raw_fd(),
+                    stacks.as_raw_fd(),
+                    leaf_lr,
+                )
+            },
+            |instructions| load(instructions, "omn_futex_out"),
+        )?;
 
         // Entries before exits: a wait opened by a program whose partner is not
         // attached yet ages out of the map, whereas an exit seen before any
@@ -610,6 +630,7 @@ impl FutexProgram {
             rows,
             drops,
             stacks,
+            leaf_lr_missing,
             enter_program,
             _enter_link: enter_link,
             exit_program,
@@ -642,6 +663,12 @@ impl FutexProgram {
 
     pub fn stack_depth(&self) -> usize {
         self.stacks.depth() as usize
+    }
+
+    /// Why the user link register is not read, on aarch64 where it is the
+    /// only place a frameless leaf's caller is.
+    pub fn leaf_lr_missing(&self) -> Option<&str> {
+        self.leaf_lr_missing.as_deref()
     }
 
     /// How many threads were inside a futex wait when the run ended. Their
@@ -698,7 +725,7 @@ mod tests {
     }
 
     fn exit(btf: &Btf, whose: Whose) -> Vec<Insn> {
-        exit_instructions(btf, &Followed::only(whose), 3, 4, 5, 6).expect("a program")
+        exit_instructions(btf, &Followed::only(whose), 3, 4, 5, 6, true).expect("a program")
     }
 
     /// Both tracepoints fire on every syscall of every process on the machine.
@@ -849,6 +876,8 @@ mod tests {
             (KEY_COMMAND, 4),
             (KEY_BUCKET, 4),
             (KEY_STACK, 4),
+            (KEY_PAD, 4),
+            (KEY_LR, 8),
         ];
         let row_value = [
             (VALUE_COUNT, 8),
@@ -923,6 +952,7 @@ mod tests {
             command,
             bucket: 2,
             stack: None,
+            lr: 0,
             count: 1,
             total_ns: 1,
             first_ns: 0,
@@ -939,7 +969,7 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = exit_instructions(&btf, &Followed::only(Whose::Process(1)), 3, 4, 5, 6)
+        let program = exit_instructions(&btf, &Followed::only(Whose::Process(1)), 3, 4, 5, 6, true)
             .expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }

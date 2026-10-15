@@ -57,6 +57,77 @@ pub const EEXIST: i32 = 17;
 /// `BPF_NOEXIST`: fail rather than overwrite.
 pub const BPF_NOEXIST: i32 = 1;
 
+/// Where aarch64 keeps the link register in the user registers a task entered
+/// the kernel with: `x30` of `user_pt_regs.regs[31]`, the first member of the
+/// kernel's `struct pt_regs`. The layout is the ptrace ABI's, not an internal
+/// one.
+#[cfg(target_arch = "aarch64")]
+const PT_REGS_LR: i32 = 30 * 8;
+
+/// Writes the current task's user link register to the stack at `slot`, or
+/// zero where it is not asked for or this architecture has none.
+///
+/// Why a user stack needs it: the kernel's walk follows frame records, and a
+/// function that sets none up -- glibc enters every blocking syscall through
+/// one, its cancellation helper -- leaves its caller in the link register
+/// alone, so the walk goes from the leaf to the caller's caller. Whether the
+/// register *is* the caller is the leaf's unwind rule's to say, in userspace
+/// (`collect::sched::LeafCallers`); a leaf that keeps a frame leaves a stale
+/// value here, which splits a row by a number userspace then ignores.
+///
+/// `bpf_task_pt_regs` (5.15) of the current task is the user registers it
+/// entered the kernel with, which is what the kernel's own user stack walk
+/// starts from: the two agree about which frame is the leaf. Read with
+/// `bpf_probe_read_kernel`, which writes zero where the read fails. Clobbers
+/// `r0` to `r5`.
+pub fn push_user_lr(program: &mut Program, slot: i16, leaf_lr: bool) {
+    #[cfg(target_arch = "aarch64")]
+    if leaf_lr {
+        program.push(Insn::call(helper::GET_CURRENT_TASK_BTF));
+        program.push(Insn::mov64_reg(1, 0));
+        program.push(Insn::call(helper::TASK_PT_REGS));
+        program.push(Insn::mov64_reg(3, 0));
+        program.push(Insn::add64_imm(3, PT_REGS_LR));
+        program.push(Insn::mov64_reg(1, R10));
+        program.push(Insn::add64_imm(1, i32::from(slot)));
+        program.push(Insn::mov64_imm(2, 8));
+        program.push(Insn::call(helper::PROBE_READ_KERNEL));
+        return;
+    }
+    let _ = leaf_lr;
+    program.push(Insn::st_imm(BPF_DW, R10, slot, 0));
+}
+
+/// Loads a program that walks a user stack, reading the user link register
+/// with it where the architecture has one ([`push_user_lr`]), and without it
+/// where the kernel refuses the read (before 5.15). The second answer is why
+/// it is not read, for the run to say: a blocking call made from a function
+/// that sets up no frame is then missing its caller from every stack.
+pub fn load_reading_user_lr<T>(
+    what: &str,
+    build: impl Fn(bool) -> Result<Vec<super::insn::Insn>, String>,
+    load: impl Fn(&[super::insn::Insn]) -> Result<T, String>,
+) -> Result<(T, Option<String>), String> {
+    if !cfg!(target_arch = "aarch64") {
+        return Ok((load(&build(false)?)?, None));
+    }
+    match load(&build(true)?) {
+        Ok(program) => Ok((program, None)),
+        Err(refused) => {
+            let program = load(&build(false)?)?;
+            Ok((
+                program,
+                Some(format!(
+                    "this kernel would not hand the {what} program a task's user link register \
+                     ({refused}), so a blocking call made from a function that sets up no frame \
+                     -- glibc's syscall wrappers -- is missing its caller from every stack: the \
+                     kernel's walk goes from the leaf to the caller's caller"
+                )),
+            ))
+        }
+    }
+}
+
 /// Counts a failed `bpf_map_update_elem` under the reason the kernel gave.
 ///
 /// The reasons are different facts about the run and are answered differently:

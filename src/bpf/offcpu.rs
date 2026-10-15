@@ -46,8 +46,8 @@ use super::insn::{
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows, StackTraces};
 use super::sched_common::{
-    push_followed_filter, push_kernel_wait, push_last_queued, push_rq_clock, push_run_delay,
-    Descendants, Followed, KernelClock,
+    load_reading_user_lr, push_followed_filter, push_kernel_wait, push_last_queued, push_rq_clock,
+    push_run_delay, push_user_lr, Descendants, Followed, KernelClock,
 };
 use super::syscall;
 
@@ -146,13 +146,6 @@ const ENTRY_KEY: i16 = -208;
 /// `sched_info.run_delay` when the block began and when it ended.
 const CLOCK_DELAY_THEN: i16 = -216;
 const CLOCK_DELAY_NOW: i16 = -224;
-
-/// Where aarch64 keeps the link register in the user registers a task entered
-/// the kernel with: `x30` of `user_pt_regs.regs[31]`, the first member of the
-/// kernel's `struct pt_regs`. The layout is the ptrace ABI's, not an internal
-/// one.
-#[cfg(target_arch = "aarch64")]
-const PT_REGS_LR: i16 = 30 * 8;
 
 /// The layout of a totals key, as byte offsets within it.
 ///
@@ -723,31 +716,6 @@ fn instructions(
     Ok(instructions)
 }
 
-/// Writes the current task's user link register to the stack at `slot`, or
-/// zero where it is not asked for or this architecture has none.
-///
-/// `bpf_task_pt_regs` (5.15) of the current task is the user registers the
-/// task entered the kernel with, which is what the kernel's own user stack
-/// walk starts from: the two agree about which frame is the leaf. Read with
-/// `bpf_probe_read_kernel`, which writes zero where the read fails.
-fn push_user_lr(program: &mut Program, slot: i16, leaf_lr: bool) {
-    #[cfg(target_arch = "aarch64")]
-    if leaf_lr {
-        program.push(Insn::call(helper::GET_CURRENT_TASK_BTF));
-        program.push(Insn::mov64_reg(1, 0));
-        program.push(Insn::call(helper::TASK_PT_REGS));
-        program.push(Insn::mov64_reg(3, 0));
-        program.push(Insn::add64_imm(3, i32::from(PT_REGS_LR)));
-        program.push(Insn::mov64_reg(1, R10));
-        program.push(Insn::add64_imm(1, i32::from(slot)));
-        program.push(Insn::mov64_imm(2, 8));
-        program.push(Insn::call(helper::PROBE_READ_KERNEL));
-        return;
-    }
-    let _ = leaf_lr;
-    program.push(Insn::st_imm(BPF_DW, R10, slot, 0));
-}
-
 /// The program on `sched_wakeup`: a blocked task has been made runnable.
 ///
 /// It writes the moment into the in-flight entry the `sched_switch` program
@@ -1013,36 +981,15 @@ impl OffCpuProgram {
                 "omn_offcpu",
                 LICENSE,
             )
-        };
-        // The link register where the architecture has one and the kernel
-        // hands it over; a kernel that refuses the read (before 5.15) loads
-        // the program without it, and the run says what that costs.
-        let mut leaf_lr_missing = None;
-        let loaded = if cfg!(target_arch = "aarch64") {
-            match load(&build(true)?) {
-                Ok(program) => Ok(program),
-                Err(error) if error.is_permission() => Err(error),
-                Err(error) => {
-                    leaf_lr_missing = Some(format!(
-                        "this kernel would not hand the off-cpu program a blocked task's user \
-                         link register ({error}), so a blocking call made from a function that \
-                         sets up no frame -- glibc's syscall wrappers -- is missing its caller \
-                         from every stack: the kernel's walk goes from the leaf to the caller's \
-                         caller"
-                    ));
-                    load(&build(false)?)
+            .map_err(|error| {
+                if error.is_permission() {
+                    super::permission_advice("loading a raw tracepoint program")
+                } else {
+                    format!("the kernel refused the off-cpu program: {error}")
                 }
-            }
-        } else {
-            load(&build(false)?)
+            })
         };
-        let program = loaded.map_err(|error| {
-            if error.is_permission() {
-                super::permission_advice("loading a raw tracepoint program")
-            } else {
-                format!("the kernel refused the off-cpu program: {error}")
-            }
-        })?;
+        let (program, leaf_lr_missing) = load_reading_user_lr("off-cpu", build, load)?;
 
         let link = syscall::raw_tracepoint_open("sched_switch", program.as_raw_fd())
             .map_err(|error| format!("cannot attach to the `sched_switch` tracepoint: {error}"))?;
