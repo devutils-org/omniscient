@@ -14022,8 +14022,28 @@ Still open, each a defect or a question:
   return address is still in the register, and puts the frame back marked
   `[recovered]` only then. The three tests pass. `sched.futex` and
   `sched.lock` walk user stacks the same way and do not read the LR yet.
-- **`net.request`'s network rows** (`net_rx`, `net_tx`) are empty here: six
-  `vertical` tests and `view_workloads`' `a004`.
+- ~~**`net.request`'s network rows** (`net_rx`, `net_tx`) are empty here: six
+  `vertical` tests and `view_workloads`' `a004`.~~ -- **fixed** (2026-10-15).
+  A defect, not the machine: this clang-built kernel inlined
+  `tcp_data_ready` and `tcp_event_new_data_sent` into their callers and kept
+  out-of-line copies nobody calls, so the fentry programs attached and never
+  ran (`bpf_prog_info.run_cnt` 0 over a session; kprobes 0 over forty
+  loopback segments, `sock_def_readable` 42) -- the probe said *usable*, and
+  the run blamed an evicted socket entry. The same programs, idempotent,
+  are attached as well to `sock_def_readable` (filtered to TCP streams) and
+  to `__tcp_push_pending_frames`' exit; 5 of 5 requests have both rows,
+  `vertical` and `view_workloads` pass. Not verified on the development
+  machine, where both functions of each pair run. Left on such a kernel: a
+  transmission made straight from `tcp_write_xmit` (a deferred small-queue
+  flush, a probe timer) is seen at the next push or at the end.
+  `scenario_net`'s refused handshakes were the same defect in
+  `net.tcp.connect`: `tcp_done_with_error` ran zero times for five refused
+  connects, `tcp_done` five; `tcp_done` now closes a handshake too, its
+  errno read from `sk_err`. Found alongside: the "never ended" note named
+  the serving task by the kernel's id where its events use this namespace's.
+- Flaky here, green once in two: `scenario_net`'s
+  `every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason` ("only 0
+  drops were reported"), on `main` as well.
 - `join_engine`'s retained row is 104 KiB under the freed pages, against a
   64 KiB allowance for the interpreter (python 3.14 on aarch64).
 - `cases`' `cpython-perf-map`: `blocked` 759 ms against the writer's 1501 ms

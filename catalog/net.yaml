@@ -12,8 +12,10 @@
     # the answer: `tcp_finish_connect` for a SYN-ACK, `tcp_done_with_error`
     # for a RST or a timeout, the connect call's own return for a failure
     # before any packet left. The close runs in softirq, so the stamp carries
-    # the caller.
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:tcp_v4_connect(sock *, sockaddr_unsized *, int)|(sock *, sockaddr *, int)", "fentry:tcp_finish_connect", "fentry:tcp_done_with_error"], cost: low}
+    # the caller. `tcp_done` beside `tcp_done_with_error`, for a kernel that
+    # inlined the second into its callers (a clang build with link-time
+    # optimisation): it reads the errno out of `sk_err`.
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:tcp_v4_connect(sock *, sockaddr_unsized *, int)|(sock *, sockaddr *, int)", "fentry:tcp_finish_connect", "fentry:tcp_done_with_error", "fentry:tcp_done"], cost: low}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: low, degraded: "no BTF: struct offsets are not portable"}
   modes: [trace]
   emits: [hist, topk, raw, summary]
@@ -543,8 +545,11 @@
     # reaching the socket, `net_tx` to the response's last byte leaving it.
     # Neither runs in the serving thread, so both are read by the socket's
     # cookie -- see `src/bpf/request_net.rs`. Those four functions are the
-    # first backend's; the second follows the thread and not the socket.
-    - {id: "bpf:usdt", requires: ["uprobe_multi", "bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_waking(task_struct *)", "fentry:tcp_data_ready", "fentry:tcp_event_new_data_sent", "fentry:sk_wait_data", "fentry:sk_stream_wait_memory"], cost: low}
+    # first backend's, with `sock_def_readable` and `__tcp_push_pending_frames`
+    # beside the first two for a kernel that inlined them (a clang build with
+    # link-time optimisation); the second follows the thread and not the
+    # socket.
+    - {id: "bpf:usdt", requires: ["uprobe_multi", "bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_waking(task_struct *)", "fentry:tcp_data_ready", "fentry:tcp_event_new_data_sent", "fentry:sk_wait_data", "fentry:sk_stream_wait_memory", "fentry:sock_def_readable", "fentry:__tcp_push_pending_frames"], cost: low}
     - {id: "bpf:usdt:threads", requires: ["uprobe_multi", "bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_waking(task_struct *)"], cost: low,
        degraded: "no `net_rx` or `net_tx`: the socket the probes name is not followed, and a sleep on it is counted in `sleep_ns`"}
   modes: [trace]

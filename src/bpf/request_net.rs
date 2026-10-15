@@ -204,6 +204,8 @@ pub(super) struct Offsets {
     write_seq: i32,
     snd_nxt: i32,
     copied_seq: i32,
+    protocol: i32,
+    kind: i32,
 }
 
 impl Offsets {
@@ -221,6 +223,8 @@ impl Offsets {
             write_seq: at("tcp_sock", "write_seq")?,
             snd_nxt: at("tcp_sock", "snd_nxt")?,
             copied_seq: at("tcp_sock", "copied_seq")?,
+            protocol: at("sock", "sk_protocol")?,
+            kind: at("sock", "sk_type")?,
         })
     }
 }
@@ -462,10 +466,22 @@ pub(super) struct NetMaps {
 /// `tcp_data_ready(sk)`: data was queued on a socket. The first byte no
 /// request has claimed is stamped; everything after it until a birth claims
 /// it, and everything that arrives while a request is live, is not.
+///
+/// Also attached to `sock_def_readable`, what `tcp_data_ready` calls through
+/// `sk->sk_data_ready` (see [`ARRIVAL_BEHIND`]), which serves every kind of
+/// socket: anything but a TCP stream is passed over before the socket map is
+/// touched, or a machine's unix sockets would evict the server's entries.
 fn arrival_instructions(at: &Offsets, maps: NetMaps) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
     program.push(Insn::ldx(BPF_DW, 6, 1, 0));
     program.jump_to("done", Insn::jeq_imm(6, 0, 0));
+    // `SEQ` is scratch until the stamp reads into it.
+    read_narrow(&mut program, SEQ, 2, 6, at.protocol);
+    program.push(Insn::ldx(BPF_W, 1, R10, SEQ));
+    program.jump_to("done", Insn::jne_imm(1, IPPROTO_TCP, 0));
+    read_narrow(&mut program, SEQ, 2, 6, at.kind);
+    program.push(Insn::ldx(BPF_W, 1, R10, SEQ));
+    program.jump_to("done", Insn::jne_imm(1, SOCK_STREAM, 0));
     program.push(Insn::mov64_reg(1, 6));
     program.push(Insn::call(GET_SOCKET_COOKIE));
     program.push(Insn::stx(BPF_DW, R10, SOCK_KEY, 0));
@@ -514,6 +530,11 @@ fn arrival_instructions(at: &Offsets, maps: NetMaps) -> Result<Vec<Insn>, String
 /// it reaches the target an ended request armed the socket with, the
 /// response has left the stack, and whichever of this and the end claims the
 /// arming first says when.
+///
+/// Also attached to the exit of `__tcp_push_pending_frames` (see
+/// [`TRANSMIT_BEHIND`]); it reads the socket alone, and only a run that finds
+/// the target reached claims the arming, so a second exit after the same
+/// transmission changes nothing.
 fn transmit_instructions(at: &Offsets, maps: NetMaps) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
     program.push(Insn::ldx(BPF_DW, 6, 1, 0));
@@ -607,6 +628,34 @@ fn wait_instructions(maps: NetMaps, mark: i32) -> Result<Vec<Insn>, String> {
 
 const ARRIVAL: (&str, &[&[&str]]) = ("tcp_data_ready", &[&["sock *"]]);
 const TRANSMIT: (&str, &[&[&str]]) = ("tcp_event_new_data_sent", &[&["sock *", "sk_buff *"]]);
+
+/// Where the same two moments are read on a kernel that inlined the functions
+/// above into their callers, which keeps an out-of-line copy nobody calls:
+/// attached, and never run. A clang-built kernel with link-time optimisation
+/// does (OrbStack's 7.2 on aarch64: over forty loopback segments,
+/// `tcp_data_ready` and `tcp_event_new_data_sent` ran zero times, so every
+/// request had neither network row and the run blamed the socket map).
+///
+/// `sock_def_readable` is called through `sk->sk_data_ready`, a pointer no
+/// compiler inlines, right after `tcp_data_ready` decides the data is
+/// readable; `__tcp_push_pending_frames` is exported, and is what both a send
+/// and an acknowledgement that opens the window push the queue through. Both
+/// programs are idempotent -- the arrival stamps only where nothing is, the
+/// transmit claims only a reached target -- so on a kernel where both
+/// functions of a pair run, the second changes nothing.
+///
+/// What this leaves on such a kernel: a transmission the kernel makes
+/// straight from `tcp_write_xmit`, a deferred small-queue flush or a probe
+/// timer, is seen only at the next push or at the end.
+const ARRIVAL_BEHIND: (&str, &[&[&str]]) = ("sock_def_readable", &[&["sock *"]]);
+const TRANSMIT_BEHIND: (&str, &[&[&str]]) = (
+    "__tcp_push_pending_frames",
+    &[&["sock *", "unsigned int", "int"]],
+);
+
+/// `IPPROTO_TCP` and `SOCK_STREAM`, as `sk_protocol` and `sk_type` hold them.
+const IPPROTO_TCP: i32 = 6;
+const SOCK_STREAM: i32 = 1;
 const RX_WAIT: (&str, &[&[&str]]) = ("sk_wait_data", &[&["sock *", "long int *", "sk_buff *"]]);
 const TX_WAIT: (&str, &[&[&str]]) = ("sk_stream_wait_memory", &[&["sock *", "long int *"]]);
 
@@ -673,6 +722,18 @@ impl SocketPrograms {
                 arrival_instructions(&at, maps)?,
                 "omn_req_rx",
             ),
+            (
+                TRANSMIT_BEHIND,
+                Side::Exit,
+                transmit_instructions(&at, maps)?,
+                "omn_req_tx_push",
+            ),
+            (
+                ARRIVAL_BEHIND,
+                Side::Entry,
+                arrival_instructions(&at, maps)?,
+                "omn_req_rx_ready",
+            ),
         ] {
             let target = fentry::expect(function, shapes)?;
             links.push(fentry::attach(&target, side, &instructions, name)?);
@@ -730,14 +791,21 @@ pub(super) mod tests {
         assert_eq!(btf.member_offset("sock", "__sk_common"), Ok(0));
     }
 
-    /// The four functions have the prototypes the programs read their
+    /// The six functions have the prototypes the programs read their
     /// arguments out of.
     #[test]
     fn the_socket_functions_have_the_prototypes_the_programs_read() {
         if kernel_btf().is_none() {
             return;
         }
-        for (function, shapes) in [ARRIVAL, TRANSMIT, RX_WAIT, TX_WAIT] {
+        for (function, shapes) in [
+            ARRIVAL,
+            TRANSMIT,
+            RX_WAIT,
+            TX_WAIT,
+            ARRIVAL_BEHIND,
+            TRANSMIT_BEHIND,
+        ] {
             fentry::expect(function, shapes).expect("a known prototype");
         }
     }

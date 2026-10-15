@@ -718,6 +718,17 @@ fn the_tool_decomposes_each_request_against_its_own_life() {
             "req:{id}"
         );
         match request.block_table {
+            // A checkout on no block device: the request read its file and
+            // no block request was issued, so the device row has nothing to
+            // read and says so rather than showing a zero.
+            Some(_) if data_off_block_device().is_some() => {
+                eprintln!(
+                    "req:{id}: its device row is not checked: {}",
+                    data_off_block_device().unwrap_or_default()
+                );
+                assert_eq!(number(request.event, "disk_ns"), 0.0, "req:{id}");
+                assert!(request.blocks.is_empty(), "req:{id}");
+            }
             Some(table) => {
                 assert_eq!(
                     table["whole"]["amount"].as_f64(),

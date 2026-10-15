@@ -151,6 +151,11 @@ pub struct RequestCollector {
     counts: RequestCounts,
     skipped: u64,
     /// Requests born and not yet ended, by id, with the thread and the birth.
+    ///
+    /// The thread as this process's namespace numbers it, translated at the
+    /// birth while the task is alive to be found: the program wrote the
+    /// kernel's id, the events are translated to this one, and a note naming
+    /// the other number names a task the reader's `/proc` has no entry for.
     open: BTreeMap<u64, (u32, u64)>,
     /// Ended requests whose response had not left the stack, by id and end.
     awaiting: BTreeMap<(u64, u64), RequestRecord>,
@@ -362,7 +367,8 @@ impl RequestCollector {
     fn absorb(&mut self, records: Vec<RequestRecord>, events: &mut Vec<Event>, seq: u64) {
         for record in records {
             if record.is_birth() {
-                self.open.insert(record.id, (record.tid, record.born_ns));
+                let tid = crate::bpf::pidns::ours(record.tid).unwrap_or(record.tid);
+                self.open.insert(record.id, (tid, record.born_ns));
                 continue;
             }
             if record.is_drain() {
