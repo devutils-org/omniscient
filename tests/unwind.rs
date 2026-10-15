@@ -878,15 +878,29 @@ fn each_mode_copies_what_it_declares_and_dwarf_costs_more_per_sample_than_fp() {
             let sp = sample.user_regs.unwrap().sp;
             (layout.end_above(sp).saturating_sub(sp) as usize).min(declared)
         };
+        // aarch64's user copy reports a fault's whole block as not copied
+        // (its copy loop moves 64 bytes at a time, and the API lets it return
+        // less than it could): on the OrbStack machine the copy ended 48
+        // bytes short of a non-resident page on nearly every sample. Short by
+        // less than a block is the kernel's rounding there, not the tool's.
+        let slack = if cfg!(target_arch = "aarch64") { 63 } else { 0 };
+        let agrees = |sample: &Sample, got: usize| {
+            got <= expected(sample) && expected(sample) - got <= slack
+        };
         let exact = samples
             .iter()
-            .filter(|sample| sample.user_stack.as_ref().map(Vec::len) == Some(expected(sample)))
+            .filter(|sample| {
+                sample
+                    .user_stack
+                    .as_ref()
+                    .is_some_and(|stack| agrees(sample, stack.len()))
+            })
             .count();
         let mismatched: Vec<(usize, usize)> = samples
             .iter()
             .filter_map(|sample| {
                 let got = sample.user_stack.as_ref()?.len();
-                (got != expected(sample)).then(|| (expected(sample), got))
+                (!agrees(sample, got)).then(|| (expected(sample), got))
             })
             .take(10)
             .collect();
