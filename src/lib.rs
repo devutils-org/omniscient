@@ -1,10 +1,12 @@
 //! Omniscient: one vocabulary for system observability.
 //!
-//! This crate is the request side of the tool. It turns any input surface --
-//! the command line, a session file in YAML, JSON or TOML -- into a single
-//! [`Request`](request::Request), checks it against the catalog, and renders it
-//! back out. It attaches nothing and collects nothing: that arrives with the
-//! collectors, behind the resolver.
+//! It turns any input surface -- the command line, a session file in YAML,
+//! JSON or TOML -- into a single [`Request`](request::Request), checks it
+//! against the catalog ([`validate`]), decides how this machine serves it
+//! ([`resolve`]), collects it ([`collect`]) and renders what it measured
+//! ([`emit`], [`encode`]). The `omn` binary is one user of this library; a
+//! program that wants a run's events while it goes uses [`collect::live`], as
+//! `examples/live.rs` shows.
 //!
 //! The ordering is deliberate. The request model and the catalog are what every
 //! later phase is written against, and they are the expensive things to change;

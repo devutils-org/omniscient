@@ -23,6 +23,9 @@ pub mod gpu;
 pub(crate) mod io;
 mod launch;
 pub(crate) use launch::helper_output;
+/// A run's events handed out while it goes: what `omn top` draws from, and
+/// what a program embedding `omn` reacts to.
+pub mod live;
 pub use launch::{adopt_orphans, PROGRAM_STDERR_VARIABLE, PROGRAM_STDOUT_VARIABLE};
 pub mod mem;
 /// Public for its probes: `net::probe` answers the PTP-clock and ethtool

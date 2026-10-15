@@ -3447,8 +3447,8 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
 /// window does -- and each collection says it was detached because the view
 /// was quit.
 struct Tap<'a> {
-    /// How many events of each request were handed over already.
-    sent: Vec<usize>,
+    /// What each request has handed over already.
+    handover: collect::live::Handover,
     sender: std::sync::mpsc::Sender<omn_view::feed::Update>,
     quit: std::sync::Arc<std::sync::atomic::AtomicBool>,
     last: Option<std::time::Instant>,
@@ -3475,7 +3475,7 @@ impl<'a> Tap<'a> {
         view_cpu: Option<&'a mut ViewCpu>,
     ) -> Self {
         Self {
-            sent: vec![0; shell.run.results.len()],
+            handover: collect::live::Handover::new(shell.run.results.len()),
             sender,
             quit,
             last: None,
@@ -3492,7 +3492,7 @@ impl<'a> Tap<'a> {
     /// reach the view at the end: the feed has no update that sets them on a
     /// result already drawing.
     fn describe(&mut self, said: &[collect::Described<'_>]) -> Option<omn_view::model::Data> {
-        if self.sent.iter().any(|sent| *sent > 0) {
+        if self.handover.any() {
             return None;
         }
         let mut changed = false;
@@ -3526,20 +3526,7 @@ impl<'a> Tap<'a> {
 
     /// Hands the events read since the last hand-over to the drawing thread.
     fn hand_over(&mut self, run: &collect::Progress<'_>) {
-        for (index, events) in run.events.iter().enumerate() {
-            let Some(sent) = self.sent.get_mut(index) else {
-                continue;
-            };
-            // A buffer can only grow while the run goes; one that shrank was
-            // let go by the runner, and what is in it now is all new.
-            if events.len() < *sent {
-                *sent = 0;
-            }
-            if events.len() == *sent {
-                continue;
-            }
-            let fresh = &events[*sent..];
-            *sent = events.len();
+        for (index, fresh) in self.handover.fresh(run) {
             let (converted, unconverted) = to_view_events(fresh);
             let update = omn_view::feed::Update::Events {
                 index,
@@ -3604,17 +3591,7 @@ impl collect::Escalate for Tap<'_> {
 
     fn decide(&mut self, run: &collect::Progress<'_>) -> Vec<collect::Switch> {
         if self.quit.load(std::sync::atomic::Ordering::SeqCst) {
-            return run
-                .standing
-                .iter()
-                .enumerate()
-                .filter(|(_, standing)| matches!(standing, collect::Standing::Attached))
-                .map(|(index, _)| collect::Switch {
-                    index,
-                    attach: false,
-                    why: "the view was quit".to_owned(),
-                })
-                .collect();
+            return collect::live::detach_all(run, "the view was quit");
         }
         if self.unheard || self.last.is_some_and(|last| last.elapsed() < Self::EVERY) {
             return Vec::new();
@@ -4101,7 +4078,24 @@ mod tests {
         assert_eq!(first.drains[0].dropped, 3);
         assert_eq!(described.run.results[1].value_attr, None);
         assert!(tap.describe(&said).is_none(), "an unchanged one is not");
-        tap.sent[1] = 5;
+        let went_over = omn::event::Event {
+            ts_ns: 0,
+            ts_err_ns: 0,
+            kind: "net.tcp.connect".to_owned(),
+            keys: Vec::new(),
+            attrs: Vec::new(),
+            collector_id: omn::event::CollectorId::new("test"),
+            seq: 0,
+        };
+        let events = [Vec::new(), vec![went_over; 5]];
+        let standing = [collect::Standing::Attached, collect::Standing::Attached];
+        tap.handover.fresh(&collect::Progress {
+            opened_ns: 0,
+            now_ns: 0,
+            events: &events,
+            standing: &standing,
+            bound: &[],
+        });
         let mut later = said;
         later[1].value_attr = "bytes";
         assert!(
