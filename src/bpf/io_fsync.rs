@@ -724,6 +724,12 @@ mod tests {
             ("vfs_fsync", &WHOLE_SIGNATURE[..], Via::Whole),
             ("vfs_fsync_range", &RANGE_SIGNATURE[..], Via::Range),
         ] {
+            // A function this kernel does not have -- `do_fsync` inlined into
+            // the syscall, as a clang build does -- is one it cannot serve.
+            if let Err(reason) = fentry::index().and_then(|index| index.function(name)) {
+                eprintln!("skipped `{name}`: {reason}");
+                continue;
+            }
             let function = fentry::expect(name, &[signature]).expect("the prototype");
             let shape = Shape {
                 function: &function,
@@ -754,6 +760,10 @@ mod tests {
             return;
         };
         let offsets = Offsets::read(btf).expect("the offsets");
+        if let Err(reason) = fentry::index().and_then(|index| index.function("do_fsync")) {
+            eprintln!("skipped: {reason}");
+            return;
+        }
         let function = fentry::expect("do_fsync", &[&FD_SIGNATURE]).expect("the prototype");
         let exit = exit_instructions(
             &Shape {

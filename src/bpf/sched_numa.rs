@@ -292,9 +292,18 @@ impl NumaProgram {
 mod tests {
     use super::*;
 
+    /// The running kernel's BTF, when it has the tracepoint this program
+    /// attaches to: a kernel built without NUMA balancing has none, which is
+    /// a machine that cannot serve the source, not a defect of the program.
     fn kernel_btf() -> Option<Btf> {
         match Btf::from_kernel() {
-            Ok(btf) => Some(btf),
+            Ok(btf) => match btf.tracepoint_signature("sched_stick_numa") {
+                Ok(_) => Some(btf),
+                Err(reason) => {
+                    eprintln!("skipped: {reason}");
+                    None
+                }
+            },
             Err(reason) => {
                 eprintln!("skipped: {reason}");
                 None
