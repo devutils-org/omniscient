@@ -203,10 +203,11 @@ impl Wakeup {
 }
 
 /// Where this kernel keeps the cpu's preempt count: a per-cpu variable's BTF
-/// id, and the offset of the count inside it.
+/// id and the offset of the count inside it (x86-64), or the offset inside
+/// the current task (`btf_id` none: aarch64's `thread_info`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreemptCount {
-    btf_id: u32,
+    btf_id: Option<u32>,
     offset: i32,
 }
 
@@ -214,15 +215,32 @@ impl PreemptCount {
     /// Finds it on x86, in either of the two layouts the kernels this tool
     /// runs on have used: `__preempt_count` on its own (up to 6.1, and again
     /// since `pcpu_hot` was taken apart), or the `preempt_count` member of
-    /// `pcpu_hot` (6.2 to 6.14). Another architecture keeps it in the task's
-    /// `thread_info`, which this does not read, and gets `None`.
+    /// `pcpu_hot` (6.2 to 6.14). aarch64 keeps it in the current task's
+    /// `thread_info` (`task_struct.thread_info.preempt_count`, whose low half
+    /// is the count): read there, with the offsets the kernel's BTF gives.
+    /// Without either the program cannot tell an interrupt's wakeup from a
+    /// task's, and `None` says so.
     pub fn locate(btf: &Btf) -> Option<Self> {
         if let Some(btf_id) = btf.var_id("__preempt_count") {
-            return Some(Self { btf_id, offset: 0 });
+            return Some(Self {
+                btf_id: Some(btf_id),
+                offset: 0,
+            });
         }
-        let btf_id = btf.var_id("pcpu_hot")?;
-        let offset = btf.member_offset("pcpu_hot", "preempt_count").ok()?;
-        Some(Self { btf_id, offset })
+        if let Some(btf_id) = btf.var_id("pcpu_hot") {
+            if let Ok(offset) = btf.member_offset("pcpu_hot", "preempt_count") {
+                return Some(Self {
+                    btf_id: Some(btf_id),
+                    offset,
+                });
+            }
+        }
+        let thread_info = btf.member_offset("task_struct", "thread_info").ok()?;
+        let count = btf.member_offset("thread_info", "preempt_count").ok()?;
+        Some(Self {
+            btf_id: None,
+            offset: thread_info + count,
+        })
     }
 }
 
@@ -303,9 +321,19 @@ fn instructions(
     // filter below can match, so such a wakeup is kept only for its wakee.
     match preempt {
         Some(preempt) => {
-            program.extend(Insn::load_btf_id(1, preempt.btf_id));
-            program.push(Insn::call(helper::THIS_CPU_PTR));
-            // `bpf_this_cpu_ptr` never returns null for a per-cpu variable.
+            match preempt.btf_id {
+                Some(btf_id) => {
+                    program.extend(Insn::load_btf_id(1, btf_id));
+                    program.push(Insn::call(helper::THIS_CPU_PTR));
+                    // `bpf_this_cpu_ptr` never returns null for a per-cpu
+                    // variable.
+                }
+                // The current task, typed, so the load is checked against
+                // the member it lands on; never null in a task's context.
+                None => {
+                    program.push(Insn::call(helper::GET_CURRENT_TASK_BTF));
+                }
+            }
             program.push(Insn::ldx(BPF_W, 1, 0, preempt.offset as i16));
             program.push(Insn::and64_imm(1, INTERRUPT_BITS as i32));
             program.push(Insn::stx(BPF_W, R10, CONTEXT, 1));
@@ -857,6 +885,8 @@ mod tests {
             helper::RINGBUF_OUTPUT,
             helper::MAP_LOOKUP_ELEM,
             helper::THIS_CPU_PTR,
+            // aarch64's preempt count, read off the current task.
+            helper::GET_CURRENT_TASK_BTF,
             helper::GET_CURRENT_COMM,
         ];
         for helper in &called {
@@ -1087,11 +1117,10 @@ mod tests {
     fn an_interrupts_waker_is_replaced_before_the_target_is_compared() {
         let Ok(btf) = Btf::from_kernel() else { return };
         let Some(preempt) = PreemptCount::locate(&btf) else {
-            if cfg!(target_arch = "x86_64") {
-                panic!("an x86 kernel with BTF declares `__preempt_count` or `pcpu_hot`");
-            }
-            eprintln!("skipped: this kernel's preempt count is not a per-cpu variable");
-            return;
+            panic!(
+                "a kernel with BTF declares `__preempt_count` or `pcpu_hot` (x86-64), or \
+                 `thread_info.preempt_count` (aarch64)"
+            );
         };
         let program = instructions(
             &btf,
@@ -1102,13 +1131,24 @@ mod tests {
             Some(5),
         )
         .expect("a program");
-        let load = program
-            .iter()
-            .position(|insn| {
-                insn.code == 0x18 && insn.regs >> 4 == crate::bpf::insn::BPF_PSEUDO_BTF_ID
-            })
-            .expect("the preempt count is loaded by its BTF id");
-        assert_eq!(program[load].imm as u32, preempt.btf_id);
+        // Per cpu, the variable is named by its BTF id; in the task, the
+        // count is read off the current task.
+        let load = match preempt.btf_id {
+            Some(btf_id) => {
+                let at = program
+                    .iter()
+                    .position(|insn| {
+                        insn.code == 0x18 && insn.regs >> 4 == crate::bpf::insn::BPF_PSEUDO_BTF_ID
+                    })
+                    .expect("the preempt count is loaded by its BTF id");
+                assert_eq!(program[at].imm as u32, btf_id);
+                at
+            }
+            None => program
+                .iter()
+                .position(|insn| insn.code == 0x85 && insn.imm == helper::GET_CURRENT_TASK_BTF)
+                .expect("the preempt count is read off the current task"),
+        };
         let zeroed = program
             .iter()
             .position(|insn| insn.code == 0x62 && insn.off == WAKER_PID && insn.imm == 0)

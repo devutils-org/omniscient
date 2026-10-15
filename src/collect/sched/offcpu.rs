@@ -830,12 +830,20 @@ mod tests {
     #[test]
     fn a_thread_that_sleeps_a_known_time_is_off_cpu_for_it() {
         const SLEEP: StdDuration = StdDuration::from_millis(300);
-        let mut collector = OffCpuCollector::new(Whose::Process(std::process::id()), false);
+        let mut collector = OffCpuCollector::new(
+            Whose::Process(
+                crate::bpf::pidns::kernel_tgid(std::process::id()).expect("this process"),
+            ),
+            false,
+        );
         if skip_without_bpf(&mut collector) {
             return;
         }
 
-        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
+        // The collector's events carry the kernel's id for the thread, which
+        // in a container is not the one gettid returns.
+        let tid = crate::bpf::pidns::kernel_tid(unsafe { libc::syscall(libc::SYS_gettid) } as u32)
+            .expect("this thread");
         std::thread::sleep(SLEEP);
 
         let mut events = collector.sample(0).expect("a drain");
@@ -864,11 +872,19 @@ mod tests {
     /// turn a program doing nothing into a program stuck on a device.
     #[test]
     fn a_timed_sleep_is_reported_as_interruptible() {
-        let mut collector = OffCpuCollector::new(Whose::Process(std::process::id()), false);
+        let mut collector = OffCpuCollector::new(
+            Whose::Process(
+                crate::bpf::pidns::kernel_tgid(std::process::id()).expect("this process"),
+            ),
+            false,
+        );
         if skip_without_bpf(&mut collector) {
             return;
         }
-        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
+        // The collector's events carry the kernel's id for the thread, which
+        // in a container is not the one gettid returns.
+        let tid = crate::bpf::pidns::kernel_tid(unsafe { libc::syscall(libc::SYS_gettid) } as u32)
+            .expect("this thread");
         std::thread::sleep(StdDuration::from_millis(50));
         let mut events = collector.sample(0).expect("a drain");
         events.extend(collector.stop());
@@ -897,11 +913,19 @@ mod tests {
     /// its wait is run queue latency, which is a different source.
     #[test]
     fn a_thread_that_only_spins_is_not_reported_as_blocked() {
-        let mut collector = OffCpuCollector::new(Whose::Process(std::process::id()), false);
+        let mut collector = OffCpuCollector::new(
+            Whose::Process(
+                crate::bpf::pidns::kernel_tgid(std::process::id()).expect("this process"),
+            ),
+            false,
+        );
         if skip_without_bpf(&mut collector) {
             return;
         }
-        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
+        // The collector's events carry the kernel's id for the thread, which
+        // in a container is not the one gettid returns.
+        let tid = crate::bpf::pidns::kernel_tid(unsafe { libc::syscall(libc::SYS_gettid) } as u32)
+            .expect("this thread");
         let until = std::time::Instant::now() + StdDuration::from_millis(200);
         let mut spun = 0u64;
         while std::time::Instant::now() < until {

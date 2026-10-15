@@ -13884,18 +13884,30 @@ differ here line for line (4).
 cancellation helper that exports no symbol (`libc.so.6+0x85094`), and the
 stack names `__nanosleep` above it.
 
+Fixed alongside, in the tests: a dozen unit tests named this process or
+thread to a filter by the id it reads (`std::process::id()`, `gettid`) where
+the program compares the kernel's, or by a pid nobody has (`4242`), which a
+container's translation refuses; they use the kernel's id of a task that
+exists.
+
 **aarch64 or the VM, to investigate** -- each could be a defect:
 
 - `sched.migrations`: 200 affinity rewrites, 100 migrations counted, in
   both modes (`scenario_sched`).
-- A timer interrupt's wakeup is credited to the idle task, never named
-  `interrupt (hardirq)` (`scenario_sched`, `join_engine`): the interrupt
-  context is read from `preempt_count`, which aarch64 keeps in
-  `thread_info` and x86-64 per cpu.
-- `proc.exec` under a cgroup target: 418 of 528 children have no exec event
-  and 0 are counted lost -- **a silent loss if it is the tool's**
-  (`scenario_proc`); `proc.exit` misses one exit; the signal storm's counted
-  plus dropped falls short of what was sent.
+- ~~A timer interrupt's wakeup is credited to the idle task~~ -- **fixed**:
+  `sched.wakeup` read the preempt count from x86-64's per-cpu variables only,
+  and aarch64 keeps it in the current task's `thread_info`; it reads it there
+  now (`bpf_get_current_task_btf`, offsets from BTF), and the four interrupt
+  scenarios of `scenario_sched` and `join_engine` pass.
+- `proc.exec` under a cgroup target: 418 of 528 children "have no exec
+  event". **Not lost**: the children exec and exit in milliseconds, before
+  the iterator that translates ids sees them, so their events keep the
+  kernel's ids and the test, which looks for the container's, does not find
+  them; the run counts them in its notes ("N task id(s) are the kernel's").
+  The way out is the namespace's ids read in the kernel at the event
+  (`bpf_get_ns_current_pid_tgid` for the current task) rather than after it,
+  a change to every program and so a decision of its own. `proc.exit` missing
+  one exit and the signal storm's shortfall are likely the same.
 - `net.socket` sees none of the server's receives, `net.tcp.connect` no
   handshake outcome, `net.request` no network row (`scenario_net`,
   `vertical`, the flows views): the receive and handshake functions may be

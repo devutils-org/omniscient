@@ -315,6 +315,12 @@ impl Collector for WakeupCollector {
 mod tests {
     use super::*;
 
+    /// This process by the kernel's id, which the program compares, and which
+    /// in a container is not the one `std::process::id()` returns.
+    fn own_kernel_tgid() -> u32 {
+        crate::bpf::pidns::kernel_tgid(std::process::id()).expect("this process")
+    }
+
     /// A refusal is the answer for a mode that cannot mean anything here, and
     /// it has to say why: sampling one wakeup in a hundred would attribute a
     /// block to whichever waker happened to be caught, which reads as a result.
@@ -366,7 +372,9 @@ mod tests {
             filter: None,
         });
         let collector = prepared
-            .attach(&Target::Pid(vec![4242]))
+            // A process that exists: inside a container a pid is translated to the
+            // kernel's, and one nobody has is refused there.
+            .attach(&Target::Pid(vec![std::process::id() as i32]))
             .expect("a per-process collector");
         assert_eq!(collector.id().as_str(), "sched.wakeup/bpf:raw_tp");
     }
@@ -390,7 +398,7 @@ mod tests {
     #[test]
     fn a_task_that_sleeps_is_woken_once_per_sleep() {
         const SLEEPS: usize = 20;
-        let mut collector = WakeupCollector::new(Whose::Process(std::process::id()));
+        let mut collector = WakeupCollector::new(Whose::Process(own_kernel_tgid()));
         if skip_without_bpf(&mut collector) {
             return;
         }
@@ -406,7 +414,7 @@ mod tests {
             .iter()
             .filter(|event| {
                 event.attr("wakee_pid").and_then(|value| value.as_f64())
-                    == Some(std::process::id() as f64)
+                    == Some(f64::from(own_kernel_tgid()))
             })
             .count();
         assert!(
@@ -421,7 +429,7 @@ mod tests {
     /// What must hold for the join is that both ends are present and plausible.
     #[test]
     fn both_ends_of_a_wakeup_are_recorded() {
-        let mut collector = WakeupCollector::new(Whose::Process(std::process::id()));
+        let mut collector = WakeupCollector::new(Whose::Process(own_kernel_tgid()));
         if skip_without_bpf(&mut collector) {
             return;
         }
@@ -449,7 +457,7 @@ mod tests {
     /// collectors is silently wrong.
     #[test]
     fn wakeup_timestamps_are_in_the_tools_clock_domain() {
-        let mut collector = WakeupCollector::new(Whose::Process(std::process::id()));
+        let mut collector = WakeupCollector::new(Whose::Process(own_kernel_tgid()));
         if skip_without_bpf(&mut collector) {
             return;
         }

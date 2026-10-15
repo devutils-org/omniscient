@@ -509,13 +509,15 @@ mod tests {
     #[test]
     fn a_thread_target_is_not_turned_into_its_process() {
         let by_thread = prepare(Mode::Trace)
-            .attach(&Target::Tid(vec![4242]))
+            // This thread: a tid nobody has is refused inside a container,
+            // where it is translated to the kernel's.
+            .attach(&Target::Tid(vec![unsafe { libc::gettid() }]))
             .expect("a tid target is declared");
         assert_eq!(by_thread.id().as_str(), "sched.futex/bpf:raw_tp");
         // The shape is checked through the program's own tests; here the point
         // is only that both targets are accepted and neither is refused.
         assert!(prepare(Mode::Trace)
-            .attach(&Target::Pid(vec![4242]))
+            .attach(&Target::Pid(vec![std::process::id() as i32]))
             .is_ok());
     }
 

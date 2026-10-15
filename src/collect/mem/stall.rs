@@ -721,7 +721,7 @@ mod tests {
             filter: None,
         });
         let collector = prepared
-            .attach(&Target::Pid(vec![4242]))
+            .attach(&Target::Pid(vec![std::process::id() as i32]))
             .expect("a process is a target reclaim is accounted per");
         assert_eq!(collector.id().as_str(), "mem.reclaim/bpf:raw_tp");
     }
