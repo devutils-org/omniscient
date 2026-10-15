@@ -13892,8 +13892,11 @@ exists.
 
 **aarch64 or the VM, to investigate** -- each could be a defect:
 
-- `sched.migrations`: 200 affinity rewrites, 100 migrations counted, in
-  both modes (`scenario_sched`).
+- ~~`sched.migrations`: 200 affinity rewrites, 100 migrations counted~~ --
+  **the workload, not the source**: it pinned itself to cores 0, 5, 10 and
+  15, and on seven cores every rewrite to 10 or 15 failed, so half moved
+  nothing. It alternates between the first and the last online core now, and
+  both `scenario_sched` tests count 200 here.
 - ~~A timer interrupt's wakeup is credited to the idle task~~ -- **fixed**:
   `sched.wakeup` read the preempt count from x86-64's per-cpu variables only,
   and aarch64 keeps it in the current task's `thread_info`; it reads it there

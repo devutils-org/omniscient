@@ -1134,8 +1134,8 @@ fn counting_migrations_is_one_window_and_tracing_them_is_a_series() {
     // one drain interval is one drain, and one drain of `trace` looks like the
     // single window of `count` however the mode is implemented.
     let loop_body = format!(
-        "i=0\nwhile [ $i -lt {AFFINITY_CHANGES} ]; do\n  taskset -pc $(( (i % 4) * 5 )) $$ \
-         >/dev/null 2>&1\n  i=$((i + 1))\n  if [ $(( i % 40 )) -eq 0 ]; then sleep 0.15; fi\n\
+        "last=$(( $(getconf _NPROCESSORS_ONLN) - 1 ))\ni=0\nwhile [ $i -lt {AFFINITY_CHANGES} ]; do\n  \
+         taskset -pc $(( (i % 2) * last )) $$ >/dev/null 2>&1\n  i=$((i + 1))\n  if [ $(( i % 40 )) -eq 0 ]; then sleep 0.15; fi\n\
          done\n"
     );
     let moved_by = |mode: &str| -> Option<Value> {

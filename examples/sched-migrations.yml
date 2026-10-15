@@ -5,9 +5,12 @@
 # Migrations are usually read as a symptom -- a thread bouncing between cores
 # leaves its cache behind on each one -- and a symptom is hard to check, because
 # nothing chose how many times the scheduler would move the task. So this
-# workload chooses: it rewrites its own cpu affinity two hundred times, to a
-# different core each time, and a task whose affinity no longer admits the core
-# it is on is moved at once. Two hundred changes, two hundred migrations.
+# workload chooses: it rewrites its own cpu affinity two hundred times, back and
+# forth between the first and the last online core, and a task whose affinity
+# no longer admits the core it is on is moved at once. Two hundred changes, two
+# hundred migrations. (It used to name cores 0, 5, 10 and 15, and on a machine
+# with fewer than sixteen every rewrite to a missing core failed: seven cores
+# counted half.)
 #
 # Measured on this machine: 204. The four extra are the shell starting up and
 # being placed, which is a migration in the kernel's accounting too.
@@ -30,9 +33,10 @@ requests:
         - /bin/sh
         - -c
         - |
+          last=$(( $(getconf _NPROCESSORS_ONLN) - 1 ))
           i=0
           while [ $i -lt 200 ]; do
-            taskset -pc $(( (i % 4) * 5 )) $$ >/dev/null 2>&1
+            taskset -pc $(( (i % 2) * last )) $$ >/dev/null 2>&1
             i=$((i + 1))
           done
     mode: trace
