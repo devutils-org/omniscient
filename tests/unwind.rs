@@ -6,7 +6,9 @@
 //! fixed number of iterations -- parse 20 %, hash 40 %, sort 30 %, checksum
 //! 10 % of every batch. The same source is built four ways, on purpose:
 //!
-//! - `fp`: `-O0 -fno-omit-frame-pointer`, a frame pointer in every function;
+//! - `fp`: `-O0 -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer`, a
+//!   frame pointer in every function (gcc on aarch64 omits a leaf's by
+//!   default, even at `-O0`);
 //! - `leaf`: `-O1 -fno-omit-frame-pointer -momit-leaf-frame-pointer`, frame
 //!   pointers everywhere but in `spin`, as gcc builds leaves from `-O1`;
 //! - `nofp`: `-O1 -fomit-frame-pointer`, none at all;
@@ -162,7 +164,14 @@ fn builds() -> Option<&'static BTreeMap<&'static str, PathBuf>> {
             std::fs::write(&source, CALLTREE).ok()?;
             let mut built = BTreeMap::new();
             for (build, flags) in [
-                (Build::Fp, &["-O0", "-fno-omit-frame-pointer"][..]),
+                (
+                    Build::Fp,
+                    &[
+                        "-O0",
+                        "-fno-omit-frame-pointer",
+                        "-mno-omit-leaf-frame-pointer",
+                    ][..],
+                ),
                 (
                     Build::Leaf,
                     &[
@@ -1233,8 +1242,10 @@ fn stack_layout_of(pid: i32) -> Option<StackLayout> {
 // ---------------------------------------------------------------------------
 // The kernel's default paranoia: user-only stacks.
 
-/// A program that spends most of its time in the kernel -- one-byte writes to
-/// `/dev/null` -- sampled with both halves and with the user half only. The
+/// A program that spends most of its time in the kernel -- page-sized reads
+/// of `/dev/zero`, a copy the kernel makes on every call, where a one-byte
+/// write to `/dev/null` was so cheap on aarch64 that the loop around it
+/// weighed two thirds of it -- sampled with both halves and with the user half only. The
 /// second must carry no kernel frame at all, and must have been delivered far
 /// fewer samples for the same work: the time in system calls is what
 /// `exclude_kernel` leaves out, and what the choice says it leaves out.
@@ -1253,9 +1264,9 @@ fn user_only_stacks_carry_no_kernel_frame_and_leave_the_system_calls_out() {
 #include <unistd.h>
 int main(int argc, char **argv) {
     long n = argc > 1 ? atol(argv[1]) : 300000;
-    int fd = open("/dev/null", O_WRONLY);
-    char byte = 0;
-    for (long i = 0; i < n; i++) write(fd, &byte, 1);
+    int fd = open("/dev/zero", O_RDONLY);
+    static char page[4096];
+    for (long i = 0; i < n; i++) read(fd, page, sizeof page);
     struct rusage usage;
     getrusage(RUSAGE_SELF, &usage);
     fprintf(stderr, "user_us=%ld system_us=%ld\n",

@@ -13902,15 +13902,19 @@ exists.
   and aarch64 keeps it in the current task's `thread_info`; it reads it there
   now (`bpf_get_current_task_btf`, offsets from BTF), and the four interrupt
   scenarios of `scenario_sched` and `join_engine` pass.
-- `proc.exec` under a cgroup target: 418 of 528 children "have no exec
-  event". **Not lost**: the children exec and exit in milliseconds, before
-  the iterator that translates ids sees them, so their events keep the
-  kernel's ids and the test, which looks for the container's, does not find
-  them; the run counts them in its notes ("N task id(s) are the kernel's").
-  The way out is the namespace's ids read in the kernel at the event
-  (`bpf_get_ns_current_pid_tgid` for the current task) rather than after it,
-  a change to every program and so a decision of its own. `proc.exit` missing
-  one exit and the signal storm's shortfall are likely the same.
+- ~~`proc.exec` under a cgroup target: 418 of 528 children "have no exec
+  event"~~ -- **fixed, they were not lost**: the children exec and exit in
+  milliseconds, before the iterator that translates ids saw them, so their
+  events kept the kernel's ids. `pidns` now loads, beside the iterator, a
+  program on `sched_process_fork` that writes every new task's id in `omn`'s
+  namespace under the kernel's (an LRU map of 65 536), read only for an id
+  the iterator missed; the runner starts it before it attaches the first
+  eBPF collector. Every program is unchanged. `proc.exec`'s cgroup test,
+  `proc.exit`'s missing exit, the signal storm and `sched.switches`' forced
+  program (one run in twenty kept twelve kernel ids) pass. A task born
+  before the run began and gone before an iteration still keeps the
+  kernel's id, and the note says which of the two reasons applies, with the
+  births program's skipped runs.
 - `net.socket` saw none of the server's receives: **`sock_recvmsg` is off
   the path here**, as `vfs_write` was -- a root kprobe counted 0 calls of it
   beside 44 of `inet_recvmsg`, its own callee, over twenty HTTP round trips.
@@ -13924,9 +13928,15 @@ exists.
   `tcp_finish_connect` 20, `inet_csk_accept` 21). `net.tcp.connect` with no
   handshake outcome and `net.request` with no network row are still open
   (`scenario_net`, `vertical`, the flows views).
-- `fp` and `fp+leaf` on aarch64 (`unwind`, 5): frame-pointer detection of
-  the test's leaf build and the leaf's caller recovery assume x86-64's
-  prologue.
+- ~~`fp` and `fp+leaf` on aarch64 (`unwind`, 5)~~ -- **fixed**: the
+  prologue check knew `mov x29, sp` only, and gcc's `main` at -O1 allocates
+  its locals first and points x29 above them (`add x29, sp, #0x20`): the
+  leaf build was taken for one without frame pointers. Any `add x29, sp,
+  #n` counts now. And gcc on aarch64 omits a leaf's frame pointer by
+  default, even at `-O0 -fno-omit-frame-pointer`, so the test's `fp` build
+  was a leaf build; it passes `-mno-omit-leaf-frame-pointer`. The user-only
+  test's workload, one-byte writes to `/dev/null`, was two thirds loop on
+  this machine; it reads pages of `/dev/zero`. All 18 pass.
 - `sched.switches` counts none of a forced program's voluntary switches.
 - ~~A launched program's child's switches are not followed~~ -- **they were,
   under the kernel's ids**: `sched.switches -m count` keeps its rows in the

@@ -1789,13 +1789,17 @@ fn sets_up_frame_pointer(bytes: &[u8], offset: u64) -> Option<bool> {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        // `mov x29, sp`, which follows the `stp x29, x30` that saved them.
-        // Within the first four instructions: a prologue may allocate first.
-        Some(
-            code.chunks_exact(4)
-                .take(4)
-                .any(|word| word == [0xfd, 0x03, 0x00, 0x91]),
-        )
+        // `add x29, sp, #n`, which follows the `stp x29, x30` that saved them:
+        // `mov x29, sp` where the record is at the bottom of the frame, and a
+        // non-zero `n` where the function allocated its locals first and
+        // stored the record above them (`sub sp, sp, #0x50; stp x29, x30,
+        // [sp, #32]; add x29, sp, #0x20`, gcc's `main` at -O1). The mask
+        // keeps the opcode and both registers and leaves the shift and the
+        // twelve-bit immediate out. Within the first four instructions.
+        Some(code.chunks_exact(4).take(4).any(|word| {
+            let word = u32::from_le_bytes(word.try_into().expect("four bytes"));
+            word & 0xff80_03ff == 0x9100_03fd
+        }))
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
@@ -3235,10 +3239,38 @@ mod tests {
 
     /// The prologue is what makes the frame-pointer degradation a measurement.
     #[test]
+    #[cfg(target_arch = "aarch64")]
     fn a_prologue_is_read_for_what_it_does_with_the_frame_pointer() {
-        if cfg!(not(target_arch = "x86_64")) {
-            return;
-        }
+        let words = |words: &[u32]| -> Vec<u8> {
+            words.iter().flat_map(|word| word.to_le_bytes()).collect()
+        };
+        // stp x29, x30, [sp, #-16]! ; mov x29, sp
+        assert_eq!(
+            sets_up_frame_pointer(&words(&[0xa9bf_7bfd, 0x9100_03fd]), 0),
+            Some(true)
+        );
+        // sub sp, sp, #0x50 ; stp x29, x30, [sp, #32] ; add x29, sp, #0x20
+        assert_eq!(
+            sets_up_frame_pointer(&words(&[0xd101_43ff, 0xa902_7bfd, 0x9100_83fd]), 0),
+            Some(true)
+        );
+        // sub sp, sp, #0x20 ; str x0, [sp, #8]: a frame, but not a frame
+        // pointer, as gcc builds a leaf even with -fno-omit-frame-pointer.
+        assert_eq!(
+            sets_up_frame_pointer(&words(&[0xd100_83ff, 0xf900_07e0]), 0),
+            Some(false)
+        );
+        // add x0, sp, #0x20: the stack pointer into another register.
+        assert_eq!(
+            sets_up_frame_pointer(&words(&[0x9100_83e0, 0xd503_201f]), 0),
+            Some(false)
+        );
+        assert_eq!(sets_up_frame_pointer(&[0u8; 32], 30), None);
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn a_prologue_is_read_for_what_it_does_with_the_frame_pointer() {
         // push %rbp ; mov %rsp,%rbp
         assert_eq!(
             sets_up_frame_pointer(&[0x55, 0x48, 0x89, 0xe5, 0x90, 0x90, 0x90, 0x90], 0),
