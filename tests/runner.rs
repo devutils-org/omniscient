@@ -1367,21 +1367,23 @@ fn workload_runs_only_when_this_binary_was_launched_as_a_workload() {
 
 /// The program's loop, in this binary: `turns` turns of two instructions.
 fn retire(turns: u64) {
-    if turns == 0 {
-        return;
-    }
+    // Zero turns is no loop: `dec` from zero would wrap and run 2^64 of them.
     #[cfg(target_arch = "x86_64")]
-    // SAFETY: the loop decrements a register it owns and branches on the flag
-    // that decrement sets.
-    unsafe {
-        std::arch::asm!(
-            "2:",
-            "dec {n}",
-            "jnz 2b",
-            n = inout(reg) turns => _,
-            options(nostack),
-        );
+    if turns != 0 {
+        // SAFETY: the loop decrements a register it owns and branches on the
+        // flag that decrement sets.
+        unsafe {
+            std::arch::asm!(
+                "2:",
+                "dec {n}",
+                "jnz 2b",
+                n = inout(reg) turns => _,
+                options(nostack),
+            );
+        }
     }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = turns;
 }
 
 /// A counter attached late to a program that already runs a second thread
