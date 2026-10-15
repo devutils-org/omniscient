@@ -13807,8 +13807,14 @@ sockets, 60 events, a check of `bench/apps/http-roundtrips.toml`.
   `only_tid` were the container's ids where the program compares the
   kernel's. Measured: `runtime.custom` on `libc:mutex_entry` counts 101 for a
   workload's 100 locks and its setup's one; `sched.mutex --pid` over USDT 464
-  acquisitions. Still x86-64's: `net.request`'s uprobes read `pt_regs.di` and
-  `bp` (`src/bpf/request.rs`).
+  acquisitions. `net.request` read its own
+  operands through `pt_regs` members by name, which aarch64 does not have; it
+  places them through the USDT layer now, and the vertical case runs here:
+  5 requests, `a001`'s 43.45 ms asleep against the server's 43.48 ms on its
+  lock, `a003`'s 20.25 ms against 20.36 ms. **Still open on this machine**:
+  no request has its `net_rx` or `net_tx` row ("its socket's entry was
+  evicted before the end"), and the server's O_DIRECT reads are on virtiofs,
+  which is no block device, so `io.latency` has nothing to join.
 - **Tests that assume the development machine's kernel**, red here and not
   defects of the tool: `io_fsync` (`do_fsync` is inlined on this kernel),
   `sched_numa` (no `sched_stick_numa` without NUMA), `usdt`'s libc notes

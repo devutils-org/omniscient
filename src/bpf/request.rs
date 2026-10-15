@@ -676,10 +676,9 @@ fn read_argument_at(
     into: i16,
 ) -> Result<(), String> {
     let arg = &site.args[index];
-    let register = |member: &str| -> Result<i16, String> {
-        let offset = btf.member_offset("pt_regs", member)?;
-        i16::try_from(offset).map_err(|_| format!("`pt_regs.{member}` is at {offset}"))
-    };
+    // The USDT layer's placement, which knows each architecture's `pt_regs`:
+    // x86-64's named members, aarch64's `regs[31]` array.
+    let register = |member: &str| super::usdt::register_offset(btf, member);
     match &arg.operand {
         Operand::Register {
             member,
@@ -1217,6 +1216,26 @@ impl RequestProgram {
 mod tests {
     use super::*;
 
+    // The same probes as each architecture's compiler describes them: the id
+    // in the first argument register, a socket in the second, the id spilled
+    // to the stack, and an operand nothing here reads.
+    #[cfg(not(target_arch = "aarch64"))]
+    const ID_ARG: &str = "8@%rdi";
+    #[cfg(not(target_arch = "aarch64"))]
+    const SOCKET_ARGS: &str = "8@%rdi -4@%esi";
+    #[cfg(not(target_arch = "aarch64"))]
+    const ON_STACK: &str = "-8@-24(%rbp)";
+    #[cfg(not(target_arch = "aarch64"))]
+    const UNREADABLE: &str = "8@%xmm0";
+    #[cfg(target_arch = "aarch64")]
+    const ID_ARG: &str = "8@x0";
+    #[cfg(target_arch = "aarch64")]
+    const SOCKET_ARGS: &str = "8@x0 -4@w1";
+    #[cfg(target_arch = "aarch64")]
+    const ON_STACK: &str = "-8@[x29, -24]";
+    #[cfg(target_arch = "aarch64")]
+    const UNREADABLE: &str = "8@[x0, #:lo12:.LANCHOR0]";
+
     fn kernel_btf() -> Option<&'static Btf> {
         match super::super::kernel_btf() {
             Ok(btf) => Some(btf),
@@ -1438,9 +1457,9 @@ mod tests {
                     && pair[1].imm == TASK_STORAGE_GET
             })
         };
-        let birth = birth_instructions(btf, &site("8@%rdi"), MAPS).expect("a birth");
+        let birth = birth_instructions(btf, &site(ID_ARG), MAPS).expect("a birth");
         assert!(creates(&birth));
-        let end = end_instructions(btf, &site("8@%rdi"), MAPS).expect("an end");
+        let end = end_instructions(btf, &site(ID_ARG), MAPS).expect("an end");
         assert!(!creates(&end));
         assert!(!creates(&switch_instructions(btf, MAPS).expect("a switch")));
         let mut program = Program::new();
@@ -1456,7 +1475,7 @@ mod tests {
     #[test]
     fn the_end_removes_the_id_from_the_task() {
         let Some(btf) = kernel_btf() else { return };
-        let end = end_instructions(btf, &site("-8@-24(%rbp)"), MAPS).expect("an end");
+        let end = end_instructions(btf, &site(ON_STACK), MAPS).expect("an end");
         assert!(helpers(&end).contains(&TASK_STORAGE_DELETE));
     }
 
@@ -1466,8 +1485,8 @@ mod tests {
         let Some(btf) = kernel_btf() else { return };
         const KTIME_GET_BOOT_NS: i32 = 125;
         for program in [
-            birth_instructions(btf, &site("8@%rdi"), MAPS).unwrap(),
-            end_instructions(btf, &site("8@%rdi"), MAPS).unwrap(),
+            birth_instructions(btf, &site(ID_ARG), MAPS).unwrap(),
+            end_instructions(btf, &site(ID_ARG), MAPS).unwrap(),
             switch_instructions(btf, MAPS).unwrap(),
             wakeup_instructions(btf, MAPS).unwrap(),
         ] {
@@ -1482,7 +1501,7 @@ mod tests {
     #[test]
     fn an_id_this_build_cannot_read_is_refused_by_name() {
         let Some(btf) = kernel_btf() else { return };
-        let error = birth_instructions(btf, &site("8@%xmm0"), MAPS).expect_err("unreadable");
+        let error = birth_instructions(btf, &site(UNREADABLE), MAPS).expect_err("unreadable");
         assert!(error.contains("request__start"), "{error}");
         let error = birth_instructions(btf, &site(""), MAPS).expect_err("no argument");
         assert!(error.contains("declares no argument"), "{error}");
@@ -1494,8 +1513,8 @@ mod tests {
     fn every_record_is_cleared_before_it_is_filled() {
         let Some(btf) = kernel_btf() else { return };
         for program in [
-            birth_instructions(btf, &site("8@%rdi"), MAPS).unwrap(),
-            end_instructions(btf, &site("8@%rdi"), MAPS).unwrap(),
+            birth_instructions(btf, &site(ID_ARG), MAPS).unwrap(),
+            end_instructions(btf, &site(ID_ARG), MAPS).unwrap(),
         ] {
             let cleared: Vec<i16> = program
                 .iter()
@@ -1542,12 +1561,10 @@ mod tests {
                 && program.iter().any(|insn| insn.off == SOCK_KEY)
         };
         for build in [birth_instructions, end_instructions] {
-            assert!(reads_cookie(
-                &build(btf, &site("8@%rdi -4@%esi"), maps).unwrap()
-            ));
-            assert!(!reads_cookie(&build(btf, &site("8@%rdi"), maps).unwrap()));
+            assert!(reads_cookie(&build(btf, &site(SOCKET_ARGS), maps).unwrap()));
+            assert!(!reads_cookie(&build(btf, &site(ID_ARG), maps).unwrap()));
             assert!(!reads_cookie(
-                &build(btf, &site("8@%rdi -4@%esi"), MAPS).unwrap()
+                &build(btf, &site(SOCKET_ARGS), MAPS).unwrap()
             ));
         }
     }

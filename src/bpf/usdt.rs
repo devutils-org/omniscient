@@ -942,7 +942,7 @@ impl Hit {
 /// Where each register lives in `struct pt_regs`, read from the kernel's BTF
 /// rather than assumed: the program reads user registers out of the context a
 /// uprobe hands it, and that context is this structure.
-fn register_offset(btf: &Btf, member: &str) -> Result<i16, String> {
+pub(super) fn register_offset(btf: &Btf, member: &str) -> Result<i16, String> {
     // aarch64's general registers are one array, `u64 regs[31]`, at the head
     // of its `pt_regs`: `xN` is the Nth slot of it.
     let numbered = member
