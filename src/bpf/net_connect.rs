@@ -53,6 +53,14 @@ pub(crate) const CONNECT_SIGNATURES: [&[&str]; 2] = [
 ];
 const FINISH_SIGNATURE: [&str; 2] = ["sock *", "sk_buff *"];
 const DONE_SIGNATURE: [&str; 2] = ["sock *", "int"];
+/// `tcp_done(sk)`, which `tcp_done_with_error` calls once it has written the
+/// errno into `sk->sk_err`: where a refusal is read on a kernel that inlined
+/// `tcp_done_with_error` into its callers and keeps an out-of-line copy
+/// nobody calls -- a clang build with link-time optimisation does (OrbStack's
+/// 7.2 on aarch64: five refused connects, `tcp_done_with_error` run zero
+/// times, `tcp_done` five). The first of the two to run takes the socket's
+/// stamp, so on a kernel where both run the second finds none.
+const DONE_BEHIND_SIGNATURE: [&str; 1] = ["sock *"];
 
 /// How a handshake ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +220,7 @@ struct Offsets {
     rcv_saddr: i32,
     v6_daddr: i32,
     v6_rcv_saddr: i32,
+    err: i32,
 }
 
 impl Offsets {
@@ -229,6 +238,7 @@ impl Offsets {
             rcv_saddr: at("skc_rcv_saddr")?,
             v6_daddr: at("skc_v6_daddr")?,
             v6_rcv_saddr: at("skc_v6_rcv_saddr")?,
+            err: btf.member_offset("sock", "sk_err")?,
         })
     }
 }
@@ -290,6 +300,10 @@ enum Close {
     Finished,
     /// `tcp_done_with_error(sk, err)`: the errno is the second argument.
     Done,
+    /// `tcp_done(sk)`: the errno is `sk->sk_err`, and a socket done with
+    /// none -- closed while its handshake was under way -- is not a refusal
+    /// and is left to the connect call's return.
+    DoneBehind,
     /// The exit half of the connect call: only a non-zero return closes, and
     /// the errno is its negation.
     Returned,
@@ -312,6 +326,10 @@ fn close_instructions(
         program.jump_to("done", Insn::jeq_imm(1, 0, 0));
     }
     program.push(Insn::ldx(BPF_DW, 7, 6, function.arg(0)));
+    if let Close::DoneBehind = close {
+        program.push(Insn::ldx(BPF_W, 1, 7, at.err as i16));
+        program.jump_to("done", Insn::jeq_imm(1, 0, 0));
+    }
     program.push(Insn::stx(BPF_DW, R10, PEND_KEY, 7));
     program.extend(Insn::load_map_fd(1, pending_fd));
     program.push(Insn::mov64_reg(2, R10));
@@ -362,6 +380,16 @@ fn close_instructions(
                 Outcome::Refused as i32,
             ));
             program.push(Insn::ldx(BPF_DW, 1, 6, function.arg(1)));
+            program.push(Insn::stx(BPF_W, R10, EVENT + R_ERRNO, 1));
+        }
+        Close::DoneBehind => {
+            program.push(Insn::st_imm(
+                BPF_W,
+                R10,
+                EVENT + R_OUTCOME,
+                Outcome::Refused as i32,
+            ));
+            program.push(Insn::ldx(BPF_W, 1, 7, at.err as i16));
             program.push(Insn::stx(BPF_W, R10, EVENT + R_ERRNO, 1));
         }
         Close::Returned => {
@@ -437,6 +465,7 @@ impl ConnectProgram {
         let v6 = fentry::expect("tcp_v6_connect", &CONNECT_SIGNATURES).ok();
         let finish = fentry::expect("tcp_finish_connect", &[&FINISH_SIGNATURE])?;
         let done = fentry::expect("tcp_done_with_error", &[&DONE_SIGNATURE])?;
+        let done_behind = fentry::expect("tcp_done", &[&DONE_BEHIND_SIGNATURE])?;
 
         let bytes = ring_bytes(RING_BYTES);
         let ring_map =
@@ -458,6 +487,11 @@ impl ConnectProgram {
                 &done,
                 Side::Entry,
                 close_instructions(&done, Close::Done, &offsets, p, r, d)?,
+            ),
+            (
+                &done_behind,
+                Side::Entry,
+                close_instructions(&done_behind, Close::DoneBehind, &offsets, p, r, d)?,
             ),
             (
                 &v4,
@@ -645,8 +679,9 @@ mod tests {
         );
         assert_eq!(returned[2].code, 0x15, "and a zero return is left alone");
         for (name, signature, close) in [
-            ("tcp_finish_connect", &FINISH_SIGNATURE, Close::Finished),
-            ("tcp_done_with_error", &DONE_SIGNATURE, Close::Done),
+            ("tcp_finish_connect", &FINISH_SIGNATURE[..], Close::Finished),
+            ("tcp_done_with_error", &DONE_SIGNATURE[..], Close::Done),
+            ("tcp_done", &DONE_BEHIND_SIGNATURE[..], Close::DoneBehind),
         ] {
             let function = fentry::expect(name, &[signature]).expect(name);
             let program =
