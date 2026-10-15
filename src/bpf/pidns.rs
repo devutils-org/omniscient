@@ -258,6 +258,11 @@ pub fn tasks() -> Result<Vec<Task>, String> {
     })
 }
 
+/// The iterator's link, loaded on the first pass and kept for the run: a
+/// pass is then one `BPF_ITER_CREATE` and one read, and a run that refreshes
+/// its table on every tick ([`remember`]) does not verify a program each time.
+static LINK: std::sync::Mutex<Option<OwnedFd>> = std::sync::Mutex::new(None);
+
 /// One pass of the iterator; `None` when this process may not load one.
 ///
 /// Refused for permission, the ids are left as they were named: a process
@@ -267,34 +272,41 @@ pub fn tasks() -> Result<Vec<Task>, String> {
 fn iterate() -> Result<Option<Vec<Task>>, String> {
     let why = "`omn` runs in a pid namespace other than the initial one, so the ids it names \
                a target by are not the kernel's, and translating them needs a task iterator";
-    let btf = crate::bpf::kernel_btf()?;
-    let offsets = Offsets::read(btf).map_err(|reason| format!("{why}: {reason}"))?;
-    let target = fentry::index()
-        .and_then(|index| index.function("bpf_iter_task"))
-        .map_err(|reason| format!("{why}, and this kernel has none: {reason}"))?;
-    let program = match fentry::load_tracing(
-        &target,
-        BPF_TRACE_ITER,
-        &instructions(&offsets),
-        "omn_pidns",
-    ) {
-        Ok(program) => program,
-        Err(error) if error.is_permission() => return Ok(None),
-        Err(error) => return Err(format!("{why}, which did not load: {error}")),
-    };
-    let mut attr = LinkCreateAttr {
-        prog_fd: program.as_raw_fd() as u32,
-        attach_type: BPF_TRACE_ITER,
-        ..Default::default()
-    };
-    let link = bpf(BPF_LINK_CREATE, &mut attr)
-        .map_err(|error| format!("{why}, which did not attach: {error}"))?;
+    let mut link = LINK.lock().expect("the iterator's link");
+    if link.is_none() {
+        let btf = crate::bpf::kernel_btf()?;
+        let offsets = Offsets::read(btf).map_err(|reason| format!("{why}: {reason}"))?;
+        let target = fentry::index()
+            .and_then(|index| index.function("bpf_iter_task"))
+            .map_err(|reason| format!("{why}, and this kernel has none: {reason}"))?;
+        let program = match fentry::load_tracing(
+            &target,
+            BPF_TRACE_ITER,
+            &instructions(&offsets),
+            "omn_pidns",
+        ) {
+            Ok(program) => program,
+            Err(error) if error.is_permission() => return Ok(None),
+            Err(error) => return Err(format!("{why}, which did not load: {error}")),
+        };
+        let mut attr = LinkCreateAttr {
+            prog_fd: program.as_raw_fd() as u32,
+            attach_type: BPF_TRACE_ITER,
+            ..Default::default()
+        };
+        // The link holds the program: its descriptor can close.
+        *link = Some(
+            bpf(BPF_LINK_CREATE, &mut attr)
+                .map_err(|error| format!("{why}, which did not attach: {error}"))?,
+        );
+    }
     let mut attr = IterCreateAttr {
-        link_fd: link.as_raw_fd() as u32,
+        link_fd: link.as_ref().expect("loaded above").as_raw_fd() as u32,
         flags: 0,
     };
     let iterator = bpf(BPF_ITER_CREATE, &mut attr)
         .map_err(|error| format!("{why}, which did not open: {error}"))?;
+    drop(link);
     let mut bytes = Vec::new();
     std::fs::File::from(iterator)
         .read_to_end(&mut bytes)
@@ -467,6 +479,42 @@ pub fn ours(kernel: u32) -> Option<u32> {
         Err(_) => {}
     }
     table.get(&kernel).copied()
+}
+
+/// When [`remember`] last iterated, in `CLOCK_MONOTONIC` nanoseconds.
+static REMEMBERED_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The live tasks added to the table [`translate`] reads, at most once per
+/// 100 ms, for a collector that keeps its rows in the kernel until its stop:
+/// by the time it hands them over, a target's children have exited and no
+/// iteration can name them. The runner calls this on every read of an eBPF
+/// collector that handed nothing over, so a task that lived one tick keeps its
+/// translation. A task shorter than that still exits unseen, and is counted
+/// ([`untranslated_note`]).
+pub fn remember() {
+    use std::sync::atomic::Ordering;
+    if in_initial_pid_namespace() {
+        return;
+    }
+    let now = crate::clock::monotonic_ns();
+    let last = REMEMBERED_NS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 100_000_000
+        || REMEMBERED_NS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+    {
+        return;
+    }
+    let Ok(Some(tasks)) = iterate() else {
+        return;
+    };
+    let mut back = BACK.lock().expect("the translation table");
+    let table = back.get_or_insert_with(Default::default);
+    for task in tasks {
+        if let Some(ours) = task.ns_tid {
+            table.insert(task.tid, ours);
+        }
+    }
 }
 
 /// The note a run carries for the ids [`translate`] left as the kernel's.

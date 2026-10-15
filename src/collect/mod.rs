@@ -970,6 +970,12 @@ fn into_our_ids(serving: Option<&ResolvedRequest>, events: &mut [Event], losses:
     if !serving.is_some_and(|serving| loads_programs(&serving.backend.id)) {
         return;
     }
+    // Nothing handed over may be rows still in the kernel, whose tasks must
+    // be seen alive to be translated when they come (`pidns::remember`).
+    if events.is_empty() {
+        crate::bpf::pidns::remember();
+        return;
+    }
     let missed = crate::bpf::pidns::translate(events);
     if missed > 0 {
         losses.note(crate::bpf::pidns::untranslated_note(missed));

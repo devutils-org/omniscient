@@ -1115,6 +1115,11 @@ fn a_machine_wide_run_that_asked_for_no_stacks_does_not_symbolise_the_machine() 
 /// `btf_trace_<name>` type for it, which is what the probe reads, so an entry
 /// naming one this kernel does not have would be ordering its chain in front
 /// of nothing.
+/// Raw tracepoints a kernel defines only under a config option, each with the
+/// file that exists exactly when the option is on.
+const CONFIGURED_TRACEPOINTS: &[(&str, &str)] =
+    &[("sched_stick_numa", "/proc/sys/kernel/numa_balancing")];
+
 #[test]
 fn no_sched_backend_needs_tracefs_before_one_that_does_not() {
     let listing = run(&["list", "sched"]);
@@ -1150,6 +1155,15 @@ fn no_sched_backend_needs_tracefs_before_one_that_does_not() {
 
         for line in text.lines().map(str::trim) {
             if let Some(rest) = line.strip_prefix("needs    raw_tracepoint:") {
+                // A tracepoint the kernel defines only under a config option
+                // it was built without is missing for that reason, which the
+                // option's own file says: not a misspelt name.
+                let unconfigured = CONFIGURED_TRACEPOINTS.iter().any(|(name, file)| {
+                    rest.starts_with(&format!("{name}(")) && !std::path::Path::new(file).exists()
+                });
+                if unconfigured {
+                    continue;
+                }
                 // The probe reads the kernel's own BTF and needs no
                 // privileges, so this is an answer on any machine.
                 assert!(
@@ -1385,9 +1399,16 @@ fn a_launched_programs_children_are_followed_and_wait_what_their_schedstat_says(
              waits, {measured} ns ({by_tracepoints} ns by the tracepoints); {blocks} blocks, \
              {blocked_queue} ns of them queued"
         );
+        // A sleep whose timer fired before the task reached `schedule` never
+        // left the cpu -- a VM whose vcpu the host descheduled in between sees
+        // a few -- and the kernel counts no run after it either: the child's
+        // own `slices` is the bound when it is below `TIMES`, less the first
+        // run and a preemption or two.
+        let expected = TIMES.min(slices);
         assert!(
-            blocks >= TIMES,
-            "child {pid} slept {TIMES} times and {blocks} blocks were counted:\n{queued:?}"
+            blocks + 4 >= expected,
+            "child {pid} slept {TIMES} times, its schedstat counted {slices} runs, and {blocks} \
+             blocks were counted:\n{queued:?}"
         );
         // A wait the kernel stamped on a path neither tracepoint marks, or a
         // run of a program the kernel skipped on a busy cpu, is a handful in

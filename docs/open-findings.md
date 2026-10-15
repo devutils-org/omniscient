@@ -13927,5 +13927,17 @@ exists.
 - `fp` and `fp+leaf` on aarch64 (`unwind`, 5): frame-pointer detection of
   the test's leaf build and the leaf's caller recovery assume x86-64's
   prologue.
-- `sched.switches` counts none of a forced program's voluntary switches;
-  a launched program's child's switches are not followed (`family_sched`).
+- `sched.switches` counts none of a forced program's voluntary switches.
+- ~~A launched program's child's switches are not followed~~ -- **they were,
+  under the kernel's ids**: `sched.switches -m count` keeps its rows in the
+  kernel until its stop, by which time the children had exited and the
+  iterator could not name them; 2240 switches sat under a tid `ps` never
+  showed. The runner now refreshes the translation table on every read of an
+  eBPF collector that handed nothing over (`pidns::remember`, at most every
+  100 ms, the iterator's link kept for the run), so a task that lived one
+  tick keeps its translation; `family_sched`'s three child-following tests
+  pass. Its blocking test expected 3000 blocks from 3000 20 us sleeps, and
+  here a sleep whose timer fired before `schedule` never left the cpu: the
+  child's own `schedstat` counted the same 2997, which is the bound now.
+  `sched_stick_numa` is missing for want of `CONFIG_NUMA_BALANCING`, which
+  the ordering test now tells from a misspelt name.
