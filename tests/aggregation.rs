@@ -386,16 +386,16 @@ fn a_format_refuses_an_emit_it_cannot_express_before_collecting_anything() {
     );
 }
 
-/// Until a collector captures one, `--emit stack` has to say that no event
-/// carried a stack.
+/// Until a collector captures one, `--emit stack` on the heap is refused
+/// before the program runs, with the reason.
 ///
-/// The aggregation is written and the encoders are written; what is missing is
-/// the capture. An empty profile and a program that did nothing render
-/// identically, so the count of what carried no stack is the whole difference
-/// between "not built yet" and "nothing happened". When stacks arrive this test
-/// changes shape; it must not quietly keep passing.
+/// The shim captures no stack, and its backend says so in the catalog
+/// (`emits: [hist, topk, raw, summary]`): the resolver passes it over, so the
+/// refusal names what `preload` emits and comes before the launch, where it
+/// used to come after the program had run with nothing to write (heap 1). When
+/// stacks arrive this test changes shape; it must not quietly keep passing.
 #[test]
-fn a_stack_emit_with_no_captured_stacks_says_so_rather_than_showing_an_empty_profile() {
+fn a_stack_emit_no_backend_captures_is_refused_before_the_program_runs() {
     if !has_python() {
         eprintln!("skipped: this machine has no python3 to launch");
         return;
@@ -404,26 +404,19 @@ fn a_stack_emit_with_no_captured_stacks_says_so_rather_than_showing_an_empty_pro
     let output = run_session(&session(
         "mem.heap.alloc",
         "stack",
-        &allocating(&[(2 * MIB, 4)]),
+        "print('launched', flush=True)",
         "json",
     ));
-    assert_ran(&output);
-
-    let run: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("one json document");
-    let stacks = &run["results"][0]["outputs"][0];
-    let seen = run["results"][0]["events_seen"]
-        .as_u64()
-        .expect("a count of events");
-    assert!(seen > 0, "the program allocated: {run}");
-    assert_eq!(
-        stacks["unattributed"].as_u64(),
-        Some(seen),
-        "no collector captures a stack yet, and every event has to be counted as such: {run}"
+    let message = stderr(&output);
+    assert!(!output.status.success(), "{message}");
+    assert!(
+        !stdout(&output).contains("launched"),
+        "the program ran before the refusal: {}",
+        stdout(&output)
     );
-    assert_eq!(
-        stacks["stacks"].as_array().map(Vec::len),
-        Some(0),
-        "{stacks}"
+    assert!(
+        message.contains("`preload` emits") && message.contains("not `stack`"),
+        "{message}"
     );
 }
 
@@ -445,10 +438,12 @@ fn a_collapsed_stack_file_is_refused_rather_than_written_empty() {
         "an empty folded file was written: {:?}",
         stdout(&output)
     );
+    // Refused before the run now, since no backend of the heap captures a
+    // stack (heap 1); the refusal says why either way.
+    let message = stderr(&output);
     assert!(
-        stderr(&output).contains("no event carried one"),
-        "{}",
-        stderr(&output)
+        message.contains("no event carried one") || message.contains("not `stack`"),
+        "{message}"
     );
 }
 
