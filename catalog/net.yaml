@@ -318,6 +318,9 @@
   filter_fields: [comm, bytes, dport, family, op, iface]
   determinism: low
   caveats:
+    - "A process target and the processes it starts are followed from the
+       fork, as the `sched` sources follow them: a launched script's calls are
+       its programs' too."
     - "Sends are timed for inet, inet6 and unix sockets only; receives for
        every family. Compare the two directions within those families."
     - "A receive's latency includes the wait for data. A blocking recv that

@@ -249,6 +249,12 @@ impl VfsProgram {
     pub fn missed(&self) -> u64 {
         self.inner.missed()
     }
+
+    /// Processes the target started that are not followed; see
+    /// [`fentry::HistogramProgram::unfollowed`].
+    pub fn unfollowed(&self) -> u64 {
+        self.inner.unfollowed()
+    }
 }
 
 fn timed(name: &str, shape: &[&str], op: Op) -> Result<Timed, String> {

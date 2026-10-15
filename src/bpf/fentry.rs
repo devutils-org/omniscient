@@ -939,6 +939,8 @@ const PEND_VALUE_BYTES: usize = 8;
 const ENTRY_PEND_KEY: i16 = -8;
 const ENTRY_PEND_VALUE: i16 = -16;
 const ENTRY_DROP_KEY: i16 = -20;
+/// The calling thread group, looked up in the descendants map.
+const ENTRY_TGID: i16 = -24;
 
 /// Writes the entry half of a timed pair.
 ///
@@ -963,6 +965,7 @@ pub(crate) fn entry_instructions(
     drop_slot: u32,
     orphan_slot: u32,
     narrowing: Narrowing,
+    descendants: Option<i32>,
     gate: &dyn Fn(&mut Program),
 ) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
@@ -973,7 +976,24 @@ pub(crate) fn entry_instructions(
     if let Some(tgid) = narrowing.tgid {
         program.push(Insn::mov64_reg(1, 7));
         program.push(Insn::rsh64_imm(1, 32));
-        program.jump_to(SKIP, Insn::jne_imm(1, tgid as i32, 0));
+        match descendants {
+            None => {
+                program.jump_to(SKIP, Insn::jne_imm(1, tgid as i32, 0));
+            }
+            // The root is a constant in the stream; the processes it started
+            // since are in the map `sched_process_fork` fills, as for the
+            // `sched` sources (`sched_common::Descendants`).
+            Some(map) => {
+                program.push(Insn::stx(BPF_W, R10, ENTRY_TGID, 1));
+                program.jump_to("followed", Insn::jeq_imm(1, tgid as i32, 0));
+                program.extend(Insn::load_map_fd(1, map));
+                program.push(Insn::mov64_reg(2, R10));
+                program.push(Insn::add64_imm(2, ENTRY_TGID as i32));
+                program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+                program.jump_to(SKIP, Insn::jeq_imm(0, 0, 0));
+                program.label("followed");
+            }
+        }
     }
     // The whole slot is cleared, then the low word written: the key is four
     // bytes and a stack slot is eight, and the kernel hashes what it is told
@@ -1410,6 +1430,9 @@ pub struct HistogramProgram {
     /// When the current map started being written.
     flipped_at: std::cell::Cell<u64>,
     links: Vec<Link>,
+    /// The processes a process target started, followed by the entry
+    /// programs: a launched shell script's calls are its children's.
+    descendants: Option<crate::bpf::sched_common::Descendants>,
 }
 
 /// What one drain found beside the rows.
@@ -1514,6 +1537,14 @@ impl HistogramProgram {
         // Every instruction stream is built before anything is attached, so a
         // kernel that refuses one of them refuses the source before any of it
         // runs.
+        // A process target is followed into the processes it starts: without
+        // it `omn trace io.syscall -- ./script.sh` timed the shell's own calls
+        // and none of the programs it ran, and read as an idle program.
+        let descendants = spec
+            .narrowing
+            .tgid
+            .map(crate::bpf::sched_common::Descendants::follow)
+            .transpose()?;
         let mut built = Vec::with_capacity(spec.timed.len());
         for timed in &spec.timed {
             let entry = entry_instructions(
@@ -1522,6 +1553,9 @@ impl HistogramProgram {
                 DROP_PENDING,
                 DROP_ORPHANED,
                 spec.narrowing,
+                descendants
+                    .as_ref()
+                    .map(crate::bpf::sched_common::Descendants::map_fd),
                 &|program| (spec.gate)(program, timed),
             )?;
             let exit = exit_instructions(timed, maps, spec.fill)?;
@@ -1558,6 +1592,7 @@ impl HistogramProgram {
             writing: std::cell::Cell::new(0),
             flipped_at: std::cell::Cell::new(now),
             links,
+            descendants,
         })
     }
 
@@ -1619,9 +1654,23 @@ impl HistogramProgram {
         )
     }
 
-    /// Runs the kernel skipped; see [`Link::misses`].
+    /// Runs the kernel skipped; see [`Link::misses`]. The programs that
+    /// follow a process target's children are among them: a fork they did not
+    /// see is a child none of whose calls is timed.
     pub fn missed(&self) -> u64 {
         misses(&self.links)
+            + self
+                .descendants
+                .as_ref()
+                .map_or(0, crate::bpf::sched_common::Descendants::skipped)
+    }
+
+    /// Processes the target started that are not followed, because the map
+    /// of them was full.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants
+            .as_ref()
+            .map_or(0, crate::bpf::sched_common::Descendants::missed)
     }
 }
 
@@ -1856,6 +1905,36 @@ mod tests {
         assert_eq!(read.arg(2), 16);
     }
 
+    /// A process target's entry half keeps the root by a constant and the
+    /// processes it started by a lookup in the descendants map; without the
+    /// map it keeps the root alone, and a whole-machine one compares nothing.
+    #[test]
+    fn a_process_target_s_entry_half_looks_its_children_up() {
+        const DESCENDANTS: i32 = 9;
+        let lookups = |narrowing: Narrowing, descendants: Option<i32>| {
+            let program =
+                entry_instructions(3, 4, 0, 2, narrowing, descendants, &|_| {}).expect("entry");
+            let loads = program
+                .iter()
+                .filter(|insn| insn.code == 0x18 && insn.imm == DESCENDANTS)
+                .count();
+            let calls = program
+                .iter()
+                .filter(|insn| insn.code == 0x85 && insn.imm == helper::MAP_LOOKUP_ELEM)
+                .count();
+            (loads, calls)
+        };
+        let process = Narrowing {
+            tgid: Some(4242),
+            tid: None,
+        };
+        let (followed_loads, followed_calls) = lookups(process, Some(DESCENDANTS));
+        let (root_loads, root_calls) = lookups(process, None);
+        assert_eq!((followed_loads, root_loads), (1, 0));
+        assert_eq!(followed_calls, root_calls + 1, "one lookup more, the map's");
+        assert_eq!(lookups(Narrowing::default(), None), (0, root_calls));
+    }
+
     /// Both halves of the pair take one timestamp each, from the monotonic
     /// clock and no other.
     #[test]
@@ -1866,7 +1945,8 @@ mod tests {
             function: index.function("vfs_read").expect("vfs_read"),
             op: 0,
         };
-        let entry = entry_instructions(3, 4, 0, 2, Narrowing::default(), &|_| {}).expect("entry");
+        let entry =
+            entry_instructions(3, 4, 0, 2, Narrowing::default(), None, &|_| {}).expect("entry");
         let exit = exit_instructions(&timed, maps(), &|_, _| Ok(())).expect("exit");
         for (what, program) in [("entry", entry), ("exit", exit)] {
             let calls: Vec<i32> = program

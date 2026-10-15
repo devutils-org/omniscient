@@ -155,6 +155,10 @@ impl Rows for SocketProgram {
     fn missed(&self) -> u64 {
         SocketProgram::missed(self)
     }
+
+    fn unfollowed(&self) -> u64 {
+        SocketProgram::unfollowed(self)
+    }
 }
 
 #[cfg(test)]

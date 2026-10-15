@@ -1724,10 +1724,13 @@ embedded catalog a second time. The decisions are in `DECISIONS.md`,
        A poller read first in a round that outlasted the run is read again
        at the close now, late and counted: it used to end with its baseline
        alone, no event and nothing lost.
-     - `src/bpf/fentry.rs`: `Narrowing` with a descendants map, so
-       `io.syscall`, `io.fs` and `net.socket` follow forked children (io;
-       lazy's io default names `io.syscall`, so `omn io -- ./script.sh`
-       reads as an idle program until it lands).
+     - ~~`src/bpf/fentry.rs`: `Narrowing` with a descendants map~~ --
+       **done** (2026-10-15): a process target's entry halves keep the root
+       by a constant and the processes it started by `sched_common::
+       Descendants`' map, so `io.syscall`, `io.fs` and `net.socket` follow
+       forked children; a child's 200 `pread64`s were 0 kept before, 200
+       after (`scenario_io::a_timed_pair_follows_a_launched_programs_
+       forked_child`), and a full map is said.
      - `src/perf.rs`: `PERF_SAMPLE_PERIOD` decoded, so the frequency-mode
        samples of `cpu.instructions`, `cpu.branches` and the misses carry a
        `weight` and their shares are perf's (cpu).

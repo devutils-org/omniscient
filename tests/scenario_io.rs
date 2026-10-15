@@ -6558,6 +6558,87 @@ fn a_launched_programs_forked_child_is_followed() {
     );
 }
 
+/// Forks, and makes `N` `pread64` calls in the child alone, then reports the
+/// child's pid: the parent makes none.
+const FORKED_PREADS: &str = r#"
+import json, os, sys
+path, count, account = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+child = os.fork()
+if child == 0:
+    fd = os.open(path, os.O_RDONLY)
+    for _ in range(count):
+        os.pread(fd, 512, 0)
+    os.close(fd)
+    with open(account, "w") as out:
+        json.dump({"pid": os.getpid()}, out)
+    os._exit(0)
+_, status = os.waitpid(child, 0)
+sys.exit(os.waitstatus_to_exitcode(status))
+"#;
+
+/// A launched program's forked child is followed by the timed-pair sources:
+/// its calls are the run's.
+///
+/// `omn trace io.syscall -- ./script.sh` timed the shell's own calls and none
+/// of the programs it ran: the entry programs compared the caller with the
+/// launched process alone, where every `sched` source follows the processes
+/// it starts (`STATE.md`, item 1, `src/bpf/fentry.rs`). Ground truth is the
+/// child's own count of the `pread64` calls it made, which the parent never
+/// makes; they are counted one for one, under the child's pid.
+#[test]
+fn a_timed_pair_follows_a_launched_programs_forked_child() {
+    if let Some(reason) = no_bpf_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
+    if let Some(reason) = lacks_here("io.syscall", "bpf:fentry") {
+        eprintln!("skipped: {reason:?}");
+        return;
+    }
+    const PREADS: u64 = 200;
+    let forks = script("io-forked-preads.py", FORKED_PREADS);
+    let account_path = scratch("io-forked-preads.json");
+    let _ = std::fs::remove_file(&account_path);
+    let output = run(&[
+        "io.syscall",
+        "-m",
+        "count",
+        "-e",
+        "raw",
+        "--format",
+        "json",
+        "--",
+        "python3",
+        forks.to_str().expect("a path"),
+        forks.to_str().expect("a path"),
+        &PREADS.to_string(),
+        account_path.to_str().expect("a path"),
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let child = account(&account_path)["pid"]
+        .as_u64()
+        .expect("the child's pid");
+    let document = json(&output);
+    let result = result(&document, "io.syscall");
+    let found: u64 = raw_events(result)
+        .into_iter()
+        .filter(|attrs| attrs["pid"].as_u64() == Some(child))
+        .filter(|attrs| attrs["syscall"].as_str() == Some("pread64"))
+        .map(|attrs| attrs["count"].as_u64().unwrap_or(0))
+        .sum();
+    let dropped = losses(result)["dropped"].as_u64().unwrap_or(0);
+    assert!(
+        found <= PREADS,
+        "{found} pread64 calls from the child for {PREADS}: something is counted twice"
+    );
+    assert!(
+        found + dropped >= PREADS,
+        "the child made {PREADS} pread64 calls and the run kept {found}, reporting {dropped} \
+         lost: the launched program's child is not followed. {}",
+        stderr(&output)
+    );
+}
+
 /// `io.vfs` counts every `vfs_write`, of any file type: a program that writes
 /// 20 000 times to `/dev/null` from a forked child is found 20 000 times, and
 /// the parent, which writes nothing, adds nothing. `/dev/null` is not a
