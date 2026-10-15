@@ -3415,6 +3415,16 @@ fn each_refusal_names_the_thing_that_is_missing() {
     ];
     for (args, expected) in unbuilt {
         let (code, message) = run(args).refusal();
+        // Unwritten and missing something here is answered in the chain's
+        // order, the machine first (`DECISIONS.md`, "one order for unbuilt
+        // and missing"): a kernel without PSI has no `cpu.pressure` anywhere.
+        if code == 1 && message.contains("missing:") {
+            eprintln!(
+                "`{}`: this machine lacks what it needs: {message}",
+                args.join(" ")
+            );
+            continue;
+        }
         assert_eq!(
             code,
             3,

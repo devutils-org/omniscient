@@ -698,7 +698,11 @@ fn every_mode_and_emit_the_catalog_offers_is_served_or_refused_by_name() {
             message.contains(mode)
                 || message.contains(emit)
                 || message.contains("bpf")
-                || message.contains("no collector"),
+                || message.contains("no collector")
+                // The machine refusing names what each backend lacked.
+                || (code == 1
+                    && message.contains("no viable backend")
+                    && message.contains("missing:")),
             "`{source} -m {mode} -e {emit}` was refused without naming what is missing:\n{message}"
         );
     }
@@ -1903,6 +1907,10 @@ fn monotonic_ns() -> u64 {
 /// is low enough to mean something, and says so when it is not.
 #[test]
 fn pressure_is_a_share_of_its_own_window_and_full_never_exceeds_some() {
+    if let Some(reason) = no_psi_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
     let file = scratch("io-pressure.bin");
     if let Some(reason) = no_device_here(Path::new(env!("CARGO_TARGET_TMPDIR"))) {
         eprintln!("skipped: {reason}");
@@ -2599,6 +2607,13 @@ fn each_refusal_names_the_thing_that_is_actually_missing() {
     assert!(stdout(&at_attach).is_empty(), "{}", stdout(&at_attach));
 }
 
+/// Why this kernel serves no pressure source, if it serves none: one built
+/// without `CONFIG_PSI`, or booted with `psi=0`, has no `/proc/pressure`.
+fn no_psi_here() -> Option<&'static str> {
+    (!Path::new("/proc/pressure").exists())
+        .then_some("this kernel publishes no PSI: /proc/pressure does not exist")
+}
+
 /// A machine that cannot serve a source at all says which file is missing.
 ///
 /// The fourth answer, and the one no real machine here can be made to give:
@@ -2607,22 +2622,39 @@ fn each_refusal_names_the_thing_that_is_actually_missing() {
 /// kernel built without `CONFIG_PSI` looks like from the tool's side.
 #[test]
 fn a_machine_that_cannot_serve_pressure_says_which_file_it_wanted() {
-    if let Some(reason) = no_namespace_here() {
-        eprintln!("skipped: {reason}, so a machine without PSI cannot be simulated");
-        return;
-    }
-    let output = Command::new("unshare")
-        .args([
-            "-Urm",
-            "sh",
-            "-c",
-            &format!(
-                "mount -t tmpfs none /proc/pressure && exec {BINARY} io.pressure --system \
+    // A kernel without PSI is the machine this simulates: asked as it is.
+    let output = if no_psi_here().is_some() {
+        Command::new(BINARY)
+            .args([
+                "io.pressure",
+                "--system",
+                "-m",
+                "poll@100ms",
+                "-d",
+                "200ms",
+                "-e",
+                "timeline",
+            ])
+            .output()
+            .expect("omn should run")
+    } else {
+        if let Some(reason) = no_namespace_here() {
+            eprintln!("skipped: {reason}, so a machine without PSI cannot be simulated");
+            return;
+        }
+        Command::new("unshare")
+            .args([
+                "-Urm",
+                "sh",
+                "-c",
+                &format!(
+                    "mount -t tmpfs none /proc/pressure && exec {BINARY} io.pressure --system \
                  -m poll@100ms -d 200ms -e timeline"
-            ),
-        ])
-        .output()
-        .expect("unshare should run");
+                ),
+            ])
+            .output()
+            .expect("unshare should run")
+    };
 
     let message = stderr(&output);
     if message.contains("mount") && message.contains("denied") {
@@ -2666,6 +2698,12 @@ fn a_machine_that_cannot_serve_pressure_says_which_file_it_wanted() {
 #[test]
 fn the_sessions_a_reader_can_run_unaided_produce_series() {
     for name in ["io-device-load.yml", "io-pressure.yml"] {
+        if name == "io-pressure.yml" {
+            if let Some(reason) = no_psi_here() {
+                eprintln!("{name} skipped: {reason}");
+                continue;
+            }
+        }
         let output = run(&["-f", &session(name), "--format", "json"]);
         assert!(output.status.success(), "{name}: {}", stderr(&output));
         let document = json(&output);
@@ -4698,6 +4736,12 @@ fn a_file_read_cold_fills_every_page_and_read_warm_fills_none() {
     let (dev, _) = mounted_device(&path);
     let mut filled_by_phase = Vec::new();
     for phase in ["cold", "warm"] {
+        // Warmed by a read of its own rather than left so by the cold one: a
+        // kernel may drop at close the pages a descriptor read after
+        // `POSIX_FADV_DONTNEED` on it, as 7.2 on the aarch64 machine does.
+        if phase == "warm" {
+            std::fs::read(&path).expect("the file reads");
+        }
         let account_path = scratch(&format!("pagecache-{phase}.json"));
         let output = run_on_launch(
             &format!("pagecache-{phase}"),

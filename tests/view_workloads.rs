@@ -35,6 +35,40 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Why a read of `path` issues no block request, if it issues none: the
+/// filesystem it is on, found as the longest mount point above it in
+/// `/proc/self/mountinfo`, is not backed by a `/dev` device -- virtiofs, NFS,
+/// 9p, FUSE, a tmpfs. A checkout shared into a VM is one.
+fn off_any_block_device(path: &std::path::Path) -> Option<String> {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let table = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let (_, fstype, source) = table
+        .lines()
+        .filter_map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let point = left.split_whitespace().nth(4)?;
+            let mut right = right.split_whitespace();
+            let fstype = right.next()?;
+            let source = right.next()?;
+            path.starts_with(point)
+                .then(|| (point.len(), fstype.to_owned(), source.to_owned()))
+        })
+        .max_by_key(|(length, _, _)| *length)?;
+    (!source.starts_with("/dev/") || fstype == "tmpfs").then(|| {
+        format!(
+            "{} is on {fstype} ({source}), which is no block device: no read of it is a block \
+             request",
+            path.display()
+        )
+    })
+}
+
+/// Why the workloads' files reach no device here, if they do not: they are
+/// written under the checkout's `target/` (`view/workloads/common.py`).
+fn workloads_off_block_device() -> Option<String> {
+    off_any_block_device(&root().join("target"))
+}
+
 fn dir(view: &str) -> PathBuf {
     root().join("view/workloads").join(view)
 }
@@ -109,7 +143,53 @@ fn session_text(view: &str) -> String {
 /// The results of a view's session, or `None` when this machine cannot run it
 /// (said on stderr).
 fn measure(view: &str) -> Option<Vec<Value>> {
-    measure_text(view, &session_text(view))
+    measure_text(view, &for_this_machine(&session_text(view)))
+}
+
+/// Whether this kernel publishes PSI: one built without `CONFIG_PSI`, or
+/// booted with `psi=0`, has no `/proc/pressure` and no pressure in any cgroup.
+fn psi_here() -> bool {
+    std::path::Path::new("/proc/pressure").exists()
+}
+
+/// A session with the requests this machine cannot serve taken out, said on
+/// stderr: a session is refused whole for one request the machine lacks, and
+/// the rest of a view's panels still have something to check. The one taken
+/// out is `mem.pressure` on a kernel without PSI.
+fn for_this_machine(text: &str) -> String {
+    if psi_here() {
+        return text.to_owned();
+    }
+    let mut kept = Vec::new();
+    let mut request: Vec<&str> = Vec::new();
+    let flush = |request: &mut Vec<&str>, kept: &mut Vec<String>| {
+        if request
+            .iter()
+            .any(|line| line.trim() == "source: mem.pressure")
+        {
+            eprintln!(
+                "note: this kernel publishes no PSI, so the session runs without its \
+                       `mem.pressure` request"
+            );
+        } else {
+            kept.extend(request.iter().map(|line| (*line).to_owned()));
+        }
+        request.clear();
+    };
+    for line in text.lines() {
+        // A request begins at `  - label:`, and the block ends at the next
+        // one or at a line that is not indented under the list.
+        if line.starts_with("  - ") || !line.starts_with("    ") {
+            flush(&mut request, &mut kept);
+        }
+        if line.starts_with("  - ") || (line.starts_with("    ") && !request.is_empty()) {
+            request.push(line);
+        } else {
+            kept.push(line.to_owned());
+        }
+    }
+    flush(&mut request, &mut kept);
+    kept.join("\n") + "\n"
 }
 
 fn measure_text(view: &str, text: &str) -> Option<Vec<Value>> {
@@ -450,6 +530,15 @@ fn every_session_is_understood() {
             .output()
             .expect("omn should run");
         let said = spoken(&resolved);
+        // The machine answering: a source this kernel or this hardware cannot
+        // serve (no PSI, no GPU), every backend named with what it lacked.
+        if !resolved.status.success()
+            && said.contains("no viable backend")
+            && said.contains("it is this machine that cannot serve it")
+        {
+            eprintln!("skipped resolving {path}: this machine cannot serve it:\n{said}");
+            continue;
+        }
         if !resolved.status.success() && said.contains("no viable backend") && unprivileged(&said) {
             eprintln!(
                 "skipped resolving {path}: its sources need CAP_BPF and CAP_PERFMON, which this \
@@ -736,7 +825,7 @@ fn flows_bytes_per_file_and_socket_are_the_manifests() {
         .sum();
     let devices = timeline_sum(labelled(&results, "devices"), None);
     assert!(
-        devices >= written,
+        workloads_off_block_device().is_some() || devices >= written,
         "{written} bytes are fsynced to a disk; the devices moved {devices}"
     );
     let carried = timeline_sum(labelled(&results, "network"), Some("iface:lo"));
@@ -918,7 +1007,7 @@ fn system_panels_carry_at_least_the_manifests_cost() {
     let written = f(&truth["file"]["written"]);
     let devices = timeline_sum(labelled(&results, "devices"), None);
     assert!(
-        devices >= written,
+        workloads_off_block_device().is_some() || devices >= written,
         "{written} bytes fsynced; the devices moved {devices}"
     );
 
@@ -930,7 +1019,7 @@ fn system_panels_carry_at_least_the_manifests_cost() {
     );
 
     assert!(
-        !timeline_points(labelled(&results, "pressure")).is_empty(),
+        !psi_here() || !timeline_points(labelled(&results, "pressure")).is_empty(),
         "the memory pressure panel has no point at all"
     );
 }
@@ -1121,6 +1210,12 @@ fn request_causes_are_the_manifests() {
                 assert!(
                     sleep >= lock * 0.75 && sleep <= lock * 1.5,
                     "{id} waits {lock} ms for the lock; asleep {sleep:.2} ms"
+                );
+            }
+            "block_io" if workloads_off_block_device().is_some() => {
+                eprintln!(
+                    "{id}: its reads are not checked against the disk: {}",
+                    workloads_off_block_device().unwrap_or_default()
                 );
             }
             "block_io" => {

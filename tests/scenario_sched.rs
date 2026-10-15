@@ -1641,6 +1641,18 @@ fn an_overflowing_wakeup_ring_says_what_it_could_not_hold() {
         eprintln!("skipped: sched.wakeup needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
         return;
     }
+    // A cgroup whose `pids.max` is below the burst refuses the threads, and
+    // the fixture says which one it could not start.
+    if let Some(line) = text
+        .lines()
+        .find(|line| line.contains("could not start thread"))
+    {
+        eprintln!(
+            "skipped: the burst needs {BURST_WAITERS} threads and this machine refused them \
+             ({line}); a cgroup's `pids.max` or `ulimit -u` below that is the usual reason"
+        );
+        return;
+    }
     assert_eq!(exit_code(&output), 0, "{text}");
     let woken = printed_count(&text, "woken");
     assert!(
@@ -2963,6 +2975,12 @@ fn interrupt_counts() -> Option<std::collections::BTreeMap<u64, InterruptLine>> 
 
 // ------------------------------------ sched.numa_balance: the machine's limit
 
+/// Whether this kernel was built with NUMA balancing, whose sysctl exists
+/// exactly when it was (`CONFIG_NUMA_BALANCING`).
+fn numa_balancing_built() -> bool {
+    Path::new("/proc/sys/kernel/numa_balancing").exists()
+}
+
 /// A machine with one NUMA node reports no balancing decisions, and says that
 /// the empty series is the machine.
 ///
@@ -2992,6 +3010,20 @@ fn a_machine_with_one_numa_node_says_the_empty_series_is_the_machine() {
     let text = spoken(&output);
     if unprivileged(&text) {
         eprintln!("skipped: `sched.numa_balance` needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
+        return;
+    }
+    // A kernel built without NUMA balancing has no balancer to observe and no
+    // tracepoint for it: the machine answering is the refusal, naming it.
+    if !numa_balancing_built() {
+        assert_eq!(exit_code(&output), 1, "{text}");
+        assert!(
+            text.contains("no viable backend") && text.contains("sched_stick_numa"),
+            "a kernel without NUMA balancing has to say it is the machine:\n{text}"
+        );
+        eprintln!(
+            "this kernel has no NUMA balancing (no /proc/sys/kernel/numa_balancing), and the run \
+             refuses by naming the tracepoint it lacks"
+        );
         return;
     }
     assert_eq!(exit_code(&output), 0, "{text}");
@@ -3054,7 +3086,30 @@ fn a_machine_with_one_numa_node_says_the_empty_series_is_the_machine() {
 /// starts.
 #[test]
 fn every_emit_the_machine_wide_sources_declare_renders() {
-    let output = session("sched-sweep-machine.yml", &["--format", "json"]);
+    // `sched.numa_balance` is the last two requests of the sweep, and a
+    // kernel without NUMA balancing cannot serve them (the test above checks
+    // that it says so): the rest of the sweep runs without them there.
+    let numa = numa_balancing_built();
+    let output = if numa {
+        session("sched-sweep-machine.yml", &["--format", "json"])
+    } else {
+        let text = std::fs::read_to_string("examples/sched-sweep-machine.yml")
+            .expect("the sweep is part of this scenario");
+        let cut = text
+            .find("  - label: numa-traced")
+            .expect("the sweep's numa requests");
+        let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("sched-sweep-machine-{}.yml", std::process::id()));
+        std::fs::write(&path, &text[..cut]).expect("the trimmed sweep is written");
+        let output = omn(&[
+            "-f",
+            path.to_str().expect("a utf-8 path"),
+            "--format",
+            "json",
+        ]);
+        let _ = std::fs::remove_file(&path);
+        output
+    };
     let text = spoken(&output);
     if unprivileged(&text) {
         eprintln!("skipped: every source in this sweep needs CAP_BPF and CAP_PERFMON, which this machine does not grant");
@@ -3068,6 +3123,9 @@ fn every_emit_the_machine_wide_sources_declare_renders() {
         ("irq-traced", "sched.irq"),
         ("numa-traced", "sched.numa_balance"),
     ] {
+        if !numa && source == "sched.numa_balance" {
+            continue;
+        }
         let declared = declared_emits(source);
         let rendered = emits(labelled(&results, label));
         for emit in &declared {
@@ -3083,6 +3141,9 @@ fn every_emit_the_machine_wide_sources_declare_renders() {
     // window is not a distribution and not a ranking -- and the three it does
     // allow still have to render.
     for label in ["irq-counted", "numa-counted"] {
+        if !numa && label == "numa-counted" {
+            continue;
+        }
         let rendered = emits(labelled(&results, label));
         for emit in ["rate", "raw", "summary"] {
             assert!(
@@ -5758,12 +5819,14 @@ fn an_off_cpu_histogram_is_of_blocks_and_finds_both_modes_of_a_bimodal_sleeper()
     const WORKLOAD: &str = "import resource, sys, time\n\
         blocked = lambda: resource.getrusage(resource.RUSAGE_THREAD).ru_nvcsw\n\
         v = blocked()\n\
-        for _ in range(40): time.sleep(0.003)\n\
+        over = 0\n\
+        for _ in range(40):\n    t = time.monotonic_ns(); time.sleep(0.003)\n    \
+        over += time.monotonic_ns() - t >= 1 << 22\n\
         short = blocked() - v\n\
         v = blocked()\n\
         for _ in range(20): time.sleep(0.040)\n\
         long = blocked() - v\n\
-        sys.stderr.write(f'SLEPT short={short} long={long}\\n')\n";
+        sys.stderr.write(f'SLEPT short={short} long={long} over={over}\\n')\n";
     if !have("python3") {
         eprintln!("skipped: the workload is python3, which this machine does not have");
         return;
@@ -5797,7 +5860,7 @@ fn an_off_cpu_histogram_is_of_blocks_and_finds_both_modes_of_a_bimodal_sleeper()
             .and_then(|count| count.parse().ok())
             .unwrap_or_else(|| panic!("the workload reports `{name}`:\n{text}"))
     };
-    let (short, long) = (said("short"), said("long"));
+    let (short, long, over) = (said("short"), said("long"), said("over"));
     let results = results(&output);
     // The sleeper's own series: the one holding the long sleeps.
     let series = outputs(&results[0], "hist")
@@ -5827,9 +5890,12 @@ fn an_off_cpu_histogram_is_of_blocks_and_finds_both_modes_of_a_bimodal_sleeper()
     // A short sleep the thread was preempted in the middle of blocks for less
     // than 3 ms and lands a bucket lower, which a loaded machine does to a
     // few; a long one is not moved out of a bucket 33 ms wide.
+    // And a 3 ms sleep the thread's own clock timed at 2^22 ns or more --
+    // a VM's coarse timers make most of them so -- belongs a bucket higher.
     assert!(
-        fast * 2 >= short && fast <= short + 2,
-        "{short} blocks of 3 ms, and [2^21, 2^22) holds {fast}:\n{series}"
+        fast * 2 >= short.saturating_sub(over) && fast <= short + 2,
+        "{short} blocks of 3 ms, {over} of them 2^22 ns or longer by the thread's own clock, \
+         and [2^21, 2^22) holds {fast}:\n{series}"
     );
     assert!(
         slow + 2 >= long && slow <= long,

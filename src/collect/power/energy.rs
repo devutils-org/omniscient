@@ -494,6 +494,9 @@ mod tests {
             // Running as root, or on a kernel that still opens the counter.
             Ok(()) => {}
             Err(refused) if refused.contains("no RAPL domain") => {}
+            Err(refused) if !std::path::Path::new(POWERCAP).exists() => {
+                eprintln!("skipped: {refused}, so no counter can be unreadable");
+            }
             Err(refused) => assert!(
                 refused.contains("root"),
                 "an unreadable counter must ask for privileges: {refused}"

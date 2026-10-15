@@ -1495,6 +1495,14 @@ fn an_overlap_join_reads_the_same_in_text_as_in_its_json() {
 /// they waited is inside the time the reads took.
 #[test]
 fn a_woke_join_reads_the_same_in_text_as_in_its_json() {
+    // The reader's file is in the checkout's `target/`, and one shared into a
+    // VM is on no block device: no read of it is a request, and no pair.
+    if let Some(reason) =
+        off_any_block_device(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target"))
+    {
+        eprintln!("skipped: {reason}");
+        return;
+    }
     if !has_python() {
         eprintln!("skipped: the workload is python3, which this machine does not have");
         return;
@@ -1676,4 +1684,32 @@ fn a_woke_join_reads_the_same_in_text_as_in_its_json() {
         "the reads waited {shown_total} ns from completion to wakeup, inside the {read_ns} ns \
          they took"
     );
+}
+
+/// Why a read of `path` issues no block request, if it issues none: the
+/// filesystem it is on, found as the longest mount point above it in
+/// `/proc/self/mountinfo`, is not backed by a `/dev` device -- virtiofs, NFS,
+/// 9p, FUSE, a tmpfs. A checkout shared into a VM is one.
+fn off_any_block_device(path: &std::path::Path) -> Option<String> {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let table = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let (_, fstype, source) = table
+        .lines()
+        .filter_map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let point = left.split_whitespace().nth(4)?;
+            let mut right = right.split_whitespace();
+            let fstype = right.next()?;
+            let source = right.next()?;
+            path.starts_with(point)
+                .then(|| (point.len(), fstype.to_owned(), source.to_owned()))
+        })
+        .max_by_key(|(length, _, _)| *length)?;
+    (!source.starts_with("/dev/") || fstype == "tmpfs").then(|| {
+        format!(
+            "{} is on {fstype} ({source}), which is no block device: no read of it is a block \
+             request",
+            path.display()
+        )
+    })
 }

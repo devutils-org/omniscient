@@ -228,6 +228,39 @@ fn run() -> Option<&'static Run> {
     }
 }
 
+/// Why a read of `path` issues no block request, if it issues none: the
+/// filesystem it is on, found as the longest mount point above it in
+/// `/proc/self/mountinfo`, is not backed by a `/dev` device -- virtiofs, NFS,
+/// 9p, FUSE, a tmpfs. A checkout shared into a VM is one.
+fn off_any_block_device(path: &std::path::Path) -> Option<String> {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let table = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let (_, fstype, source) = table
+        .lines()
+        .filter_map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let point = left.split_whitespace().nth(4)?;
+            let mut right = right.split_whitespace();
+            let fstype = right.next()?;
+            let source = right.next()?;
+            path.starts_with(point)
+                .then(|| (point.len(), fstype.to_owned(), source.to_owned()))
+        })
+        .max_by_key(|(length, _, _)| *length)?;
+    (!source.starts_with("/dev/") || fstype == "tmpfs").then(|| {
+        format!(
+            "{} is on {fstype} ({source}), which is no block device: no read of it is a block \
+             request",
+            path.display()
+        )
+    })
+}
+
+/// Why the vertical case's reads reach no device here, if they do not.
+fn data_off_block_device() -> Option<String> {
+    off_any_block_device(&root().join("target/omn-vertical"))
+}
+
 macro_rules! needs_run {
     () => {
         match run() {
@@ -471,7 +504,12 @@ fn each_injected_delay_lands_in_the_row_it_was_injected_into() {
                 lock_wait / MS
             ),
         }
-        if field(request.worker, "reads") > 0.0 {
+        if field(request.worker, "reads") > 0.0 && data_off_block_device().is_some() {
+            eprintln!(
+                "req:{id}: its reads are not checked against the device: {}",
+                data_off_block_device().unwrap_or_default()
+            );
+        } else if field(request.worker, "reads") > 0.0 {
             assert!(
                 device > 0.0,
                 "req:{id} read and no block request carries its id"
@@ -522,6 +560,10 @@ fn each_injected_delay_lands_in_the_row_it_was_injected_into() {
 #[test]
 fn every_block_request_a_request_submitted_carries_its_id_and_no_other_does() {
     let run = needs_run!();
+    if let Some(reason) = data_off_block_device() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
     let worker: f64 = field(run.role("worker"), "tid");
     for id in IDS {
         let request = run.request(id);
@@ -925,6 +967,10 @@ fn the_network_rows_are_read_by_the_socket_the_server_accepted() {
 #[test]
 fn the_block_io_rows_carry_the_identity_the_block_requests_read_back() {
     let run = needs_run!();
+    if let Some(reason) = data_off_block_device() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
     for name in ["one-request", "block-io"] {
         for table in run.decomposition(name)["tables"]
             .as_array()

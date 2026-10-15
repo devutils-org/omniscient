@@ -396,6 +396,32 @@ fn reads_that_must_reach_the_device_are_uninterruptible_waits() {
     let blob = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("offcpu-direct.blob");
     write_incompressible(&blob, BLOCK_BYTES * READS);
 
+    // The kernel's own count first, outside `omn`: the same `dd`'s voluntary
+    // switches, from `wait4`. A device that completes a direct read before
+    // its reader reaches `schedule` -- a VM's virtio disk whose host serves
+    // it inside the kick -- makes the reads no wait at all, and then there is
+    // nothing for the source to see.
+    let mut calibration = std::process::Command::new("/usr/bin/dd")
+        .arg(format!("if={}", blob.display()))
+        .args(["of=/dev/null", "bs=64k", "iflag=direct", "status=none"])
+        .spawn()
+        .expect("dd runs");
+    let mut status = 0;
+    // SAFETY: an all-zero `rusage` is a valid value, and `wait4` writes one.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: waits for our own child, writing into locals this frame owns.
+    let waited = unsafe { libc::wait4(calibration.id() as i32, &mut status, 0, &mut usage) };
+    let _ = calibration.try_wait();
+    if waited > 0 && (usage.ru_nvcsw as usize) < READS * 9 / 10 {
+        let _ = std::fs::remove_file(&blob);
+        eprintln!(
+            "skipped: {READS} direct reads made dd wait {} times by its own rusage: this device \
+             completes a read before its reader sleeps, so there is no wait to see",
+            usage.ru_nvcsw
+        );
+        return;
+    }
+
     let output = run(&[
         "sched.offcpu",
         "--mode",
@@ -1224,8 +1250,15 @@ static void block(int times, const char *out) {
     close(stat);
     unsigned long long cpu, delay, slices;
     if (sscanf(text, "%llu %llu %llu", &cpu, &delay, &slices) != 3) exit(3);
+    char status[4096] = {0};
+    int self = open("/proc/thread-self/status", O_RDONLY);
+    if (self < 0 || read(self, status, sizeof status - 1) <= 0) exit(5);
+    close(self);
+    const char *at = strstr(status, "\nvoluntary_ctxt_switches:");
+    unsigned long long voluntary = at ? strtoull(at + strlen("\nvoluntary_ctxt_switches:"), 0, 10) : 0;
     char line[128];
-    int length = snprintf(line, sizeof line, "%d %llu %llu\n", getpid(), delay, slices);
+    int length = snprintf(line, sizeof line, "%d %llu %llu %llu\n", getpid(), delay, slices,
+                          voluntary);
     int file = open(out, O_WRONLY | O_APPEND | O_CREAT, 0644);
     if (file < 0 || write(file, line, length) != length) exit(4);
     close(file);
@@ -1365,7 +1398,7 @@ fn a_launched_programs_children_are_followed_and_wait_what_their_schedstat_says(
     let woken = by_process(labelled("runnable"), "wake_to_run_ns");
     let queued = by_process(labelled("blocked"), "queued_ns");
 
-    let children: Vec<(u64, u64, u64)> = std::fs::read_to_string(&reference)
+    let children: Vec<(u64, u64, u64, u64)> = std::fs::read_to_string(&reference)
         .expect("every child wrote its schedstat")
         .lines()
         .map(|line| {
@@ -1373,19 +1406,19 @@ fn a_launched_programs_children_are_followed_and_wait_what_their_schedstat_says(
                 .split_whitespace()
                 .map(|field| field.parse().expect("a number"))
                 .collect();
-            (fields[0], fields[1], fields[2])
+            (fields[0], fields[1], fields[2], fields[3])
         })
         .collect();
     assert_eq!(children.len(), CHILDREN, "every child wrote its line");
     let mut kernel_off = 0u64;
     let mut tracepoints_off = 0u64;
-    for &(pid, run_delay, _) in &children {
+    for &(pid, run_delay, _, _) in &children {
         let measured = waits.get(&pid).map_or(0, |&(measured, _)| measured);
         let by_tracepoints = woken.get(&pid).map_or(0, |&(sum, _)| sum);
         kernel_off += measured.abs_diff(run_delay);
         tracepoints_off += by_tracepoints.abs_diff(run_delay);
     }
-    for (pid, run_delay, slices) in children {
+    for (pid, run_delay, slices, voluntary) in children {
         let Some(&(measured, counted)) = waits.get(&pid) else {
             panic!(
                 "child {pid} of the launched program waited {run_delay} ns on a run queue by its \
@@ -1399,16 +1432,17 @@ fn a_launched_programs_children_are_followed_and_wait_what_their_schedstat_says(
              waits, {measured} ns ({by_tracepoints} ns by the tracepoints); {blocks} blocks, \
              {blocked_queue} ns of them queued"
         );
-        // A sleep whose timer fired before the task reached `schedule` never
-        // left the cpu -- a VM whose vcpu the host descheduled in between sees
-        // a few -- and the kernel counts no run after it either: the child's
-        // own `slices` is the bound when it is below `TIMES`, less the first
-        // run and a preemption or two.
-        let expected = TIMES.min(slices);
+        // The kernel's own count of the child's blocks is its voluntary
+        // switches, read just before its line: a sleep whose timer fired
+        // before the task reached `schedule` never left the cpu and is in
+        // neither -- a VM whose vcpu the host descheduled in between sees a
+        // few -- and a preemption is in neither either. Bounded by `TIMES`
+        // where the kernel counted more than the sleeps (the gate, a write).
+        let expected = TIMES.min(voluntary);
         assert!(
-            blocks + 4 >= expected,
-            "child {pid} slept {TIMES} times, its schedstat counted {slices} runs, and {blocks} \
-             blocks were counted:\n{queued:?}"
+            blocks + 2 >= expected,
+            "child {pid} slept {TIMES} times, the kernel counted {voluntary} voluntary switches \
+             ({slices} runs), and {blocks} blocks were counted:\n{queued:?}"
         );
         // A wait the kernel stamped on a path neither tracepoint marks, or a
         // run of a program the kernel skipped on a busy cpu, is a handful in

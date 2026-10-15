@@ -460,7 +460,10 @@ fn system_shows_the_programs_known_load() {
     // `│lo  ···██···  8.02MiB in  8.02MiB out`: one figure per direction.
     let lo: f64 = drawn
         .lines()
-        .filter(|line| line.starts_with("│lo "))
+        // `lo@netns:<inode>` where the recording is drawn from another
+        // network namespace than the one it was made in (`KeyValue`'s
+        // spelling): the same interface.
+        .filter(|line| line.starts_with("│lo ") || line.starts_with("│lo@netns:"))
         .flat_map(|line| words(line).into_iter().filter_map(bytes))
         .sum();
     assert!(

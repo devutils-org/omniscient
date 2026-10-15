@@ -13951,3 +13951,85 @@ exists.
   child's own `schedstat` counted the same 2997, which is the bound now.
   `sched_stick_numa` is missing for want of `CONFIG_NUMA_BALANCING`, which
   the ordering test now tells from a misspelt name.
+
+### The suite on the aarch64 machine, made to answer for the machine (2026-10-15)
+
+A second pass, after the one above: every test that failed because the
+machine cannot serve it now skips or narrows with the reason, from the
+kernel's own account rather than a guess, and the defects that pass found are
+fixed. The full suite went from 64 red to the list at the end.
+
+Defects, fixed:
+
+- **`cgroup2:<x>.pressure` answered available on a kernel without PSI.** The
+  probe accepted any cgroup file whose controller was enabled, which is right
+  for `memory.current` (the hierarchy root publishes none) and wrong for a
+  pressure file, which exists nowhere without PSI. `omn list` called
+  `mem.pressure` usable, the resolver chose `fs:cgroup`, and `omn saturate`
+  failed at attach on every question. The probe now answers missing, naming
+  `/proc/pressure`.
+- **`mem.swap` reported zero zero-filled pages for a cgroup on a kernel booted
+  with `cgroup.memory=nokmem`** (OrbStack's): the kernel charges them through
+  the object cgroup that option removes, and `memory.stat` says zero whatever
+  was swapped while `/proc/vmstat` counted 41 013 pages. The fields are absent
+  there now, with a note, and the catalog says so.
+- **`mem.swap --backend perf:kprobe` reads in folios**, and a kernel with
+  16 KiB anonymous mTHP on swaps four pages in per read: 463 257 reads for
+  1 938 497 pages. The source already counted reads; the run now says which
+  folio size this kernel may use and by how much `in_bytes` may be short.
+- **`mem.reclaim` under a pid target saw nothing in a container**: its begin
+  program compared the container's pid, a site the pid-namespace work had
+  missed, and its end program counted every other process's reclaim as an
+  unpaired ending -- 734 losses for a run that lost nothing. The target is
+  the kernel's thread group, and an unpaired ending is compared with it before
+  it is counted.
+- **`omn top --batch` printed a refusal of several lines with one `#`**, so
+  the backends it listed read as rows of the table a script parses.
+- **`flows` tied no socket to its interface when a recording was drawn in
+  another network namespace than the one it was made in**: it compared the
+  socket's interface key as this process spells it with the series key as the
+  recorder did. It looks for the recorder's spelling now.
+
+New: **`omn saturate` reads memory without PSI** as the workload's tasks in
+direct reclaim (`mem.reclaim`, Σ reclaim / T, KEY), and says it is the
+narrower number. On the machine, a 400 MiB writer under a 150 MiB
+`MemoryHigh` was 0.551 tasks in reclaim, 1 049 stalls of 349 us.
+
+The machine, said by the tests (skips and narrowings, each with its
+evidence): no PSI; no NUMA (`CONFIG_NUMA` and `CONFIG_NUMA_BALANCING` off);
+no powercap, no hwmon; a cgroup namespace whose root is an ordinary cgroup;
+`pids.max` 4 819 under a 16 384-thread burst; the checkout on virtiofs, whose
+reads are no block request (`vertical`, `view_workloads`, `cross_io`'s
+one-liner, `encoders`); a virtio disk that completes a direct read before its
+reader sleeps (`dd` waits 1 time in 512 by its own `rusage`), so no device
+wait exists to see; 3 ms sleeps lasting past 4 ms; a recording from the
+development machine drawn under `@netns`. And two kernel behaviours: 7.2
+drops at close the pages a descriptor read after `POSIX_FADV_DONTNEED` on it,
+and a 20 us sleep whose timer fires before `schedule` is no block, which the
+child's `voluntary_ctxt_switches` now bounds.
+
+Still open, each a defect or a question:
+
+- **A blocking syscall's caller is lost in eBPF user stacks on aarch64.**
+  glibc 2.43 enters the kernel from a frameless cancellation helper
+  (`libc.so.6+0x85094`); its caller, `clock_nanosleep`, is only in the user
+  LR, which the kernel's frame-pointer walk does not read. `fp+leaf` recovers
+  it for perf samples; the eBPF programs would need the user LR from
+  `bpf_task_pt_regs`. Three tests (`scenario_sched` two, `family_sched` one).
+- **`net.request`'s network rows** (`net_rx`, `net_tx`) are empty here: six
+  `vertical` tests and `view_workloads`' `a004`.
+- `join_engine`'s retained row is 104 KiB under the freed pages, against a
+  64 KiB allowance for the interpreter (python 3.14 on aarch64).
+- `cases`' `cpython-perf-map`: `blocked` 759 ms against the writer's 1501 ms
+  held.
+- `triage`'s `lock-contended`, known: a 20 us sleep lasts 2.9 ms here.
+- Flaky under the suite's load and green alone: `cross_io` when its tests run
+  in parallel, `dwarf_counts_and_says_the_stacks_deeper_than_its_copy`, the
+  view gallery's `system` snapshots once.
+- A completion-to-wakeup `woke` join pairs a completion with the reader's next
+  wakeup within its window even when the reader never slept for it: 401 ms
+  later, here, where no read slept at all. The window is the session's; the
+  engine cannot know when the read returned.
+- `omn top`'s `system` panel truncates `lo@netns:<inode>` to `lo@netns:`,
+  which keeps the qualifier and loses the namespace it names.
+

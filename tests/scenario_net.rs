@@ -754,6 +754,16 @@ fn forcing_a_net_backend_nothing_implements_names_it_and_exits_three() {
         args.extend_from_slice(&["--duration", "200ms", "--backend", &pinned]);
         let outcome = omn(&args);
         let complaint = stderr(&outcome);
+        // Unwritten and missing something here is answered in the chain's
+        // order, the machine first (`DECISIONS.md`, "one order for unbuilt
+        // and missing"): `net.hwts` with no readable PTP clock exits 1.
+        if code(&outcome) == 1 && complaint.contains("missing:") {
+            eprintln!(
+                "`{source}` forced onto `{backend}`: this machine lacks what it needs, which is \
+                 answered before the build's gap:\n{complaint}"
+            );
+            continue;
+        }
         assert_eq!(
             code(&outcome),
             3,

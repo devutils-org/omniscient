@@ -170,11 +170,18 @@ fn a_mode_a_source_does_not_support_is_refused_with_what_it_does() {
     assert!(message.contains("poll, snapshot"), "{message}");
 }
 
+/// Why this kernel serves no pressure source, if it serves none: one built
+/// without `CONFIG_PSI`, or booted with `psi=0`, has no `/proc/pressure`.
+fn no_psi_here() -> Option<&'static str> {
+    (!std::path::Path::new("/proc/pressure").exists())
+        .then_some("this kernel publishes no PSI: /proc/pressure does not exist")
+}
+
 /// The dumped request is a session file, not a pretty-printed summary: what
 /// the command line prototypes, a file replays.
 #[test]
 fn a_dumped_io_request_is_a_session_file_that_validates() {
-    let dumped = run(&[
+    let mut args = vec![
         "io.pressure",
         "--system",
         "-m",
@@ -186,7 +193,13 @@ fn a_dumped_io_request_is_a_session_file_that_validates() {
         "--dump-request",
         "--format",
         "yaml",
-    ]);
+    ];
+    // Written down for a machine that can serve it: the dump is the request,
+    // and this one cannot resolve it.
+    if no_psi_here().is_some() {
+        args.push("--no-resolve");
+    }
+    let dumped = run(&args);
     let session = stdout(&dumped);
     assert!(session.contains("io.pressure"), "{session}");
 
@@ -360,6 +373,10 @@ fn the_summary_carries_the_number_the_collector_measured() {
 /// gave rather than passing the kernel's decayed average off as this run's.
 #[test]
 fn a_pressure_snapshot_says_it_measured_no_window() {
+    if let Some(reason) = no_psi_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
     let run = run(&["io.pressure", "--system", "-m", "snapshot", "-e", "raw"]);
     assert!(run.status.success(), "{}", stderr(&run));
     let out = stdout(&run);
@@ -379,6 +396,10 @@ fn a_pressure_snapshot_says_it_measured_no_window() {
 /// the machine.
 #[test]
 fn the_numbers_and_the_record_of_how_they_were_taken_are_written_together() {
+    if let Some(reason) = no_psi_here() {
+        eprintln!("skipped: {reason}");
+        return;
+    }
     let directory = std::env::temp_dir().join(format!("omn-io-artifacts-{}", std::process::id()));
     std::fs::remove_dir_all(&directory).ok();
     let run = run(&[

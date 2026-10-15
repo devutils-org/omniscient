@@ -351,6 +351,12 @@ mod tests {
     /// rather than report that the file is missing.
     #[test]
     fn the_hierarchy_root_is_refused_by_name_rather_than_answered() {
+        // In a cgroup namespace `/` is the namespace's root, an ordinary
+        // cgroup that the kernel charges, and answering it is right.
+        if !crate::bpf::pidns::in_initial_cgroup_namespace() {
+            eprintln!("skipped: `omn` runs in a cgroup namespace, whose root is no hierarchy root");
+            return;
+        }
         let refused = Box::new(Prepare(Mode::Snapshot))
             .attach(&Target::Cgroup(PathBuf::from("/")))
             .err()

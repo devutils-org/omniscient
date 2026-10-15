@@ -663,6 +663,11 @@ mod defect_hold {
     fn poll_has_no_leading_event() {
         let mut failed = Vec::new();
         for source in ["cpu.util", "cpu.pressure", "mem.pressure", "io.pressure"] {
+            // A kernel without PSI has no pressure source to poll.
+            if source.ends_with(".pressure") && !std::path::Path::new("/proc/pressure").exists() {
+                eprintln!("{source} skipped: this kernel publishes no PSI");
+                continue;
+            }
             for _ in 0..10 {
                 match leading_event(source) {
                     Ok(Some(true)) => {

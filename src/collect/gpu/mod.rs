@@ -813,6 +813,12 @@ mod tests {
 
     #[test]
     fn a_hwmon_name_no_device_carries_is_missing_and_lists_what_is_there() {
+        if std::fs::read_dir("/sys/class/hwmon").is_err() {
+            eprintln!(
+                "skipped: /sys/class/hwmon is not readable here, so there is nothing to list"
+            );
+            return;
+        }
         let probe = probe("hwmon:definitely-not-a-sensor").unwrap();
         assert!(probe.is_missing(), "{probe}");
         assert!(probe.to_string().contains("this machine has"), "{probe}");

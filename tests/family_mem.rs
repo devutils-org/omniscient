@@ -58,7 +58,12 @@ fn unavailable(output: &Output) -> Option<String> {
         !message.contains(SHIM_MISSING),
         "the heap sources need the preload shim: run `cargo build -p omn-preload` first\n{message}"
     );
-    let withheld = message.contains("not readable") || message.contains("perf_event_paranoid");
+    // The resolver's own refusal is the machine answering too: a kernel
+    // without PSI or without NUMA has no backend to offer, and says which
+    // file each one lacked.
+    let withheld = message.contains("not readable")
+        || message.contains("perf_event_paranoid")
+        || message.contains("has no viable backend on this machine");
     withheld.then_some(message)
 }
 
@@ -1002,8 +1007,52 @@ fn a_thrashing_process_s_swap_ins_are_its_scope_s() {
         pages > 10_000.0,
         "the process did not thrash: {pages} pages in"
     );
+    // A read is one folio, and a kernel that builds multi-page anonymous
+    // folios swaps each in with one read: the floor divides by the largest.
+    let folio_pages = largest_small_folio_pages();
     assert!(
-        counted <= pages * 1.02 && counted >= 0.6 * pages,
-        "omn counted {counted} swap-ins inside a window where the scope read {pages} pages"
+        counted <= pages * 1.02 && counted >= 0.6 * pages / folio_pages,
+        "omn counted {counted} swap-ins inside a window where the scope read {pages} pages, \
+         in folios of up to {folio_pages} pages"
     );
+}
+
+/// The pages in the largest multi-page anonymous folio this kernel may build
+/// below the PMD size, the largest one swap reads in whole; 1 where none is
+/// turned on. `hugepages-<n>kB/enabled` per size, `inherit` taking the
+/// top-level switch.
+fn largest_small_folio_pages() -> f64 {
+    let root = std::path::Path::new("/sys/kernel/mm/transparent_hugepage");
+    let chosen = |path: std::path::PathBuf| -> Option<String> {
+        std::fs::read_to_string(path)
+            .ok()?
+            .split_whitespace()
+            .find_map(|word| Some(word.strip_prefix('[')?.strip_suffix(']')?.to_owned()))
+    };
+    let Some(top) = chosen(root.join("enabled")) else {
+        return 1.0;
+    };
+    let pmd_kib = std::fs::read_to_string(root.join("hpage_pmd_size"))
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .map_or(u64::MAX, |bytes| bytes / 1024);
+    std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let kib: u64 = name
+                .strip_prefix("hugepages-")?
+                .strip_suffix("kB")?
+                .parse()
+                .ok()?;
+            let on = match chosen(entry.path().join("enabled"))?.as_str() {
+                "always" | "madvise" => true,
+                "inherit" => top != "never",
+                _ => false,
+            };
+            (on && kib < pmd_kib).then_some(kib as f64 / 4.0)
+        })
+        .fold(1.0, f64::max)
 }
