@@ -17,7 +17,7 @@
 //! | cpu | cpus busy with it: cpu time / T | tasks waiting for a cpu: Σ run queue wait / T | not per process: `cpu.throttle` is per cgroup |
 //! | disk | requests in flight at the device: Σ latency / T | tasks blocked on it: Σ uninterruptible / T; the device's own queue depth beside it | requests completed with an error status |
 //! | lock | time a mutex was held: Σ hold / T, at most 1 | threads waiting for it: Σ wait / T | -- |
-//! | memory | -- | the cgroup's memory stall share (PSI) | -- |
+//! | memory | -- | the cgroup's memory stall share (PSI); without PSI, tasks in direct reclaim: Σ reclaim / T | -- |
 //!
 //! The objective decides which column the verdict reads:
 //!
@@ -66,6 +66,7 @@ pub const DEVICE_QUEUE: &str = "device-queue";
 pub const LOCK: &str = "lock";
 pub const FUTEX: &str = "futex";
 pub const MEMORY: &str = "memory";
+pub const RECLAIM: &str = "memory-reclaim";
 pub const ENERGY: &str = "energy";
 pub const MACHINE_CPU: &str = "machine-cpu";
 
@@ -160,6 +161,7 @@ impl Ask {
             request(LOCK, "sched.mutex", workload, "trace", "hist"),
             request(FUTEX, "sched.futex", workload, "trace", "hist"),
             request(MEMORY, "mem.pressure", workload, "poll@100ms", "summary"),
+            request(RECLAIM, "mem.reclaim", workload, "trace", "summary"),
         ];
         // A launched program's cpu time is exact at the reap; a process
         // already running has no reap, and is polled instead.
@@ -842,6 +844,51 @@ pub fn read(ask: &Ask, run: &Run, dropped: Vec<Dropped>) -> Answer {
             }
         }
         None => memory.unread.push("no memory pressure reading".to_owned()),
+    }
+    // The workload's own stalls in direct reclaim, which PSI's memory share
+    // counts among others: a Little line either way, and the saturation where
+    // there is no PSI (a kernel built without it, or booted with `psi=0`),
+    // said to be the narrower number it is.
+    match run.result(RECLAIM) {
+        Some(results) => {
+            let (mut n, mut total) = (0.0, 0.0);
+            for event in run.events_of("mem.reclaim") {
+                n += attr(event, "count").unwrap_or(1.0);
+                total += attr(event, "total_ns").unwrap_or(0.0);
+            }
+            let little = Little::of(
+                "stalls in direct reclaim",
+                &results.source,
+                n,
+                total,
+                window,
+                short_of(results),
+            );
+            if memory.saturation.is_none() {
+                memory.saturation = Some(Reading {
+                    value: little.mean_count,
+                    unit: "tasks".to_owned(),
+                    says: format!(
+                        "{:.3} of its tasks stalled in direct reclaim, on average -- without PSI, \
+                         the narrower number: a refault on a thrashing page and a wait for a \
+                         swap-in are memory stalls PSI counts and this does not",
+                        little.mean_count
+                    ),
+                    source: results.source.clone(),
+                    whose: "the workload's".to_owned(),
+                    evidence: Evidence::Key,
+                    short: little.short.clone(),
+                });
+                memory
+                    .unread
+                    .retain(|unread| unread != "no memory pressure reading");
+            }
+            memory.little.push(little);
+        }
+        None if memory.saturation.is_none() => memory
+            .unread
+            .push("no direct reclaim reading: `mem.reclaim` did not run".to_owned()),
+        None => {}
     }
     resources.push(memory);
 

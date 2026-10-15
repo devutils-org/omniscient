@@ -98,3 +98,16 @@ requests:
   emit:
   - summary
   label: memory
+- source: mem.reclaim
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - queue
+    - '4'
+    - '250'
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: memory-reclaim

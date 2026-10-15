@@ -159,7 +159,7 @@ rate times the mean wait, and the text prints both.
 | cpu | cpus busy with it: the reap's rusage / T (polled `cpu.oncpu_time` for `--pid`) | tasks waiting for a cpu: Σ `sched.runqlat` / T | not per process: `cpu.throttle` is a cgroup's |
 | disk | requests in flight at the device: Σ `io.latency` / T | tasks blocked on a device: Σ uninterruptible / T; the device's own queue depth (`io.inflight`, every process's) beside it | requests completed with an error status |
 | lock | a mutex held: Σ `hold_ns` / T, at most 1 | threads waiting for it: Σ `wait_ns` / T (`sched.futex` when no pthread mutex was seen) | — |
-| memory | — | the cgroup's memory stall share (PSI), marked TEMPORAL: the cgroup holds more than the workload | — |
+| memory | — | the cgroup's memory stall share (PSI), marked TEMPORAL: the cgroup holds more than the workload; without PSI, the workload's tasks in direct reclaim (`mem.reclaim`, Σ reclaim / T), marked KEY | — |
 
 - **throughput** names the longest queue of the workload's own work *behind
   something another task holds* — a cpu or a lock — when it reaches a tenth of
@@ -492,8 +492,12 @@ development machine; `cargo test --test triage` is 17 tests in about 23 s.
 - **Energy is an estimate by cpu time**, marked TEMPORAL; RAPL meters a
   package, and on a machine shared with three building streams the package's
   energy is mostly theirs.
-- **Memory is PSI only**, of the workload's cgroup, which holds more than the
-  workload. Utilization of memory has no single number here worth naming.
+- **Memory is PSI**, of the workload's cgroup, which holds more than the
+  workload. On a kernel without PSI (built without `CONFIG_PSI`, booted with
+  `psi=0`) it is the workload's own stalls in direct reclaim, `mem.reclaim`,
+  which is narrower and says so: a refault on a thrashing page and a wait for
+  a swap-in are memory stalls PSI counts and direct reclaim does not. The
+  reclaim's Little line is there either way. Utilization of memory has no single number here worth naming.
 - **No `--budget` on `omn latency` or `omn saturate`.** A triage question
   pays for the sources its method needs and measures what they cost on every
   result. The escalation is where a budget decides something, and it runs
