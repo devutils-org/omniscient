@@ -13150,10 +13150,11 @@ Stream emit's handoff is `docs/fixes/w24-emit.md`. **Landed in the wave**:
 `comm` on every `cpu.profile` sample, so a `comm` filter keeps the program's
 samples (stream cpu, the other of the two ways emit offered).
 
-### To `catalog/mem.yaml`: heap 1's data line, a defect still on `main`
+### ~~To `catalog/mem.yaml`: heap 1's data line, a defect still on `main`~~ -- **done** (2026-10-15)
 
 `emits: [hist, topk, raw, summary]` on `mem.heap.alloc`'s `preload` backend,
-until the shim captures stacks. Without it `omn trace mem.heap.alloc -e stack
+until the shim captures stacks. Landed: the resolver passes `preload` over
+with that reason and the run is refused before the launch. Without it `omn trace mem.heap.alloc -e stack
 -- prog` runs the program and refuses after it; with it the resolver refuses
 before the launch (shown on a scratch catalog).
 

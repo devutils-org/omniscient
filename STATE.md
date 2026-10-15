@@ -1744,12 +1744,10 @@ embedded catalog a second time. The decisions are in `DECISIONS.md`,
      (net); `omn list --format json` carrying the defaults and each
      backend's own `emits` (lazy, emit).
    - **The catalog lines one stream asked of another** (`catalog/*.yaml`):
-     - **heap 1, still a defect on `main`**: stream emit's resolver refuses
-       an emit a backend does not produce before the run, but
-       `catalog/mem.yaml`'s `preload` backend of `mem.heap.alloc` does not
-       yet say `emits: [hist, topk, raw, summary]`, so `omn trace
-       mem.heap.alloc -e stack -- prog` still runs the program and refuses
-       after it. One line (emit's request to mem).
+     - ~~**heap 1**~~ -- **done**: `catalog/mem.yaml`'s `preload` backend
+       of `mem.heap.alloc` says `emits: [hist, topk, raw, summary]`, and
+       `omn trace mem.heap.alloc -e stack -- prog` is refused before the
+       program is launched, `preload` passed over with that reason.
      - `func` in `cpu.profile`'s `keys:` (and the counting sources that
        sample), now that `KeyKind::Func` is on `main`: one line, perfrecord
        3 (emit's request to cpu).

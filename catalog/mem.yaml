@@ -171,7 +171,8 @@
   summary: "Userspace allocations by call site"
   unit: bytes
   backends:
-    - {id: "preload", requires: ["preload:shim"], cost: extreme}
+    - {id: "preload", requires: ["preload:shim"], cost: extreme,
+       emits: [hist, topk, raw, summary]}
     - {id: "bpf:usdt", requires: ["usdt:libc"], cost: extreme, equivalent: true}
     - {id: "bpf:uprobe", requires: ["uprobe", "bpf", "symbols:malloc"], cost: extreme,
        degraded: "~1-2 us per call: heavily dilates allocation-heavy workloads"}
