@@ -222,6 +222,7 @@ impl Server {
         }
         let outcome = match name {
             "catalog" => self.catalog_tool(&arguments),
+            "defaults" => self.defaults_tool(&arguments),
             "capabilities" => self.capabilities_tool(&arguments),
             "list_runs" => Ok(self.list_runs()),
             "read_run" => self.read_run(&arguments),
@@ -254,6 +255,67 @@ impl Server {
             "missing": [
                 "the catalog is what a source is and what each backend declares, not what this \
                  machine can serve: `capabilities` asks the omn binary that",
+            ],
+        }))
+    }
+
+    /// `defaults`: what `omn trace <family> -- PROGRAM` composes, per band or
+    /// one band, from the catalog's own `default:` blocks.
+    fn defaults_tool(&self, arguments: &Value) -> Result<Value, String> {
+        let band = arguments
+            .get("cost")
+            .and_then(Value::as_str)
+            .map(omn::lazy::parse_band)
+            .transpose()?;
+        let defaults: Vec<&omn::catalog::FamilyDefault> =
+            match arguments.get("family").and_then(Value::as_str) {
+                None => self.catalog.defaults().iter().collect(),
+                Some(family) => vec![self.catalog.default_of(family).ok_or_else(|| {
+                    format!(
+                        "no family `{family}` has a default; the families are {}",
+                        self.catalog
+                            .defaults()
+                            .iter()
+                            .map(|default| default.family.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?],
+            };
+        let listed: Vec<Value> = defaults
+            .into_iter()
+            .map(|default| {
+                let mut value = json!({"family": default.family});
+                if let Some(question) = &default.question {
+                    value["question"] = json!(question);
+                }
+                if let Some(none) = &default.none {
+                    value["none"] = json!(none);
+                    return value;
+                }
+                match band {
+                    Some(band) => {
+                        value["cost"] = json!(band.as_str());
+                        value["requests"] = json!(default.band(band));
+                    }
+                    None => {
+                        for (band, requests) in default.bands() {
+                            value[band.as_str()] = json!(requests);
+                        }
+                    }
+                }
+                value
+            })
+            .collect();
+        Ok(json!({
+            "defaults": listed,
+            "missing": [
+                "a request here has no target: it takes the one the person gives, and is a \
+                 session's request once one is added (`plan_session` says what it would cost \
+                 here), unless it says `target: system`",
+                "a band is the catalog's cost word for the backend the default is written \
+                 against; what this machine serves it with, and at what cost, is \
+                 `plan_session`'s answer",
             ],
         }))
     }
@@ -653,6 +715,19 @@ fn tools() -> Vec<Value> {
                 "properties": {
                     "source": {"type": "string", "description": "One source, as <family>.<metric>"},
                     "family": {"type": "string", "description": "Every source of one family"},
+                },
+            },
+            "annotations": read_only,
+        }),
+        json!({
+            "name": "defaults",
+            "title": "What a family's lazy mode composes",
+            "description": "Each family's default, what `omn trace <family> -- PROGRAM` composes: the question it answers and the requests of each cost band (low, med, high), or why the family has no safe default. With `cost`, that band's requests alone. A request takes the target the person gives: add one and it is a session's request for `plan_session` or `run_session`. Machine-independent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "family": {"type": "string", "description": "One family (`io`)"},
+                    "cost": {"type": "string", "enum": ["low", "med", "high"], "description": "One cost band"},
                 },
             },
             "annotations": read_only,

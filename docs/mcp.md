@@ -251,6 +251,7 @@ for the model that restate what each "missing" field means.
 | Tool | Answers | Machine? |
 |---|---|---|
 | `catalog` | every source, one family or one source, as the catalog declares it: backends in order with requirements, cost band and degradation, modes, emits, targets, keys, filter fields, caveats | no, the library's built-in catalog |
+| `defaults` | each family's default, what `omn trace <family>` composes: its question and the requests of each cost band, or one band with `cost`, or why the family has none; a request plans once a target is added | no, the library's built-in catalog |
 | `capabilities` | `omn list`'s sweep: per source available, unverified or unavailable, and the collector column; with `source`, the full listing with every requirement's probe answer and reason | yes, asked of `omn` |
 | `list_runs` | the runs under `--dir`: their requests and backends, why each stopped, which are lossy or carry a shortfall | no, the files |
 | `read_run` | one run, regrouped per request (below) | no, the files |

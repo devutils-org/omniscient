@@ -1894,9 +1894,12 @@ embedded catalog a second time. The decisions are in `DECISIONS.md`,
    and splits by `dir`, `process` on the shared palette, the request view's
    bytes, the socket -> interface edge, `--against` and focus snapshots,
    `sqlite-latency`'s `blocked` with its events, a recording holding a drop.
-4. **The lazy mode, what is left**: `omn list --format json` and `omn-mcp`
-   offering the defaults (a `family` + `cost` argument through
-   `omn::lazy::compose`); a low band this machine cannot keep is said, not
+4. **The lazy mode, what is left**: ~~`omn list --format json` and `omn-mcp`
+   offering the defaults~~ -- **done** (2026-10-16): `omn list --defaults
+   [family] [--format json]`, and `omn-mcp`'s `defaults` tool (`family`,
+   `cost`), checked against the binary's listing; a request of a band plans
+   once a target is added, which is what the tool hands an agent rather
+   than a composed session; a low band this machine cannot keep is said, not
    avoided -- `cpu.profile` (`pmu:sw`), `mem.rss` (`smaps_rollup`, with
    `statm` free below it) and both gpu sources declare `med` at `--cost
    low`, and choosing the backend by band is the resolver's change; and the

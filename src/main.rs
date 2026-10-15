@@ -2505,6 +2505,32 @@ fn list(args: ListArgs) -> anyhow::Result<ExitCode> {
     if args.verify_attach {
         omn::bpf::verify_attach();
     }
+    if args.defaults {
+        let defaults: Vec<&omn::catalog::FamilyDefault> = match args.selection.as_deref() {
+            None => catalog.defaults().iter().collect(),
+            Some(name) => catalog.default_of(name).into_iter().collect(),
+        };
+        if args.selection.is_some() && defaults.is_empty() {
+            eprintln!(
+                "error: there is no family `{}`; a default is a family's, not a source's",
+                args.selection.as_deref().unwrap_or_default()
+            );
+            return Ok(ExitCode::from(EXIT_REJECTED));
+        }
+        match args.format {
+            OutputFormat::Text => print!(
+                "{}",
+                omn::lazy::listing(&catalog, args.selection.as_deref()).trim_start_matches('\n')
+            ),
+            format if format.renders_documents() => {
+                print!("{}", format.serialize_document(&defaults)?)
+            }
+            format => anyhow::bail!(
+                "`{format}` describes results; the defaults list as text, json, yaml or toml"
+            ),
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let capabilities = Capabilities::detect();
     match args.format {
         OutputFormat::Text => print!(

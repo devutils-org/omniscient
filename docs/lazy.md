@@ -95,6 +95,13 @@ cpu      "Where does the program spend its CPU time?"
   high   cpu.profile -m sample@997hz -e stack --stack dwarf
 ```
 
+`omn list --defaults [family]` lists the defaults alone, and with `--format
+json` (or yaml, toml) as a document a program reads: per family its question
+and the requests of each band, spelled as a session's requests are, or `none`
+with the reason. A request takes the target the person gives, so adding one
+makes it a session's request. `omn-mcp`'s `defaults` tool answers the same,
+with `family` and `cost` to narrow it.
+
 A default is held to what a request would be: the catalog refuses to load one
 that names a source, a mode, an emit or a key its family does not have, or
 puts a source in a band its cheapest backend cannot keep. The reasoning is in

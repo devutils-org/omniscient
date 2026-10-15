@@ -65,6 +65,48 @@ fn long_forms(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// `omn list --defaults`: the families' defaults alone, as text a person
+/// reads or a document a program does; every family is in it, a family with
+/// no safe default by its reason; a source is no family and is refused.
+#[test]
+fn the_defaults_are_listed_on_their_own_as_text_or_a_document() {
+    let text = omn(&["list", "--defaults"]);
+    assert!(text.status.success(), "{}", stderr(&text));
+    assert!(stdout(&text).starts_with("DEFAULTS:"), "{}", stdout(&text));
+
+    let document = omn(&["list", "--defaults", "--format", "json"]);
+    assert!(document.status.success(), "{}", stderr(&document));
+    let defaults = json(&document);
+    let families: Vec<&str> = defaults
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|default| default["family"].as_str().expect("a family"))
+        .collect();
+    for family in ["cpu", "mem", "io", "net", "sched"] {
+        assert!(families.contains(&family), "{family} in {families:?}");
+    }
+    for default in defaults.as_array().unwrap() {
+        let bands = ["low", "med", "high"]
+            .iter()
+            .any(|band| default.get(*band).is_some());
+        assert!(
+            bands != default.get("none").is_some(),
+            "a family has bands or the reason it has none: {default}"
+        );
+    }
+
+    let one = json(&omn(&["list", "--defaults", "io", "--format", "json"]));
+    assert_eq!(one.as_array().map(Vec::len), Some(1));
+    let source = omn(&["list", "--defaults", "io.latency"]);
+    assert_eq!(source.status.code(), Some(2));
+    assert!(
+        stderr(&source).contains("not a source's"),
+        "{}",
+        stderr(&source)
+    );
+}
+
 #[test]
 fn a_family_where_a_source_is_expected_composes_its_default() {
     let output = omn(&[

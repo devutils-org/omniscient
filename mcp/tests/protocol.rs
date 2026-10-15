@@ -443,6 +443,68 @@ fn the_sweep_is_the_one_the_binary_that_runs_gives() {
     assert_eq!(sweep["missing"], json!([]));
 }
 
+/// A family's default comes back as the binary lists it, one band when asked
+/// for one; a request of it, given a target, is a session's request the plan
+/// accepts; a family with no default is refused with the families that have
+/// one.
+#[test]
+fn a_familys_default_is_the_binarys_and_plans_once_it_has_a_target() {
+    let dir = scratch("defaults");
+    let listed = Command::new(omn())
+        .args(["list", "--defaults", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listed: Value = serde_json::from_slice(&listed.stdout).expect("one document");
+    let mut client = Client::over(&dir);
+
+    let every = client.call("defaults", json!({}));
+    let families = |value: &Value, key: &str| -> Vec<String> {
+        value[key]
+            .as_array()
+            .expect("a list")
+            .iter()
+            .map(|default| default["family"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        families(&every, "defaults"),
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|default| default["family"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    );
+
+    let io = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|default| default["family"] == "io")
+        .expect("io has a default");
+    let med = client.call("defaults", json!({"family": "io", "cost": "med"}));
+    let served = &med["defaults"][0];
+    assert_eq!(served["cost"], "med");
+    assert_eq!(served["requests"], io["med"], "{served}");
+
+    // Given the person's target, the band's first request plans.
+    let mut request = served["requests"][0].clone();
+    request["target"] = json!({"pid": [std::process::id()]});
+    let session = serde_json::to_string(&json!({"requests": [request]})).unwrap();
+    let plan = client.call("plan_session", json!({"session": session}));
+    assert_eq!(plan["validation"]["valid"], true, "{plan}");
+
+    let refused = client.refused("defaults", json!({"family": "nope"}));
+    assert!(refused.contains("io"), "{refused}");
+    let refused = client.refused("defaults", json!({"cost": "extreme"}));
+    assert!(refused.contains("low"), "{refused}");
+}
+
 #[test]
 fn a_plan_says_what_it_would_serve_and_degrade_and_runs_nothing() {
     let dir = scratch("plan");

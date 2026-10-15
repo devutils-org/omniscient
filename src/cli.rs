@@ -376,6 +376,13 @@ pub struct ListArgs {
     /// know a backend will still be there once a target has been launched.
     #[arg(long)]
     pub verify_attach: bool,
+
+    /// List each family's default instead of the sources: what `omn trace
+    /// <family> -- PROGRAM` composes, per cost band, or why the family has
+    /// none. As json, yaml or toml, one document a program reads the bands
+    /// out of, the requests spelled as a session's.
+    #[arg(long, conflicts_with = "verify_attach")]
+    pub defaults: bool,
 }
 
 #[derive(Debug, Args)]
