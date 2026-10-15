@@ -13850,6 +13850,7 @@ sockets, 60 events, a check of `bench/apps/http-roundtrips.toml`.
   short of `stack top - sp` on almost every sample.
 - `clippy` on aarch64: `src/capabilities.rs:1730` casts a `c_char` to `u8`,
   which is `u8` already here and `i8` on x86-64.
-- `make`'s `setcap` names `target/debug/omn`, and a `build.target-dir` in
-  `~/.cargo/config.toml` (this machine's) puts the binary elsewhere: the
-  capability step then reports none and the eBPF layer reads as missing.
+- ~~`make`'s `setcap` names `target/debug/omn`, and a `build.target-dir` puts
+  the binary elsewhere~~ -- **fixed**: `make` asks `cargo metadata` where it
+  built and links `target/<profile>` there, so the capabilities, the sessions,
+  `make demo` and `make apps` find the binary.

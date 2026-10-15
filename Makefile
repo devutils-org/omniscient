@@ -43,8 +43,22 @@ all: build
 # loads, and the failure surfaces as a resolver choosing a different backend.
 # The CUDA injection library (`cupti/`) is the same kind of member, and
 # `gpu.kernel` refuses without it, naming where it looked.
+#
+# Every path below is `target/<profile>`, and a `build.target-dir` (in
+# ~/.cargo/config.toml, or CARGO_TARGET_DIR) puts the build elsewhere -- on a
+# VM whose checkout is on a shared filesystem, where file capabilities do not
+# hold, that is the point of it. Then `target/<profile>` is made a link to
+# where cargo built, so the capabilities, the sessions and the scripts find
+# the binary where they look; a directory already there is left alone.
 build:
 	cargo build --workspace $(CARGOFLAGS)
+	@real="$$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+	    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"; \
+	if [ -n "$$real" ] && [ "$$real" != "$(CURDIR)/target" ] && [ ! -d target/$(PROFILE) -o -L target/$(PROFILE) ] \
+	    && [ "$$(readlink target/$(PROFILE) 2>/dev/null)" != "$$real/$(PROFILE)" ]; then \
+	    mkdir -p target && ln -sfn "$$real/$(PROFILE)" target/$(PROFILE) \
+	    && echo "linked target/$(PROFILE) to $$real/$(PROFILE), where cargo builds"; \
+	fi
 	@$(MAKE) --no-print-directory caps PROFILE=$(PROFILE)
 	@$(MAKE) --no-print-directory vertical-server
 	@$(MAKE) --no-print-directory triage-fixture
