@@ -13829,8 +13829,14 @@ sockets, 60 events, a check of `bench/apps/http-roundtrips.toml`.
   No collector attaches a program through `kprobe()` today; the test lost its
   ceiling and `Scope::Task` says it. A counting kprobe with no program -- the
   path check's, `mem.swap`'s -- is scoped.
-- **`proc.syscall` names a syscall by number on aarch64** (`syscall_63` is
-  `read`): `src/collect/proc/syscall_names.rs` has x86-64's table only.
+- ~~**`proc.syscall` names a syscall by number on aarch64**~~ -- **fixed**:
+  `src/collect/proc/syscall_names.rs` carries aarch64's table, generated from
+  the kernel's `asm/unistd_64.h` (327 entries) and each number checked against
+  libc's `SYS_*` by a static assertion. `-k syscall` is `strace -c` here and
+  `--filter "syscall == 'openat'"` gives `proc.calls` every open with its path.
+  The filter and counting tests now run on both architectures; three of them
+  named this process by its own pid where the program compares the kernel's,
+  and are given the kernel's.
 - **`tests/unwind.rs`'s `each_mode_copies_what_it_declares...`** is red here on
   a clean `main` three runs of three: a `dwarf` sample's user stack is 48 bytes
   short of `stack top - sp` on almost every sample.

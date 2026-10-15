@@ -1243,7 +1243,9 @@ mod tests {
             mode: Mode::Trace,
             filter: None,
         })
-        .attach(&Target::Pid(vec![4242]))
+        // A process that exists: in a container its id is translated to the
+        // kernel's, and a pid nobody has is refused there.
+        .attach(&Target::Pid(vec![std::process::id() as i32]))
         .expect("a per-process collector");
         assert_eq!(collector.id().as_str(), "proc.signals/bpf:raw_tp");
     }
@@ -1307,11 +1309,13 @@ mod tests {
         if skip_without_bpf(&mut collector) {
             return;
         }
+        // Alive long enough to be named by the kernel's id, which is the one
+        // the program reports and, in a container, not `child.id()`.
         let child = std::process::Command::new("/bin/sh")
-            .args(["-c", "exit 7"])
+            .args(["-c", "sleep 0.2; exit 7"])
             .spawn()
             .expect("a shell runs");
-        let pid = child.id();
+        let pid = crate::bpf::pidns::kernel_tgid(child.id()).expect("the shell is running");
         let status = child.wait_with_output().expect("the shell finishes").status;
         assert_eq!(status.code(), Some(7));
 

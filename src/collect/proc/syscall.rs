@@ -641,7 +641,13 @@ mod tests {
         };
         assert_eq!(value("nr").as_deref(), Some("1"));
         if syscall_names::table_is_for_this_machine() {
-            assert_eq!(value("syscall").as_deref(), Some("write"));
+            // 1 is `write` on x86-64 and `io_destroy` on aarch64.
+            let expected = if cfg!(target_arch = "x86_64") {
+                "write"
+            } else {
+                "io_destroy"
+            };
+            assert_eq!(value("syscall").as_deref(), Some(expected));
         }
     }
 
@@ -674,25 +680,34 @@ mod tests {
 
     /// The whole promise of this source's caveat, from the request's side.
     #[test]
-    #[cfg(target_arch = "x86_64")]
     fn a_predicate_naming_one_syscall_becomes_a_number_the_program_can_hold() {
+        let Some(getppid) = syscall_names::number("getppid") else {
+            return;
+        };
         let by_name: FilterExpr = "syscall == 'getppid'".parse().expect("a predicate");
-        assert_eq!(pushed_down_syscall(&by_name), Ok(Some(110)));
-        let by_number: FilterExpr = "syscall == 110".parse().expect("a predicate");
-        assert_eq!(pushed_down_syscall(&by_number), Ok(Some(110)));
+        assert_eq!(pushed_down_syscall(&by_name), Ok(Some(getppid)));
+        let by_number: FilterExpr = format!("syscall == {getppid}")
+            .parse()
+            .expect("a predicate");
+        assert_eq!(pushed_down_syscall(&by_number), Ok(Some(getppid)));
         // A conjunction still names it; the other half runs in userspace.
         let conjunction: FilterExpr = "comm == 'python3' && syscall == 'getppid'"
             .parse()
             .expect("a predicate");
-        assert_eq!(pushed_down_syscall(&conjunction), Ok(Some(110)));
+        assert_eq!(pushed_down_syscall(&conjunction), Ok(Some(getppid)));
     }
 
-    /// `syscall == 110` is pushed down as the number, so the userspace pass has
+    /// `syscall == <getppid's number>` is pushed down as the number, so the userspace pass has
     /// to read it as the number too: against the name, every row the kernel
     /// kept would be dropped.
     #[test]
-    #[cfg(target_arch = "x86_64")]
     fn a_syscall_number_is_compared_with_nr_in_userspace_wherever_it_sits() {
+        let (Some(p), Some(w)) = (
+            syscall_names::number("getppid"),
+            syscall_names::number("write"),
+        ) else {
+            return;
+        };
         let event = |nr: u32| Event {
             ts_ns: 1,
             ts_err_ns: 0,
@@ -702,17 +717,17 @@ mod tests {
             collector_id: CollectorId::new("test"),
             seq: 0,
         };
-        let getppid = event(110);
-        let write = event(1);
+        let getppid = event(p);
+        let write = event(w);
         for (text, keeps_getppid, keeps_write) in [
-            ("syscall == 110", true, false),
-            ("syscall != 110", false, true),
-            ("syscall in (110, 2)", true, false),
-            ("syscall in (110, 'write')", true, true),
-            ("comm == 'sh' && syscall == 110", true, false),
-            ("syscall == 110 || syscall == 'write'", true, true),
-            ("!(syscall == 1)", true, false),
-            ("syscall == 'getppid'", true, false),
+            (format!("syscall == {p}"), true, false),
+            (format!("syscall != {p}"), false, true),
+            (format!("syscall in ({p}, 9999)"), true, false),
+            (format!("syscall in ({p}, 'write')"), true, true),
+            (format!("comm == 'sh' && syscall == {p}"), true, false),
+            (format!("syscall == {p} || syscall == 'write'"), true, true),
+            (format!("!(syscall == {w})"), true, false),
+            ("syscall == 'getppid'".to_owned(), true, false),
         ] {
             let predicate = numbers_read_as_nr(text.parse().expect("a predicate"));
             assert_eq!(
@@ -732,7 +747,6 @@ mod tests {
     /// comparison down would throw away everything the other half was about,
     /// and the series that came back would be a subset nobody asked for.
     #[test]
-    #[cfg(target_arch = "x86_64")]
     fn a_disjunction_is_not_pushed_down_even_though_it_names_a_syscall() {
         let expression: FilterExpr = "syscall == 'getppid' || comm == 'sh'"
             .parse()
@@ -744,14 +758,13 @@ mod tests {
     /// userspace, and report an empty series -- which reads exactly like a
     /// process that made no calls. It is refused instead, by name.
     #[test]
-    #[cfg(target_arch = "x86_64")]
     fn a_syscall_name_this_build_does_not_know_is_refused_rather_than_matched() {
         let expression: FilterExpr = "syscall == 'wriet'".parse().expect("a predicate");
         let Err(reason) = pushed_down_syscall(&expression) else {
             panic!("`wriet` is not a syscall");
         };
         assert!(reason.contains("wriet"), "{reason}");
-        assert!(reason.contains("x86_64"), "{reason}");
+        assert!(reason.contains(syscall_names::ARCHITECTURE), "{reason}");
 
         let prepared = Box::new(Prepare {
             mode: Mode::Trace,
@@ -764,12 +777,14 @@ mod tests {
     /// `bpf` backend with pushing predicates down, and for this source that is
     /// true of one comparison and not of the others.
     #[test]
-    #[cfg(target_arch = "x86_64")]
     fn the_notes_say_which_half_of_the_predicate_ran_in_the_kernel() {
+        let Some(getppid) = syscall_names::number("getppid") else {
+            return;
+        };
         let collector = SyscallCollector::new(
             Narrowing {
                 whose: Whose::Process(1),
-                syscall_nr: Some(110),
+                syscall_nr: Some(getppid),
             },
             Mode::Trace,
             Some("syscall == 'getppid'".parse().expect("a predicate")),
@@ -809,13 +824,16 @@ mod tests {
     /// computed. Narrowed to this process and to that one syscall, so the rest
     /// of the parallel test suite cannot contribute.
     #[test]
-    #[cfg(target_arch = "x86_64")]
     fn a_known_number_of_calls_is_counted_as_that_number() {
         const CALLS: u64 = 500;
-        let getppid = syscall_names::number("getppid").expect("x86_64 has getppid");
+        let getppid = syscall_names::number("getppid").expect("the table has getppid");
         let mut collector = SyscallCollector::new(
             Narrowing {
-                whose: Whose::Process(std::process::id()),
+                // The program compares the kernel's id, which in a container
+                // is not the one this process reads as its own.
+                whose: Whose::Process(
+                    crate::bpf::pidns::kernel_tgid(std::process::id()).expect("this process"),
+                ),
                 syscall_nr: Some(getppid),
             },
             Mode::Trace,
@@ -862,15 +880,18 @@ mod tests {
     /// The mean comes from `total_ns`, which is exact, rather than from the
     /// bucket, which is a factor of two wide.
     #[test]
-    #[cfg(target_arch = "x86_64")]
     fn an_injected_delay_is_reported_as_that_delay() {
         const SLEEPS: u64 = 10;
         const NANOS: u64 = 50_000_000;
         let clock_nanosleep =
-            syscall_names::number("clock_nanosleep").expect("x86_64 has clock_nanosleep");
+            syscall_names::number("clock_nanosleep").expect("the table has clock_nanosleep");
         let mut collector = SyscallCollector::new(
             Narrowing {
-                whose: Whose::Process(std::process::id()),
+                // The program compares the kernel's id, which in a container
+                // is not the one this process reads as its own.
+                whose: Whose::Process(
+                    crate::bpf::pidns::kernel_tgid(std::process::id()).expect("this process"),
+                ),
                 syscall_nr: Some(clock_nanosleep),
             },
             Mode::Trace,

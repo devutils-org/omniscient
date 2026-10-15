@@ -57,6 +57,6 @@ when you need each call.
   at the end is said, not recorded.
 - `proc.fd`'s count means nothing without the limit beside it (900 is fine
   against 524288 and an outage against 1024).
-- On aarch64, `proc.syscall` names syscalls by number (`syscall_63` is `read`),
-  and a filter by name (`syscall == 'openat'`) is refused: only x86-64's name
-  table is built. Filter on the number instead.
+- Syscall names come from a table built for x86-64 and aarch64. On any other
+  architecture the rows are numbered (`syscall_63`) and a filter by name is
+  refused: filter on the number there.

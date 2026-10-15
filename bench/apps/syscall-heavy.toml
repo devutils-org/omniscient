@@ -8,7 +8,7 @@ truth = "bench-report"
 
 [[trace]]
 label = "syscalls"
-args = ["proc.syscall", "-m", "count", "-e", "summary", "--filter", "syscall == {nr:getppid}"]
+args = ["proc.syscall", "-m", "count", "-e", "summary", "--filter", "syscall == 'getppid'"]
 value = "count"
 truth = "ops"
 tolerance = 0.0

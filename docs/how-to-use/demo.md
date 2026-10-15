@@ -169,7 +169,7 @@ says.**
 
 | Show | Command | Point at |
 |---|---|---|
-| `strace -c` in one run, from the kernel | `omn trace proc.syscall -m count -k syscall -e summary --program-stdout /dev/null -- ls -R /usr` | one row per syscall; on aarch64 the rows are numbered, not named |
+| `strace -c` in one run, from the kernel | `omn trace proc.syscall -m count -k syscall -e summary --program-stdout /dev/null -- ls -R /usr` | one row per syscall, by name |
 | the lazy mode | `omn cpu -- target/omn-triage-fixture/workload cpu 500` | it prints the requests it composed, in long form, then the profile |
 | a flame graph file | `omn trace cpu.profile -m sample@997hz -e stack --format speedscope -o ~/.cache/omn-demo/prof -- target/omn-triage-fixture/workload cpu 500` | open `results.speedscope.json` in speedscope.app |
 | the cost of looking | any run's `cost:` line | what the collection spent against what the target spent, and *unknown* rather than zero when the kernel did not time it |
