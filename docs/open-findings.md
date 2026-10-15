@@ -13912,9 +13912,11 @@ exists.
   the path here**, as `vfs_write` was -- a root kprobe counted 0 calls of it
   beside 44 of `inet_recvmsg`, its own callee, over twenty HTTP round trips.
   The path check covers it now (a datagram this process reads back through
-  `recv(2)`), and `net.socket` is refused here with the reason rather than
-  timing no receive. A fallback that times `inet_recvmsg` -- inet sockets
-  only, as the sends already are -- would serve it again. The other socket
+  `recv(2)`), and `net.socket` falls to a second backend,
+  `bpf:fentry:families`, which times the receives at the families' own
+  `inet_recvmsg`, `inet6_recvmsg`, `unix_stream_recvmsg` and
+  `unix_dgram_recvmsg`, as the sends already were, and says so; `omn net` and
+  `scenario_net`'s server receives work again here. The other socket
   functions are on the path (`inet_sendmsg` 65, `tcp_v4_connect` 20,
   `tcp_finish_connect` 20, `inet_csk_accept` 21). `net.tcp.connect` with no
   handshake outcome and `net.request` with no network row are still open

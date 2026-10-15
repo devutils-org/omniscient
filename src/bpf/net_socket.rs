@@ -62,6 +62,29 @@ pub const OP_RECV: u32 = 1;
 
 const SEND_SIGNATURE: [&str; 3] = ["socket *", "msghdr *", "size_t"];
 const RECV_SIGNATURE: [&str; 3] = ["socket *", "msghdr *", "int"];
+/// The families' own receive functions, which `sock_recvmsg` calls through
+/// `sock->ops->recvmsg`, take the size beside the flags.
+const FAMILY_RECV_SIGNATURE: [&str; 4] = ["socket *", "msghdr *", "size_t", "int"];
+
+/// Where receives are timed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Receives {
+    /// At `sock_recvmsg`, for every family.
+    Generic,
+    /// At the families' own `recvmsg`, as the sends are: for a kernel that
+    /// inlined `sock_recvmsg` into the syscalls, so that the copy a trampoline
+    /// patches is off their path (a clang build of 7.2, measured: no call of
+    /// it beside 44 of `inet_recvmsg`).
+    Families,
+}
+
+/// The families' receive functions, required as their sends are.
+const RECVS: [(&str, bool); 4] = [
+    ("inet_recvmsg", true),
+    ("inet6_recvmsg", false),
+    ("unix_stream_recvmsg", false),
+    ("unix_dgram_recvmsg", false),
+];
 
 /// The families' send functions. `inet_sendmsg` is required; the others are
 /// timed where the kernel has them -- IPv6 and unix sockets can be modules, and
@@ -188,14 +211,29 @@ fn socket_identity(program: &mut Program, at: &Offsets) {
 }
 
 impl SocketProgram {
-    pub fn load(narrowing: Narrowing) -> Result<Self, String> {
+    pub fn load(narrowing: Narrowing, receives: Receives) -> Result<Self, String> {
         let btf = crate::bpf::kernel_btf()?;
         let offsets = Offsets::read(btf)?;
-        let mut timed = vec![Timed {
-            function: fentry::expect("sock_recvmsg", &[&RECV_SIGNATURE])?,
-            op: OP_RECV,
-        }];
+        let mut timed = Vec::new();
         let mut missing = Vec::new();
+        match receives {
+            Receives::Generic => timed.push(Timed {
+                function: fentry::expect("sock_recvmsg", &[&RECV_SIGNATURE])?,
+                op: OP_RECV,
+            }),
+            Receives::Families => {
+                for (name, required) in RECVS {
+                    match fentry::expect(name, &[&FAMILY_RECV_SIGNATURE]) {
+                        Ok(function) => timed.push(Timed {
+                            function,
+                            op: OP_RECV,
+                        }),
+                        Err(reason) if required => return Err(reason),
+                        Err(_) => missing.push(name.to_owned()),
+                    }
+                }
+            }
+        }
         for (name, required) in SENDS {
             match fentry::expect(name, &[&SEND_SIGNATURE]) {
                 Ok(function) => timed.push(Timed {

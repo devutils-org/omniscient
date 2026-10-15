@@ -66,6 +66,9 @@ omn trace net.sockets -m snapshot -e raw --system
 
 - fentry sources (`net.socket`, `net.tcp.connect`, `net.tcp.accept`) are `low`
   per event, but attaching the trampolines costs about 65 ms once per run.
+- `net.socket` times receives at `sock_recvmsg`, or, on a kernel that inlined
+  it into the syscalls, at each family's own receive function
+  (`bpf:fentry:families`, inet, inet6 and unix only), and the run says which.
 - `net.capture` is `high` and copies headers only (no payload enters the
   process). Watch its drops: a capture that loses packets under load produces
   wrong conclusions.

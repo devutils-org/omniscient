@@ -10,6 +10,7 @@
 //! object is.
 
 use crate::bpf::attach::fentry::{self, Row};
+use crate::bpf::attach::net_socket::Receives;
 use crate::bpf::attach::net_socket::{family_and_port, SocketProgram, OP_RECV, OP_SEND};
 use crate::collect::io::histogram::{Describe, HistogramCollector, Rows, Source};
 use crate::collect::io::vfs::narrowing;
@@ -21,6 +22,8 @@ use crate::request::{Mode, Target};
 pub struct Prepare {
     pub mode: Mode,
     pub filter: Option<FilterExpr>,
+    /// Where the receives are timed: the backend's choice.
+    pub receives: Receives,
 }
 
 impl Prepared for Prepare {
@@ -34,14 +37,15 @@ impl Prepared for Prepare {
             ));
         }
         let narrowing = narrowing("net.socket", target)?;
+        let receives = self.receives;
         let load = Box::new(move || -> Result<Box<dyn Rows>, String> {
-            let program = SocketProgram::load(narrowing)?;
+            let program = SocketProgram::load(narrowing, receives)?;
             if !program.missing.is_empty() {
                 // Said where it is decided rather than guessed at later: a
                 // family whose send function is absent contributes receives
                 // and no sends, and a reader comparing the two must know.
                 eprintln!(
-                    "note: net.socket: this kernel has no {} in its BTF, so sends on those \
+                    "note: net.socket: this kernel has no {} in its BTF, so calls on those \
                      sockets are not timed",
                     program.missing.join(", ")
                 );
@@ -51,16 +55,31 @@ impl Prepared for Prepare {
         Ok(Box::new(HistogramCollector::new(
             Source {
                 kind: "net.socket",
-                collector: "net.socket/bpf:fentry",
+                collector: match receives {
+                    Receives::Generic => "net.socket/bpf:fentry",
+                    Receives::Families => "net.socket/bpf:fentry:families",
+                },
                 call: "a send or a receive",
                 load,
                 describe: describe(),
                 notes: vec![
-                    "receives are timed at sock_recvmsg, for every family; sends at \
-                     inet_sendmsg, inet6_sendmsg, unix_stream_sendmsg and unix_dgram_sendmsg, \
-                     because the syscalls inline the generic send path -- a send on any other \
-                     family is not here, and neither are sendfile, splice or io_uring"
-                        .to_owned(),
+                    match receives {
+                        Receives::Generic => {
+                            "receives are timed at sock_recvmsg, for every \
+                            family; sends at inet_sendmsg, inet6_sendmsg, unix_stream_sendmsg \
+                            and unix_dgram_sendmsg, because the syscalls inline the generic send \
+                            path -- a send on any other family is not here, and neither are \
+                            sendfile, splice or io_uring"
+                        }
+                        Receives::Families => {
+                            "receives and sends are both timed at the \
+                            families' own functions -- inet, inet6 and unix stream and datagram \
+                            sockets -- because this kernel inlined sock_recvmsg into the \
+                            syscalls as it does the generic send path: a call on any other family \
+                            is not here, and neither are sendfile, splice or io_uring"
+                        }
+                    }
+                    .to_owned(),
                     "a row's `iface` is the interface the socket's cached route left by at the \
                      call; a socket with no route (unix, an unconnected datagram socket) or in \
                      another network namespace carries none"

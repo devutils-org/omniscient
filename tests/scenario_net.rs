@@ -3842,7 +3842,15 @@ fn the_fentry_leg_of_the_sweep_answers_with_every_emit_it_promised() {
     ] {
         let result = labelled(&run, label);
         assert_eq!(emits(result), wanted, "`{label}` emitted the wrong set");
-        assert_eq!(result["backend"], "bpf:fentry", "`{label}`");
+        // Either fentry road: `bpf:fentry:families` where this kernel put
+        // `sock_recvmsg` off the syscalls' path.
+        assert!(
+            result["backend"]
+                .as_str()
+                .is_some_and(|backend| backend.starts_with("bpf:fentry")),
+            "`{label}`: {}",
+            result["backend"]
+        );
         let seen = result["events_seen"].as_u64().expect("an event count");
         assert!(
             seen > 0,

@@ -138,6 +138,16 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(socket::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                receives: crate::bpf::attach::net_socket::Receives::Generic,
+            }))
+        }),
+        // The same, with the receives at the families' own functions, for a
+        // kernel whose `sock_recvmsg` is off the syscalls' path.
+        Factory::new("net.socket", "bpf:fentry:families", |resolved| {
+            Ok(Box::new(socket::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                receives: crate::bpf::attach::net_socket::Receives::Families,
             }))
         }),
         // A request the server declared, followed in the task serving it --

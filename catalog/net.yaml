@@ -302,6 +302,11 @@
     # Both count in the kernel, one row per (task, op, socket, log2 bucket)
     # drained on a tick: one event stands for every call in its bucket.
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:sock_recvmsg", "fentry:inet_sendmsg"], cost: low, drained: true}
+    # A kernel that inlined `sock_recvmsg` into the syscalls -- a clang build
+    # of 7.2, measured: no call of it beside 44 of `inet_recvmsg` -- is timed
+    # at the families' own receive functions, the way the sends already are.
+    - {id: "bpf:fentry:families", requires: ["btf", "bpf", "fentry:inet_recvmsg", "fentry:inet_sendmsg"], cost: low, drained: true,
+       degraded: "receives timed at the families' own recvmsg, as the sends are: inet, inet6 and unix sockets only, because sock_recvmsg is off this kernel's syscall path"}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: med, drained: true,
        degraded: "no BTF: struct offsets are not portable across kernels"}
   modes: [trace, count]
