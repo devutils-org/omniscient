@@ -258,6 +258,139 @@ pub fn tasks() -> Result<Vec<Task>, String> {
     })
 }
 
+/// `BPF_MAP_TYPE_LRU_HASH`, in `enum bpf_map_type`. Frozen UAPI.
+const BPF_MAP_TYPE_LRU_HASH: u32 = 9;
+
+/// Births remembered at once: the oldest is forgotten first, so a long run on
+/// a busy machine keeps the recent ones, which are the ones still to drain.
+const BIRTHS: u32 = 65_536;
+
+/// A program on `sched_process_fork` writing every new task's id in `omn`'s
+/// namespace under the kernel's, for the tasks no iteration lives to see.
+///
+/// The iterator names the tasks alive when it runs, and a task that execs and
+/// exits in a few milliseconds -- a build's compiler, a test's thread -- is
+/// gone by the next pass: its events kept the kernel's id. The fork
+/// tracepoint fires in `kernel_clone` once the child's `struct pid` is
+/// attached and before it runs, for a thread as for a process, so every task
+/// born after the first pass is in this map whatever it lived. The map is
+/// only read for an id the iterator missed.
+struct Births {
+    map: OwnedFd,
+    program: OwnedFd,
+    _link: OwnedFd,
+}
+
+/// The births program, loaded with the iterator's link; the reason when it
+/// could not be, which the run's note gives ([`untranslated_note`]).
+static BORN: OnceLock<Result<Births, String>> = OnceLock::new();
+
+/// Stack slots of the births program.
+const BORN_KEY: i16 = -8;
+const BORN_VALUE: i16 = -16;
+const BORN_SCRATCH: i16 = -24;
+const BORN_LEVEL: i16 = -32;
+
+/// `sched_process_fork(parent, child)`: the child's `nr` at the level whose
+/// namespace is `own`, under the child's `pid`. A child outside `omn`'s
+/// namespace has no such level and writes nothing.
+fn births_instructions(at: &Offsets, own: u64, map_fd: i32) -> Vec<Insn> {
+    const NEXT: [&str; LEVELS] = ["b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7"];
+    let mut program = Program::new();
+    // A raw tracepoint's context is its arguments: r7 the child.
+    program.push(Insn::ldx(BPF_DW, 7, 1, 8));
+    program.push(Insn::st_imm(BPF_DW, R10, BORN_KEY, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, BORN_VALUE, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, BORN_LEVEL, 0));
+    probe_read(&mut program, BORN_KEY, 4, 7, at.pid);
+    // r9 the child's `struct pid`, r8 its level.
+    probe_read(&mut program, BORN_SCRATCH, 8, 7, at.thread_pid);
+    program.push(Insn::ldx(BPF_DW, 9, R10, BORN_SCRATCH));
+    program.jump_to("done", Insn::jeq_imm(9, 0, 0));
+    probe_read(&mut program, BORN_LEVEL, 4, 9, at.pid_level);
+    program.push(Insn::ldx(BPF_W, 8, R10, BORN_LEVEL));
+    for (level, next) in NEXT.iter().enumerate() {
+        program.push(Insn::mov64_imm(1, level as i32));
+        program.jump_to("done", Insn::jgt_reg(1, 8, 0));
+        let upid = at.numbers + level as i32 * at.upid_size;
+        probe_read(&mut program, BORN_SCRATCH, 8, 9, upid + at.upid_ns);
+        program.push(Insn::ldx(BPF_DW, 4, R10, BORN_SCRATCH));
+        program.jump_to(next, Insn::jeq_imm(4, 0, 0));
+        program.push(Insn::st_imm(BPF_DW, R10, BORN_SCRATCH, 0));
+        probe_read(&mut program, BORN_SCRATCH, 4, 4, at.ns_inum);
+        program.push(Insn::ldx(BPF_W, 1, R10, BORN_SCRATCH));
+        // An inode above `i32::MAX` is not an immediate a 64-bit compare
+        // takes as it is: it sign-extends.
+        program.extend(Insn::ld_imm64(2, own as i64));
+        program.jump_to(next, Insn::jne_reg(1, 2, 0));
+        probe_read(&mut program, BORN_VALUE, 4, 9, upid + at.upid_nr);
+        program.jump_to("store", Insn::ja());
+        program.label(next);
+    }
+    program.jump_to("done", Insn::ja());
+    program.label("store");
+    program.extend(Insn::load_map_fd(1, map_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, BORN_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, BORN_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    program.build()
+}
+
+/// Loads and attaches the births program.
+fn watch_births(btf: &Btf, at: &Offsets, own: u64) -> Result<Births, String> {
+    let signature = btf.tracepoint_signature("sched_process_fork")?;
+    if signature != ["task_struct *", "task_struct *"] {
+        return Err(format!(
+            "this kernel declares `sched_process_fork({})`, and the program reads the child \
+             from the second of two task pointers",
+            signature.join(", ")
+        ));
+    }
+    let map =
+        crate::bpf::syscall::map_create(BPF_MAP_TYPE_LRU_HASH, 4, 4, BIRTHS, "omn_pidns_born")
+            .map_err(|error| format!("cannot create the births map: {error}"))?;
+    let instructions = births_instructions(at, own, map.as_raw_fd());
+    crate::bpf::insn::audit(&instructions)?;
+    let program = crate::bpf::syscall::prog_load(
+        crate::bpf::syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+        &instructions,
+        "omn_pidns_born",
+        "Dual MIT/GPL",
+    )
+    .map_err(|error| format!("the kernel refused the births program: {error}"))?;
+    let link = crate::bpf::syscall::raw_tracepoint_open("sched_process_fork", program.as_raw_fd())
+        .map_err(|error| format!("cannot attach to `sched_process_fork`: {error}"))?;
+    Ok(Births {
+        map,
+        program,
+        _link: link,
+    })
+}
+
+/// Runs of the births program the kernel skipped, as every program here
+/// reports them: a fork it skipped is a task whose id only an iteration that
+/// saw it alive can translate. Zero where the program is not running.
+pub fn skipped() -> u64 {
+    match BORN.get() {
+        Some(Ok(births)) => crate::bpf::attach::fentry::skipped([&births.program]),
+        _ => 0,
+    }
+}
+
+/// The id in `omn`'s namespace the births program wrote for a kernel id.
+fn born(kernel: u32) -> Option<u32> {
+    let births = BORN.get()?.as_ref().ok()?;
+    let value = crate::bpf::syscall::map_lookup(births.map.as_raw_fd(), &kernel.to_ne_bytes(), 4)
+        .ok()??;
+    Some(u32::from_ne_bytes(value.get(..4)?.try_into().ok()?))
+}
+
 /// The iterator's link, loaded on the first pass and kept for the run: a
 /// pass is then one `BPF_ITER_CREATE` and one read, and a run that refreshes
 /// its table on every tick ([`remember`]) does not verify a program each time.
@@ -294,6 +427,16 @@ fn iterate() -> Result<Option<Vec<Task>>, String> {
             attach_type: BPF_TRACE_ITER,
             ..Default::default()
         };
+        // Before the link, so that the births are watched from the first
+        // pass on: a task born after it is either alive at the next one or
+        // in the map.
+        BORN.get_or_init(|| {
+            watch_births(
+                btf,
+                &offsets,
+                namespace_inode("pid").unwrap_or(INITIAL_PID_NS),
+            )
+        });
         // The link holds the program: its descriptor can close.
         *link = Some(
             bpf(BPF_LINK_CREATE, &mut attr)
@@ -417,7 +560,9 @@ pub fn translate(events: &mut [crate::event::Event]) -> usize {
                 }
             }
         }
-        table.get(&id).copied()
+        let ours = table.get(&id).copied().or_else(|| born(id))?;
+        table.insert(id, ours);
+        Some(ours)
     };
     for event in events.iter_mut() {
         for key in &mut event.keys {
@@ -478,7 +623,9 @@ pub fn ours(kernel: u32) -> Option<u32> {
         Ok(None) => return Some(kernel),
         Err(_) => {}
     }
-    table.get(&kernel).copied()
+    let id = table.get(&kernel).copied().or_else(|| born(kernel))?;
+    table.insert(kernel, id);
+    Some(id)
 }
 
 /// When [`remember`] last iterated, in `CLOCK_MONOTONIC` nanoseconds.
@@ -487,10 +634,11 @@ static REMEMBERED_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// The live tasks added to the table [`translate`] reads, at most once per
 /// 100 ms, for a collector that keeps its rows in the kernel until its stop:
 /// by the time it hands them over, a target's children have exited and no
-/// iteration can name them. The runner calls this on every read of an eBPF
-/// collector that handed nothing over, so a task that lived one tick keeps its
-/// translation. A task shorter than that still exits unseen, and is counted
-/// ([`untranslated_note`]).
+/// iteration can name them. The runner calls this before it attaches an eBPF
+/// collector, which also starts the births program ([`Births`]), and on every
+/// read of one that handed nothing over. A task born before the first call
+/// and gone before an iteration saw it still keeps the kernel's id, and is
+/// counted ([`untranslated_note`]).
 pub fn remember() {
     use std::sync::atomic::Ordering;
     if in_initial_pid_namespace() {
@@ -519,11 +667,28 @@ pub fn remember() {
 
 /// The note a run carries for the ids [`translate`] left as the kernel's.
 pub fn untranslated_note(missed: usize) -> String {
-    format!(
-        "{missed} task id(s) are the kernel's rather than this pid namespace's: the task exited \
-         before the iterator that translates them saw it, or it lives outside the namespace \
-         `omn` runs in"
-    )
+    match BORN.get() {
+        Some(Err(reason)) => format!(
+            "{missed} task id(s) are the kernel's rather than this pid namespace's: the task \
+             exited before the iterator that translates them saw it, and the program that \
+             remembers each task's birth is not running ({reason}), or it lives outside the \
+             namespace `omn` runs in"
+        ),
+        _ => {
+            let skipped = match skipped() {
+                0 => String::new(),
+                runs => format!(
+                    ", or the kernel skipped the run of the program that remembers its birth \
+                     ({runs} skipped)"
+                ),
+            };
+            format!(
+                "{missed} task id(s) are the kernel's rather than this pid namespace's: the task \
+                 was born before `omn` began translating and exited before the iterator saw \
+                 it{skipped}, or it lives outside the namespace `omn` runs in"
+            )
+        }
+    }
 }
 
 /// How many levels of the whole hierarchy lie above the root of `omn`'s

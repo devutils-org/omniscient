@@ -2353,6 +2353,12 @@ fn run_core(
     // ones that appear among this process's descriptors while it is prepared
     // and attached, which is what its cost inside the target is read from.
     let program_stats = ProgramStats::for_run(resolved);
+    // In a container the ids every program writes are translated: the table
+    // starts now, and with it the program that remembers each task's birth,
+    // so that a task born and gone between two reads is still named.
+    if resolved.iter().any(|one| loads_programs(&one.backend.id)) {
+        crate::bpf::pidns::remember();
+    }
     let mut programs: Vec<Vec<(RawFd, u32)>> = vec![Vec::new(); resolved.len()];
     let mut prepared: Vec<Box<dyn Prepared>> =
         all_or_nothing(resolved.iter().enumerate().map(|(index, resolved)| {
@@ -4468,6 +4474,9 @@ impl Ledger {
         spending.attaching(index);
         let entered_ns = monotonic_ns();
         let backend = spending.serving[index].backend.id.clone();
+        if loads_programs(&backend) {
+            crate::bpf::pidns::remember();
+        }
         let before = loads_programs(&backend).then(programs_held);
         let account = prepared.inside();
         Target::narrowed_to_one();
