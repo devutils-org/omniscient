@@ -254,7 +254,7 @@ impl FutexCollector {
         let symbolizer = self
             .symbolizers
             .entry(row.tgid as i32)
-            .or_insert_with(|| Symbolizer::for_process(row.tgid as i32));
+            .or_insert_with(|| Symbolizer::for_kernel_process(row.tgid as i32));
         let stack = symbolizer.symbolize(&RawStack {
             kernel: Vec::new(),
             user: addresses,

@@ -147,7 +147,7 @@ pub(crate) fn refresh_followed_symbols(
                 held.get_mut().refresh();
             }
             std::collections::hash_map::Entry::Vacant(empty) => {
-                empty.insert(crate::stack::Symbolizer::for_process(tgid as i32));
+                empty.insert(crate::stack::Symbolizer::for_kernel_process(tgid as i32));
             }
         }
     }

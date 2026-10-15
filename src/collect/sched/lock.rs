@@ -263,7 +263,7 @@ impl LockCollector {
         let symbolizer = self
             .symbolizers
             .entry(row.tgid as i32)
-            .or_insert_with(|| Symbolizer::for_process(row.tgid as i32));
+            .or_insert_with(|| Symbolizer::for_kernel_process(row.tgid as i32));
         // User frames only: `BPF_F_USER_STACK` asked for the thread's own, and
         // putting them through kernel symbols would name them after whatever
         // function lives at that offset in the kernel's tables.

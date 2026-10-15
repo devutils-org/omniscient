@@ -354,7 +354,7 @@ impl OffCpuCollector {
         let debuginfod = self.debuginfod.clone();
         self.symbolizers
             .entry(tgid as i32)
-            .or_insert_with(|| Symbolizer::with_debuginfod(tgid as i32, debuginfod))
+            .or_insert_with(|| Symbolizer::with_debuginfod_kernel(tgid as i32, debuginfod))
     }
 
     /// Symbolizes the stack behind an entry, once per distinct id.

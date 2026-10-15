@@ -679,6 +679,12 @@ const PERF_MAP_REREAD_NS: u64 = 10_000_000;
 /// nothing before it stops asking.
 const MAX_FAILED_REREADS: u32 = 8;
 
+/// A kernel id in this namespace's numbering, the id itself where it has
+/// none here.
+fn ours(kernel_tgid: i32) -> i32 {
+    crate::bpf::pidns::ours(kernel_tgid as u32).map_or(kernel_tgid, |id| id as i32)
+}
+
 impl Symbolizer {
     /// A symbolizer for one process: its mappings, and the kernel's.
     ///
@@ -707,6 +713,23 @@ impl Symbolizer {
 
     /// A symbolizer that asks debuginfod for the names of a file that carries
     /// no symbol table of its own. See [`unwind::Debuginfod`].
+    /// [`Symbolizer::for_process`] for a process an eBPF program named, by
+    /// the kernel's id: `/proc` is read under the id this namespace gives it,
+    /// which inside a container is another number (`bpf::pidns`). One that
+    /// exited before it could be translated is read under the kernel's id,
+    /// and finds nothing, as it would have.
+    pub fn for_kernel_process(kernel_tgid: i32) -> Self {
+        Self::for_process(ours(kernel_tgid))
+    }
+
+    /// [`Symbolizer::with_debuginfod`], by the kernel's id.
+    pub fn with_debuginfod_kernel(
+        kernel_tgid: i32,
+        debuginfod: Option<Arc<unwind::Debuginfod>>,
+    ) -> Self {
+        Self::with_debuginfod(ours(kernel_tgid), debuginfod)
+    }
+
     pub fn with_debuginfod(pid: i32, debuginfod: Option<Arc<unwind::Debuginfod>>) -> Self {
         Self {
             debuginfod,
