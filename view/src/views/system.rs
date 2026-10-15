@@ -2642,16 +2642,24 @@ const BATCH: &[(&str, Col)] = &[
     ("GPU_MEM_BYTES", Col::GpuMem),
 ];
 
-/// A number as the batch prints it: whole when it is whole, four
-/// significant decimals otherwise, never in a unit's words.
+/// A number as the batch prints it: whole when it is whole to the four
+/// decimals it is printed at, those four decimals otherwise, never in a
+/// unit's words.
+///
+/// To the decimals printed, not exactly: a sum of nanoseconds read back from
+/// a recording is added in another order than the live run added it, and
+/// `219209.99999997` printed as `219210.0000` beside the live run's `219210`
+/// made one run two tables.
 fn batch_number(value: f64) -> String {
     if !value.is_finite() {
         return "-".to_owned();
     }
-    if value.fract() == 0.0 && value.abs() < 1e15 {
-        return format!("{value:.0}");
+    let printed = format!("{value:.4}");
+    match printed.strip_suffix(".0000") {
+        Some("-0") => "0".to_owned(),
+        Some(whole) => whole.to_owned(),
+        None => printed,
     }
-    format!("{value:.4}")
 }
 
 /// `text` as `#` lines, one per line of it: a refusal that lists what each
@@ -2904,6 +2912,17 @@ fn draw_cost(frame: &mut Frame<'_>, area: Rect, data: &Data) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A number is whole in the batch when it is whole to the decimals the
+    /// batch prints: the live run and its recording print one table.
+    #[test]
+    fn a_batch_number_is_whole_to_the_decimals_it_prints() {
+        assert_eq!(batch_number(219_210.0), "219210");
+        assert_eq!(batch_number(219_209.999_999_97), "219210");
+        assert_eq!(batch_number(1.072_7), "1.0727");
+        assert_eq!(batch_number(-0.000_01), "0");
+        assert_eq!(batch_number(f64::NAN), "-");
+    }
 
     /// A refusal listing what each backend lacked is several lines, and each
     /// stays a comment: a script reading the table sees no row of it.

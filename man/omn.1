@@ -1086,6 +1086,18 @@ draws without a terminal: a live run is collected to
 .BR \-o ,
 a replay is printed as text at
 .BR \-\-size .
+.B \-\-batch
+prints the system view as a table a script parses, as
+.B top \-b
+does: live when the run ends, or a
+.BR \-\-replay ;
+shares are fractions, times nanoseconds, sizes bytes, and what a column is
+not to be read at face value for is a
+.B #
+line.
+.B \-\-sort
+.I key
+orders its tasks by cpu (the default), memory, faults, io or runqueue.
 .B \-\-dump\-session
 prints the session a live run would ask for.
 .PP

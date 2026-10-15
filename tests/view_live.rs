@@ -209,6 +209,48 @@ fn what_cannot_mean_anything_is_refused() {
     assert!(text(&missing.stderr).contains("does not exist"));
 }
 
+/// `omn top --batch`: the `system` view as a table on stdout, `top -b`'s
+/// use, from a recording here and needing no terminal; the sort is one of
+/// the view's and asks for `--batch`.
+#[test]
+fn a_batch_prints_the_system_view_as_a_table_sorted_as_asked() {
+    let fixture = fixture();
+    let fixture = fixture.to_str().unwrap();
+    let by = |sort: &str| {
+        let output = run(&["top", "--batch", "--replay", fixture, "--sort", sort]);
+        assert!(output.status.success(), "{}", text(&output.stderr));
+        text(&output.stdout)
+    };
+    let table = by("cpu");
+    assert!(table.starts_with("# omn top --batch: "), "{table}");
+    let header = table
+        .lines()
+        .find(|line| line.starts_with("ID "))
+        .expect("the tasks' heading");
+    assert!(
+        header.contains(" CPU ") && header.contains(" RSS_BYTES "),
+        "{header}"
+    );
+    // Every line is a comment, a machine series or a row of the table.
+    for line in table.lines() {
+        assert!(
+            line.starts_with('#')
+                || line.starts_with("machine ")
+                || line.starts_with("ID ")
+                || line.split_whitespace().count() == header.split_whitespace().count(),
+            "{line}"
+        );
+    }
+    assert_ne!(by("memory"), table, "the sort reorders the tasks");
+
+    let unbatched = run(&["top", "--replay", fixture, "--sort", "io"]);
+    assert!(!unbatched.status.success());
+    assert!(text(&unbatched.stderr).contains("--batch"));
+    let unknown = run(&["top", "--batch", "--replay", fixture, "--sort", "bogus"]);
+    assert!(!unknown.status.success());
+    assert!(text(&unknown.stderr).contains("runqueue"));
+}
+
 /// `omn top` without a controlling terminal: in a session of its own, as an
 /// agent shell, CI or `nohup` runs it.
 fn without_a_terminal(args: &[&str]) -> (Output, std::time::Duration) {

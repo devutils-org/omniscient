@@ -1802,9 +1802,12 @@ embedded catalog a second time. The decisions are in `DECISIONS.md`,
    - **`src/collect/proc/`**: `proc.calls` on `bpf:tp`, and paths for
      `open`, `openat2`, `execve`; `proc.exec`'s tree exact through
      `sched_process_fork`.
-   - **`src/main.rs` and `src/cli.rs` (run)**: `omn top --batch [--sort
-     cpu|memory|faults|io|runqueue]`, the flag over the landed
-     `views::system::batch` (top); `omn latency` and `omn saturate` exiting
+   - **`src/main.rs` and `src/cli.rs` (run)**: ~~`omn top --batch [--sort
+     cpu|memory|faults|io|runqueue]`~~ -- **done** (2026-10-15), live and
+     on `--replay`, the two printing one table (a recording's sums printed
+     `219210.0000` beside the live run's `219210` until the batch rounded
+     to the decimals it prints); a live machine-wide `--batch` shows
+     `cpu.util`'s one poll in three seconds, item 13's starvation; `omn latency` and `omn saturate` exiting
      1 when their answer carries `failures` (triage); `Tap::described`
      sending `Update::Described` on every change (views); `Beside::capacity`
      filled once the model has it (run, views, top); the process cpu spent

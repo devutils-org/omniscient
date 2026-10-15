@@ -1188,6 +1188,26 @@ pub struct TopArgs {
     #[arg(long)]
     pub headless: bool,
 
+    /// No terminal, and the `system` view as a table a script parses, on
+    /// stdout: `top -b`'s use. Live, the run lasts `--duration` and the table
+    /// is printed when it ends; with `--replay`, the recording's. Shares are
+    /// fractions, times nanoseconds, sizes bytes, `-` where a task was not
+    /// measured; what a column is not to be read at face value for is a `#`
+    /// line.
+    #[arg(long, conflicts_with_all = ["gallery", "dump_session"])]
+    pub batch: bool,
+
+    /// The order of the tasks in `--batch`: cpu, memory, faults, io or
+    /// runqueue.
+    #[arg(
+        long,
+        value_name = "KEY",
+        default_value = "cpu",
+        value_parser = ["cpu", "memory", "faults", "io", "runqueue"],
+        requires = "batch"
+    )]
+    pub sort: String,
+
     /// The size a headless view is printed at, as COLUMNSxROWS.
     #[arg(
         long,

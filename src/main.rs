@@ -2906,6 +2906,12 @@ fn top_replay(catalog: &Catalog, args: &TopArgs, path: &Path) -> anyhow::Result<
         .as_deref()
         .map(|path| top_load(catalog, path))
         .transpose()?;
+    if args.batch {
+        let table = omn_view::views::system::batch(&data, &args.sort)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        std::io::stdout().lock().write_all(table.as_bytes())?;
+        return Ok(ExitCode::SUCCESS);
+    }
     if args.headless {
         let (columns, rows) = top_size(args)?;
         let names: Vec<String> = match (&args.gallery, &args.view) {
@@ -3075,7 +3081,7 @@ fn top_session(
 }
 
 fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
-    if args.headless && args.out.is_none() && !args.dump_session {
+    if args.headless && !args.batch && args.out.is_none() && !args.dump_session {
         eprintln!(
             "error: a headless live run draws nothing, so it needs --out <dir> to write what it \
              collects"
@@ -3204,7 +3210,7 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
 
     // The terminal is taken before anything is collected: a run with no
     // terminal to draw on is refused now, not after its whole duration.
-    let screen = if args.headless {
+    let screen = if args.headless || args.batch {
         None
     } else {
         match omn_view::term::Screen::open() {
@@ -3397,6 +3403,9 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
         view_cpu_ns: view_spent.map(|(drawing, handover)| drawing + handover),
     };
     beside.apply_ts_err(&mut ended);
+    let table = args
+        .batch
+        .then(|| omn_view::views::system::batch(&ended, &args.sort));
     let _ = sender.send(omn_view::feed::Update::Ended(Box::new(ended)));
     drop(sender);
     if let Some(drawing) = drawing {
@@ -3435,6 +3444,10 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
             directory.display(),
             directory.display()
         );
+    }
+    if let Some(table) = table {
+        let table = table.map_err(|error| anyhow::anyhow!(error))?;
+        std::io::stdout().lock().write_all(table.as_bytes())?;
     }
     Ok(outcome(&failures))
 }
