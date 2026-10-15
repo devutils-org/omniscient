@@ -13796,11 +13796,19 @@ sockets, 60 events, a check of `bench/apps/http-roundtrips.toml`.
 
 ### Open: what is still x86-64's
 
-- **USDT and `net.request`'s uprobes** decode x86 register names
-  (`src/bpf/usdt.rs`, `src/bpf/request.rs` read `pt_regs.di`, `bp`), yet
-  `runtime.custom` and `net.request` list usable here: they would refuse at
-  the run. Either an aarch64 operand decoder (`x0`..`x30`, `sp`) or a
-  requirement that says it.
+- ~~**USDT** decoded x86 register names only~~ -- **fixed**: `src/bpf/usdt.rs`
+  reads aarch64's operands (`x1`, `w1`, `sp`, `[x4, 1088]`, `[x19]`, a
+  constant; a `:lo12:` relocation is unread by name) and objects of the host's
+  ELF machine, and splits a note's arguments outside brackets -- aarch64 writes
+  `8@[x4, 1088]` with a space in it, which a split on whitespace cut in two.
+  Three more things kept it from attaching here, each fixed: the libraries a
+  launched program needs were looked for as x86-64 ELF only
+  (`collect/runtime/objects.rs`), and the program's tgid and the collectors'
+  `only_tid` were the container's ids where the program compares the
+  kernel's. Measured: `runtime.custom` on `libc:mutex_entry` counts 101 for a
+  workload's 100 locks and its setup's one; `sched.mutex --pid` over USDT 464
+  acquisitions. Still x86-64's: `net.request`'s uprobes read `pt_regs.di` and
+  `bp` (`src/bpf/request.rs`).
 - **Tests that assume the development machine's kernel**, red here and not
   defects of the tool: `io_fsync` (`do_fsync` is inlined on this kernel),
   `sched_numa` (no `sched_stick_numa` without NUMA), `usdt`'s libc notes

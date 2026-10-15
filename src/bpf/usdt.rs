@@ -33,10 +33,12 @@
 //! tool did not launch and cannot preload into -- and names: the program says
 //! which events it has, rather than having them guessed from symbol names.
 //!
-//! **Only x86-64 little-endian ELF64 is read.** Argument descriptors are in the
-//! target architecture's assembler syntax, and the registers they name are
-//! fields of that architecture's `pt_regs`. Anything else is refused by name
-//! rather than parsed as if it were x86.
+//! **Only the machine's own architecture is read: x86-64 or aarch64,
+//! little-endian ELF64.** Argument descriptors are in the target
+//! architecture's assembler syntax (`-4@%esi`, `8@16(%rbx)` on x86-64;
+//! `-4@x1`, `8@[x4, 1088]` on aarch64), and the registers they name are
+//! fields of that architecture's `pt_regs`. An object built for another is
+//! refused by name rather than parsed as if it were this one.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -57,7 +59,17 @@ use super::Support;
 
 const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const EM_X86_64: u16 = 62;
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+const EM_AARCH64: u16 = 183;
+/// The ELF machine this build reads probes of, and its name.
+#[cfg(target_arch = "x86_64")]
+const EM_HOST: (u16, &str) = (EM_X86_64, "x86-64");
+#[cfg(target_arch = "aarch64")]
+const EM_HOST: (u16, &str) = (EM_AARCH64, "aarch64");
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const EM_HOST: (u16, &str) = (0, "x86-64 or aarch64");
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
@@ -115,15 +127,16 @@ impl Object {
         if data[4] != ELFCLASS64 || data[5] != ELFDATA2LSB {
             return Err(format!(
                 "{shown} is not a 64-bit little-endian ELF object, and USDT argument descriptors \
-                 are read here for x86-64 only"
+                 are read here for x86-64 and aarch64 only"
             ));
         }
         let machine = u16::from_le_bytes([data[18], data[19]]);
-        if machine != EM_X86_64 {
+        let (host, host_name) = EM_HOST;
+        if machine != host {
             return Err(format!(
-                "{shown} is built for ELF machine {machine}, not x86-64 (62). Its probes' argument \
-                 descriptors name another architecture's registers, and reading them as x86 would \
-                 produce numbers rather than an error"
+                "{shown} is built for ELF machine {machine}, not {host_name} ({host}). Its probes' \
+                 argument descriptors name another architecture's registers, and reading them as \
+                 this one's would produce numbers rather than an error"
             ));
         }
         let mut object = Self {
@@ -484,7 +497,7 @@ pub const MAX_ARGS: usize = 12;
 /// argument string with more than twelve descriptors is refused, because the
 /// record has nowhere to put the thirteenth.
 pub fn parse_arguments(text: &str) -> Result<Vec<Arg>, String> {
-    let args: Vec<Arg> = text.split_whitespace().map(parse_argument).collect();
+    let args: Vec<Arg> = descriptors(text).into_iter().map(parse_argument).collect();
     if args.len() > MAX_ARGS {
         return Err(format!(
             "`{text}` describes {} arguments and `sys/sdt.h` defines at most {MAX_ARGS}",
@@ -492,6 +505,33 @@ pub fn parse_arguments(text: &str) -> Result<Vec<Arg>, String> {
         ));
     }
     Ok(args)
+}
+
+/// The descriptors of an argument string, separated by whitespace outside
+/// brackets: aarch64 writes a memory operand with a space inside it,
+/// `8@[x4, 1088]`, and splitting on every space made two broken descriptors
+/// of it.
+fn descriptors(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut start) = (0usize, None);
+    for (at, byte) in text.bytes().enumerate() {
+        match byte {
+            b'[' => depth += 1,
+            b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if byte.is_ascii_whitespace() && depth == 0 {
+            if let Some(from) = start.take() {
+                out.push(&text[from..at]);
+            }
+        } else if start.is_none() {
+            start = Some(at);
+        }
+    }
+    if let Some(from) = start {
+        out.push(&text[from..]);
+    }
+    out
 }
 
 /// Reads one descriptor: `[-]size@operand`, or a bare operand in the oldest
@@ -527,7 +567,86 @@ pub fn parse_argument(descriptor: &str) -> Arg {
     }
 }
 
+/// The operand in this architecture's assembler syntax.
 fn parse_operand(text: &str) -> Operand {
+    if cfg!(target_arch = "aarch64") {
+        parse_operand_aarch64(text)
+    } else {
+        parse_operand_x86(text)
+    }
+}
+
+/// aarch64's operands, as GCC writes them into the notes: a register (`x1`,
+/// `w1`, `sp`), memory at a register (`[x19]`), at a register plus a constant
+/// (`[x4, 1088]`, `[sp, 16]`, `[x0, #-8]`), or a constant alone (`5`).
+/// `[x0, #:lo12:.LANCHOR0]` is the low half of a symbol's address, which only
+/// the loaded image knows: unread, by name.
+fn parse_operand_aarch64(text: &str) -> Operand {
+    if let Some(value) = parse_integer(text.strip_prefix('#').unwrap_or(text)) {
+        return Operand::Immediate(value);
+    }
+    if let Some((member, width)) = register_aarch64(text) {
+        return Operand::Register {
+            member,
+            width,
+            shift: 0,
+        };
+    }
+    let Some(inside) = text
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return Operand::Unreadable(format!("`{text}` is not an operand this build can read"));
+    };
+    let (base_text, offset_text) = match inside.split_once(',') {
+        Some((base, offset)) => (base.trim(), offset.trim()),
+        None => (inside.trim(), "0"),
+    };
+    let Some((base, 8)) = register_aarch64(base_text) else {
+        return Operand::Unreadable(format!(
+            "`{text}` addresses memory through `{base_text}`, which is not a 64-bit register"
+        ));
+    };
+    let offset_text = offset_text.strip_prefix('#').unwrap_or(offset_text);
+    match parse_integer(offset_text) {
+        Some(offset) => Operand::Memory { base, offset },
+        None if offset_text.starts_with(':') => Operand::Unreadable(format!(
+            "`{text}` is at `{offset_text}` from a register, a relocation naming a symbol whose \
+             address is known only to the loaded image; this build does not resolve it"
+        )),
+        None => Operand::Unreadable(format!(
+            "`{text}` adds `{offset_text}` to a register, which is not a constant this build reads \
+             (a shifted or extended index register)"
+        )),
+    }
+}
+
+/// An aarch64 register, as the name `register_offset` places in `pt_regs`
+/// (`x0` to `x30`, `sp`) and the width the name selects (`w` is the low 32
+/// bits of the same register).
+fn register_aarch64(name: &str) -> Option<(&'static str, u8)> {
+    const X: [&str; 31] = [
+        "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+        "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
+        "x27", "x28", "x29", "x30",
+    ];
+    if name == "sp" {
+        return Some(("sp", 8));
+    }
+    let (width, digits) = match name.as_bytes().first()? {
+        b'x' => (8, &name[1..]),
+        b'w' => (4, &name[1..]),
+        _ => return None,
+    };
+    if digits.is_empty() || (digits.len() > 1 && digits.starts_with('0')) {
+        return None;
+    }
+    let index: usize = digits.parse().ok()?;
+    X.get(index).map(|member| (*member, width))
+}
+
+/// x86-64's operands, in AT&T syntax: `%reg`, `$constant`, `offset(%reg)`.
+fn parse_operand_x86(text: &str) -> Operand {
     if let Some(value) = text.strip_prefix('$') {
         return match parse_integer(value) {
             Some(value) => Operand::Immediate(value),
@@ -824,7 +943,16 @@ impl Hit {
 /// rather than assumed: the program reads user registers out of the context a
 /// uprobe hands it, and that context is this structure.
 fn register_offset(btf: &Btf, member: &str) -> Result<i16, String> {
-    let offset = btf.member_offset("pt_regs", member)?;
+    // aarch64's general registers are one array, `u64 regs[31]`, at the head
+    // of its `pt_regs`: `xN` is the Nth slot of it.
+    let numbered = member
+        .strip_prefix('x')
+        .and_then(|digits| digits.parse::<i32>().ok())
+        .filter(|_| cfg!(target_arch = "aarch64"));
+    let offset = match numbered {
+        Some(index) => btf.member_offset("pt_regs", "regs")? + 8 * index,
+        None => btf.member_offset("pt_regs", member)?,
+    };
     i16::try_from(offset)
         .map_err(|_| format!("`pt_regs.{member}` is at {offset}, past any load offset"))
 }
@@ -1144,6 +1272,10 @@ impl UsdtProgram {
         requested_ring_bytes: usize,
     ) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
+        // The perf events and the uprobe links take `pid` as this process
+        // names it; the program compares the kernel's id, which in a
+        // container is another number (`pidns`).
+        let kernel_tgid = super::pidns::kernel_tgid(pid as u32)?;
         let bytes = ring_bytes(requested_ring_bytes);
         let ring_map = syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_usdt")
             .map_err(|error| map_failure("USDT ring buffer", error))?;
@@ -1165,7 +1297,7 @@ impl UsdtProgram {
                 btf,
                 site,
                 index as u32,
-                Some(pid as u32),
+                Some(kernel_tgid),
                 ring_map.as_raw_fd(),
                 drops.as_raw_fd(),
                 counts.as_ref().map(Counters::as_raw_fd),
@@ -1323,7 +1455,96 @@ impl fmt::Display for Operand {
 mod tests {
     use super::*;
 
+    /// aarch64's descriptors, as this machine's glibc writes them (`readelf -n
+    /// /usr/lib/libc.so.6`): a register, a register at a width, memory at a
+    /// register plus a constant, at the stack pointer, at a bare base, and a
+    /// constant alone.
     #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn aarch64_descriptors_are_read_the_way_glibc_writes_them() {
+        let args =
+            parse_arguments("8@x0 -4@x1 8@[x4, 1088] 8@[sp, 16] 8@[x19] -4@w2 4@5 8@[x0, #-8]")
+                .expect("eight arguments");
+        let register = |member, width| Operand::Register {
+            member,
+            width,
+            shift: 0,
+        };
+        assert_eq!(args[0].operand, register("x0", 8));
+        assert_eq!((args[1].size, args[1].signed), (4, true));
+        assert_eq!(args[1].operand, register("x1", 8));
+        assert_eq!(
+            args[2].operand,
+            Operand::Memory {
+                base: "x4",
+                offset: 1088
+            }
+        );
+        assert_eq!(
+            args[3].operand,
+            Operand::Memory {
+                base: "sp",
+                offset: 16
+            }
+        );
+        assert_eq!(
+            args[4].operand,
+            Operand::Memory {
+                base: "x19",
+                offset: 0
+            }
+        );
+        assert_eq!(args[5].operand, register("x2", 4));
+        assert_eq!(args[6].operand, Operand::Immediate(5));
+        assert_eq!(
+            args[7].operand,
+            Operand::Memory {
+                base: "x0",
+                offset: -8
+            }
+        );
+    }
+
+    /// What aarch64 cannot have read is said: a symbol's low twelve bits
+    /// (the second half of an `adrp` pair, whose first half only the loaded
+    /// image knows), a register that does not exist, a shifted index.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn aarch64_operands_this_build_cannot_read_say_why() {
+        for (text, says) in [
+            ("8@[x0, #:lo12:.LANCHOR0]", "relocation"),
+            ("8@x31", "not an operand"),
+            ("8@[x1, x2, lsl #3]", "not a constant"),
+            ("8@[w1, 8]", "not a 64-bit register"),
+        ] {
+            let arg = parse_argument(text);
+            let Operand::Unreadable(why) = &arg.operand else {
+                panic!("`{text}` was read as {:?}", arg.operand);
+            };
+            assert!(why.contains(says), "`{text}`: {why}");
+        }
+    }
+
+    /// `xN` is the Nth slot of `pt_regs.regs`, read from the running kernel.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn an_aarch64_register_is_its_slot_of_pt_regs_regs() {
+        let Ok(btf) = super::super::kernel_btf() else {
+            return;
+        };
+        let regs = btf
+            .member_offset("pt_regs", "regs")
+            .expect("aarch64's pt_regs.regs");
+        assert_eq!(register_offset(btf, "x0"), Ok(regs as i16));
+        assert_eq!(register_offset(btf, "x19"), Ok((regs + 8 * 19) as i16));
+        assert_eq!(
+            register_offset(btf, "sp"),
+            btf.member_offset("pt_regs", "sp").map(|at| at as i16)
+        );
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
     fn the_descriptors_glibc_writes_are_read_the_way_they_are_meant() {
         // From `libc:pthread_start` and `libc:setjmp` on this project's
         // development machine, verbatim.
@@ -1355,6 +1576,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn a_constant_a_negative_offset_and_a_bare_base_are_all_read() {
         let args = parse_arguments("-8@$-7 8@-80(%rbx) 8@(%rdi) -2@%cx 1@%ah").expect("five");
         assert_eq!(args[0].operand, Operand::Immediate(-7));
@@ -1393,6 +1615,7 @@ mod tests {
     /// An operand this build cannot compute is carried as unread with the
     /// reason, never as a zero that looks like a value.
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn what_cannot_be_read_says_why_rather_than_reading_zero() {
         for (descriptor, reason) in [
             ("-4@counter(%rip)", "symbol"),
@@ -1410,6 +1633,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn every_register_width_maps_onto_its_pt_regs_member() {
         for (name, member, width) in [
             ("rax", "ax", 8),
@@ -1468,7 +1692,7 @@ mod tests {
         data[..4].copy_from_slice(b"\x7fELF");
         data[4] = ELFCLASS64;
         data[5] = ELFDATA2LSB;
-        data[18..20].copy_from_slice(&EM_X86_64.to_le_bytes());
+        data[18..20].copy_from_slice(&EM_HOST.0.to_le_bytes());
         data[32..40].copy_from_slice(&phoff.to_le_bytes());
         data[40..48].copy_from_slice(&shoff.to_le_bytes());
         data[54..56].copy_from_slice(&56u16.to_le_bytes());
@@ -1543,11 +1767,20 @@ mod tests {
     #[test]
     fn an_object_for_another_machine_is_refused_by_name() {
         let mut data = synthetic_object();
-        data[18..20].copy_from_slice(&183u16.to_le_bytes());
-        let error = Object::parse(Path::new("arm"), data)
+        // The other of the two architectures this build reads.
+        let other = if EM_HOST.0 == EM_X86_64 {
+            EM_AARCH64
+        } else {
+            EM_X86_64
+        };
+        data[18..20].copy_from_slice(&other.to_le_bytes());
+        let error = Object::parse(Path::new("other"), data)
             .err()
-            .expect("aarch64 is refused");
-        assert!(error.contains("183") && error.contains("x86-64"), "{error}");
+            .expect("another architecture's object is refused");
+        assert!(
+            error.contains(&other.to_string()) && error.contains(EM_HOST.1),
+            "{error}"
+        );
         let error = Object::parse(Path::new("text"), b"#!/bin/sh\n".repeat(10))
             .err()
             .expect("a script");
@@ -1587,14 +1820,25 @@ mod tests {
             eprintln!("skipped: this kernel publishes no BTF, so pt_regs cannot be laid out");
             return;
         };
-        let full = [
-            "8@%rdi",
-            "-4@%esi",
-            "8@$-7",
-            "8@-80(%rbx)",
-            "1@%ah",
-            "-4@sym(%rip)",
-        ]
+        let full = if cfg!(target_arch = "aarch64") {
+            [
+                "8@x0",
+                "-4@w1",
+                "8@5",
+                "8@[x4, -80]",
+                "8@[sp, 16]",
+                "8@[x0, #:lo12:.LANCHOR0]",
+            ]
+        } else {
+            [
+                "8@%rdi",
+                "-4@%esi",
+                "8@$-7",
+                "8@-80(%rbx)",
+                "1@%ah",
+                "-4@sym(%rip)",
+            ]
+        }
         .join(" ");
         let program = instructions(btf, &site(&full), 3, Some(42), 5, 6, None).expect("a program");
         let counting =

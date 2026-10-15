@@ -85,9 +85,11 @@ mkdir -p ~/.cache/omn-demo && omn latency --objective latency -- target/omn-tria
   a device and usually a disk: I/O-bound`, against `sync_ns`. The directory
   must not be on tmpfs, where a sync waits for nothing.
 
-**Plan B (VM, aarch64):** the lock case's sentence names the busiest thread
-rather than the mutex, and the stacks are partly addresses. Lead with `queue`
-and `io`, which are as sharp there as on the physical machine.
+**Plan B (VM):** a VM's timers can be coarse -- on the OrbStack machine a
+20 us sleep lasts 2.9 ms -- and the lock workload sleeps between its
+acquisitions, so there its sleeps outweigh the mutex and the answer rightly
+names the sleep. The stacks inside libc are partly addresses. Lead with
+`queue` and `io`, which are as sharp there as on the physical machine.
 
 ---
 

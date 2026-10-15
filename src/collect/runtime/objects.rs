@@ -218,13 +218,13 @@ fn resolve_library(name: &str, own: &[PathBuf], system: &[PathBuf]) -> Option<Pa
         .chain(&from_environment)
         .chain(system)
         .map(|dir| dir.join(name))
-        .find(|candidate| is_x86_64_elf(candidate))
+        .find(|candidate| is_this_machines_elf(candidate))
 }
 
 /// A library of the right name and the wrong architecture is skipped, the way
 /// the linker skips it: a 32-bit `libc.so.6` in `/usr/lib32` is not the one a
 /// 64-bit program maps.
-fn is_x86_64_elf(path: &Path) -> bool {
+fn is_this_machines_elf(path: &Path) -> bool {
     let Ok(file) = fs::File::open(path) else {
         return false;
     };
@@ -233,9 +233,16 @@ fn is_x86_64_elf(path: &Path) -> bool {
     if (&file).read_exact(&mut header).is_err() {
         return false;
     }
+    // EM_X86_64 and EM_AARCH64: the machine this build runs on, the one whose
+    // libraries a program here maps.
+    let machine = if cfg!(target_arch = "aarch64") {
+        183
+    } else {
+        62
+    };
     &header[..4] == b"\x7fELF"
         && header[4] == 2
-        && u16::from_le_bytes([header[18], header[19]]) == 62
+        && u16::from_le_bytes([header[18], header[19]]) == machine
 }
 
 /// The directories `/etc/ld.so.conf` names, then the linker's defaults.
@@ -245,8 +252,17 @@ fn system_directories() -> Vec<PathBuf> {
     for default in [
         "/lib64",
         "/usr/lib64",
-        "/lib/x86_64-linux-gnu",
-        "/usr/lib/x86_64-linux-gnu",
+        // Debian's multiarch directories, for whichever of the two this is.
+        if cfg!(target_arch = "aarch64") {
+            "/lib/aarch64-linux-gnu"
+        } else {
+            "/lib/x86_64-linux-gnu"
+        },
+        if cfg!(target_arch = "aarch64") {
+            "/usr/lib/aarch64-linux-gnu"
+        } else {
+            "/usr/lib/x86_64-linux-gnu"
+        },
         "/lib",
         "/usr/lib",
     ] {

@@ -128,7 +128,9 @@ impl Prepared for Prepare {
             Target::Tid(_) => (
                 crate::collect::task::tgid_of(pid)
                     .ok_or_else(|| format!("thread {pid} does not exist"))?,
-                Some(pid as u32),
+                // Compared with the hits' tid, which the program wrote as the
+                // kernel numbers it.
+                Some(crate::bpf::pidns::kernel_tid(pid as u32)?),
             ),
             _ => (pid, None),
         };

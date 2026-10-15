@@ -98,7 +98,7 @@ Fields:
 | `setup` | commands run before, each a list of arguments |
 | `truth` | `omn-truth`, `bench-report` or `static` |
 | `values` | the static truth |
-| `known` | `{ aarch64 = "reason" }` or `{ any = "reason" }`: failures become KNOWN |
+| `known` | `{ aarch64 = "reason" }` or `{ any = "reason" }`: a failed verdict check becomes KNOWN; a number's check still fails |
 | `[latency]` | `limit`, `says`, `objective`, and `check = [{ row, truth, tolerance }]` comparing a state's amount (`on-cpu`, `runnable`, `blocked: uninterruptible`, `whole`, ...) with a truth value in nanoseconds |
 | `[[trace]]` | `label`, `args` (everything after `omn trace` but the target), `value`, `truth`, `tolerance`, `slack`, `at_least`, `offset` |
 

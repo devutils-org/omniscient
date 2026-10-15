@@ -19,8 +19,8 @@ need the capabilities a relink drops, and without them most checks are
 skipped with the reason rather than failed. docs/how-to-use/apps.md says how
 to write a manifest for a program of your own.
 
-A check a manifest marks `known` for this architecture (or `any`) reports
-KNOWN with the reason instead of FAIL: a defect already filed, kept visible
+A verdict check a manifest marks `known` for this architecture (or `any`)
+reports KNOWN with the reason instead of FAIL -- never a number's check: a defect already filed, kept visible
 rather than tolerated by loosening the expectation.
 
 Exit status: 0 when nothing failed (a skip or a known one is not a failure), 1 otherwise,
@@ -159,7 +159,10 @@ class Run:
     def row(self, check, expected, measured, truth, result, note=""):
         known = self.manifest.get("known", {})
         reason = known.get(platform.machine()) or known.get("any")
-        if result == "FAIL" and reason:
+        # A known reason is about the verdict; a number that disagrees with
+        # the program's own is still a failure, whatever the verdict was.
+        about_the_verdict = check.startswith(("verdict", "says "))
+        if result == "FAIL" and reason and about_the_verdict:
             result, note = "KNOWN", reason
         self.rows.append(
             {
