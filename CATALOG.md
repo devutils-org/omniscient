@@ -487,7 +487,7 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `net.tcp.retransmit` | retransmissions | `bpf:tp` tcp:tcp_retransmit_skb | trace, count | system, pid | low | low |
 | `net.drops` | dropped packets (+ reason) | `bpf:tp` skb:kfree_skb (reason on recent kernels) | trace, count | system | low | medium |
 | `net.bytes` / `.packets` | volume | `fs:proc` /proc/net/dev · `netlink` · `bpf:fentry` sock_sendmsg | poll, count | system, iface, pid, cgroup | free / low | low |
-| `net.socket` | socket read/write latency, keyed by socket, task and interface | `bpf:fentry` sock_recvmsg/inet_sendmsg · `bpf:kprobe` | trace, count | pid, tid, cgroup, system | low / med | low |
+| `net.socket` | socket read/write latency, keyed by socket, task and interface | `bpf:fentry` sock_recvmsg/inet_sendmsg · `bpf:fentry:families` the families' recvmsg/sendmsg · `bpf:kprobe` | trace, count | pid, tid, cgroup, system | low / med | low |
 | `net.request` | one declared request's life by state, and the network on either side of it | `bpf:usdt` request__start/done + sched_switch + tcp fentry · `bpf:usdt:threads` (no socket) | trace | pid, launch | low | medium |
 | `net.backlog` | accept/SYN queue drops | `fs:proc` netstat (LINUX_MIB) | poll | system | low | medium |
 | `net.qdisc` | TX scheduling latency | `bpf:tp` qdisc:qdisc_dequeue | trace | system | low | low |
