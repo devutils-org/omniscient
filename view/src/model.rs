@@ -813,16 +813,21 @@ pub fn draw_as_recorded(data: &Data) {
             keys(&outputs, &mut bare);
         }
     }
-    let recorder = data.run.results.iter().flat_map(Results::events).find_map(|event| {
-        event.keys.iter().find_map(|key| match key {
-            Key::Iface { netns, name, .. }
-                if *netns != 0 && bare.contains(&format!("iface:{name}")) =>
-            {
-                Some(*netns)
-            }
-            _ => None,
-        })
-    });
+    let recorder = data
+        .run
+        .results
+        .iter()
+        .flat_map(Results::events)
+        .find_map(|event| {
+            event.keys.iter().find_map(|key| match key {
+                Key::Iface { netns, name, .. }
+                    if *netns != 0 && bare.contains(&format!("iface:{name}")) =>
+                {
+                    Some(*netns)
+                }
+                _ => None,
+            })
+        });
     if let Some(netns) = recorder {
         DRAWN_AS.store(netns, std::sync::atomic::Ordering::Relaxed);
     }
