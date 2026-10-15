@@ -826,6 +826,16 @@ impl Capabilities {
         if access(&root.join(file)).is_readable() {
             return Probe::Available;
         }
+        // A pressure file is PSI's, whatever controller its name begins
+        // with: a kernel without PSI (or booted with `psi=0`) publishes it in
+        // no cgroup, and `/proc/pressure` is where it says so. The controller
+        // being enabled is no answer for it.
+        if file.ends_with(".pressure") && !Path::new("/proc/pressure").exists() {
+            return Probe::Missing(format!(
+                "this kernel publishes no PSI (/proc/pressure does not exist), and a cgroup's \
+                 `{file}` is the same accounting: no cgroup has one"
+            ));
+        }
         let controller = file.split('.').next().unwrap_or(file);
         match std::fs::read_to_string(root.join("cgroup.controllers")) {
             Ok(controllers)
