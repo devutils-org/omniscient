@@ -14044,6 +14044,18 @@ Still open, each a defect or a question:
 - Flaky here, green once in two: `scenario_net`'s
   `every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason` ("only 0
   drops were reported"), on `main` as well.
+- The full suite after those fixes (2026-10-15): 3065 green, 13 red, then
+  11 once `aggregation`'s two heap-stack tests learned the refusal heap 1
+  moved before the launch. Of the 11: green alone -- `cli`'s container
+  cgroup, `scenario_mem`'s allocator ledger, `view_workloads`' flame
+  weights; red on the pre-session sources as well -- `scenario_sched`'s
+  unseen-wakeup note (87 rows with no queue wait and no note saying so),
+  `scenario_io`'s in-kernel histogram (16 KiB requests not making whole 64
+  KiB reads), `scenario_net`'s eBPF sweep (`net.tcp.lifetime` serves a
+  connection run alone; in the sweep the traffic, 150 ms after the spawn,
+  likely precedes five sources' attach here); known -- the interrupt
+  wakeup, `lock-contended`, `join_engine`'s retained row, `scenario_io`'s
+  forked child, `sharing_one_file` (red alone this time).
 - `join_engine`'s retained row is 104 KiB under the freed pages, against a
   64 KiB allowance for the interpreter (python 3.14 on aarch64).
 - `cases`' `cpython-perf-map`: `blocked` 759 ms against the writer's 1501 ms
