@@ -505,8 +505,25 @@ fn trigger(function: &str) -> Option<fn(RawFd)> {
             }
         }
     }
+    // A datagram this process sends itself and reads back through `recv(2)`,
+    // which enters `sock_recvmsg`: on the clang build that inlines it there
+    // a root kprobe counted 0 calls of it beside 44 of `inet_recvmsg`, its
+    // own callee, and `net.socket` timed no receive at all.
+    fn recv(_: RawFd) {
+        let mut pair = [0i32; 2];
+        unsafe {
+            if libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, pair.as_mut_ptr()) == 0 {
+                let mut byte = [0u8; 1];
+                libc::send(pair[0], b"o".as_ptr() as *const libc::c_void, 1, 0);
+                libc::recv(pair[1], byte.as_mut_ptr() as *mut libc::c_void, 1, 0);
+                libc::close(pair[0]);
+                libc::close(pair[1]);
+            }
+        }
+    }
     match function {
         "vfs_write" => Some(write),
+        "sock_recvmsg" => Some(recv),
         "vfs_read" => Some(read),
         "vfs_fsync" => Some(fsync),
         "vfs_fsync_range" => Some(msync),
@@ -1658,7 +1675,13 @@ mod tests {
 
     #[test]
     fn only_the_functions_a_source_times_at_a_syscall_have_a_trigger() {
-        for function in ["vfs_read", "vfs_write", "vfs_fsync", "vfs_fsync_range"] {
+        for function in [
+            "vfs_read",
+            "vfs_write",
+            "vfs_fsync",
+            "vfs_fsync_range",
+            "sock_recvmsg",
+        ] {
             assert!(trigger(function).is_some(), "{function}");
         }
         assert!(trigger("tcp_v4_connect").is_none());

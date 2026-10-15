@@ -13908,11 +13908,17 @@ exists.
   (`bpf_get_ns_current_pid_tgid` for the current task) rather than after it,
   a change to every program and so a decision of its own. `proc.exit` missing
   one exit and the signal storm's shortfall are likely the same.
-- `net.socket` sees none of the server's receives, `net.tcp.connect` no
-  handshake outcome, `net.request` no network row (`scenario_net`,
-  `vertical`, the flows views): the receive and handshake functions may be
-  off the path here, as `vfs_write` was, and the path check covers only the
-  VFS functions.
+- `net.socket` saw none of the server's receives: **`sock_recvmsg` is off
+  the path here**, as `vfs_write` was -- a root kprobe counted 0 calls of it
+  beside 44 of `inet_recvmsg`, its own callee, over twenty HTTP round trips.
+  The path check covers it now (a datagram this process reads back through
+  `recv(2)`), and `net.socket` is refused here with the reason rather than
+  timing no receive. A fallback that times `inet_recvmsg` -- inet sockets
+  only, as the sends already are -- would serve it again. The other socket
+  functions are on the path (`inet_sendmsg` 65, `tcp_v4_connect` 20,
+  `tcp_finish_connect` 20, `inet_csk_accept` 21). `net.tcp.connect` with no
+  handshake outcome and `net.request` with no network row are still open
+  (`scenario_net`, `vertical`, the flows views).
 - `fp` and `fp+leaf` on aarch64 (`unwind`, 5): frame-pointer detection of
   the test's leaf build and the leaf's caller recovery assume x86-64's
   prologue.

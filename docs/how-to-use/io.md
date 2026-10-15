@@ -89,3 +89,4 @@ writer's, and the source falls back to the file key (`file:dev+ino`, `KEY`).
   calls the copy a trampoline patches. The probe checks it with a call of its
   own, and `io.fs`, `io.fsync` and `io.vfs` are then refused with the reason
   rather than counting nothing; `io.syscall` still serves the syscall layer.
+  `net.socket` is checked the same way, on `sock_recvmsg`.
