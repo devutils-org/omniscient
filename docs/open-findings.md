@@ -14061,6 +14061,14 @@ Still open, each a defect or a question:
   likely precedes five sources' attach here); known -- the interrupt
   wakeup, `lock-contended`, `join_engine`'s retained row, `scenario_io`'s
   forked child, `sharing_one_file` (red alone this time).
+- The full suite after the futex/lock LR, the catalog cache, `omn top
+  --batch`, the mapped unwind modules and the closing read (2026-10-15,
+  `8a72e51`): 3068 green, 13 red. Seven green alone, once each --
+  `runner`'s detached-source join and mid-run attach, `cross_io`'s page
+  cache and completion pairing, `scenario_io`'s writeback rounds,
+  `budget`'s faster poll, `mcp`'s walk-through; the six left are the ones
+  above (the unseen-wakeup note, the in-kernel histogram, the forked child,
+  the interrupt wakeup, `lock-contended`, `join_engine`'s retained row).
 - `join_engine`'s retained row is 104 KiB under the freed pages, against a
   64 KiB allowance for the interpreter (python 3.14 on aarch64).
 - `cases`' `cpython-perf-map`: `blocked` 759 ms against the writer's 1501 ms
