@@ -1701,12 +1701,14 @@ embedded catalog a second time. The decisions are in `DECISIONS.md`,
    wave"). A **defect** breaks a standing invariant or a number; the rest
    are features.
    - **The shared layers, the coordinator's**:
-     - `src/emit.rs` and the catalog loader: **`omn trace`'s startup
-       doubled** (37 to 86 ms of user cpu in the debug build), 45 % of it
-       `emit::values_add_up` parsing the embedded catalog a second time;
-       give it the run's catalog, or parse the embedded one once per process
-       (the coordinator's run). Then `cpu.cycles.system`'s band, which needs
-       a slack that does not depend on the machine's idle rate.
+     - ~~`src/emit.rs` and the catalog loader: **`omn trace`'s startup
+       doubled**~~ -- **done** (2026-10-15): `Catalog::embedded` parses
+       once per process and hands out copies (45 ms a parse in the debug
+       build on the aarch64 machine, 0.4 ms a copy); `omn trace sched.offcpu
+       -e summary -- /bin/true` went from 274 to 167 ms of user cpu there,
+       `omn trace cpu -- /bin/true` from 162 to 127. Left: `cpu.cycles.system`'s
+       band, which needs a slack that does not depend on the machine's idle
+       rate.
      - `src/collect/mod.rs` and `omn top`'s session in `src/main.rs`: **a
        live `omn top` of the machine starves its pollers** (top, finding 1:
        `cpu.util` 2 events for about 64 asked, `proc.tasks` one poll, while

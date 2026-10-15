@@ -901,7 +901,22 @@ pub struct Catalog {
 
 impl Catalog {
     /// Loads the catalog compiled into the binary.
+    ///
+    /// Parsed once per process and copied after: the text cannot change under
+    /// a running binary, and the run, the emit layer and the collectors each
+    /// asked for it -- a second parse in `emit::values_add_up` was 45 % of
+    /// `omn trace`'s startup. A catalog that fails to parse is not kept, and
+    /// says why every time.
     pub fn embedded() -> Result<Self, ParseError> {
+        static PARSED: std::sync::OnceLock<Catalog> = std::sync::OnceLock::new();
+        if let Some(catalog) = PARSED.get() {
+            return Ok(catalog.clone());
+        }
+        let catalog = Self::parse_embedded()?;
+        Ok(PARSED.get_or_init(|| catalog).clone())
+    }
+
+    fn parse_embedded() -> Result<Self, ParseError> {
         let mut entries = Vec::new();
         let mut defaults = Vec::new();
         for (name, text) in EMBEDDED {
