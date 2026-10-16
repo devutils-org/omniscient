@@ -275,6 +275,12 @@ impl SocketProgram {
     pub fn missed(&self) -> u64 {
         self.inner.missed()
     }
+
+    /// Processes the target started that were not followed: the map of them
+    /// was full.
+    pub fn unfollowed(&self) -> u64 {
+        self.inner.unfollowed()
+    }
 }
 
 /// The family and the peer port a row's `aux` carries, the port in host order.

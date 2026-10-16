@@ -323,6 +323,10 @@
   filter_fields: [comm, fd, bytes, op, syscall]
   determinism: low
   caveats:
+    - "A --pid or launched target follows the processes it starts, from
+       their fork, as `io.fsync` and the sched sources do: `omn io --
+       ./script.sh` counts its `dd`s' calls, and a `--pid` target's children
+       already running are read from /proc when the run attaches."
     - "An event is a histogram row, not a call: `count` says how many calls it
        stands for and `lat_ns` is the low bound of their log2 bucket. The exact
        total is `total_ns`."
@@ -350,6 +354,10 @@
   filter_fields: [comm, dev, ino, bytes, fs, op]
   determinism: low
   caveats:
+    - "A --pid or launched target follows the processes it starts, from
+       their fork, as `io.fsync` and the sched sources do: `omn io --
+       ./script.sh` counts its `dd`s' calls, and a `--pid` target's children
+       already running are read from /proc when the run attaches."
     - "Regular files only. vfs_read also serves pipes, sockets and terminals,
        and a reader blocked on an empty pipe is not filesystem latency; that
        wait is in io.syscall and not here."

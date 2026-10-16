@@ -939,6 +939,8 @@ const PEND_VALUE_BYTES: usize = 8;
 const ENTRY_PEND_KEY: i16 = -8;
 const ENTRY_PEND_VALUE: i16 = -16;
 const ENTRY_DROP_KEY: i16 = -20;
+/// The calling thread group, as the key of a lookup in the descendants map.
+const ENTRY_FOLLOW_KEY: i16 = -24;
 
 /// Writes the entry half of a timed pair.
 ///
@@ -957,12 +959,19 @@ const ENTRY_DROP_KEY: i16 = -20;
 /// So the stamp is written only if absent; a stamp found is counted in
 /// `orphan_slot` and then replaced, so the thread is timed again from this
 /// call on.
+///
+/// A process target is compared as a constant; with `descendants`, the map
+/// of the processes it started (`sched_common::Descendants`), a thread group
+/// that is not the root is looked up there, so a shell script's children are
+/// timed as the script is: the root compared first, which costs the target's
+/// own calls no lookup.
 pub(crate) fn entry_instructions(
     pending_fd: i32,
     drops_fd: i32,
     drop_slot: u32,
     orphan_slot: u32,
     narrowing: Narrowing,
+    descendants: Option<i32>,
     gate: &dyn Fn(&mut Program),
 ) -> Result<Vec<Insn>, String> {
     let mut program = Program::new();
@@ -973,7 +982,21 @@ pub(crate) fn entry_instructions(
     if let Some(tgid) = narrowing.tgid {
         program.push(Insn::mov64_reg(1, 7));
         program.push(Insn::rsh64_imm(1, 32));
-        program.jump_to(SKIP, Insn::jne_imm(1, tgid as i32, 0));
+        match descendants {
+            None => {
+                program.jump_to(SKIP, Insn::jne_imm(1, tgid as i32, 0));
+            }
+            Some(map) => {
+                program.push(Insn::stx(BPF_W, R10, ENTRY_FOLLOW_KEY, 1));
+                program.jump_to("followed", Insn::jeq_imm(1, tgid as i32, 0));
+                program.extend(Insn::load_map_fd(1, map));
+                program.push(Insn::mov64_reg(2, R10));
+                program.push(Insn::add64_imm(2, ENTRY_FOLLOW_KEY as i32));
+                program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+                program.jump_to(SKIP, Insn::jeq_imm(0, 0, 0));
+                program.label("followed");
+            }
+        }
     }
     // The whole slot is cleared, then the low word written: the key is four
     // bytes and a stack slot is eight, and the kernel hashes what it is told
@@ -1410,6 +1433,9 @@ pub struct HistogramProgram {
     /// When the current map started being written.
     flipped_at: std::cell::Cell<u64>,
     links: Vec<Link>,
+    /// The processes a process target started, followed from the fork: a
+    /// shell script's `dd` is the script's I/O.
+    descendants: Option<crate::bpf::sched_common::Descendants>,
 }
 
 /// What one drain found beside the rows.
@@ -1504,6 +1530,13 @@ impl HistogramProgram {
         .map_err(|error| map_failure(&format!("{} generation word", spec.name), error))?;
         let drops = Counters::create(3, &format!("{}_drop", spec.name))
             .map_err(|error| map_failure(&format!("{} drop counter", spec.name), error))?;
+        let descendants = match spec.narrowing.tgid {
+            Some(root) => Some(crate::bpf::sched_common::Descendants::follow(root)?),
+            None => None,
+        };
+        let followed = descendants
+            .as_ref()
+            .map(crate::bpf::sched_common::Descendants::map_fd);
         let maps = ExitMaps {
             pending: pending.as_raw_fd(),
             generation: generation.as_raw_fd(),
@@ -1522,6 +1555,7 @@ impl HistogramProgram {
                 DROP_PENDING,
                 DROP_ORPHANED,
                 spec.narrowing,
+                followed,
                 &|program| (spec.gate)(program, timed),
             )?;
             let exit = exit_instructions(timed, maps, spec.fill)?;
@@ -1558,6 +1592,7 @@ impl HistogramProgram {
             writing: std::cell::Cell::new(0),
             flipped_at: std::cell::Cell::new(now),
             links,
+            descendants,
         })
     }
 
@@ -1619,9 +1654,22 @@ impl HistogramProgram {
         )
     }
 
-    /// Runs the kernel skipped; see [`Link::misses`].
+    /// Runs the kernel skipped; see [`Link::misses`]. The programs that
+    /// follow a process target's children are counted too.
     pub fn missed(&self) -> u64 {
         misses(&self.links)
+            + self
+                .descendants
+                .as_ref()
+                .map_or(0, crate::bpf::sched_common::Descendants::skipped)
+    }
+
+    /// Processes the target started that the descendants map had no room
+    /// for, so whose calls no program here kept.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants
+            .as_ref()
+            .map_or(0, crate::bpf::sched_common::Descendants::missed)
     }
 }
 
@@ -1856,6 +1904,43 @@ mod tests {
         assert_eq!(read.arg(2), 16);
     }
 
+    /// A process target with its descendants map compares the root first and
+    /// looks every other thread group up in the map; without the map it
+    /// compares the root alone, and the machine compares nothing.
+    #[test]
+    fn a_process_target_follows_the_processes_it_started() {
+        let lookups = |program: &[Insn]| {
+            program
+                .iter()
+                .filter(|insn| insn.code == 0x85 && insn.imm == helper::MAP_LOOKUP_ELEM)
+                .count()
+        };
+        let root = Narrowing {
+            tgid: Some(4242),
+            tid: None,
+        };
+        let followed = entry_instructions(3, 4, 0, 2, root, Some(9), &|_| {}).expect("entry");
+        assert!(
+            followed
+                .iter()
+                .any(|insn| insn.code == Insn::jeq_imm(1, 0, 0).code && insn.imm == 4242),
+            "the root is compared before the lookup"
+        );
+        let alone = entry_instructions(3, 4, 0, 2, root, None, &|_| {}).expect("entry");
+        assert_eq!(
+            lookups(&followed),
+            lookups(&alone) + 1,
+            "one lookup more, of the descendants map"
+        );
+        let machine =
+            entry_instructions(3, 4, 0, 2, Narrowing::default(), Some(9), &|_| {}).expect("entry");
+        assert_eq!(
+            lookups(&machine),
+            lookups(&alone),
+            "a machine target follows nothing"
+        );
+    }
+
     /// Both halves of the pair take one timestamp each, from the monotonic
     /// clock and no other.
     #[test]
@@ -1866,7 +1951,8 @@ mod tests {
             function: index.function("vfs_read").expect("vfs_read"),
             op: 0,
         };
-        let entry = entry_instructions(3, 4, 0, 2, Narrowing::default(), &|_| {}).expect("entry");
+        let entry =
+            entry_instructions(3, 4, 0, 2, Narrowing::default(), None, &|_| {}).expect("entry");
         let exit = exit_instructions(&timed, maps(), &|_, _| Ok(())).expect("exit");
         for (what, program) in [("entry", entry), ("exit", exit)] {
             let calls: Vec<i32> = program

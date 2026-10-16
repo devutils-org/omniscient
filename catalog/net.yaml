@@ -318,6 +318,10 @@
   filter_fields: [comm, bytes, dport, family, op, iface]
   determinism: low
   caveats:
+    - "A --pid or launched target follows the processes it starts, from
+       their fork, as `io.fsync` and the sched sources do: `omn io --
+       ./script.sh` counts its `dd`s' calls, and a `--pid` target's children
+       already running are read from /proc when the run attaches."
     - "Sends are timed for inet, inet6 and unix sockets only; receives for
        every family. Compare the two directions within those families."
     - "A receive's latency includes the wait for data. A blocking recv that

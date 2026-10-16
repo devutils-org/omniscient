@@ -313,6 +313,10 @@ impl Rows for VfsProgram {
     fn missed(&self) -> u64 {
         VfsProgram::missed(self)
     }
+
+    fn unfollowed(&self) -> u64 {
+        VfsProgram::unfollowed(self)
+    }
 }
 
 #[cfg(test)]

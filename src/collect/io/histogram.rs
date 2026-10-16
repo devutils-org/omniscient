@@ -49,6 +49,11 @@ pub trait Rows {
     fn dropped(&self) -> (u64, u64, u64);
     /// Runs of the programs the kernel skipped, which lost the call outright.
     fn missed(&self) -> u64;
+    /// Processes a process target started that were not followed, the map
+    /// of them being full: their calls are in no row.
+    fn unfollowed(&self) -> u64 {
+        0
+    }
 }
 
 /// What one source makes of a row: the keys its event carries, and the
@@ -91,6 +96,7 @@ pub struct HistogramCollector {
     dropped_rows: u64,
     orphaned: u64,
     missed: u64,
+    unfollowed_said: bool,
     window_opened_ns: u64,
     /// Calls this run bucketed, which is what the event count is not.
     calls: u64,
@@ -117,6 +123,7 @@ impl HistogramCollector {
             dropped_rows: 0,
             orphaned: 0,
             missed: 0,
+            unfollowed_said: false,
             window_opened_ns: 0,
             calls: 0,
             rows: 0,
@@ -238,6 +245,17 @@ impl HistogramCollector {
                 self.call
             ));
             self.missed = missed;
+        }
+        let unfollowed = program.unfollowed();
+        if unfollowed > 0 && !self.unfollowed_said {
+            self.losses.note(format!(
+                "{unfollowed} process{} the target started {} not followed: the map of the \
+                 processes it started was full, so {} calls are in no row",
+                if unfollowed == 1 { "" } else { "es" },
+                if unfollowed == 1 { "was" } else { "were" },
+                if unfollowed == 1 { "its" } else { "their" },
+            ));
+            self.unfollowed_said = true;
         }
     }
 }
