@@ -2548,10 +2548,22 @@ fn list(args: ListArgs) -> anyhow::Result<ExitCode> {
                 .into_iter()
                 .map(|entry| Listed {
                     here: resolve::availability(entry, &capabilities),
+                    defaults: catalog
+                        .default_of(&entry.family)
+                        .into_iter()
+                        .flat_map(|default| default.bands())
+                        .flat_map(|(band, requests)| {
+                            requests
+                                .iter()
+                                .filter(|request| request.source == entry.id)
+                                .map(move |request| InDefault { band, request })
+                        })
+                        .collect(),
                     probes: entry
                         .backends
                         .iter()
                         .map(|backend| BackendProbes {
+                            emits: entry.backend_emits(backend).to_vec(),
                             backend: backend.id.clone(),
                             collector: coverage
                                 .get(entry.id.as_str())
@@ -2585,11 +2597,26 @@ struct Listed<'a> {
     /// Every backend of the chain in order, with what each requirement's
     /// probe answered here and whether this build has a collector for it.
     probes: Vec<BackendProbes>,
+    /// Where this source is in its family's default, `omn trace <family>`:
+    /// the band and the request written there. Empty when it is in none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    defaults: Vec<InDefault<'a>>,
+}
+
+/// One place a source holds in its family's default.
+#[derive(Serialize)]
+struct InDefault<'a> {
+    band: omn::catalog::Cost,
+    #[serde(flatten)]
+    request: &'a omn::catalog::DefaultRequest,
 }
 
 #[derive(Serialize)]
 struct BackendProbes {
     backend: String,
+    /// What this backend produces: its own `emits` when it declares them,
+    /// the entry's otherwise.
+    emits: Vec<omn::request::EmitKind>,
     collector: bool,
     requirements: Vec<resolve::Requirement>,
 }
