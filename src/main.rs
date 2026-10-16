@@ -1289,6 +1289,20 @@ impl MeasuredCost {
         } else {
             String::new()
         };
+        // The same on the other side: what it spent after the window closed
+        // -- an fentry collector unlinking its trampolines, about 69 ms for
+        // `io.fsync`, the stacks resolved, the other requests' tails -- is
+        // in no percentage either, and is named when it outweighs the
+        // window, per collection.
+        let after = if overhead.after_window_cpu_ns > overhead.attributed_cpu_ns {
+            format!(
+                "; and {} after it closed (detaching, resolving what it read), which is in no \
+                 percentage either",
+                span(overhead.after_window_cpu_ns)
+            )
+        } else {
+            String::new()
+        };
         // A table loaded once inside the window is in the cpu said, and not
         // in the percentage, which is the rate a budget weighs.
         let once = if overhead.one_time_cpu_ns > 0 {
@@ -1301,7 +1315,7 @@ impl MeasuredCost {
         };
         format!(
             "{} ({}) via `{}` spent {} of cpu{once}{inside} {against}, over {} of wall \
-             time{before}; measuring that cost {} across {} read(s){unknown}",
+             time{before}{after}; measuring that cost {} across {} read(s){unknown}",
             self.source,
             self.mode,
             self.served_by.join("` then `"),
@@ -2729,7 +2743,7 @@ fn latency(args: LatencyArgs) -> anyhow::Result<ExitCode> {
     match latency::answer(&catalog, &capabilities, &ask) {
         Ok(answer) => {
             print_answer(args.format, &answer, || answer.text())?;
-            Ok(ExitCode::SUCCESS)
+            Ok(outcome(&answer.failures))
         }
         Err(TriageError::Refused(refusal)) => Ok(refuse_triage(&refusal)),
         Err(error) => {
@@ -2776,7 +2790,7 @@ fn saturate(args: SaturateArgs) -> anyhow::Result<ExitCode> {
     match saturate::answer(&catalog, &capabilities, &ask) {
         Ok(answer) => {
             print_answer(args.format, &answer, || answer.text())?;
-            Ok(ExitCode::SUCCESS)
+            Ok(outcome(&answer.failures))
         }
         Err(TriageError::Refused(refusal)) => Ok(refuse_triage(&refusal)),
         Err(error) => {
@@ -3401,6 +3415,7 @@ fn top_live(catalog: &Catalog, args: &TopArgs) -> anyhow::Result<ExitCode> {
         refused: refused.clone(),
         ts_err_ns,
         view_cpu_ns: view_spent.map(|(drawing, handover)| drawing + handover),
+        capacity: Some(omn_view::model::MachineCapacity::here()),
     };
     beside.apply_ts_err(&mut ended);
     let table = args
@@ -3498,18 +3513,11 @@ impl<'a> Tap<'a> {
         }
     }
 
-    /// The opening data with what the collectors say, when that changes it
-    /// and nothing was handed over yet.
-    ///
-    /// A source attached after the first events, or drops placed after them,
-    /// reach the view at the end: the feed has no update that sets them on a
-    /// result already drawing.
-    fn describe(&mut self, said: &[collect::Described<'_>]) -> Option<omn_view::model::Data> {
-        if self.handover.any() {
-            return None;
-        }
-        let mut changed = false;
-        for (results, said) in self.shell.run.results.iter_mut().zip(said) {
+    /// What the collectors say, set on the opening data: the indices whose
+    /// value attribute, row stamp or drains changed.
+    fn describe(&mut self, said: &[collect::Described<'_>]) -> Vec<usize> {
+        let mut changed = Vec::new();
+        for (index, (results, said)) in self.shell.run.results.iter_mut().zip(said).enumerate() {
             let value_attr = (!said.value_attr.is_empty()).then(|| said.value_attr.to_owned());
             let row_stamp = said.row_stamp.and_then(|stamp| {
                 serde_json::to_value(stamp)
@@ -3531,10 +3539,42 @@ impl<'a> Tap<'a> {
                 results.value_attr = value_attr;
                 results.row_stamp = row_stamp;
                 results.drains = drains;
-                changed = true;
+                changed.push(index);
             }
         }
-        changed.then(|| self.shell.clone())
+        changed
+    }
+
+    /// What the collectors say, as the updates that carry it: the opening
+    /// data again while nothing was handed over, and one
+    /// `Update::Described` per changed result after, which keeps the events
+    /// already drawing. A source attached after the first events, or drops
+    /// placed after them, used to reach the view only at the end.
+    fn described_updates(
+        &mut self,
+        said: &[collect::Described<'_>],
+    ) -> Vec<omn_view::feed::Update> {
+        let changed = self.describe(said);
+        if changed.is_empty() {
+            return Vec::new();
+        }
+        if !self.handover.any() {
+            return vec![omn_view::feed::Update::Restart(Box::new(
+                self.shell.clone(),
+            ))];
+        }
+        changed
+            .into_iter()
+            .map(|index| {
+                let results = &self.shell.run.results[index];
+                omn_view::feed::Update::Described {
+                    index,
+                    value_attr: results.value_attr.clone(),
+                    row_stamp: results.row_stamp.clone(),
+                    drains: results.drains.clone(),
+                }
+            })
+            .collect()
     }
 
     /// Hands the events read since the last hand-over to the drawing thread.
@@ -3594,10 +3634,10 @@ impl collect::Escalate for Tap<'_> {
         if self.unheard {
             return;
         }
-        if let Some(described) = self.describe(said) {
-            let restart = omn_view::feed::Update::Restart(Box::new(described));
-            if self.sender.send(restart).is_err() {
+        for update in self.described_updates(said) {
+            if self.sender.send(update).is_err() {
                 self.unheard = true;
+                return;
             }
         }
     }
@@ -3930,6 +3970,42 @@ mod tests {
         assert_eq!(overhead.after_window_cpu_ns, 160);
     }
 
+    /// The cpu spent after a collection's window closed -- an fentry unlink,
+    /// about 69 ms for `io.fsync` -- is named in the cost line when it
+    /// outweighs the window, as the cpu before it opened is.
+    #[test]
+    fn the_cost_line_names_the_cpu_spent_after_the_window_closed() {
+        let cost = |after_window_cpu_ns| MeasuredCost {
+            label: "io.fsync".to_owned(),
+            source: "io.fsync".to_owned(),
+            mode: "trace".to_owned(),
+            backend: "bpf:fentry".to_owned(),
+            served_by: vec!["bpf:fentry".to_owned()],
+            declared: "low",
+            declared_worst_case_percent: 5.0,
+            budget_percent: None,
+            within_budget: None,
+            measured_percent: None,
+            own_percent: None,
+            overhead: collect::Overhead {
+                attributed_cpu_ns: 5_000_000,
+                after_window_cpu_ns,
+                ..Default::default()
+            },
+            stopped_because: String::new(),
+            stopped_by_budget: false,
+            notes: Vec::new(),
+            weighed_over_ns: None,
+        };
+        let line = cost(69_000_000).line();
+        assert!(
+            line.contains("and 69.0ms after it closed (detaching"),
+            "{line}"
+        );
+        let line = cost(1_000_000).line();
+        assert!(!line.contains("after it closed"), "{line}");
+    }
+
     /// A batch with one event that cannot be handed over loses that one,
     /// counted with the reason, and not the rest.
     #[test]
@@ -4057,11 +4133,12 @@ mod tests {
     }
 
     /// A live view is given what each collector says of its events -- the
-    /// value attribute, the row stamp, the drops at their drains -- while no
-    /// event was handed over, once per change, and never after: a restart
-    /// then would lose what it holds.
+    /// value attribute, the row stamp, the drops at their drains -- once per
+    /// change: as the opening data while no event was handed over, and as an
+    /// `Update::Described` of the changed result after, since a restart then
+    /// would lose what it holds.
     #[test]
-    fn a_live_view_is_told_how_to_read_its_results_before_its_first_events() {
+    fn a_live_view_is_told_how_to_read_its_results_whenever_that_changes() {
         let mut shell = omn_view::model::Data::default();
         shell.run.results = vec![omn_view::model::Results::default(); 2];
         let (sender, _receiver) = std::sync::mpsc::channel();
@@ -4083,14 +4160,21 @@ mod tests {
                 drains: &[],
             },
         ];
-        let described = tap.describe(&said).expect("the first description is given");
+        let mut updates = tap.described_updates(&said);
+        assert_eq!(updates.len(), 1, "one restart");
+        let Some(omn_view::feed::Update::Restart(described)) = updates.pop() else {
+            panic!("the first description is the opening data again");
+        };
         let first = &described.run.results[0];
         assert_eq!(first.value_attr.as_deref(), Some("latency_ns"));
         assert_eq!(first.row_stamp.as_deref(), Some("drain_close"));
         assert_eq!(first.drains.len(), 1);
         assert_eq!(first.drains[0].dropped, 3);
         assert_eq!(described.run.results[1].value_attr, None);
-        assert!(tap.describe(&said).is_none(), "an unchanged one is not");
+        assert!(
+            tap.described_updates(&said).is_empty(),
+            "an unchanged one is not"
+        );
         let went_over = omn::event::Event {
             ts_ns: 0,
             ts_err_ns: 0,
@@ -4111,9 +4195,17 @@ mod tests {
         });
         let mut later = said;
         later[1].value_attr = "bytes";
-        assert!(
-            tap.describe(&later).is_none(),
-            "nor any once events went over"
-        );
+        let updates = tap.described_updates(&later);
+        assert_eq!(updates.len(), 1, "only the changed result");
+        match &updates[0] {
+            omn_view::feed::Update::Described {
+                index, value_attr, ..
+            } => {
+                assert_eq!(*index, 1);
+                assert_eq!(value_attr.as_deref(), Some("bytes"));
+            }
+            _ => panic!("once events went over, a description keeps them"),
+        }
+        assert!(tap.described_updates(&later).is_empty());
     }
 }

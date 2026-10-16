@@ -937,6 +937,43 @@ pub struct Beside {
     /// taken out of every collector's figure in `results.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_cpu_ns: Option<u64>,
+    /// The machine the run was on: what a replay's usage is a share of.
+    /// Written by `omn top -o`; a recording without it draws no gradient
+    /// rather than this machine's, which would be a guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<MachineCapacity>,
+}
+
+/// The resources of the machine a run was on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct MachineCapacity {
+    /// The cores the scheduler lets the process use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cores: Option<f64>,
+    /// `MemTotal`, in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<f64>,
+}
+
+impl MachineCapacity {
+    /// The machine this process runs on.
+    pub fn here() -> MachineCapacity {
+        MachineCapacity {
+            cores: std::thread::available_parallelism()
+                .ok()
+                .map(|cores| cores.get() as f64),
+            memory_bytes: std::fs::read_to_string("/proc/meminfo")
+                .ok()
+                .and_then(|text| mem_total(&text)),
+        }
+    }
+}
+
+/// `MemTotal` from `/proc/meminfo`'s text, in bytes.
+pub fn mem_total(text: &str) -> Option<f64> {
+    let line = text.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kib: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kib * 1024.0)
 }
 
 impl Beside {
@@ -968,6 +1005,8 @@ pub struct Data {
     /// Set while a live run is still going: every figure is provisional --
     /// losses, overhead and stack names are only known at the run's end.
     pub live: Option<Live>,
+    /// The machine a recording was made on, from its `view.json`.
+    pub capacity: Option<MachineCapacity>,
 }
 
 /// Where a live run is.
@@ -1020,6 +1059,7 @@ impl Data {
                 beside.apply_ts_err(&mut data);
                 data.facts = beside.facts;
                 data.refused = beside.refused;
+                data.capacity = beside.capacity;
                 if !beside.origin.is_empty() {
                     data.origin = format!("replay of {} ({})", file.display(), beside.origin);
                 }

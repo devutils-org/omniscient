@@ -30,7 +30,7 @@ use ratatui::Frame;
 use super::timebar::{self, Class, Verdict};
 use super::{flame, ledger};
 use super::{Action, Ctx, Focus, Need, Region, View};
-use crate::model::{Data, Event, Output, Results};
+use crate::model::{Data, Event, MachineCapacity, Output, Results};
 use crate::trust::{palette, usage, Trust};
 use crate::units;
 
@@ -530,32 +530,24 @@ pub struct Capacity {
 }
 
 impl Capacity {
-    /// A live run's machine is the one the view runs on: its cores the
-    /// scheduler lets this process use, its memory `MemTotal`. A recording
-    /// does not carry its machine's (`docs/fixes/w21-process.md` asks for
-    /// it), and this machine's would be a guess.
+    /// The machine the run was on: a recording's from its `view.json`, a
+    /// live run's the one the view runs on -- its cores the scheduler lets
+    /// this process use, its memory `MemTotal`. A recording without one gets
+    /// none: this machine's would be a guess.
     fn of(data: &Data) -> Capacity {
-        if data.live.is_none() {
-            return Capacity::default();
+        let machine = match (data.capacity, &data.live) {
+            (Some(recorded), _) => recorded,
+            (None, Some(_)) => {
+                static HERE: OnceLock<MachineCapacity> = OnceLock::new();
+                *HERE.get_or_init(MachineCapacity::here)
+            }
+            (None, None) => return Capacity::default(),
+        };
+        Capacity {
+            cores: machine.cores,
+            memory: machine.memory_bytes,
         }
-        static HERE: OnceLock<Capacity> = OnceLock::new();
-        HERE.get_or_init(|| Capacity {
-            cores: std::thread::available_parallelism()
-                .ok()
-                .map(|cores| cores.get() as f64),
-            memory: std::fs::read_to_string("/proc/meminfo")
-                .ok()
-                .and_then(|text| mem_total(&text)),
-        })
-        .clone()
     }
-}
-
-/// `MemTotal` from `/proc/meminfo`'s text, in bytes.
-fn mem_total(text: &str) -> Option<f64> {
-    let line = text.lines().find(|line| line.starts_with("MemTotal:"))?;
-    let kib: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
-    Some(kib * 1024.0)
 }
 
 /// The run's time, cut into [`SPARK`] cells: the program's life when the run
@@ -2038,8 +2030,28 @@ mod tests {
         assert_eq!(cells[SPARK - 1], Some(12.0));
     }
 
+    /// A replay reads the capacity of the machine it was recorded on, from
+    /// its `view.json`, and only that: without one it has none.
+    #[test]
+    fn a_replay_reads_the_capacity_its_recording_carries() {
+        let mut data = recording();
+        assert_eq!(Capacity::of(&data), Capacity::default());
+        data.capacity = Some(MachineCapacity {
+            cores: Some(24.0),
+            memory_bytes: Some(64.0e9),
+        });
+        assert_eq!(
+            Capacity::of(&data),
+            Capacity {
+                cores: Some(24.0),
+                memory: Some(64.0e9),
+            }
+        );
+    }
+
     #[test]
     fn mem_total_is_read_in_bytes() {
+        use crate::model::mem_total;
         assert_eq!(
             mem_total("MemTotal:       65536 kB\nMemFree: 1 kB\n"),
             Some(65536.0 * 1024.0)
