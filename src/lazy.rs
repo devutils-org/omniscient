@@ -150,6 +150,28 @@ pub fn cost_refusal(args: &TraceArgs) -> Option<String> {
     })
 }
 
+/// The same composition, from the words of an `omn trace` command line
+/// after `trace` (`["cpu", "--cost", "med", "--pid", "42"]`): what a caller
+/// without the parser -- `omn-mcp` -- hands over to compose a family's
+/// default exactly as the command would.
+pub fn compose_words(catalog: &Catalog, words: &[String]) -> Result<Composed, ParseError> {
+    use clap::Parser;
+    let mut argv: Vec<OsString> = vec!["omn".into(), "trace".into()];
+    argv.extend(words.iter().map(OsString::from));
+    let argv = spell_family(argv);
+    let cli = crate::cli::Cli::try_parse_from(argv)
+        .map_err(|error| ParseError::new(error.render().to_string().trim().to_owned()))?;
+    let crate::cli::Command::Trace(args) = cli.command else {
+        return Err(ParseError::new("not an `omn trace` command line"));
+    };
+    let Some(family) = args.family.clone() else {
+        return Err(ParseError::new(
+            "these words name no family: the first one is a family, as `cpu` or `io`",
+        ));
+    };
+    compose(&args, catalog, &family)
+}
+
 /// Composes the session `omn trace <family>` runs, from the family's default
 /// and the band asked.
 pub fn compose(args: &TraceArgs, catalog: &Catalog, family: &str) -> Result<Composed, ParseError> {
