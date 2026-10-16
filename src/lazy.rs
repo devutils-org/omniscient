@@ -430,6 +430,66 @@ fn quoted(word: &str) -> String {
     }
 }
 
+/// Moves each request of a composed default that this machine serves above
+/// the band asked onto the first later backend of its chain that declares
+/// the band or less and resolves here: `mem.rss` at `--cost low` is served
+/// by `fs:proc:smaps_rollup` (`med`) first, and by `fs:proc:statm` (`free`)
+/// once the band is what chooses. Returns what moved, in words; a request no
+/// backend can keep the band for is left as it was, for [`band_notes`] to
+/// say.
+pub fn keep_band(
+    catalog: &Catalog,
+    capabilities: &crate::capabilities::Capabilities,
+    band: Cost,
+    resolutions: &mut [ResolvedRequest],
+) -> Vec<String> {
+    let mut moved = Vec::new();
+    for resolved in resolutions.iter_mut() {
+        if resolved.backend.cost <= band || resolved.request.backend.is_some() {
+            continue;
+        }
+        let Some(entry) = catalog.get(&resolved.request.source) else {
+            continue;
+        };
+        let after = entry
+            .backends
+            .iter()
+            .position(|backend| backend.id == resolved.backend.id)
+            .map_or(0, |at| at + 1);
+        let cheaper = entry.backends[after..]
+            .iter()
+            .filter(|backend| backend.cost <= band)
+            .find_map(|backend| {
+                let mut request = resolved.request.clone();
+                request.backend = backend.id.parse().ok();
+                crate::resolve::resolve(catalog, capabilities, &request).ok()
+            });
+        let Some(cheaper) = cheaper else {
+            continue;
+        };
+        let request = &resolved.request;
+        moved.push(format!(
+            "the `{band}` band was asked, so `{}` is served through `{}`, which declares `{}`, \
+             in place of `{}` (`{}`), the first of its chain{}",
+            request.label.as_deref().map_or_else(
+                || request.source.to_string(),
+                |label| format!("{} ({label})", request.source)
+            ),
+            cheaper.backend.id,
+            cheaper.backend.cost,
+            resolved.backend.id,
+            resolved.backend.cost,
+            entry
+                .backend(&cheaper.backend.id)
+                .and_then(|backend| backend.degraded.as_deref())
+                .map(|degraded| format!(": it gives up {}", degraded.trim()))
+                .unwrap_or_default()
+        ));
+        *resolved = cheaper;
+    }
+    moved
+}
+
 /// What a band asked cannot be kept to on this machine, once the backends
 /// are known: a request served here by a backend that declares more than the
 /// band. Said, not refused: the band chose the requests, the machine chose

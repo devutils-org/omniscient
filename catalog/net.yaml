@@ -617,3 +617,4 @@
     med:
       - {source: net.socket, mode: trace, emit: [hist, summary], label: "socket latency"}
       - {source: net.tcp.connect, mode: trace, emit: [hist, summary], label: "connect latency"}
+      - {source: net.tcp.lifetime, mode: trace, emit: [hist, summary], label: "connection lifetime"}

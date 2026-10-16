@@ -42,7 +42,10 @@ pub enum Source {
 /// call naming `family` in place of a session: the session as JSON text, and
 /// what the composition decided, in the words the command prints first.
 /// `None` when the call names no family.
-pub fn composed(catalog: &Catalog, arguments: &Value) -> Result<Option<(Source, Vec<String>)>, String> {
+pub fn composed(
+    catalog: &Catalog,
+    arguments: &Value,
+) -> Result<Option<(Source, Vec<String>)>, String> {
     let Some(family) = arguments.get("family").and_then(Value::as_str) else {
         return Ok(None);
     };

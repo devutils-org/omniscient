@@ -363,7 +363,8 @@ impl Server {
 
     fn plan_session(&self, arguments: &Value) -> Result<Value, String> {
         let (source, composed) = self.source(arguments)?;
-        let mut answer = session::plan(&self.catalog, &self.binary, &source, self.launch_allowed())?;
+        let mut answer =
+            session::plan(&self.catalog, &self.binary, &source, self.launch_allowed())?;
         if let Some(notes) = composed {
             answer["composed"] = json!(notes);
         }

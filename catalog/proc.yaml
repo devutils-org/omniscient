@@ -212,4 +212,5 @@
     question: "How many threads and open files does the program hold?"
     low:
       - {source: proc.threads, mode: "poll@100ms", emit: [timeline, summary], label: "threads"}
+      - {source: proc.tasks, mode: "poll@100ms", emit: [summary], label: "tasks"}
       - {source: proc.fd, mode: "poll@100ms", emit: [summary], label: "open files"}

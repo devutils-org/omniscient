@@ -531,6 +531,14 @@ fn trace(args: TraceArgs) -> anyhow::Result<ExitCode> {
         ))));
     }
 
+    // A composed default's band chooses the backend where the chain has one
+    // that keeps it; what still cannot is said.
+    if let Some(band) = band {
+        for note in omn::lazy::keep_band(&catalog, &capabilities, band, &mut resolutions) {
+            eprintln!("note: {note}");
+        }
+    }
+
     // Requests whose backends cannot share the one launch they ask for are
     // the invalid combination too: asked once each request's backend is
     // known, since the rule is about the library that will serve it, and

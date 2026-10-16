@@ -58,8 +58,11 @@ default costs more than you asked refuses and tells you which band to ask
 (`io` starts at `med`: following a program's reads and writes means tracing
 them).
 
-The band chooses *what* is measured. *How* it is measured is up to this
-machine: if the only way it has costs more than the band, the run says so
+The band chooses *what* is measured, and *how* where the source has a choice:
+a source whose first way on this machine costs more than the band is served
+by the first later one that keeps it, and the run says which and what it
+gives up (`mem.rss` at `--cost low` reads `statm`, resident pages only,
+rather than `smaps_rollup`). If no way it has keeps the band, the run says so
 before it starts, and the `cost:` line at the end says what it actually
 spent. To hold a run to a measured ceiling, add `--budget 2%`: the run then
 moves to a cheaper way, or stops, when the measurement says it is over.
@@ -94,6 +97,13 @@ cpu      "Where does the program spend its CPU time?"
   med    cpu.profile -m sample@997hz -e stack
   high   cpu.profile -m sample@997hz -e stack --stack dwarf
 ```
+
+`omn list --format json` carries the same: each source's `defaults`, the
+band and the request its family's default writes there, beside each
+backend's `emits`. `omn-mcp`'s `plan_session` and `run_session` take
+`family` and `cost` (and `pid`, `cgroup`, `system`, `duration`) in place of a
+session, compose it as the command does, and answer what they decided under
+`composed`.
 
 A default is held to what a request would be: the catalog refuses to load one
 that names a source, a mode, an emit or a key its family does not have, or
