@@ -1795,8 +1795,8 @@ mod tests {
     /// measurement nobody took.
     #[test]
     fn a_target_that_never_runs_reports_no_count_rather_than_zero() {
-        let Ok(mut child) = std::process::Command::new("/bin/sleep").arg("5").spawn() else {
-            eprintln!("skipped: /bin/sleep is not available");
+        let Ok(mut child) = std::process::Command::new("sleep").arg("5").spawn() else {
+            eprintln!("skipped: no `sleep` on this machine's PATH");
             return;
         };
         // Let it reach its nanosleep before the window opens.

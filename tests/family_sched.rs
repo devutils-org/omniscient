@@ -195,18 +195,6 @@ fn a_wakeup_session_is_valid_where_it_cannot_be_served() {
     assert!(text.contains("sched.wakeup"), "{text}");
 }
 
-/// Where `sleep` is. The launcher execs the path it is given and does not
-/// search `PATH`, because a measurement of "whichever program that name found"
-/// is not a measurement of anything.
-fn sleep_binary() -> &'static str {
-    for candidate in ["/usr/bin/sleep", "/bin/sleep"] {
-        if std::path::Path::new(candidate).exists() {
-            return candidate;
-        }
-    }
-    panic!("no `sleep` on this machine, and the off-cpu tests are about a known delay");
-}
-
 /// Whether the run was refused for want of the capabilities, which is the
 /// project's answer on an unprivileged machine and not a failure. The refusal
 /// still has to say what would make it work, and that is asserted rather than
@@ -249,7 +237,7 @@ fn a_program_that_sleeps_a_known_time_is_off_cpu_for_that_time() {
         "--emit",
         "raw",
         "--",
-        sleep_binary(),
+        "sleep",
         "0.4",
     ]);
     let text = String::from_utf8_lossy(&output.stdout).into_owned()
@@ -401,7 +389,7 @@ fn reads_that_must_reach_the_device_are_uninterruptible_waits() {
     // its reader reaches `schedule` -- a VM's virtio disk whose host serves
     // it inside the kick -- makes the reads no wait at all, and then there is
     // nothing for the source to see.
-    let mut calibration = std::process::Command::new("/usr/bin/dd")
+    let mut calibration = std::process::Command::new("dd")
         .arg(format!("if={}", blob.display()))
         .args(["of=/dev/null", "bs=64k", "iflag=direct", "status=none"])
         .spawn()
@@ -429,7 +417,7 @@ fn reads_that_must_reach_the_device_are_uninterruptible_waits() {
         "--emit",
         "raw",
         "--",
-        "/usr/bin/dd",
+        "dd",
         &format!("if={}", blob.display()),
         "of=/dev/null",
         "bs=64k",

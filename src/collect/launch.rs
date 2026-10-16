@@ -647,7 +647,7 @@ fn program_output(variable: &str, path: Option<&std::ffi::OsStr>) -> io::Result<
 /// first entry of `path` holding an executable file of that name otherwise,
 /// and the name unchanged when none does -- so the one `execve` fails as
 /// `execvp`'s last one would, and the child exits 127.
-fn find_program(program: &str, path: Option<&std::ffi::OsStr>) -> std::path::PathBuf {
+pub(crate) fn find_program(program: &str, path: Option<&std::ffi::OsStr>) -> std::path::PathBuf {
     use std::os::unix::ffi::OsStrExt;
     if program.contains('/') || program.is_empty() {
         return program.into();
@@ -985,7 +985,7 @@ mod tests {
 
     #[test]
     fn a_child_waits_at_the_gate_until_it_is_released() {
-        let mut child = gated(&["/bin/true".to_owned()], &[]).expect("fork");
+        let mut child = gated(&["true".to_owned()], &[]).expect("fork");
         // Nothing released it yet, so it cannot have run.
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(
@@ -1044,7 +1044,7 @@ mod tests {
         assert_eq!((life.exit_code, life.signal), (Some(3), None));
         assert!(life.cpu_ns.is_some(), "the reap hands over the cpu");
 
-        let mut child = gated(&["/bin/sleep".to_owned(), "30".to_owned()], &[]).expect("fork");
+        let mut child = gated(&["sleep".to_owned(), "30".to_owned()], &[]).expect("fork");
         child.release();
         child.terminate();
         let life = child.lifetime().expect("a lifetime");
@@ -1057,7 +1057,7 @@ mod tests {
     /// run.
     #[test]
     fn a_program_seen_exiting_is_readable_until_the_run_reaps_it() {
-        let mut child = gated(&["/bin/true".to_owned()], &[]).expect("fork");
+        let mut child = gated(&["true".to_owned()], &[]).expect("fork");
         let pid = child.pid();
         ended_by_itself(&mut child);
         assert!(
@@ -1113,7 +1113,7 @@ mod tests {
     #[test]
     fn dropping_the_handle_does_not_leave_the_child_parked_forever() {
         let pid = {
-            let child = gated(&["/bin/sleep".to_owned(), "30".to_owned()], &[]).expect("fork");
+            let child = gated(&["sleep".to_owned(), "30".to_owned()], &[]).expect("fork");
             child.pid()
         };
 
@@ -1166,7 +1166,7 @@ mod tests {
         // `sleep` rather than a program that reads stdin: a child inherits the
         // test harness's stdin, which is closed, so anything reading it sees end
         // of file and exits before the test can terminate it.
-        let mut child = gated(&["/bin/sleep".to_owned(), "30".to_owned()], &[]).expect("fork");
+        let mut child = gated(&["sleep".to_owned(), "30".to_owned()], &[]).expect("fork");
         child.release();
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(
@@ -1249,7 +1249,7 @@ mod tests {
     /// it, whatever privileges the tool itself was given.
     #[test]
     fn a_launched_program_is_readable_in_procfs_by_its_launcher() {
-        let mut child = gated(&["/bin/sleep".to_owned(), "30".to_owned()], &[]).expect("fork");
+        let mut child = gated(&["sleep".to_owned(), "30".to_owned()], &[]).expect("fork");
         child.release();
         // Give the exec a moment; before it, the child is still this process's
         // fork and the question is not yet meaningful.

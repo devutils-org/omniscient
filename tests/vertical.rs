@@ -1154,7 +1154,7 @@ fn a_probe_behind_a_semaphore_is_raised_and_followed() {
 /// A program that declares no request is refused with what it does carry.
 #[test]
 fn a_program_that_declares_no_request_is_refused_by_name() {
-    let output = omn(&["net.request", "--emit", "raw", "--", "/bin/true"]);
+    let output = omn(&["net.request", "--emit", "raw", "--", "true"]);
     let stderr = text(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
     // The probes are looked for once the resolver has chosen a backend. A

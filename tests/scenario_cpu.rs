@@ -2569,8 +2569,10 @@ fn a_profile_costs_its_window_and_not_a_fixed_second() {
 /// the unit tests of `src/collect/cpu/counters.rs`.
 #[test]
 fn a_counter_over_a_target_that_never_ran_says_that_is_what_happened() {
-    let Ok(mut asleep) = Command::new("/bin/sleep").arg("5").spawn() else {
-        eprintln!("skipped: this machine has no `/bin/sleep`, so nothing here is idle on purpose");
+    let Ok(mut asleep) = Command::new("sleep").arg("5").spawn() else {
+        eprintln!(
+            "skipped: this machine has no `sleep` on PATH, so nothing here is idle on purpose"
+        );
         return;
     };
     let pid = asleep.id().to_string();
@@ -3236,11 +3238,11 @@ fn each_refusal_names_the_thing_that_is_missing() {
     // The request, the exit code, and what the message has to contain.
     let rejections: [(&[&str], &str); 7] = [
         (
-            &["cpu.ipc", "-m", "count", "-e", "hist", "--", "/bin/true"],
+            &["cpu.ipc", "-m", "count", "-e", "hist", "--", "true"],
             "cannot emit `hist`",
         ),
         (
-            &["cpu.profile", "-m", "count", "-e", "raw", "--", "/bin/true"],
+            &["cpu.profile", "-m", "count", "-e", "raw", "--", "true"],
             "cannot be observed in `count` mode",
         ),
         (
@@ -3288,7 +3290,7 @@ fn each_refusal_names_the_thing_that_is_missing() {
                 "--filter",
                 "nope == 1",
                 "--",
-                "/bin/true",
+                "true",
             ],
             "has no field `nope`",
         ),
@@ -3302,7 +3304,7 @@ fn each_refusal_names_the_thing_that_is_missing() {
                 "-k",
                 "mem",
                 "--",
-                "/bin/true",
+                "true",
             ],
             "does not carry the `mem` key",
         ),
@@ -3336,11 +3338,11 @@ fn each_refusal_names_the_thing_that_is_missing() {
     // Both are legitimate requests that another machine runs.
     let unserved: [(&[&str], &str); 2] = [
         (
-            &["cpu.topdown", "-m", "count", "-e", "raw", "--", "/bin/true"],
+            &["cpu.topdown", "-m", "count", "-e", "raw", "--", "true"],
             "slots",
         ),
         (
-            &["cpu.flow", "-m", "trace", "-e", "raw", "--", "/bin/true"],
+            &["cpu.flow", "-m", "trace", "-e", "raw", "--", "true"],
             "intel_pt",
         ),
     ];
@@ -3463,7 +3465,7 @@ fn a_mode_the_build_does_not_implement_exits_as_unimplemented() {
         "-e",
         "raw",
         "--",
-        "/bin/true",
+        "true",
     ])
     .refusal();
     // The build's gap is reached only through a backend the machine offers.

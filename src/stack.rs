@@ -3190,8 +3190,8 @@ mod tests {
     /// which is exactly when this is asked.
     #[test]
     fn a_symbolizer_keeps_the_mappings_it_has_when_the_target_is_gone() {
-        let Ok(mut child) = std::process::Command::new("/bin/sleep").arg("30").spawn() else {
-            eprintln!("skipped: this machine has no `/bin/sleep` to read the mappings of");
+        let Ok(mut child) = std::process::Command::new("sleep").arg("30").spawn() else {
+            eprintln!("skipped: this machine has no `sleep` on PATH to read the mappings of");
             return;
         };
         let mut symbols = Symbolizer::for_process(child.id() as i32);

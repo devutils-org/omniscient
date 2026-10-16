@@ -2441,7 +2441,7 @@ fn a_filter_on_the_machine_wide_proc_sources_keeps_only_what_it_names() {
         assert!(shell.run_with_pid("exit 0").1.success());
         assert!(shell.run_with_pid("kill -USR1 $$").1.code().is_none());
         // What every filter has to remove.
-        assert!(Command::new("/bin/true").status().expect("true").success());
+        assert!(Command::new("true").status().expect("true").success());
     });
 
     for (output, what, per_round) in [
@@ -2563,7 +2563,7 @@ spawns, own, sent, calls = [], [], [], []
 print("ready", os.getpid(), flush=True)
 end = mono() + int(seconds * 1e9)
 while mono() < end:
-    a = mono(); child = subprocess.Popen(["/bin/true"]); child.wait(); b = mono()
+    a = mono(); child = subprocess.Popen(["true"]); child.wait(); b = mono()
     spawns.append([a, b, child.pid])
     a = mono(); os.kill(os.getpid(), signal.SIGUSR1); b = mono(); own.append([a, b])
     if peer:
@@ -2919,16 +2919,32 @@ fn a_task_that_renames_itself_is_counted_under_each_name_with_its_errors() {
 /// must add none.
 #[test]
 fn a_launched_programs_execs_are_its_tree_and_nothing_beside_it() {
+    // `true` and `echo` are shell builtins: naming them unqualified in a
+    // script would skip the exec this test is counting. `command -v` finds
+    // each one's external binary wherever this machine's PATH keeps it.
+    let which = |name: &str| -> String {
+        let out = Command::new("sh")
+            .args(["-c", &format!("command -v {name}")])
+            .output()
+            .expect("sh runs");
+        String::from_utf8(out.stdout)
+            .expect("utf8")
+            .trim()
+            .to_owned()
+    };
+    let (echo, r#true, cat) = (which("echo"), which("true"), which("cat"));
     let script = std::env::temp_dir().join(format!("omn-exec-tree-{}.sh", std::process::id()));
     std::fs::write(
         &script,
-        "for i in 1 2 3 4 5; do /bin/echo x >/dev/null; done\n\
-         ( /bin/true; /bin/true )\n\
-         /bin/true | /bin/cat >/dev/null\n",
+        format!(
+            "for i in 1 2 3 4 5; do {echo} x >/dev/null; done\n\
+             ( {true}; {true} )\n\
+             {true} | {cat} >/dev/null\n"
+        ),
     )
     .expect("a script");
     let mut beside = Command::new("sh")
-        .args(["-c", "while :; do /bin/true; sleep 0.02; done"])
+        .args(["-c", &format!("while :; do {true}; sleep 0.02; done")])
         .spawn()
         .expect("a loop beside");
     let output = omn(&[

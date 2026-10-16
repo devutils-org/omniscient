@@ -526,7 +526,7 @@ mod tests {
     /// cannot exist has none and no cpu.
     #[test]
     fn a_child_is_a_descendant_and_a_missing_process_has_none() {
-        let mut child = std::process::Command::new("/bin/sleep")
+        let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
             .expect("sleep");
