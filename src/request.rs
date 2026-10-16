@@ -1237,10 +1237,29 @@ pub enum KeyKind {
     /// name is its object and offset, `libc.so.6+0x27781`, so unnamed code
     /// is one row per address rather than one row for all of it.
     Func,
+    /// `op:<name>`, the operation an event counted: `io.vfs`'s `vfs_read`,
+    /// the heap's `alloc` or `free`, a GPU `kernel` or `memcpy`.
+    ///
+    /// Read off the event's `op` attribute, as every key below is read off
+    /// the attribute it is named after: a collector puts the attribute on its
+    /// event and declares the key in its entry's `keys:`, and nothing else.
+    Op,
+    /// `level:<where>`, the memory level a sampled access was served from
+    /// (`mem.latency`'s `l1`, `l2`, `dram`, ...): perf mem's sort key.
+    Level,
+    /// `mapping:<name>`, the mapping a memory figure belongs to: the file
+    /// backing it or `[heap]`, `[stack]`, `[anon]`, as `smaps` names them.
+    Mapping,
+    /// `user:<name>`, the user owning the task: what `top`'s USER column
+    /// groups by.
+    User,
+    /// `counter:<name>`, the counter a row of several read at once is:
+    /// `net.snmp`'s `Tcp.RetransSegs`, so a run keyed on it is `nstat`.
+    Counter,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 18] = [
+    pub const ALL: [KeyKind; 23] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -1259,12 +1278,26 @@ impl KeyKind {
         KeyKind::Comm,
         KeyKind::Domain,
         KeyKind::Func,
+        KeyKind::Op,
+        KeyKind::Level,
+        KeyKind::Mapping,
+        KeyKind::User,
+        KeyKind::Counter,
     ];
 
     /// The keys no collector attaches and the emit layer derives from what
-    /// an event carries: `func`, from its stack.
+    /// an event carries: `func`, from its stack; the others from the
+    /// attribute named after them.
     pub fn derived(self) -> bool {
-        matches!(self, KeyKind::Func)
+        matches!(
+            self,
+            KeyKind::Func
+                | KeyKind::Op
+                | KeyKind::Level
+                | KeyKind::Mapping
+                | KeyKind::User
+                | KeyKind::Counter
+        )
     }
 
     pub fn as_str(self) -> &'static str {
@@ -1287,6 +1320,11 @@ impl KeyKind {
             KeyKind::Comm => "comm",
             KeyKind::Domain => "domain",
             KeyKind::Func => "func",
+            KeyKind::Op => "op",
+            KeyKind::Level => "level",
+            KeyKind::Mapping => "mapping",
+            KeyKind::User => "user",
+            KeyKind::Counter => "counter",
         }
     }
 }

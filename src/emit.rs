@@ -2111,6 +2111,43 @@ mod tests {
         }
     }
 
+    /// The keys read off an attribute -- `op`, `level`, `mapping`, `user`,
+    /// `counter` -- name a series by the attribute's value, and an event
+    /// without it is `<key>:?`, as `func` is.
+    #[test]
+    fn a_key_named_after_an_attribute_makes_a_series_per_value() {
+        let with = |op: Option<&str>, calls| {
+            let mut event = event(0, 1, calls);
+            if let Some(op) = op {
+                event.attrs.push(Attr::text("op", op));
+            }
+            event
+        };
+        let events = vec![
+            with(Some("vfs_read"), 3),
+            with(Some("vfs_write"), 5),
+            with(Some("vfs_read"), 4),
+            with(None, 1),
+        ];
+        let Output::TopK { series, .. } =
+            topk_by(&events, &[KeyKind::Op], "bytes", 10, &Shortfalls::run_wide(None)).unwrap()
+        else {
+            panic!("topk is a ranking");
+        };
+        let rows: Vec<(&str, f64)> = series
+            .iter()
+            .map(|row| (row.key.as_str(), row.total))
+            .collect();
+        assert_eq!(
+            rows,
+            [("op:vfs_read", 7.0), ("op:vfs_write", 5.0), ("op:?", 1.0)]
+        );
+        for key in [KeyKind::Level, KeyKind::Mapping, KeyKind::User, KeyKind::Counter] {
+            assert!(key.derived(), "{key}");
+            assert_eq!(key.as_str().parse::<KeyKind>().unwrap(), key);
+        }
+    }
+
     /// One event standing for four hundred measurements counts as four
     /// hundred, in every emit that counts.
     ///
