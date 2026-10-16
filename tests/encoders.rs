@@ -1147,6 +1147,7 @@ fn distribution(losses: Losses) -> Results {
                 series: vec![SeriesSummary {
                     key: "task:7".into(),
                     unmeasured: 0,
+                    sums: BTreeMap::new(),
                     count: records as usize,
                     min: 2.0 * MIB,
                     max: 64.0 * MIB,

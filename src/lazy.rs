@@ -263,6 +263,8 @@ pub fn compose(args: &TraceArgs, catalog: &Catalog, family: &str) -> Result<Comp
             backend: None,
             label: request.label.clone(),
             window: None,
+            value: None,
+            sum: Vec::new(),
         })
         .collect();
     for request in &built {

@@ -1777,6 +1777,17 @@ pub struct Request {
     /// the whole run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<Window>,
+    /// The attribute the aggregating emits reduce, when it is not the one
+    /// the collector measures: `--value busy` on `power.freq`, `--value
+    /// errors` on `proc.syscall`. One of the entry's `filter_fields`, so a
+    /// name the source does not carry is refused before the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Attributes `summary` also adds up per series, beside the value:
+    /// `--sum errors` on `proc.syscall -k syscall -e summary` is `strace
+    /// -c` with its errors column. Each one of the entry's `filter_fields`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sum: Vec<String>,
 }
 
 /// A session: the requests to run together, plus what they share.

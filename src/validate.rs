@@ -137,6 +137,7 @@ pub fn validate_request(
     check_keys(entry, request, &mut rejections);
     check_filter(entry, request, &mut rejections);
     check_ranking(entry, request, &mut rejections);
+    check_value(entry, request, &mut rejections);
     check_stack(entry, request, &mut rejections, &mut report);
     check_backend(entry, request, &mut rejections, &mut report);
     carry_caveats(entry, &mut report);
@@ -775,6 +776,50 @@ fn check_ranking(entry: &Entry, request: &Request, rejections: &mut Vec<Rejectio
     }
 }
 
+/// `--value` and `--sum` name attributes the source declares, as a ranking
+/// by an attribute does; and `--sum` adds to a summary, so one is asked.
+fn check_value(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection>) {
+    let named = request
+        .value
+        .iter()
+        .map(|name| ("--value", name))
+        .chain(request.sum.iter().map(|name| ("--sum", name)));
+    for (flag, name) in named {
+        if entry.filter_fields.iter().any(|known| known == name) {
+            continue;
+        }
+        let suggestion = nearest(name, entry.filter_fields.iter().map(String::as_str));
+        let hint = if entry.filter_fields.is_empty() {
+            format!("`{}` declares no attribute beside its value", entry.id)
+        } else {
+            format!(
+                "`{}` declares {}",
+                entry.id,
+                one_of(entry.filter_fields.iter().map(String::as_str))
+            )
+        };
+        rejections.push(Rejection::with_hint(
+            format!(
+                "`{flag} {name}` names an attribute `{}` does not declare{}",
+                entry.id,
+                DidYouMean(suggestion)
+            ),
+            hint,
+        ));
+    }
+    if !request.sum.is_empty()
+        && !request
+            .emit
+            .iter()
+            .any(|emit| emit.kind() == EmitKind::Summary)
+    {
+        rejections.push(Rejection::with_hint(
+            "`--sum` adds attributes up beside a summary's value, and no summary is asked".to_owned(),
+            "add `-e summary`",
+        ));
+    }
+}
+
 fn check_stack(
     entry: &Entry,
     request: &Request,
@@ -946,6 +991,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         }
     }
 

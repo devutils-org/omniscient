@@ -244,6 +244,22 @@ pub struct TraceArgs {
     )]
     pub keys: Vec<KeyKind>,
 
+    /// The attribute the aggregating emits reduce, in place of the source's
+    /// own value: `--value busy` on `power.freq`, `--value errors` on
+    /// `proc.syscall`. One the source declares as a filter field.
+    #[arg(long, value_name = "ATTR", conflicts_with = "file")]
+    pub value: Option<String>,
+
+    /// Attributes a summary also adds up per series, beside its value:
+    /// `proc.syscall -k syscall -e summary --sum errors` is `strace -c`.
+    #[arg(
+        long,
+        value_name = "ATTR",
+        value_delimiter = ',',
+        conflicts_with = "file"
+    )]
+    pub sum: Vec<String>,
+
     /// Predicate, pushed into the kernel when the backend allows it.
     #[arg(
         long,
@@ -804,6 +820,8 @@ fn request_for(
         backend: args.backend.clone(),
         label: args.label.clone(),
         window: args.window,
+        value: args.value.clone(),
+        sum: args.sum.clone(),
     })
 }
 

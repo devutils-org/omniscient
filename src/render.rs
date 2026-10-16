@@ -812,6 +812,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         let dumped = Session::single(request, OutputFormat::Text, None);
         let text = session(&catalog, &dumped, &Report::default(), &[]);

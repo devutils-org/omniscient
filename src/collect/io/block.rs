@@ -1214,6 +1214,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         let log2 = Emit::Hist(HistScale::Log2);
         assert!(histogram_is_enough(&request(vec![log2], vec![], None)));

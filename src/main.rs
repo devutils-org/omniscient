@@ -3056,6 +3056,8 @@ fn top_session(
                 backend: None,
                 label: Some(need.label.clone()),
                 window: None,
+                value: None,
+                sum: Vec::new(),
             })
         })();
         let request = match built {
@@ -3872,6 +3874,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         let capabilities = Capabilities::detect();
         resolve::resolve(&catalog, &capabilities, &request)

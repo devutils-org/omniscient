@@ -1756,6 +1756,8 @@ mod tests {
                 backend: None,
                 label: Some((*source).to_owned()),
                 window: None,
+                value: None,
+                sum: Vec::new(),
             })
             .collect();
         assert!(ask_symbols(&mut requests, None).is_empty());

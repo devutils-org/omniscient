@@ -5677,6 +5677,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         let resolved: Vec<_> = [Target::Pid(vec![own]), Target::Pid(vec![1])]
             .into_iter()
@@ -5723,6 +5725,8 @@ mod tests {
             backend: backend.map(|id| id.parse().unwrap()),
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves")
     }
@@ -5843,6 +5847,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         let resolved = crate::resolve::resolve(&catalog, &capabilities, &request).unwrap();
         let mut events = vec![event_with(Vec::new())];
@@ -5876,6 +5882,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         let resolved = match crate::resolve::resolve(&catalog, &capabilities, &request) {
             Ok(resolved) => resolved,
@@ -5924,6 +5932,8 @@ mod tests {
             backend: Some("force:fs:proc".parse().unwrap()),
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         let resolved =
             crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves");
@@ -6374,6 +6384,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves")
     }
@@ -6856,6 +6868,8 @@ mod tests {
             backend: None,
             label: None,
             window: window.map(|text| text.parse().unwrap()),
+            value: None,
+            sum: Vec::new(),
         };
         crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves")
     }

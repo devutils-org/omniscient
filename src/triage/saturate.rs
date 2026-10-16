@@ -144,6 +144,8 @@ impl Ask {
                 backend: None,
                 label: Some(label.to_owned()),
                 window: None,
+                value: None,
+                sum: Vec::new(),
             }
         };
         let workload = &self.target;

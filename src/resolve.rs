@@ -989,6 +989,9 @@ fn check_filter_fields(
             .filter_map(|emit| emit.by())
             .map(|by| by.as_str()),
     );
+    // And so does a value or a sum the request names.
+    fields.extend(request.value.as_deref());
+    fields.extend(request.sum.iter().map(String::as_str));
     let carried = entry.backend_filter_fields(backend);
     for field in fields {
         if carried.iter().any(|known| known == field)
@@ -1273,6 +1276,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         }
     }
 

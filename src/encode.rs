@@ -1318,9 +1318,16 @@ fn text(results: &Results) -> String {
                             bound(summary.short.as_ref())
                         )
                     });
+                    // The attributes asked added up beside the value, each a
+                    // count of its own (`--sum errors`).
+                    let sums: String = summary
+                        .sums
+                        .iter()
+                        .map(|(name, sum)| format!("  {name} {sum}"))
+                        .collect();
                     let _ = writeln!(
                         out,
-                        "    {:<14} n{short}{:<5} min {}  mean {}{}  max {}{}  last {}{total}",
+                        "    {:<14} n{short}{:<5} min {}  mean {}{}  max {}{}  last {}{total}{sums}",
                         summary.key,
                         summary.count,
                         quantity(summary.min, results.unit),
@@ -2708,6 +2715,7 @@ mod tests {
                     series: vec![SeriesSummary {
                         key: "task:7".into(),
                         unmeasured: 0,
+                        sums: BTreeMap::new(),
                         count: 2,
                         min: 1_048_576.0,
                         max: 2_097_152.0,

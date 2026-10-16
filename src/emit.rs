@@ -758,6 +758,12 @@ pub struct SeriesSummary {
     /// refused, and left out of every other number here.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub unmeasured: usize,
+    /// The attributes the request asked added up beside the value, per
+    /// series (`--sum errors`): `proc.syscall -k syscall -e summary --sum
+    /// errors` is `strace -c` with its errors column. A lower bound when
+    /// `short` is present.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sums: BTreeMap<String, f64>,
     /// What this run lost, when it lost something that biases the shape.
     ///
     /// Beside the numbers rather than above them: `count`, `mean` and `max`
@@ -976,6 +982,19 @@ pub fn aggregate(
     let mut degradations = resolved.degradations.clone();
     degradations.extend(collection.notes.iter().cloned());
 
+    // A request naming its value reduces that attribute, in the unit its
+    // name says; the validator has checked the source carries it.
+    let (value_attr, unit) = match request.value.as_deref() {
+        Some(named) if named != value_attr => {
+            let unit = unit_named_by(named);
+            degradations.push(format!(
+                "the value is `{named}`, as asked, not `{value_attr}`: read in {unit}, from its name"
+            ));
+            (named, unit)
+        }
+        _ => (value_attr, unit),
+    };
+
     // One shortfall for the run, not one per series: a ring drops without
     // regard to which series the record would have joined, so a fraction
     // computed per series would be attributing every drop to each of them.
@@ -1026,12 +1045,18 @@ pub fn aggregate(
                 first_ts_ns: collection.events.first().map(|event| event.ts_ns),
             },
             Emit::Summary => Output::Summary {
-                series: match &ticks {
-                    Some(groups) => summary_of(borrowed(groups), value_attr, adds_up, |key| {
-                        shorts.for_series(key)
-                    })?,
-                    None => summary_by(&collection.events, axes, value_attr, adds_up, &shorts)?,
-                },
+                series: with_sums(
+                    match &ticks {
+                        Some(groups) => summary_of(borrowed(groups), value_attr, adds_up, |key| {
+                            shorts.for_series(key)
+                        })?,
+                        None => {
+                            summary_by(&collection.events, axes, value_attr, adds_up, &shorts)?
+                        }
+                    },
+                    grouped(&collection.events, axes),
+                    &request.sum,
+                )?,
             },
             Emit::Rate => Output::Rate {
                 series: rate_by(
@@ -1057,12 +1082,16 @@ pub fn aggregate(
             Emit::SummaryBy(by) => {
                 uncarried(&collection.events, *by, "summary", &mut degradations);
                 Output::Summary {
-                    series: summary_over(
-                        &collection.events,
-                        by.as_str(),
-                        value_attr,
-                        adds_up,
-                        &shorts,
+                    series: with_sums(
+                        summary_over(
+                            &collection.events,
+                            by.as_str(),
+                            value_attr,
+                            adds_up,
+                            &shorts,
+                        )?,
+                        grouped_over(&collection.events, by.as_str()),
+                        &request.sum,
                     )?,
                 }
             }
@@ -1525,6 +1554,55 @@ fn summary_over(
     })
 }
 
+/// The unit an attribute's name says, for a request naming its own value:
+/// `_ns` is time, `bytes` bytes, `hz` a frequency, a share or `busy` a
+/// ratio, and anything else a count.
+fn unit_named_by(attr: &str) -> Unit {
+    let name = attr.to_ascii_lowercase();
+    if name == "ns" || name.ends_with("_ns") {
+        Unit::Ns
+    } else if name.contains("bytes") {
+        Unit::Bytes
+    } else if name == "hz" || name.ends_with("_hz") {
+        Unit::Hz
+    } else if name.contains("cycles") {
+        Unit::Cycles
+    } else if name.contains("joules") {
+        Unit::Joules
+    } else if name.contains("ratio") || name.contains("share") || name == "busy" {
+        Unit::Ratio
+    } else {
+        Unit::Count
+    }
+}
+
+/// Each summary row with the attributes the request asked added up beside
+/// its value (`--sum errors`), over the same events the row summarises.
+fn with_sums(
+    mut summaries: Vec<SeriesSummary>,
+    groups: BTreeMap<SeriesKey, Vec<&Event>>,
+    sums: &[String],
+) -> Result<Vec<SeriesSummary>, EmitError> {
+    if sums.is_empty() {
+        return Ok(summaries);
+    }
+    for summary in &mut summaries {
+        let Some(events) = groups.get(&summary.key) else {
+            continue;
+        };
+        for name in sums {
+            let mut total = 0.0;
+            for event in events {
+                if let Some(value) = measured(event, name)? {
+                    total += value;
+                }
+            }
+            summary.sums.insert(name.clone(), total);
+        }
+    }
+    Ok(summaries)
+}
+
 fn summary_of(
     groups: BTreeMap<SeriesKey, Vec<&Event>>,
     attr: &str,
@@ -1558,6 +1636,7 @@ fn summary_of(
                     last: 0.0,
                     total: adds_up.then_some(0.0),
                     unmeasured,
+                    sums: BTreeMap::new(),
                     short: short_of(&key),
                     key,
                 });
@@ -1591,6 +1670,7 @@ fn summary_of(
             last,
             total: adds_up.then_some(total),
             unmeasured,
+            sums: BTreeMap::new(),
         });
     }
     Ok(summaries)
@@ -2148,6 +2228,32 @@ mod tests {
         }
     }
 
+    /// `--sum errors` adds the attribute up per series beside the value, as
+    /// `strace -c`'s errors column; a named value is read in the unit its
+    /// name says.
+    #[test]
+    fn a_summary_adds_up_the_attributes_asked_beside_its_value() {
+        let call = |tid, ns, errors| {
+            let mut event = event(0, tid, ns);
+            event.attrs.push(Attr::uint("errors", errors));
+            event
+        };
+        let events = vec![call(1, 10, 2), call(1, 30, 1), call(2, 5, 0)];
+        let summaries = with_sums(
+            summary(&events, "bytes", None).unwrap(),
+            grouped(&events, &[]),
+            &["errors".to_owned()],
+        )
+        .unwrap();
+        let errors: Vec<f64> = summaries.iter().map(|row| row.sums["errors"]).collect();
+        assert_eq!(errors, [3.0, 0.0]);
+        assert_eq!(unit_named_by("latency_ns"), Unit::Ns);
+        assert_eq!(unit_named_by("avg_hz"), Unit::Hz);
+        assert_eq!(unit_named_by("busy"), Unit::Ratio);
+        assert_eq!(unit_named_by("errors"), Unit::Count);
+        assert_eq!(unit_named_by("freed_bytes"), Unit::Bytes);
+    }
+
     /// One event standing for four hundred measurements counts as four
     /// hundred, in every emit that counts.
     ///
@@ -2489,6 +2595,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         crate::resolve::resolve(&catalog, &capabilities, &request).unwrap()
     }
