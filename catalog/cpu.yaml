@@ -25,8 +25,9 @@
        below its highest. A share of cycles, not of time: `cpu.profile` is the
        on-cpu time profile. Every counting source of this family samples the
        same way on its own counter (`perf record -e <event>`), in the kernel's
-       frequency mode where a fixed period has no natural unit, each sample
-       weighing one."
+       frequency mode where a fixed period has no natural unit, each sample's
+       `count` the period the kernel chose for it (`PERF_SAMPLE_PERIOD`), so
+       its shares are perf's."
 
 - id: cpu.instructions
   family: cpu
