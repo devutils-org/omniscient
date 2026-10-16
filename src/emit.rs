@@ -1008,6 +1008,25 @@ pub fn aggregate(
     // counted belongs to one of them: then a series keyed by that key is short
     // by its own ring's losses and by nothing else ([`Shortfalls`]).
     let mut collection = collection;
+    // A key that puts one event in several series is aggregated over copies,
+    // and the raw events and the count stay the run's own.
+    let mut original = None;
+    if request.keys.contains(&KeyKind::Within) {
+        let (inside, stackless) = within_each(&collection);
+        degradations.push(format!(
+            "`--keys within` counts each sample once in the row of every distinct function on \
+             its stack, so the rows add up to more than the run{}",
+            if stackless > 0 {
+                format!(
+                    "; {stackless} of {} events carried no stack and are `within:?`",
+                    collection.events.len()
+                )
+            } else {
+                String::new()
+            }
+        ));
+        original = Some(std::mem::replace(&mut collection.events, inside));
+    }
     if request.keys.contains(&KeyKind::Func) {
         let stackless = derive_func(&mut collection);
         if stackless > 0 {
@@ -1038,7 +1057,9 @@ pub fn aggregate(
     for emit in &request.emit {
         outputs.push(match emit {
             Emit::Raw => Output::Raw {
-                events: collection.events.clone(),
+                events: original
+                    .clone()
+                    .unwrap_or_else(|| collection.events.clone()),
             },
             Emit::Timeline => Output::Timeline {
                 series: timeline_by(&collection.events, axes, first_ts_ns, value_attr)?,
@@ -1176,7 +1197,9 @@ pub fn aggregate(
         unit,
         backend: resolved.backend.id.clone(),
         outputs,
-        events_seen: collection.events.len(),
+        events_seen: original
+            .as_ref()
+            .map_or(collection.events.len(), Vec::len),
         observed_ns: collection.observed_ns,
         window: collection.window,
         stopped_because: collection.stopped_because,
@@ -1230,6 +1253,43 @@ fn derive_func(collection: &mut Collection) -> usize {
             .push(crate::event::Attr::text(name, leaf.clone()));
     }
     stackless
+}
+
+/// Each event once for every distinct function on its stack, carrying that
+/// function as `within`: what [`KeyKind::Within`] aggregates over. A
+/// recursive function is counted once per sample, as `perf report
+/// --children` counts it. Returns the copies and how many events had no
+/// stack, which are kept once as `within:?`.
+fn within_each(collection: &Collection) -> (Vec<Event>, usize) {
+    let scanned = stack_table(&collection.events);
+    let name = KeyKind::Within.as_str();
+    let mut inside = Vec::with_capacity(collection.events.len());
+    let mut stackless = 0;
+    for event in &collection.events {
+        let frames = stack_id(event).and_then(|id| {
+            collection
+                .stacks
+                .get(&id)
+                .or_else(|| scanned.get(&id))
+                .filter(|frames| !frames.is_empty())
+        });
+        let Some(frames) = frames else {
+            stackless += 1;
+            inside.push(event.clone());
+            continue;
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for frame in frames {
+            if !seen.insert(frame.as_str()) {
+                continue;
+            }
+            let mut copy = event.clone();
+            copy.attrs.retain(|attr| attr.name != name);
+            copy.attrs.push(crate::event::Attr::text(name, frame.clone()));
+            inside.push(copy);
+        }
+    }
+    (inside, stackless)
 }
 
 /// Says how many events carried no `by`, for an `@<attr>` emit that holds
@@ -3413,6 +3473,52 @@ mod tests {
             "{:?}",
             results.degradations
         );
+    }
+
+    /// `--keys within` is the inclusive share: a sample counts once in the
+    /// row of each distinct function on its stack, a recursive one once, and
+    /// the raw events and their count stay the run's.
+    #[test]
+    fn the_within_key_charges_each_sample_to_every_function_it_was_inside() {
+        let sampled = |id: u64, frames: &str| {
+            let mut one = event(id, 7, 1);
+            one.attrs.push(Attr::uint(STACK_ID_ATTR, id));
+            one.attrs.push(Attr::text(STACK_ATTR, frames));
+            one
+        };
+        let events = vec![
+            sampled(1, "main;work;heavy"),
+            sampled(1, "main;work;heavy"),
+            sampled(2, "main;work;work;light"),
+            sampled(3, "main;idle"),
+        ];
+        let collection = quiet(events, 1_000);
+        let resolved = rss_request(
+            vec![Emit::TopK { k: 10, by: None }, Emit::Raw],
+            vec![KeyKind::Within],
+        );
+        let results = aggregate(&resolved, collection, Unit::Count, "bytes").unwrap();
+        let Output::TopK { series, .. } = &results.outputs[0] else {
+            panic!("a ranking");
+        };
+        let rows: Vec<(String, f64)> = series
+            .iter()
+            .map(|one| (one.key.to_string(), one.total))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("within:main".into(), 4.0),
+                ("within:work".into(), 3.0),
+                ("within:heavy".into(), 2.0),
+                ("within:idle".into(), 1.0),
+                ("within:light".into(), 1.0),
+            ]
+        );
+        let Output::Raw { events } = &results.outputs[1] else {
+            panic!("raw");
+        };
+        assert_eq!((events.len(), results.events_seen), (4, 4));
     }
 
     /// A poll regrouped by fewer keys than its events carry adds the readings

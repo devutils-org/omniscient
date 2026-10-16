@@ -1256,10 +1256,18 @@ pub enum KeyKind {
     /// `counter:<name>`, the counter a row of several read at once is:
     /// `net.snmp`'s `Tcp.RetransSegs`, so a run keyed on it is `nstat`.
     Counter,
+    /// `within:<name>`, every function on a sample's stack: the inclusive
+    /// share, `perf report --children`, where `func` is the self share.
+    ///
+    /// Derived from the stack as `func` is, and the one key that puts an
+    /// event in several series: a sample counts once in the row of each
+    /// distinct function it was inside, so the rows add up to more than the
+    /// run, and `main` holds nearly all of it.
+    Within,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 23] = [
+    pub const ALL: [KeyKind; 24] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -1283,6 +1291,7 @@ impl KeyKind {
         KeyKind::Mapping,
         KeyKind::User,
         KeyKind::Counter,
+        KeyKind::Within,
     ];
 
     /// The keys no collector attaches and the emit layer derives from what
@@ -1297,6 +1306,7 @@ impl KeyKind {
                 | KeyKind::Mapping
                 | KeyKind::User
                 | KeyKind::Counter
+                | KeyKind::Within
         )
     }
 
@@ -1325,6 +1335,7 @@ impl KeyKind {
             KeyKind::Mapping => "mapping",
             KeyKind::User => "user",
             KeyKind::Counter => "counter",
+            KeyKind::Within => "within",
         }
     }
 }

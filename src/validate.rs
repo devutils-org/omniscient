@@ -854,6 +854,12 @@ fn check_stack(
                 "drop --stack none, or key by something other than func",
             ));
         }
+        if request.keys.contains(&crate::request::KeyKind::Within) {
+            rejections.push(Rejection::with_hint(
+                "`--keys within` with `--stack none` charges each sample to the functions of a stack it forbids unwinding",
+                "drop --stack none, or key by something other than within",
+            ));
+        }
         return;
     }
     let mode = request.mode.kind();
@@ -1254,12 +1260,14 @@ mod tests {
     #[test]
     fn an_entry_offering_the_function_key_produces_stacks() {
         for entry in catalog().entries() {
-            if entry.keys.contains(&crate::request::KeyKind::Func) {
-                assert!(
-                    entry.emits.contains(&EmitKind::Stack),
-                    "`{}` offers `func` and emits no stack",
-                    entry.id
-                );
+            for key in [crate::request::KeyKind::Func, crate::request::KeyKind::Within] {
+                if entry.keys.contains(&key) {
+                    assert!(
+                        entry.emits.contains(&EmitKind::Stack),
+                        "`{}` offers `{key}` and emits no stack",
+                        entry.id
+                    );
+                }
             }
         }
     }
