@@ -1071,9 +1071,7 @@ pub fn aggregate(
                         Some(groups) => summary_of(borrowed(groups), value_attr, adds_up, |key| {
                             shorts.for_series(key)
                         })?,
-                        None => {
-                            summary_by(&collection.events, axes, value_attr, adds_up, &shorts)?
-                        }
+                        None => summary_by(&collection.events, axes, value_attr, adds_up, &shorts)?,
                     },
                     grouped(&collection.events, axes),
                     &request.sum,
@@ -1197,9 +1195,7 @@ pub fn aggregate(
         unit,
         backend: resolved.backend.id.clone(),
         outputs,
-        events_seen: original
-            .as_ref()
-            .map_or(collection.events.len(), Vec::len),
+        events_seen: original.as_ref().map_or(collection.events.len(), Vec::len),
         observed_ns: collection.observed_ns,
         window: collection.window,
         stopped_because: collection.stopped_because,
@@ -1285,7 +1281,8 @@ fn within_each(collection: &Collection) -> (Vec<Event>, usize) {
             }
             let mut copy = event.clone();
             copy.attrs.retain(|attr| attr.name != name);
-            copy.attrs.push(crate::event::Attr::text(name, frame.clone()));
+            copy.attrs
+                .push(crate::event::Attr::text(name, frame.clone()));
             inside.push(copy);
         }
     }
@@ -2269,9 +2266,14 @@ mod tests {
             with(Some("vfs_read"), 4),
             with(None, 1),
         ];
-        let Output::TopK { series, .. } =
-            topk_by(&events, &[KeyKind::Op], "bytes", 10, &Shortfalls::run_wide(None)).unwrap()
-        else {
+        let Output::TopK { series, .. } = topk_by(
+            &events,
+            &[KeyKind::Op],
+            "bytes",
+            10,
+            &Shortfalls::run_wide(None),
+        )
+        .unwrap() else {
             panic!("topk is a ranking");
         };
         let rows: Vec<(&str, f64)> = series
@@ -2282,7 +2284,12 @@ mod tests {
             rows,
             [("op:vfs_read", 7.0), ("op:vfs_write", 5.0), ("op:?", 1.0)]
         );
-        for key in [KeyKind::Level, KeyKind::Mapping, KeyKind::User, KeyKind::Counter] {
+        for key in [
+            KeyKind::Level,
+            KeyKind::Mapping,
+            KeyKind::User,
+            KeyKind::Counter,
+        ] {
             assert!(key.derived(), "{key}");
             assert_eq!(key.as_str().parse::<KeyKind>().unwrap(), key);
         }

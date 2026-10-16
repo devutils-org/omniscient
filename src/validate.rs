@@ -814,7 +814,8 @@ fn check_value(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection>
             .any(|emit| emit.kind() == EmitKind::Summary)
     {
         rejections.push(Rejection::with_hint(
-            "`--sum` adds attributes up beside a summary's value, and no summary is asked".to_owned(),
+            "`--sum` adds attributes up beside a summary's value, and no summary is asked"
+                .to_owned(),
             "add `-e summary`",
         ));
     }
@@ -1260,7 +1261,10 @@ mod tests {
     #[test]
     fn an_entry_offering_the_function_key_produces_stacks() {
         for entry in catalog().entries() {
-            for key in [crate::request::KeyKind::Func, crate::request::KeyKind::Within] {
+            for key in [
+                crate::request::KeyKind::Func,
+                crate::request::KeyKind::Within,
+            ] {
                 if entry.keys.contains(&key) {
                     assert!(
                         entry.emits.contains(&EmitKind::Stack),

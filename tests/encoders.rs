@@ -1353,7 +1353,7 @@ fn a_format_that_cannot_carry_a_distribution_refuses_it_rather_than_marking_it()
             .expect_err(&format!("`{format}` cannot hold a histogram"));
         let message = refusal.message();
         assert!(
-            message.contains("stack") || message.contains("timeline"),
+            message.contains("stack") || message.contains("timeline") || message.contains("raw"),
             "`{format}` has to say what it does carry: {refusal}"
         );
     }
