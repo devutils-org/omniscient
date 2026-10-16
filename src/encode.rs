@@ -1290,6 +1290,13 @@ fn text(results: &Results) -> String {
                             );
                         }
                     }
+                    if rate.unmeasured > 0 {
+                        let _ = writeln!(
+                            out,
+                            "    {:<14} and {} events that carried no value, in no total",
+                            "", rate.unmeasured
+                        );
+                    }
                 }
                 push_shortfall(&mut out, series.iter().find_map(|one| one.short.as_ref()));
             }
@@ -1343,6 +1350,13 @@ fn text(results: &Results) -> String {
                             "      +{:<10} {}",
                             Duration::from_nanos(round_to_ms(point.offset_ns)).to_string(),
                             quantity(point.value, results.unit)
+                        );
+                    }
+                    if series.unmeasured > 0 {
+                        let _ = writeln!(
+                            out,
+                            "      and {} events that carried no value, in no point",
+                            series.unmeasured
                         );
                     }
                 }
@@ -2717,6 +2731,7 @@ mod tests {
                                 value: 2_097_152.0,
                             },
                         ],
+                        unmeasured: 0,
                     }],
                 },
             ],
@@ -3760,6 +3775,7 @@ mod tests {
                     total,
                     per_second: Some(total / 2.0),
                     window_ns: 2_000_000_000,
+                    unmeasured: 0,
                     counted_window: true,
                     short: None,
                 }],
@@ -3796,6 +3812,7 @@ mod tests {
                         total: 900.0,
                         per_second: Some(900.0),
                         window_ns: 1_000_000_000,
+                        unmeasured: 0,
                         counted_window: false,
                         short: short.clone(),
                     }],

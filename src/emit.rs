@@ -393,6 +393,11 @@ pub struct SeriesRate {
     /// exist.
     pub per_second: Option<f64>,
     pub window_ns: u64,
+    /// Events that carried no value at all, left out of every other number
+    /// here and counted, as `summary` counts them: `power.freq` through
+    /// `pmu` on a cpu that never left idle used to refuse the whole run.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub unmeasured: usize,
     /// Set when `window_ns` is the counter's own enabled time rather than the
     /// run's: a counted source puts `enabled_ns` on its event, which is the
     /// window the counter measured -- for a per-task counter, the time the
@@ -415,6 +420,11 @@ pub struct SeriesRate {
 pub struct Series {
     pub key: SeriesKey,
     pub points: Vec<Point>,
+    /// Events that carried no value at all, left out of every other number
+    /// here and counted, as `summary` counts them: `power.freq` through
+    /// `pmu` on a cpu that never left idle used to refuse the whole run.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub unmeasured: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1286,15 +1296,6 @@ fn topk(
     topk_by(events, &[], attr, k, &Shortfalls::run_wide(short))
 }
 
-fn value_of(event: &Event, attr: &str) -> Result<f64, EmitError> {
-    event
-        .attr(attr)
-        .and_then(|value| value.as_f64())
-        .ok_or_else(|| EmitError::NotNumeric {
-            attr: attr.to_owned(),
-        })
-}
-
 /// An event's value, or `None` when it carries no value attribute at all.
 ///
 /// Absent and malformed are different answers. An event without the attribute
@@ -1322,13 +1323,22 @@ fn timeline_by(
     let mut series = Vec::new();
     for (key, events) in grouped(events, axes) {
         let mut points = Vec::with_capacity(events.len());
+        let mut unmeasured = 0;
         for event in events {
+            let Some(value) = measured(event, attr)? else {
+                unmeasured += 1;
+                continue;
+            };
             points.push(Point {
                 offset_ns: event.ts_ns.saturating_sub(first_ts_ns),
-                value: value_of(event, attr)?,
+                value,
             });
         }
-        series.push(Series { key, points });
+        series.push(Series {
+            key,
+            points,
+            unmeasured,
+        });
     }
     Ok(series)
 }
@@ -1342,12 +1352,14 @@ fn rate_by(
 ) -> Result<Vec<SeriesRate>, EmitError> {
     let mut rates = Vec::new();
     for (key, events) in grouped(events, axes) {
-        let total: f64 = events
-            .iter()
-            .map(|event| Ok(weighed(event, attr, value_of(event, attr)?)))
-            .collect::<Result<Vec<_>, EmitError>>()?
-            .iter()
-            .sum();
+        let mut total = 0.0;
+        let mut unmeasured = 0;
+        for event in &events {
+            match measured(event, attr)? {
+                Some(value) => total += weighed(event, attr, value),
+                None => unmeasured += 1,
+            }
+        }
         // A series of counted windows is over the time its counter was
         // enabled, when every one of them says; the run's window otherwise.
         let enabled: Option<u64> = events
@@ -1368,10 +1380,11 @@ fn rate_by(
         rates.push(SeriesRate {
             short: shorts.for_series(&key),
             key,
-            events: events.len(),
+            events: events.len() - unmeasured,
             total,
             per_second: seconds.map(|seconds| total / seconds),
             window_ns,
+            unmeasured,
             counted_window,
         });
     }
@@ -3365,6 +3378,14 @@ mod tests {
             (series[0].events, series[0].unmeasured, series[0].total),
             (2, 1, 32.0)
         );
+
+        // Timeline and rate leave it out and count it, as the others do: they
+        // used to refuse the run.
+        let timeline = &timeline(&events, 0, "bytes").unwrap()[0];
+        assert_eq!((timeline.points.len(), timeline.unmeasured), (2, 1));
+        let rate = &rate(&events, 2_000_000_000, "bytes", None).unwrap()[0];
+        assert_eq!((rate.events, rate.unmeasured, rate.total), (2, 1, 32.0));
+        assert_eq!(rate.per_second, Some(16.0));
 
         // A value that is there and is not a number is still a collector bug.
         let mut malformed = event(0, 1, 0);
