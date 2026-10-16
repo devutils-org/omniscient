@@ -2779,7 +2779,10 @@ fn every_cuda_call_the_program_made_is_one_event_nested_in_its_own_timing() {
     // since the twenty-fifth wave.
     for api in ["cuCtxCreate", "cuModuleLoadData"] {
         let seen = calls.iter().filter(|(name, _)| name == api).count();
-        assert_eq!(seen, 1, "the program called {api} once and the run reports {seen}");
+        assert_eq!(
+            seen, 1,
+            "the program called {api} once and the run reports {seen}"
+        );
     }
     assert_eq!(
         calls.len() as u64,

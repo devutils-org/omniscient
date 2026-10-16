@@ -277,7 +277,7 @@
   modes: [count, poll]
   emits: [rate, summary, timeline, raw]
   targets: {system: native, pid: bpf_only, tid: bpf_only, launch: bpf_only, cgroup: bpf_only}
-  keys: []
+  keys: [op]
   filter_fields: [op]
   determinism: medium
   caveats:
@@ -285,7 +285,8 @@
        each function's count is beside it under its name (`vfs_read`,
        `vfs_open`, `vfs_fsync_range`, ...). The aggregating emits answer with
        the total, `--filter 'op == \"vfs_open\"'` keeps one function, and
-       `raw` is the split."
+       `raw` is the split. `--keys op` makes each function an event of its
+       own instead, so `-m count -k op -e rate` is `vfsstat`'s columns as series."
     - "Any file type: a pipe's, a socket's or a terminal's read is a
        `vfs_read` too, which is what `vfsstat` counts and what `io.fs`
        (regular files only) leaves out. io_uring, sendfile, splice and a
