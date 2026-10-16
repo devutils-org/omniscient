@@ -413,7 +413,7 @@ fn container_complaints(catalog: &Catalog) -> Vec<String> {
 fn adds_up(unit: Unit) -> bool {
     match unit {
         Unit::Ns | Unit::Bytes | Unit::Count | Unit::Joules | Unit::Cycles => true,
-        Unit::Ratio | Unit::Hz | Unit::Watts | Unit::Celsius => false,
+        Unit::Ratio | Unit::Hz | Unit::Watts | Unit::Celsius | Unit::BytesPerSecond => false,
     }
 }
 
@@ -832,7 +832,7 @@ fn check_stack(
             .emit
             .iter()
             .any(|emit| emit.kind() == EmitKind::Stack)
-            && !crate::collect::gpu::DEVICE_STACKS.contains(&request.source.as_str())
+            && !entry.device_stacks()
         {
             report.push("no --stack given (or `auto`), so the resolver picks the best unwind mode this machine and this target serve, and says why it passed over the others");
         }

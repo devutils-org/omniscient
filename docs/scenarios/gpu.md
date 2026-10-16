@@ -1059,3 +1059,20 @@ with `processes` 1 while non-zero; `nvidia-smi pmon -s u` beside it printed
 share) it needs a request to name its value attribute, filed in
 `docs/fixes/w24-gpu.md`. Test:
 `a_launched_tree_s_engine_share_rides_beside_the_device_s`.
+
+## The twenty-fifth wave
+
+- **`gpu.throttle` drops the two shares a driver no longer defines.** On a
+  driver that answers "not supported" or "deprecated" for application clocks
+  (this RTX 2080 Ti on 615.78.08: "Not Supported"),
+  `below_application_clocks_ratio` and `below_base_clocks_ratio` read 0.996
+  at 1950 MHz; they are left out and a note names the driver's answer. The
+  idle board's `power_cap_ratio` of 1.0 is the driver's own: `nvidia-smi
+  dmon -s pv` prints `pviol` 100 and the "SW Power Capping" counter grew
+  0.99998 of a two-second wait.
+- **`gpu.pcie`** (`bytes_per_second`, a new unit): a host-to-device copy loop
+  that moved 13.12 GB/s by its own count read a median 14.13 GB/s received
+  and 1.21 GB/s sent; the bus's bytes include its headers.
+- **`gpu.api`** sees `cuMemsetD8`, `cuModuleLoadData`, `cuCtxCreate` and
+  NVTX's `nvtxRangePushA`/`nvtxRangePop`: a C program making 1, 3 and 37 of
+  the first three read exactly 1, 3 and 37.

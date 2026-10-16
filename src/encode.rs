@@ -1902,6 +1902,7 @@ fn round_to_ms(offset_ns: u64) -> u64 {
 fn quantity(value: f64, unit: Unit) -> String {
     match unit {
         Unit::Bytes => bytes(value),
+        Unit::BytesPerSecond => format!("{}/s", bytes(value)),
         // Not the exact-unit form `Duration` renders for round trips: that
         // picks the largest unit a value divides evenly into, so 6654000 ns
         // reads as `6654us` while 7021500 ns reads as `7021500ns` in the very
@@ -2345,6 +2346,7 @@ fn pprof_unit(unit: Unit) -> (&'static str, bool) {
         Unit::Watts => ("watts", false),
         Unit::Celsius => ("celsius", false),
         Unit::Cycles => ("cycles", false),
+        Unit::BytesPerSecond => ("bytes_per_second", false),
     }
 }
 

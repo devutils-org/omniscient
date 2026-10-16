@@ -1618,6 +1618,8 @@ fn unit_named_by(attr: &str) -> Unit {
     let name = attr.to_ascii_lowercase();
     if name == "ns" || name.ends_with("_ns") {
         Unit::Ns
+    } else if name.ends_with("bytes_per_second") {
+        Unit::BytesPerSecond
     } else if name.contains("bytes") {
         Unit::Bytes
     } else if name == "hz" || name.ends_with("_hz") {

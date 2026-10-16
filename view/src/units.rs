@@ -113,6 +113,7 @@ pub fn quantity(value: f64, unit: &str) -> String {
     match unit {
         "ns" => duration(value),
         "bytes" => bytes(value),
+        "bytes_per_second" => format!("{}/s", bytes(value)),
         "count" | "cycles" | "" => count(value),
         "ratio" => format!("{value:.3}"),
         "hz" => format!("{}Hz", count(value)),

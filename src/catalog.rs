@@ -76,9 +76,30 @@ pub struct Entry {
     pub determinism: Determinism,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub caveats: Vec<String>,
+    /// Whose stacks the `stack` emit carries: absent, the host's, unwound on
+    /// this machine in the mode `--stack` chooses; `device`, the device's
+    /// own call paths (`gpu.profile`'s kernel and its source lines), which no
+    /// host unwind mode applies to, so `--stack` has nothing to choose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stacks: Option<Stacks>,
+}
+
+/// Whose stacks a source's `stack` emit carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stacks {
+    /// The device's own: a GPU kernel's call paths, read by the vendor's
+    /// library, not unwound on the host.
+    Device,
 }
 
 impl Entry {
+    /// Whether the `stack` emit is the device's own call paths rather than
+    /// host stacks a `--stack` mode unwinds.
+    pub fn device_stacks(&self) -> bool {
+        self.stacks == Some(Stacks::Device)
+    }
+
     /// How this source supports a target kind, following the documented
     /// fallbacks: launching a program is following a pid tree, a container is a
     /// cgroup, a thread is a narrower pid.
@@ -524,6 +545,10 @@ pub enum Unit {
     /// on purpose: converting goes through a clock that moves with load and
     /// temperature, which is a number the hardware did not measure.
     Cycles,
+    /// A throughput the hardware reported as one, bytes over its own window:
+    /// a level, like watts, that a sum over readings makes nothing of
+    /// (`gpu.pcie`, whose cumulative counters wrap in a third of a second).
+    BytesPerSecond,
 }
 
 impl Unit {
@@ -538,6 +563,7 @@ impl Unit {
             Unit::Watts => "watts",
             Unit::Celsius => "celsius",
             Unit::Cycles => "cycles",
+            Unit::BytesPerSecond => "bytes_per_second",
         }
     }
 }
@@ -785,7 +811,7 @@ fn check_backend_units(entry: &Entry) -> Result<(), ParseError> {
     fn sums(unit: Unit) -> bool {
         match unit {
             Unit::Ns | Unit::Bytes | Unit::Count | Unit::Joules | Unit::Cycles => true,
-            Unit::Ratio | Unit::Hz | Unit::Watts | Unit::Celsius => false,
+            Unit::Ratio | Unit::Hz | Unit::Watts | Unit::Celsius | Unit::BytesPerSecond => false,
         }
     }
     for (rank, backend) in entry.backends.iter().enumerate() {
@@ -1401,7 +1427,7 @@ impl FromStr for Unit {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        const ALL: [Unit; 9] = [
+        const ALL: [Unit; 10] = [
             Unit::Ns,
             Unit::Bytes,
             Unit::Count,
@@ -1411,6 +1437,7 @@ impl FromStr for Unit {
             Unit::Watts,
             Unit::Celsius,
             Unit::Cycles,
+            Unit::BytesPerSecond,
         ];
         ALL.into_iter()
             .find(|unit| unit.as_str() == s.trim())
