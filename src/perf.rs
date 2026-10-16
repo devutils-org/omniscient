@@ -2831,7 +2831,16 @@ mod tests {
         let data_src = (u64::from(b::PERF_MEM_OP_LOAD) << b::PERF_MEM_OP_SHIFT)
             | (u64::from(b::PERF_MEM_LVLNUM_RAM) << b::PERF_MEM_LVLNUM_SHIFT);
         let mut body = vec![0u8; 8];
-        for word in [0x401000u64, (7u64 << 32) | 6, 1_000, 0, 5, 123_457, weight, data_src] {
+        for word in [
+            0x401000u64,
+            (7u64 << 32) | 6,
+            1_000,
+            0,
+            5,
+            123_457,
+            weight,
+            data_src,
+        ] {
             body.extend_from_slice(&word.to_ne_bytes());
         }
         let sample = decode_sample(&body, 0, spec.sample_type());

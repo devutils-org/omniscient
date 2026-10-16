@@ -863,7 +863,12 @@ mod tests {
     /// right denominator.
     #[test]
     fn a_scheduler_count_is_a_rate_over_the_run_not_over_its_time_on_cpu() {
-        let attrs = || vec![Attr::uint("count", 1000), Attr::uint("enabled_ns", 30_000_000)];
+        let attrs = || {
+            vec![
+                Attr::uint("count", 1000),
+                Attr::uint("enabled_ns", 30_000_000),
+            ]
+        };
         let mut switches = attrs();
         wall_window(spec("cpu.context_switches"), &mut switches);
         assert!(switches.iter().any(|attr| attr.name == "oncpu_ns"));

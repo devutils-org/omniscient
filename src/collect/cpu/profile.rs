@@ -102,6 +102,15 @@ const fn software(config: u32) -> (u32, u64) {
     (perf::PERF_TYPE_SOFTWARE, config as u64)
 }
 
+/// A `PERF_TYPE_HW_CACHE` event: which cache, which operation and which
+/// result, a byte each, as `perf list` spells `L1-dcache-load-misses`.
+const fn hw_cache(cache: u32, op: u32, result: u32) -> (u32, u64) {
+    (
+        perf::PERF_TYPE_HW_CACHE,
+        cache as u64 | (op as u64) << 8 | (result as u64) << 16,
+    )
+}
+
 const fn sampled(
     source: &'static str,
     backend: &'static str,
@@ -177,7 +186,64 @@ pub const SAMPLED: &[Sampled] = &[
         "context-switches",
         Weight::Adjusted,
     ),
+    // `mem.cache_*`'s `sample` mode: a profile on the miss, `perf record -e
+    // L1-dcache-load-misses`, where the loads beside it are what a counted
+    // window divides by and a profile has no use for.
+    sampled(
+        "mem.cache_l1",
+        "pmu",
+        hw_cache(
+            perf::PERF_COUNT_HW_CACHE_L1D,
+            perf::PERF_COUNT_HW_CACHE_OP_READ,
+            perf::PERF_COUNT_HW_CACHE_RESULT_MISS,
+        ),
+        "L1-dcache-load-misses",
+        Weight::Adjusted,
+    ),
+    sampled(
+        "mem.cache_llc",
+        "pmu",
+        hw_cache(
+            perf::PERF_COUNT_HW_CACHE_LL,
+            perf::PERF_COUNT_HW_CACHE_OP_READ,
+            perf::PERF_COUNT_HW_CACHE_RESULT_MISS,
+        ),
+        "LLC-load-misses",
+        Weight::Adjusted,
+    ),
+    sampled(
+        "mem.cache_llc",
+        "pmu:generic",
+        hardware(perf::PERF_COUNT_HW_CACHE_MISSES),
+        "cache-misses",
+        Weight::Adjusted,
+    ),
+    sampled(
+        "mem.cache_tlb",
+        "pmu",
+        hw_cache(
+            perf::PERF_COUNT_HW_CACHE_DTLB,
+            perf::PERF_COUNT_HW_CACHE_OP_READ,
+            perf::PERF_COUNT_HW_CACHE_RESULT_MISS,
+        ),
+        "dTLB-load-misses",
+        Weight::Adjusted,
+    ),
 ];
+
+/// A frame as the instruction it is at: `function+0xoff`, or the object and
+/// its offset for a frame nothing named, or the bare address.
+fn instruction(frame: &crate::stack::Frame) -> String {
+    match (&frame.symbol, &frame.module) {
+        (Some(symbol), _) => format!("{symbol}+{:#x}", frame.offset),
+        (None, Some(module)) => format!(
+            "{}+{:#x}",
+            module.rsplit('/').next().unwrap_or(module),
+            frame.offset
+        ),
+        (None, None) => format!("{:#x}", frame.addr),
+    }
+}
 
 /// The event a (source, backend) samples on, or nothing when this collector
 /// does not sample for it.
@@ -444,6 +510,10 @@ pub struct ProfileCollector {
     /// carry (`task:<tid>`), read at the task's first sample with a stack,
     /// while it is alive: after the run `/proc/<pid>/exe` is gone.
     executables: BTreeMap<String, String>,
+    /// The process of each sampled task with a stack, by the same key: its
+    /// unwinder's executable, re-read after an `execve`, is what the
+    /// provenance names, `executables` what was read first.
+    task_processes: BTreeMap<String, u32>,
     losses: Losses,
     /// Whether every thread of `pid` is followed rather than `pid` alone.
     whole_process: bool,
@@ -494,6 +564,7 @@ impl ProfileCollector {
             stack_ids: BTreeMap::new(),
             stack_origins: Vec::new(),
             executables: BTreeMap::new(),
+            task_processes: BTreeMap::new(),
             losses: Losses::default(),
             whole_process,
             sampled_tasks: BTreeSet::new(),
@@ -599,6 +670,7 @@ impl ProfileCollector {
         let stack_ids = &mut self.stack_ids;
         let stack_origins = &mut self.stack_origins;
         let executables = &mut self.executables;
+        let task_processes = &mut self.task_processes;
         let seen = &mut self.sampled_tasks;
         let processes = &mut self.processes;
         let map_reads = &mut self.map_reads;
@@ -653,8 +725,22 @@ impl ProfileCollector {
                             .record(&sample)
                     });
                     let stack = stack.flatten();
+                    // The leaf's instruction, for `--keys insn`: the frame the
+                    // sample's own ip is in, as `func+0xoff`.
+                    if let Some(leaf) = stack.and_then(|stack| {
+                        unwinders
+                            .get(&sample.pid)?
+                            .table()
+                            .get(stack)?
+                            .frames
+                            .first()
+                            .map(instruction)
+                    }) {
+                        attrs.push(Attr::text("insn", leaf));
+                    }
                     if stack.is_some() {
                         let task = KeyValue::task(sample.tid as i32).to_string();
+                        task_processes.entry(task.clone()).or_insert(sample.pid);
                         if let std::collections::btree_map::Entry::Vacant(slot) =
                             executables.entry(task)
                         {
@@ -966,10 +1052,26 @@ impl Collector for ProfileCollector {
                 Some((run_id as u64, stack.named_by_root_first()))
             })
             .collect();
+        // The unwinders' own: the perf map each read, with the file's device
+        // and inode, and the file each process executes as last read -- after
+        // an `execve` the new one.
+        let mut perf_maps: Vec<crate::stack::PerfMapFile> = self
+            .unwinders
+            .values()
+            .filter_map(Unwinder::perf_map_file)
+            .collect();
+        perf_maps.sort();
+        perf_maps.dedup();
+        let mut executables = self.executables.clone();
+        for (task, pid) in &self.task_processes {
+            if let Some(file) = self.unwinders.get(pid).and_then(Unwinder::executable) {
+                executables.insert(task.clone(), file.to_owned());
+            }
+        }
         crate::stack::Provenance {
             named_by,
-            perf_maps: Vec::new(),
-            executables: self.executables.clone(),
+            perf_maps,
+            executables,
         }
     }
 

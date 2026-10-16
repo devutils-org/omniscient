@@ -1264,10 +1264,15 @@ pub enum KeyKind {
     /// distinct function it was inside, so the rows add up to more than the
     /// run, and `main` holds nearly all of it.
     Within,
+    /// `insn:<func>+0x<off>`, the instruction a sample's leaf was at: `perf
+    /// annotate`'s attribution, a row per instruction of a hot function
+    /// (perfrecord 7). Read off the `insn` attribute the profile puts on a
+    /// sample with a stack; an unnamed leaf is its object and offset.
+    Insn,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 24] = [
+    pub const ALL: [KeyKind; 25] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -1292,6 +1297,7 @@ impl KeyKind {
         KeyKind::User,
         KeyKind::Counter,
         KeyKind::Within,
+        KeyKind::Insn,
     ];
 
     /// The keys no collector attaches and the emit layer derives from what
@@ -1307,6 +1313,7 @@ impl KeyKind {
                 | KeyKind::User
                 | KeyKind::Counter
                 | KeyKind::Within
+                | KeyKind::Insn
         )
     }
 
@@ -1336,6 +1343,7 @@ impl KeyKind {
             KeyKind::User => "user",
             KeyKind::Counter => "counter",
             KeyKind::Within => "within",
+            KeyKind::Insn => "insn",
         }
     }
 }

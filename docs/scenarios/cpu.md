@@ -190,7 +190,13 @@ Every counting source of the family samples on its own counter: `cpu.cycles
 sampled is `perf record -e branch-misses`. Cycles sample at a fixed period,
 the cpu's highest frequency over the rate, so the samples times the period are
 the cycles a counter beside them counted (held to 10 %); the others sample in
-the kernel's frequency mode, each sample weighing one, and say so. On the
+the kernel's frequency mode, each sample's `count` the period the kernel
+chose for it (`PERF_SAMPLE_PERIOD`), so their shares are perf's and their sum
+estimates the count: `cpu.instructions -m sample@997hz` summed 6.186 G where
+`-m count` read 6.191 G, and `mem.cache_l1`, sampled on its misses since the
+twenty-fifth wave, 40.33 M against 40.32 M. `--keys insn` names each sample's
+leaf instruction, `hot+0x5a`, at the instruction boundaries `objdump -d`
+prints. On the
 perfrecord `hot` workload a cycles profile read `hot_beta` 0.495, `hot_gamma`
 0.291, `hot_alpha` 0.200 against `perf record -e cycles`' 0.483, 0.306, 0.206.
 

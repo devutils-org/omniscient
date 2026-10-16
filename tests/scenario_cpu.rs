@@ -3442,45 +3442,45 @@ fn each_refusal_names_the_thing_that_is_missing() {
     }
 }
 
-/// A mode the catalog offers and this build does not serve exits 3, not 1.
+/// A backend the catalog offers and this build does not serve exits 3, not 1.
 ///
-/// `mem.cache_l1 -m sample` is a valid request -- the catalog declares the
-/// mode, the machine has the counter -- that this build cannot serve because
-/// no collector samples on a cache descriptor. That is the same statement as
-/// "no collector is written", and it now carries the same code. (It was
-/// `cpu.cycles -m sample` until the twenty-fourth wave, when the counting
-/// sources of this family came to sample on their own counters.)
+/// `cpu.profile`'s `pmu` row is the one left: a pointer to `cpu.cycles -m
+/// sample`, kept in the chain and never served. Pinned, it is a valid request
+/// this build cannot serve, the same statement as "no collector is written",
+/// with the same code. (It was `mem.cache_l1 -m sample` until the
+/// twenty-fifth wave, when the cache sources came to sample on their miss
+/// events, and `cpu.cycles -m sample` before the twenty-fourth.)
 ///
 /// It used to exit 1, which is what a caller reads as a run that went wrong,
 /// and that was defect 4 of `docs/scenarios/cpu.md`. What decides it is where
-/// the refusal is raised: this one comes out of the factory, which is a pure
-/// function of the resolved request, so nothing about this machine or this run
-/// can be involved in it.
+/// the refusal is raised: from the resolved request alone, so nothing about
+/// this machine or this run can be involved in it.
 #[test]
-fn a_mode_the_build_does_not_implement_exits_as_unimplemented() {
+fn a_backend_the_build_does_not_implement_exits_as_unimplemented() {
     let (code, message) = run(&[
-        "mem.cache_l1",
+        "cpu.profile",
         "-m",
         "sample@99hz",
         "-e",
         "raw",
+        "--backend",
+        "force:pmu",
         "--",
         "true",
     ])
     .refusal();
-    // The build's gap is reached only through a backend the machine offers.
     if withheld_here(&message) {
         eprintln!("skipped: {}", machine_s_reason(&message));
         return;
     }
     assert_eq!(
         code, 3,
-        "a mode no collector implements is this build's gap, not this run's failure: {message}"
+        "a backend no collector implements is this build's gap, not this run's failure: {message}"
     );
-    // The code is the half a script reads; the message is the half a person
-    // reads, and it has to name the mechanism and the way round it.
-    assert!(message.contains("sampling path"), "{message}");
-    assert!(message.contains("--mode count"), "{message}");
+    assert!(
+        message.contains("no collector is written for `cpu.profile` on backend `pmu`"),
+        "{message}"
+    );
 }
 
 /// A workload that goes to sleep a chosen number of times is taken off the cpu
