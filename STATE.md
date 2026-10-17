@@ -273,7 +273,7 @@ join what-released-the-block  sched.wakeup -> sched.offcpu  evidence WAKEUP
 | 6 — emit, aggregation, budget | **done but for one measurement**: the 2 M IOPS overhead of the in-kernel histogram. Run once before the seventeenth wave, it read 23.57 % (781 ns a request at 3.16 M IOPS); the wave gave the histogram its own program pair, whose cost is the coordinator's next `null_blk` run, and whether 1 % is the right criterion is open (`DECISIONS.md`). The eighteenth wave found why the program statistics read 0 runs (the block programs were closed at the stop, before the run read their account) and keeps them loaded until the close. Run after its merge: 11.54 %, 332 ns a request, of which the programs' own run time is most (298.5 ns a request with the statistics on, which add about 125); `tp_btf` is the next cut, and the criterion is still open. A kernel-built row's sum is its exact `total_ns` in every emit since the seventeenth wave. Since the sixteenth wave the budget's ladder steps from `trace` to `sample` on a collector that weighs its samples (`mem.faults` on `pmu:sw`), held to the task's own fault count across the move, and weighs the target in nanoseconds. Every emit exists, and every declared output format has an encoder — `folded`, `speedscope`, `pprof` and `chrome` included. A run measures its own cpu against the target's and is held to `--budget`, degrading or stopping and saying which. And since the tenth wave, **hot attach**: a request carries a `window` inside the run, attached and detached while the rest keep running, and two sources attached for one phase each of a program count that phase within +0.17 % and nothing of the other. Three edges are filed with the files that own them: the join engine credits events after a detach to a stale state, the results document does not yet say where a window was, and a per-task counter attached late to a program that already has threads counts one of them. |
 | 7 — declarative configuration | **done**, every criterion: since the sixteenth wave's sweep every gap between two fresh matrix cells is explained by their resolved records. Sessions in YAML, JSON and TOML; a dumped request reads back unchanged; the resolved file is written beside the results. |
 | 8 — self-benchmark | **done**; the second table ran before the seventeenth wave (68 minutes, its test green, 46 pairs flagged over their declared band, worst `io.fsync` through `bpf:fentry` at 142 %), and since the eighteenth wave the bands are corrected to it: 43 `cost:` lines moved, two stand with their reason, the table is recorded in `docs/bench.md` and `tests/bench_bands.rs` fails when a band and its row disagree. A table re-measured after the wave's fixes is the next run. Since the nineteenth wave the GPU tracers have a table of their own, per regime and against a negative control (`gpu.kernel` `extreme` from +67 % launch-bound, `gpu.api` `high`), held by `tests/bench_gpu.rs`. The harness has every task the phase lists, and it has measured: 94 (source, backend) pairs alone on this machine, every workload admitted by a gate that judges what a median resolves and refuses a busy machine (`docs/bench.md`). The resolver's seven choices between served backends were confirmed. What the table corrects is the cost bands: an in-kernel collector's cost is in the target's dilation, not the tool's cpu (`proc.syscall`: 0.42 % against +296 %), and the preload shim cost an allocation-bound program about 150 times -- two system calls a record -- until it was moved onto a shared ring, which brought a record to about 70 ns. Finding 47 files each. |
-| 9 — breadth | nearly done; **115 of 118 sources, 133 of 226 backends** since the twenty-fourth wave added sixteen sources (`cpu.branches`, `mem.system`, `mem.oom`, `io.util`, `io.vfs`, `net.snmp`, `net.sockets`, `net.tcp.accept`, `sched.interrupts`, `sched.runqueue`, `sched.slices`, `power.wakeups`, `gpu.mem_freq`, `gpu.throttle`, `proc.calls`, `proc.tasks`) and new backends to existing ones (`cpu.oncpu_time`'s task-clock, `power.freq`'s APERF/MPERF, `mem.numa`'s `fs:sys`, `mem.swap`'s counting kprobe). The three without a collector wait on hardware this machine lacks; the vendor library (CUPTI) was the nineteenth wave's. |
+| 9 — breadth | nearly done; **116 of 119 sources, 135 of 228 backends** since the twenty-fifth wave added `gpu.pcie` (`vendor:nvml`, in `bytes_per_second`) and the twenty-fourth sixteen sources (`cpu.branches`, `mem.system`, `mem.oom`, `io.util`, `io.vfs`, `net.snmp`, `net.sockets`, `net.tcp.accept`, `sched.interrupts`, `sched.runqueue`, `sched.slices`, `power.wakeups`, `gpu.mem_freq`, `gpu.throttle`, `proc.calls`, `proc.tasks`) and new backends to existing ones (`cpu.oncpu_time`'s task-clock, `power.freq`'s APERF/MPERF, `mem.numa`'s `fs:sys`, `mem.swap`'s counting kprobe). The three without a collector wait on hardware this machine lacks; the vendor library (CUPTI) was the nineteenth wave's. |
 | 10 — intelligence layer | **its first method is done by the engine**. TSA — where a thread's wall clock went — is what `examples/join-decompose-compute.yml` produces: three states, each row's kind and resolution, the program's life as the whole, and a residue inside its own resolution. Since the tenth wave the layer above it exists and calls the engine like any other user: the objective is required and refused when missing, `omn latency` names what dominates a run or its tail, `omn saturate` reads a queue by Little's law, and `omn diff` subtracts two profiles -- each checked against a workload whose limit the test chose. Since the eleventh wave **the escalation** closes it: a session's `escalate:` block attaches the layer the cheap pass names mid-run, detaches the rest and holds the budget; a program cpu-bound then lock-bound gets the lock layer 0.4 to 0.5 s after the switch (`docs/triage.md`). **Done.** Since the eighteenth wave `omn latency` follows a wait for a child into the child that ran during it and names the busiest other thread beside a block it ran in, asks `sched.mutex` only in a second pass, and takes `--symbols`. |
 | 11 — a model reads it | **done** (the twelfth wave): `omn-mcp`, an MCP server over stdio in the workspace, exposing the catalog, the runs a directory holds and this machine's sweep, as the documents themselves regrouped per request with what each is missing stated first. It probes nothing (the `omn` binary answers every machine question), and runs a session only when its operator allowed it, bounded, budgeted, and never one that launches a program (`docs/mcp.md`). What it filed: `omn list --format json` carrying the sweep, so the server stops parsing the text table. Since the fourteenth wave the use case runs end to end: an agent benchmarks a launched program through approved sessions and says what dominates its time, every number it is handed held to the run's files (`docs/mcp.md`, "The walk-through"). Since the eighteenth wave one privilege model: the capabilities are on `omn` alone and `omn-mcp` collects through it, shown on a `CAP_BPF` run; `run_session` takes an optional budget, says what a budget is a share of (`budget_against`) and hands back the program's stdout. |
 | 12 — programs nobody wrote for it | **started in the seventeenth wave**: a case is a directory (`cases/<name>/case.yml`, `docs/cases.md`), asked both ways by `tests/cases.rs`, `omn latency` and `omn-mcp`. Seven cases since the eighteenth wave brought `gcc-shell` back (`sqlite3-stripped`, `sqlite3-durability`, `cpython-interpreter`, `cpython-perf-map`, `http-server-stdlib`, `make-sqlite`, `gcc-shell`). The first suspect is the known cause, both ways, for every cause asked here, `make-sqlite`'s one-job cause in four runs of five; what still gets the cited numbers wrong (a job is a chain of processes, a thread that waits beside the main thread) is filed; since the twentieth wave the triage follows a thread blocked on a connection beside the block (`waiting`), carries the rest of a job (`followed.job`) and never names its own eBPF frames, shown on its own workloads and not yet on those cases. Four of six exit criteria met since the twenty-fourth wave followed `http-server-stdlib`'s slow client on the agent's way too (no case ends with a confident wrong suspect; and a seventh program is a directory, a stripped binary named from debuginfod both ways, and every case at paranoid 2: run after the merge, each cause answers as at -1 with the capabilities and skips both ways with the machine's reason without them, through the skip gate); `ROADMAP.md` says which are partly. |
@@ -1691,6 +1691,63 @@ regression in cost, **`omn trace`'s startup doubled** (37 to 86 ms of user
 cpu in the debug build), 45 % of it `emit::values_add_up` parsing the
 embedded catalog a second time. The decisions are in `DECISIONS.md`,
 "Settled in the twenty-fourth wave".
+
+**The twenty-fifth wave, where it stopped (2026-10-17).** Run one stream at a
+time, by hand, after the parallel run used up its budget. Seven of the
+eighteen streams of `BRIEF.md` are merged, each with its handoff
+(`docs/fixes/w25-<stream>.md`); the other eleven never started, and their
+items are still item 1's bullets below. The full suite was **not** run at
+the end: run it once, on a quiet machine, before the next wave.
+
+- **Merged**: **run** (a poll round that never ran counted beside its late
+  tick; `omn latency`/`saturate` exit 1 on `failures`; `Update::Described`
+  sent on every change; `Beside::capacity` written and read on replay, the
+  views' half included; the cpu after a window closed in the cost line;
+  the `--emit` and `--program-stderr` help), **emit** (`filter.rs` reads an
+  attribute named `kind` first; timeline and rate count a value-less event
+  as unmeasured; keys `op`, `level`, `mapping`, `user`, `counter`, `within`
+  -- the inclusive share -- read off attributes; `--value ATTR`; `--sum
+  ATTR` on a summary; `--format pcap`), **lazy** (the JSON listing's
+  `defaults` and per-backend `emits`; `omn-mcp` composing a family's
+  default; the band choosing the backend where the chain keeps it;
+  `net.tcp.lifetime` and `proc.tasks` in their defaults), **narrow** (the
+  fentry timed pairs follow a process target's children; reconciled at the
+  merge with origin's `fe847b9`, one descendants map a program), **cpu**
+  (`PERF_SAMPLE_PERIOD` weights; `cpu.context_switches -e rate` over the
+  run; kallsyms read beside the window; `perf_maps` and `executables` from
+  the unwinders; an `insn` key; `func`, `within`, `insn` on the sampling
+  sources; `mem.cache_*` sampled on their misses; the `pmu` row's and
+  `cpu.oncpu_time`'s caveats), **gpu** (`gpu.throttle`'s shares against
+  undefined application clocks left out; `bytes_per_second` and
+  `gpu.pcie`; entry-level `stacks: device`, `DEVICE_STACKS` gone; launch
+  facts as values; `cuMemsetD8`, `cuModuleLoadData`, `cuCtxCreate`, NVTX
+  ranges in `gpu.api`), **io** (`io.bytes`'s first interval from a stale
+  baseline; `io.vfs -k op`).
+- **Not started**: mem, heap, net, power, proc, sched, reference, views (but
+  `Beside::capacity`, done in run), triage, unwind, docs. Their lists are
+  `BRIEF.md`'s, unchanged. Found on the way, for them: mem's three "listed
+  usable, refused at the run" sources are already fixed on `main` (served or
+  refused with the reason here); `mem.oom`'s victim and a per-cache slab
+  need root here (`/dev/kmsg`, `/proc/slabinfo` and `/sys/kernel/slab` are
+  all root's); `mem.cache_*` want `func`, `within`, `insn` in their keys,
+  `mem.latency` `level`, `net.snmp` `counter`, and `net.capture` the
+  `header` hex (with `realtime_ns`) that `--format pcap` writes; `net.bytes`
+  on `fs:proc` may take its baseline as `io.bytes` did.
+- **Left by the merged streams** (their handoffs, "Not done"): the `object`
+  key (needs every frame's object from the unwinder); `omn list --format
+  toml` fails on a top-level array (it did before the wave); a
+  `kworker`-dispatched block request charged to the bio's submitter (a
+  `block_rq_insert` program nobody could load here); `net.tcp.accept`
+  following a launched tree; a CUPTI callback backend; `gpu.freq`'s three
+  clock calls stay three (the one combined call saves 4 % and drops the SM
+  clock, measured).
+- **Privileged runs these streams want** (this machine grants no CAP_BPF):
+  the starvation of a live `omn top`'s pollers, now counted
+  (`docs/fixes/w25-run.md`); `io.syscall` on a script's children against
+  `strace -f -c` (`w25-narrow.md`); `cpu.profile --pid`'s attach delay with
+  a kernel half (`w25-cpu.md`); `io.vfs -k op` against `vfsstat`
+  (`w25-io.md`); `--format pcap` through `tcpdump -r` once net fills
+  `header` (`w25-emit.md`).
 
 **After the twenty-fourth wave, in order:**
 

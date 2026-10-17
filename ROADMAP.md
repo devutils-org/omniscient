@@ -782,6 +782,10 @@ known hot loop first. The three left wait on hardware this machine lacks
 *Twentieth wave: 112 of 206 backends: `cpu.oncpu_time` through `bpf:raw_tp`
 on `sched_stat_runtime`, one row per thread, held exactly to each thread's
 `schedstat`.*
+*Twenty-fifth wave (seven of its eighteen streams merged, `STATE.md`): 116 of
+119 sources, 135 of 228 backends: `gpu.pcie` through `vendor:nvml`, in a new
+`bytes_per_second` unit, held to a host-to-device copy loop's own count
+(13.12 GB/s moved, 14.13 GB/s received on the bus, headers included).*
 
 ---
 
