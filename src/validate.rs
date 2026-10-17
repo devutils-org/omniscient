@@ -137,6 +137,7 @@ pub fn validate_request(
     check_keys(entry, request, &mut rejections);
     check_filter(entry, request, &mut rejections);
     check_ranking(entry, request, &mut rejections);
+    check_value(entry, request, &mut rejections);
     check_stack(entry, request, &mut rejections, &mut report);
     check_backend(entry, request, &mut rejections, &mut report);
     carry_caveats(entry, &mut report);
@@ -412,7 +413,7 @@ fn container_complaints(catalog: &Catalog) -> Vec<String> {
 fn adds_up(unit: Unit) -> bool {
     match unit {
         Unit::Ns | Unit::Bytes | Unit::Count | Unit::Joules | Unit::Cycles => true,
-        Unit::Ratio | Unit::Hz | Unit::Watts | Unit::Celsius => false,
+        Unit::Ratio | Unit::Hz | Unit::Watts | Unit::Celsius | Unit::BytesPerSecond => false,
     }
 }
 
@@ -775,6 +776,51 @@ fn check_ranking(entry: &Entry, request: &Request, rejections: &mut Vec<Rejectio
     }
 }
 
+/// `--value` and `--sum` name attributes the source declares, as a ranking
+/// by an attribute does; and `--sum` adds to a summary, so one is asked.
+fn check_value(entry: &Entry, request: &Request, rejections: &mut Vec<Rejection>) {
+    let named = request
+        .value
+        .iter()
+        .map(|name| ("--value", name))
+        .chain(request.sum.iter().map(|name| ("--sum", name)));
+    for (flag, name) in named {
+        if entry.filter_fields.iter().any(|known| known == name) {
+            continue;
+        }
+        let suggestion = nearest(name, entry.filter_fields.iter().map(String::as_str));
+        let hint = if entry.filter_fields.is_empty() {
+            format!("`{}` declares no attribute beside its value", entry.id)
+        } else {
+            format!(
+                "`{}` declares {}",
+                entry.id,
+                one_of(entry.filter_fields.iter().map(String::as_str))
+            )
+        };
+        rejections.push(Rejection::with_hint(
+            format!(
+                "`{flag} {name}` names an attribute `{}` does not declare{}",
+                entry.id,
+                DidYouMean(suggestion)
+            ),
+            hint,
+        ));
+    }
+    if !request.sum.is_empty()
+        && !request
+            .emit
+            .iter()
+            .any(|emit| emit.kind() == EmitKind::Summary)
+    {
+        rejections.push(Rejection::with_hint(
+            "`--sum` adds attributes up beside a summary's value, and no summary is asked"
+                .to_owned(),
+            "add `-e summary`",
+        ));
+    }
+}
+
 fn check_stack(
     entry: &Entry,
     request: &Request,
@@ -786,7 +832,7 @@ fn check_stack(
             .emit
             .iter()
             .any(|emit| emit.kind() == EmitKind::Stack)
-            && !crate::collect::gpu::DEVICE_STACKS.contains(&request.source.as_str())
+            && !entry.device_stacks()
         {
             report.push("no --stack given (or `auto`), so the resolver picks the best unwind mode this machine and this target serve, and says why it passed over the others");
         }
@@ -807,6 +853,12 @@ fn check_stack(
             rejections.push(Rejection::with_hint(
                 "`--keys func` with `--stack none` names each sample by the leaf frame of a stack it forbids unwinding",
                 "drop --stack none, or key by something other than func",
+            ));
+        }
+        if request.keys.contains(&crate::request::KeyKind::Within) {
+            rejections.push(Rejection::with_hint(
+                "`--keys within` with `--stack none` charges each sample to the functions of a stack it forbids unwinding",
+                "drop --stack none, or key by something other than within",
             ));
         }
         return;
@@ -946,6 +998,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         }
     }
 
@@ -1207,12 +1261,17 @@ mod tests {
     #[test]
     fn an_entry_offering_the_function_key_produces_stacks() {
         for entry in catalog().entries() {
-            if entry.keys.contains(&crate::request::KeyKind::Func) {
-                assert!(
-                    entry.emits.contains(&EmitKind::Stack),
-                    "`{}` offers `func` and emits no stack",
-                    entry.id
-                );
+            for key in [
+                crate::request::KeyKind::Func,
+                crate::request::KeyKind::Within,
+            ] {
+                if entry.keys.contains(&key) {
+                    assert!(
+                        entry.emits.contains(&EmitKind::Stack),
+                        "`{}` offers `{key}` and emits no stack",
+                        entry.id
+                    );
+                }
             }
         }
     }

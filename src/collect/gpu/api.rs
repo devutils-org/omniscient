@@ -38,6 +38,11 @@ pub const ENTRY_POINTS: &[&str] = &[
     "vkDeviceWaitIdle",
     "vkWaitForFences",
     "vkQueuePresentKHR",
+    "cuMemsetD8_v2",
+    "cuModuleLoadData",
+    "cuCtxCreate_v2",
+    "nvtxRangePushA",
+    "nvtxRangePop",
 ];
 
 /// The name a user filters on: the entry point without the ABI suffix `cuda.h`
@@ -99,6 +104,8 @@ impl ApiCollector {
                 "family",
                 if api.starts_with("vk") {
                     "vulkan"
+                } else if api.starts_with("nvtx") {
+                    "nvtx"
                 } else {
                     "cuda"
                 },
@@ -184,11 +191,13 @@ mod tests {
     /// thing naming a call.
     #[test]
     fn the_entry_points_are_in_the_order_the_shim_sends_them() {
-        assert_eq!(ENTRY_POINTS.len(), 16);
+        assert_eq!(ENTRY_POINTS.len(), 21);
         assert_eq!(ENTRY_POINTS[0], "cuLaunchKernel");
         assert_eq!(ENTRY_POINTS[5], "cuCtxSynchronize");
         assert_eq!(ENTRY_POINTS[10], "vkQueueSubmit");
         assert_eq!(ENTRY_POINTS[15], "vkQueuePresentKHR");
+        assert_eq!(ENTRY_POINTS[16], "cuMemsetD8_v2");
+        assert_eq!(ENTRY_POINTS[20], "nvtxRangePop");
     }
 
     #[test]

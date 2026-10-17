@@ -1064,7 +1064,7 @@ fn asking_for_stacks_costs_the_stacks_and_not_the_kernels_symbol_table() {
         best
     };
 
-    let sleeper = ["--", "/usr/bin/sleep", "0.2"];
+    let sleeper = ["--", "sleep", "0.2"];
     let mut raw = vec!["sched.offcpu", "--emit", "raw"];
     raw.extend(sleeper);
     let mut stacks = vec!["sched.offcpu", "--emit", "stack"];
@@ -1814,11 +1814,11 @@ fn a_request_that_cannot_mean_anything_is_refused_by_name() {
 fn an_under_specified_request_is_rejected_rather_than_failed() {
     let under_specified: [(&[&str], &str); 3] = [
         (
-            &["sched.switches", "--emit", "summary", "--", "/bin/true"],
+            &["sched.switches", "--emit", "summary", "--", "true"],
             "needs --mode",
         ),
         (
-            &["sched.switches", "--mode", "trace", "--", "/bin/true"],
+            &["sched.switches", "--mode", "trace", "--", "true"],
             "without an emit",
         ),
         (
@@ -3904,7 +3904,7 @@ fn a_mutex_request_the_shim_cannot_serve_is_refused_by_name() {
         "--emit",
         "stack",
         "--",
-        "/bin/true",
+        "true",
     ]);
     let text = spoken(&stacks);
     assert_eq!(exit_code(&stacks), 3, "{text}");

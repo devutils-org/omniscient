@@ -2569,8 +2569,10 @@ fn a_profile_costs_its_window_and_not_a_fixed_second() {
 /// the unit tests of `src/collect/cpu/counters.rs`.
 #[test]
 fn a_counter_over_a_target_that_never_ran_says_that_is_what_happened() {
-    let Ok(mut asleep) = Command::new("/bin/sleep").arg("5").spawn() else {
-        eprintln!("skipped: this machine has no `/bin/sleep`, so nothing here is idle on purpose");
+    let Ok(mut asleep) = Command::new("sleep").arg("5").spawn() else {
+        eprintln!(
+            "skipped: this machine has no `sleep` on PATH, so nothing here is idle on purpose"
+        );
         return;
     };
     let pid = asleep.id().to_string();
@@ -3236,11 +3238,11 @@ fn each_refusal_names_the_thing_that_is_missing() {
     // The request, the exit code, and what the message has to contain.
     let rejections: [(&[&str], &str); 7] = [
         (
-            &["cpu.ipc", "-m", "count", "-e", "hist", "--", "/bin/true"],
+            &["cpu.ipc", "-m", "count", "-e", "hist", "--", "true"],
             "cannot emit `hist`",
         ),
         (
-            &["cpu.profile", "-m", "count", "-e", "raw", "--", "/bin/true"],
+            &["cpu.profile", "-m", "count", "-e", "raw", "--", "true"],
             "cannot be observed in `count` mode",
         ),
         (
@@ -3288,7 +3290,7 @@ fn each_refusal_names_the_thing_that_is_missing() {
                 "--filter",
                 "nope == 1",
                 "--",
-                "/bin/true",
+                "true",
             ],
             "has no field `nope`",
         ),
@@ -3302,7 +3304,7 @@ fn each_refusal_names_the_thing_that_is_missing() {
                 "-k",
                 "mem",
                 "--",
-                "/bin/true",
+                "true",
             ],
             "does not carry the `mem` key",
         ),
@@ -3336,11 +3338,11 @@ fn each_refusal_names_the_thing_that_is_missing() {
     // Both are legitimate requests that another machine runs.
     let unserved: [(&[&str], &str); 2] = [
         (
-            &["cpu.topdown", "-m", "count", "-e", "raw", "--", "/bin/true"],
+            &["cpu.topdown", "-m", "count", "-e", "raw", "--", "true"],
             "slots",
         ),
         (
-            &["cpu.flow", "-m", "trace", "-e", "raw", "--", "/bin/true"],
+            &["cpu.flow", "-m", "trace", "-e", "raw", "--", "true"],
             "intel_pt",
         ),
     ];
@@ -3440,45 +3442,45 @@ fn each_refusal_names_the_thing_that_is_missing() {
     }
 }
 
-/// A mode the catalog offers and this build does not serve exits 3, not 1.
+/// A backend the catalog offers and this build does not serve exits 3, not 1.
 ///
-/// `mem.cache_l1 -m sample` is a valid request -- the catalog declares the
-/// mode, the machine has the counter -- that this build cannot serve because
-/// no collector samples on a cache descriptor. That is the same statement as
-/// "no collector is written", and it now carries the same code. (It was
-/// `cpu.cycles -m sample` until the twenty-fourth wave, when the counting
-/// sources of this family came to sample on their own counters.)
+/// `cpu.profile`'s `pmu` row is the one left: a pointer to `cpu.cycles -m
+/// sample`, kept in the chain and never served. Pinned, it is a valid request
+/// this build cannot serve, the same statement as "no collector is written",
+/// with the same code. (It was `mem.cache_l1 -m sample` until the
+/// twenty-fifth wave, when the cache sources came to sample on their miss
+/// events, and `cpu.cycles -m sample` before the twenty-fourth.)
 ///
 /// It used to exit 1, which is what a caller reads as a run that went wrong,
 /// and that was defect 4 of `docs/scenarios/cpu.md`. What decides it is where
-/// the refusal is raised: this one comes out of the factory, which is a pure
-/// function of the resolved request, so nothing about this machine or this run
-/// can be involved in it.
+/// the refusal is raised: from the resolved request alone, so nothing about
+/// this machine or this run can be involved in it.
 #[test]
-fn a_mode_the_build_does_not_implement_exits_as_unimplemented() {
+fn a_backend_the_build_does_not_implement_exits_as_unimplemented() {
     let (code, message) = run(&[
-        "mem.cache_l1",
+        "cpu.profile",
         "-m",
         "sample@99hz",
         "-e",
         "raw",
+        "--backend",
+        "force:pmu",
         "--",
-        "/bin/true",
+        "true",
     ])
     .refusal();
-    // The build's gap is reached only through a backend the machine offers.
     if withheld_here(&message) {
         eprintln!("skipped: {}", machine_s_reason(&message));
         return;
     }
     assert_eq!(
         code, 3,
-        "a mode no collector implements is this build's gap, not this run's failure: {message}"
+        "a backend no collector implements is this build's gap, not this run's failure: {message}"
     );
-    // The code is the half a script reads; the message is the half a person
-    // reads, and it has to name the mechanism and the way round it.
-    assert!(message.contains("sampling path"), "{message}");
-    assert!(message.contains("--mode count"), "{message}");
+    assert!(
+        message.contains("no collector is written for `cpu.profile` on backend `pmu`"),
+        "{message}"
+    );
 }
 
 /// A workload that goes to sleep a chosen number of times is taken off the cpu

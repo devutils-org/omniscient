@@ -446,6 +446,8 @@ fn try_resolved(
         backend: None,
         label: None,
         window: None,
+        value: None,
+        sum: Vec::new(),
     };
     omn::resolve::resolve(&catalog, &capabilities, &request)
 }

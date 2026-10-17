@@ -13,7 +13,7 @@
   modes: [count, poll, sample]
   emits: [summary, timeline, rate, hist, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
-  keys: [task, cgroup, cpu]
+  keys: [task, cgroup, cpu, func, within, insn]
   filter_fields: [comm, cpu]
   determinism: medium
   caveats:
@@ -25,8 +25,9 @@
        below its highest. A share of cycles, not of time: `cpu.profile` is the
        on-cpu time profile. Every counting source of this family samples the
        same way on its own counter (`perf record -e <event>`), in the kernel's
-       frequency mode where a fixed period has no natural unit, each sample
-       weighing one."
+       frequency mode where a fixed period has no natural unit, each sample's
+       `count` the period the kernel chose for it (`PERF_SAMPLE_PERIOD`), so
+       its shares are perf's."
 
 - id: cpu.instructions
   family: cpu
@@ -37,7 +38,7 @@
   modes: [count, poll, sample]
   emits: [summary, timeline, rate, hist, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
-  keys: [task, cgroup, cpu]
+  keys: [task, cgroup, cpu, func, within, insn]
   filter_fields: [comm, cpu]
   determinism: high
   caveats:
@@ -74,7 +75,7 @@
   modes: [count, poll, sample]
   emits: [summary, timeline, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
-  keys: [task, cgroup, cpu]
+  keys: [task, cgroup, cpu, func, within, insn]
   filter_fields: [comm, cpu]
   determinism: medium
 
@@ -87,7 +88,7 @@
   modes: [count, poll, sample]
   emits: [summary, timeline, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
-  keys: [task, cgroup, cpu]
+  keys: [task, cgroup, cpu, func, within, insn]
   filter_fields: [comm, cpu]
   determinism: high
   caveats:
@@ -104,7 +105,7 @@
   modes: [count, poll, sample]
   emits: [summary, timeline, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
-  keys: [task, cgroup, cpu]
+  keys: [task, cgroup, cpu, func, within, insn]
   filter_fields: [comm, cpu]
   determinism: low
 
@@ -148,7 +149,7 @@
   modes: [sample]
   emits: [stack, topk, hist, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
-  keys: [task, cgroup, cpu]
+  keys: [task, cgroup, cpu, func, within, insn]
   filter_fields: [comm, cpu]
   determinism: low
   caveats:
@@ -161,9 +162,10 @@
        spent in the kernel is not sampled at all."
     - "Each sample carries its thread as the `task` key, its process as `pid`
        and the thread's name as `comm`, read from `/proc` at a bounded rate.
-       A cycles profile is `cpu.cycles -m sample -e stack`; the `pmu` row
-       here has no collector, because a sample of this source is a period of
-       on-cpu time that `omn latency` and `omn diff` read as nanoseconds."
+       The `pmu` row is a pointer, kept on purpose and never served: a cycles
+       profile is `cpu.cycles -m sample -e stack`, which samples `cycles` and
+       says so, while a sample of this source is a period of on-cpu time that
+       `omn latency` and `omn diff` read as nanoseconds."
     - "A time-based sample counts the time the task held its cpu, including the
        interrupts that ran on it meanwhile, and at high rates those interrupts
        are this profile's own. The kernel's own on-cpu figure leaves interrupt
@@ -215,12 +217,11 @@
        in `/proc/<pid>/stat` are its own threads', so what a launched program
        starts -- a shell's commands, a build driver's compilers -- is in no
        reading; their time reaches the parent's `cutime` only as it waits for
-       them, and this backend does not read it. And a launched program is
-       reaped before the run's closing read, so its cpu since the last poll,
-       up to one interval, is in no reading either; the run counts it in its
-       losses, as one failed read with that reason. The program's exit in the
-       results carries the exact total, `cpu_ns`, from the reap (`wait4`),
-       its waited-for children included."
+       them, and this backend does not read it. A launched program is reaped
+       after the run's closing read, so its last interval is read from its
+       zombie's `stat`, and the polls add up to the reap's figure to a tick.
+       The program's exit in the results carries the exact total, `cpu_ns`,
+       from the reap (`wait4`), its waited-for children included."
     - "`-m count` is `perf stat`'s task-clock, through `pmu:sw`: the
        nanoseconds the target's threads held a cpu by the scheduler's clock,
        one total under `count` (`counter=task_clock_ns`), inherited by the
@@ -235,7 +236,7 @@
   modes: [count, poll, sample]
   emits: [summary, timeline, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
-  keys: [task, cgroup, cpu]
+  keys: [task, cgroup, cpu, func, within, insn]
   filter_fields: [comm, cpu]
   determinism: low
   caveats:

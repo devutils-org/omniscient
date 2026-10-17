@@ -2775,12 +2775,21 @@ fn every_cuda_call_the_program_made_is_one_event_nested_in_its_own_timing() {
         matches_the_fixture(&calls, &said, api);
     }
     assert_eq!((launches, syncs), (CUDA_LAUNCHES, CUDA_LAUNCHES));
+    // The context's creation and the module's load, once each, interposed
+    // since the twenty-fifth wave.
+    for api in ["cuCtxCreate", "cuModuleLoadData"] {
+        let seen = calls.iter().filter(|(name, _)| name == api).count();
+        assert_eq!(
+            seen, 1,
+            "the program called {api} once and the run reports {seen}"
+        );
+    }
     assert_eq!(
         calls.len() as u64,
-        2 * CUDA_LAUNCHES + 3,
+        2 * CUDA_LAUNCHES + 5,
         "the program made {} calls into interposed entry points and nothing else, and the run \
          reports {}: the driver calling its own exported symbols would look like this",
-        2 * CUDA_LAUNCHES + 3,
+        2 * CUDA_LAUNCHES + 5,
         calls.len()
     );
     let (mean_launch, mean_sync) = (launched_ns / launches, synced_ns / syncs);

@@ -68,6 +68,8 @@ fn request(source: &str, target: Target) -> Request {
         backend: None,
         label: None,
         window: None,
+        value: None,
+        sum: Vec::new(),
     }
 }
 

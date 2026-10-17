@@ -126,10 +126,13 @@ pub enum OutputFormat {
     Pprof,
     /// Chrome Trace Event Format, read by Perfetto UI and chrome://tracing.
     ChromeTrace,
+    /// A pcap capture file (nanosecond timestamps), read by tcpdump -r,
+    /// Wireshark and tshark: the frames' captured header bytes.
+    Pcap,
 }
 
 impl OutputFormat {
-    pub const ALL: [OutputFormat; 9] = [
+    pub const ALL: [OutputFormat; 10] = [
         OutputFormat::Text,
         OutputFormat::Json,
         OutputFormat::Yaml,
@@ -139,6 +142,7 @@ impl OutputFormat {
         OutputFormat::Speedscope,
         OutputFormat::Pprof,
         OutputFormat::ChromeTrace,
+        OutputFormat::Pcap,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -152,6 +156,7 @@ impl OutputFormat {
             OutputFormat::Speedscope => "speedscope",
             OutputFormat::Pprof => "pprof",
             OutputFormat::ChromeTrace => "chrome",
+            OutputFormat::Pcap => "pcap",
         }
     }
 
@@ -167,6 +172,9 @@ impl OutputFormat {
             OutputFormat::Speedscope => "speedscope JSON, sampled profiles and evented timelines",
             OutputFormat::Pprof => "gzipped profile.proto, for pprof and Parca",
             OutputFormat::ChromeTrace => "Chrome Trace Event Format, for Perfetto UI",
+            OutputFormat::Pcap => {
+                "pcap capture of the frames' headers, for tcpdump -r and Wireshark"
+            }
         }
     }
 
@@ -193,6 +201,7 @@ impl OutputFormat {
             OutputFormat::Folded | OutputFormat::Pprof => emit == EmitKind::Stack,
             OutputFormat::Speedscope => matches!(emit, EmitKind::Stack | EmitKind::Timeline),
             OutputFormat::ChromeTrace => matches!(emit, EmitKind::Timeline | EmitKind::Raw),
+            OutputFormat::Pcap => emit == EmitKind::Raw,
         }
     }
 
@@ -237,6 +246,10 @@ impl OutputFormat {
             // former's aggregate and `chrome` the latter's series; neither
             // needed a new collector, only a wire format.
             OutputFormat::Pprof | OutputFormat::ChromeTrace => FormatStatus::Ready,
+            // The wire format is written; the frames' bytes are net.capture's
+            // `header` attribute, and a run without it is refused by the
+            // encoder with that reason.
+            OutputFormat::Pcap => FormatStatus::Ready,
         }
     }
 
@@ -258,12 +271,12 @@ impl OutputFormat {
 
     /// Whether the encoder produces bytes that are not text.
     ///
-    /// Only `pprof` is: a gzipped protobuf is not a `String` and cannot be
-    /// printed through one. Everything else this tool writes is UTF-8, which is
+    /// `pprof` and `pcap` are: a gzipped protobuf or a capture file is not a
+    /// `String` and cannot be printed through one. Everything else this tool writes is UTF-8, which is
     /// why the encoder's ordinary entry point returns text and the binary one
     /// has to be asked for by name.
     pub fn is_binary(self) -> bool {
-        matches!(self, OutputFormat::Pprof)
+        matches!(self, OutputFormat::Pprof | OutputFormat::Pcap)
     }
 
     pub fn serialize_document<T: Serialize>(self, value: &T) -> Result<String, ParseError> {
@@ -391,12 +404,10 @@ mod tests {
     /// distinction has to be askable rather than inferred from the name: a
     /// caller that prints a `String` has no way to notice it is holding gzip.
     #[test]
-    fn only_the_gzipped_protobuf_is_binary() {
-        assert!(OutputFormat::Pprof.is_binary());
+    fn only_the_gzipped_protobuf_and_the_capture_are_binary() {
+        let binary = [OutputFormat::Pprof, OutputFormat::Pcap];
         for format in OutputFormat::ALL {
-            if format != OutputFormat::Pprof {
-                assert!(!format.is_binary(), "`{format}` is not gzip");
-            }
+            assert_eq!(format.is_binary(), binary.contains(&format), "`{format}`");
         }
     }
 

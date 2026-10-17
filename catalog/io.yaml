@@ -277,7 +277,7 @@
   modes: [count, poll]
   emits: [rate, summary, timeline, raw]
   targets: {system: native, pid: bpf_only, tid: bpf_only, launch: bpf_only, cgroup: bpf_only}
-  keys: []
+  keys: [op]
   filter_fields: [op]
   determinism: medium
   caveats:
@@ -285,7 +285,8 @@
        each function's count is beside it under its name (`vfs_read`,
        `vfs_open`, `vfs_fsync_range`, ...). The aggregating emits answer with
        the total, `--filter 'op == \"vfs_open\"'` keeps one function, and
-       `raw` is the split."
+       `raw` is the split. `--keys op` makes each function an event of its
+       own instead, so `-m count -k op -e rate` is `vfsstat`'s columns as series."
     - "Any file type: a pipe's, a socket's or a terminal's read is a
        `vfs_read` too, which is what `vfsstat` counts and what `io.fs`
        (regular files only) leaves out. io_uring, sendfile, splice and a
@@ -323,9 +324,10 @@
   filter_fields: [comm, fd, bytes, op, syscall]
   determinism: low
   caveats:
-    - "A process target and the processes it starts are followed from the
-       fork, as the `sched` sources follow them: a launched script's calls are
-       its programs' too."
+    - "A --pid or launched target follows the processes it starts, from
+       their fork, as `io.fsync` and the sched sources do: `omn io --
+       ./script.sh` counts its `dd`s' calls, and a `--pid` target's children
+       already running are read from /proc when the run attaches."
     - "An event is a histogram row, not a call: `count` says how many calls it
        stands for and `lat_ns` is the low bound of their log2 bucket. The exact
        total is `total_ns`."
@@ -353,9 +355,10 @@
   filter_fields: [comm, dev, ino, bytes, fs, op]
   determinism: low
   caveats:
-    - "A process target and the processes it starts are followed from the
-       fork, as the `sched` sources follow them: a launched script's calls are
-       its programs' too."
+    - "A --pid or launched target follows the processes it starts, from
+       their fork, as `io.fsync` and the sched sources do: `omn io --
+       ./script.sh` counts its `dd`s' calls, and a `--pid` target's children
+       already running are read from /proc when the run attaches."
     - "Regular files only. vfs_read also serves pipes, sockets and terminals,
        and a reader blocked on an empty pipe is not filesystem latency; that
        wait is in io.syscall and not here."

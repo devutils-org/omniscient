@@ -424,12 +424,27 @@ impl Server {
     }
 
     fn plan_session(&self, arguments: &Value) -> Result<Value, String> {
+        let (source, composed) = self.source(arguments)?;
+        let mut answer =
+            session::plan(&self.catalog, &self.binary, &source, self.launch_allowed())?;
+        if let Some(notes) = composed {
+            answer["composed"] = json!(notes);
+        }
+        Ok(answer)
+    }
+
+    /// The session a call names: a family's default composed, or a file, a
+    /// text or an approved session.
+    fn source(&self, arguments: &Value) -> Result<(Source, Option<Vec<String>>), String> {
+        if let Some((source, notes)) = session::composed(&self.catalog, arguments)? {
+            return Ok((source, Some(notes)));
+        }
         let source = Source::from_arguments(
             arguments,
             &std::env::current_dir().unwrap_or_default(),
             self.config.allow_launch.as_deref(),
         )?;
-        session::plan(&self.catalog, &self.binary, &source, self.launch_allowed())
+        Ok((source, None))
     }
 
     /// Whether an approved session may launch its program here.
@@ -495,11 +510,7 @@ impl Server {
                 ))
             }
         };
-        let source = Source::from_arguments(
-            arguments,
-            &std::env::current_dir().unwrap_or_default(),
-            self.config.allow_launch.as_deref(),
-        )?;
+        let (source, _) = self.source(arguments)?;
         self.runs_started += 1;
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -690,6 +701,27 @@ fn session_properties() -> Value {
         "approved": {
             "type": "string",
             "description": "One of the approved sessions, by the name `list_approved` gives it: a file of the directory the server was started with --allow-launch. The only kind of session that may launch a program",
+        },
+        "family": {
+            "type": "string",
+            "description": "In place of a session: a family (`cpu`, `io`, ...), whose default is composed as `omn trace <family>` composes it, the band by `cost`. The answer's `composed` says what it decided, and `catalog` with `family` lists the sources to choose from instead",
+        },
+        "cost": {
+            "type": "string",
+            "enum": ["low", "med", "high"],
+            "description": "Beside `family`: the band of its default; the cheapest it has when absent",
+        },
+        "pid": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": "Beside `family`: the processes to target",
+        },
+        "cgroup": {"type": "string", "description": "Beside `family`: a cgroup v2 path to target"},
+        "system": {"type": "boolean", "description": "Beside `family`: the whole machine (give `duration`)"},
+        "program": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Beside `family`: a program to launch, for `plan_session`; `run_session` launches only approved sessions",
         },
     })
 }

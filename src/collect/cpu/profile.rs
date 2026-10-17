@@ -102,6 +102,15 @@ const fn software(config: u32) -> (u32, u64) {
     (perf::PERF_TYPE_SOFTWARE, config as u64)
 }
 
+/// A `PERF_TYPE_HW_CACHE` event: which cache, which operation and which
+/// result, a byte each, as `perf list` spells `L1-dcache-load-misses`.
+const fn hw_cache(cache: u32, op: u32, result: u32) -> (u32, u64) {
+    (
+        perf::PERF_TYPE_HW_CACHE,
+        cache as u64 | (op as u64) << 8 | (result as u64) << 16,
+    )
+}
+
 const fn sampled(
     source: &'static str,
     backend: &'static str,
@@ -177,7 +186,64 @@ pub const SAMPLED: &[Sampled] = &[
         "context-switches",
         Weight::Adjusted,
     ),
+    // `mem.cache_*`'s `sample` mode: a profile on the miss, `perf record -e
+    // L1-dcache-load-misses`, where the loads beside it are what a counted
+    // window divides by and a profile has no use for.
+    sampled(
+        "mem.cache_l1",
+        "pmu",
+        hw_cache(
+            perf::PERF_COUNT_HW_CACHE_L1D,
+            perf::PERF_COUNT_HW_CACHE_OP_READ,
+            perf::PERF_COUNT_HW_CACHE_RESULT_MISS,
+        ),
+        "L1-dcache-load-misses",
+        Weight::Adjusted,
+    ),
+    sampled(
+        "mem.cache_llc",
+        "pmu",
+        hw_cache(
+            perf::PERF_COUNT_HW_CACHE_LL,
+            perf::PERF_COUNT_HW_CACHE_OP_READ,
+            perf::PERF_COUNT_HW_CACHE_RESULT_MISS,
+        ),
+        "LLC-load-misses",
+        Weight::Adjusted,
+    ),
+    sampled(
+        "mem.cache_llc",
+        "pmu:generic",
+        hardware(perf::PERF_COUNT_HW_CACHE_MISSES),
+        "cache-misses",
+        Weight::Adjusted,
+    ),
+    sampled(
+        "mem.cache_tlb",
+        "pmu",
+        hw_cache(
+            perf::PERF_COUNT_HW_CACHE_DTLB,
+            perf::PERF_COUNT_HW_CACHE_OP_READ,
+            perf::PERF_COUNT_HW_CACHE_RESULT_MISS,
+        ),
+        "dTLB-load-misses",
+        Weight::Adjusted,
+    ),
 ];
+
+/// A frame as the instruction it is at: `function+0xoff`, or the object and
+/// its offset for a frame nothing named, or the bare address.
+fn instruction(frame: &crate::stack::Frame) -> String {
+    match (&frame.symbol, &frame.module) {
+        (Some(symbol), _) => format!("{symbol}+{:#x}", frame.offset),
+        (None, Some(module)) => format!(
+            "{}+{:#x}",
+            module.rsplit('/').next().unwrap_or(module),
+            frame.offset
+        ),
+        (None, None) => format!("{:#x}", frame.addr),
+    }
+}
 
 /// The event a (source, backend) samples on, or nothing when this collector
 /// does not sample for it.
@@ -444,6 +510,10 @@ pub struct ProfileCollector {
     /// carry (`task:<tid>`), read at the task's first sample with a stack,
     /// while it is alive: after the run `/proc/<pid>/exe` is gone.
     executables: BTreeMap<String, String>,
+    /// The process of each sampled task with a stack, by the same key: its
+    /// unwinder's executable, re-read after an `execve`, is what the
+    /// provenance names, `executables` what was read first.
+    task_processes: BTreeMap<String, u32>,
     losses: Losses,
     /// Whether every thread of `pid` is followed rather than `pid` alone.
     whole_process: bool,
@@ -494,6 +564,7 @@ impl ProfileCollector {
             stack_ids: BTreeMap::new(),
             stack_origins: Vec::new(),
             executables: BTreeMap::new(),
+            task_processes: BTreeMap::new(),
             losses: Losses::default(),
             whole_process,
             sampled_tasks: BTreeSet::new(),
@@ -599,6 +670,7 @@ impl ProfileCollector {
         let stack_ids = &mut self.stack_ids;
         let stack_origins = &mut self.stack_origins;
         let executables = &mut self.executables;
+        let task_processes = &mut self.task_processes;
         let seen = &mut self.sampled_tasks;
         let processes = &mut self.processes;
         let map_reads = &mut self.map_reads;
@@ -617,14 +689,21 @@ impl ProfileCollector {
                 Record::Sample(sample) => {
                     seen.insert(sample.tid as i32);
                     processes.insert(sample.pid);
+                    // A sample in the kernel's frequency mode stands for the
+                    // period it was taken at, which the kernel adjusts from
+                    // one to the next: weighed by it, a share is perf's, a
+                    // share of the event and not of the samples.
                     let mut attrs = vec![
-                        Attr::uint("count", 1),
+                        Attr::uint("count", sample.period.unwrap_or(1).max(1)),
                         Attr::uint("ip", sample.ip),
                         // The process beside the thread the key names, so a
                         // profile of a machine or a cgroup can be read per
                         // program without a join.
                         Attr::uint("pid", u64::from(sample.pid)),
                     ];
+                    if let Some(period) = sample.period {
+                        attrs.push(Attr::uint("period", period));
+                    }
                     if let Some(comm) = comms.get(sample.tid as i32) {
                         attrs.push(Attr::text("comm", comm));
                     }
@@ -646,8 +725,22 @@ impl ProfileCollector {
                             .record(&sample)
                     });
                     let stack = stack.flatten();
+                    // The leaf's instruction, for `--keys insn`: the frame the
+                    // sample's own ip is in, as `func+0xoff`.
+                    if let Some(leaf) = stack.and_then(|stack| {
+                        unwinders
+                            .get(&sample.pid)?
+                            .table()
+                            .get(stack)?
+                            .frames
+                            .first()
+                            .map(instruction)
+                    }) {
+                        attrs.push(Attr::text("insn", leaf));
+                    }
                     if stack.is_some() {
                         let task = KeyValue::task(sample.tid as i32).to_string();
+                        task_processes.entry(task.clone()).or_insert(sample.pid);
                         if let std::collections::btree_map::Entry::Vacant(slot) =
                             executables.entry(task)
                         {
@@ -759,14 +852,16 @@ impl Collector for ProfileCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        // Before the window, not inside a drain: see
-        // `stack::prime_kernel_symbols`. A profile whose callchain has a
-        // kernel half walks into the kernel on almost any workload, and the
-        // runner's round is serial. A user-only one (`perf_event_paranoid` 2)
-        // never sees a kernel frame, and the table would be most of a second
-        // of this process's cpu before the window for nothing.
+        // Started now, read beside the window rather than before it: see
+        // `stack::prime_kernel_symbols_aside`. A profile whose callchain has a
+        // kernel half walks into the kernel on almost any workload; read here
+        // on the runner's thread, the table held the window shut for 1.0 to
+        // 1.5 s of a debug build, and `--pid` attached that late -- what the
+        // process did meanwhile was in no sample. A user-only one
+        // (`perf_event_paranoid` 2) never sees a kernel frame, and the table
+        // would be most of a second of this process's cpu for nothing.
         if self.callchain.kernel() {
-            crate::stack::prime_kernel_symbols();
+            crate::stack::prime_kernel_symbols_aside();
         }
         let hz = match self.mode {
             Mode::Sample { freq } => freq.as_hz(),
@@ -957,10 +1052,26 @@ impl Collector for ProfileCollector {
                 Some((run_id as u64, stack.named_by_root_first()))
             })
             .collect();
+        // The unwinders' own: the perf map each read, with the file's device
+        // and inode, and the file each process executes as last read -- after
+        // an `execve` the new one.
+        let mut perf_maps: Vec<crate::stack::PerfMapFile> = self
+            .unwinders
+            .values()
+            .filter_map(Unwinder::perf_map_file)
+            .collect();
+        perf_maps.sort();
+        perf_maps.dedup();
+        let mut executables = self.executables.clone();
+        for (task, pid) in &self.task_processes {
+            if let Some(file) = self.unwinders.get(pid).and_then(Unwinder::executable) {
+                executables.insert(task.clone(), file.to_owned());
+            }
+        }
         crate::stack::Provenance {
             named_by,
-            perf_maps: Vec::new(),
-            executables: self.executables.clone(),
+            perf_maps,
+            executables,
         }
     }
 
@@ -972,9 +1083,9 @@ impl Collector for ProfileCollector {
             (Weight::CpuTime, _) | (Weight::Cycles, Some(_)) => {}
             (_, _) => notes.push(format!(
                 "sampled on `{}` in the kernel's frequency mode: about the rate asked for, each \
-                 sample a period the kernel adjusts as it goes and this run does not see, so \
-                 every sample weighs one -- a share of samples over a steady phase, not a count \
-                 of `{}`; `--mode count` counts them exactly",
+                 sample's `count` the period the kernel chose for it, so a share is one of \
+                 `{}`, as perf's is -- the sum is an estimate of the count, which `--mode \
+                 count` reads exactly",
                 self.sampled.name, self.sampled.name
             )),
         }
@@ -1135,10 +1246,10 @@ mod tests {
     /// runs, which is a process whose kernel symbol table nothing has read yet.
     const PRIME_CHILD: &str = "OMN_PROFILE_PRIME_CHILD";
 
-    /// Bytes this thread has read through system calls so far, by the
-    /// kernel's own account (`/proc/thread-self/io`, `rchar`).
-    fn thread_rchar() -> u64 {
-        std::fs::read_to_string("/proc/thread-self/io")
+    /// Bytes this process has read through system calls so far, by the
+    /// kernel's own account (`/proc/self/io`, `rchar`), its threads included.
+    fn process_rchar() -> u64 {
+        std::fs::read_to_string("/proc/self/io")
             .ok()
             .and_then(|text| {
                 text.lines()
@@ -1152,10 +1263,11 @@ mod tests {
     /// sees a kernel frame, so it must not pay for the kernel's symbol table
     /// before its window -- the better part of a second of a debug build's
     /// cpu, measured at 978 ms for a one-second profile. One whose stacks have
-    /// a kernel half must, before the window rather than inside a drain.
+    /// a kernel half must, from its start -- on a thread of its own, so the
+    /// window opens at once -- rather than leave it to a drain.
     ///
-    /// Ground truth is the kernel's count of the bytes the starting thread
-    /// read, against the size of `/proc/kallsyms` read here. The table is read
+    /// Ground truth is the kernel's count of the bytes this process read,
+    /// against the size of `/proc/kallsyms` read here. The table is read
     /// once per process, so the two starts run, user-only first, in a fresh
     /// copy of this test binary where nothing has read it.
     #[test]
@@ -1173,9 +1285,17 @@ mod tests {
                     debuginfod: None,
                 };
                 let mut collector = prepare.collector(pid, false);
-                let before = thread_rchar();
+                let before = process_rchar();
                 let started = collector.start();
-                let read = thread_rchar() - before;
+                // The read runs aside: waited for here, never by the start.
+                let asked = std::time::Instant::now();
+                while !user_only
+                    && !crate::stack::kernel_symbols_read()
+                    && asked.elapsed() < std::time::Duration::from_secs(60)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                let read = process_rchar() - before;
                 // The table is primed before the event is opened, so what
                 // was read is known whether or not the kernel then refused
                 // the event (`perf_event_paranoid` 4).

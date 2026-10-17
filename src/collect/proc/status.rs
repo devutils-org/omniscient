@@ -389,9 +389,8 @@ mod tests {
     /// is not about the program.
     #[test]
     fn the_first_reading_of_a_launched_program_is_of_the_program() {
-        let mut child =
-            crate::collect::launch::gated(&["/bin/sleep".to_owned(), "5".to_owned()], &[])
-                .expect("fork");
+        let mut child = crate::collect::launch::gated(&["sleep".to_owned(), "5".to_owned()], &[])
+            .expect("fork");
         let mut collector = Box::new(Prepare(Counted::Descriptors))
             .attach(&Target::Pid(vec![child.pid()]))
             .expect("a pid target");

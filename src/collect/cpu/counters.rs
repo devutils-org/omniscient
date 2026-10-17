@@ -577,6 +577,29 @@ pub(super) fn measured(
     Some(attrs)
 }
 
+/// Renames a per-task or per-cgroup count's `enabled_ns` to `oncpu_ns` when
+/// the source is one the scheduler raises, so its rate is per second of the
+/// run rather than per second the target held a cpu.
+///
+/// The results layer divides a series by `enabled_ns` when every event carries
+/// one, and for a task's counter that time advances only while the task runs
+/// (for a cgroup's, while one of its tasks runs on that cpu). For cycles that
+/// is the right denominator. For switches and migrations it is not: a task
+/// that sleeps a thousand times a second is on a cpu for a few milliseconds of
+/// it, and `pidstat -w`'s 1000/s reads as tens of thousands
+/// (`docs/fixes/w22-sysstat.md`, defect 1, which `sched.switches` fixed the
+/// same way). The time is kept under the name of what it is.
+pub(super) fn wall_window(spec: &Spec, attrs: &mut [Attr]) {
+    if !spec.counts_in_kernel_only() {
+        return;
+    }
+    for attr in attrs.iter_mut() {
+        if attr.name == "enabled_ns" {
+            attr.name = "oncpu_ns".to_owned();
+        }
+    }
+}
+
 /// What the readings had to give up, in words that reach the user.
 ///
 /// A counter that shared the hardware reports a value it did not count, and
@@ -658,6 +681,7 @@ impl CounterCollector {
     }
 
     fn event_with(&mut self, mut attrs: Vec<Attr>, seq: u64) -> Option<Event> {
+        wall_window(self.spec, &mut attrs);
         if let Some(comm) = self.comm.get() {
             attrs.push(Attr::text("comm", comm));
         }
@@ -830,6 +854,31 @@ mod tests {
             .iter()
             .find(|spec| spec.source == source)
             .expect("the source is in the table")
+    }
+
+    /// A switch or a migration count keeps its counter's enabled time as
+    /// `oncpu_ns`, so its rate is over the run's window: over `enabled_ns`, a
+    /// task sleeping a thousand times a second read as tens of thousands
+    /// (`pidstat -w` read 1000/s). A cycles count keeps `enabled_ns`, its
+    /// right denominator.
+    #[test]
+    fn a_scheduler_count_is_a_rate_over_the_run_not_over_its_time_on_cpu() {
+        let attrs = || {
+            vec![
+                Attr::uint("count", 1000),
+                Attr::uint("enabled_ns", 30_000_000),
+            ]
+        };
+        let mut switches = attrs();
+        wall_window(spec("cpu.context_switches"), &mut switches);
+        assert!(switches.iter().any(|attr| attr.name == "oncpu_ns"));
+        assert!(!switches.iter().any(|attr| attr.name == "enabled_ns"));
+        let mut migrations = attrs();
+        wall_window(spec("cpu.migrations"), &mut migrations);
+        assert!(!migrations.iter().any(|attr| attr.name == "enabled_ns"));
+        let mut cycles = attrs();
+        wall_window(spec("cpu.cycles"), &mut cycles);
+        assert!(cycles.iter().any(|attr| attr.name == "enabled_ns"));
     }
 
     /// A mapping of `bytes`, on pages the kernel has been told not to collapse.
@@ -1795,8 +1844,8 @@ mod tests {
     /// measurement nobody took.
     #[test]
     fn a_target_that_never_runs_reports_no_count_rather_than_zero() {
-        let Ok(mut child) = std::process::Command::new("/bin/sleep").arg("5").spawn() else {
-            eprintln!("skipped: /bin/sleep is not available");
+        let Ok(mut child) = std::process::Command::new("sleep").arg("5").spawn() else {
+            eprintln!("skipped: no `sleep` on this machine's PATH");
             return;
         };
         // Let it reach its nanosleep before the window opens.

@@ -49,9 +49,11 @@ pub trait Rows {
     fn dropped(&self) -> (u64, u64, u64);
     /// Runs of the programs the kernel skipped, which lost the call outright.
     fn missed(&self) -> u64;
-    /// Processes a process target started that the programs do not follow,
-    /// because the map of them was full.
-    fn unfollowed(&self) -> u64;
+    /// Processes a process target started that were not followed, the map
+    /// of them being full: their calls are in no row.
+    fn unfollowed(&self) -> u64 {
+        0
+    }
 }
 
 /// What one source makes of a row: the keys its event carries, and the

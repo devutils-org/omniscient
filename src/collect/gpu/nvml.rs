@@ -33,6 +33,12 @@ const NVML_ERROR_NOT_FOUND: c_int = 6;
 const NVML_ERROR_INSUFFICIENT_SIZE: c_int = 7;
 const NVML_ERROR_DRIVER_NOT_LOADED: c_int = 9;
 const NVML_ERROR_GPU_IS_LOST: c_int = 15;
+/// `nvmlPcieUtilCounter_t`: what the device sent, and what it received.
+const NVML_PCIE_UTIL_TX_BYTES: c_int = 0;
+const NVML_PCIE_UTIL_RX_BYTES: c_int = 1;
+/// `NVML_ERROR_DEPRECATED`: a call the driver still exports and no longer
+/// answers, application clocks on the 600-series drivers.
+const NVML_ERROR_DEPRECATED: c_int = 26;
 
 /// `nvmlSamplingType_t`: the driver's own samples of the occupancy.
 const NVML_GPU_UTILIZATION_SAMPLES: c_int = 1;
@@ -98,6 +104,12 @@ impl NvmlError {
     /// papered over with a substitute number.
     pub fn is_not_supported(&self) -> bool {
         self.code == NVML_ERROR_NOT_SUPPORTED
+    }
+
+    /// The driver no longer defines what was asked: as final as "not
+    /// supported", for the same reason.
+    pub fn is_deprecated(&self) -> bool {
+        self.code == NVML_ERROR_DEPRECATED
     }
 
     /// The device or the driver went away: the run is over, not degraded.
@@ -281,6 +293,7 @@ pub struct Nvml {
     samples: Option<FnSamples>,
     field_values: Option<FnFieldValues>,
     process_utilization: Option<FnProcessUtilization>,
+    pcie_throughput: Option<FnTemperature>,
 }
 
 impl Nvml {
@@ -383,6 +396,9 @@ impl Nvml {
                 samples: optional(library, "nvmlDeviceGetSamples"),
                 field_values: optional(library, "nvmlDeviceGetFieldValues"),
                 process_utilization: optional(library, "nvmlDeviceGetProcessUtilization"),
+                // `(device, nvmlPcieUtilCounter_t, unsigned int *)`, the shape
+                // of the temperature call.
+                pcie_throughput: optional(library, "nvmlDeviceGetPcieThroughput"),
             }
         };
         Ok(nvml)
@@ -647,6 +663,29 @@ impl Nvml {
         // SAFETY: the handle came from this library; the output is a live local.
         self.check(unsafe { entry(device.0, NVML_TEMPERATURE_GPU, &mut celsius) })?;
         Ok(celsius as u32)
+    }
+
+    /// The PCIe traffic of the device over the driver's 20 ms window, in
+    /// bytes a second, as `(sent by the device, received by it)`: its
+    /// `NVML_PCIE_UTIL_TX_BYTES` and `RX_BYTES`, which it reports in KB/s.
+    /// Each direction is a call that waits out its own window, so a reading
+    /// takes 40 ms of wall clock and about 1 ms of cpu.
+    pub fn pcie_bytes_per_second(&self, device: DeviceHandle) -> Result<(u64, u64), NvmlError> {
+        let entry = self
+            .pcie_throughput
+            .ok_or_else(|| self.missing("nvmlDeviceGetPcieThroughput"))?;
+        let mut answer = [0u64; 2];
+        for (slot, counter) in answer
+            .iter_mut()
+            .zip([NVML_PCIE_UTIL_TX_BYTES, NVML_PCIE_UTIL_RX_BYTES])
+        {
+            let mut kilobytes: c_uint = 0;
+            // SAFETY: the handle came from this library; the output is a live
+            // local.
+            self.check(unsafe { entry(device.0, counter, &mut kilobytes) })?;
+            *slot = u64::from(kilobytes) * 1024;
+        }
+        Ok((answer[0], answer[1]))
     }
 
     pub fn memory(&self, device: DeviceHandle) -> Result<Memory, NvmlError> {

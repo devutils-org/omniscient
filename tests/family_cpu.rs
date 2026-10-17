@@ -182,7 +182,7 @@ fn the_resolved_record_names_the_backend_that_counts() {
         "--format",
         "json",
         "--",
-        "/bin/true",
+        "true",
     ]) else {
         return;
     };

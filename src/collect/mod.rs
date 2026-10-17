@@ -542,6 +542,14 @@ pub struct Overrun {
     pub worst_ns: u64,
     /// Every late round added up, so a mean can be taken against the count.
     pub total_ns: u64,
+    /// The readings that fell due while a late round held the run and were
+    /// never taken: the schedule is re-based on the late read, so a round
+    /// that held a 250 ms poll for three seconds is one late tick and eleven
+    /// readings that never ran. A machine-wide `omn top` starving its
+    /// pollers showed as one late tick a poller, and these were counted
+    /// nowhere.
+    #[serde(default)]
+    pub skipped: u64,
 }
 
 impl Losses {
@@ -602,6 +610,9 @@ impl Losses {
         overrun.tick_ns = tick_ns;
         overrun.worst_ns = overrun.worst_ns.max(spent_ns);
         overrun.total_ns += spent_ns;
+        // The readings due at one tick, two ticks, ... after the late one's
+        // own due time and before it finished.
+        overrun.skipped += spent_ns.saturating_sub(1) / tick_ns.max(1);
     }
 
     /// Turns the accumulated magnitudes into the one reason a reader sees.
@@ -618,12 +629,19 @@ impl Losses {
             return;
         }
         let mean_ns = overrun.total_ns / self.late_ticks;
-        let reason = format!(
+        let mut reason = format!(
             "a round of reads outran the {} tick: worst {}, {} on average",
             span_ns(overrun.tick_ns),
             span_ns(overrun.worst_ns),
             span_ns(mean_ns),
         );
+        if overrun.skipped > 0 {
+            reason.push_str(&format!(
+                "; {} more reading{} fell due meanwhile and never ran",
+                overrun.skipped,
+                if overrun.skipped == 1 { "" } else { "s" },
+            ));
+        }
         self.note_times(reason, self.late_ticks);
     }
 
@@ -650,6 +668,7 @@ impl Losses {
                 tick_ns: mine.tick_ns.max(theirs.tick_ns),
                 worst_ns: mine.worst_ns.max(theirs.worst_ns),
                 total_ns: mine.total_ns + theirs.total_ns,
+                skipped: mine.skipped + theirs.skipped,
             }),
             (mine, theirs) => mine.or(theirs),
         };
@@ -5658,6 +5677,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         let resolved: Vec<_> = [Target::Pid(vec![own]), Target::Pid(vec![1])]
             .into_iter()
@@ -5704,6 +5725,8 @@ mod tests {
             backend: backend.map(|id| id.parse().unwrap()),
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves")
     }
@@ -5824,6 +5847,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         let resolved = crate::resolve::resolve(&catalog, &capabilities, &request).unwrap();
         let mut events = vec![event_with(Vec::new())];
@@ -5857,6 +5882,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         let resolved = match crate::resolve::resolve(&catalog, &capabilities, &request) {
             Ok(resolved) => resolved,
@@ -5905,6 +5932,8 @@ mod tests {
             backend: Some("force:fs:proc".parse().unwrap()),
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         let resolved =
             crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves");
@@ -6037,9 +6066,28 @@ mod tests {
                 tick_ns: 10_000_000,
                 worst_ns: 30_000_000,
                 total_ns: 60_000_000,
+                skipped: 2 + 1 + 1,
             })
         );
         assert!(!losses.is_clean());
+    }
+
+    /// A round that held a poll for many of its intervals is one late tick,
+    /// and the readings that fell due meanwhile are said: a live `omn top` of
+    /// the machine read `cpu.util` once in three seconds, and the eleven
+    /// readings it never took were counted nowhere.
+    #[test]
+    fn the_readings_a_late_round_swallowed_are_counted() {
+        let mut losses = Losses::default();
+        losses.late_tick(3_000_000_000, 250_000_000);
+        losses.summarize();
+        assert_eq!(losses.late_ticks, 1);
+        assert_eq!(losses.overrun.map(|overrun| overrun.skipped), Some(11));
+        let (reason, _) = losses.reasons.iter().next().expect("one reason");
+        assert!(
+            reason.ends_with("11 more readings fell due meanwhile and never ran"),
+            "{reason}"
+        );
     }
 
     /// A collector is read at its own pace, and one that has a ring to drain
@@ -6336,6 +6384,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves")
     }
@@ -6818,6 +6868,8 @@ mod tests {
             backend: None,
             label: None,
             window: window.map(|text| text.parse().unwrap()),
+            value: None,
+            sum: Vec::new(),
         };
         crate::resolve::resolve(&catalog, &capabilities, &request).expect("resolves")
     }

@@ -385,10 +385,7 @@ mod tests {
     /// however often the run asks again.
     #[test]
     fn a_task_reaped_before_the_closing_read_is_a_counted_loss() {
-        let mut child = Command::new("/bin/sleep")
-            .arg("30")
-            .spawn()
-            .expect("sleep runs");
+        let mut child = Command::new("sleep").arg("30").spawn().expect("sleep runs");
         let pid = child.id() as i32;
         let mut collector =
             OnCpuTime::new(pid, PathBuf::from(format!("/proc/{pid}/stat")), poll(100));
@@ -494,8 +491,8 @@ mod tests {
             kernel as f64 / 1e6
         );
 
-        let Some(idle) = Command::new("/bin/sleep").arg("0.4").spawn().ok() else {
-            eprintln!("skipped: /bin/sleep is not available");
+        let Some(idle) = Command::new("sleep").arg("0.4").spawn().ok() else {
+            eprintln!("skipped: no `sleep` on this machine's PATH");
             return;
         };
         let (reported, kernel, wall) = follow(idle, 50);

@@ -142,6 +142,12 @@ impl SampleSpec {
                 | sys::bindings::PERF_SAMPLE_WEIGHT_STRUCT
                 | sys::bindings::PERF_SAMPLE_DATA_SRC) as u64;
         }
+        // In frequency mode the kernel adjusts each sample's period as it
+        // goes, and a sample stands for that many events: perf weighs its
+        // shares by it, and so does a profile that reads it.
+        if matches!(self.rate, Rate::Hz(_)) {
+            sample_type |= sys::bindings::PERF_SAMPLE_PERIOD as u64;
+        }
         sample_type
     }
 }
@@ -379,6 +385,10 @@ pub struct Sample {
     /// Where the sampled access went and how long it waited, when the event
     /// asked for it. See [`SampleSpec::memory`].
     pub access: Option<MemoryAccess>,
+    /// How many occurrences of the event this sample stands for, when the
+    /// event asked for it: in frequency mode, the period the kernel chose
+    /// for this sample, which changes from one to the next.
+    pub period: Option<u64>,
 }
 
 /// Which privilege level the sampled instruction was running at.
@@ -938,6 +948,8 @@ fn decode_sample(body: &[u8], misc: u16, sample_type: u64) -> Sample {
     };
     // `cpu` then a reserved half-word, in one word.
     let cpu = asked(b::PERF_SAMPLE_CPU).then(|| (next() & 0xffff_ffff) as u32);
+    // After `cpu` and before `read` and the callchain, in bit order.
+    let period = asked(b::PERF_SAMPLE_PERIOD).then(&mut next);
     let callchain = asked(b::PERF_SAMPLE_CALLCHAIN).then(|| {
         let chain = callchain_of(body, index);
         index += 1 + chain.len();
@@ -1007,6 +1019,7 @@ fn decode_sample(body: &[u8], misc: u16, sample_type: u64) -> Sample {
             (Some(weight), Some(data_src)) => Some(MemoryAccess::from_words(weight, data_src)),
             _ => None,
         },
+        period,
     }
 }
 
@@ -2800,6 +2813,43 @@ mod tests {
     use super::*;
 
     const PAGE_FAULTS: u64 = sys::bindings::PERF_COUNT_SW_PAGE_FAULTS as u64;
+
+    /// In frequency mode a sample carries its period, between `cpu` and the
+    /// fields after it; a fixed period asks for none.
+    #[test]
+    fn a_frequency_mode_sample_carries_its_period_and_the_fields_after_it_line_up() {
+        use sys::bindings as b;
+        let spec = SampleSpec {
+            memory: true,
+            rate: Rate::Hz(99),
+            ..SampleSpec::software(0, 1, Callchain::Off)
+        };
+        assert!(spec.sample_type() & u64::from(b::PERF_SAMPLE_PERIOD) != 0);
+        let fixed = SampleSpec::software(0, 1, Callchain::Off);
+        assert!(fixed.sample_type() & u64::from(b::PERF_SAMPLE_PERIOD) == 0);
+        let weight = 309u64;
+        let data_src = (u64::from(b::PERF_MEM_OP_LOAD) << b::PERF_MEM_OP_SHIFT)
+            | (u64::from(b::PERF_MEM_LVLNUM_RAM) << b::PERF_MEM_LVLNUM_SHIFT);
+        let mut body = vec![0u8; 8];
+        for word in [
+            0x401000u64,
+            (7u64 << 32) | 6,
+            1_000,
+            0,
+            5,
+            123_457,
+            weight,
+            data_src,
+        ] {
+            body.extend_from_slice(&word.to_ne_bytes());
+        }
+        let sample = decode_sample(&body, 0, spec.sample_type());
+        assert_eq!(sample.cpu, Some(5));
+        assert_eq!(sample.period, Some(123_457));
+        let access = sample.access.expect("the weight after the period");
+        assert_eq!(access.latency_cycles, 309);
+        assert_eq!(decode_sample(&body, 0, fixed.sample_type()).period, None);
+    }
 
     /// The user registers and the copied stack sit between the callchain and
     /// the weight, and the stack is as long as the kernel filled it, not as

@@ -505,6 +505,47 @@ fn a_familys_default_is_the_binarys_and_plans_once_it_has_a_target() {
     assert!(refused.contains("low"), "{refused}");
 }
 
+/// A family and a band in place of a session: the default composed as
+/// `omn trace <family>` composes it, with what it decided said, and the
+/// same requests `omn trace <family> --dump-request` writes.
+#[test]
+fn a_plan_composes_a_family_s_default_as_the_command_does() {
+    let dir = scratch("plan-family");
+    let mut client = Client::over(&dir);
+    let plan = client.call(
+        "plan_session",
+        json!({"family": "mem", "cost": "low", "pid": [std::process::id()]}),
+    );
+    assert_eq!(plan["validation"]["valid"], true, "{plan}");
+    let composed = plan["composed"].as_array().expect("what it decided");
+    assert!(
+        composed[0].as_str().unwrap().contains("`low` default"),
+        "{plan}"
+    );
+    let dumped = Command::new(omn())
+        .args(["trace", "mem", "--cost", "low", "--pid"])
+        .arg(std::process::id().to_string())
+        .args(["--dump-request", "--format", "json"])
+        .output()
+        .unwrap();
+    let dumped: Value = serde_json::from_slice(&dumped.stdout).expect("a session");
+    let sources = |requests: &Value| -> Vec<String> {
+        requests
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|request| request["source"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(sources(&plan["requests"]), sources(&dumped["requests"]));
+
+    let refused = client.refused("plan_session", json!({"family": "nope"}));
+    assert!(
+        refused.contains("neither a source nor a family"),
+        "{refused}"
+    );
+}
+
 #[test]
 fn a_plan_says_what_it_would_serve_and_degrade_and_runs_nothing() {
     let dir = scratch("plan");

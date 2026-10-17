@@ -158,6 +158,7 @@ fn evidence_text(levels: &[crate::join::Evidence]) -> String {
 pub fn run_output_bytes(format: OutputFormat, output: &RunOutput) -> Result<Vec<u8>, ParseError> {
     match format {
         OutputFormat::Pprof => pprof(output),
+        OutputFormat::Pcap => pcap(output),
         format => run_output(format, output).map(String::into_bytes),
     }
 }
@@ -1009,6 +1010,7 @@ pub fn results(format: OutputFormat, results: &Results) -> Result<String, ParseE
         OutputFormat::Folded
         | OutputFormat::Speedscope
         | OutputFormat::Pprof
+        | OutputFormat::Pcap
         | OutputFormat::ChromeTrace => run_output(
             format,
             &RunOutput {
@@ -1290,6 +1292,13 @@ fn text(results: &Results) -> String {
                             );
                         }
                     }
+                    if rate.unmeasured > 0 {
+                        let _ = writeln!(
+                            out,
+                            "    {:<14} and {} events that carried no value, in no total",
+                            "", rate.unmeasured
+                        );
+                    }
                 }
                 push_shortfall(&mut out, series.iter().find_map(|one| one.short.as_ref()));
             }
@@ -1311,9 +1320,16 @@ fn text(results: &Results) -> String {
                             bound(summary.short.as_ref())
                         )
                     });
+                    // The attributes asked added up beside the value, each a
+                    // count of its own (`--sum errors`).
+                    let sums: String = summary
+                        .sums
+                        .iter()
+                        .map(|(name, sum)| format!("  {name} {sum}"))
+                        .collect();
                     let _ = writeln!(
                         out,
-                        "    {:<14} n{short}{:<5} min {}  mean {}{}  max {}{}  last {}{total}",
+                        "    {:<14} n{short}{:<5} min {}  mean {}{}  max {}{}  last {}{total}{sums}",
                         summary.key,
                         summary.count,
                         quantity(summary.min, results.unit),
@@ -1343,6 +1359,13 @@ fn text(results: &Results) -> String {
                             "      +{:<10} {}",
                             Duration::from_nanos(round_to_ms(point.offset_ns)).to_string(),
                             quantity(point.value, results.unit)
+                        );
+                    }
+                    if series.unmeasured > 0 {
+                        let _ = writeln!(
+                            out,
+                            "      and {} events that carried no value, in no point",
+                            series.unmeasured
                         );
                     }
                 }
@@ -1879,6 +1902,7 @@ fn round_to_ms(offset_ns: u64) -> u64 {
 fn quantity(value: f64, unit: Unit) -> String {
     match unit {
         Unit::Bytes => bytes(value),
+        Unit::BytesPerSecond => format!("{}/s", bytes(value)),
         // Not the exact-unit form `Duration` renders for round trips: that
         // picks the largest unit a value divides evenly into, so 6654000 ns
         // reads as `6654us` while 7021500 ns reads as `7021500ns` in the very
@@ -2189,6 +2213,128 @@ fn pprof(output: &RunOutput) -> Result<Vec<u8>, ParseError> {
 /// under their own name rather than under the nearest one pprof would
 /// recognize: a ratio reported as `count` renders as a count, and a temperature
 /// reported as anything renders as a lie. The caller writes a comment saying so.
+/// The attribute a captured frame's bytes travel in, as lowercase hex: what
+/// `net.capture` copied of the frame, its headers.
+pub const PCAP_HEADER_ATTR: &str = "header";
+
+/// A pcap file of the raw events that carry their frame's bytes.
+///
+/// Nanosecond pcap (magic `0xa1b23c4d`), one link type for the file:
+/// Ethernet unless the events say otherwise through `linktype`. The time of a
+/// record is the event's `realtime_ns` when the collector kept the kernel's
+/// own stamp, and its monotonic time moved onto the realtime clock otherwise.
+/// `incl_len` is the bytes carried and `orig_len` the frame's length on the
+/// wire, `bytes`, so tcpdump says how much each record was cut.
+fn pcap(output: &RunOutput) -> Result<Vec<u8>, ParseError> {
+    let events: Vec<&Event> = output
+        .results
+        .iter()
+        .flat_map(|results| results.outputs.iter())
+        .filter_map(|out| match out {
+            Output::Raw { events } => Some(events.iter()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let mut frames: Vec<(u64, Vec<u8>, u32, u32)> = Vec::new();
+    let mut linktype = None;
+    let realtime_offset = realtime_minus_monotonic_ns();
+    for event in &events {
+        let Some(hex) = event.attr(PCAP_HEADER_ATTR).map(ToString::to_string) else {
+            continue;
+        };
+        let bytes = from_hex(&hex).ok_or_else(|| {
+            ParseError::new(format!(
+                "a `{PCAP_HEADER_ATTR}` attribute is not hex bytes: {hex:.40}"
+            ))
+        })?;
+        let wire = event
+            .attr("bytes")
+            .and_then(|value| value.as_f64())
+            .map_or(bytes.len() as u32, |len| len as u32);
+        // Read as an integer: a nanosecond wall time is past what an f64
+        // holds exactly.
+        let at = match event.attr("realtime_ns") {
+            Some(crate::event::AttrValue::Uint(ns)) => *ns,
+            Some(crate::event::AttrValue::Int(ns)) if *ns >= 0 => *ns as u64,
+            _ => (event.ts_ns as i128 + realtime_offset).max(0) as u64,
+        };
+        let link = event
+            .attr("linktype")
+            .and_then(|value| value.as_f64())
+            .map_or(1, |link| link as u32);
+        if *linktype.get_or_insert(link) != link {
+            return Err(ParseError::new(
+                "a pcap file has one link type, and this run's frames carry two: capture one \
+                 interface at a time (`--iface`)",
+            ));
+        }
+        frames.push((at, bytes, wire, link));
+    }
+    if frames.is_empty() {
+        return Err(ParseError::new(if events.is_empty() {
+            "`pcap` writes captured frames, and this run has no raw events: ask `net.capture -e raw`"
+                .to_owned()
+        } else {
+            format!(
+                "`pcap` writes captured frames, and none of this run's {} events carries its \
+                 frame's bytes (`{PCAP_HEADER_ATTR}`): only `net.capture` keeps them",
+                events.len()
+            )
+        }));
+    }
+    frames.sort_by_key(|frame| frame.0);
+    let snaplen = frames
+        .iter()
+        .map(|frame| frame.1.len() as u32)
+        .max()
+        .unwrap_or(0)
+        .max(65_535);
+    let mut out = Vec::with_capacity(24 + frames.iter().map(|f| 16 + f.1.len()).sum::<usize>());
+    out.extend_from_slice(&0xa1b2_3c4du32.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(&0i32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&snaplen.to_le_bytes());
+    out.extend_from_slice(&linktype.unwrap_or(1).to_le_bytes());
+    for (at, bytes, wire, _) in &frames {
+        out.extend_from_slice(&((at / 1_000_000_000) as u32).to_le_bytes());
+        out.extend_from_slice(&((at % 1_000_000_000) as u32).to_le_bytes());
+        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(*wire).max(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(bytes);
+    }
+    Ok(out)
+}
+
+/// `CLOCK_REALTIME` minus `CLOCK_MONOTONIC`, now: what moves a monotonic
+/// stamp onto the wall clock pcap readers print.
+fn realtime_minus_monotonic_ns() -> i128 {
+    let read = |clock| {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // Safety: a valid clock id and a timespec this function owns.
+        unsafe { libc::clock_gettime(clock, &mut ts) };
+        ts.tv_sec as i128 * 1_000_000_000 + ts.tv_nsec as i128
+    };
+    read(libc::CLOCK_REALTIME) - read(libc::CLOCK_MONOTONIC)
+}
+
+/// Lowercase or uppercase hex, two digits a byte.
+fn from_hex(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim();
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
+        .collect()
+}
+
 fn pprof_unit(unit: Unit) -> (&'static str, bool) {
     match unit {
         Unit::Ns => ("nanoseconds", true),
@@ -2200,6 +2346,7 @@ fn pprof_unit(unit: Unit) -> (&'static str, bool) {
         Unit::Watts => ("watts", false),
         Unit::Celsius => ("celsius", false),
         Unit::Cycles => ("cycles", false),
+        Unit::BytesPerSecond => ("bytes_per_second", false),
     }
 }
 
@@ -2683,6 +2830,71 @@ mod tests {
         Bucket, Point, Rest, Series, SeriesHist, SeriesSummary, SeriesTotal, StackCount,
     };
 
+    /// A captured frame's bytes are written as a pcap record: the header
+    /// says nanoseconds and Ethernet, the record keeps the bytes carried and
+    /// the frame's length on the wire; a run with none is refused, saying so.
+    #[test]
+    fn pcap_writes_the_frames_a_capture_kept() {
+        let frame = |ns: u64, hex: Option<&str>| Event {
+            ts_ns: ns,
+            ts_err_ns: 1,
+            kind: "net.capture".into(),
+            keys: Vec::new(),
+            attrs: {
+                let mut attrs = vec![
+                    crate::event::Attr::uint("bytes", 1514),
+                    crate::event::Attr::uint("realtime_ns", 1_700_000_000_000_000_000 + ns),
+                ];
+                if let Some(hex) = hex {
+                    attrs.push(crate::event::Attr::text(PCAP_HEADER_ATTR, hex));
+                }
+                attrs
+            },
+            collector_id: crate::event::CollectorId::new("test"),
+            seq: 0,
+        };
+        let mut results = sample();
+        results.outputs = vec![Output::Raw {
+            events: vec![frame(7, Some("ffffffffffff0011")), frame(9, None)],
+        }];
+        let run = RunOutput {
+            results: vec![results.clone()],
+            joins: Vec::new(),
+            decompositions: Vec::new(),
+        };
+        let bytes = run_output_bytes(OutputFormat::Pcap, &run).expect("a capture");
+        assert_eq!(&bytes[0..4], &0xa1b2_3c4du32.to_le_bytes());
+        assert_eq!(&bytes[20..24], &1u32.to_le_bytes(), "Ethernet");
+        let record = &bytes[24..];
+        assert_eq!(&record[0..4], &1_700_000_000u32.to_le_bytes());
+        assert_eq!(&record[4..8], &7u32.to_le_bytes());
+        assert_eq!(&record[8..12], &8u32.to_le_bytes(), "incl_len");
+        assert_eq!(&record[12..16], &1514u32.to_le_bytes(), "orig_len");
+        assert_eq!(
+            &record[16..24],
+            &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11]
+        );
+        assert_eq!(
+            bytes.len(),
+            24 + 16 + 8,
+            "the frame without bytes is not written"
+        );
+
+        results.outputs = vec![Output::Raw {
+            events: vec![frame(9, None)],
+        }];
+        let run = RunOutput {
+            results: vec![results],
+            joins: Vec::new(),
+            decompositions: Vec::new(),
+        };
+        let error = run_output_bytes(OutputFormat::Pcap, &run).unwrap_err();
+        assert!(
+            error.to_string().contains("only `net.capture` keeps them"),
+            "{error}"
+        );
+    }
+
     fn sample() -> Results {
         Results {
             label: "rss".into(),
@@ -2694,6 +2906,7 @@ mod tests {
                     series: vec![SeriesSummary {
                         key: "task:7".into(),
                         unmeasured: 0,
+                        sums: BTreeMap::new(),
                         count: 2,
                         min: 1_048_576.0,
                         max: 2_097_152.0,
@@ -2717,6 +2930,7 @@ mod tests {
                                 value: 2_097_152.0,
                             },
                         ],
+                        unmeasured: 0,
                     }],
                 },
             ],
@@ -3287,6 +3501,20 @@ mod tests {
         let mut run = correlated_run();
         run.results.push(profile());
         run.results.push(histogram());
+        // A capture, for `pcap`: a raw frame carrying its bytes.
+        let mut capture = histogram();
+        capture.outputs = vec![Output::Raw {
+            events: vec![Event {
+                ts_ns: 1,
+                ts_err_ns: 1,
+                kind: "net.capture".into(),
+                keys: Vec::new(),
+                attrs: vec![crate::event::Attr::text(PCAP_HEADER_ATTR, "00ff")],
+                collector_id: crate::event::CollectorId::new("test"),
+                seq: 0,
+            }],
+        }];
+        run.results.push(capture);
         for format in OutputFormat::ALL {
             assert!(
                 run.results.iter().any(|results| results
@@ -3760,6 +3988,7 @@ mod tests {
                     total,
                     per_second: Some(total / 2.0),
                     window_ns: 2_000_000_000,
+                    unmeasured: 0,
                     counted_window: true,
                     short: None,
                 }],
@@ -3796,6 +4025,7 @@ mod tests {
                         total: 900.0,
                         per_second: Some(900.0),
                         window_ns: 1_000_000_000,
+                        unmeasured: 0,
                         counted_window: false,
                         short: short.clone(),
                     }],

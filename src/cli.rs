@@ -52,7 +52,9 @@ pub struct Cli {
     /// Write the launched program's standard error to this file, created or
     /// truncated, instead of omn's own: what OMN_PROGRAM_STDERR sets, which
     /// this flag overrides. Only beside a program to launch, or a session
-    /// file that may launch one.
+    /// file that may launch one. With `omn latency --runs N`, each launch's
+    /// stderr is also kept as FILE.1 ... FILE.N, the file itself the last
+    /// one's.
     #[arg(long, value_name = "FILE", global = true)]
     pub program_stderr: Option<PathBuf>,
 
@@ -221,6 +223,8 @@ pub struct TraceArgs {
     pub mode: Option<Mode>,
 
     /// What comes out: raw, hist[:log2|:linear:WIDTH], rate, topk[:N], stack, timeline, summary.
+    /// `topk:N@<attr>`, `summary@<attr>` and `hist[:<scale>]@<attr>` give one
+    /// row or histogram per value of an attribute (`summary@kernel`).
     #[arg(
         short = 'e',
         long,
@@ -239,6 +243,22 @@ pub struct TraceArgs {
         conflicts_with = "file"
     )]
     pub keys: Vec<KeyKind>,
+
+    /// The attribute the aggregating emits reduce, in place of the source's
+    /// own value: `--value busy` on `power.freq`, `--value errors` on
+    /// `proc.syscall`. One the source declares as a filter field.
+    #[arg(long, value_name = "ATTR", conflicts_with = "file")]
+    pub value: Option<String>,
+
+    /// Attributes a summary also adds up per series, beside its value:
+    /// `proc.syscall -k syscall -e summary --sum errors` is `strace -c`.
+    #[arg(
+        long,
+        value_name = "ATTR",
+        value_delimiter = ',',
+        conflicts_with = "file"
+    )]
+    pub sum: Vec<String>,
 
     /// Predicate, pushed into the kernel when the backend allows it.
     #[arg(
@@ -807,6 +827,8 @@ fn request_for(
         backend: args.backend.clone(),
         label: args.label.clone(),
         window: args.window,
+        value: args.value.clone(),
+        sum: args.sum.clone(),
     })
 }
 

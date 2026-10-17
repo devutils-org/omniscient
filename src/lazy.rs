@@ -150,6 +150,28 @@ pub fn cost_refusal(args: &TraceArgs) -> Option<String> {
     })
 }
 
+/// The same composition, from the words of an `omn trace` command line
+/// after `trace` (`["cpu", "--cost", "med", "--pid", "42"]`): what a caller
+/// without the parser -- `omn-mcp` -- hands over to compose a family's
+/// default exactly as the command would.
+pub fn compose_words(catalog: &Catalog, words: &[String]) -> Result<Composed, ParseError> {
+    use clap::Parser;
+    let mut argv: Vec<OsString> = vec!["omn".into(), "trace".into()];
+    argv.extend(words.iter().map(OsString::from));
+    let argv = spell_family(argv);
+    let cli = crate::cli::Cli::try_parse_from(argv)
+        .map_err(|error| ParseError::new(error.render().to_string().trim().to_owned()))?;
+    let crate::cli::Command::Trace(args) = cli.command else {
+        return Err(ParseError::new("not an `omn trace` command line"));
+    };
+    let Some(family) = args.family.clone() else {
+        return Err(ParseError::new(
+            "these words name no family: the first one is a family, as `cpu` or `io`",
+        ));
+    };
+    compose(&args, catalog, &family)
+}
+
 /// Composes the session `omn trace <family>` runs, from the family's default
 /// and the band asked.
 pub fn compose(args: &TraceArgs, catalog: &Catalog, family: &str) -> Result<Composed, ParseError> {
@@ -263,6 +285,8 @@ pub fn compose(args: &TraceArgs, catalog: &Catalog, family: &str) -> Result<Comp
             backend: None,
             label: request.label.clone(),
             window: None,
+            value: None,
+            sum: Vec::new(),
         })
         .collect();
     for request in &built {
@@ -404,6 +428,66 @@ fn quoted(word: &str) -> String {
     } else {
         format!("'{}'", word.replace('\'', r"'\''"))
     }
+}
+
+/// Moves each request of a composed default that this machine serves above
+/// the band asked onto the first later backend of its chain that declares
+/// the band or less and resolves here: `mem.rss` at `--cost low` is served
+/// by `fs:proc:smaps_rollup` (`med`) first, and by `fs:proc:statm` (`free`)
+/// once the band is what chooses. Returns what moved, in words; a request no
+/// backend can keep the band for is left as it was, for [`band_notes`] to
+/// say.
+pub fn keep_band(
+    catalog: &Catalog,
+    capabilities: &crate::capabilities::Capabilities,
+    band: Cost,
+    resolutions: &mut [ResolvedRequest],
+) -> Vec<String> {
+    let mut moved = Vec::new();
+    for resolved in resolutions.iter_mut() {
+        if resolved.backend.cost <= band || resolved.request.backend.is_some() {
+            continue;
+        }
+        let Some(entry) = catalog.get(&resolved.request.source) else {
+            continue;
+        };
+        let after = entry
+            .backends
+            .iter()
+            .position(|backend| backend.id == resolved.backend.id)
+            .map_or(0, |at| at + 1);
+        let cheaper = entry.backends[after..]
+            .iter()
+            .filter(|backend| backend.cost <= band)
+            .find_map(|backend| {
+                let mut request = resolved.request.clone();
+                request.backend = backend.id.parse().ok();
+                crate::resolve::resolve(catalog, capabilities, &request).ok()
+            });
+        let Some(cheaper) = cheaper else {
+            continue;
+        };
+        let request = &resolved.request;
+        moved.push(format!(
+            "the `{band}` band was asked, so `{}` is served through `{}`, which declares `{}`, \
+             in place of `{}` (`{}`), the first of its chain{}",
+            request.label.as_deref().map_or_else(
+                || request.source.to_string(),
+                |label| format!("{} ({label})", request.source)
+            ),
+            cheaper.backend.id,
+            cheaper.backend.cost,
+            resolved.backend.id,
+            resolved.backend.cost,
+            entry
+                .backend(&cheaper.backend.id)
+                .and_then(|backend| backend.degraded.as_deref())
+                .map(|degraded| format!(": it gives up {}", degraded.trim()))
+                .unwrap_or_default()
+        ));
+        *resolved = cheaper;
+    }
+    moved
 }
 
 /// What a band asked cannot be kept to on this machine, once the backends

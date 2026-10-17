@@ -1283,19 +1283,22 @@ mod tests {
         if skip_without_bpf(&mut collector) {
             return;
         }
-        let status = std::process::Command::new("/bin/true")
+        let true_path =
+            crate::collect::launch::find_program("true", std::env::var_os("PATH").as_deref());
+        let status = std::process::Command::new(&true_path)
             .status()
-            .expect("/bin/true runs");
+            .unwrap_or_else(|error| panic!("{} runs: {error}", true_path.display()));
         assert!(status.success());
 
         let mut events = collector.sample(0).expect("a drain");
         events.extend(collector.stop());
-        let found = events.iter().any(|event| {
-            event.attr("filename").map(ToString::to_string) == Some("/bin/true".to_owned())
-        });
+        let expected = true_path.to_string_lossy().into_owned();
+        let found = events
+            .iter()
+            .any(|event| event.attr("filename").map(ToString::to_string) == Some(expected.clone()));
         assert!(
             found,
-            "an exec of /bin/true was performed and not reported; {} events seen, losses {:?}",
+            "an exec of {expected} was performed and not reported; {} events seen, losses {:?}",
             events.len(),
             collector.losses()
         );

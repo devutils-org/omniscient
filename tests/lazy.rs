@@ -318,6 +318,76 @@ fn the_listing_shows_every_familys_default() {
     assert!(!source.contains("DEFAULTS:"), "{source}");
 }
 
+/// The JSON listing carries what the text one does: each source's place in
+/// its family's default, and what each backend of its chain produces.
+#[test]
+fn the_json_listing_names_the_defaults_and_each_backend_s_emits() {
+    let listed = json(&omn(&["list", "io.syscall", "--format", "json"]));
+    let entry = &listed[0];
+    let bands: Vec<&str> = entry["defaults"]
+        .as_array()
+        .expect("io.syscall is in io's default")
+        .iter()
+        .map(|place| place["band"].as_str().unwrap())
+        .collect();
+    assert_eq!(bands, ["med", "high"], "{entry}");
+    let heap = json(&omn(&["list", "mem.heap.alloc", "--format", "json"]));
+    let preload = &heap[0]["probes"][0];
+    assert_eq!(preload["backend"], "preload");
+    assert!(
+        !preload["emits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|emit| emit == "stack"),
+        "{preload}"
+    );
+}
+
+/// At `--cost low`, a source whose chain starts above the band is served by
+/// the first later backend that keeps it, and the run says so: `mem.rss`
+/// through `statm`, not `smaps_rollup`.
+#[test]
+fn the_band_chooses_the_backend_where_the_chain_has_one_that_keeps_it() {
+    let pid = std::process::id().to_string();
+    let output = omn(&[
+        "trace",
+        "mem",
+        "--cost",
+        "low",
+        "--pid",
+        &pid,
+        "-d",
+        "1s",
+        "--dump-resolved",
+        "--format",
+        "json",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let resolved = json(&output);
+    assert_eq!(resolved[0]["backend"]["id"], "fs:proc:statm", "{resolved}");
+    assert!(
+        stderr(&output).contains("is served through `fs:proc:statm`, which declares `free`"),
+        "{}",
+        stderr(&output)
+    );
+    // The `med` band keeps the head of the chain.
+    let output = omn(&[
+        "trace",
+        "mem",
+        "--cost",
+        "med",
+        "--pid",
+        &pid,
+        "-d",
+        "1s",
+        "--dump-resolved",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(json(&output)[0]["backend"]["id"], "fs:proc:smaps_rollup");
+}
+
 // ----------------------------------------------------------------- the loader
 
 /// A copy of the catalog with the `default:` item of one family's file

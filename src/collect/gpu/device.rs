@@ -55,6 +55,7 @@ pub enum Metric {
     EngineBusy,
     MemFreq,
     Throttle,
+    Pcie,
 }
 
 impl Metric {
@@ -68,6 +69,7 @@ impl Metric {
             Metric::EngineBusy => "gpu.engine_busy",
             Metric::MemFreq => "gpu.mem_freq",
             Metric::Throttle => "gpu.throttle",
+            Metric::Pcie => "gpu.pcie",
         }
     }
 
@@ -78,7 +80,12 @@ impl Metric {
         match self {
             Metric::Power => Some("energy counter"),
             Metric::EngineBusy => Some("occupancy"),
-            Metric::Freq | Metric::Temp | Metric::Mem | Metric::MemFreq | Metric::Throttle => None,
+            Metric::Freq
+            | Metric::Temp
+            | Metric::Mem
+            | Metric::MemFreq
+            | Metric::Throttle
+            | Metric::Pcie => None,
         }
     }
 
@@ -111,6 +118,7 @@ impl Metric {
             Metric::EngineBusy => "ratio",
             Metric::MemFreq => "hz",
             Metric::Throttle => "ratio",
+            Metric::Pcie => "bytes_per_second",
         }
     }
 }
@@ -237,7 +245,19 @@ struct Device {
     /// When that reading was taken: the start of a counted window, whose
     /// length is what `rate` divides the energy by to give watts.
     energy_base_ns: u64,
+    /// For `gpu.throttle`: the driver's answer when it no longer defines
+    /// application clocks (`deprecated` on the 600-series drivers, `not
+    /// supported` on a board that never had them). Its two shares against
+    /// them, `below_application_clocks_ratio` and `below_base_clocks_ratio`,
+    /// then read 0.996 with the SM at 1950 MHz, above any base clock: they
+    /// are left out, and the notes say why.
+    clocks_undefined: Option<String>,
 }
+
+/// The throttle shares measured against application clocks: meaningless on a
+/// driver that does not define them.
+const AGAINST_APPLICATION_CLOCKS: [&str; 2] =
+    ["below_application_clocks_ratio", "below_base_clocks_ratio"];
 
 /// Reads one number per device per tick.
 pub struct NvmlCollector {
@@ -521,6 +541,11 @@ impl NvmlCollector {
             let uuid = nvml
                 .device_uuid(handle)
                 .unwrap_or_else(|error| format!("unknown ({error})"));
+            let clocks_undefined = (metric == Metric::Throttle)
+                .then(|| nvml.application_clocks(handle).err())
+                .flatten()
+                .filter(|error| error.is_not_supported() || error.is_deprecated())
+                .map(|error| error.message);
             devices.push(Device {
                 handle,
                 index,
@@ -528,6 +553,7 @@ impl NvmlCollector {
                 uuid,
                 energy_base_mj: 0,
                 energy_base_ns: 0,
+                clocks_undefined,
             });
         }
 
@@ -585,6 +611,17 @@ impl NvmlCollector {
         Ok((attrs, 0))
     }
 
+    /// Both directions, and their sum as the value: what crossed the bus over
+    /// the driver's two 20 ms windows, read one after the other.
+    fn pcie(&self, device: &Device) -> Result<(Vec<Attr>, u32), NvmlError> {
+        let (sent, received) = self.nvml.pcie_bytes_per_second(device.handle)?;
+        let mut attrs = self.device_attrs(device, "device");
+        attrs.push(Attr::uint("bytes_per_second", sent + received));
+        attrs.push(Attr::uint("tx_bytes_per_second", sent));
+        attrs.push(Attr::uint("rx_bytes_per_second", received));
+        Ok((attrs, 0))
+    }
+
     fn mem_freq(&self, device: &Device) -> Result<(Vec<Attr>, u32), NvmlError> {
         let memory = self.nvml.memory_clock_mhz(device.handle)?;
         let mut attrs = self.device_attrs(device, "device");
@@ -620,6 +657,9 @@ impl NvmlCollector {
             else {
                 continue;
             };
+            if device.clocks_undefined.is_some() && AGAINST_APPLICATION_CLOCKS.contains(name) {
+                continue;
+            }
             let Some(share) = held_share(before, after) else {
                 continue;
             };
@@ -946,6 +986,7 @@ impl Collector for NvmlCollector {
                 Metric::Mem => self.mem(device, &tree),
                 Metric::EngineBusy => self.engine_busy(device, &tree),
                 Metric::MemFreq => self.mem_freq(device),
+                Metric::Pcie => self.pcie(device),
                 Metric::Throttle => {
                     let base = self.throttle_base.get(offset).cloned().unwrap_or_default();
                     self.throttle(device, &base).map(|(attrs, err, now)| {
@@ -1080,6 +1121,16 @@ impl Collector for NvmlCollector {
             notes.extend(self.counter_check.notes(interval.as_nanos()));
         }
         notes.extend(self.held.note());
+        for device in &self.devices {
+            if let Some(answer) = &device.clocks_undefined {
+                notes.push(format!(
+                    "{}: the driver answers \"{answer}\" for application clocks, so `{}` and \
+                     `{}`, the shares of time the clocks sat below them, are left out: against \
+                     clocks the driver does not define they read near 1 at any clock",
+                    device.name, AGAINST_APPLICATION_CLOCKS[0], AGAINST_APPLICATION_CLOCKS[1]
+                ));
+            }
+        }
         if self.metric != Metric::EngineBusy {
             return notes;
         }

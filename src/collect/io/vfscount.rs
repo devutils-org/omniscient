@@ -23,6 +23,10 @@ use crate::request::{Mode, Target};
 pub struct Prepare {
     pub mode: Mode,
     pub filter: Option<FilterExpr>,
+    /// `--keys op`: one event per function each interval, so every
+    /// aggregating emit gives a series per function, rather than one event
+    /// with each function's count beside the total.
+    pub by_op: bool,
 }
 
 impl Prepared for Prepare {
@@ -35,7 +39,9 @@ impl Prepared for Prepare {
             ));
         }
         let whose = crate::collect::sched::whose(target, "a VFS call is counted per task")?;
-        Ok(Box::new(VfsCount::new(whose, self.mode, self.filter)))
+        let mut collector = VfsCount::new(whose, self.mode, self.filter);
+        collector.by_op = self.by_op;
+        Ok(Box::new(collector))
     }
 }
 
@@ -53,6 +59,7 @@ pub struct VfsCount {
     unfollowed: u64,
     unguarded: u64,
     filtered_out: u64,
+    by_op: bool,
 }
 
 impl VfsCount {
@@ -70,6 +77,7 @@ impl VfsCount {
             unfollowed: 0,
             unguarded: 0,
             filtered_out: 0,
+            by_op: false,
         }
     }
 
@@ -115,6 +123,26 @@ impl VfsCount {
         self.previous = now;
         self.previous_ns = now_ns;
         self.absorb();
+        if self.by_op {
+            // A series per function: each its own event, `op` naming it.
+            return split
+                .into_iter()
+                .enumerate()
+                .map(|(offset, count)| Event {
+                    ts_ns: now_ns,
+                    ts_err_ns: 0,
+                    kind: "io.vfs".to_owned(),
+                    keys: Vec::new(),
+                    attrs: vec![
+                        Attr::uint("calls", count.value.as_f64().unwrap_or(0.0) as u64),
+                        Attr::uint("interval_ns", interval_ns),
+                        Attr::text("op", count.name),
+                    ],
+                    collector_id: self.id.clone(),
+                    seq: seq + offset as u64,
+                })
+                .collect();
+        }
         let mut attrs = vec![
             Attr::uint("calls", total),
             Attr::uint("interval_ns", interval_ns),
@@ -259,6 +287,7 @@ mod tests {
         let prepare = Box::new(Prepare {
             mode: Mode::Trace,
             filter: None,
+            by_op: false,
         });
         let refused = match prepare.attach(&Target::System) {
             Ok(_) => panic!("a trace of counted calls"),

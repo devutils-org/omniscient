@@ -393,6 +393,11 @@ pub struct SeriesRate {
     /// exist.
     pub per_second: Option<f64>,
     pub window_ns: u64,
+    /// Events that carried no value at all, left out of every other number
+    /// here and counted, as `summary` counts them: `power.freq` through
+    /// `pmu` on a cpu that never left idle used to refuse the whole run.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub unmeasured: usize,
     /// Set when `window_ns` is the counter's own enabled time rather than the
     /// run's: a counted source puts `enabled_ns` on its event, which is the
     /// window the counter measured -- for a per-task counter, the time the
@@ -415,6 +420,11 @@ pub struct SeriesRate {
 pub struct Series {
     pub key: SeriesKey,
     pub points: Vec<Point>,
+    /// Events that carried no value at all, left out of every other number
+    /// here and counted, as `summary` counts them: `power.freq` through
+    /// `pmu` on a cpu that never left idle used to refuse the whole run.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub unmeasured: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -748,6 +758,12 @@ pub struct SeriesSummary {
     /// refused, and left out of every other number here.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub unmeasured: usize,
+    /// The attributes the request asked added up beside the value, per
+    /// series (`--sum errors`): `proc.syscall -k syscall -e summary --sum
+    /// errors` is `strace -c` with its errors column. A lower bound when
+    /// `short` is present.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sums: BTreeMap<String, f64>,
     /// What this run lost, when it lost something that biases the shape.
     ///
     /// Beside the numbers rather than above them: `count`, `mean` and `max`
@@ -966,6 +982,19 @@ pub fn aggregate(
     let mut degradations = resolved.degradations.clone();
     degradations.extend(collection.notes.iter().cloned());
 
+    // A request naming its value reduces that attribute, in the unit its
+    // name says; the validator has checked the source carries it.
+    let (value_attr, unit) = match request.value.as_deref() {
+        Some(named) if named != value_attr => {
+            let unit = unit_named_by(named);
+            degradations.push(format!(
+                "the value is `{named}`, as asked, not `{value_attr}`: read in {unit}, from its name"
+            ));
+            (named, unit)
+        }
+        _ => (value_attr, unit),
+    };
+
     // One shortfall for the run, not one per series: a ring drops without
     // regard to which series the record would have joined, so a fraction
     // computed per series would be attributing every drop to each of them.
@@ -979,6 +1008,25 @@ pub fn aggregate(
     // counted belongs to one of them: then a series keyed by that key is short
     // by its own ring's losses and by nothing else ([`Shortfalls`]).
     let mut collection = collection;
+    // A key that puts one event in several series is aggregated over copies,
+    // and the raw events and the count stay the run's own.
+    let mut original = None;
+    if request.keys.contains(&KeyKind::Within) {
+        let (inside, stackless) = within_each(&collection);
+        degradations.push(format!(
+            "`--keys within` counts each sample once in the row of every distinct function on \
+             its stack, so the rows add up to more than the run{}",
+            if stackless > 0 {
+                format!(
+                    "; {stackless} of {} events carried no stack and are `within:?`",
+                    collection.events.len()
+                )
+            } else {
+                String::new()
+            }
+        ));
+        original = Some(std::mem::replace(&mut collection.events, inside));
+    }
     if request.keys.contains(&KeyKind::Func) {
         let stackless = derive_func(&mut collection);
         if stackless > 0 {
@@ -1009,19 +1057,25 @@ pub fn aggregate(
     for emit in &request.emit {
         outputs.push(match emit {
             Emit::Raw => Output::Raw {
-                events: collection.events.clone(),
+                events: original
+                    .clone()
+                    .unwrap_or_else(|| collection.events.clone()),
             },
             Emit::Timeline => Output::Timeline {
                 series: timeline_by(&collection.events, axes, first_ts_ns, value_attr)?,
                 first_ts_ns: collection.events.first().map(|event| event.ts_ns),
             },
             Emit::Summary => Output::Summary {
-                series: match &ticks {
-                    Some(groups) => summary_of(borrowed(groups), value_attr, adds_up, |key| {
-                        shorts.for_series(key)
-                    })?,
-                    None => summary_by(&collection.events, axes, value_attr, adds_up, &shorts)?,
-                },
+                series: with_sums(
+                    match &ticks {
+                        Some(groups) => summary_of(borrowed(groups), value_attr, adds_up, |key| {
+                            shorts.for_series(key)
+                        })?,
+                        None => summary_by(&collection.events, axes, value_attr, adds_up, &shorts)?,
+                    },
+                    grouped(&collection.events, axes),
+                    &request.sum,
+                )?,
             },
             Emit::Rate => Output::Rate {
                 series: rate_by(
@@ -1047,12 +1101,16 @@ pub fn aggregate(
             Emit::SummaryBy(by) => {
                 uncarried(&collection.events, *by, "summary", &mut degradations);
                 Output::Summary {
-                    series: summary_over(
-                        &collection.events,
-                        by.as_str(),
-                        value_attr,
-                        adds_up,
-                        &shorts,
+                    series: with_sums(
+                        summary_over(
+                            &collection.events,
+                            by.as_str(),
+                            value_attr,
+                            adds_up,
+                            &shorts,
+                        )?,
+                        grouped_over(&collection.events, by.as_str()),
+                        &request.sum,
                     )?,
                 }
             }
@@ -1137,7 +1195,7 @@ pub fn aggregate(
         unit,
         backend: resolved.backend.id.clone(),
         outputs,
-        events_seen: collection.events.len(),
+        events_seen: original.as_ref().map_or(collection.events.len(), Vec::len),
         observed_ns: collection.observed_ns,
         window: collection.window,
         stopped_because: collection.stopped_because,
@@ -1191,6 +1249,44 @@ fn derive_func(collection: &mut Collection) -> usize {
             .push(crate::event::Attr::text(name, leaf.clone()));
     }
     stackless
+}
+
+/// Each event once for every distinct function on its stack, carrying that
+/// function as `within`: what [`KeyKind::Within`] aggregates over. A
+/// recursive function is counted once per sample, as `perf report
+/// --children` counts it. Returns the copies and how many events had no
+/// stack, which are kept once as `within:?`.
+fn within_each(collection: &Collection) -> (Vec<Event>, usize) {
+    let scanned = stack_table(&collection.events);
+    let name = KeyKind::Within.as_str();
+    let mut inside = Vec::with_capacity(collection.events.len());
+    let mut stackless = 0;
+    for event in &collection.events {
+        let frames = stack_id(event).and_then(|id| {
+            collection
+                .stacks
+                .get(&id)
+                .or_else(|| scanned.get(&id))
+                .filter(|frames| !frames.is_empty())
+        });
+        let Some(frames) = frames else {
+            stackless += 1;
+            inside.push(event.clone());
+            continue;
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for frame in frames {
+            if !seen.insert(frame.as_str()) {
+                continue;
+            }
+            let mut copy = event.clone();
+            copy.attrs.retain(|attr| attr.name != name);
+            copy.attrs
+                .push(crate::event::Attr::text(name, frame.clone()));
+            inside.push(copy);
+        }
+    }
+    (inside, stackless)
 }
 
 /// Says how many events carried no `by`, for an `@<attr>` emit that holds
@@ -1286,15 +1382,6 @@ fn topk(
     topk_by(events, &[], attr, k, &Shortfalls::run_wide(short))
 }
 
-fn value_of(event: &Event, attr: &str) -> Result<f64, EmitError> {
-    event
-        .attr(attr)
-        .and_then(|value| value.as_f64())
-        .ok_or_else(|| EmitError::NotNumeric {
-            attr: attr.to_owned(),
-        })
-}
-
 /// An event's value, or `None` when it carries no value attribute at all.
 ///
 /// Absent and malformed are different answers. An event without the attribute
@@ -1322,13 +1409,22 @@ fn timeline_by(
     let mut series = Vec::new();
     for (key, events) in grouped(events, axes) {
         let mut points = Vec::with_capacity(events.len());
+        let mut unmeasured = 0;
         for event in events {
+            let Some(value) = measured(event, attr)? else {
+                unmeasured += 1;
+                continue;
+            };
             points.push(Point {
                 offset_ns: event.ts_ns.saturating_sub(first_ts_ns),
-                value: value_of(event, attr)?,
+                value,
             });
         }
-        series.push(Series { key, points });
+        series.push(Series {
+            key,
+            points,
+            unmeasured,
+        });
     }
     Ok(series)
 }
@@ -1342,12 +1438,14 @@ fn rate_by(
 ) -> Result<Vec<SeriesRate>, EmitError> {
     let mut rates = Vec::new();
     for (key, events) in grouped(events, axes) {
-        let total: f64 = events
-            .iter()
-            .map(|event| Ok(weighed(event, attr, value_of(event, attr)?)))
-            .collect::<Result<Vec<_>, EmitError>>()?
-            .iter()
-            .sum();
+        let mut total = 0.0;
+        let mut unmeasured = 0;
+        for event in &events {
+            match measured(event, attr)? {
+                Some(value) => total += weighed(event, attr, value),
+                None => unmeasured += 1,
+            }
+        }
         // A series of counted windows is over the time its counter was
         // enabled, when every one of them says; the run's window otherwise.
         let enabled: Option<u64> = events
@@ -1368,10 +1466,11 @@ fn rate_by(
         rates.push(SeriesRate {
             short: shorts.for_series(&key),
             key,
-            events: events.len(),
+            events: events.len() - unmeasured,
             total,
             per_second: seconds.map(|seconds| total / seconds),
             window_ns,
+            unmeasured,
             counted_window,
         });
     }
@@ -1512,6 +1611,57 @@ fn summary_over(
     })
 }
 
+/// The unit an attribute's name says, for a request naming its own value:
+/// `_ns` is time, `bytes` bytes, `hz` a frequency, a share or `busy` a
+/// ratio, and anything else a count.
+fn unit_named_by(attr: &str) -> Unit {
+    let name = attr.to_ascii_lowercase();
+    if name == "ns" || name.ends_with("_ns") {
+        Unit::Ns
+    } else if name.ends_with("bytes_per_second") {
+        Unit::BytesPerSecond
+    } else if name.contains("bytes") {
+        Unit::Bytes
+    } else if name == "hz" || name.ends_with("_hz") {
+        Unit::Hz
+    } else if name.contains("cycles") {
+        Unit::Cycles
+    } else if name.contains("joules") {
+        Unit::Joules
+    } else if name.contains("ratio") || name.contains("share") || name == "busy" {
+        Unit::Ratio
+    } else {
+        Unit::Count
+    }
+}
+
+/// Each summary row with the attributes the request asked added up beside
+/// its value (`--sum errors`), over the same events the row summarises.
+fn with_sums(
+    mut summaries: Vec<SeriesSummary>,
+    groups: BTreeMap<SeriesKey, Vec<&Event>>,
+    sums: &[String],
+) -> Result<Vec<SeriesSummary>, EmitError> {
+    if sums.is_empty() {
+        return Ok(summaries);
+    }
+    for summary in &mut summaries {
+        let Some(events) = groups.get(&summary.key) else {
+            continue;
+        };
+        for name in sums {
+            let mut total = 0.0;
+            for event in events {
+                if let Some(value) = measured(event, name)? {
+                    total += value;
+                }
+            }
+            summary.sums.insert(name.clone(), total);
+        }
+    }
+    Ok(summaries)
+}
+
 fn summary_of(
     groups: BTreeMap<SeriesKey, Vec<&Event>>,
     attr: &str,
@@ -1545,6 +1695,7 @@ fn summary_of(
                     last: 0.0,
                     total: adds_up.then_some(0.0),
                     unmeasured,
+                    sums: BTreeMap::new(),
                     short: short_of(&key),
                     key,
                 });
@@ -1578,6 +1729,7 @@ fn summary_of(
             last,
             total: adds_up.then_some(total),
             unmeasured,
+            sums: BTreeMap::new(),
         });
     }
     Ok(summaries)
@@ -2098,6 +2250,79 @@ mod tests {
         }
     }
 
+    /// The keys read off an attribute -- `op`, `level`, `mapping`, `user`,
+    /// `counter` -- name a series by the attribute's value, and an event
+    /// without it is `<key>:?`, as `func` is.
+    #[test]
+    fn a_key_named_after_an_attribute_makes_a_series_per_value() {
+        let with = |op: Option<&str>, calls| {
+            let mut event = event(0, 1, calls);
+            if let Some(op) = op {
+                event.attrs.push(Attr::text("op", op));
+            }
+            event
+        };
+        let events = vec![
+            with(Some("vfs_read"), 3),
+            with(Some("vfs_write"), 5),
+            with(Some("vfs_read"), 4),
+            with(None, 1),
+        ];
+        let Output::TopK { series, .. } = topk_by(
+            &events,
+            &[KeyKind::Op],
+            "bytes",
+            10,
+            &Shortfalls::run_wide(None),
+        )
+        .unwrap() else {
+            panic!("topk is a ranking");
+        };
+        let rows: Vec<(&str, f64)> = series
+            .iter()
+            .map(|row| (row.key.as_str(), row.total))
+            .collect();
+        assert_eq!(
+            rows,
+            [("op:vfs_read", 7.0), ("op:vfs_write", 5.0), ("op:?", 1.0)]
+        );
+        for key in [
+            KeyKind::Level,
+            KeyKind::Mapping,
+            KeyKind::User,
+            KeyKind::Counter,
+        ] {
+            assert!(key.derived(), "{key}");
+            assert_eq!(key.as_str().parse::<KeyKind>().unwrap(), key);
+        }
+    }
+
+    /// `--sum errors` adds the attribute up per series beside the value, as
+    /// `strace -c`'s errors column; a named value is read in the unit its
+    /// name says.
+    #[test]
+    fn a_summary_adds_up_the_attributes_asked_beside_its_value() {
+        let call = |tid, ns, errors| {
+            let mut event = event(0, tid, ns);
+            event.attrs.push(Attr::uint("errors", errors));
+            event
+        };
+        let events = vec![call(1, 10, 2), call(1, 30, 1), call(2, 5, 0)];
+        let summaries = with_sums(
+            summary(&events, "bytes", None).unwrap(),
+            grouped(&events, &[]),
+            &["errors".to_owned()],
+        )
+        .unwrap();
+        let errors: Vec<f64> = summaries.iter().map(|row| row.sums["errors"]).collect();
+        assert_eq!(errors, [3.0, 0.0]);
+        assert_eq!(unit_named_by("latency_ns"), Unit::Ns);
+        assert_eq!(unit_named_by("avg_hz"), Unit::Hz);
+        assert_eq!(unit_named_by("busy"), Unit::Ratio);
+        assert_eq!(unit_named_by("errors"), Unit::Count);
+        assert_eq!(unit_named_by("freed_bytes"), Unit::Bytes);
+    }
+
     /// One event standing for four hundred measurements counts as four
     /// hundred, in every emit that counts.
     ///
@@ -2439,6 +2664,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         };
         crate::resolve::resolve(&catalog, &capabilities, &request).unwrap()
     }
@@ -3257,6 +3484,52 @@ mod tests {
         );
     }
 
+    /// `--keys within` is the inclusive share: a sample counts once in the
+    /// row of each distinct function on its stack, a recursive one once, and
+    /// the raw events and their count stay the run's.
+    #[test]
+    fn the_within_key_charges_each_sample_to_every_function_it_was_inside() {
+        let sampled = |id: u64, frames: &str| {
+            let mut one = event(id, 7, 1);
+            one.attrs.push(Attr::uint(STACK_ID_ATTR, id));
+            one.attrs.push(Attr::text(STACK_ATTR, frames));
+            one
+        };
+        let events = vec![
+            sampled(1, "main;work;heavy"),
+            sampled(1, "main;work;heavy"),
+            sampled(2, "main;work;work;light"),
+            sampled(3, "main;idle"),
+        ];
+        let collection = quiet(events, 1_000);
+        let resolved = rss_request(
+            vec![Emit::TopK { k: 10, by: None }, Emit::Raw],
+            vec![KeyKind::Within],
+        );
+        let results = aggregate(&resolved, collection, Unit::Count, "bytes").unwrap();
+        let Output::TopK { series, .. } = &results.outputs[0] else {
+            panic!("a ranking");
+        };
+        let rows: Vec<(String, f64)> = series
+            .iter()
+            .map(|one| (one.key.to_string(), one.total))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("within:main".into(), 4.0),
+                ("within:work".into(), 3.0),
+                ("within:heavy".into(), 2.0),
+                ("within:idle".into(), 1.0),
+                ("within:light".into(), 1.0),
+            ]
+        );
+        let Output::Raw { events } = &results.outputs[1] else {
+            panic!("raw");
+        };
+        assert_eq!((events.len(), results.events_seen), (4, 4));
+    }
+
     /// A poll regrouped by fewer keys than its events carry adds the readings
     /// of one tick into one (io 5): two devices read at once are one reading
     /// of a direction, not two measurements of half of it.
@@ -3365,6 +3638,14 @@ mod tests {
             (series[0].events, series[0].unmeasured, series[0].total),
             (2, 1, 32.0)
         );
+
+        // Timeline and rate leave it out and count it, as the others do: they
+        // used to refuse the run.
+        let timeline = &timeline(&events, 0, "bytes").unwrap()[0];
+        assert_eq!((timeline.points.len(), timeline.unmeasured), (2, 1));
+        let rate = &rate(&events, 2_000_000_000, "bytes", None).unwrap()[0];
+        assert_eq!((rate.events, rate.unmeasured, rate.total), (2, 1, 32.0));
+        assert_eq!(rate.per_second, Some(16.0));
 
         // A value that is there and is not a number is still a collector bug.
         let mut malformed = event(0, 1, 0);

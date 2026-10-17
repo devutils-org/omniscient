@@ -1446,6 +1446,35 @@ pub fn prime_kernel_symbols() {
     let _ = kernel_symbols();
 }
 
+/// Whether the kernel's symbols were read already, by whichever thread.
+pub fn kernel_symbols_read() -> bool {
+    KERNEL_SYMBOLS.get().is_some()
+}
+
+/// The same, on a thread of its own, so that the window it is paid for opens
+/// now rather than after it.
+///
+/// A sampler's window has to open at once -- a profile attached to a running
+/// `--pid` a second late has missed that second -- while its rings keep what
+/// the target does until a drain reads them. The first drain to meet a kernel
+/// frame before the table is read waits for the rest of the read, once,
+/// which is a round late rather than a second of the target unseen; on a
+/// machine with a spare cpu, which the read then runs on, it waits for
+/// nothing. The read's cpu is this process's either way, and is weighed as
+/// the one-time load it is.
+pub fn prime_kernel_symbols_aside() {
+    if KERNEL_SYMBOLS.get().is_some() {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("omn-kallsyms".to_owned())
+        .spawn(prime_kernel_symbols);
+    // A process that cannot start a thread reads the table where it is.
+    if spawned.is_err() {
+        prime_kernel_symbols();
+    }
+}
+
 /// The kernel's own symbol table.
 struct KernelSymbols {
     /// `(address, name)`, sorted by address.
@@ -3190,8 +3219,8 @@ mod tests {
     /// which is exactly when this is asked.
     #[test]
     fn a_symbolizer_keeps_the_mappings_it_has_when_the_target_is_gone() {
-        let Ok(mut child) = std::process::Command::new("/bin/sleep").arg("30").spawn() else {
-            eprintln!("skipped: this machine has no `/bin/sleep` to read the mappings of");
+        let Ok(mut child) = std::process::Command::new("sleep").arg("30").spawn() else {
+            eprintln!("skipped: this machine has no `sleep` on PATH to read the mappings of");
             return;
         };
         let mut symbols = Symbolizer::for_process(child.id() as i32);
@@ -3323,6 +3352,8 @@ mod tests {
             backend: None,
             label: None,
             window: None,
+            value: None,
+            sum: Vec::new(),
         }
     }
 

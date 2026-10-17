@@ -34,6 +34,8 @@ use crate::{
 const CUDA_NOT_INITIALIZED: c_int = 3;
 /// `VK_ERROR_INITIALIZATION_FAILED`.
 const VK_INITIALIZATION_FAILED: i32 = -3;
+/// What NVTX's range calls answer when they did nothing: a negative level.
+const NVTX_NO_LIBRARY: c_int = -1;
 
 fn watching() -> bool {
     reporting(CLASS_GPU) && !in_hook()
@@ -121,6 +123,17 @@ entry_points! {
     13 vkDeviceWaitIdle(device: *mut c_void) -> i32 = VK_INITIALIZATION_FAILED;
     14 vkWaitForFences(device: *mut c_void, count: u32, fences: *const u64, all: u32, timeout: u64) -> i32 = VK_INITIALIZATION_FAILED;
     15 vkQueuePresentKHR(queue: *mut c_void, info: *const c_void) -> i32 = VK_INITIALIZATION_FAILED;
+    // Appended, so every index above keeps its name: the rest of the CUDA
+    // driver's calls a profile asks about -- a memset, a module load (a JIT
+    // of PTX lands there), a context's creation, which is the device's
+    // initialisation the first time -- and NVTX's ranges, through the
+    // `libnvToolsExt` a program links (NVTX 3's header-only injection fetches
+    // its own pointers and is not seen).
+    16 cuMemsetD8_v2(device: u64, value: u8, count: usize) -> c_int = CUDA_NOT_INITIALIZED;
+    17 cuModuleLoadData(module: *mut *mut c_void, image: *const c_void) -> c_int = CUDA_NOT_INITIALIZED;
+    18 cuCtxCreate_v2(context: *mut *mut c_void, flags: c_uint, device: c_int) -> c_int = CUDA_NOT_INITIALIZED;
+    19 nvtxRangePushA(message: *const std::ffi::c_char) -> c_int = NVTX_NO_LIBRARY;
+    20 nvtxRangePop() -> c_int = NVTX_NO_LIBRARY;
 }
 
 #[cfg(test)]
@@ -150,6 +163,11 @@ mod tests {
                 "vkDeviceWaitIdle",
                 "vkWaitForFences",
                 "vkQueuePresentKHR",
+                "cuMemsetD8_v2",
+                "cuModuleLoadData",
+                "cuCtxCreate_v2",
+                "nvtxRangePushA",
+                "nvtxRangePop",
             ]
         );
     }

@@ -160,6 +160,7 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(vfscount::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                by_op: resolved.request.keys.contains(&crate::request::KeyKind::Op),
             }))
         }),
         Factory::new("io.fsync", "bpf:fentry", |resolved| {

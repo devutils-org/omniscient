@@ -959,6 +959,12 @@ const ENTRY_TGID: i16 = -24;
 /// So the stamp is written only if absent; a stamp found is counted in
 /// `orphan_slot` and then replaced, so the thread is timed again from this
 /// call on.
+///
+/// A process target is compared as a constant; with `descendants`, the map
+/// of the processes it started (`sched_common::Descendants`), a thread group
+/// that is not the root is looked up there, so a shell script's children are
+/// timed as the script is: the root compared first, which costs the target's
+/// own calls no lookup.
 pub(crate) fn entry_instructions(
     pending_fd: i32,
     drops_fd: i32,
@@ -1527,6 +1533,13 @@ impl HistogramProgram {
         .map_err(|error| map_failure(&format!("{} generation word", spec.name), error))?;
         let drops = Counters::create(3, &format!("{}_drop", spec.name))
             .map_err(|error| map_failure(&format!("{} drop counter", spec.name), error))?;
+        let descendants = match spec.narrowing.tgid {
+            Some(root) => Some(crate::bpf::sched_common::Descendants::follow(root)?),
+            None => None,
+        };
+        let followed = descendants
+            .as_ref()
+            .map(crate::bpf::sched_common::Descendants::map_fd);
         let maps = ExitMaps {
             pending: pending.as_raw_fd(),
             generation: generation.as_raw_fd(),
@@ -1540,11 +1553,6 @@ impl HistogramProgram {
         // A process target is followed into the processes it starts: without
         // it `omn trace io.syscall -- ./script.sh` timed the shell's own calls
         // and none of the programs it ran, and read as an idle program.
-        let descendants = spec
-            .narrowing
-            .tgid
-            .map(crate::bpf::sched_common::Descendants::follow)
-            .transpose()?;
         let mut built = Vec::with_capacity(spec.timed.len());
         for timed in &spec.timed {
             let entry = entry_instructions(
@@ -1553,9 +1561,7 @@ impl HistogramProgram {
                 DROP_PENDING,
                 DROP_ORPHANED,
                 spec.narrowing,
-                descendants
-                    .as_ref()
-                    .map(crate::bpf::sched_common::Descendants::map_fd),
+                followed,
                 &|program| (spec.gate)(program, timed),
             )?;
             let exit = exit_instructions(timed, maps, spec.fill)?;
@@ -1933,6 +1939,43 @@ mod tests {
         assert_eq!((followed_loads, root_loads), (1, 0));
         assert_eq!(followed_calls, root_calls + 1, "one lookup more, the map's");
         assert_eq!(lookups(Narrowing::default(), None), (0, root_calls));
+    }
+
+    /// A process target with its descendants map compares the root first and
+    /// looks every other thread group up in the map; without the map it
+    /// compares the root alone, and the machine compares nothing.
+    #[test]
+    fn a_process_target_follows_the_processes_it_started() {
+        let lookups = |program: &[Insn]| {
+            program
+                .iter()
+                .filter(|insn| insn.code == 0x85 && insn.imm == helper::MAP_LOOKUP_ELEM)
+                .count()
+        };
+        let root = Narrowing {
+            tgid: Some(4242),
+            tid: None,
+        };
+        let followed = entry_instructions(3, 4, 0, 2, root, Some(9), &|_| {}).expect("entry");
+        assert!(
+            followed
+                .iter()
+                .any(|insn| insn.code == Insn::jeq_imm(1, 0, 0).code && insn.imm == 4242),
+            "the root is compared before the lookup"
+        );
+        let alone = entry_instructions(3, 4, 0, 2, root, None, &|_| {}).expect("entry");
+        assert_eq!(
+            lookups(&followed),
+            lookups(&alone) + 1,
+            "one lookup more, of the descendants map"
+        );
+        let machine =
+            entry_instructions(3, 4, 0, 2, Narrowing::default(), Some(9), &|_| {}).expect("entry");
+        assert_eq!(
+            lookups(&machine),
+            lookups(&alone),
+            "a machine target follows nothing"
+        );
     }
 
     /// Both halves of the pair take one timestamp each, from the monotonic

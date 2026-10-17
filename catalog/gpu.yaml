@@ -46,7 +46,7 @@
   emits: [timeline, raw, summary]
   targets: {system: native, launch: native}
   keys: []
-  filter_fields: [engine, device]
+  filter_fields: [engine, device, process_ratio]
   determinism: low
   caveats:
     - "With a launch target, each NVML reading also carries the launched
@@ -87,7 +87,7 @@
   emits: [timeline, raw, summary]
   targets: {system: native, launch: native}
   keys: []
-  filter_fields: [device]
+  filter_fields: [device, memory_hz, graphics_hz]
   determinism: low
   caveats:
     - "A clock read through NVML costs 0.8 to 2.1 ms of the tool's cpu per
@@ -228,6 +228,35 @@
     - "A launch target sets the window, not the scope. The figure is the whole
        device's, shared with everything else that was using it."
 
+- id: gpu.pcie
+  family: gpu
+  summary: "PCIe traffic to and from the GPU, in bytes a second"
+  unit: bytes_per_second
+  backends:
+    - {id: "vendor:nvml", requires: ["nvml"], cost: low}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native, launch: native}
+  keys: []
+  filter_fields: [device, tx_bytes_per_second, rx_bytes_per_second]
+  determinism: low
+  caveats:
+    - "What the driver measured crossing the bus over its own 20 ms window,
+       per direction: `rx_bytes_per_second` is what the device received (a
+       host-to-device copy), `tx_bytes_per_second` what it sent, and the value
+       their sum. A window of 20 ms in each poll interval, not the interval:
+       a burst between two windows is in no reading. `--value
+       rx_bytes_per_second` reads one direction. The bus's bytes, headers
+       included: a host-to-device copy loop that moved 13.12 GB/s by its own
+       count read 14.13 GB/s received, and 1.2 GB/s sent back."
+    - "Each direction is a call that waits out its window, so a reading holds
+       the run's round for 40 ms per device; poll no faster than 200 ms."
+    - "The cumulative counters (`NVML_FI_DEV_PCIE_COUNT_*_BYTES`) are 32-bit
+       on consumer boards and wrap in about a third of a second at 12 GB/s,
+       which is why this reads the windowed rate instead."
+    - "A launch target sets the window, not the scope: the bus is the
+       device's, shared with everything else using it."
+
 - id: gpu.mem
   family: gpu
   summary: "VRAM held, by device or by process"
@@ -282,8 +311,8 @@
   # context and stream, never its thread, so `task` is the process's main
   # thread and the device is an attribute: a `gpu` key is a fence, which a
   # kernel record does not carry.
-  keys: [task, proc]
-  filter_fields: [kernel, op, device, stream, context, bytes, copy, pid]
+  keys: [task, proc, op]
+  filter_fields: [kernel, op, device, stream, context, bytes, copy, pid, registers, shared_bytes]
   determinism: medium
   caveats:
     - "A launched program only: CUPTI works inside the process that owns the
@@ -293,7 +322,10 @@
     - "One event per kernel, memcpy and memset the device ran (`op`), named
        by `kernel` -- the demangled kernel name, or `[memcpy HtoD]` and the
        like -- with its time on the device as `duration_ns`. Rank them with
-       `topk:10@kernel`; count only kernels with `--filter \"op == 'kernel'\"`."
+       `topk:10@kernel`; count only kernels with `--filter \"op == 'kernel'\"`,
+       or split by it with `--keys op`. A launch's facts are values too:
+       `--value registers -e summary@kernel` gives each kernel's registers per
+       thread, and `--value shared_bytes` its shared memory."
     - "Vendor timestamps live in another clock domain: CUPTI's clock is
        bracketed between two CLOCK_MONOTONIC reads at the start, at every
        flush and at the end, and every event carries the measured error as a
@@ -355,9 +387,12 @@
        (most Vulkan engines) -- reports nothing, and the run says so rather than
        reporting an idle GPU."
     - "The entry points interposed are the CUDA driver's launch, copy,
-       synchronize and allocation calls and Vulkan's submit, present and wait
-       calls; `api` names them without their ABI suffix. OpenGL is not among
-       them."
+       memset, synchronize, allocation, module load and context creation
+       calls, Vulkan's submit, present and wait calls, and NVTX's range push
+       and pop (`family` `nvtx`, through a linked `libnvToolsExt`; NVTX 3's
+       header-only injection is not seen); `api` names them without their ABI
+       suffix. OpenGL is not among them. A range's text is not carried: an
+       `nvtxRangePushA` is its time and the depth it returned."
     - "Its cost is a price per call, paid by the calling thread: a
        launch-bound program (a launch every 2 us) ran 11.3 % longer here, a
        program of millisecond kernels 3 % or less. The band, `high`, is the
@@ -433,6 +468,7 @@
     - {id: "vendor:cupti", requires: ["cupti"], cost: med}
   modes: [trace]
   emits: [stack, topk, raw]
+  stacks: device
   targets:
     launch: native
     pid: "no: a launched program only -- CUPTI's PC sampling works inside the process that

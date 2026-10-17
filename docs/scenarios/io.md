@@ -1630,11 +1630,27 @@ that does not inline.
   submitter read at `block_rq_insert`, in the task's context, and carried to
   the issue -- is a third program in the hot path, and with no workload that
   shows the loss it would be reasoned only. Ranked first for the next wave.
-- **`op` as a key on `io.vfs`**: one event per interval carries each
-  function's count beside the total, and a filter on `op` keeps one; a
-  series per function needs a `KeyValue` the emit layer groups on
-  (`src/event.rs`, filed).
+- ~~**`op` as a key on `io.vfs`**~~ -- done in the twenty-fifth wave:
+  `--keys op` makes each function an event of its own, `op` a derived key
+  the emit layer reads off the attribute.
 - A loaded-machine failure of
   `a_cold_read_of_a_known_file_is_measured_against_the_bytes_it_had_to_move`
   ("the session's window never enclosed the read", three tries, load
   average 30): passed alone at once. Noted, not widened.
+
+## The twenty-fifth wave
+
+- **`io.bytes` through `fs:proc` measured its first interval from a stale
+  baseline** (top, finding 2): the baseline is taken at `start`, and a
+  live `omn top` spent up to 3.4 s attaching the rest before the window
+  opened, so the first event carried 833 MB at offset zero. A baseline older
+  than one interval at the first tick is retaken there; a launched program's,
+  taken just before its release, is younger and keeps the release's bytes.
+  Held by `a_baseline_older_than_an_interval_is_retaken_at_the_window_s_opening`.
+- **`io.vfs -k op`**: a series per function.
+- **Not done**: a block request a `kworker` dispatched, charged to the bio's
+  submitter. It needs a third program on `block_rq_insert` in the hot path,
+  and this machine grants no CAP_BPF to load or verify it, with no workload
+  that shows the loss on a launched program. Still ranked first.
+- **Followed children**: `io.syscall` and `io.fs` follow a process target's
+  children since the `feat(fentry)` commit (stream narrow).

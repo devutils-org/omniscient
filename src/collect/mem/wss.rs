@@ -451,7 +451,12 @@ mod tests {
     fn a_rollup_opened_across_an_exec_answers_esrch_from_a_running_process() {
         use std::io::Read;
 
-        let program = std::ffi::CString::new("/bin/sleep").unwrap();
+        let resolved =
+            crate::collect::launch::find_program("sleep", std::env::var_os("PATH").as_deref());
+        let program = {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::CString::new(resolved.as_os_str().as_bytes()).unwrap()
+        };
         let seconds = std::ffi::CString::new("5").unwrap();
         let argv = [program.as_ptr(), seconds.as_ptr(), std::ptr::null()];
         let mut gate = [0i32; 2];
@@ -473,9 +478,7 @@ mod tests {
         let mut early = std::fs::File::open(&rollup).expect("the child's rollup opens");
         // SAFETY: one byte to the gate this test made.
         unsafe { libc::write(gate[1], b"x".as_ptr().cast(), 1) };
-        let exe = std::path::PathBuf::from("/bin/sleep")
-            .canonicalize()
-            .unwrap_or_else(|_| "/bin/sleep".into());
+        let exe = resolved.canonicalize().unwrap_or(resolved.clone());
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while std::fs::read_link(format!("/proc/{pid}/exe")).ok().as_ref() != Some(&exe) {
             assert!(

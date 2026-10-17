@@ -570,6 +570,21 @@ impl Collector for Diskstats {
             return Ok(Vec::new());
         }
         if std::mem::take(&mut self.pass_first_tick) {
+            // The first tick is the window's opening. A baseline older than
+            // one interval was taken while the rest of the run was still
+            // attaching -- up to 3.4 s of a live `omn top` loading its
+            // programs -- and its bytes are from before the window: the first
+            // event carried them all, a spike at offset zero. Measured from
+            // here instead. A baseline taken just before a launched program
+            // was released is younger than that, and keeps the bytes between
+            // the release and this tick.
+            let since = self.previous.as_ref().map(|previous| previous.ts_ns);
+            if let (Mode::Poll { interval }, Some(since)) = (self.mode, since) {
+                let now = self.read()?;
+                if now.ts_ns.saturating_sub(since) > interval.as_nanos() {
+                    self.previous = Some(now);
+                }
+            }
             return Ok(Vec::new());
         }
         let after = self.read()?;
@@ -983,6 +998,39 @@ mod tests {
             events[0].attr("bytes").unwrap().as_f64(),
             Some(24.0 * 512.0),
             "the whole increase since the start, the release's included"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A baseline older than an interval at the first tick was taken while
+    /// the run was still attaching, and what the device did since is from
+    /// before the window: the first interval is measured from the first tick
+    /// instead (top, finding 2: 833 MB at offset zero of a live `omn top`).
+    #[test]
+    fn a_baseline_older_than_an_interval_is_retaken_at_the_window_s_opening() {
+        let Some(device) = a_leaf_device() else {
+            return;
+        };
+        let path = scratch("stale-baseline");
+        write_stats(&path, &[line(&device, 10, 100, 20, 200)]);
+        let mut collector = Diskstats::new(
+            Metric::Bytes,
+            Mode::Poll {
+                interval: "10ms".parse().unwrap(),
+            },
+            path.clone(),
+        );
+        collector.start().expect("the fake file reads");
+        // Startup: other collectors attaching, the device busy meanwhile.
+        write_stats(&path, &[line(&device, 1000, 100_000, 2000, 200_000)]);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(collector.sample(0).expect("the first tick").is_empty());
+        write_stats(&path, &[line(&device, 1001, 100_004, 2001, 200_004)]);
+        let events = collector.sample(1).expect("the second tick");
+        assert_eq!(
+            events[0].attr("bytes").unwrap().as_f64(),
+            Some(8.0 * 512.0),
+            "only what the device did inside the window"
         );
         std::fs::remove_file(&path).ok();
     }

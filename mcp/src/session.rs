@@ -38,6 +38,56 @@ pub enum Source {
     },
 }
 
+/// A family's default composed as `omn trace <family>` composes it, for a
+/// call naming `family` in place of a session: the session as JSON text, and
+/// what the composition decided, in the words the command prints first.
+/// `None` when the call names no family.
+pub fn composed(
+    catalog: &Catalog,
+    arguments: &Value,
+) -> Result<Option<(Source, Vec<String>)>, String> {
+    let Some(family) = arguments.get("family").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if ["path", "session", "approved"]
+        .iter()
+        .any(|key| arguments.get(*key).is_some())
+    {
+        return Err("pass `family` or one of `path`, `session` or `approved`, not both".into());
+    }
+    let mut words = vec![family.to_owned()];
+    if let Some(cost) = arguments.get("cost").and_then(Value::as_str) {
+        words.extend(["--cost".to_owned(), cost.to_owned()]);
+    }
+    if let Some(pids) = arguments.get("pid").and_then(Value::as_array) {
+        let pids: Vec<String> = pids.iter().map(ToString::to_string).collect();
+        words.extend(["--pid".to_owned(), pids.join(",")]);
+    }
+    if let Some(cgroup) = arguments.get("cgroup").and_then(Value::as_str) {
+        words.extend(["--cgroup".to_owned(), cgroup.to_owned()]);
+    }
+    if arguments.get("system").and_then(Value::as_bool) == Some(true) {
+        words.push("--system".to_owned());
+    }
+    if let Some(duration) = arguments.get("duration").and_then(Value::as_str) {
+        words.extend(["--duration".to_owned(), duration.to_owned()]);
+    }
+    if let Some(program) = arguments.get("program").and_then(Value::as_array) {
+        words.push("--".to_owned());
+        words.extend(program.iter().filter_map(Value::as_str).map(str::to_owned));
+    }
+    let composed = omn::lazy::compose_words(catalog, &words).map_err(|error| error.to_string())?;
+    let text = serde_json::to_string(&composed.session)
+        .map_err(|error| format!("the composed session does not encode: {error}"))?;
+    Ok(Some((
+        Source::Text {
+            text,
+            format: InputFormat::Json,
+        },
+        composed.defaulted.iter().map(str::to_owned).collect(),
+    )))
+}
+
 impl Source {
     /// The session a call names. `approved` names a file of the directory
     /// passed with `--allow-launch`, and is refused when the server was

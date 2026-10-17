@@ -693,7 +693,9 @@ mod tests {
 /// placement is worth reporting.
 ///
 /// A field resolves against the event's attributes, plus `kind`, which every
-/// event has. A field the event does not carry makes the comparison false
+/// event has: an attribute named `kind` comes first, since a source that
+/// declares one (`sched.irq`'s `hard`/`soft`) filters on it, and the event's
+/// own kind is the source's name, which `--filter` has no reason to ask. A field the event does not carry makes the comparison false
 /// rather than an error: an event that lacks the field simply is not one of the
 /// events being asked for.
 pub fn matches(expression: &FilterExpr, event: &crate::event::Event) -> bool {
@@ -712,10 +714,10 @@ pub fn matches(expression: &FilterExpr, event: &crate::event::Event) -> bool {
 fn compare(field: &str, operator: CompareOp, value: &Value, event: &crate::event::Event) -> bool {
     use crate::event::AttrValue;
 
-    let attribute = if field == "kind" {
-        Some(AttrValue::Text(event.kind.clone()))
-    } else {
-        event.attr(field).cloned()
+    let attribute = match event.attr(field) {
+        Some(attribute) => Some(attribute.clone()),
+        None if field == "kind" => Some(AttrValue::Text(event.kind.clone())),
+        None => None,
     };
     let Some(attribute) = attribute else {
         return false;
@@ -810,6 +812,19 @@ mod evaluation_tests {
     fn the_event_kind_is_addressable_like_a_field() {
         assert!(check("kind == 'mem.heap.alloc'"));
         assert!(check("kind =~ 'heap'"));
+    }
+
+    /// A source that declares an attribute named `kind` -- `sched.irq`'s
+    /// `hard` or `soft` -- is filtered on it: `--filter 'kind == "soft"'`
+    /// used to compare the event's own kind, `sched.irq`, and keep nothing.
+    #[test]
+    fn an_attribute_named_kind_comes_before_the_event_s_kind() {
+        let mut irq = event();
+        irq.kind = "sched.irq".to_owned();
+        irq.attrs.push(Attr::text("kind", "soft"));
+        let check = |text: &str| matches(&text.parse::<FilterExpr>().unwrap(), &irq);
+        assert!(check("kind == 'soft'"));
+        assert!(!check("kind == 'sched.irq'"));
     }
 
     #[test]
