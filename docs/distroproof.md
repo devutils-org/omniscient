@@ -102,8 +102,9 @@ since on a glibc host its shim would be injected into glibc programs.
 **Why.** The distributions the phase names include Gentoo, which distroproof
 did not boot, and a rolling Debian and a second Fedora make the matrix's
 two ends -- the next kernel a distribution ships, and the release a user
-still runs. Each was added to distroproof's catalog (its branch
-`more-images`), not worked around here (`DECISIONS.md`).
+still runs. Each was added to distroproof's catalog
+([devutils-org/distroproof#4](https://github.com/devutils-org/distroproof/pull/4)),
+not worked around here (`DECISIONS.md`).
 
 **What distroproof showed, and what was fixed there.**
 
