@@ -58,10 +58,13 @@ pub fn interfaces(only: Option<&str>, losses: &mut Losses) -> Result<Vec<Interfa
             .collect();
         if columns.len() < 16 {
             losses.undecoded += 1;
-            losses.note(format!(
-                "{DEV}: the line for `{name}` had {} columns, not 16",
-                columns.len()
-            ));
+            losses.note_times(
+                format!(
+                    "{DEV}: the line for `{name}` had {} columns, not 16",
+                    columns.len()
+                ),
+                1,
+            );
             continue;
         }
         let index = super::interfaces::index_of(&name).unwrap_or(0);
@@ -132,10 +135,13 @@ impl Deltas {
             None => None,
             Some(previous) if current < previous => {
                 losses.failed_reads += 1;
-                losses.note(format!(
-                    "`{key}` went backwards, so what it counts was replaced; that interval is \
+                losses.note_times(
+                    format!(
+                        "`{key}` went backwards, so what it counts was replaced; that interval is \
                      not measured"
-                ));
+                    ),
+                    1,
+                );
                 None
             }
             Some(previous) => Some(current - previous),

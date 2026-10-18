@@ -143,9 +143,10 @@ impl DevCollector {
                 (fields.get(receive_column), fields.get(transmit_column))
             else {
                 self.losses.undecoded += 1;
-                self.losses.note(format!(
-                    "{PATH}: a line for `{name}` had fewer columns than expected"
-                ));
+                self.losses.note_times(
+                    format!("{PATH}: a line for `{name}` had fewer columns than expected"),
+                    1,
+                );
                 continue;
             };
             lines.push(Line {
@@ -235,11 +236,14 @@ impl Collector for DevCollector {
             // pretending otherwise would put a spike in the series.
             if current.0 < previous.0 || current.1 < previous.1 {
                 self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "the counters for `{}` went backwards, so the interface was replaced; \
+                self.losses.note_times(
+                    format!(
+                        "the counters for `{}` went backwards, so the interface was replaced; \
                      that interval is not measured",
-                    line.name
-                ));
+                        line.name
+                    ),
+                    1,
+                );
                 continue;
             }
 

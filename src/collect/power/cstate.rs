@@ -140,9 +140,10 @@ impl Residency {
                     sysfs::number(&state.join("usage")),
                 ) else {
                     self.losses.undecoded += 1;
-                    self.losses.note(format!(
-                        "cpu{cpu} state `{name}` did not report its residency"
-                    ));
+                    self.losses.note_times(
+                        format!("cpu{cpu} state `{name}` did not report its residency"),
+                        1,
+                    );
                     continue;
                 };
                 let total = states.entry((cpu, name)).or_insert((0, 0));
@@ -167,10 +168,11 @@ impl Residency {
     fn delta_events(&mut self, before: &Reading, after: &Reading, seq: u64) -> Vec<Event> {
         if before.states.keys().ne(after.states.keys()) {
             self.losses.undecoded += 1;
-            self.losses.note(
+            self.losses.note_times(
                 "the set of idle states changed between two reads, so the increase between them \
                  is not one machine's worth of idling"
                     .to_owned(),
+                1,
             );
             return Vec::new();
         }
@@ -192,10 +194,13 @@ impl Residency {
                 usage.checked_sub(before_usage),
             ) else {
                 self.losses.undecoded += 1;
-                self.losses.note(format!(
+                self.losses.note_times(
+                    format!(
                     "the residency counter for cpu{cpu} state `{name}` went backwards, so this \
                      interval cannot be attributed"
-                ));
+                ),
+                    1,
+                );
                 return Vec::new();
             };
             // cpuidle counts microseconds; everything in this tool is
@@ -306,9 +311,10 @@ impl Collector for Residency {
             Ok(after) => self.delta_events(&before, &after, 0),
             Err(error) => {
                 self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "the closing read failed, so the window measured nothing: {error:?}"
-                ));
+                self.losses.note_times(
+                    format!("the closing read failed, so the window measured nothing: {error:?}"),
+                    1,
+                );
                 Vec::new()
             }
         }

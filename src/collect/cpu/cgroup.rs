@@ -122,11 +122,14 @@ impl CgroupCounters {
             // A cpu taken offline mid-run: the others counted a real window,
             // and the count is short by whatever ran there, which is said.
             self.losses.failed_reads += 1;
-            self.losses.note(format!(
-                "reading `{}` on cpu {cpu} failed ({error}), so what the cgroup ran there is \
+            self.losses.note_times(
+                format!(
+                    "reading `{}` on cpu {cpu} failed ({error}), so what the cgroup ran there is \
                  not in the count",
-                self.spec.source
-            ));
+                    self.spec.source
+                ),
+                1,
+            );
         }
         let readings = total?;
         let ts_ns = monotonic_ns();

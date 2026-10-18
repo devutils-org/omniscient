@@ -106,7 +106,8 @@ impl Pressure {
             Ok(attrs) => attrs,
             Err(unmeasured) => {
                 self.losses.undecoded += 1;
-                self.losses.note(unmeasured.explain("/proc/pressure/io"));
+                self.losses
+                    .note_times(unmeasured.explain("/proc/pressure/io"), 1);
                 return None;
             }
         };

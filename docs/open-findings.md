@@ -14149,7 +14149,7 @@ What each found is in its handoff (`docs/fixes/w25-<stream>.md`, "Run").
 - `scenario_proc::a_launched_programs_execs_are_its_tree_and_nothing_beside_it`
   had only ever skipped; with CAP_BPF it failed on `command -v echo`.
 
-### Open: a loss reason's count is the rounds it was noted in, not the losses
+### ~~Open~~ Fixed: a loss reason's count is the rounds it was noted in, not the losses
 
 `Losses::reasons` is documented as each reason "with how often each
 occurred", and the summary prints it as `{count}x {reason}`. But 186 of the
@@ -14163,6 +14163,14 @@ total is right; the split is not readable. A fix is in the shared layer: a
 and the 186 sites moved onto it (mechanical: each pairs `+= n` with one
 `note`). Then `--format json`'s `reasons` sums to the counters, which a test
 can hold.
+
+**Fixed the same day.** `Losses::note_times(reason, n)` is public, and the
+181 sites that paired `+= n` with one `note` call it with that `n` (a
+mechanical rewrite; two GPU sites of another shape by hand). The 37 others
+carry their count in their words (`"{unfollowed} processes ..."`) and stay
+noted once. Under the same eight pipe writers: `LOSS: 13151 dropped` above
+`13140x a thread began waiting for a second lock ...` and `11x the kernel
+skipped a run ...`.
 
 ### The full run's eight "machine failures", rerun with the capabilities
 
@@ -14244,3 +14252,13 @@ build -- 19 machine-wide sources, 2.7 s of cpu in 3 s -- and none in
 release (`cpu.util@system` 12 readings of 12, 1.5 s of cpu), where only the
 10 ms drains (`cpu.profile`, `mem.faults`, `sched.wakeup`, `io.latency`)
 run late, 76 to 79 times, by at most 170 ms.
+
+The full suite after the loss-count rewrite and the `kallsyms` fix
+(2026-10-18, with the capabilities): 3 154 passed, 5 failed. Both triage
+tests passed this time. In the flaky tally: `scenario_gpu::a_target_that_exits_...`,
+`scenario_mem::every_mode_and_emit_...`, and newly
+`scenario_net::every_datagram_sent_to_a_closed_port_is_a_drop_with_one_reason`
+(478 of 512 `NO_SOCKET` drops among the suite's 2 515; four passes of four
+alone). `scenario_gpu::the_memory_clock_is_a_series_...` wants an idle board;
+`cases::every_case_names_its_known_cause_both_ways` is the cases' finding
+above.

@@ -181,7 +181,7 @@ impl Clocks {
                 }
                 Err(error) => {
                     self.losses.failed_reads += 1;
-                    self.losses.note(format!("cpu{cpu}: {error}"));
+                    self.losses.note_times(format!("cpu{cpu}: {error}"), 1);
                     continue;
                 }
             };
@@ -253,7 +253,7 @@ impl Collector for Clocks {
                 Ok(interval) => interval,
                 Err(undivided) => {
                     self.losses.failed_reads += 1;
-                    self.losses.note(undivided.reason(cpu));
+                    self.losses.note_times(undivided.reason(cpu), 1);
                     continue;
                 }
             };

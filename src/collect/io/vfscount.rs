@@ -166,9 +166,10 @@ impl VfsCount {
         let missed = program.missed();
         if missed > self.missed {
             self.losses.dropped += missed - self.missed;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of these programs because one was already running on \
                  that cpu, preempted halfway, so a call went uncounted",
+                missed - self.missed,
             );
             self.missed = missed;
         }

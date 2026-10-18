@@ -142,18 +142,20 @@ impl AcceptCollector {
         let missed = program.missed();
         if missed > self.missed {
             self.losses.dropped += missed - self.missed;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of the accept program because one was already running \
                  on that cpu, so an accept went unseen",
+                missed - self.missed,
             );
             self.missed = missed;
         }
         let unfollowed = program.unfollowed();
         if unfollowed > self.unfollowed {
             self.losses.dropped += unfollowed - self.unfollowed;
-            self.losses.note(
+            self.losses.note_times(
                 "a process the target started found the descendants map full, so its accepts \
                  were not kept",
+                unfollowed - self.unfollowed,
             );
             self.unfollowed = unfollowed;
         }

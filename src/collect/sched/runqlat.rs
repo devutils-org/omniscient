@@ -163,7 +163,7 @@ impl RunqLatCollector {
                 // map: they are not lost, they arrive with the next one. What
                 // is lost is knowing which window they belonged to.
                 self.losses.failed_reads += 1;
-                self.losses.note(reason);
+                self.losses.note_times(reason, 1);
                 return;
             }
         };
@@ -258,10 +258,11 @@ impl RunqLatCollector {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of this program because one was already running on \
                  that cpu, so an occurrence was never seen; the count is the machine's, an \
                  upper bound on the target's share, and every total here is a lower bound",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }
@@ -279,17 +280,19 @@ impl RunqLatCollector {
         let (queued, rows) = program.dropped();
         if queued > self.dropped_queued {
             self.losses.dropped += queued - self.dropped_queued;
-            self.losses.note(
+            self.losses.note_times(
                 "more tasks were waiting for a cpu at once than the run queue map holds, so \
                  their waits were never timed",
+                queued - self.dropped_queued,
             );
             self.dropped_queued = queued;
         }
         if rows > self.dropped_rows {
             self.losses.dropped += rows - self.dropped_rows;
-            self.losses.note(
+            self.losses.note_times(
                 "more distinct (task, cpu, priority, bucket) rows appeared in one interval than \
                  the histogram holds, so their waits were never counted",
+                rows - self.dropped_rows,
             );
             self.dropped_rows = rows;
         }

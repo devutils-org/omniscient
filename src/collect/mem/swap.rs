@@ -254,10 +254,13 @@ impl Swap {
             after.out_pages.checked_sub(before.out_pages),
         ) else {
             self.losses.undecoded += 1;
-            self.losses.note(format!(
-                "a swap counter in {} went backwards, so this interval cannot be attributed",
-                self.path.display()
-            ));
+            self.losses.note_times(
+                format!(
+                    "a swap counter in {} went backwards, so this interval cannot be attributed",
+                    self.path.display()
+                ),
+                1,
+            );
             return None;
         };
 
@@ -368,10 +371,13 @@ impl Collector for Swap {
         };
         if closed.ts_ns == opened.ts_ns {
             self.losses.undecoded += 1;
-            self.losses.note(format!(
-                "{} was read once, so a counted run has no window to report a flow over",
-                self.path.display()
-            ));
+            self.losses.note_times(
+                format!(
+                    "{} was read once, so a counted run has no window to report a flow over",
+                    self.path.display()
+                ),
+                1,
+            );
             return Vec::new();
         }
         self.flow_event(&opened, &closed, u64::MAX / 2)

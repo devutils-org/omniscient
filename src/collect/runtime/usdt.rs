@@ -431,9 +431,10 @@ impl UsdtCollector {
         }
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;
-            self.losses.note(
+            self.losses.note_times(
                 "the USDT ring was full: probes fired faster than they were drained, and each \
                  lost hit is a probe the program did reach",
+                dropped - self.dropped,
             );
             self.dropped = dropped;
         }

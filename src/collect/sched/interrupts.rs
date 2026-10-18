@@ -193,10 +193,11 @@ impl InterruptsCollector {
                 Moved::Wrapped => self.wraps += 1,
                 Moved::Reset => {
                     self.losses.failed_reads += 1;
-                    self.losses.note(
+                    self.losses.note_times(
                         "a per-cpu interrupt counter went backwards without wrapping, the \
                          line reset under the same name: its window counts from the reset, \
                          and what it counted before is lost",
+                        1,
                     );
                 }
             }
@@ -265,10 +266,13 @@ impl Collector for InterruptsCollector {
             Ok(counts) => self.window(counts, monotonic_ns(), 0),
             Err(error) => {
                 self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "the closing read of the interrupt counters failed, so the window has no \
+                self.losses.note_times(
+                    format!(
+                        "the closing read of the interrupt counters failed, so the window has no \
                      count: {error:?}"
-                ));
+                    ),
+                    1,
+                );
                 Vec::new()
             }
         }

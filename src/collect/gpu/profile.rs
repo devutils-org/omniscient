@@ -256,12 +256,15 @@ impl ProfileCollector {
         if shortfall > 0 {
             self.totals.shortfall = shortfall;
             self.common.losses.dropped += shortfall;
-            self.common.losses.note(format!(
-                "CUPTI counted {expected} samples in the program's kernels and the program \
+            self.common.losses.note_times(
+                format!(
+                    "CUPTI counted {expected} samples in the program's kernels and the program \
                  counters carried {}: {shortfall} were not reported -- a drain that did not fit \
                  its buffer, or a batch that never reached `omn`",
-                self.totals.reported
-            ));
+                    self.totals.reported
+                ),
+                shortfall,
+            );
         }
     }
 }
@@ -292,11 +295,14 @@ impl Collector for ProfileCollector {
         self.common.unfinished();
         if self.totals.launches > 0 && self.totals.cupti == 0 {
             self.common.losses.failed_reads += 1;
-            self.common.losses.note(format!(
-                "{} kernel launches ran and PC sampling took no sample at all: CUPTI accepted \
+            self.common.losses.note_times(
+                format!(
+                    "{} kernel launches ran and PC sampling took no sample at all: CUPTI accepted \
                  a configuration it did not apply, so this profile is missing, not empty",
-                self.totals.launches
-            ));
+                    self.totals.launches
+                ),
+                1,
+            );
         }
         self.account_for_samples();
         events

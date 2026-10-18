@@ -162,10 +162,11 @@ impl Victims {
         let (dropped, skipped) = (program.dropped(), program.skipped());
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of the OOM victim program because one was already \
                  running on that cpu, so a victim was never seen; the count is the machine's"
                     .to_owned(),
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }

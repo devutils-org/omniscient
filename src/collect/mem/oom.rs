@@ -176,10 +176,13 @@ impl Oom {
             };
             let Some(moved) = now.checked_sub(*then) else {
                 self.losses.undecoded += 1;
-                self.losses.note(format!(
-                    "{name} in {} went backwards, so that interval is not reported",
-                    self.path.display()
-                ));
+                self.losses.note_times(
+                    format!(
+                        "{name} in {} went backwards, so that interval is not reported",
+                        self.path.display()
+                    ),
+                    1,
+                );
                 return None;
             };
             let attr = if *name == "oom_kill" { "kills" } else { name };

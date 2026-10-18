@@ -299,9 +299,12 @@ impl NodeStat {
             };
             let Some(moved) = now.checked_sub(*then) else {
                 self.losses.undecoded += 1;
-                self.losses.note(format!(
-                    "node {node}'s {field} went backwards, so that interval is not reported"
-                ));
+                self.losses.note_times(
+                    format!(
+                        "node {node}'s {field} went backwards, so that interval is not reported"
+                    ),
+                    1,
+                );
                 return None;
             };
             attrs.push(Attr::uint(*field, moved));

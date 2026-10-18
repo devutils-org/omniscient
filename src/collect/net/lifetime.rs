@@ -285,10 +285,11 @@ impl LifetimeCollector {
         if closed.owned == 0 {
             self.unowned += 1;
             self.losses.dropped += 1;
-            self.losses.note(
+            self.losses.note_times(
                 "a connection closed with no process seen acting on it (a reset, a timer, or \
                  one opened before the program attached), so it could be the target's or \
                  another process's and was left out",
+                1,
             );
             return false;
         }
@@ -317,9 +318,10 @@ impl LifetimeCollector {
                 // someone else's.
                 self.unplaced += 1;
                 self.losses.dropped += 1;
-                self.losses.note(
+                self.losses.note_times(
                     "a connection's process had exited before it could be placed in or out of \
                      the target's tree",
+                    1,
                 );
                 false
             }
@@ -335,26 +337,27 @@ impl LifetimeCollector {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of these programs because one was already running on \
                  its cpu, so a connection went unseen; the count is the machine's, and an upper bound \
-                 on this target's",
-            );
+                 on this target's", skipped - self.skipped);
             self.skipped = skipped;
         }
         let (open, ring) = program.dropped();
         if open > self.dropped_open {
             self.losses.dropped += open - self.dropped_open;
-            self.losses.note(
+            self.losses.note_times(
                 "more connections were established at once than the open map holds, so their \
                  lifetimes were never timed",
+                open - self.dropped_open,
             );
             self.dropped_open = open;
         }
         if ring > self.dropped_ring {
             self.losses.dropped += ring - self.dropped_ring;
-            self.losses.note(
+            self.losses.note_times(
                 "the connection ring was full: connections closed faster than they were drained",
+                ring - self.dropped_ring,
             );
             self.dropped_ring = ring;
         }

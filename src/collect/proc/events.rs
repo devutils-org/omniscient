@@ -68,9 +68,10 @@ impl Streaming {
     fn note_undecoded(&mut self, undecoded: u64, what: &str) {
         if undecoded > 0 {
             self.losses.undecoded += undecoded;
-            self.losses.note(format!(
-                "a record in the {what} ring was shorter than one event"
-            ));
+            self.losses.note_times(
+                format!("a record in the {what} ring was shorter than one event"),
+                undecoded,
+            );
         }
     }
 
@@ -84,17 +85,21 @@ impl Streaming {
     fn absorb_drops(&mut self, dropped: u64, skipped: u64, what: &str) {
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(format!(
+            self.losses.note_times(
+                format!(
                 "the kernel skipped a run of the {what} program because one was already running \
                  on that cpu, so an event was never seen; the count is the machine's"
-            ));
+            ),
+                skipped - self.skipped,
+            );
             self.skipped = skipped;
         }
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;
-            self.losses.note(format!(
-                "the {what} ring was full: events happened faster than they were drained"
-            ));
+            self.losses.note_times(
+                format!("the {what} ring was full: events happened faster than they were drained"),
+                dropped - self.dropped,
+            );
             self.dropped = dropped;
         }
     }
@@ -409,9 +414,10 @@ impl ExecCollector {
             let missed = descendants.missed();
             if missed > self.missed_forks {
                 self.inner.losses.dropped += missed - self.missed_forks;
-                self.inner.losses.note(
+                self.inner.losses.note_times(
                     "a process the target started found the descendants map full, so its \
                      execs are placed by walking `/proc`",
+                    missed - self.missed_forks,
                 );
                 self.missed_forks = missed;
             }

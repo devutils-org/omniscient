@@ -222,35 +222,39 @@ impl CallsCollector {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of a call program because one was already running on \
                  that cpu, so a call was never seen; the count is the machine's",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }
         let unfollowed = program.unfollowed();
         if unfollowed > self.unfollowed {
             self.losses.dropped += unfollowed - self.unfollowed;
-            self.losses.note(
+            self.losses.note_times(
                 "a process the target started was not followed: the map of the processes it \
                  started was full, so its calls are in no record",
+                unfollowed - self.unfollowed,
             );
             self.unfollowed = unfollowed;
         }
         let (pending, ring) = program.dropped();
         if pending > self.dropped_pending {
             self.losses.dropped += pending - self.dropped_pending;
-            self.losses.note(
+            self.losses.note_times(
                 "more threads were inside a syscall at once than the pending map holds, so \
                  their calls were never recorded",
+                pending - self.dropped_pending,
             );
             self.dropped_pending = pending;
         }
         if ring > self.dropped_ring {
             self.losses.dropped += ring - self.dropped_ring;
-            self.losses.note(
+            self.losses.note_times(
                 "the call ring was full: calls returned faster than they were drained; a \
                  `syscall` filter narrows the program to one call",
+                ring - self.dropped_ring,
             );
             self.dropped_ring = ring;
         }

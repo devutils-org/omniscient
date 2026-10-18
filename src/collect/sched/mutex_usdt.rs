@@ -237,9 +237,10 @@ impl MutexUsdtCollector {
         }
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;
-            self.losses.note(
+            self.losses.note_times(
                 "the USDT ring was full: mutex probes fired faster than they were drained, so \
                  some acquisitions were never paired and are in no number here",
+                dropped - self.dropped,
             );
             self.dropped = dropped;
         }

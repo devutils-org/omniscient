@@ -231,10 +231,13 @@ impl EnergyPmu {
             if !whole {
                 // A sum missing one core's counter is not the domain's energy.
                 self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "the `{}` energy counter of package {} could not be read",
-                    opened.domain, opened.package
-                ));
+                self.losses.note_times(
+                    format!(
+                        "the `{}` energy counter of package {} could not be read",
+                        opened.domain, opened.package
+                    ),
+                    1,
+                );
                 continue;
             }
             readings.insert((opened.package, opened.domain), Reading { ticks, ts_ns });
@@ -257,10 +260,13 @@ impl EnergyPmu {
         // returned.
         if after.ticks < before.ticks {
             losses.failed_reads += 1;
-            losses.note(format!(
+            losses.note_times(
+                format!(
                 "the `{}` counter of package {} went backwards, so that interval is not measured",
                 opened.domain, opened.package
-            ));
+            ),
+                1,
+            );
             return None;
         }
         let ticks = after.ticks - before.ticks;

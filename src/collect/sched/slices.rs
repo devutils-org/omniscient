@@ -335,18 +335,20 @@ impl SlicesCollector {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of this program because one was already running on \
                  that cpu, so a switch was never seen",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;
-            self.losses.note(
+            self.losses.note_times(
                 "the switch ring was full: switches happened faster than they were drained, \
                  and the slices they closed are not here",
+                dropped - self.dropped,
             );
             self.dropped = dropped;
         }

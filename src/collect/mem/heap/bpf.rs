@@ -174,8 +174,9 @@ impl HeapUprobes {
         }
         if pending > self.dropped.1 {
             self.losses.dropped += pending - self.dropped.1;
-            self.losses.note(
+            self.losses.note_times(
                 "the pending map was full: an allocation's size could not be kept to its return",
+                pending - self.dropped.1,
             );
         }
         self.dropped = (ring, pending);
@@ -312,9 +313,10 @@ impl super::Feed for UprobeFeed {
         let (ring, pending) = program.dropped();
         if ring + pending > self.dropped.0 + self.dropped.1 {
             self.losses.dropped += ring + pending - self.dropped.0 - self.dropped.1;
-            self.losses.note(
+            self.losses.note_times(
                 "the heap ring or its pending map was full: an allocation or a free is in no \
                  total",
+                ring + pending - self.dropped.0 - self.dropped.1,
             );
         }
         self.dropped = (ring, pending);

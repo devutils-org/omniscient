@@ -340,9 +340,10 @@ impl Common {
         for message in messages {
             let Some((pid, frames)) = wire::parse(&message) else {
                 self.losses.undecoded += 1;
-                self.losses.note(
+                self.losses.note_times(
                     "a message from the injection library was not one this build reads: the \
                      library and `omn` are from different builds",
+                    1,
                 );
                 continue;
             };
@@ -396,9 +397,10 @@ impl Common {
                 sender.unsent = sender.unsent.max(unsent);
                 if new > 0 {
                     self.losses.dropped += new;
-                    self.losses.note(
+                    self.losses.note_times(
                         "the injection library could not send these records to omn within its \
                          send timeout",
+                        new,
                     );
                 }
             }
@@ -416,9 +418,10 @@ impl Common {
             wire::OP_INSIDE_FIRST..=wire::OP_INSIDE_LAST => return false,
             _ => {
                 self.losses.undecoded += 1;
-                self.losses.note(
+                self.losses.note_times(
                     "a frame from the injection library was not one this build reads: the \
                      library and `omn` are from different builds",
+                    1,
                 );
             }
         }
@@ -468,7 +471,7 @@ impl Common {
         } else {
             self.losses.dropped += count;
         }
-        self.losses.note(reason);
+        self.losses.note_times(reason, count);
     }
 
     /// Opens NVML before the program runs: its first load takes a large

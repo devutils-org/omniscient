@@ -204,22 +204,25 @@ impl FsyncCollector {
         let (pending, ring, orphaned) = program.dropped();
         if orphaned > self.orphaned {
             self.losses.dropped += orphaned - self.orphaned;
-            self.losses.note(super::histogram::ORPHANED);
+            self.losses
+                .note_times(super::histogram::ORPHANED, orphaned - self.orphaned);
             self.orphaned = orphaned;
         }
         if pending > self.dropped_pending {
             self.losses.dropped += pending - self.dropped_pending;
-            self.losses.note(
+            self.losses.note_times(
                 "more threads were inside a sync at once than the pending map holds, so their \
                  syncs were never timed",
+                pending - self.dropped_pending,
             );
             self.dropped_pending = pending;
         }
         if ring > self.dropped_ring {
             self.losses.dropped += ring - self.dropped_ring;
-            self.losses.note(
+            self.losses.note_times(
                 "the fsync ring was full: syncs returned faster than they were drained, so this \
                  run's count of them is short",
+                ring - self.dropped_ring,
             );
             self.dropped_ring = ring;
         }
@@ -237,9 +240,10 @@ impl FsyncCollector {
         let missed = program.missed();
         if missed > self.missed {
             self.losses.dropped += missed - self.missed;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of these programs because one was already running on \
                  that cpu, preempted halfway, so a sync went untimed",
+                missed - self.missed,
             );
             self.missed = missed;
         }
@@ -279,7 +283,8 @@ impl Collector for FsyncCollector {
             self.still_pending = open;
             if orphaned > 0 {
                 self.losses.dropped += orphaned as u64;
-                self.losses.note(super::histogram::ORPHANED);
+                self.losses
+                    .note_times(super::histogram::ORPHANED, orphaned as u64);
             }
         }
         // The programs stay attached until the collector is dropped, after

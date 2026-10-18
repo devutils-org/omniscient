@@ -190,10 +190,13 @@ impl SnmpCollector {
             };
             if counter.value < previous {
                 self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "`{name}` went backwards, so the namespace's counters were replaced; that \
+                self.losses.note_times(
+                    format!(
+                        "`{name}` went backwards, so the namespace's counters were replaced; that \
                      interval is not measured"
-                ));
+                    ),
+                    1,
+                );
                 continue;
             }
             let moved = (counter.value - previous) as u64;
@@ -268,9 +271,10 @@ impl Collector for SnmpCollector {
             Ok(events) => events,
             Err(error) => {
                 self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "the closing read failed, so the run measured nothing: {error:?}"
-                ));
+                self.losses.note_times(
+                    format!("the closing read failed, so the run measured nothing: {error:?}"),
+                    1,
+                );
                 Vec::new()
             }
         }

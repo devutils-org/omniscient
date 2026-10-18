@@ -212,19 +212,19 @@ impl WritebackCollector {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of these programs because one was already running on \
                  its cpu, so a writeback round went unseen; the count is the machine's, and an upper bound \
-                 on this target's",
-            );
+                 on this target's", skipped - self.skipped);
             self.skipped = skipped;
         }
         let (open, ring) = program.dropped();
         if open > self.dropped_open {
             self.losses.dropped += open - self.dropped_open;
-            self.losses.note(
+            self.losses.note_times(
                 "more writeback rounds were running at once than the round map holds, so they \
                  were never timed",
+                open - self.dropped_open,
             );
             self.dropped_open = open;
         }

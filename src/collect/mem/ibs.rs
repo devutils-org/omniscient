@@ -717,16 +717,18 @@ impl IbsCollector {
         }
         if dropped > 0 {
             self.losses.dropped += dropped;
-            self.losses.note(
+            self.losses.note_times(
                 "an op-sampling ring overflowed: ops were tagged and never read, and the busy \
                  phases are the ones that overflow, so what is left under-represents them",
+                dropped,
             );
         }
         if throttles > 0 {
             self.losses.throttled += throttles;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel throttled op sampling: an unknown number of ops in each throttled \
                  period were not tagged (see kernel.perf_event_max_sample_rate)",
+                throttles,
             );
         }
         self.losses.undecoded += undecoded;

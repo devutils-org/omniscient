@@ -198,8 +198,9 @@ impl SwitchCollector {
         });
         if dropped > 0 {
             self.losses.dropped += dropped;
-            self.losses.note(
+            self.losses.note_times(
                 "the context-switch ring overflowed: switches happened faster than they were read",
+                dropped,
             );
         }
         // Throttling is the kernel deciding this event costs too much and
@@ -212,9 +213,10 @@ impl SwitchCollector {
         // consumer filters on at zero.
         if throttles > 0 {
             self.losses.throttled += throttles;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel throttled context-switch sampling: an unknown number of switches in \
                  each throttled period were not sampled (see kernel.perf_event_max_sample_rate)",
+                throttles,
             );
         }
         self.losses.undecoded += undecoded;

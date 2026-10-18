@@ -341,10 +341,13 @@ impl Thp {
         };
         let Some(promotions) = delta(after.promotions(), before.promotions()) else {
             self.losses.undecoded += 1;
-            self.losses.note(format!(
+            self.losses.note_times(
+                format!(
                 "a huge page counter in {} went backwards, so this interval cannot be attributed",
                 self.source.read_from()
-            ));
+            ),
+                1,
+            );
             return None;
         };
 

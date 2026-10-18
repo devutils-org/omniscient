@@ -591,7 +591,11 @@ impl Losses {
         self.note_times(reason, 1);
     }
 
-    fn note_times(&mut self, reason: impl Into<String>, times: u64) {
+    /// Records `reason` as the cause of `times` losses: the call beside a
+    /// counter's `+= n`, so that the reasons count what the counters count
+    /// and the summary's `{n}x {reason}` reads as that many lost, not as the
+    /// number of drains that lost some.
+    pub fn note_times(&mut self, reason: impl Into<String>, times: u64) {
         *self.reasons.entry(reason.into()).or_insert(0) += times;
     }
 
@@ -6039,6 +6043,20 @@ mod tests {
     /// used to be the same thing: the reason carried the nanoseconds of the
     /// round that overran, so no two were ever equal and a run that was late a
     /// thousand times printed a thousand lines with a count of one each.
+    /// A reason noted beside a counter carries the losses it explains, not the
+    /// drains that found some: two drains losing 700 and 13 000 print `13700x`,
+    /// where they used to print `2x` under a count of 13 700.
+    #[test]
+    fn a_reason_counts_the_losses_it_explains_not_the_drains() {
+        let mut losses = Losses::default();
+        for lost in [700, 13_000] {
+            losses.dropped += lost;
+            losses.note_times("a full ring", lost);
+        }
+        assert_eq!(losses.reasons.get("a full ring"), Some(&13_700));
+        assert_eq!(losses.reasons.values().sum::<u64>(), losses.dropped);
+    }
+
     #[test]
     fn late_ticks_are_one_reason_carrying_the_count_they_explain() {
         let mut losses = Losses::default();

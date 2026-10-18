@@ -254,10 +254,11 @@ impl Collector for WorkingSet {
 
         if interval_ns == 0 {
             self.losses.undecoded += 1;
-            self.losses.note(
+            self.losses.note_times(
                 "the referenced bits were cleared and read back in the same nanosecond, so there \
                  is no window this working set belongs to"
                     .to_owned(),
+                1,
             );
             return Ok(Vec::new());
         }

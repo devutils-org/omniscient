@@ -163,7 +163,7 @@ impl HistogramCollector {
                 // The rows are still in the map and arrive with the next drain;
                 // what is lost is which window they belonged to.
                 self.losses.failed_reads += 1;
-                self.losses.note(reason);
+                self.losses.note_times(reason, 1);
                 return;
             }
         };
@@ -217,35 +217,42 @@ impl HistogramCollector {
         let (pending, rows, orphaned) = program.dropped();
         if pending > self.dropped_pending {
             self.losses.dropped += pending - self.dropped_pending;
-            self.losses.note(format!(
-                "more threads were inside {} at once than the pending map holds, so their \
+            self.losses.note_times(
+                format!(
+                    "more threads were inside {} at once than the pending map holds, so their \
                  calls were never timed",
-                self.call
-            ));
+                    self.call
+                ),
+                pending - self.dropped_pending,
+            );
             self.dropped_pending = pending;
         }
         if rows > self.dropped_rows {
             self.losses.dropped += rows - self.dropped_rows;
-            self.losses.note(
+            self.losses.note_times(
                 "more distinct rows appeared in one drain interval than the histogram holds, \
                  so those calls are in no bucket and every count here is a lower bound",
+                rows - self.dropped_rows,
             );
             self.dropped_rows = rows;
         }
         if orphaned > self.orphaned {
             self.losses.dropped += orphaned - self.orphaned;
-            self.losses.note(ORPHANED);
+            self.losses.note_times(ORPHANED, orphaned - self.orphaned);
             self.orphaned = orphaned;
         }
         let missed = program.missed();
         if missed > self.missed {
             self.losses.dropped += missed - self.missed;
-            self.losses.note(format!(
+            self.losses.note_times(
+                format!(
                 "the kernel skipped a run of these programs because one was already running on \
                  that cpu, preempted halfway, so {} was never timed and every count here is a \
                  lower bound",
                 self.call
-            ));
+            ),
+                missed - self.missed,
+            );
             self.missed = missed;
         }
         let unfollowed = program.unfollowed();
@@ -330,7 +337,7 @@ impl Collector for HistogramCollector {
             let (open, orphaned) = program.still_pending();
             if orphaned > 0 {
                 self.losses.dropped += orphaned as u64;
-                self.losses.note(ORPHANED);
+                self.losses.note_times(ORPHANED, orphaned as u64);
             }
             if open > 0 {
                 self.notes.push(format!(

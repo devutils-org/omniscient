@@ -123,10 +123,11 @@ impl CaptureCollector {
                 self.totals.queue_freezes += stats.queue_freezes;
                 if stats.drops > 0 {
                     self.losses.dropped += stats.drops as u64;
-                    self.losses.note(
+                    self.losses.note_times(
                         "the capture ring was full and the kernel dropped frames it had nowhere \
                          to put"
                             .to_owned(),
+                        stats.drops as u64,
                     );
                 }
                 if stats.queue_freezes > 0 {
@@ -139,9 +140,10 @@ impl CaptureCollector {
             }
             Err(error) => {
                 self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "the capture's own drop counter could not be read: {error}"
-                ));
+                self.losses.note_times(
+                    format!("the capture's own drop counter could not be read: {error}"),
+                    1,
+                );
             }
         }
     }

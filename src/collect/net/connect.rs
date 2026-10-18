@@ -171,9 +171,10 @@ impl ConnectCollector {
         let (pending, ring) = program.dropped();
         if pending > self.dropped_pending {
             self.losses.dropped += pending - self.dropped_pending;
-            self.losses.note(
+            self.losses.note_times(
                 "more handshakes were in flight at once than the pending map holds, so they were \
                  never timed",
+                pending - self.dropped_pending,
             );
             self.dropped_pending = pending;
         }
@@ -186,9 +187,10 @@ impl ConnectCollector {
         let missed = program.missed();
         if missed > self.missed {
             self.losses.dropped += missed - self.missed;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of these programs because one was already running on \
                  that cpu, preempted halfway, so a handshake went untimed",
+                missed - self.missed,
             );
             self.missed = missed;
         }

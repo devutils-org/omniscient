@@ -234,7 +234,7 @@ impl PageCacheCollector {
                 // The rows are still in the map and arrive with the next drain;
                 // what is lost is which window they belonged to.
                 self.losses.failed_reads += 1;
-                self.losses.note(reason);
+                self.losses.note_times(reason, 1);
                 return;
             }
         };
@@ -283,21 +283,25 @@ impl PageCacheCollector {
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;
-            self.losses.note(format!(
-                "more distinct (task, file) rows appeared in one interval than the {} the map \
+            self.losses.note_times(
+                format!(
+                    "more distinct (task, file) rows appeared in one interval than the {} the map \
                  holds, so those lookups and fills were never counted and every total here is \
                  a lower bound",
-                program.capacity()
-            ));
+                    program.capacity()
+                ),
+                dropped - self.dropped,
+            );
             self.dropped = dropped;
         }
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of these programs because one was already running on \
                  that cpu, so a lookup or a fill was never counted and every total here is a \
                  lower bound",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }

@@ -152,21 +152,21 @@ impl Collector for Wakeups {
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
-        let threads = match self.read() {
-            Ok(threads) => threads,
-            Err(gone) => {
-                // The interval since the last read is lost with the process:
-                // every thread it then had is a series that ends unread.
-                if let Some((_, before)) = self.previous.take() {
-                    self.losses.dropped += before.len() as u64;
-                    self.losses.note(
+        let threads =
+            match self.read() {
+                Ok(threads) => threads,
+                Err(gone) => {
+                    // The interval since the last read is lost with the process:
+                    // every thread it then had is a series that ends unread.
+                    if let Some((_, before)) = self.previous.take() {
+                        self.losses.dropped += before.len() as u64;
+                        self.losses.note_times(
                         "the process was gone at a read, and its wakeups since the previous one \
-                         are not counted",
-                    );
+                         are not counted", before.len() as u64);
+                    }
+                    return Err(gone);
                 }
-                return Err(gone);
-            }
-        };
+            };
         let ts_ns = monotonic_ns();
         if self.proc_key.is_none() {
             self.proc_key = KeyValue::proc_of(self.pid);
@@ -179,9 +179,10 @@ impl Collector for Wakeups {
         let (wakeups, exited) = wakeups_between(&before, &threads);
         if exited > 0 {
             self.losses.dropped += exited;
-            self.losses.note(
+            self.losses.note_times(
                 "a thread exited between two reads, and its wakeups since the earlier one are \
                  not counted",
+                exited,
             );
         }
         let interval_ns = ts_ns.saturating_sub(before_ns).max(1);
@@ -333,10 +334,13 @@ impl Collector for MachineWakeups {
         }
         if exited_threads > 0 {
             self.losses.dropped += exited_threads;
-            self.losses.note(format!(
+            self.losses.note_times(
+                format!(
                 "threads that exited between two reads took their wakeups since the earlier one \
                  with them ({gone} whole processes among them, by the last interval)"
-            ));
+            ),
+                exited_threads,
+            );
         }
         Ok(events)
     }

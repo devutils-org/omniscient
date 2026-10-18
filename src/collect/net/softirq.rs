@@ -260,7 +260,7 @@ impl SoftIrqCollector {
                 // map: they are not lost, they arrive with the next one. What
                 // is lost is knowing which window they belonged to.
                 self.losses.failed_reads += 1;
-                self.losses.note(reason);
+                self.losses.note_times(reason, 1);
                 return;
             }
         };
@@ -332,19 +332,21 @@ impl SoftIrqCollector {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of these programs because one was already running on \
                  its cpu, so a handler went unseen; the count is the machine's, and an upper bound \
                  on this target's",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;
-            self.losses.note(
+            self.losses.note_times(
                 "more distinct (cpu, vector, bucket) rows appeared in one interval than the \
                  softirq histogram holds, so those handlers were never counted",
+                dropped - self.dropped,
             );
             self.dropped = dropped;
         }

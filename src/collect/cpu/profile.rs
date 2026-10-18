@@ -797,9 +797,10 @@ impl ProfileCollector {
         self.throttled += throttles;
         if dropped > 0 {
             self.losses.dropped += dropped;
-            self.losses.note(
+            self.losses.note_times(
                 "the profile ring overflowed: samples were taken and never read, so the stacks \
                  here are a biased subset -- the busy phases are the ones that overflow",
+                dropped,
             );
         }
         // A throttle is the kernel declining to deliver for a while, not a
@@ -810,9 +811,10 @@ impl ProfileCollector {
         // that was throttled twenty times.
         if throttles > 0 {
             self.losses.throttled += throttles;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel throttled profile sampling: an unknown number of samples in each \
                  throttled period were not taken (see kernel.perf_event_max_sample_rate)",
+                throttles,
             );
         }
         self.losses.undecoded += undecoded;

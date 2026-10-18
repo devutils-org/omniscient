@@ -115,7 +115,7 @@ impl OnCpuThreads {
             Ok(drained) => drained,
             Err(reason) => {
                 self.losses.failed_reads += 1;
-                self.losses.note(reason);
+                self.losses.note_times(reason, 1);
                 return Vec::new();
             }
         };
@@ -150,9 +150,10 @@ impl OnCpuThreads {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of this program because one was already running on \
                  that cpu, so an increment of a thread's time is in no row",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }
@@ -166,9 +167,10 @@ impl OnCpuThreads {
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;
-            self.losses.note(
+            self.losses.note_times(
                 "more threads ran in one poll than the row map holds, so their time was \
                  never added up",
+                dropped - self.dropped,
             );
             self.dropped = dropped;
         }

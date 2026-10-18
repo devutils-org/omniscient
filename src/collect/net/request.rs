@@ -464,26 +464,29 @@ impl RequestCollector {
         let storage = grew(counts.no_storage, self.counts.no_storage);
         if storage > 0 {
             self.losses.dropped += storage;
-            self.losses.note(
+            self.losses.note_times(
                 "a request was born in a task the kernel would not give storage to, so it was \
                  never followed",
+                storage,
             );
         }
         let sleepers = grew(counts.sleepers_full, self.counts.sleepers_full);
         if sleepers > 0 {
             self.losses.dropped += sleepers;
-            self.losses.note(
+            self.losses.note_times(
                 "more serving tasks were asleep at once than the sleeper map holds, so a \
                  sleep's wakeup was not seen and the wait after it is counted asleep",
+                sleepers,
             );
         }
         self.counts = counts;
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of these programs on a cpu where one was already \
                  running: a switch nobody saw is a stretch whose state is unknown",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }

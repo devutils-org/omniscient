@@ -853,9 +853,10 @@ fn closing_read(
         Err(SampleError::TargetGone(_)) if metric == Metric::Mem && process_scoped => Vec::new(),
         Err(SampleError::Transient(reason) | SampleError::TargetGone(reason)) => {
             losses.failed_reads += 1;
-            losses.note(format!(
-                "the closing read of the counted window failed: {reason}"
-            ));
+            losses.note_times(
+                format!("the closing read of the counted window failed: {reason}"),
+                1,
+            );
             Vec::new()
         }
     }

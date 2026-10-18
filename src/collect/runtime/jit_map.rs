@@ -118,10 +118,13 @@ impl JitMapCollector {
                     // The map was there and is not any more: whatever the
                     // runtime wrote into it after the last read is gone.
                     self.losses.failed_reads += 1;
-                    self.losses.note(format!(
-                        "{} disappeared while the program was still running",
-                        self.path.display()
-                    ));
+                    self.losses.note_times(
+                        format!(
+                            "{} disappeared while the program was still running",
+                            self.path.display()
+                        ),
+                        1,
+                    );
                 } else {
                     self.absent_before_first_read += 1;
                 }
@@ -149,12 +152,15 @@ impl JitMapCollector {
             // recycled pid, or a runtime that restarted its map -- and whatever
             // stood between the two reads is gone.
             self.losses.dropped += 1;
-            self.losses.note(format!(
-                "{} shrank from {} to {length} bytes: it was replaced, and the entries \
+            self.losses.note_times(
+                format!(
+                    "{} shrank from {} to {length} bytes: it was replaced, and the entries \
                  written before that are not recoverable",
-                self.path.display(),
-                self.consumed
-            ));
+                    self.path.display(),
+                    self.consumed
+                ),
+                1,
+            );
             self.consumed = 0;
             self.partial.clear();
         }
@@ -211,10 +217,13 @@ impl JitMapCollector {
                 // skip quietly: a map in a format this does not know would
                 // otherwise read as a program that compiled nothing.
                 self.losses.undecoded += 1;
-                self.losses.note(format!(
-                    "a line of {} is not `<hex address> <hex size> <symbol>`",
-                    self.path.display()
-                ));
+                self.losses.note_times(
+                    format!(
+                        "a line of {} is not `<hex address> <hex size> <symbol>`",
+                        self.path.display()
+                    ),
+                    1,
+                );
                 continue;
             };
             self.compilations += 1;
@@ -279,14 +288,17 @@ impl Collector for JitMapCollector {
             // at all, and a count of polls is the run's length over its tick --
             // 360 of them in the bench's table, a number that measured nothing.
             self.losses.failed_reads += 1;
-            self.losses.note(format!(
-                "{} does not exist: nothing was read for pid {}, because the program either \
+            self.losses.note_times(
+                format!(
+                    "{} does not exist: nothing was read for pid {}, because the program either \
                  has no JIT or was not started so that it writes one \
                  (node --perf-basic-prof, or a JVM agent that maintains it). That is not the \
                  same as a program that compiled nothing",
-                self.path.display(),
-                self.pid
-            ));
+                    self.path.display(),
+                    self.pid
+                ),
+                1,
+            );
         }
         trailing
     }

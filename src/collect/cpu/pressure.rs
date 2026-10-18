@@ -89,7 +89,7 @@ impl PressureCollector {
             Ok(attrs) => attrs,
             Err(unmeasured) => {
                 self.losses.undecoded += 1;
-                self.losses.note(unmeasured.explain(PATH));
+                self.losses.note_times(unmeasured.explain(PATH), 1);
                 return None;
             }
         };

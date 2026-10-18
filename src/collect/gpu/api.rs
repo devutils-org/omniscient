@@ -166,11 +166,14 @@ impl Collector for ApiCollector {
         let mut losses = self.stream.losses();
         if self.unnamed > 0 {
             losses.undecoded += self.unnamed;
-            losses.note(format!(
-                "{} calls named an entry point this build does not know: the shim and `omn` \
+            losses.note_times(
+                format!(
+                    "{} calls named an entry point this build does not know: the shim and `omn` \
                  are from different builds",
-                self.unnamed
-            ));
+                    self.unnamed
+                ),
+                self.unnamed,
+            );
         }
         losses
     }

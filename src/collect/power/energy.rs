@@ -164,10 +164,11 @@ impl Energy {
     fn delta_event(&mut self, before: &Reading, after: &Reading, seq: u64) -> Option<Event> {
         if before.energy_uj.len() != after.energy_uj.len() {
             self.losses.undecoded += 1;
-            self.losses.note(
+            self.losses.note_times(
                 "the set of RAPL domains changed between two reads, so the energy between them is \
                  not one machine's worth"
                     .to_owned(),
+                1,
             );
             return None;
         }
@@ -316,9 +317,10 @@ impl Collector for Energy {
                 .collect(),
             Err(error) => {
                 self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "the closing read failed ({error:?}), so this run has no total"
-                ));
+                self.losses.note_times(
+                    format!("the closing read failed ({error:?}), so this run has no total"),
+                    1,
+                );
                 Vec::new()
             }
         }

@@ -289,19 +289,19 @@ impl DropCollector {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of these programs because one was already running on \
                  its cpu, so a packet drop went unseen; the count is the machine's, and an upper bound \
-                 on this target's",
-            );
+                 on this target's", skipped - self.skipped);
             self.skipped = skipped;
         }
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;
-            self.losses.note(
+            self.losses.note_times(
                 "the drop ring was full: the machine lost packets faster than they were drained, \
                  so this run's own count of them is short",
+                dropped - self.dropped,
             );
             self.dropped = dropped;
         }

@@ -115,7 +115,7 @@ impl JobCollector {
             Ok(drained) => drained,
             Err(reason) => {
                 self.losses.failed_reads += 1;
-                self.losses.note(reason);
+                self.losses.note_times(reason, 1);
                 return;
             }
         };
@@ -174,10 +174,11 @@ impl JobCollector {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of this program because one was already running on \
                  that cpu, so an occurrence was never seen; the count is the machine's, an \
                  upper bound on the target's share, and every total here is a lower bound",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }
@@ -216,7 +217,7 @@ impl JobCollector {
         ] {
             if fresh > before {
                 self.losses.dropped += fresh - before;
-                self.losses.note(reason);
+                self.losses.note_times(reason, fresh - before);
             }
         }
         self.dropped = now;

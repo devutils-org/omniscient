@@ -197,10 +197,13 @@ impl Collector for Throttling {
                 package_after.checked_sub(package_before),
             ) else {
                 self.losses.undecoded += 1;
-                self.losses.note(format!(
-                    "the throttle counter for cpu{cpu} went backwards, which means it went \
+                self.losses.note_times(
+                    format!(
+                        "the throttle counter for cpu{cpu} went backwards, which means it went \
                      offline and came back; this interval cannot be attributed"
-                ));
+                    ),
+                    1,
+                );
                 continue;
             };
             events.push(Event {

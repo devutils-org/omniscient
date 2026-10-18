@@ -112,9 +112,10 @@ impl CallbackCollector {
         for message in messages {
             let Some((pid, frames)) = wire::parse(&message) else {
                 self.losses.undecoded += 1;
-                self.losses.note(
+                self.losses.note_times(
                     "a message from the injection library was not one this build reads: the \
                      library and `omn` are from different builds",
+                    1,
                 );
                 continue;
             };
@@ -147,9 +148,10 @@ impl CallbackCollector {
             }
             wire::OP_API_UNPAIRED => {
                 self.losses.dropped += 1;
-                self.losses.note(
+                self.losses.note_times(
                     "a driver API call returned whose entry the callbacks did not see: it was \
                      under way when they were subscribed",
+                    1,
                 );
                 None
             }

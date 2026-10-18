@@ -238,7 +238,7 @@ impl Topdown {
             Ok(both) => both,
             Err(reason) => {
                 self.losses.failed_reads += 1;
-                self.losses.note(reason);
+                self.losses.note_times(reason, 1);
                 return None;
             }
         };
@@ -385,9 +385,12 @@ impl Collector for Topdown {
                         }
                         Err(error) => {
                             self.losses.failed_reads += 1;
-                            self.losses.note(format!(
-                                "reading the top-down counters on cpu {cpu} failed: {error}"
-                            ));
+                            self.losses.note_times(
+                                format!(
+                                    "reading the top-down counters on cpu {cpu} failed: {error}"
+                                ),
+                                1,
+                            );
                         }
                     }
                 }
@@ -397,10 +400,13 @@ impl Collector for Topdown {
                 let (total, failed) = groups.read_total();
                 for (cpu, error) in failed {
                     self.losses.failed_reads += 1;
-                    self.losses.note(format!(
-                        "reading the top-down counters on cpu {cpu} failed ({error}), so the \
+                    self.losses.note_times(
+                        format!(
+                            "reading the top-down counters on cpu {cpu} failed ({error}), so the \
                          cgroup's slots there are not in the fractions"
-                    ));
+                        ),
+                        1,
+                    );
                 }
                 let key = match &self.scope {
                     Scoped::Cgroup(cgroup, _) => cgroup.key(),

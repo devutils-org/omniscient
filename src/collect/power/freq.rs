@@ -259,7 +259,7 @@ impl Collector for Frequencies {
                 Ok(kilohertz) => per_cpu.push((cpu, kilohertz)),
                 Err(error) => {
                     self.losses.failed_reads += 1;
-                    self.losses.note(format!("cpu{cpu}: {error}"));
+                    self.losses.note_times(format!("cpu{cpu}: {error}"), 1);
                 }
             }
         }

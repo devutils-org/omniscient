@@ -216,7 +216,7 @@ impl OffCpuCollector {
                 // the map: they are not lost, they arrive with the next one.
                 // What is lost is knowing which window they belonged to.
                 self.losses.failed_reads += 1;
-                self.losses.note(reason);
+                self.losses.note_times(reason, 1);
                 return;
             }
         };
@@ -477,10 +477,11 @@ impl OffCpuCollector {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of this program because one was already running on \
                  that cpu, so an occurrence was never seen; the count is the machine's, an \
                  upper bound on the target's share, and every total here is a lower bound",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }
@@ -499,17 +500,19 @@ impl OffCpuCollector {
         let (in_flight, totals) = program.dropped();
         if in_flight > self.dropped_in_flight {
             self.losses.dropped += in_flight - self.dropped_in_flight;
-            self.losses.note(
+            self.losses.note_times(
                 "more tasks were off cpu at once than the in-flight map holds, so their blocks \
                  were never timed",
+                in_flight - self.dropped_in_flight,
             );
             self.dropped_in_flight = in_flight;
         }
         if totals > self.dropped_totals {
             self.losses.dropped += totals - self.dropped_totals;
-            self.losses.note(
+            self.losses.note_times(
                 "more distinct tasks blocked in one interval than the total map holds, so their \
                  time was never added",
+                totals - self.dropped_totals,
             );
             self.dropped_totals = totals;
         }

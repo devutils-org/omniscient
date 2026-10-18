@@ -120,9 +120,10 @@ impl RunqLen {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a tick of the run queue program because one was already \
                  running on that cpu",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }

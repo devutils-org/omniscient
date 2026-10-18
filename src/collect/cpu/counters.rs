@@ -526,10 +526,13 @@ pub(super) fn measured(
             let denominator = readings.get(1)?;
             if denominator.value == 0 {
                 losses.failed_reads += 1;
-                losses.note(format!(
-                    "`{}` counted zero, so `{}` has no value",
-                    denominator.name, spec.source
-                ));
+                losses.note_times(
+                    format!(
+                        "`{}` counted zero, so `{}` has no value",
+                        denominator.name, spec.source
+                    ),
+                    1,
+                );
                 return None;
             }
             attrs.push(Attr::float(

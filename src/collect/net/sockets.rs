@@ -235,9 +235,12 @@ impl Collector for SocketsCollector {
                     }
                     Err(error) => {
                         self.losses.failed_reads += 1;
-                        self.losses.note(format!(
+                        self.losses.note_times(
+                            format!(
                             "the sock_diag dump of {protocol} for family {family} failed: {error}"
-                        ));
+                        ),
+                            1,
+                        );
                     }
                 }
             }

@@ -255,9 +255,10 @@ impl PageFaultCollector {
         // throttled run reported itself as clean.
         if throttles > 0 {
             self.losses.throttled += throttles;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel throttled page-fault sampling: an unknown number of faults in each \
                  throttled period were not sampled (see kernel.perf_event_max_sample_rate)",
+                throttles,
             );
         }
         if dropped > 0 {

@@ -362,7 +362,7 @@ impl Diskstats {
 
         for reason in undecoded {
             self.losses.undecoded += 1;
-            self.losses.note(reason);
+            self.losses.note_times(reason, 1);
         }
 
         Ok(Reading {
@@ -393,20 +393,26 @@ impl Diskstats {
                 // category is the one the line below uses for the same shape of
                 // gap: a reading the collector could not turn into an interval.
                 self.losses.undecoded += 1;
-                self.losses.note(format!(
+                self.losses.note_times(
+                    format!(
                     "`{}` appeared during the run, so this interval has nothing to measure its \
                      counters against",
                     device.name
-                ));
+                ),
+                    1,
+                );
                 continue;
             };
             let Some(delta) = counters.since(earlier) else {
                 self.losses.undecoded += 1;
-                self.losses.note(format!(
+                self.losses.note_times(
+                    format!(
                     "a counter for `{}` in /proc/diskstats went backwards, which happens when a \
                      device is removed and re-added; this interval cannot be attributed",
                     device.name
-                ));
+                ),
+                    1,
+                );
                 continue;
             };
             if self.by_direction {
@@ -612,10 +618,13 @@ impl Collector for Diskstats {
             Ok(after) => self.delta_events(&before, &after, u64::MAX / 2),
             Err(error) => {
                 self.losses.failed_reads += 1;
-                self.losses.note(format!(
-                    "the closing read failed ({error:?}), so the last interval of this run is \
+                self.losses.note_times(
+                    format!(
+                        "the closing read failed ({error:?}), so the last interval of this run is \
                      missing"
-                ));
+                    ),
+                    1,
+                );
                 Vec::new()
             }
         }

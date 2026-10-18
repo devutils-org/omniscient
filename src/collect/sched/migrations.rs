@@ -174,7 +174,7 @@ impl MigrationCollector {
             Ok(drained) => drained,
             Err(reason) => {
                 self.losses.failed_reads += 1;
-                self.losses.note(reason);
+                self.losses.note_times(reason, 1);
                 return;
             }
         };
@@ -241,10 +241,11 @@ impl MigrationCollector {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of this program because one was already running on \
                  that cpu, so an occurrence was never seen; the count is the machine's, an \
                  upper bound on the target's share, and every total here is a lower bound",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }
@@ -261,9 +262,10 @@ impl MigrationCollector {
         let dropped = program.dropped();
         if dropped > self.dropped {
             self.losses.dropped += dropped - self.dropped;
-            self.losses.note(
+            self.losses.note_times(
                 "more distinct (task, cpu) pairs migrated in one interval than the map holds, \
                  so those migrations were never counted",
+                dropped - self.dropped,
             );
             self.dropped = dropped;
         }

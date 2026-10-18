@@ -171,9 +171,10 @@ impl HwtsCollector {
                 }
                 Err(error) => {
                     self.losses.failed_reads += 1;
-                    self.losses.note(format!(
-                        "`{name}` was asked what it can timestamp and answered: {error}"
-                    ));
+                    self.losses.note_times(
+                        format!("`{name}` was asked what it can timestamp and answered: {error}"),
+                        1,
+                    );
                     continue;
                 }
             };
@@ -342,7 +343,7 @@ impl Collector for HwtsCollector {
                 }
                 Err(SampleError::Transient(reason)) => {
                     self.losses.failed_reads += 1;
-                    self.losses.note(reason);
+                    self.losses.note_times(reason, 1);
                 }
                 Err(other) => return Err(other),
             }

@@ -216,9 +216,10 @@ impl Collector for TcpRttCollector {
                     // One family failing is not the run failing: a machine
                     // without IPv6 still has IPv4 connections.
                     self.losses.failed_reads += 1;
-                    self.losses.note(format!(
-                        "the sock_diag dump for family {family} failed: {error}"
-                    ));
+                    self.losses.note_times(
+                        format!("the sock_diag dump for family {family} failed: {error}"),
+                        1,
+                    );
                     continue;
                 }
             };

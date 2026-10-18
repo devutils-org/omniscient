@@ -100,11 +100,14 @@ impl<F: Feed> RetainedCollector<F> {
         let (evicted, evicted_bytes) = self.freed.evicted();
         if evicted > self.evictions_reported {
             self.losses.dropped += evicted - self.evictions_reported;
-            self.losses.note(format!(
-                "the freed-range table holds {RANGE_CAPACITY} ranges and dropped the oldest \
+            self.losses.note_times(
+                format!(
+                    "the freed-range table holds {RANGE_CAPACITY} ranges and dropped the oldest \
                  ones, {evicted_bytes} bytes of address space in all: whatever is still \
                  resident in those is missing from the retained total"
-            ));
+                ),
+                evicted - self.evictions_reported,
+            );
             self.evictions_reported = evicted;
         }
     }

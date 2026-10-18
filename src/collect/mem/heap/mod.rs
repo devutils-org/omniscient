@@ -852,11 +852,14 @@ impl Stream {
                     // sources of that class.
                     if record.ptr as u8 & class != 0 {
                         self.losses.dropped += record.size;
-                        self.losses.note(format!(
-                            "the shim could not keep up: {} happened faster than the pipe \
+                        self.losses.note_times(
+                            format!(
+                                "the shim could not keep up: {} happened faster than the pipe \
                              drained",
-                            self.which.activity()
-                        ));
+                                self.which.activity()
+                            ),
+                            record.size,
+                        );
                     }
                     continue;
                 }
@@ -884,12 +887,15 @@ impl Stream {
 
         if past_the_bound > 0 {
             self.losses.dropped += past_the_bound;
-            self.losses.note(format!(
-                "the shim reported more {} than this run holds: past the first {HELD_RECORDS} \
+            self.losses.note_times(
+                format!(
+                    "the shim reported more {} than this run holds: past the first {HELD_RECORDS} \
                  records, each one it read was dropped and counted rather than kept, so what \
                  omn holds does not grow with the program it watches",
-                self.which.activity()
-            ));
+                    self.which.activity()
+                ),
+                past_the_bound,
+            );
         }
         self.pending.drain(..whole);
         records

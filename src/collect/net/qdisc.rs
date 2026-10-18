@@ -161,7 +161,7 @@ impl QdiscCollector {
             Ok(drained) => drained,
             Err(reason) => {
                 self.losses.failed_reads += 1;
-                self.losses.note(reason);
+                self.losses.note_times(reason, 1);
                 return;
             }
         };
@@ -206,27 +206,30 @@ impl QdiscCollector {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of these programs because one was already running on \
                  its cpu, so a packet went unseen; the count is the machine's, and an upper bound \
                  on this target's",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }
         let (queued, rows) = program.dropped();
         if queued > self.dropped_queued {
             self.losses.dropped += queued - self.dropped_queued;
-            self.losses.note(
+            self.losses.note_times(
                 "more packets were inside queueing disciplines at once than the map holds, so \
                  their waits were never timed",
+                queued - self.dropped_queued,
             );
             self.dropped_queued = queued;
         }
         if rows > self.dropped_rows {
             self.losses.dropped += rows - self.dropped_rows;
-            self.losses.note(
+            self.losses.note_times(
                 "more distinct (interface, discipline, bucket) rows appeared in one interval \
                  than the histogram holds, so those waits were never counted",
+                rows - self.dropped_rows,
             );
             self.dropped_rows = rows;
         }

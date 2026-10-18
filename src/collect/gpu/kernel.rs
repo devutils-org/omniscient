@@ -397,9 +397,10 @@ impl KernelCollector {
     fn message(&mut self, message: &[u8], seq: u64, events: &mut Vec<Event>) {
         let Some((pid, frames)) = wire::parse(message) else {
             self.losses.undecoded += 1;
-            self.losses.note(
+            self.losses.note_times(
                 "a message from the injection library was not one this build reads: the library \
                  and `omn` are from different builds",
+                1,
             );
             return;
         };
@@ -454,9 +455,10 @@ impl KernelCollector {
             wire::OP_DROPPED if payload.len() >= 8 => {
                 let dropped = read.u64();
                 self.losses.dropped += dropped;
-                self.losses.note(
+                self.losses.note_times(
                     "CUPTI had no buffer to put these records in and dropped them: the program \
                      launched faster than its buffers were handed back",
+                    dropped,
                 );
             }
             wire::OP_LOST if payload.len() >= 8 => {
@@ -466,20 +468,22 @@ impl KernelCollector {
                 sender.lost = sender.lost.max(lost);
                 self.losses.dropped += new;
                 if new > 0 {
-                    self.losses.note(
+                    self.losses.note_times(
                         "the injection library could not send these records to omn within its \
                          send timeout -- or, in the batches it could not send, the counts of \
                          records CUPTI had dropped or handed back unfinished",
+                        new,
                     );
                 }
             }
             wire::OP_INCOMPLETE if payload.len() >= 8 => {
                 let incomplete = read.u64();
                 self.losses.dropped += incomplete;
-                self.losses.note(
+                self.losses.note_times(
                     "CUPTI handed these records back before their activity had finished, \
                      without the times to report: the program exited with work still queued \
                      on the device",
+                    incomplete,
                 );
             }
             wire::OP_ERROR => {
@@ -497,17 +501,19 @@ impl KernelCollector {
                 sender.lost = sender.lost.max(lost);
                 if new > 0 {
                     self.losses.dropped += new;
-                    self.losses.note(
+                    self.losses.note_times(
                         "the injection library could not send these records to omn within its \
                          send timeout -- or, in the batches it could not send, the counts of \
                          records CUPTI had dropped or handed back unfinished",
+                        new,
                     );
                 }
                 if unknown > 0 {
                     self.losses.undecoded += unknown;
-                    self.losses.note(
+                    self.losses.note_times(
                         "CUPTI returned activity records of a kind the injection library does \
                          not decode",
+                        unknown,
                     );
                 }
             }
@@ -520,9 +526,10 @@ impl KernelCollector {
             wire::OP_INSIDE_FIRST..=wire::OP_INSIDE_LAST => {}
             _ => {
                 self.losses.undecoded += 1;
-                self.losses.note(
+                self.losses.note_times(
                     "a frame from the injection library was not one this build reads: the \
                      library and `omn` are from different builds",
+                    1,
                 );
             }
         }
@@ -532,11 +539,14 @@ impl KernelCollector {
     fn admit(&mut self) -> bool {
         if self.held >= HELD_EVENTS {
             self.losses.dropped += 1;
-            self.losses.note(format!(
+            self.losses.note_times(
+                format!(
                 "the program ran more than {HELD_EVENTS} device activities: past them, each one \
                  was read, dropped and counted rather than kept, so what omn holds does not \
                  grow with the program it watches"
-            ));
+            ),
+                1,
+            );
             return false;
         }
         self.held += 1;
@@ -558,9 +568,10 @@ impl KernelCollector {
     /// another build or a message lost before it.
     fn uncalibrated(&mut self) {
         self.losses.undecoded += 1;
-        self.losses.note(
+        self.losses.note_times(
             "a device activity arrived before any clock calibration from its process, so it has \
              no time in CLOCK_MONOTONIC",
+            1,
         );
     }
 

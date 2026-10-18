@@ -537,9 +537,10 @@ impl BlockCollector {
         let (inflight, ring) = program.dropped();
         if inflight > self.dropped_inflight {
             self.losses.dropped += inflight - self.dropped_inflight;
-            self.losses.note(
+            self.losses.note_times(
                 "more requests were in flight at once than the in-flight map holds, so they were \
                  never timed",
+                inflight - self.dropped_inflight,
             );
             self.dropped_inflight = inflight;
         }
@@ -552,10 +553,11 @@ impl BlockCollector {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of these programs because an interrupt re-entered one \
                  on its own cpu, so a request went unseen; the count is the machine's, and an \
                  upper bound on this target's",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }
@@ -703,7 +705,7 @@ impl Collector for BlockCollector {
                     // Every request the rows held is lost, and how many that
                     // was is not knowable without the read that failed.
                     self.losses.failed_reads += 1;
-                    self.losses.note(reason);
+                    self.losses.note_times(reason, 1);
                 }
             }
             self.absorb_counters();

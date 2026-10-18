@@ -278,7 +278,7 @@ impl SyscallCollector {
                 // map: they are not lost, they arrive with the next one. What
                 // is lost is knowing which window they belonged to.
                 self.losses.failed_reads += 1;
-                self.losses.note(reason);
+                self.losses.note_times(reason, 1);
                 return;
             }
         };
@@ -404,36 +404,40 @@ impl SyscallCollector {
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
-            self.losses.note(
+            self.losses.note_times(
                 "the kernel skipped a run of this program because one was already running on \
                  that cpu, so an occurrence was never seen; the count is the machine's, an \
                  upper bound on the target's share, and every total here is a lower bound",
+                skipped - self.skipped,
             );
             self.skipped = skipped;
         }
         let unfollowed = program.unfollowed();
         if unfollowed > self.unfollowed {
             self.losses.dropped += unfollowed - self.unfollowed;
-            self.losses.note(
+            self.losses.note_times(
                 "a process the target started was not followed: the map of the processes it \
                  started was full, so its calls are in no total",
+                unfollowed - self.unfollowed,
             );
             self.unfollowed = unfollowed;
         }
         let (pending, rows) = program.dropped();
         if pending > self.dropped_pending {
             self.losses.dropped += pending - self.dropped_pending;
-            self.losses.note(
+            self.losses.note_times(
                 "more threads were inside a syscall at once than the pending map holds, so \
                  their calls were never timed",
+                pending - self.dropped_pending,
             );
             self.dropped_pending = pending;
         }
         if rows > self.dropped_rows {
             self.losses.dropped += rows - self.dropped_rows;
-            self.losses.note(
+            self.losses.note_times(
                 "more distinct (task, syscall, bucket) rows appeared in one interval than the \
                  histogram holds, so their calls were never counted",
+                rows - self.dropped_rows,
             );
             self.dropped_rows = rows;
         }

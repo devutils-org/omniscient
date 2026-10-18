@@ -148,10 +148,13 @@ impl Collector for ProcessEnergy {
             (self.baseline, self.ticks())
         else {
             self.losses.failed_reads += 1;
-            self.losses.note(format!(
+            self.losses.note_times(
+                format!(
                 "process {}'s cpu time could not be read at the close, so the window has no share",
                 self.pid
-            ));
+            ),
+                1,
+            );
             return Vec::new();
         };
         let process = process_after.saturating_sub(process_before);
