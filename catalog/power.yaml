@@ -90,10 +90,10 @@
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:cpu_idle", "kernel>=5.8"], cost: low}
     - {id: "bpf:tp", requires: ["tracepoint:power:cpu_idle", "bpf"], cost: low, equivalent: true}
-    - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/cpuidle"], cost: high, modes: [poll],
+    - {id: "fs:sys", requires: ["/sys/devices/system/cpu/cpu0/cpuidle"], cost: high, modes: [poll, count],
        degraded: "residency totals only: no transition timeline"}
-  modes: [trace, poll]
-  emits: [timeline, hist, summary, raw]
+  modes: [trace, poll, count]
+  emits: [timeline, hist, summary, raw, rate]
   targets: {system: native, cpu: native}
   keys: [cpu]
   filter_fields: [cpu, state]
@@ -109,6 +109,10 @@
        a core that slept a second and woke inside a 200 ms tick reports a share
        of five. Measured here: up to 5.0 on one tick, converging on the real
        share over a window long enough for the crediting to wash out."
+    - "`-m count` reads once at the start and once at the close: one event per
+       cpu over the whole window, and `-e rate` is each cpu's idle share of it
+       (idle nanoseconds per second), what `cpupower monitor` prints over a
+       command."
 
 - id: power.temp
   family: power

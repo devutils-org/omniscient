@@ -42,7 +42,7 @@ pub struct Prepare {
 impl Prepare {
     pub fn new(mode: Mode) -> Result<Self, String> {
         match mode {
-            Mode::Poll { .. } => Ok(Self { mode }),
+            Mode::Poll { .. } | Mode::Count => Ok(Self { mode }),
             Mode::Trace => Err(
                 "an idle transition is an event, and events come from the `power:cpu_idle` \
                  tracepoint: cpuidle holds residency totals, so poll them"
@@ -50,7 +50,7 @@ impl Prepare {
             ),
             other => Err(format!(
                 "residency is a counter: `{}` would report the time spent idle since boot rather \
-                 than during the run; poll it",
+                 than during the run; poll it, or count it over the window",
                 other.kind()
             )),
         }
@@ -100,7 +100,8 @@ struct Reading {
 
 pub struct Residency {
     id: CollectorId,
-    #[allow(dead_code)]
+    /// `count`: a baseline at the start and one closing read, so `-e rate`
+    /// is each cpu's idle share of the window.
     mode: Mode,
     root: PathBuf,
     cpus: Vec<u32>,
@@ -274,15 +275,43 @@ impl Collector for Residency {
                 directory.display()
             ));
         }
+        if self.mode == Mode::Count {
+            self.previous = Some(self.read().map_err(|error| format!("{error:?}"))?);
+        }
         Ok(())
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+        // A counted window closes at `stop`, from the baseline `start` read.
+        if self.mode == Mode::Count {
+            return Ok(Vec::new());
+        }
         let after = self.read()?;
         let before = self.previous.replace(after.clone());
         Ok(before
             .map(|before| self.delta_events(&before, &after, seq))
             .unwrap_or_default())
+    }
+
+    /// The closing read of a counted window; a polled run reads nothing here
+    /// (the runner's last round of `sample` closed it).
+    fn stop(&mut self) -> Vec<Event> {
+        if self.mode != Mode::Count {
+            return Vec::new();
+        }
+        let Some(before) = self.previous.take() else {
+            return Vec::new();
+        };
+        match self.read() {
+            Ok(after) => self.delta_events(&before, &after, 0),
+            Err(error) => {
+                self.losses.failed_reads += 1;
+                self.losses.note(format!(
+                    "the closing read failed, so the window measured nothing: {error:?}"
+                ));
+                Vec::new()
+            }
+        }
     }
 
     fn losses(&self) -> Losses {
@@ -299,6 +328,28 @@ mod tests {
         Mode::Poll {
             interval: Mode::DEFAULT_POLL_INTERVAL,
         }
+    }
+
+    /// A counted window: the baseline at `start`, nothing on a tick, and the
+    /// whole window's residency at `stop`.
+    #[test]
+    fn a_counted_window_closes_at_stop_from_the_baseline_start_read() {
+        let root = scratch::tree("cpuidle-count");
+        let write = |time: u64, usage: u64| {
+            scratch::write(&root, "cpu0/cpuidle/state0/name", "C1");
+            scratch::write(&root, "cpu0/cpuidle/state0/time", &time.to_string());
+            scratch::write(&root, "cpu0/cpuidle/state0/usage", &usage.to_string());
+        };
+        write(1_000, 1);
+        let mut collector = Residency::new(Mode::Count, root.clone(), vec![0]);
+        collector.start().expect("a cpuidle directory");
+        write(5_000, 3);
+        assert!(collector.sample(0).expect("a tick").is_empty());
+        write(9_000, 4);
+        let events = collector.stop();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].attr("idle_ns").unwrap().as_f64(), Some(8_000_000.0));
+        assert_eq!(events[0].attr("entries").unwrap().as_f64(), Some(3.0));
     }
 
     /// Two cpus, three states, known counters: the increase has to come out
