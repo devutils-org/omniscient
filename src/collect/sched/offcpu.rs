@@ -37,7 +37,7 @@ use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
 use crate::request::{Mode, Target};
 use crate::stack::unwind::{Debuginfod, NameOrigin};
-use crate::stack::{Frame, RawStack, Symbolizer};
+use crate::stack::{Frame, NamedBy, PerfMapFile, RawStack, Symbolizer};
 
 /// How often the totals are drained.
 ///
@@ -120,6 +120,16 @@ pub struct OffCpuCollector {
     /// moment it exits -- and a program that blocks is often a program that
     /// then finishes.
     stacks: BTreeMap<u64, Vec<String>>,
+    /// Who named each frame of `stacks`, root first, under the same ids, so
+    /// the flame and the triage charge off-cpu stacks as they charge
+    /// `cpu.profile`'s.
+    named_by: BTreeMap<u64, Vec<Option<NamedBy>>>,
+    /// The process each stack's task belonged to, by the `task:<tid>` key a
+    /// result writes, for the file each executed.
+    task_processes: BTreeMap<String, i32>,
+    /// What the retired symbolizers knew of their perf maps and executables.
+    left_perf_maps: Vec<PerfMapFile>,
+    left_executables: BTreeMap<i32, String>,
     /// One symbolizer per process seen, built lazily. A system-wide run sees
     /// many, and each carries that process's own mappings.
     symbolizers: HashMap<i32, Symbolizer>,
@@ -172,6 +182,10 @@ impl OffCpuCollector {
             symbolizers: HashMap::new(),
             leaf: super::LeafCallers::default(),
             leaving: BTreeSet::new(),
+            named_by: BTreeMap::new(),
+            task_processes: BTreeMap::new(),
+            left_perf_maps: Vec::new(),
+            left_executables: BTreeMap::new(),
             left_origins: BTreeMap::new(),
             unwalkable: 0,
             evicted_stacks: 0,
@@ -340,6 +354,10 @@ impl OffCpuCollector {
             }
             self.leaf.retain(|kept| kept != tgid);
             if let Some(symbolizer) = self.symbolizers.remove(&tgid) {
+                self.left_perf_maps.extend(symbolizer.perf_map_file());
+                if let Some(file) = symbolizer.executable() {
+                    self.left_executables.insert(tgid, file.to_owned());
+                }
                 for (path, origin) in symbolizer.origins() {
                     self.left_origins
                         .entry(path.clone())
@@ -379,6 +397,10 @@ impl OffCpuCollector {
         if !self.wants_stacks {
             return None;
         }
+        // Every task with a stack, for the file it executed: a stack two
+        // tasks share is resolved once, and both tasks are named.
+        self.task_processes
+            .insert(KeyValue::task(entry.tid as i32).to_string(), entry.tgid as i32);
         let id = match entry.stack {
             Some(id) => id,
             None if entry.stack_error == Some(libc::EEXIST) => {
@@ -418,13 +440,16 @@ impl OffCpuCollector {
             stack.frames[1].recovered = true;
         }
         let mut frames: Vec<String> = stack.frames.iter().rev().map(Frame::label).collect();
+        let mut named_by = stack.named_by_root_first();
         if truncated {
             // Root first, so the missing frames are the ones before the first
             // one here. Said rather than left to be inferred from a stack that
             // begins in the middle of a program.
             frames.insert(0, "[truncated]".to_owned());
+            named_by.insert(0, None);
         }
         self.stacks.insert(resolved, frames);
+        self.named_by.insert(resolved, named_by);
         Some(resolved)
     }
 
@@ -613,6 +638,37 @@ impl Collector for OffCpuCollector {
 
     fn stacks(&self) -> BTreeMap<u64, Vec<String>> {
         self.stacks.clone()
+    }
+
+    /// Who named each frame, the perf maps that named any, and the file each
+    /// task executed: what `cpu.profile` says beside its stacks.
+    fn provenance(&self) -> crate::stack::Provenance {
+        let mut perf_maps: Vec<PerfMapFile> = self
+            .symbolizers
+            .values()
+            .filter_map(Symbolizer::perf_map_file)
+            .chain(self.left_perf_maps.iter().cloned())
+            .collect();
+        perf_maps.sort();
+        perf_maps.dedup();
+        let executables = self
+            .task_processes
+            .iter()
+            .filter_map(|(task, pid)| {
+                let file = self
+                    .symbolizers
+                    .get(pid)
+                    .and_then(Symbolizer::executable)
+                    .map(str::to_owned)
+                    .or_else(|| self.left_executables.get(pid).cloned())?;
+                Some((task.clone(), file))
+            })
+            .collect();
+        crate::stack::Provenance {
+            named_by: self.named_by.clone(),
+            perf_maps,
+            executables,
+        }
     }
 
     /// Where the stacks' names came from, in the words `cpu.profile` uses.
