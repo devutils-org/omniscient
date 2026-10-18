@@ -14262,3 +14262,15 @@ tests passed this time. In the flaky tally: `scenario_gpu::a_target_that_exits_.
 alone). `scenario_gpu::the_memory_clock_is_a_series_...` wants an idle board;
 `cases::every_case_names_its_known_cause_both_ways` is the cases' finding
 above.
+
+After the `kallsyms` fix, the cases with the capabilities: `gcc-shell`
+passes, and `http-server-stdlib/a-large-listing`'s `on-cpu` went from 770 ms
+under the handler's account to within 31 ms of it. The sampled `on-cpu` rows
+of `cpython-interpreter`, `cpython-perf-map` and `http-server-stdlib` miss
+their tolerance now and then by 5 to 10 ms (a count of samples against
+`getrusage`, the 1 % the cases allow for interrupts): 17 passes of 18 over
+three runs of the three cases, so they join the flaky tally rather than
+have their slack widened. `make-sqlite`'s critical path is its registered
+open finding. The two triage tests of the first capped run
+(`a_job_s_wait_...`, `the_same_program_is_cpu_bound_...`) pass alone, twice
+each, and in the suite: the 870 ms round was theirs too.

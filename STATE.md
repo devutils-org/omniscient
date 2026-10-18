@@ -1780,9 +1780,18 @@ count.
   the sudoers line (pcap), and the witnesses `tcpdump`, `strace` (the
   classic `bpf:tp` road's id files are root's too, and `sqlite3-durability`
   skips without it), `perf`, `bpftrace`, `stress-ng`, `powertop`,
-  `slabtop`. Found and open: a loss reason's `Nx` counts drains, not losses
-  (186 sites, the shared layer); a live `omn top`'s rounds still take 0.8
-  to 1 s.
+  `slabtop`. Then, the same day, the first full suite with the
+  capabilities (`docs/open-findings.md`, "The first full run with the
+  capabilities"): a zeroed `/proc/kallsyms` was parsed whole inside a
+  profile's drain (870 ms of a debug build's round; fixed, and with it six
+  of the nine failures), `io.fsync` was refused where `vfs_fsync` is inlined
+  though its collector times `do_fsync` (`fentry:a or b`, fixed), the lanes
+  view test wanted no CUPTI, and a loss reason's `Nx` counted drains, not
+  losses (181 sites moved onto `Losses::note_times`). Suite after: 3 154
+  passed, 5 failed, all in the flaky tally or wanting an idle GPU, but the
+  cases' finding. A live `omn top` still runs late in the debug build (none
+  of it in release, where only the 10 ms drains run late, by 170 ms at
+  most).
 - **The full suite at the end** (2026-10-18, `cargo test --workspace
   --no-fail-fast`, the machine quiet): 3 132 passed, 12 failed. One was this
   wave's (`bpf::tests::every_program_that_attaches_a_raw_tracepoint_...`:
