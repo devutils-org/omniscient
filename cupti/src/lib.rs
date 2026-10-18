@@ -49,6 +49,7 @@
 //! measured against, so the loader's own work is not billed to CUPTI.
 
 mod api;
+mod callback;
 mod channel;
 mod pcsampling;
 mod profiler;
@@ -184,6 +185,25 @@ fn arm(report: u32) -> Result<(), String> {
     if report & wire::REPORT_PC_SAMPLING != 0 {
         pcsampling::arm(cupti)?;
         ARMED.fetch_or(wire::REPORT_PC_SAMPLING, Ordering::SeqCst);
+    }
+    if report & wire::REPORT_CALLBACK != 0 {
+        callback::arm(cupti)?;
+        ARMED.fetch_or(wire::REPORT_CALLBACK, Ordering::SeqCst);
+        // The calls are batched as they return; without the activity's
+        // flush thread, a thread of its own sends the batch on the same
+        // period, so a live reader is never more than a period behind.
+        if report & wire::REPORT_ACTIVITY == 0 {
+            std::thread::Builder::new()
+                .name("omn-cupti-send".to_owned())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(flush_ms));
+                    if STOPPING.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    send_now();
+                })
+                .map_err(|error| format!("cannot start the send thread: {error}"))?;
+        }
     }
     if report & wire::REPORT_ACTIVITY == 0 {
         send_now();

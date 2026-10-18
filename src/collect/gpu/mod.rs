@@ -9,6 +9,7 @@
 
 mod api;
 mod counters;
+mod cupti_api;
 mod device;
 #[cfg(test)]
 mod fixture;
@@ -46,6 +47,8 @@ pub fn factories() -> Vec<Factory> {
         // The host side of submission, through the preload shim the heap and
         // mutex sources share; `api.rs` says which programs it can see.
         Factory::new("gpu.api", "preload", |_| api::prepare()),
+        // Every driver API call, through CUPTI's callbacks in the program.
+        Factory::new("gpu.api", "vendor:cupti", |_| cupti_api::prepare()),
         // The device's side of the same calls, through CUPTI loaded into the
         // program by the driver; `kernel.rs` says why only at exec.
         Factory::new("gpu.kernel", "vendor:cupti", |_| kernel::prepare()),

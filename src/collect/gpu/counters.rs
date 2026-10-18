@@ -410,7 +410,9 @@ impl Common {
             | wire::OP_DROPPED
             | wire::OP_LOST
             | wire::OP_UNKNOWN
-            | wire::OP_INCOMPLETE => {}
+            | wire::OP_INCOMPLETE
+            | wire::OP_API
+            | wire::OP_API_UNPAIRED => {}
             wire::OP_INSIDE_FIRST..=wire::OP_INSIDE_LAST => return false,
             _ => {
                 self.losses.undecoded += 1;

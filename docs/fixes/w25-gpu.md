@@ -45,8 +45,16 @@ Branch `feat/w25-gpu`. Done sequentially by one agent.
    `nvmlDeviceGetCurrentClockFreqs` answers graphics and memory in one call
    at a median 4.86 ms of cpu against 5.06 ms for the three calls, and gives
    no SM clock, which is the source's value. Kept as three calls.
-2. **A CUPTI callback backend** (`cupti/`): no CUPTI on this machine to
-   build or check it against.
+2. ~~**A CUPTI callback backend**~~ -- **added after the wave's first pass**:
+   `gpu.api` on `vendor:cupti`, the injection library subscribing to the
+   driver API domain (`cupti/src/callback.rs`, `REPORT_CALLBACK`, frames
+   `OP_API` stamped in `CLOCK_MONOTONIC` inside the program) and
+   `src/collect/gpu/cupti_api.rs` reading them on the shared socket; the
+   other CUPTI readers ignore the new frames. Reasoned: no libcupti here;
+   the callback data's layout, the frame round trip and the event are unit
+   tested. Wanted: `omn trace gpu.api --backend force:vendor:cupti -e summary
+   -k api -- ./cuda_program` beside the same through `preload`, the calls
+   the runtime makes through `cuGetProcAddress` present only in the first.
 
 ## Tests
 

@@ -675,7 +675,7 @@ invisible to every CPU profiler.
 | `gpu.mem_freq` | memory clock (`dmon`'s `mclk`) | `vendor:nvml` | poll, snapshot | system, launch | med | low |
 | `gpu.throttle` | share of the time the clocks were held, per reason (`dmon -s v`) | `vendor:nvml` field values | poll, count | system, launch | med | low |
 | `gpu.kernel` | GPU time per kernel | `vendor:cupti` (Activity) · `rocprof` · `l0` | trace | launch | extreme | medium |
-| `gpu.api` | host-side submission latency | `preload` cuLaunchKernel / vkQueueSubmit | trace | pid | high | low |
+| `gpu.api` | host-side submission latency | `preload` cuLaunchKernel / vkQueueSubmit · `vendor:cupti` every driver API call (callbacks) | trace | pid | high / extreme | low |
 | `gpu.counters` | counters inside a kernel, per launch, each with its verdict | `vendor:cupti` (range profiler, kernel replay) · `rocprofv3` | trace | launch | extreme | medium |
 | `gpu.profile` | where time goes inside a kernel: sampled PCs, source lines, stall reasons | `vendor:cupti` (PC sampling) | trace | launch | med | low |
 

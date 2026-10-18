@@ -363,6 +363,11 @@
     # compute-bound one, nothing on a memory-bound one (docs/bench.md, "The
     # GPU tracers, nineteenth wave", record gpu-1791099533).
     - {id: "preload", requires: ["dynamic-linking"], cost: high}
+    # CUPTI's callback API from the injection library: every driver API call,
+    # those through `cuGetProcAddress` included, and nothing that is not the
+    # CUDA driver. A lock and a frame per call; not yet benched.
+    - {id: "vendor:cupti", requires: ["cupti"], cost: extreme,
+       degraded: "the CUDA driver API only: no Vulkan and no NVTX ranges, which only the shim sees"}
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets:
@@ -386,6 +391,10 @@
        (the CUDA runtime, for every driver call it makes), `vkGetDeviceProcAddr`
        (most Vulkan engines) -- reports nothing, and the run says so rather than
        reporting an idle GPU."
+    - "`--backend force:vendor:cupti` sees every CUDA driver API call, those the
+       CUDA runtime makes through `cuGetProcAddress` included, through CUPTI's
+       callbacks in the injection library, stamped in this tool's clock inside the
+       program; it sees no Vulkan and no NVTX."
     - "The entry points interposed are the CUDA driver's launch, copy,
        memset, synchronize, allocation, module load and context creation
        calls, Vulkan's submit, present and wait calls, and NVTX's range push

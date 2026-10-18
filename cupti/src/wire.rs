@@ -41,6 +41,9 @@ pub const REPORT_COUNTERS: u32 = 2;
 /// Program counters sampled inside kernels, with their stall reasons, by
 /// CUPTI's PC sampling: `gpu.profile`.
 pub const REPORT_PC_SAMPLING: u32 = 4;
+/// Every call into the CUDA driver API, through CUPTI's callback API
+/// (`callback.rs`, `gpu.api` on `vendor:cupti`).
+pub const REPORT_CALLBACK: u32 = 8;
 
 /// The counters `gpu.counters` asks for, comma-separated, in place of
 /// [`DEFAULT_METRICS`]: CUPTI's metric names (`smsp__inst_executed.sum`...).
@@ -143,6 +146,13 @@ pub const OP_INSIDE_LAST: u8 = 31;
 /// no payload. A process that sent this and never [`OP_END`] died inside
 /// the library's own exit path -- the tool, not the program, ended it.
 pub const OP_EXITING: u8 = 32;
+/// One driver API call that returned: entered at (`CLOCK_MONOTONIC`, read in
+/// the program), how long it took, the id of its name ([`OP_NAME`]), what it
+/// returned (`CUresult`) and the thread.
+pub const OP_API: u8 = 33;
+/// The callback API's own: a call whose entry the library did not see (it
+/// was under way at the subscribe), counted.
+pub const OP_API_UNPAIRED: u8 = 34;
 
 /// What an [`OP_INSIDE_LOST`] counts: ranges CUPTI's decode said it dropped.
 pub const LOST_RANGES: u32 = 1;
@@ -160,6 +170,45 @@ pub const LOST_HW_BUFFER_FULL: u32 = 5;
 /// that did not fit in the buffer it was handed.
 pub const LOST_PCS: u32 = 6;
 /// CUPTI's own numbers, from `cupti_activity.h`.
+/// [`OP_API`]'s payload, as both sides read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Api {
+    pub start_ns: u64,
+    pub duration_ns: u64,
+    pub name: u32,
+    pub result: i32,
+    pub tid: u32,
+}
+
+impl Api {
+    pub const LEN: usize = 32;
+
+    pub fn encode(&self) -> [u8; Self::LEN] {
+        let mut bytes = [0u8; Self::LEN];
+        bytes[0..8].copy_from_slice(&self.start_ns.to_ne_bytes());
+        bytes[8..16].copy_from_slice(&self.duration_ns.to_ne_bytes());
+        bytes[16..20].copy_from_slice(&self.name.to_ne_bytes());
+        bytes[20..24].copy_from_slice(&self.result.to_ne_bytes());
+        bytes[24..28].copy_from_slice(&self.tid.to_ne_bytes());
+        bytes
+    }
+
+    pub fn decode(payload: &[u8]) -> Option<Self> {
+        if payload.len() < Self::LEN {
+            return None;
+        }
+        let word = |at: usize| u32::from_ne_bytes(payload[at..at + 4].try_into().expect("4"));
+        let long = |at: usize| u64::from_ne_bytes(payload[at..at + 8].try_into().expect("8"));
+        Some(Self {
+            start_ns: long(0),
+            duration_ns: long(8),
+            name: word(16),
+            result: word(20) as i32,
+            tid: word(24),
+        })
+    }
+}
+
 pub mod cupti {
     pub const KIND_MEMCPY: u32 = 1;
     pub const KIND_MEMSET: u32 = 2;

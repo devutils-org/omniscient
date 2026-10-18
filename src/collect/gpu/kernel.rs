@@ -512,6 +512,8 @@ impl KernelCollector {
                 }
             }
             wire::OP_UNKNOWN => {}
+            // `gpu.api`'s, through the callback API, on a socket it shares.
+            wire::OP_API | wire::OP_API_UNPAIRED => {}
             wire::OP_EXITING => sender.exiting = true,
             // What the library learns inside kernels, for the readers of
             // `gpu.counters` and `gpu.profile` on the same socket: theirs.

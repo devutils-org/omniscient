@@ -803,7 +803,17 @@ fn forcing_a_backend_this_build_does_not_implement_names_it_in_the_chains_order(
                     "the machine's refusal names what it lacks, not the collector: {complaint}"
                 );
             }
-            forced += 1;
+            // A written backend this machine refuses (CUPTI absent) is the
+            // machine's answer, not a backend nobody wrote: only the
+            // unwritten ones are counted against the listing.
+            let written = entry["probes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|probes| probes["backend"] == id && probes["collector"] == Value::Bool(true));
+            if !written {
+                forced += 1;
+            }
         }
     }
     if here == 0 {
