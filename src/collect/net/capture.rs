@@ -219,14 +219,33 @@ impl Collector for CaptureCollector {
                 frame.ifindex,
                 frame.packet_type,
                 headers,
+                frame.realtime_ns,
+                afpacket::linktype(frame.hatype).map(|link| {
+                    (
+                        link,
+                        hex(&frame.bytes[..header_end(frame.bytes, frame.network_offset)]),
+                    )
+                }),
             ));
         });
         self.capture = Some(capture);
         self.absorb_statistics();
 
         let mut events = Vec::with_capacity(captured.len());
-        for (index, (ts_ns, ts_err_ns, wire_len, captured_len, ifindex, packet_type, headers)) in
-            (seq..).zip(captured)
+        for (
+            index,
+            (
+                ts_ns,
+                ts_err_ns,
+                wire_len,
+                captured_len,
+                ifindex,
+                packet_type,
+                headers,
+                realtime_ns,
+                frame,
+            ),
+        ) in (seq..).zip(captured)
         {
             let name = self.name_of(ifindex);
             let mut attrs = vec![
@@ -254,6 +273,14 @@ impl Collector for CaptureCollector {
             }
             if let Some(port) = headers.destination_port {
                 attrs.push(Attr::uint("dport", port as u64));
+            }
+            // What `--format pcap` writes: the copied bytes, the kernel's own
+            // stamp, and the link layer they start with. A link layer this
+            // reader cannot name carries no bytes rather than mislabelled ones.
+            attrs.push(Attr::uint("realtime_ns", realtime_ns));
+            if let Some((link, bytes)) = frame {
+                attrs.push(Attr::uint("linktype", u64::from(link)));
+                attrs.push(Attr::text(crate::encode::PCAP_HEADER_ATTR, bytes));
             }
 
             events.push(Event {
@@ -373,5 +400,59 @@ mod tests {
                 "the refusal must name the privilege, not the kernel: {reason}"
             ),
         }
+    }
+}
+
+/// Where a frame's headers end: the link layer, the IP header and a TCP, UDP
+/// or ICMP header, never a byte of payload. The snaplen copies past them on a
+/// short header, and what is past them is not this tool's to hold.
+fn header_end(bytes: &[u8], network: usize) -> usize {
+    let at = |offset: usize| bytes.get(offset).copied();
+    let Some(first) = at(network) else {
+        return network.min(bytes.len());
+    };
+    let (ip_len, protocol) = match first >> 4 {
+        4 => (usize::from(first & 0x0f) * 4, at(network + 9)),
+        6 => (40, at(network + 6)),
+        _ => return network.min(bytes.len()),
+    };
+    let transport = network + ip_len;
+    let transport_len = match protocol {
+        Some(6) => at(transport + 12).map_or(0, |word| usize::from(word >> 4) * 4),
+        Some(17) | Some(1) | Some(58) => 8,
+        _ => 0,
+    };
+    (transport + transport_len).min(bytes.len())
+}
+
+/// Bytes as lowercase hex, two digits each, the form the pcap encoder reads.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+}
+
+#[cfg(test)]
+mod pcap_tests {
+    #[test]
+    fn the_bytes_are_hex_and_the_link_layers_are_named() {
+        assert_eq!(super::hex(&[0x00, 0x1b, 0xff]), "001bff");
+        assert_eq!(super::afpacket::linktype(1), Some(1));
+        assert_eq!(super::afpacket::linktype(772), Some(1));
+        assert_eq!(super::afpacket::linktype(65534), Some(101));
+        assert_eq!(super::afpacket::linktype(32), None);
+        // Ethernet, IPv4 with no options, UDP: 42 bytes, then payload.
+        let mut frame = vec![0u8; 96];
+        frame[14] = 0x45;
+        frame[23] = 17;
+        assert_eq!(super::header_end(&frame, 14), 42);
+        // TCP with a 32-byte header.
+        frame[23] = 6;
+        frame[34 + 12] = 8 << 4;
+        assert_eq!(super::header_end(&frame, 14), 66);
     }
 }

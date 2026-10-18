@@ -69,6 +69,7 @@ mod frame {
     /// header, and `sizeof(struct tpacket3_hdr)` is already 48-byte aligned.
     pub const SLL: usize = 48;
     pub const SLL_IFINDEX: usize = SLL + 4;
+    pub const SLL_HATYPE: usize = SLL + 8;
     pub const SLL_PKTTYPE: usize = SLL + 10;
 }
 
@@ -121,6 +122,8 @@ pub struct Frame<'ring> {
     /// How much of it reached this process.
     pub captured_len: u32,
     pub ifindex: u32,
+    /// `sll_hatype`, the device's `ARPHRD_*`: what the link-layer header is.
+    pub hatype: u16,
     /// `PACKET_HOST`, `PACKET_OUTGOING` and the rest, as the kernel classified
     /// the frame.
     pub packet_type: u8,
@@ -448,11 +451,25 @@ fn frame_at<'ring>(header: *mut u8, remaining: usize) -> Option<Frame<'ring>> {
         wire_len,
         captured_len,
         ifindex: read_u32(header, frame::SLL_IFINDEX),
+        hatype: read_u16(header, frame::SLL_HATYPE),
         // SAFETY: a single byte at a fixed offset inside the record.
         packet_type: unsafe { header.add(frame::SLL_PKTTYPE).read() },
         bytes,
         network_offset: net - mac,
     })
+}
+
+/// The pcap link type of a device's frames as a packet socket hands them
+/// over, or `None` for a link layer this reader does not name.
+///
+/// Loopback frames carry a zeroed Ethernet header, so both are Ethernet (1);
+/// a tunnel with no link layer starts at the IP header (`LINKTYPE_RAW`, 101).
+pub fn linktype(hatype: u16) -> Option<u32> {
+    match hatype {
+        1 | 772 => Some(1),
+        519 | 768 | 65534 => Some(101),
+        _ => None,
+    }
 }
 
 /// How the kernel classified a frame, in the words `tcpdump` uses.
