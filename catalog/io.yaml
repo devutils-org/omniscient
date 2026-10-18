@@ -483,7 +483,7 @@
     # `vfs_fsync`, into `do_fsync`, and twenty-five syncs put zero calls
     # through either. All three are timed, `do_fsync` where the kernel has
     # it, and a nested pair is one event.
-    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:vfs_fsync", "fentry:vfs_fsync_range"], cost: high}
+    - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:do_fsync or vfs_fsync", "fentry:vfs_fsync_range"], cost: high}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: high,
        degraded: "no BTF: struct offsets are not portable across kernels"}
   modes: [trace]

@@ -384,6 +384,20 @@ pub fn expect(name: &str, accepted: &[&[&str]]) -> Result<Function, String> {
 /// table's wrappers (`__x64_sys_read`, `__arm64_sys_read`): the catalog names
 /// one function, and each architecture spells it its own way.
 pub fn support(requirement: &str) -> Support {
+    // `a or b`: the first function this kernel has and a call reaches, for a
+    // collector that times whichever of them the syscall goes through
+    // (`io.fsync`'s `do_fsync`, or `vfs_fsync` where `do_fsync` is inlined).
+    if requirement.contains(" or ") {
+        let mut reasons = Vec::new();
+        for alternative in requirement.split(" or ") {
+            match support(alternative.trim()) {
+                Support::Yes => return Support::Yes,
+                Support::No(reason) => reasons.push(reason),
+                other => return other,
+            }
+        }
+        return Support::No(reasons.join("; and "));
+    }
     let requirement = match syscall_arch() {
         Some(arch) => requirement.replace("{arch}", arch),
         None if requirement.contains("{arch}") => {
@@ -525,7 +539,7 @@ fn trigger(function: &str) -> Option<fn(RawFd)> {
         "vfs_write" => Some(write),
         "sock_recvmsg" => Some(recv),
         "vfs_read" => Some(read),
-        "vfs_fsync" => Some(fsync),
+        "vfs_fsync" | "do_fsync" => Some(fsync),
         "vfs_fsync_range" => Some(msync),
         _ => None,
     }
@@ -2066,6 +2080,20 @@ mod tests {
             for (other_at, other_size) in &regions[index + 1..] {
                 assert!(at + size <= *other_at || other_at + other_size <= *at);
             }
+        }
+    }
+
+    /// `a or b` is refused only when neither is there, with both reasons; a
+    /// kernel without BTF leaves it unchecked, as one function would.
+    #[test]
+    fn one_of_two_functions_is_missing_only_when_both_are() {
+        match support("omn_no_such_function_a or omn_no_such_function_b") {
+            Support::No(reason) => {
+                assert!(reason.contains("omn_no_such_function_a"), "{reason}");
+                assert!(reason.contains("omn_no_such_function_b"), "{reason}");
+            }
+            Support::Unchecked(_) => {}
+            other => panic!("two missing functions answered {other:?}"),
         }
     }
 

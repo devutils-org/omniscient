@@ -210,7 +210,10 @@ prototypes the program reads, spelled and separated as a raw tracepoint's
 below -- `fentry:tcp_v4_connect(sock *, sockaddr_unsized *, int)|(sock *,
 sockaddr *, int)` -- so a kernel with a shape the program has never seen reads
 *missing* instead of failing at the attach; a bare name asks for existence
-only. Four more say what a program reads, not only
+only. `fentry:<a> or <b>` is satisfied by the first of them the kernel has
+and a call of this process reaches, for a collector that times whichever one
+the syscall goes through: `io.fsync`'s `fentry:do_fsync or vfs_fsync`, since
+a kernel inlines one or the other. Four more say what a program reads, not only
 where it attaches, because the portability matrix found sources that probed
 available on an older kernel and then refused at the attach:
 
