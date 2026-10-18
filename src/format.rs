@@ -288,7 +288,19 @@ impl OutputFormat {
                 serde_norway::to_string(value).map_err(to_parse_error("YAML output"))
             }
             OutputFormat::Toml => {
-                toml::to_string_pretty(value).map_err(to_parse_error("TOML output"))
+                // A TOML document is a table: a list -- `omn list`'s entries,
+                // the defaults -- is written as the array of tables
+                // `[[entries]]`, which is what the format offers for one.
+                let tree = toml::Value::try_from(value).map_err(to_parse_error("TOML output"))?;
+                let tree = match tree {
+                    toml::Value::Array(items) => {
+                        let mut table = toml::map::Map::new();
+                        table.insert("entries".to_owned(), toml::Value::Array(items));
+                        toml::Value::Table(table)
+                    }
+                    other => other,
+                };
+                toml::to_string_pretty(&tree).map_err(to_parse_error("TOML output"))
             }
             OutputFormat::Text => Err(ParseError::new(
                 "text output is rendered by the caller, not serialized",
@@ -350,6 +362,24 @@ pub enum FormatStatus {
 
 #[cfg(test)]
 mod tests {
+
+    /// A list is a TOML array of tables under `entries`: a document is a
+    /// table, and `omn list --format toml` used to fail on its top level.
+    #[test]
+    fn a_list_is_written_as_toml_s_array_of_tables() {
+        #[derive(serde::Serialize)]
+        struct Row {
+            id: &'static str,
+        }
+        let text = OutputFormat::Toml
+            .serialize_document(&vec![Row { id: "a" }, Row { id: "b" }])
+            .expect("a list serializes");
+        let back: toml::Value = toml::from_str(&text).expect("valid TOML");
+        let entries = back["entries"].as_array().expect("an array of tables");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1]["id"].as_str(), Some("b"));
+    }
+
     use super::*;
 
     #[test]
