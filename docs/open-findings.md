@@ -14189,3 +14189,39 @@ path is one job") still stands with `ppid` on the sched sources -- the
 person's way undecided, naming no state, the agent's `blocked` at `wait4`
 -- so `ppid` alone does not close it. `sqlite3-durability` skips: its
 reference counts syncs with `strace`, which this machine does not have.
+
+### The first full run with the capabilities (2026-10-18)
+
+`cargo test --workspace --no-fail-fast` with `omn` holding CAP_BPF and
+CAP_PERFMON, after the privileged runs' fixes: 3 145 passed, 12 failed.
+Three are in the flaky tally. The other nine fail alone and **fail the same
+way on `c22d735`**, before those fixes, in a worktree with the same
+capabilities: the privileged path on this machine, which every earlier full
+run here skipped. None is a regression; each is to be taken up.
+
+- **Tests that fail where they should skip** (the machine refuses, and says
+  so): `scenario_io::every_sync_is_one_event_on_the_file_it_named`
+  (`io.fsync` refused: `vfs_fsync` is inlined on this kernel);
+  `view_workloads::lanes_schedule_is_the_manifests` (`gpu.kernel` refused:
+  no `libcupti.so`).
+- **Samples missing from a profile**:
+  `view_workloads::flame_functions_weigh_what_the_manifest_says` (`heavy`
+  burns 0.8 s, about 798 samples at 997 Hz; the profile has 120);
+  `unwind::dwarf_recovers_the_whole_tree_of_a_build_without_frame_pointers`
+  (280 samples in `spin`).
+- **A cost read as zero**:
+  `unwind::each_mode_copies_what_it_declares_and_dwarf_costs_more_per_sample_than_fp`
+  (`0.0 ms of omn over 1488 ms of the target` for both modes).
+- **A poller starved beside a profile**:
+  `scenario_cpu::a_session_reads_its_slow_requests_while_another_pays_a_fixed_cost`
+  (7 readings of about 18 owed): the same shared round as a live `omn top`'s.
+- **The triage's job and verdict**:
+  `triage::a_job_s_wait_carries_every_step_of_the_job_beside_the_child_followed`
+  (a step not in the rest of the job) and
+  `triage::the_same_program_is_cpu_bound_for_latency_and_sleep_bound_for_the_tail`.
+- **The cases' cited numbers**: `cases::every_case_names_its_known_cause_both_ways`,
+  deterministic for `gcc-shell/the-passes-o2-adds` (`on-cpu` 5.2-5.3 s
+  against `-ftime-report`'s 5.8-5.9 s, 0.2 s allowed) and
+  `http-server-stdlib/a-large-listing` (`on-cpu` 1.31 s against the
+  handler's 2.09 s, 22 ms allowed); `cpython-perf-map` and
+  `sqlite3-stripped` miss by a few milliseconds, run to run.
