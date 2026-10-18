@@ -215,6 +215,9 @@ impl Connect {
 struct Offsets {
     family: i32,
     num: i32,
+    /// `inet_sock`'s `inet_sport`, network order, from the `sock`: the port a
+    /// closing socket still names after `inet_put_port` zeroed `skc_num`.
+    sport: i32,
     dport: i32,
     daddr: i32,
     rcv_saddr: i32,
@@ -233,6 +236,8 @@ impl Offsets {
         Ok(Self {
             family: at("skc_family")?,
             num: at("skc_num")?,
+            sport: btf.member_offset("inet_sock", "inet_sport")?
+                - btf.member_offset("inet_sock", "sk")?,
             dport: at("skc_dport")?,
             daddr: at("skc_daddr")?,
             rcv_saddr: at("skc_rcv_saddr")?,
@@ -531,7 +536,11 @@ fn state_instructions(
 
     read_field(&mut program, EVENT + R_COOKIE, 8, 7, cookie_at);
     read_field(&mut program, EVENT + R_FAMILY, 2, 7, at.family);
-    read_field(&mut program, EVENT + R_SPORT, 2, 7, at.num);
+    // `inet_sport`, not `skc_num`: a refusal's `TCP_CLOSE` is announced after
+    // `inet_put_port` zeroed the number, never the port. Its two bytes are in
+    // network order, so each goes to the other's place in the zeroed slot.
+    read_field(&mut program, EVENT + R_SPORT, 1, 7, at.sport + 1);
+    read_field(&mut program, EVENT + R_SPORT + 1, 1, 7, at.sport);
     read_field(&mut program, EVENT + R_DPORT, 2, 7, at.dport);
     program.push(Insn::ldx(BPF_W, 1, R10, EVENT + R_FAMILY));
     program.jump_to("v6", Insn::jeq_imm(1, AF_INET6, 0));

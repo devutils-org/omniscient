@@ -49,6 +49,21 @@ Branches `feat/w25-net` (the capture header, merged first) and
 - Accept on a launched tree: `omn trace net.tcp.accept -e raw -- sh -c 'python3 -m http.server 8765 & sleep 1; curl -s localhost:8765 >/dev/null; kill %1'`
   keeps the server's accept (the child of `sh`).
 
+**Run (2026-10-18, with CAP_BPF):**
+
+- Connect, both roads: `curl http://example.com` reads 1 established on each,
+  `curl localhost:1` 2 refused (v6 then v4) with errno 111 on each. In-window
+  cpu: 0.5 ms on `raw_tp` against 69 ms on `fentry`, the detach the road was
+  for. **Defect found and fixed**: `raw_tp` read `sport=0` on every refusal.
+  `tcp_set_state(TCP_CLOSE)` runs `inet_put_port`, which zeroes `skc_num`,
+  before `inet_sk_state_store` fires the tracepoint; the road now reads
+  `inet_sport`, which survives it. Against a client printing
+  `getsockname()`: 48928 and 34084 on both sides, established and refused.
+- Accept on a launched tree: the `http.server` that `sh` started is kept
+  (1 accept, `sport=8765`, `max_backlog=5`, `socketserver`'s queue size).
+- pcap: not run. `make CAPTURE=1` needs `cap_net_raw`, which the sudoers line
+  does not grant, and `tcpdump` is not installed.
+
 ## Not done
 
 Nothing of the stream's list. `net.tcp.lifetime` in the lazy `med` band was
