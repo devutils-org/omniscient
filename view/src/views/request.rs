@@ -2376,7 +2376,10 @@ mod tests {
         assert!(text.contains("no block request seen"), "{text}");
         assert!(text.contains("none seen: io.latency lost 3"), "{text}");
         assert!(text.contains("io.latency lost 3, so some may"), "{text}");
-        assert!(text.contains("3 lost") && !text.contains("-3 lost"), "{text}");
+        assert!(
+            text.contains("3 lost") && !text.contains("-3 lost"),
+            "{text}"
+        );
         assert!(!text.contains("no block request issued"), "{text}");
         // Lost nothing, watched the whole run: a zero, said as one.
         let clean = snapshot::fixture("vertical-requests");

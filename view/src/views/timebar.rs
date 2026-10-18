@@ -685,6 +685,20 @@ fn from_decomposition(data: &Data, threads: &Threads, written: Written) -> Sheet
                 unsplit = true;
                 part.named.extend(heaviest_block(data, several));
             }
+            // A row already split by state reads `blocked: sleeping` whole,
+            // and the kernel puts a futex wait and a `nanosleep` in that one
+            // state: the futex waits come out of it as a lock, as they do out
+            // of a split row's sleep, or the suspect reads sleep where
+            // `sched.futex` holds the wait.
+            if class == Class::Sleep {
+                let waits = tid.and_then(|tid| futex_of(&futex, tid));
+                if let (Some(amount), Some((waited, count))) = (row.amount, waits) {
+                    if waited > 0.0 && amount > 0.0 {
+                        parts.extend(lock_out_of_sleep(part, amount, waited, count));
+                        continue;
+                    }
+                }
+            }
             if class == Class::OnCpu && row.source == "cpu.profile" {
                 part.named.extend(hottest_leaf(data, several));
             }
@@ -971,6 +985,33 @@ fn split_blocked(
             }
             other => push(format!("blocked: {other}"), Class::Other, entry, None),
         }
+    }
+    parts
+}
+
+/// A sleep row's futex waits taken out of it as a lock: never more than the
+/// sleep, and what is left stays sleep.
+fn lock_out_of_sleep(sleep: Part, amount: f64, waited: f64, waits: u64) -> Vec<Part> {
+    let taken = waited.min(amount);
+    let mut lock = sleep.clone();
+    lock.class = Class::Lock;
+    lock.state = "blocked: sleeping, on a futex".to_owned();
+    lock.amount = Some(taken);
+    lock.readings = waits;
+    lock.named = vec![format!(
+        "{} waiting in futex(2) over {waits} wait(s), from `sched.futex`",
+        units::duration(waited)
+    )];
+    let mut parts = vec![lock];
+    let rest = amount - taken;
+    if rest > amount * 1e-6 {
+        let mut sleep = sleep;
+        sleep.amount = Some(rest);
+        sleep.readings = sleep.readings.saturating_sub(waits);
+        sleep
+            .named
+            .push("the sleep less the futex waits `sched.futex` saw".to_owned());
+        parts.push(sleep);
     }
     parts
 }
@@ -2543,6 +2584,33 @@ mod tests {
         let summed: f64 = all.iter().filter_map(|part| part.amount).sum();
         assert!((summed - sleeping).abs() < 1.0);
         assert_eq!(amount(&all, Class::Sleep), 0.0);
+    }
+
+    /// A row already read as `blocked: sleeping` gives its futex waits to a
+    /// lock too, so a program parked on a lock is not named asleep: three
+    /// quarters of its sleep on futexes is a lock, and the verdict names it.
+    #[test]
+    fn a_sleep_row_gives_its_futex_waits_to_a_lock() {
+        let mut sleep = Part::new(
+            Class::Sleep,
+            "blocked: sleeping".to_owned(),
+            "sched.offcpu".to_owned(),
+        );
+        sleep.amount = Some(1.0e9);
+        sleep.readings = 10;
+        let parts = lock_out_of_sleep(sleep.clone(), 1.0e9, 0.75e9, 3);
+        assert_eq!(parts[0].class, Class::Lock);
+        assert_eq!(parts[0].amount, Some(0.75e9));
+        assert_eq!(parts[1].class, Class::Sleep);
+        assert_eq!(parts[1].amount, Some(0.25e9));
+        let Verdict::Names { part, .. } = decide(&parts, Some(1.0e9), None) else {
+            panic!("a verdict")
+        };
+        assert_eq!(parts[part].class, Class::Lock);
+        // More futex wait than sleep: a lock, and nothing left asleep.
+        let all = lock_out_of_sleep(sleep, 1.0e9, 2.0e9, 9);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].amount, Some(1.0e9));
     }
 
     #[test]
