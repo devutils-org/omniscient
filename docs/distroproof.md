@@ -35,6 +35,9 @@ program and on the machine, about two minutes, and its document is the cell
 |---|---|---|---|---|
 | `rocky-8` | 2.28 | 4.18.0-553.el8_10 | yes | 62 of 123 |
 | `ubuntu-18.04` | 2.27 | 4.15.0-212 (no BTF) | yes | 52 of 123 |
+| `fedora-previous` (Fedora 43) | 2.42 | 6.17.1-300.fc43 | yes | 98 of 123 (root) |
+| `debian-sid` (forky/sid) | 2.43 | 7.2.11+deb14 (`perf_event_paranoid` 3) | yes | 98 of 123 (root) |
+| `gentoo` (OpenRC, dist-kernel) | 2.43 | 6.18.54 | yes | 98 of 123 (root) |
 | `alpine` (glibc archive) | musl 1.2.6 | 6.18.35-virt | **no**: `./omn/bin/omn: not found`; yes with `gcompat` | 91 of 123 (root) |
 | `alpine` (musl archive) | musl 1.2.6 | 6.18.35-virt | yes | 93 of 123 (root) |
 | Arch (the development host) | 2.44 | 7.2.9 | yes | 67 of 123 |
@@ -93,3 +96,33 @@ and both are kept:
 `verify` checks the musl archive's linking (no program interpreter, the shim
 needing musl's `libc.so` alone) and leaves running it to an Alpine guest,
 since on a glibc host its shim would be injected into glibc programs.
+
+### 2. Gentoo, and two images more, added to distroproof (fixed in distroproof)
+
+**Why.** The distributions the phase names include Gentoo, which distroproof
+did not boot, and a rolling Debian and a second Fedora make the matrix's
+two ends -- the next kernel a distribution ships, and the release a user
+still runs. Each was added to distroproof's catalog (its branch
+`more-images`), not worked around here (`DECISIONS.md`).
+
+**What distroproof showed, and what was fixed there.**
+
+- `gentoo` (the autobuilds' `di-amd64-cloudinit` image): the VM read **512
+  bytes** of its disk in four minutes at 100 % cpu -- distroproof's metrics,
+  the only signal, since nothing reached the serial console. The image is a
+  GPT disk with no BIOS boot code; it boots under UEFI.
+- Then `guest: kernel not found in /boot for 6.18.54`: distroproof extracts
+  the kernel on the first boot so that later runs boot it directly (and may
+  change its command line, which the `lockdown` variant needs). Gentoo's
+  `installkernel` writes `/boot/kernel-<release>`, and its
+  `modules/<release>/vmlinuz` is a link into a kernel source tree the image
+  does not ship. The agent looks for `/boot/kernel-<release>` now; direct
+  boot takes 13 s, against 18 s from the disk.
+- `debian-sid` and `fedora-previous` booted at once.
+
+**Checked.** On all three the glibc archive starts, lists the catalog,
+polls `cpu.util` ten times a second, attaches `sched.runqlat` over
+`bpf:raw_tp`, and the shim reads the allocations of what a shell starts.
+`debian-sid` is the first image whose `perf_event_paranoid` is 3, Debian's
+own patch, and the first on a 7.2 kernel other than the development host's.
+
