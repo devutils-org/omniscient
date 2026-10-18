@@ -38,10 +38,13 @@ the same sinks and total.
 
 ## Not done
 
-1. **Flows' file -> device ribbon**: the textual edge stands. A ribbon would
-   draw the files' bytes as the device's, and those went through the page
-   cache (115 MiB of files, 15.5 MiB on the device in the gallery's run);
-   drawing it honestly is a two-layer junction, a design not started.
+1. **Flows' file -> device ribbon: settled, not drawn.** The junction is
+   already two layers: the `cache` column carries the files' volume (115 MiB
+   in the gallery's run) and the device column the device's (15.3 MiB), each
+   at its own height. A ribbon from each file to a device would need each
+   file's device bytes, which nothing measures -- the page cache merges
+   them, and writeback writes them later from a kworker. The textual edge
+   (`◂ N files`, from `io.fs`'s `blk_devs`) is what is known, and stays.
 2. **A placed drop on screen**: needs a recording whose drop is on one of
    the heatmap's four sources (`sched.runqlat`, `io.latency`, `net.socket`,
    `gpu.kernel`), which needs a load that overruns a ring under CAP_BPF.

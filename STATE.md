@@ -1741,15 +1741,19 @@ count.
   - **docs**: `docs/triage.md`, `docs/cases.md`, `docs/unwind.md`,
     `docs/view/*`, `GUIDE.md` ("The shape of a run"), `docs/bench.md`,
     `docs/how-to-use/`.
-- **Left, from the handoffs' "Not done"**: flows' file -> device ribbon (a
-  two-layer junction, a design not started); a placed drop on screen (a
-  recording that overruns a heatmap source's ring); `mem.heap.live` and
-  `mem.heap.retained` on the uprobes (a second constructor each); a
-  `kworker`-dispatched block request charged to its bio's submitter; a
-  CUPTI callback backend; `omn list --format toml` on a top-level array; the
-  reference pairs whose tools are not installed here (iostat, mpstat,
-  pidstat, turbostat, perf, bpftrace) and the pairs to rewrite as `omn ...
-  --system -- workload`; a `mem.slab` pair once slabtop is granted.
+- **The finishing pass (2026-10-18)**, the handoffs' "Not done" taken up:
+  `omn list --format toml` (`[[entries]]`); `mem.heap.live` and
+  `mem.heap.retained` on `bpf:uprobe`; a kworker-dispatched block request
+  charged to its inserter (`block_rq_insert`); `gpu.api` through CUPTI's
+  callbacks (`vendor:cupti`); eight reference pairs, four of them held here
+  (`vmstat-in`, `vmstat-r`, `ss-tuan-sockets`, `top-batch-cpus`) and
+  `kind` made a filter field of `sched.interrupts` by the first; flows'
+  ribbon settled as not drawn (`DECISIONS.md`). Left, each needing what this
+  machine lacks: a placed drop on screen (a privileged recording that
+  overruns a heatmap source's ring), the reference pairs whose root tools
+  are neither installed nor captured, the pairs to rewrite as `omn ...
+  --system -- workload` (each to be shown unchanged under its tool), and a
+  `mem.slab` pair once slabtop is granted.
 - **Privileged runs these streams want** (each handoff gives the command):
   every eBPF attach above -- the OOM victims against `journalctl -k`, the
   slab caches against `slabtop`, pcap through `tcpdump -r`, the connect

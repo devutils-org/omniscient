@@ -1464,6 +1464,10 @@ open line is settled: `cpu.profile`'s `pmu` row, as the brief decided.
 | A kernel address naming an object for its lifetime | **An attribute, never a key** (`sched.lock`'s `addr`). | A key outlives the object; the address is recycled. |
 | `ppid` | **Put on an event by its collector**, from the program's fork records or `/proc`, and a filter field wherever an event carries it. | The kernel's fork record is exact; a field no event carries is refused. |
 | A reference tool that lost events | **The pair skips, quoting it**, rather than fails (`common::INCOMPLETE`). | The tool's shortfall is not `omn`'s. |
+| A block request a kworker issues | **Charged to the task that inserted it** (`block_rq_insert`, stamped in that task's context); one issued straight to the device, never inserted, to its issuer. | The issuer of a dispatched request is kblockd, never the program. |
+| Flows' file -> device edge | **Words, not a ribbon**: the junction draws the files' volume and the device's, each at its height; no ribbon from a file to a device. | Each file's device bytes are not measured: the page cache merges them and writeback writes them later. |
+| A document that is a list, in TOML | **The array of tables `[[entries]]`.** | A TOML document is a table. |
+| A heap source on `bpf:uprobe` | **The same collectors as on `preload`**, reading a `heap::Feed`; the records are the same facts. | One collector per question, whatever road the records took. |
 
 ## Open
 
