@@ -440,6 +440,39 @@ pub fn syscall_arch() -> Option<&'static str> {
     }
 }
 
+/// Whether the kernel was built with the function tracer, by the symbol it
+/// defines for every function's call site: `__fentry__` (x86), `_mcount`
+/// (arm64). `/proc/kallsyms` names its symbols even where `kptr_restrict`
+/// zeroes their addresses, and is read until the symbol turns up, so a
+/// kernel that has it pays a few lines. `None` where the file cannot be read.
+///
+/// The kernel's BTF was the first question asked, and it does not answer on
+/// 5.10: its BTF, made by an older pahole, leaves most functions out, ftrace's
+/// with them, and debian-11 was told it had no ftrace where envprobe read
+/// CONFIG_FUNCTION_TRACER=y.
+fn kernel_has_function_tracer() -> Option<bool> {
+    use std::io::BufRead;
+    static ANSWER: OnceLock<Option<bool>> = OnceLock::new();
+    *ANSWER.get_or_init(|| {
+        let file = std::fs::File::open("/proc/kallsyms").ok()?;
+        let wanted = if cfg!(target_arch = "aarch64") {
+            "_mcount"
+        } else {
+            "__fentry__"
+        };
+        let mut lines = 0usize;
+        for line in std::io::BufReader::new(file).lines() {
+            let line = line.ok()?;
+            lines += 1;
+            if line.split_whitespace().nth(2) == Some(wanted) {
+                return Some(true);
+            }
+        }
+        // An empty read is no answer.
+        (lines > 0).then_some(false)
+    })
+}
+
 /// Whether `function` is in this kernel's BTF and, where this process may ask,
 /// whether a tracing program loads against it.
 fn exists(function: &str) -> Support {
@@ -454,13 +487,12 @@ fn exists(function: &str) -> Support {
     };
     // A kernel built without ftrace compiles its functions with no `__fentry__`
     // call site, and a trampoline has nowhere to go: Alpine's `virt` kernel
-    // loaded every fentry program and refused each attach with EBUSY. Its
-    // BTF then lacks ftrace's own functions, which is free to ask.
-    if index.function("register_ftrace_function").is_err() {
+    // loaded every fentry program and refused each attach with EBUSY.
+    if kernel_has_function_tracer() == Some(false) {
         return Support::No(
-            "this kernel was built without ftrace (no CONFIG_FUNCTION_TRACER: \
-             `register_ftrace_function` is not in its BTF), so its functions carry no call \
-             site a trampoline can be installed on and no fentry program attaches"
+            "this kernel was built without ftrace (no CONFIG_FUNCTION_TRACER: /proc/kallsyms \
+             has no `__fentry__`), so its functions carry no call site a trampoline can be \
+             installed on and no fentry program attaches"
                 .to_owned(),
         );
     }
