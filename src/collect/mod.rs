@@ -5216,7 +5216,7 @@ fn sleep_or_wake(ns: u64, wake: Option<RawFd>) {
         return;
     };
     let timeout = libc::timespec {
-        tv_sec: (ns / 1_000_000_000) as libc::time_t,
+        tv_sec: (ns / 1_000_000_000) as _,
         tv_nsec: (ns % 1_000_000_000) as libc::c_long,
     };
     let mut watched = libc::pollfd {

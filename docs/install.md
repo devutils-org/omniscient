@@ -21,9 +21,22 @@ $ omn list | tail -n 3 | head -n 1
 
 ### From a release archive
 
-A release is one archive and its checksum. The archive is a prefix: it holds
-exactly these nine files under one top directory, and nothing else
-(`scripts/release.sh list` prints the list the archive is checked against):
+A release is two archives, each with its checksum, one per C library:
+
+| Archive | For | What differs |
+|---|---|---|
+| `omn-<version>-x86_64-linux-gnu.tar.gz` | every glibc distribution, glibc 2.17 or later | everything below |
+| `omn-<version>-x86_64-linux-musl.tar.gz` | musl distributions (Alpine) | `omn` and `omn-mcp` linked statically, the shim linked against musl, no `libomn_cupti.so`: a static binary loads no library, so the NVIDIA sources (NVML, CUPTI) are refused, saying so |
+
+On Alpine the glibc archive also runs once `gcompat` is installed (`apk add
+gcompat`), shim included -- measured on Alpine 3.24 (`docs/distroproof.md`) --
+but the musl archive needs nothing. The musl archive's shim is for musl
+programs: on a glibc system, use the glibc archive.
+
+Each archive is a prefix: the glibc one holds exactly these files under one
+top directory, and nothing else, and the musl one the same but
+`libomn_cupti.so` (`scripts/release.sh list [gnu|musl]` prints the list each
+archive is checked against):
 
 ```
 bin/omn                    the tool

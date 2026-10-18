@@ -140,7 +140,7 @@ fn nvml_probe() -> Probe {
         .get_or_init(|| {
             if let Err(reason) = nvml::Nvml::present() {
                 return Probe::Missing(format!(
-                    "the NVIDIA management library is not loadable on this machine ({reason})"
+                    "the NVIDIA management library is not loadable by this omn ({reason})"
                 ));
             }
             let library = match nvml::Nvml::open() {

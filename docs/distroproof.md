@@ -31,7 +31,8 @@ phase and not written yet.
 |---|---|---|---|---|
 | `rocky-8` | 2.28 | 4.18.0-553.el8_10 | yes | 62 of 123 |
 | `ubuntu-18.04` | 2.27 | 4.15.0-212 (no BTF) | yes | 52 of 123 |
-| `alpine` | musl 1.2.6 | 6.18.35-virt | **no**: `./omn/bin/omn: not found` | -- |
+| `alpine` (glibc archive) | musl 1.2.6 | 6.18.35-virt | **no**: `./omn/bin/omn: not found`; yes with `gcompat` | 91 of 123 (root) |
+| `alpine` (musl archive) | musl 1.2.6 | 6.18.35-virt | yes | 93 of 123 (root) |
 | Arch (the development host) | 2.44 | 7.2.9 | yes | 67 of 123 |
 
 Every other image distroproof boots (Debian 10 to 13, Ubuntu 20.04 to 24.04,
@@ -64,8 +65,27 @@ holds the floor at 2.17 and the documents to it.
 catalog with each refusal's reason, polls `cpu.util` ten times in a second,
 and the preload shim reads the allocations of every process a shell starts.
 
-**Left.** musl: on `alpine` the binary is "not found", the shell's word for a
-missing program interpreter (`/lib64/ld-linux-x86-64.so.2`). A static musl
-build cannot `dlopen` NVML or CUPTI, and the shim must match the libc of the
-program it is injected into; whether Alpine is served by a second archive, by
-`gcompat`, or named as unsupported is still to decide.
+**Then musl (fixed the same day).** On `alpine` the glibc binary was "not
+found", the shell's word for a missing program interpreter
+(`/lib64/ld-linux-x86-64.so.2`). Both answers were measured on Alpine 3.24,
+and both are kept:
+
+- **The glibc archive with `gcompat`** (`apk add gcompat`): it starts, 91
+  sources usable as root, `cpu.util` 10 polls in 10, and the glibc shim
+  injected into musl programs reads them -- 67.6 MiB in `python3`, busybox
+  `sh`'s allocations. A fallback that costs nothing to build.
+- **A second archive, `-linux-musl`**: `omn` and `omn-mcp` linked statically
+  (`cargo zigbuild --target x86_64-unknown-linux-musl`), and the shim as a
+  dynamic library against zig's musl (`-C target-feature=-crt-static`; built
+  with the host's linker it depended on glibc's `libc.so.6`). Without
+  `gcompat`: 93 sources usable, `sched.runqlat` attaches over `bpf:raw_tp`,
+  and the musl shim reads 67.6 MiB in `python3`. A static binary loads no
+  library into its process, so the NVIDIA sources are refused -- and the
+  refusal now says the build is the reason, where the loader's "Dynamic
+  loading not supported" read as the machine's lack. Two lines of the code
+  needed changing for musl: `pthread_t` is a pointer there, and `time_t` is
+  named through its field.
+
+`verify` checks the musl archive's linking (no program interpreter, the shim
+needing musl's `libc.so` alone) and leaves running it to an Alpine guest,
+since on a glibc host its shim would be injected into glibc programs.

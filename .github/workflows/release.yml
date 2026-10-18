@@ -52,16 +52,22 @@ jobs:
             exit 1
           fi
 
-      - name: Build the archive
-        run: scripts/release.sh
+      - name: Build the archives, for glibc and for musl
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          scripts/release.sh
 
-      - name: Verify it, and run the extracted tree
-        run: scripts/release.sh verify "target/dist/$(scripts/release.sh name).tar.gz"
+      - name: Verify them, and run the glibc archive's extracted tree
+        run: |
+          scripts/release.sh verify "target/dist/$(scripts/release.sh name gnu).tar.gz"
+          scripts/release.sh verify "target/dist/$(scripts/release.sh name musl).tar.gz"
 
-      - name: Attach it to the release
+      - name: Attach them to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          name="$(scripts/release.sh name)"
+          gnu="$(scripts/release.sh name gnu)"
+          musl="$(scripts/release.sh name musl)"
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
-            "target/dist/$name.tar.gz" "target/dist/$name.tar.gz.sha256"
+            "target/dist/$gnu.tar.gz" "target/dist/$gnu.tar.gz.sha256" \
+            "target/dist/$musl.tar.gz" "target/dist/$musl.tar.gz.sha256"

@@ -3763,7 +3763,9 @@ impl ViewCpu {
         let mut clock: libc::clockid_t = 0;
         // SAFETY: the thread is joined only after this value's last use, so
         // its handle names a thread that has not been reaped.
-        let status = unsafe { libc::pthread_getcpuclockid(drawing.as_pthread_t(), &mut clock) };
+        let status = unsafe {
+            libc::pthread_getcpuclockid(drawing.as_pthread_t() as libc::pthread_t, &mut clock)
+        };
         let mut view_cpu = Self {
             drawing: (status == 0).then_some(clock),
             handover,

@@ -962,7 +962,18 @@ pub fn dlopen_probe(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether this binary is statically linked (the musl archive), which loads
+/// no library at all: its loader's own words, "Dynamic loading not
+/// supported", would read like the machine's lack.
+const STATIC_BUILD: bool = cfg!(all(target_env = "musl", target_feature = "crt-static"));
+
 pub(super) fn dl_error() -> String {
+    if STATIC_BUILD {
+        return "this omn is the static musl build, which cannot load a library into its own \
+                process; the vendor sources need the glibc archive \
+                (omn-<version>-<arch>-linux-gnu)"
+            .to_owned();
+    }
     // SAFETY: `dlerror` returns a string owned by the loader, valid until the
     // next call on this thread.
     unsafe {

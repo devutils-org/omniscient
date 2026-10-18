@@ -3,9 +3,11 @@
 # injection library and the manual page in one archive, with its checksum. docs/install.md is the user's
 # side of this script.
 #
-#   scripts/release.sh                 build target/dist/<name>.tar.gz and its .sha256
-#   scripts/release.sh list            the archive's contents, exactly, one path a line
-#   scripts/release.sh name            the archive's name, without the extension
+#   scripts/release.sh                 build both archives, target/dist/<name>.tar.gz
+#                                      and its .sha256, for glibc and for musl
+#   scripts/release.sh list [LIBC]     an archive's contents, exactly, one path a line
+#   scripts/release.sh name [LIBC]     an archive's name, without the extension
+#                                      (LIBC is gnu, the default, or musl)
 #   scripts/release.sh floor [FILE...] the oldest glibc each binary needs, failing
 #                                      above the documented $GLIBC_FLOOR
 #   scripts/release.sh built           whether target/release is newer than its
@@ -27,6 +29,16 @@
 # extracts an archive as themselves could not set it anyway. The user grants
 # it on the installed path, and docs/install.md says with what -- on `omn`
 # alone, since `omn-mcp` collects through the `omn` beside it.
+#
+# Two archives, one per libc. The glibc one (`-linux-gnu`) is linked against
+# glibc $GLIBC_FLOOR and is the one to use wherever glibc is. The musl one
+# (`-linux-musl`) is for musl systems (Alpine): `omn` and `omn-mcp` linked
+# statically, which load no library into their own process -- so no NVML,
+# and no CUDA injection library -- and a preload shim linked against musl,
+# since it runs inside the musl programs it is injected into. Run on a glibc
+# system its shim would be injected into glibc programs, so `verify` checks
+# its linking here and leaves running it to an Alpine guest
+# (docs/distroproof.md).
 
 set -euo pipefail
 
@@ -44,8 +56,13 @@ GLIBC_FLOOR=2.17
 # the target), so a build on Arch's glibc 2.44 starts on Rocky 8's 2.28 and
 # Ubuntu 18.04's 2.27. 2.17 is the oldest the Rust standard library supports.
 # `make release` stays the host's own build, for this machine alone.
+LIBC=gnu
 TARGET="$(uname -m)-unknown-linux-gnu"
 BUILT="$ROOT/target/$TARGET/release"
+MUSL_TARGET="$(uname -m)-unknown-linux-musl"
+# The musl shim is a dynamic library inside a static build's target: built
+# apart, with the C runtime dynamic, against zig's musl.
+MUSL_SHIM="$ROOT/target/musl-dylib/$MUSL_TARGET/release/libomn_preload.so"
 
 
 version() {
@@ -53,13 +70,14 @@ version() {
 }
 
 name() {
-    echo "omn-$(version)-$(uname -m)-linux-gnu"
+    echo "omn-$(version)-$(uname -m)-linux-$LIBC"
 }
 
 # The contents, in the order they are written. Everything the archive holds is
 # on this list and nothing else is: `verify` compares the two.
 contents() {
-    cat <<'EOF'
+    local listed
+    listed="$(cat <<'EOF'
 bin/omn
 bin/omn-mcp
 bin/libomn_preload.so
@@ -72,14 +90,23 @@ share/doc/omn/LICENSE-MIT
 share/doc/omn/LICENSE-APACHE
 share/doc/omn/LICENSES/GPL-2.0-only.txt
 EOF
+)"
+    if [[ "$LIBC" == musl ]]; then
+        grep -v '^bin/libomn_cupti.so$' <<<"$listed"
+    else
+        echo "$listed"
+    fi
 }
 
 # Where each archived path comes from, relative to the checkout.
 source_of() {
     case "$1" in
-        bin/omn) echo "target/$TARGET/release/omn" ;;
-        bin/omn-mcp) echo "target/$TARGET/release/omn-mcp" ;;
-        bin/libomn_preload.so) echo "target/$TARGET/release/libomn_preload.so" ;;
+        bin/omn | bin/omn-mcp) [[ "$LIBC" == musl ]] \
+            && echo "target/$MUSL_TARGET/release/${1#bin/}" \
+            || echo "target/$TARGET/release/${1#bin/}" ;;
+        bin/libomn_preload.so) [[ "$LIBC" == musl ]] \
+            && echo "${MUSL_SHIM#"$ROOT/"}" \
+            || echo "target/$TARGET/release/libomn_preload.so" ;;
         bin/libomn_cupti.so) echo "target/$TARGET/release/libomn_cupti.so" ;;
         share/man/man1/omn.1) echo man/omn.1 ;;
         share/doc/omn/README.md) echo README.md ;;
@@ -109,7 +136,13 @@ build() {
              "install zig and \`cargo install cargo-zigbuild --locked\`" >&2
         return 1
     }
-    cargo zigbuild --workspace --release --locked --target "$TARGET.$GLIBC_FLOOR"
+    if [[ "$LIBC" == musl ]]; then
+        cargo zigbuild --release --locked --target "$MUSL_TARGET" -p omn -p omn-mcp
+        RUSTFLAGS="-C target-feature=-crt-static" cargo zigbuild --release --locked \
+            --target "$MUSL_TARGET" -p omn-preload --target-dir "$ROOT/target/musl-dylib"
+    else
+        cargo zigbuild --workspace --release --locked --target "$TARGET.$GLIBC_FLOOR"
+    fi
 
     local stage archive top
     top="$(name)"
@@ -137,7 +170,7 @@ build() {
     echo "$archive"
     echo "$archive.sha256"
     echo "  $(cut -d' ' -f1 "$archive.sha256")"
-    glibc_floor
+    if [[ "$LIBC" == musl ]]; then musl_linking; else glibc_floor; fi
 }
 
 # The oldest glibc each binary runs on: the newest symbol version it needs,
@@ -170,6 +203,42 @@ glibc_floor() {
         fi
     done
     return "$above"
+}
+
+# The musl archive's linking, which is its whole point: `omn` and `omn-mcp`
+# with no program interpreter (static, so they start on any musl system and
+# need no glibc), and the shim depending on musl's `libc.so` alone (it runs
+# inside musl programs, where a glibc dependency would not resolve).
+musl_linking() {
+    local binaries=("$@")
+    (( ${#binaries[@]} )) || binaries=("$ROOT/target/$MUSL_TARGET/release/omn" \
+        "$ROOT/target/$MUSL_TARGET/release/omn-mcp" "$MUSL_SHIM")
+    command -v readelf >/dev/null || {
+        echo "musl linking: unknown, there is no readelf to read it with (binutils)" >&2
+        return 1
+    }
+    local binary needed wrong=0
+    for binary in "${binaries[@]}"; do
+        [[ -f "$binary" ]] || { echo "musl linking: no file at $binary" >&2; wrong=1; continue; }
+        needed="$(readelf -d "$binary" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort -u | tr '\n' ' ')"
+        case "$(basename "$binary")" in
+            *.so)
+                if [[ "$needed" == "libc.so " ]]; then
+                    echo "musl linking: $(basename "$binary") needs musl's libc.so alone"
+                else
+                    echo "musl linking: $(basename "$binary") needs ${needed:-nothing}, not musl's libc.so alone" >&2
+                    wrong=1
+                fi ;;
+            *)
+                if readelf -l "$binary" | grep -q "INTERP" || [[ -n "$needed" ]]; then
+                    echo "musl linking: $(basename "$binary") is not static (${needed:-a program interpreter})" >&2
+                    wrong=1
+                else
+                    echo "musl linking: $(basename "$binary") is static"
+                fi ;;
+        esac
+    done
+    return "$wrong"
 }
 
 # Whether target/release holds a build at least as new as its sources. It is
@@ -213,6 +282,7 @@ verify() {
 
     local top expected actual
     top="$(basename "$archive" .tar.gz)"
+    [[ "$top" == *-linux-musl ]] && LIBC=musl
     expected="$(contents | sed "s|^|$top/|")"
     actual="$(tar -tzf "$archive")"
     if [[ "$expected" != "$actual" ]]; then
@@ -228,7 +298,11 @@ verify() {
     local scratch status=0
     scratch="$(mktemp -d "${TMPDIR:-/tmp}/omn-verify.XXXXXX")"
     tar -C "$scratch" -xzf "$archive"
-    glibc_floor "$scratch/$top"/bin/{omn,omn-mcp,libomn_preload.so,libomn_cupti.so} || status=1
+    if [[ "$LIBC" == musl ]]; then
+        musl_linking "$scratch/$top"/bin/{omn,omn-mcp,libomn_preload.so} || status=1
+    else
+        glibc_floor "$scratch/$top"/bin/{omn,omn-mcp,libomn_preload.so,libomn_cupti.so} || status=1
+    fi
     local doc
     for doc in REFERENCE.md install.md; do
         if grep -q "glibc $GLIBC_FLOOR or later" "$scratch/$top/share/doc/omn/$doc"; then
@@ -238,7 +312,14 @@ verify() {
             status=1
         fi
     done
-    check "$scratch/$top" || status=1
+    if [[ "$LIBC" == musl ]]; then
+        # Run here, its shim would be injected into this machine's glibc
+        # programs: the extracted tree is run on Alpine, with distroproof.
+        echo "check: not run on $(uname -s) with glibc; run the extracted tree on a musl system" \
+             "(docs/distroproof.md: \`distroproof run --target alpine\`)"
+    else
+        check "$scratch/$top" || status=1
+    fi
     rm -rf "$scratch"
     return "$status"
 }
@@ -413,9 +494,9 @@ EOF
 }
 
 case "${1:-build}" in
-    build) build ;;
-    list) contents ;;
-    name) name ;;
+    build) build; LIBC=musl; build ;;
+    list) LIBC="${2:-gnu}"; contents ;;
+    name) LIBC="${2:-gnu}"; name ;;
     floor) shift; glibc_floor "$@" ;;
     built) built ;;
     verify) shift; verify "$@" ;;
