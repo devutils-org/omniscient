@@ -11,7 +11,7 @@ something else.
 
 ## Install
 
-From a release archive (x86_64, glibc 2.34 or later; Linux 5.15 is served, and
+From a release archive (x86_64, glibc 2.17 or later; Linux 5.15 is served, and
 each backend states the kernel it needs, `docs/install.md`):
 
 ```console

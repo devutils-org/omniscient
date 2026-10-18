@@ -32,6 +32,7 @@ bin/libomn_preload.so      the preload shim the mem.heap.*, sched.mutex and gpu.
 bin/libomn_cupti.so        the CUDA injection library gpu.kernel loads
 share/man/man1/omn.1       the manual page
 share/doc/omn/README.md
+share/doc/omn/REFERENCE.md
 share/doc/omn/install.md   this file
 share/doc/omn/LICENSE-MIT
 share/doc/omn/LICENSE-APACHE
@@ -53,12 +54,19 @@ really lives in, but the capabilities have to be granted on the real file:
 `setcap` refuses a symbolic link (measured, libcap 2.78:
 `Invalid file '...' for capability operation`).
 
-The binaries need **glibc 2.34 or later**, which `scripts/release.sh floor`
+The binaries need **glibc 2.17 or later**, which `scripts/release.sh floor`
 reads off the symbols they import, and fails on when a binary needs a newer
-one: `verify` runs it on every archive before it is published. That is Ubuntu 22.04 and later, Debian 12,
-Fedora 35 and later, RHEL 9 and Arch **(read from their documentation)**. They
-need nothing else at run time: no libbpf, no clang, no kernel headers. The eBPF
-programs are assembled by the tool itself.
+one: `verify` runs it on every archive before it is published. The archive is
+linked against that glibc whatever the build machine runs (`cargo zigbuild`
+with a `.2.17` target, so the build needs `zig` and `cargo-zigbuild`): a
+build on Arch's 2.44 imports nothing newer than `GLIBC_2.17`, the symbols
+glibc added since (`gettid`, `statx`, `getrandom`, `copy_file_range`) are
+weak references the standard library replaces with the system call, and
+`memfd_create` is called as one. That covers RHEL and Rocky 7 and later,
+Ubuntu 14.04 and later, Debian 8 and later, and every current distribution
+using glibc; musl (Alpine) is not covered. They need nothing else at run time:
+no libbpf, no clang, no kernel headers. The eBPF programs are assembled by the
+tool itself.
 
 ### From source
 
@@ -323,8 +331,8 @@ next.
 directory and with `OMN_PRELOAD_LIB` unset, so nothing it finds can come from
 the build tree. `scripts/release.sh verify ARCHIVE` does the same to an
 extracted archive, after checking its checksum and that it holds exactly the
-six paths above, that no binary in it needs a glibc newer than 2.34, and that
-the README and this file it carries still say 2.34. Each check compares against something the workload chose,
+paths above, that no binary in it needs a glibc newer than 2.17, and that
+the `REFERENCE.md` and this file it carries still say 2.17. Each check compares against something the workload chose,
 never against what the tool computed another way:
 
 | Check | Against |
@@ -442,11 +450,12 @@ None: this stream added no session.
   capability step of `make` stays a build-tree convenience. A grant is a
   decision about the machine, a `DESTDIR` build cannot make it on the final
   path, and tar does not carry it anyway.
-- **The release is built on the oldest hosted Ubuntu**, because the glibc
-  floor is the newest symbol linked against, and `release.sh verify` fails
-  above the documented 2.34 rather than printing it. Raising the floor is a
-  decision: change `GLIBC_FLOOR` and the two documents together, or `verify`
-  refuses.
+- **The release is linked against glibc 2.17 through zig**, because the
+  glibc floor is the newest symbol linked against, and a build machine's own
+  glibc would set it (2.39 on Arch, which no RHEL 8 or Ubuntu 20.04 starts).
+  `release.sh verify` fails above the documented 2.17 rather than printing
+  it. Raising the floor is a decision: change `GLIBC_FLOOR` and the two
+  documents together, or `verify` refuses.
 - **As root, `make install` copies and never builds.** A system-wide install
   is `make release && sudo make install`. The alternative, building as
   `$SUDO_USER` from inside the root recipe, depends on that user's `PATH`

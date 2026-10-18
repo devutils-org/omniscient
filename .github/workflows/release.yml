@@ -3,8 +3,9 @@
 # moved out of the way (docs/install.md, "Checking a release"). Only then is it
 # attached to a GitHub release named after the tag.
 #
-# Built on the oldest hosted Ubuntu there is, because the glibc a binary needs
-# is the newest one it was linked against. docs/install.md promises 2.34, and
+# Linked against glibc 2.17 through zig (`cargo zigbuild`, in
+# scripts/release.sh), because the glibc a binary needs is the newest one it
+# was linked against, whatever the runner's own. docs/install.md promises 2.17, and
 # both the build and the verify step fail when a binary needs more
 # (`GLIBC_FLOOR` in scripts/release.sh), so a newer runner or a dependency
 # linking a newer symbol stops the release instead of raising the floor.
@@ -33,6 +34,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: zig and cargo-zigbuild, which link the archive against glibc 2.17
+        run: |
+          python3 -m pip install --user ziglang==0.16.0
+          cargo install cargo-zigbuild --locked
+          mkdir -p "$HOME/.local/bin"
+          printf '#!/bin/sh\nexec python3 -m ziglang "$@"\n' > "$HOME/.local/bin/zig"
+          chmod +x "$HOME/.local/bin/zig"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: The tag names the version being built
         run: |

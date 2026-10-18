@@ -291,8 +291,12 @@ impl Ring {
     fn create() -> Result<Self, String> {
         let length = RING_SLOTS_AT + RING_SLOTS * RING_SLOT_BYTES;
         // SAFETY: a name we own; no MFD_CLOEXEC, because the program must
-        // inherit the descriptor across exec, as it inherits the pipe.
-        let fd = unsafe { libc::memfd_create(c"omn-shim-ring".as_ptr(), 0) };
+        // inherit the descriptor across exec, as it inherits the pipe. The
+        // system call rather than glibc's wrapper, which only glibc 2.27 has:
+        // the release is linked against an older one (`scripts/release.sh`).
+        let fd = unsafe {
+            libc::syscall(libc::SYS_memfd_create, c"omn-shim-ring".as_ptr(), 0) as libc::c_int
+        };
         if fd < 0 {
             return Err(format!(
                 "cannot create the shim's ring: {}",

@@ -26,6 +26,7 @@
 | `BRIEF.md` | the current wave of work, one section per stream; the only brief -- what comes after it is `STATE.md`'s "What remains" |
 | `docs/briefs/` | every earlier wave's brief, because `BRIEF.md` is overwritten each time and dozens of documents cite it |
 | `docs/open-findings.md` | findings that cut across families |
+| `docs/distroproof.md` | every distribution, run with distroproof: the matrix, its findings, and their fixes (`ROADMAP.md` phase 13) |
 | `man/omn.1` | the manual page |
 
 The catalog is **data, not documentation**. The CLI, `omn list`, the validator

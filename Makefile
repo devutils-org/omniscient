@@ -208,6 +208,7 @@ install:
 	install -D -m 644 target/release/libomn_cupti.so  $(DESTDIR)$(BINDIR)/libomn_cupti.so
 	install -D -m 644 man/omn.1                     $(DESTDIR)$(MAN1DIR)/omn.1
 	install -D -m 644 README.md                     $(DESTDIR)$(DOCDIR)/README.md
+	install -D -m 644 REFERENCE.md                  $(DESTDIR)$(DOCDIR)/REFERENCE.md
 	install -D -m 644 docs/install.md               $(DESTDIR)$(DOCDIR)/install.md
 	install -D -m 644 LICENSE-MIT                   $(DESTDIR)$(DOCDIR)/LICENSE-MIT
 	install -D -m 644 LICENSE-APACHE                $(DESTDIR)$(DOCDIR)/LICENSE-APACHE
@@ -225,7 +226,7 @@ install:
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/omn $(DESTDIR)$(BINDIR)/omn-mcp $(DESTDIR)$(BINDIR)/libomn_preload.so
 	rm -f $(DESTDIR)$(BINDIR)/libomn_cupti.so
-	rm -f $(DESTDIR)$(MAN1DIR)/omn.1 $(DESTDIR)$(DOCDIR)/README.md $(DESTDIR)$(DOCDIR)/install.md
+	rm -f $(DESTDIR)$(MAN1DIR)/omn.1 $(DESTDIR)$(DOCDIR)/README.md $(DESTDIR)$(DOCDIR)/REFERENCE.md $(DESTDIR)$(DOCDIR)/install.md
 	rm -f $(DESTDIR)$(DOCDIR)/LICENSE-MIT $(DESTDIR)$(DOCDIR)/LICENSE-APACHE
 	rm -f $(DESTDIR)$(DOCDIR)/LICENSES/GPL-2.0-only.txt
 	-rmdir $(DESTDIR)$(DOCDIR)/LICENSES 2>/dev/null

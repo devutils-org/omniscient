@@ -37,7 +37,15 @@ DIST="$ROOT/target/dist"
 # later". `floor` fails when a binary needs a newer one, and `verify` fails
 # when the documents shipped in the archive promise something else, so the
 # promise and the check cannot drift apart silently.
-GLIBC_FLOOR=2.34
+GLIBC_FLOOR=2.17
+
+# The archive is linked against that glibc, whatever this machine runs: zig's
+# linker and its per-version glibc stubs (`cargo zigbuild`, a `.2.17` suffix on
+# the target), so a build on Arch's glibc 2.44 starts on Rocky 8's 2.28 and
+# Ubuntu 18.04's 2.27. 2.17 is the oldest the Rust standard library supports.
+# `make release` stays the host's own build, for this machine alone.
+TARGET="$(uname -m)-unknown-linux-gnu"
+BUILT="$ROOT/target/$TARGET/release"
 
 
 version() {
@@ -58,6 +66,7 @@ bin/libomn_preload.so
 bin/libomn_cupti.so
 share/man/man1/omn.1
 share/doc/omn/README.md
+share/doc/omn/REFERENCE.md
 share/doc/omn/install.md
 share/doc/omn/LICENSE-MIT
 share/doc/omn/LICENSE-APACHE
@@ -68,12 +77,13 @@ EOF
 # Where each archived path comes from, relative to the checkout.
 source_of() {
     case "$1" in
-        bin/omn) echo target/release/omn ;;
-        bin/omn-mcp) echo target/release/omn-mcp ;;
-        bin/libomn_preload.so) echo target/release/libomn_preload.so ;;
-        bin/libomn_cupti.so) echo target/release/libomn_cupti.so ;;
+        bin/omn) echo "target/$TARGET/release/omn" ;;
+        bin/omn-mcp) echo "target/$TARGET/release/omn-mcp" ;;
+        bin/libomn_preload.so) echo "target/$TARGET/release/libomn_preload.so" ;;
+        bin/libomn_cupti.so) echo "target/$TARGET/release/libomn_cupti.so" ;;
         share/man/man1/omn.1) echo man/omn.1 ;;
         share/doc/omn/README.md) echo README.md ;;
+        share/doc/omn/REFERENCE.md) echo REFERENCE.md ;;
         share/doc/omn/install.md) echo docs/install.md ;;
         share/doc/omn/LICENSE-MIT) echo LICENSE-MIT ;;
         share/doc/omn/LICENSE-APACHE) echo LICENSE-APACHE ;;
@@ -94,7 +104,12 @@ build() {
     # `--workspace`, or the shim is not built: nothing depends on it.
     # `--locked`, so the archive is built from the dependencies the lock file
     # names rather than whatever resolves today.
-    cargo build --workspace --release --locked
+    command -v cargo-zigbuild >/dev/null && command -v zig >/dev/null || {
+        echo "release.sh: the archive is linked against glibc $GLIBC_FLOOR through zig;" \
+             "install zig and \`cargo install cargo-zigbuild --locked\`" >&2
+        return 1
+    }
+    cargo zigbuild --workspace --release --locked --target "$TARGET.$GLIBC_FLOOR"
 
     local stage archive top
     top="$(name)"
@@ -135,7 +150,7 @@ build() {
 # is unknown, and unknown is a failure, not a pass.
 glibc_floor() {
     local binaries=("$@")
-    (( ${#binaries[@]} )) || binaries=("$ROOT"/target/release/{omn,omn-mcp,libomn_preload.so,libomn_cupti.so})
+    (( ${#binaries[@]} )) || binaries=("$BUILT"/{omn,omn-mcp,libomn_preload.so,libomn_cupti.so})
     command -v objdump >/dev/null || {
         echo "glibc floor: unknown, there is no objdump to read it with (binutils)" >&2
         return 1
@@ -215,7 +230,7 @@ verify() {
     tar -C "$scratch" -xzf "$archive"
     glibc_floor "$scratch/$top"/bin/{omn,omn-mcp,libomn_preload.so,libomn_cupti.so} || status=1
     local doc
-    for doc in README.md install.md; do
+    for doc in REFERENCE.md install.md; do
         if grep -q "glibc $GLIBC_FLOOR or later" "$scratch/$top/share/doc/omn/$doc"; then
             echo "promise: share/doc/omn/$doc says glibc $GLIBC_FLOOR or later"
         else
