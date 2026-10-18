@@ -1,0 +1,121 @@
+# The portability matrix over distributions (ROADMAP.md, phase 13;
+# docs/distroproof.md). Every image boots on its own kernel and userspace; the
+# release archive is installed as a user installs it, its file capabilities
+# granted in `setup`, and `omn selftest` sweeps the guest as the user `test`.
+#
+#   scripts/release.sh                                     # the archives, glibc 2.17 and musl
+#   scripts/distroproof/fixtures.sh                        # the USDT fixtures, static
+#   distroproof up --no-tui --json target/matrix/distroproof.json
+#   scripts/distroproof/cells.py target/matrix/distroproof.json
+#   cargo test --test portability                          # the judges, over every cell
+#
+# A sweep lists every source and runs each for 300 ms on a launched program
+# and on the machine: about two minutes on the host, longer in a guest.
+
+[defaults]
+memory = "2G"
+cpus = 2
+timeout = "25m"
+
+# --- Debian, oldest to rolling
+[[target]]
+name = "debian-10"
+image = "debian-10"
+
+[[target]]
+name = "debian-11"
+image = "debian-11"
+
+[[target]]
+name = "debian-12"
+image = "debian-12"
+
+[[target]]
+name = "debian-13"
+image = "debian-13"
+
+[[target]]
+name = "debian-sid"
+image = "debian-sid"
+
+# --- Ubuntu LTS
+[[target]]
+name = "ubuntu-18.04"
+image = "ubuntu-18.04"
+
+[[target]]
+name = "ubuntu-20.04"
+image = "ubuntu-20.04"
+
+[[target]]
+name = "ubuntu-22.04"
+image = "ubuntu-22.04"
+
+[[target]]
+name = "ubuntu-24.04"
+image = "ubuntu-24.04"
+
+# --- RHEL's kernels, with their backports
+[[target]]
+name = "rocky-8"
+image = "rocky-8"
+
+[[target]]
+name = "rocky-9"
+image = "rocky-9"
+
+# --- Fedora, Arch, Gentoo, Alpine
+[[target]]
+name = "fedora-previous"
+image = "fedora-previous"
+
+[[target]]
+name = "fedora-latest"
+image = "fedora-latest"
+
+[[target]]
+name = "arch"
+image = "arch"
+
+[[target]]
+name = "gentoo"
+image = "gentoo"
+
+[[target]]
+name = "alpine"
+image = "alpine"
+
+# --- Variants: what a distribution or an administrator sets, one at a time
+[[target]]
+name = "ubuntu-24.04-paranoid3"
+image = "ubuntu-24.04"
+sysctl = { "kernel.perf_event_paranoid" = 3 }
+
+[[target]]
+name = "debian-12-kptr2"
+image = "debian-12"
+sysctl = { "kernel.kptr_restrict" = 2 }
+
+[[target]]
+name = "fedora-latest-lockdown"
+image = "fedora-latest"
+kernel_cmdline = "lockdown=confidentiality"
+
+[[target]]
+name = "debian-12-nopmu"
+image = "debian-12"
+pmu = false
+
+[[target]]
+name = "debian-12-root"
+image = "debian-12"
+as_user = "root"
+
+[run]
+setup = "sh scripts/distroproof/setup.sh"
+command = "sh scripts/distroproof/sweep.sh"
+as_user = "test"
+# The archives, the fixtures and the scripts, never the checkout: the guest
+# runs what a user installs.
+exclude = ["*"]
+include = ["target/dist", "target/dp-fixtures", "scripts/distroproof"]
