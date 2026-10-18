@@ -10,7 +10,7 @@ use std::time::Duration as StdDuration;
 
 use super::syscall::{numbers_read_as_nr, pushed_down_syscall};
 use super::syscall_names;
-use crate::bpf::{Call, CallsNarrowing, CallsProgram, Whose};
+use crate::bpf::{Call, CallsNarrowing, CallsProgram, PathCall, Whose, PATH_CALLS};
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 use crate::filter::FilterExpr;
@@ -24,6 +24,8 @@ const RING_BYTES: usize = 4 * 1024 * 1024;
 pub struct Prepare {
     pub mode: Mode,
     pub filter: Option<FilterExpr>,
+    /// The classic tracepoints (`bpf:tp`), for a kernel without BTF.
+    pub classic: bool,
 }
 
 impl Prepared for Prepare {
@@ -45,17 +47,22 @@ impl Prepared for Prepare {
             Some(filter) => pushed_down_syscall(filter)?,
             None => None,
         };
-        let path_nr = if syscall_names::table_is_for_this_machine() {
-            syscall_names::number("openat")
+        let paths = if syscall_names::table_is_for_this_machine() {
+            path_calls()
         } else {
-            None
+            [None; PATH_CALLS]
         };
         Ok(Box::new(CallsCollector {
-            id: CollectorId::new("proc.calls/bpf:raw_tp"),
+            id: CollectorId::new(if self.classic {
+                "proc.calls/bpf:tp"
+            } else {
+                "proc.calls/bpf:raw_tp"
+            }),
+            classic: self.classic,
             narrowing: CallsNarrowing {
                 whose,
                 syscall_nr,
-                path_nr,
+                paths,
             },
             program: None,
             predicate: self.filter.map(numbers_read_as_nr),
@@ -73,6 +80,8 @@ impl Prepared for Prepare {
 
 pub struct CallsCollector {
     id: CollectorId,
+    /// Over `raw_syscalls:*` rather than the raw tracepoints.
+    classic: bool,
     narrowing: CallsNarrowing,
     program: Option<CallsProgram>,
     predicate: Option<FilterExpr>,
@@ -97,7 +106,39 @@ pub fn errno_of(ret: i64) -> u64 {
     }
 }
 
-fn event_of(call: &Call, id: &CollectorId, seq: u64, path_nr: Option<u32>) -> Event {
+/// The calls whose path a record carries, by this machine's numbers: the
+/// opens (the path their argument names, read when they return) and the
+/// execs (read when they begin). A call this architecture does not have --
+/// `open` and `creat` on aarch64 -- is left out.
+fn path_calls() -> [Option<PathCall>; PATH_CALLS] {
+    [
+        ("open", 0, false),
+        ("openat", 1, false),
+        ("openat2", 1, false),
+        ("creat", 0, false),
+        ("execve", 0, true),
+        ("execveat", 1, true),
+    ]
+    .map(|(name, argument, at_entry)| {
+        syscall_names::number(name).map(|nr| PathCall {
+            nr,
+            argument,
+            at_entry,
+        })
+    })
+}
+
+/// The path call `nr` is, when it is one.
+fn path_call(paths: &[Option<PathCall>; PATH_CALLS], nr: u32) -> Option<PathCall> {
+    paths.iter().flatten().find(|call| call.nr == nr).copied()
+}
+
+fn event_of(
+    call: &Call,
+    id: &CollectorId,
+    seq: u64,
+    paths: &[Option<PathCall>; PATH_CALLS],
+) -> Event {
     let syscall = syscall_names::label(call.nr);
     let errno = errno_of(call.ret);
     let mut attrs = vec![
@@ -111,9 +152,11 @@ fn event_of(call: &Call, id: &CollectorId, seq: u64, path_nr: Option<u32>) -> Ev
         Attr::text("syscall", syscall.clone()),
         Attr::uint("nr", u64::from(call.nr)),
     ];
-    if Some(call.nr) == path_nr {
+    if let Some(path_call) = path_call(paths, call.nr) {
         attrs.push(Attr::text("path", call.path().unwrap_or_default()));
-        if call.ret >= 0 {
+        // An open returns the descriptor; an exec returns nothing to a
+        // caller that succeeded.
+        if call.ret >= 0 && !path_call.at_entry {
             attrs.push(Attr::int("fd", call.ret));
         }
     }
@@ -146,7 +189,7 @@ impl CallsCollector {
                 .note("a record in the call ring was shorter than one call");
         }
         for call in drained {
-            if Some(call.nr) == self.narrowing.path_nr {
+            if path_call(&self.narrowing.paths, call.nr).is_some() {
                 if call.path_read < 0 {
                     self.unread_paths += 1;
                 } else if call.path_truncated() {
@@ -157,7 +200,7 @@ impl CallsCollector {
                 &call,
                 &self.id,
                 seq + events.len() as u64,
-                self.narrowing.path_nr,
+                &self.narrowing.paths,
             );
             if let Some(predicate) = &self.predicate {
                 if !crate::filter::matches(predicate, &event) {
@@ -212,7 +255,11 @@ impl Collector for CallsCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(CallsProgram::load(self.narrowing, RING_BYTES)?);
+        self.program = Some(if self.classic {
+            CallsProgram::load_classic(self.narrowing, RING_BYTES)?
+        } else {
+            CallsProgram::load(self.narrowing, RING_BYTES)?
+        });
         Ok(())
     }
 
@@ -319,10 +366,35 @@ mod tests {
         bytes[36..40].copy_from_slice(&5i32.to_ne_bytes());
         bytes[56..60].copy_from_slice(b"/etc");
         let call = Call::from_bytes(&bytes).unwrap();
-        let event = event_of(&call, &CollectorId::new("t"), 0, Some(openat));
+        let event = event_of(&call, &CollectorId::new("t"), 0, &path_calls());
         for field in &entry.filter_fields {
             assert!(event.attr(field).is_some(), "`{field}` is not on the event");
         }
         assert_eq!(event.attr("fd").unwrap().as_f64(), Some(3.0));
+    }
+
+    /// An exec carries its path and no descriptor; every open this machine
+    /// has carries a path.
+    #[test]
+    fn an_exec_carries_its_path_and_no_descriptor() {
+        let Some(execve) = syscall_names::number("execve") else {
+            return;
+        };
+        let mut bytes = [0u8; 184];
+        bytes[32..36].copy_from_slice(&execve.to_ne_bytes());
+        bytes[36..40].copy_from_slice(&10i32.to_ne_bytes());
+        bytes[56..65].copy_from_slice(b"/bin/true");
+        let call = Call::from_bytes(&bytes).unwrap();
+        let event = event_of(&call, &CollectorId::new("t"), 0, &path_calls());
+        assert_eq!(
+            event.attr("path").map(|value| value.to_string()),
+            Some("/bin/true".to_owned())
+        );
+        assert!(event.attr("fd").is_none());
+        let paths = path_calls();
+        for name in ["openat", "openat2", "execve", "execveat"] {
+            let nr = syscall_names::number(name).expect(name);
+            assert!(path_call(&paths, nr).is_some(), "{name}");
+        }
     }
 }

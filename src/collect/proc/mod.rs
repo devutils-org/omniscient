@@ -56,6 +56,14 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(calls::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                classic: false,
+            }))
+        }),
+        Factory::new("proc.calls", "bpf:tp", |resolved| {
+            Ok(Box::new(calls::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                classic: true,
             }))
         }),
         Factory::new("proc.syscall", "bpf:raw_tp", |resolved| {

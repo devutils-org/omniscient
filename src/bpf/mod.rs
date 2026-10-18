@@ -89,7 +89,7 @@ pub use net_retransmit::{Retransmit, RetransmitProgram};
 pub use net_softirq::{SoftIrq, SoftIrqDrain, SoftIrqProgram};
 pub use offcpu::{DrainLosses, OffCpu, OffCpuProgram};
 pub use oncpu::{OnCpu, OnCpuProgram};
-pub use proc_calls::{Call, CallsNarrowing, CallsProgram};
+pub use proc_calls::{Call, CallsNarrowing, CallsProgram, PathCall, PATH_CALLS};
 pub use proc_events::{Exec, ExecProgram, Exit, ExitProgram, Signal, SignalProgram};
 pub use proc_renames::Renames;
 pub use proc_syscall::{Narrowing, SyscallDrainLosses, SyscallProgram, SyscallRow};

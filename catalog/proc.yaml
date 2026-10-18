@@ -34,10 +34,12 @@
 
 - id: proc.calls
   family: proc
-  summary: "One record per syscall: when, how long, what it returned, and openat's path"
+  summary: "One record per syscall: when, how long, what it returned, and the path an open or exec named"
   unit: ns
   backends:
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sys_enter(pt_regs *, long int)", "raw_tracepoint:sys_exit(pt_regs *, long int)", "kernel>=5.8"], cost: extreme,
+       filter_in_program: [syscall]}
+    - {id: "bpf:tp", requires: ["tracepoint:raw_syscalls:sys_enter", "tracepoint:raw_syscalls:sys_exit", "bpf"], cost: extreme, equivalent: true,
        filter_in_program: [syscall]}
   modes: [trace]
   emits: [raw, timeline, hist, summary, topk]
@@ -49,9 +51,12 @@
     - "Each call that returns is one event, stamped where it began: `lat_ns`, the
        raw `ret`, `errno` (the error a return in `[-4095, -1]` carries, zero
        otherwise), `error`, the task, its name and the syscall -- the line
-       `strace -T` and `perf trace` print. `openat` also carries `path`, read out
-       of the caller's memory when the call returns, up to 127 bytes, and `fd`
-       when it succeeded: `opensnoop`'s line. `proc.syscall` is the cheap
+       `strace -T` and `perf trace` print. `open`, `openat`, `openat2` and
+       `creat` also carry `path`, read out of the caller's memory when the call
+       returns, up to 127 bytes, and `fd` when it succeeded: `opensnoop`'s line.
+       `execve` and `execveat` carry `path` read when the call begins, since a
+       successful exec returns into an image where the old path is gone:
+       `execsnoop`'s. `proc.syscall` is the cheap
        aggregate of the same calls."
     - "Every call is a ring write, so a target making hundreds of thousands of
        calls a second fills the ring and the program counts what it could not
