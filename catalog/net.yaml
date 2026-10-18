@@ -16,6 +16,8 @@
     # inlined the second into its callers (a clang build with link-time
     # optimisation): it reads the errno out of `sk_err`.
     - {id: "bpf:fentry", requires: ["btf", "bpf", "fentry:tcp_v4_connect(sock *, sockaddr_unsized *, int)|(sock *, sockaddr *, int)", "fentry:tcp_finish_connect", "fentry:tcp_done_with_error", "fentry:tcp_done"], cost: low}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:inet_sock_set_state(sock *, int, int)", "kernel>=5.8"], cost: low,
+       degraded: "one tracepoint and no trampoline, so no 65 ms detach; but a connect that failed before its SYN left is not seen (no `failed` outcome), and the cookie is the socket's as it stands, zero where nothing asked for one"}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: low, degraded: "no BTF: struct offsets are not portable"}
   modes: [trace]
   emits: [hist, topk, raw, summary]
@@ -26,7 +28,9 @@
   caveats:
     - "Attaching the trampolines costs about 65 ms, paid once per run whatever
        the run sees, and on a short run it is most of what the run cost: the
-       bench measured 68 ms with no connection."
+       bench measured 68 ms with no connection. `--backend force:bpf:raw_tp`
+       times the same handshakes over inet_sock_set_state without them, at
+       the price its degradation names."
     - "Every handshake ends established, refused or failed, and each outcome
        is its own latency: a refusal in 30 us is not a fast connection."
     - "A SYN the peer dropped is retransmitted after the kernel's initial RTO,

@@ -28,7 +28,7 @@
 //! dumped, and this one is the number `sock_diag` and `SO_COOKIE` report, so a
 //! connection is one key from its handshake to its last byte.
 
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 
 /// `net.tcp.accept`'s program, the other end of a handshake.
 #[path = "net_accept.rs"]
@@ -446,12 +446,154 @@ fn close_instructions(
     Ok(instructions)
 }
 
+/// `inet_sock_set_state(sock *, int, int)`: the road that needs no trampoline.
+const STATE_SIGNATURE: [&str; 3] = ["sock *", "int", "int"];
+
+/// The TCP states the road reads, the frozen numbering `/proc/net/tcp` prints.
+const TCP_ESTABLISHED: i32 = 1;
+const TCP_SYN_SENT: i32 = 2;
+
+/// The road over `inet_sock_set_state`: one raw tracepoint where the fentry
+/// road attaches six trampolines, whose detach is most of what a short run
+/// costs (`docs/bench.md`).
+///
+/// A socket entering `SYN_SENT` is stamped, in the connecting task's context,
+/// which is where `tcp_v4_connect` and `tcp_v6_connect` set it; a socket
+/// leaving `SYN_SENT` closes the stamp: `ESTABLISHED` is established, `CLOSE`
+/// is refused with `sk_err`'s errno (a RST or a timer). A connect that failed
+/// before the SYN left never entered `SYN_SENT`, so `failed` is not seen; and
+/// the cookie is `skc_cookie` as it stands -- zero on a socket nothing asked
+/// for one -- since a raw tracepoint cannot call the helper that generates it.
+fn state_instructions(
+    whose: Whose,
+    at: &Offsets,
+    cookie_at: i32,
+    pending_fd: i32,
+    ring_fd: i32,
+    drops_fd: i32,
+) -> Result<Vec<Insn>, String> {
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::ldx(BPF_DW, 1, 6, 16));
+    program.jump_to("open", Insn::jeq_imm(1, TCP_SYN_SENT, 0));
+    program.push(Insn::ldx(BPF_DW, 1, 6, 8));
+    program.jump_to("done", Insn::jne_imm(1, TCP_SYN_SENT, 0));
+
+    // Leaving SYN_SENT: close the stamp.
+    program.push(Insn::ldx(BPF_DW, 7, 6, 0));
+    program.push(Insn::stx(BPF_DW, R10, PEND_KEY, 7));
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, PEND_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    for slot in 0..(RECORD_BYTES as i16 / 8) {
+        program.push(Insn::st_imm(BPF_DW, R10, EVENT + slot * 8, 0));
+    }
+    program.push(Insn::ldx(BPF_DW, 9, 0, PEND_TS));
+    program.push(Insn::ldx(BPF_DW, 1, 0, PEND_WHO));
+    program.push(Insn::stx(BPF_W, R10, EVENT + R_TID, 1));
+    program.push(Insn::rsh64_imm(1, 32));
+    program.push(Insn::stx(BPF_W, R10, EVENT + R_TGID, 1));
+    program.push(Insn::ldx(BPF_DW, 1, 0, PEND_COMM));
+    program.push(Insn::stx(BPF_DW, R10, EVENT + R_COMM, 1));
+    program.push(Insn::ldx(BPF_DW, 1, 0, PEND_COMM + 8));
+    program.push(Insn::stx(BPF_DW, R10, EVENT + R_COMM + 8, 1));
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, PEND_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, EVENT + R_TS, 0));
+    program.push(Insn::sub64_reg(0, 9));
+    program.push(Insn::stx(BPF_DW, R10, EVENT + R_DURATION, 0));
+
+    program.push(Insn::ldx(BPF_DW, 1, 6, 16));
+    program.jump_to("refused", Insn::jne_imm(1, TCP_ESTABLISHED, 0));
+    program.push(Insn::st_imm(
+        BPF_W,
+        R10,
+        EVENT + R_OUTCOME,
+        Outcome::Established as i32,
+    ));
+    program.jump_to("outcome", Insn::ja());
+    program.label("refused");
+    // `TCP_CLOSE`, or a state no kernel enters from SYN_SENT today: either
+    // way the handshake did not establish, and `sk_err` says why.
+    program.push(Insn::st_imm(
+        BPF_W,
+        R10,
+        EVENT + R_OUTCOME,
+        Outcome::Refused as i32,
+    ));
+    read_field(&mut program, EVENT + R_ERRNO, 4, 7, at.err);
+    program.label("outcome");
+
+    read_field(&mut program, EVENT + R_COOKIE, 8, 7, cookie_at);
+    read_field(&mut program, EVENT + R_FAMILY, 2, 7, at.family);
+    read_field(&mut program, EVENT + R_SPORT, 2, 7, at.num);
+    read_field(&mut program, EVENT + R_DPORT, 2, 7, at.dport);
+    program.push(Insn::ldx(BPF_W, 1, R10, EVENT + R_FAMILY));
+    program.jump_to("v6", Insn::jeq_imm(1, AF_INET6, 0));
+    read_field(&mut program, EVENT + R_SADDR, 4, 7, at.rcv_saddr);
+    read_field(&mut program, EVENT + R_DADDR, 4, 7, at.daddr);
+    program.jump_to("named", Insn::ja());
+    program.label("v6");
+    read_field(&mut program, EVENT + R_SADDR, 16, 7, at.v6_rcv_saddr);
+    read_field(&mut program, EVENT + R_DADDR, 16, 7, at.v6_daddr);
+    program.label("named");
+    program.extend(Insn::load_map_fd(1, ring_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, EVENT as i32));
+    program.push(Insn::mov64_imm(3, RECORD_BYTES as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::RINGBUF_OUTPUT));
+    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_RING, "done");
+    program.jump_to("done", Insn::ja());
+
+    // Entering SYN_SENT: the connecting task's context, compared here.
+    program.label("open");
+    push_current_filter(&mut program, whose, PEND_KEY, "done");
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_DW, R10, PEND_VALUE + PEND_WHO, 0));
+    program.push(Insn::ldx(BPF_DW, 1, 6, 0));
+    program.push(Insn::stx(BPF_DW, R10, PEND_KEY, 1));
+    program.push(Insn::st_imm(BPF_DW, R10, PEND_VALUE + PEND_COMM, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, PEND_VALUE + PEND_COMM + 8, 0));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, (PEND_VALUE + PEND_COMM) as i32));
+    program.push(Insn::mov64_imm(2, 16));
+    program.push(Insn::call(helper::GET_CURRENT_COMM));
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, PEND_VALUE + PEND_TS, 0));
+    program.extend(Insn::load_map_fd(1, pending_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, PEND_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, PEND_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.jump_to("done", Insn::jsge_imm(0, 0, 0));
+    count_drop(&mut program, drops_fd, DROP_KEY, DROP_PENDING, "done");
+
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
 /// The programs, attached, and the ring between them and userspace.
 pub struct ConnectProgram {
     ring: RingBuffer,
     drops: Counters,
     pending: Hash,
     links: Vec<Link>,
+    /// The `inet_sock_set_state` road's program and link, in place of
+    /// `links`.
+    state: Option<(OwnedFd, OwnedFd)>,
     /// Whether `tcp_v6_connect` was found and timed.
     pub v6: bool,
 }
@@ -534,7 +676,69 @@ impl ConnectProgram {
             drops,
             pending,
             links,
+            state: None,
             v6: v6.is_some(),
+        })
+    }
+
+    /// The road over `inet_sock_set_state` (`bpf:raw_tp`): see
+    /// [`state_instructions`] for what it does not see.
+    pub fn load_state(whose: Whose) -> Result<Self, String> {
+        let btf = crate::bpf::kernel_btf()?;
+        let offsets = Offsets::read(btf)?;
+        let cookie_at = btf.member_offset("sock", "__sk_common")?
+            + btf.member_offset("sock_common", "skc_cookie")?;
+        let signature = btf.tracepoint_signature("inet_sock_set_state")?;
+        if signature != STATE_SIGNATURE {
+            return Err(format!(
+                "this kernel declares `inet_sock_set_state({})`, and this program is written for \
+                 `inet_sock_set_state({})`",
+                signature.join(", "),
+                STATE_SIGNATURE.join(", ")
+            ));
+        }
+        let bytes = ring_bytes(RING_BYTES);
+        let ring_map =
+            syscall::map_create(BPF_MAP_TYPE_RINGBUF, 0, 0, bytes as u32, "omn_conn_ring")
+                .map_err(|error| map_failure("connect ring buffer", error))?;
+        let drops = Counters::create(2, "omn_conn_drop")
+            .map_err(|error| map_failure("connect drop counter", error))?;
+        let pending = Hash::create(8, PEND_VALUE_BYTES, MAX_CONNECTING, "omn_conn_pend")
+            .map_err(|error| map_failure("connect pending map", error))?;
+        let instructions = state_instructions(
+            whose,
+            &offsets,
+            cookie_at,
+            pending.as_raw_fd(),
+            ring_map.as_raw_fd(),
+            drops.as_raw_fd(),
+        )?;
+        let program = syscall::prog_load(
+            syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+            &instructions,
+            "omn_conn_state",
+            "Dual MIT/GPL",
+        )
+        .map_err(|error| {
+            if error.is_permission() {
+                crate::bpf::permission_advice("loading a raw tracepoint program")
+            } else {
+                format!("the kernel refused the connect state program: {error}")
+            }
+        })?;
+        let link = syscall::raw_tracepoint_open("inet_sock_set_state", program.as_raw_fd())
+            .map_err(|error| {
+                format!("cannot attach to the `inet_sock_set_state` tracepoint: {error}")
+            })?;
+        let ring = RingBuffer::map(ring_map, bytes)
+            .map_err(|error| format!("cannot map the connect ring buffer: {error}"))?;
+        Ok(Self {
+            ring,
+            drops,
+            pending,
+            links: Vec::new(),
+            state: Some((program, link)),
+            v6: true,
         })
     }
 
@@ -554,6 +758,10 @@ impl ConnectProgram {
     /// Runs the kernel skipped; see `fentry::Link::misses`.
     pub fn missed(&self) -> u64 {
         fentry::misses(&self.links)
+            + self
+                .state
+                .as_ref()
+                .map_or(0, |(program, _)| fentry::skipped([program]))
     }
 
     /// Handshakes stamped and not closed: still in `SYN_SENT`, or abandoned by
@@ -691,6 +899,40 @@ mod tests {
                 .any(|insn| insn.code == 0x85 && insn.imm == GET_SOCKET_COOKIE));
         }
         assert!(open_instructions(&v4, Whose::Any, 3, 5).is_ok());
+    }
+
+    /// The `inet_sock_set_state` road builds against this kernel, compares a
+    /// target only on the way into SYN_SENT, and generates no cookie: a raw
+    /// tracepoint cannot call that helper.
+    #[test]
+    fn the_state_road_builds_and_compares_the_target_at_the_syn() {
+        let Ok(btf) = crate::bpf::kernel_btf() else {
+            eprintln!("skipped: this kernel publishes no BTF");
+            return;
+        };
+        assert_eq!(
+            btf.tracepoint_signature("inet_sock_set_state")
+                .expect("the tracepoint"),
+            STATE_SIGNATURE
+        );
+        let offsets = Offsets::read(btf).expect("the offsets");
+        let program =
+            state_instructions(Whose::Process(4242), &offsets, 64, 3, 4, 5).expect("a program");
+        assert!(!program
+            .iter()
+            .any(|insn| insn.code == 0x85 && insn.imm == GET_SOCKET_COOKIE));
+        let output = program
+            .iter()
+            .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
+            .expect("the record");
+        let compared = program
+            .iter()
+            .position(|insn| insn.imm == 4242)
+            .expect("the comparison");
+        assert!(
+            compared > output,
+            "the target is compared in the opening branch"
+        );
     }
 
     /// A cgroup target is compared in the opening half, by the current task's

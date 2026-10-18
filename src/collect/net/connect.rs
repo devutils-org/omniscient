@@ -23,6 +23,8 @@ const DRAIN_INTERVAL: StdDuration = StdDuration::from_millis(10);
 pub struct Prepare {
     pub mode: Mode,
     pub filter: Option<FilterExpr>,
+    /// The `inet_sock_set_state` road (`bpf:raw_tp`) rather than fentry.
+    pub state: bool,
 }
 
 impl Prepared for Prepare {
@@ -35,7 +37,12 @@ impl Prepared for Prepare {
             ));
         }
         Ok(Box::new(ConnectCollector {
-            id: CollectorId::new("net.tcp.connect/bpf:fentry"),
+            id: CollectorId::new(if self.state {
+                "net.tcp.connect/bpf:raw_tp"
+            } else {
+                "net.tcp.connect/bpf:fentry"
+            }),
+            state: self.state,
             whose: whose(target)?,
             program: None,
             losses: Losses::default(),
@@ -69,6 +76,8 @@ fn whose(target: &Target) -> Result<Whose, String> {
 
 pub struct ConnectCollector {
     id: CollectorId,
+    /// Over `inet_sock_set_state`: no `failed`, and the cookie as it stands.
+    state: bool,
     whose: Whose,
     program: Option<ConnectProgram>,
     losses: Losses,
@@ -196,7 +205,11 @@ impl Collector for ConnectCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        let program = ConnectProgram::load(self.whose)?;
+        let program = if self.state {
+            ConnectProgram::load_state(self.whose)?
+        } else {
+            ConnectProgram::load(self.whose)?
+        };
         self.v6 = program.v6;
         self.program = Some(program);
         Ok(())

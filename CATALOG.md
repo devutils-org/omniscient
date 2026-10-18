@@ -481,8 +481,8 @@ never unless asked. Each frame says which of them named it (`elf`,
 
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
-| `net.tcp.connect` | connection setup latency | `bpf:fentry` tcp_v4/v6_connect | trace | pid, cgroup, system | low | low |
-| `net.tcp.lifetime` | duration + volume per connection, by its owner | `bpf:raw_tp` · `bpf:tp` sock:inet_sock_set_state | trace | pid, launch, system | low | low |
+| `net.tcp.connect` | connection setup latency | `bpf:fentry` tcp_v4/v6_connect · `bpf:raw_tp` sock:inet_sock_set_state (no trampolines, no `failed`) | trace | pid, cgroup, system | low | low |
+| `net.tcp.lifetime` | duration + volume per connection, by its owner | `bpf:raw_tp` · `bpf:tp` sock:inet_sock_set_state | trace | pid, tid, launch, system | low | low |
 | `net.tcp.accept` | connections a server accepted, with the listener's queue | `bpf:fentry` inet_csk_accept | trace, count | pid, launch, system | low | low |
 | `net.tcp.rtt` | RTT, cwnd, congestion state | `netlink` sock_diag · `bpf:fentry` on tcp_sock | poll, trace | pid, system | med | low |
 | `net.tcp.retransmit` | retransmissions | `bpf:tp` tcp:tcp_retransmit_skb | trace, count | system, pid | low | low |
@@ -539,11 +539,12 @@ never unless asked. Each frame says which of them named it (`elf`,
 - `net.tcp.lifetime`'s process is the connection's **owner**, the task current
   at `SYN_SENT`, `FIN_WAIT1` or `LAST_ACK`, as `tcplife` attributes it
   (`attributed: owner`); under a pid or a launch, a connection only seen at
-  its close is a counted loss. `net.tcp.accept` follows one process, not a
-  launched tree.
+  its close is a counted loss; a `--tid` keeps one thread's. `net.tcp.accept`
+  follows a launched tree's children in the kernel, as the timed pairs do.
 - `net.drops -e stack` is the kernel stack of each drop, named through
   `/proc/kallsyms`, with `function` the symbol `location` is in.
-- `net.snmp` is `raw` only until a key names a counter; a counter that did not
+- `net.snmp` keyed on `counter` is one series per counter (`nstat` as
+  `summary`, `rate`, `timeline`); a counter that did not
   move is absent from an interval, as in `nstat`. `net.sockets --pid` on a
   process whose descriptors it cannot read is refused, never an empty
   inventory.

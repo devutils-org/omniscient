@@ -144,6 +144,15 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(connect::Prepare {
                 mode: resolved.request.mode,
                 filter: resolved.request.filter.clone(),
+                state: false,
+            }))
+        }),
+        // The same handshake over one raw tracepoint, no trampolines.
+        Factory::new("net.tcp.connect", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(connect::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+                state: true,
             }))
         }),
         // The other end of a handshake: the server taking it off its queue.

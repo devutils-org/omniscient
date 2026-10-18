@@ -1124,6 +1124,31 @@ series; `net.tcp.lifetime`'s `bpf:tp` twin and `--tid`.
 
 ---
 
+## What the twenty-fifth wave added
+
+- **`net.capture` carries its frame for pcap**: `header` (hex of the link,
+  IP and transport headers, cut where they end -- the payload test caught a
+  first version that carried 54 bytes past them), `realtime_ns`, `linktype`.
+- **`net.snmp -k counter`**: one series per counter. Over a `curl` of one
+  page, `-m count -e summary --filter 'section == "Tcp"'` read
+  `TcpActiveOpens 1`, `TcpOutSegs 6`, `TcpInSegs 4`.
+- **`net.sockstat`**: `ss -s`'s transport table from `/proc/net/sockstat`
+  and `sockstat6`. Beside `ss -s` the same second: TCP 12 (6 + 6), UDP 4
+  (2 + 2), RAW 1 (0 + 1), sockets 285 against `Total: 284` a moment before.
+- **`net.bytes`, `net.packets` on `fs:proc`**: a baseline older than one
+  poll interval at the first tick is retaken there, as `io.bytes` does (a
+  unit test; not reproduced live unprivileged, where startup is short).
+- **`net.tcp.lifetime --tid`**: the connections one thread owns (unit test).
+- **`net.tcp.accept` follows a launched tree** in the kernel through
+  `sched_common::Descendants`, the root a constant; a child the map could not
+  hold is a counted loss (the program builds here; attach needs CAP_BPF).
+- **`net.tcp.connect` over `bpf:raw_tp`**: one program on
+  `inet_sock_set_state`, stamping at `SYN_SENT` in the connecting task and
+  closing on `ESTABLISHED` or `CLOSE` (`sk_err`), the fentry road's record so
+  the collector is shared. No `failed` outcome, the cookie as it stands. It
+  builds against this kernel; the attach and its cost against the fentry
+  road's 65 ms detach are a privileged run.
+
 ## Reading these scenarios
 
 Three things the checks rely on and a reader should too.
