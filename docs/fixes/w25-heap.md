@@ -38,11 +38,17 @@ no CAP_BPF.
 - A static binary the shim cannot reach (`musl-gcc -static`), where the
   uprobe is the only road.
 
+2. **`mem.heap.live` and `mem.heap.retained` on `bpf:uprobe`** (added after
+   the wave's first pass): both collectors read a `heap::Feed` -- the shim's
+   `Stream` or the uprobes' `UprobeFeed` -- the same way; a unit test feeds
+   the live total a malloc, a calloc, a realloc and a free.
+
 ## Not done
 
-1. `mem.heap.live` and `mem.heap.retained` on the uprobes: the records are
-   the same; their collectors read a preload `Stream`, and taking a uprobe
-   feed is a second constructor each.
+Nothing of the stream's list. A launched program is linked at the gate, by
+the C library `omn`'s own fork maps; a program that execs into another libc
+(or a static binary) is linked by the wrong file and says nothing. Filed for
+a privileged run with a static target.
 
 ## Tests
 

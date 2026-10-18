@@ -204,6 +204,8 @@
   unit: bytes
   backends:
     - {id: "preload", requires: ["preload:shim"], cost: extreme}
+    - {id: "bpf:uprobe", requires: ["uprobe", "bpf", "symbols:malloc"], cost: extreme, modes: [poll],
+       degraded: "~1-2 us per call, and only from the attach on: a block allocated before it is an untracked free"}
     - {id: "fs:proc", requires: ["allocator-stats:jemalloc|tcmalloc"], cost: free,
        degraded: "depends on the linked allocator, no allocation site"}
   modes: [poll, snapshot]
@@ -233,6 +235,8 @@
   derived_from: [mem.heap.live]
   backends:
     - {id: "preload", requires: ["preload:shim", "/proc/[pid]/pagemap", "/proc/[pid]/smaps_rollup"], cost: extreme}
+    - {id: "bpf:uprobe", requires: ["uprobe", "bpf", "symbols:malloc", "/proc/[pid]/pagemap", "/proc/[pid]/smaps_rollup"], cost: extreme, modes: [poll],
+       degraded: "~1-2 us per call, and only from the attach on: a block freed before it is in no freed range"}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, launch: native}

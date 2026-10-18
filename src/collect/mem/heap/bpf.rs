@@ -221,6 +221,111 @@ impl Collector for HeapUprobes {
     }
 }
 
+/// The allocator's uprobes as a [`super::Feed`]: what `mem.heap.live` and
+/// `mem.heap.retained` read on `bpf:uprobe`, the same records as the shim's
+/// and no stacks (a total has no use for one).
+pub struct UprobeFeed {
+    pid: i32,
+    program: Option<HeapProgram>,
+    losses: Losses,
+    dropped: (u64, u64),
+}
+
+impl UprobeFeed {
+    pub fn new(pid: i32) -> Self {
+        Self {
+            pid,
+            program: None,
+            losses: Losses::default(),
+            dropped: (0, 0),
+        }
+    }
+}
+
+impl super::Feed for UprobeFeed {
+    fn pid(&self) -> i32 {
+        self.pid
+    }
+
+    fn backend(&self) -> &'static str {
+        "bpf:uprobe"
+    }
+
+    fn start(&mut self) -> Result<(), String> {
+        self.program = Some(HeapProgram::load(self.pid, RING_BYTES)?);
+        Ok(())
+    }
+
+    fn drain(&mut self) -> Vec<Record> {
+        let Some(program) = self.program.as_mut() else {
+            return Vec::new();
+        };
+        let mut calls = Vec::new();
+        let mut undecoded = 0;
+        program.drain(|call| calls.push(call), &mut undecoded);
+        if undecoded > 0 {
+            self.losses.undecoded += undecoded;
+            self.losses
+                .note("a record in the heap ring was shorter than one call");
+        }
+        let (ring, pending) = program.dropped();
+        if ring + pending > self.dropped.0 + self.dropped.1 {
+            self.losses.dropped += ring + pending - self.dropped.0 - self.dropped.1;
+            self.losses.note(
+                "the heap ring or its pending map was full: an allocation or a free is in no \
+                 total",
+            );
+        }
+        self.dropped = (ring, pending);
+        calls.iter().flat_map(records_of).collect()
+    }
+
+    fn close(&mut self) {
+        self.program = None;
+    }
+
+    fn notes(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn losses(&self) -> Losses {
+        self.losses.clone()
+    }
+}
+
+/// `mem.heap.live` and `mem.heap.retained` on `bpf:uprobe`.
+pub struct LivePrepare {
+    pub which: super::Which,
+    pub mode: Mode,
+}
+
+impl Prepared for LivePrepare {
+    fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
+        let interval = match self.mode {
+            Mode::Poll { interval } => StdDuration::from_nanos(interval.as_nanos()),
+            other => {
+                return Err(format!(
+                    "`{}` through the allocator's uprobes is a total kept from the attach on, \
+                     read on a poll; `{other}` has no poll",
+                    self.which.source_id()
+                ))
+            }
+        };
+        let pid = target.first_pid().ok_or_else(|| {
+            format!(
+                "the allocator's uprobes are placed in one process, and a {} target names none",
+                target.kind()
+            )
+        })?;
+        let feed = UprobeFeed::new(pid);
+        match self.which {
+            super::Which::Retained => super::retained::RetainedCollector::new(feed, interval)
+                .map(|collector| collector as Box<dyn Collector>),
+            _ => Ok(Box::new(super::live::LiveCollector::new(feed, interval))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +357,45 @@ mod tests {
         assert_eq!(records_of(&call(OP_CALLOC, 0x3000, 8, 10))[0].size, 80);
         assert_eq!(records_of(&call(OP_MALLOC, 0x4000, 5, 0))[0].op, OP_ALLOC);
         assert_eq!(records_of(&call(CALL_FREE, 0x4000, 0, 0))[0].op, OP_FREE);
+    }
+
+    /// The live collector reads the uprobes' records as it reads the shim's:
+    /// a realloc moves its block, a calloc counts its product, a free gives
+    /// back what it ended.
+    #[test]
+    fn the_live_total_reads_the_uprobes_records() {
+        struct Fake(Vec<Record>);
+        impl super::super::Feed for Fake {
+            fn pid(&self) -> i32 {
+                std::process::id() as i32
+            }
+            fn backend(&self) -> &'static str {
+                "bpf:uprobe"
+            }
+            fn drain(&mut self) -> Vec<Record> {
+                std::mem::take(&mut self.0)
+            }
+            fn close(&mut self) {}
+            fn notes(&self) -> Vec<String> {
+                Vec::new()
+            }
+            fn losses(&self) -> Losses {
+                Losses::default()
+            }
+        }
+        let calls = [
+            call(OP_MALLOC, 0x1000, 100, 0),
+            call(OP_CALLOC, 0x2000, 8, 10),
+            call(OP_REALLOC, 0x3000, 300, 0x1000),
+            call(CALL_FREE, 0x2000, 0, 0),
+        ];
+        let records: Vec<Record> = calls.iter().flat_map(records_of).collect();
+        let mut live =
+            super::super::live::LiveCollector::new(Fake(records), StdDuration::from_secs(1));
+        assert_eq!(live.id().to_string(), "mem.heap.live/bpf:uprobe");
+        let last = live.stop();
+        assert_eq!(last[0].attr("bytes").unwrap().as_f64(), Some(300.0));
+        assert_eq!(last[0].attr("allocations").unwrap().as_f64(), Some(1.0));
     }
 
     /// The events are the preload backend's: an allocation and the free that

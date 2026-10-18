@@ -11,15 +11,15 @@
 use std::time::Duration;
 
 use super::super::cadence::Cadence;
-use super::{state::LiveSet, Stream, OP_ALLOC};
+use super::{state::LiveSet, Feed, Stream, OP_ALLOC};
 use crate::clock::monotonic_ns;
 use crate::collect::task::Comm;
 use crate::collect::{Collector, Losses, SampleError};
 use crate::event::{Attr, CollectorId, Event, KeyValue};
 
-pub struct LiveCollector {
+pub struct LiveCollector<F: Feed = Stream> {
     id: CollectorId,
-    stream: Stream,
+    stream: F,
     live: LiveSet,
     /// When a value is published, as opposed to how often the pipe is drained.
     cadence: Cadence,
@@ -28,11 +28,11 @@ pub struct LiveCollector {
     emitted: u64,
 }
 
-impl LiveCollector {
-    pub fn new(stream: Stream, interval: Duration) -> Self {
+impl<F: Feed> LiveCollector<F> {
+    pub fn new(stream: F, interval: Duration) -> Self {
         let comm = Comm::of(stream.pid());
         Self {
-            id: CollectorId::new("mem.heap.live/preload"),
+            id: CollectorId::new(format!("mem.heap.live/{}", stream.backend())),
             stream,
             live: LiveSet::default(),
             cadence: Cadence::new(interval),
@@ -85,9 +85,13 @@ impl LiveCollector {
     }
 }
 
-impl Collector for LiveCollector {
+impl<F: Feed> Collector for LiveCollector<F> {
     fn id(&self) -> &CollectorId {
         &self.id
+    }
+
+    fn start(&mut self) -> Result<(), String> {
+        self.stream.start()
     }
 
     fn value_attr(&self) -> &'static str {

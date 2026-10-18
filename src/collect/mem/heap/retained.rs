@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use super::super::cadence::Cadence;
 use super::state::{FreedRanges, LiveSet};
-use super::{pagemap::Pagemap, Stream, OP_ALLOC};
+use super::{pagemap::Pagemap, Feed, Stream, OP_ALLOC};
 use crate::clock::monotonic_ns;
 use crate::collect::task::Comm;
 use crate::collect::{Collector, Losses, SampleError};
@@ -37,9 +37,9 @@ use crate::event::{Attr, CollectorId, Event, KeyValue};
 /// anyway, and the table says what it dropped.
 const RANGE_CAPACITY: usize = 128 * 1024;
 
-pub struct RetainedCollector {
+pub struct RetainedCollector<F: Feed = Stream> {
     id: CollectorId,
-    stream: Stream,
+    stream: F,
     live: LiveSet,
     freed: FreedRanges,
     pagemap: Pagemap,
@@ -54,16 +54,12 @@ pub struct RetainedCollector {
     evictions_reported: u64,
 }
 
-impl RetainedCollector {
-    pub fn new(stream: Stream, interval: Duration) -> Result<Box<Self>, String> {
+impl<F: Feed> RetainedCollector<F> {
+    pub fn new(stream: F, interval: Duration) -> Result<Box<Self>, String> {
         Self::with_capacity(stream, interval, RANGE_CAPACITY)
     }
 
-    fn with_capacity(
-        stream: Stream,
-        interval: Duration,
-        capacity: usize,
-    ) -> Result<Box<Self>, String> {
+    fn with_capacity(stream: F, interval: Duration, capacity: usize) -> Result<Box<Self>, String> {
         let pagemap = Pagemap::open(stream.pid()).map_err(|error| {
             format!(
                 "cannot read /proc/{}/pagemap: {error}; without it there is no way to tell \
@@ -73,7 +69,7 @@ impl RetainedCollector {
         })?;
         let comm = Comm::of(stream.pid());
         Ok(Box::new(Self {
-            id: CollectorId::new("mem.heap.retained/preload"),
+            id: CollectorId::new(format!("mem.heap.retained/{}", stream.backend())),
             stream,
             live: LiveSet::default(),
             freed: FreedRanges::new(capacity),
@@ -166,9 +162,13 @@ impl RetainedCollector {
     }
 }
 
-impl Collector for RetainedCollector {
+impl<F: Feed> Collector for RetainedCollector<F> {
     fn id(&self) -> &CollectorId {
         &self.id
+    }
+
+    fn start(&mut self) -> Result<(), String> {
+        self.stream.start()
     }
 
     fn value_attr(&self) -> &'static str {

@@ -32,7 +32,48 @@
 mod alloc;
 mod bpf;
 
-pub use bpf::Prepare as UprobePrepare;
+pub use bpf::{LivePrepare as UprobeLivePrepare, Prepare as UprobePrepare};
+
+/// Where a heap collector's records come from: the preload shim's
+/// [`Stream`], or the allocator's uprobes (`bpf::UprobeFeed`). The live and
+/// retained collectors read either the same way.
+pub trait Feed {
+    /// The process the records are of.
+    fn pid(&self) -> i32;
+    /// The backend, as the collector's id names it.
+    fn backend(&self) -> &'static str;
+    /// Attaches what needs attaching before the program runs.
+    fn start(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+    /// The records since the last call.
+    fn drain(&mut self) -> Vec<Record>;
+    /// The run is over: said once.
+    fn close(&mut self);
+    fn notes(&self) -> Vec<String>;
+    fn losses(&self) -> Losses;
+}
+
+impl Feed for Stream {
+    fn pid(&self) -> i32 {
+        Stream::pid(self)
+    }
+    fn backend(&self) -> &'static str {
+        "preload"
+    }
+    fn drain(&mut self) -> Vec<Record> {
+        Stream::drain(self)
+    }
+    fn close(&mut self) {
+        Stream::close(self)
+    }
+    fn notes(&self) -> Vec<String> {
+        Stream::notes(self)
+    }
+    fn losses(&self) -> Losses {
+        Stream::losses(self)
+    }
+}
 mod live;
 mod pagemap;
 mod retained;
