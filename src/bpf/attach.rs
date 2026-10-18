@@ -382,6 +382,26 @@ pub fn tracepoint(
     open_and_set(&mut attr, program, scope, &format!("{category}:{name}"))
 }
 
+/// Attaches a `BPF_PROG_TYPE_PERF_EVENT` program to a cpu-clock event on
+/// every cpu, firing about `hz` times a second on each: a program that looks
+/// at what each cpu is doing at a steady rate (`runqlen`'s shape).
+pub fn cpu_clock(
+    hz: u64,
+    instructions: &[Insn],
+    prog_name: &str,
+) -> Result<PerfAttachment, String> {
+    let program = load(syscall::BPF_PROG_TYPE_PERF_EVENT, instructions, prog_name)?;
+    let mut attr = sys::bindings::perf_event_attr {
+        type_: sys::bindings::PERF_TYPE_SOFTWARE,
+        size: std::mem::size_of::<sys::bindings::perf_event_attr>() as u32,
+        config: u64::from(sys::bindings::PERF_COUNT_SW_CPU_CLOCK),
+        ..Default::default()
+    };
+    attr.set_freq(1);
+    attr.__bindgen_anon_1.sample_freq = hz;
+    open_and_set(&mut attr, program, Scope::System, "the cpu clock")
+}
+
 /// Attaches a loaded `BPF_PROG_TYPE_KPROBE` program to a kernel symbol.
 ///
 /// `retprobe` asks for the function's return rather than its entry, which is

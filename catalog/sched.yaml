@@ -471,6 +471,27 @@
        damped averages. The machine's sum: the per-cpu queue length is not
        exported outside debugfs."
 
+- id: sched.runqlen
+  family: sched
+  summary: "Each cpu's run queue length, sampled on its clock (runqlen)"
+  unit: count
+  backends:
+    - {id: "bpf:perf_event", requires: ["bpf", "btf", "pmu:PERF_COUNT_SW_CPU_CLOCK", "kernel>=5.8"], cost: low}
+  modes: [sample]
+  emits: [hist, topk, raw]
+  targets: {system: native, cpu: native}
+  keys: [cpu]
+  filter_fields: [cpu, len]
+  determinism: low
+  caveats:
+    - "A program on each cpu's 99 Hz clock reads the cfs run queue of the task
+       it interrupted (`nr_running`, less the task running): one event per cpu
+       and length seen in a drain, `len` the value and `ticks` its weight.
+       `-e hist` is runqlen's histogram (`-k cpu -e hist` its `-C`, per cpu),
+       `-k cpu -e topk` the cpus whose queues held the most waiting ticks. Sampled: a queue that filled and drained between two ticks is
+       not seen. A real-time task's tick says nothing of the cfs queue and is
+       not counted. `sched.runqueue` is the machine's sum from /proc/stat."
+
 - id: sched.numa_balance
   family: sched
   summary: "Automatic NUMA balancing decisions"

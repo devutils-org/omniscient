@@ -1781,7 +1781,7 @@ fn a_request_that_cannot_mean_anything_is_refused_by_name() {
         // The mode, and the one it has.
         ("cannot be observed in `count` mode", "supports trace"),
         // The field, and the fields there are.
-        ("no field `cpu` to filter on", "comm, pid, state"),
+        ("no field `cpu` to filter on", "comm, pid, ppid, state"),
         // The target, and why a network interface is not one.
         (
             "cannot be measured per iface",

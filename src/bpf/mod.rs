@@ -65,6 +65,8 @@ mod sched_futex;
 mod sched_irq;
 mod sched_lock;
 mod sched_numa;
+// `sched.runqlen`: each cpu's queue length on a 99 Hz cpu clock.
+mod sched_runqlen;
 mod switch_count;
 mod syscall;
 // Stream U's: reading `.note.stapsdt` and putting a uprobe on what it names.
@@ -101,6 +103,12 @@ pub use sched_futex::{FutexDrops, FutexProgram, FutexWait};
 pub use sched_irq::{IrqDrops, IrqProgram, IrqRun, KIND_HARD, KIND_SOFT};
 pub use sched_lock::{LockDrops, LockProgram, LockWait};
 pub use sched_numa::{NumaDrops, NumaProgram, NumaStick};
+pub use sched_runqlen::{RunqLenProgram, LENGTHS as RUNQ_LENGTHS};
+
+/// How often `sched.runqlen` looks at each cpu.
+pub fn sched_runqlen_hz() -> u64 {
+    sched_runqlen::HZ
+}
 pub use switch_count::{SwitchCount, SwitchCountProgram};
 pub use wakeup::{Wakeup, WakeupProgram};
 

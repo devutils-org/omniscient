@@ -1251,3 +1251,26 @@ Only one is over a second, and the reason is defect 3: `sched-blocking-stack.yml
 spends about 0.65 s of that parsing `/proc/kallsyms` for a symbol table it then
 does not use. Nothing here waits on a timeout, and nothing sleeps for longer
 than the measurement needs.
+
+## What the twenty-fifth wave added
+
+- **`sched.offcpu`'s provenance**: `named_by` per frame, the perf maps that
+  named any and each task's executable, as `cpu.profile` carries them, so
+  the flame and the triage read off-cpu stacks the same way.
+- **`ppid`** on `sched.switches` (the `sched_switch` backends), `sched.migrations`,
+  `sched.wakeup` (the woken task's parent) and `sched.lock`, and a filter
+  field on every source whose events carry it. Shown by a unit test: a row
+  of this test process carries its parent, and `--filter 'ppid == N'` keeps it.
+- **`sched.lock`'s `addr` and `caller`**: the lock's address from
+  `contention_begin`, an attribute (never a key: it outlives nothing), and the
+  first function of the wait's kernel stack past the tracing, the lock
+  primitives and the scheduler, as `perf lock contention` names its caller.
+- **`sched.slices`' `wake_ns`**: a stamp at `sched_wakeup`, `sched_wakeup_new`
+  and a target's preemption, closed at the switch in, timehist's `sch delay`
+  beside the kernel's `queue_ns`.
+- **`sched.runqlen`**: each cpu's cfs queue length on a 99 Hz cpu clock, a
+  per-cpu histogram (`BPF_PROG_TYPE_PERF_EVENT`, new to the layer).
+
+All of the eBPF halves are reasoned here: the programs build against this
+kernel and their instruction tests pass; none is loaded without CAP_BPF.
+

@@ -27,6 +27,7 @@ mod mutex_usdt;
 mod numa_balance;
 mod offcpu;
 mod runqlat;
+mod runqlen;
 mod runqueue;
 mod slices;
 mod switch_count;
@@ -298,6 +299,11 @@ pub(crate) fn refresh_followed_symbols(
 /// The collectors this family provides.
 pub fn factories() -> Vec<Factory> {
     vec![
+        Factory::new("sched.runqlen", "bpf:perf_event", |resolved| {
+            Ok(Box::new(runqlen::Prepare {
+                mode: resolved.request.mode,
+            }))
+        }),
         Factory::new("sched.wakeup", "bpf:raw_tp", |resolved| {
             Ok(Box::new(wakeup::Prepare {
                 mode: resolved.request.mode,

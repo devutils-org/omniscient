@@ -505,6 +505,13 @@ impl Counters {
             .map(|values| values.iter().sum())
             .unwrap_or(0)
     }
+
+    /// One slot, each cpu's own count, indexed by cpu: for a program whose
+    /// per-cpu slots are the measurement rather than a loss to add up.
+    pub fn read_per_cpu(&self, slot: u32) -> Vec<u64> {
+        syscall::map_lookup_percpu_u64(self.fd.as_raw_fd(), slot, self.cpus)
+            .unwrap_or_else(|_| vec![0; self.cpus])
+    }
 }
 
 /// The stacks a program interned with `bpf_get_stackid`.

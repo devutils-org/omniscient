@@ -49,6 +49,7 @@ pub const BPF_F_NO_PREALLOC: u32 = 1;
 /// load, which is a long way from the line that chose the wrong one.
 pub const BPF_PROG_TYPE_KPROBE: u32 = 2;
 pub const BPF_PROG_TYPE_TRACEPOINT: u32 = 5;
+pub const BPF_PROG_TYPE_PERF_EVENT: u32 = 7;
 pub const BPF_PROG_TYPE_RAW_TRACEPOINT: u32 = 17;
 
 /// How much verifier log to keep. The interesting part of a rejection is the

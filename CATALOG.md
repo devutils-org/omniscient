@@ -575,6 +575,7 @@ invisible to every CPU profiler.
 | `sched.numa_balance` | automatic NUMA migrations | `bpf:raw_tp` · `bpf:tp` sched:sched_stick_numa etc. | trace, count | system | low | low |
 | `sched.interrupts` | interrupt counts per cpu, line and softirq vector | `fs:proc` /proc/interrupts, /proc/softirqs | poll, count | cpu, system | free | low |
 | `sched.runqueue` | runnable and blocked tasks, load averages | `fs:proc` /proc/stat, /proc/loadavg | poll, snapshot | system | free | low |
+| `sched.runqlen` | each cpu's run queue length, sampled at 99 Hz (`runqlen`) | `bpf:perf_event` cpu-clock, `cfs_rq->nr_running` | sample | system, cpu | low | low |
 | `sched.slices` | one event per time slice: its run, queue wait and time off (`perf sched timehist`) | `bpf:raw_tp` sched_switch | trace | pid, tid, cgroup, system, launch | high | low |
 
 **Caveats**
