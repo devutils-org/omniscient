@@ -95,6 +95,7 @@ pub use proc_renames::Renames;
 pub use proc_syscall::{Narrowing, SyscallDrainLosses, SyscallProgram, SyscallRow};
 pub use request::{request_key, RequestCounts, RequestProgram, RequestRecord, ID_MISMATCH};
 pub use runqlat::{RunqLat, RunqLatProgram};
+pub use sched_common::Descendants;
 pub use sched_drm::{GpuJob, GpuJobDrops, GpuJobProgram};
 pub use sched_futex::{FutexDrops, FutexProgram, FutexWait};
 pub use sched_irq::{IrqDrops, IrqProgram, IrqRun, KIND_HARD, KIND_SOFT};

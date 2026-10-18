@@ -206,6 +206,7 @@ impl Prepared for PrepareExec {
             let root = crate::bpf::pidns::kernel_tgid(root)?;
             let mut collector = ExecCollector::new(self.filter);
             collector.tree = Some(Tree::rooted_at(root));
+            collector.root = Some(root);
             return Ok(Box::new(collector));
         }
         let whose = machine_or_cgroup(target, "proc.exec")?;
@@ -226,6 +227,16 @@ pub struct ExecCollector {
     predicate: Predicate,
     /// A process and its descendants, for a `pid` or launched target.
     tree: Option<Tree>,
+    /// The tree's root, and the processes it started as the kernel saw each
+    /// fork (`sched_process_fork`): what makes the tree exact, a subshell
+    /// that forked and exited before any drain included.
+    root: Option<u32>,
+    descendants: Option<crate::bpf::Descendants>,
+    /// Why the forks are not followed, when they are not: the tree is then
+    /// found by walking `/proc` at the drain.
+    unfollowed: Option<String>,
+    /// Forks the descendants map had no room for, as last read.
+    missed_forks: u64,
     /// The last drain's execs the tree did not take, looked at once more.
     undecided: Vec<Exec>,
     /// Set for the drain at `stop`, after which nothing is looked at again.
@@ -250,6 +261,26 @@ impl Tree {
     pub fn rooted_at(root: u32) -> Self {
         Self {
             members: std::iter::once(root).collect(),
+        }
+    }
+
+    /// Takes in every `(process, parent)` the kernel saw the tree fork,
+    /// in any order: a process is the tree's when its parent is.
+    pub fn adopt(&mut self, forks: Vec<(u32, u32)>) {
+        let mut pending = forks;
+        loop {
+            let before = pending.len();
+            pending.retain(|(pid, ppid)| {
+                if self.members.contains(ppid) {
+                    self.members.insert(*pid);
+                    false
+                } else {
+                    true
+                }
+            });
+            if pending.len() == before {
+                return;
+            }
         }
     }
 
@@ -350,6 +381,10 @@ impl ExecCollector {
             unnamed: 0,
             predicate: Predicate::new(filter),
             tree: None,
+            root: None,
+            descendants: None,
+            unfollowed: None,
+            missed_forks: 0,
             undecided: Vec::new(),
             last_drain: false,
         }
@@ -366,6 +401,21 @@ impl ExecCollector {
         let mut unnamed = 0;
         let mut drained = Vec::new();
         program.drain(|exec: Exec| drained.push(exec), &mut undecoded);
+        // Every process the root started, as the kernel saw the fork: read
+        // after the execs were drained, so a fork that preceded one of them
+        // is in it. Exact where the `/proc` walk below guesses.
+        if let (Some(tree), Some(descendants)) = (self.tree.as_mut(), self.descendants.as_ref()) {
+            tree.adopt(descendants.parents());
+            let missed = descendants.missed();
+            if missed > self.missed_forks {
+                self.inner.losses.dropped += missed - self.missed_forks;
+                self.inner.losses.note(
+                    "a process the target started found the descendants map full, so its \
+                     execs are placed by walking `/proc`",
+                );
+                self.missed_forks = missed;
+            }
+        }
         if let Some(tree) = self.tree.as_mut() {
             // The previous drain's execs that were not the tree's are looked
             // at once more, and only once: a parent's own exec may arrive in
@@ -466,6 +516,13 @@ impl Collector for ExecCollector {
     }
 
     fn start(&mut self) -> Result<(), String> {
+        // The forks first, so none between the two attaches is missed.
+        if let Some(root) = self.root {
+            match crate::bpf::Descendants::follow(root) {
+                Ok(descendants) => self.descendants = Some(descendants),
+                Err(reason) => self.unfollowed = Some(reason),
+            }
+        }
         self.program = Some(ExecProgram::load(self.whose, RING_BYTES)?);
         Ok(())
     }
@@ -526,6 +583,13 @@ impl Collector for ExecCollector {
             ));
         }
         notes.extend(self.predicate.note("exec"));
+        if let Some(reason) = &self.unfollowed {
+            notes.push(format!(
+                "the target's forks are not followed in the kernel ({reason}), so its tree is \
+                 found by walking `/proc` at each drain: a process that forked and exited \
+                 between two drains is not found, and its children's execs are counted lost"
+            ));
+        }
         notes
     }
 }
@@ -1063,6 +1127,18 @@ mod tests {
     /// A child whose parent's own exec comes after it in the batch is the
     /// tree's (a subshell that forked a command, then exec'd its last one);
     /// an exec of an unrelated parent is not.
+    /// The forks the kernel saw place a process whose parent left `/proc`
+    /// long ago: the case the walk cannot answer.
+    #[test]
+    fn the_forks_place_what_the_walk_cannot() {
+        let mut tree = Tree::rooted_at(100);
+        // 102 forked from 101, which forked from the root and is gone;
+        // 300 is a stranger's child. Given out of order.
+        tree.adopt(vec![(102, 101), (300, 299), (101, 100)]);
+        assert_eq!(tree.admits(103, 102), Verdict::In);
+        assert!(!tree.members.contains(&300));
+    }
+
     #[test]
     fn a_tree_takes_descendants_in_any_order_and_nothing_else() {
         let mut tree = Tree::rooted_at(100);

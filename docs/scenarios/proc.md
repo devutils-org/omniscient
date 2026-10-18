@@ -806,3 +806,22 @@ Every number below was read on this machine against something independent of
 - **`proc.signals`' sender**: `sender_comm` beside `sender_pid`, and `comm` as
   a key on `proc.exec`, `proc.exit` and `proc.signals`. Three kills of a
   `sleep` read `sender_comm` `kill` and the kill's pid.
+
+## What the twenty-fifth wave added
+
+- **`proc.calls`' paths**: `open`, `openat`, `openat2`, `creat` read when they
+  return, as `openat` was; `execve`, `execveat` read when they begin, into
+  the pending entry, since a successful exec returns into an image where the
+  old path is gone. An exec carries no `fd`. Reasoned: the programs build
+  against this kernel and the instruction test counts two entry reads and
+  one exit read; the attach needs CAP_BPF.
+- **`proc.calls` on `bpf:tp`**: the same two programs over
+  `raw_syscalls:sys_enter` and `sys_exit`, the number, the arguments and the
+  return read at tracefs's offsets instead of out of `pt_regs`. Refused here:
+  tracefs is root's.
+- **`proc.exec`'s tree exact**: the target's forks are followed in the kernel
+  (`sched_common::Descendants`), so a subshell that forked and exited before
+  any drain still places its child's execs; the `/proc` walk stays behind it,
+  said, when the forks cannot be followed. Unit tested on a tree given its
+  forks out of order.
+

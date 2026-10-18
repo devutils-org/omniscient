@@ -727,7 +727,7 @@ invisible to every CPU profiler.
 | Metric | What it measures | Backends | Modes | Targets | Cost | Det. |
 |---|---|---|---|---|---|---|
 | `proc.syscall` | per-syscall latency, count and errors, keyed by `syscall` and `comm` | `bpf:raw_tp` · `bpf:tp` raw_syscalls:sys_enter/sys_exit | trace, count | pid, tid, cgroup, system, launch | extreme | low |
-| `proc.calls` | one record per syscall: when, how long, what it returned, `openat`'s path | `bpf:raw_tp` sys_enter/sys_exit | trace | pid, tid, cgroup, system, launch | extreme | low |
+| `proc.calls` | one record per syscall: when, how long, what it returned, the path of an open or exec | `bpf:raw_tp` sys_enter/sys_exit · `bpf:tp` raw_syscalls:* | trace | pid, tid, cgroup, system, launch | extreme | low |
 | `proc.exec` / `.exit` | process lifecycle | `bpf:raw_tp` · `bpf:tp` sched:sched_process_exec/exit | trace | system, cgroup (`proc.exec`: pid, launch) | low | medium |
 | `proc.tasks` | the machine's processes, or every thread of one, as `top` and `ps` list them | `fs:proc` stat, statm, status | poll, snapshot | pid, tid, system, launch | low | low |
 | `proc.fd` | open descriptors vs limit | `fs:proc` | poll | pid | low | medium |
