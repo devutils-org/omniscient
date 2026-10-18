@@ -1075,6 +1075,78 @@ fn table_top(table: &Value) -> Option<(f64, String, String, f64)> {
     top
 }
 
+/// Which process each task is in and each process's parent, from every raw
+/// event of the read-back that carries `pid` (and `ppid`).
+#[derive(Debug, Default)]
+struct Processes {
+    pids: BTreeMap<String, u64>,
+    parents: BTreeMap<u64, u64>,
+}
+
+impl Processes {
+    fn of(read_back: &Value) -> Self {
+        let mut found = Self::default();
+        for request in read_back["requests"].as_array().into_iter().flatten() {
+            for output in request["result"]["outputs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                if output["emit"].as_str() != Some("raw") {
+                    continue;
+                }
+                for event in output["events"].as_array().into_iter().flatten() {
+                    let attr = |name: &str| {
+                        event["attrs"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .find(|attr| attr["name"] == name)
+                            .and_then(|attr| attr["value"].as_f64())
+                            .filter(|value| *value > 0.0)
+                            .map(|value| value as u64)
+                    };
+                    let Some(pid) = attr("pid") else { continue };
+                    if let Some(tid) = event["keys"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find_map(|key| key["task"]["tid"].as_u64())
+                    {
+                        found.pids.entry(format!("task:{tid}")).or_insert(pid);
+                    }
+                    if let Some(ppid) = attr("ppid") {
+                        found.parents.entry(pid).or_insert(ppid);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    fn pid_of(&self, task: &str) -> Option<u64> {
+        self.pids.get(task).copied()
+    }
+
+    /// Whether `task`'s process runs under `parent`: yes when its parents
+    /// reach it, no when they reach the program's own main process first
+    /// (or pid 1), unknown when they stop at a process no event gave a
+    /// parent -- triage's `descends`.
+    fn under(&self, task: &str, parent: u64, main: Option<u64>) -> Option<bool> {
+        let mut at = self.pid_of(task)?;
+        for _ in 0..64 {
+            if at == parent {
+                return Some(true);
+            }
+            if Some(at) == main || at <= 1 {
+                return Some(false);
+            }
+            at = *self.parents.get(&at)?;
+        }
+        None
+    }
+}
+
 /// `run_session`'s read-back, read the way an agent would, and the way
 /// `omn latency` reads the same run (`docs/cases.md`, "The agent's reading"):
 ///
@@ -1196,17 +1268,33 @@ fn read_mcp(
     }
     let task = table["key"].as_str().map(str::to_owned);
     // The rest of the job, as the person's way reads it: every busy task off
-    // the followed chain, once the chain left the main thread. The tables do
-    // not say which process a task is in, so this is every other task: an
-    // upper bound on the job, as triage's own `Job` says ("may be more").
-    // A row that agrees once this is added agrees on a loosened comparison,
-    // not because triage's decomposition changed.
+    // the followed chain that runs under the chosen child's parent, once the
+    // chain left the main thread -- triage's `Job::under`. Read off the raw
+    // events' `pid` and `ppid`, which the sched sources carry since the
+    // twenty-fifth wave. A task whose parents stop short of an answer is
+    // left out of the job, as triage keeps it apart (`unplaced`). With no
+    // `ppid` in the run at all, every other task: the upper bound triage's
+    // own `Job` says ("may be more").
     let mut job = BTreeMap::new();
     if !followed.is_empty() && !beside {
+        let tree = Processes::of(read_back);
+        let main = tables
+            .first()
+            .and_then(|first| tree.pid_of(first["key"].as_str().unwrap_or("")));
+        let chosen_parent = task
+            .as_deref()
+            .and_then(|task| tree.pid_of(task))
+            .and_then(|pid| tree.parents.get(&pid).copied());
         for state in ["on-cpu", "runnable"] {
             let rest: f64 = tables
                 .iter()
                 .filter(|other| !seen.contains(other["key"].as_str().unwrap_or("")))
+                .filter(|other| match chosen_parent {
+                    Some(parent) if !tree.parents.is_empty() => {
+                        tree.under(other["key"].as_str().unwrap_or(""), parent, main) == Some(true)
+                    }
+                    _ => true,
+                })
                 .map(|other| table_amount(other, state))
                 .sum();
             if rest > 0.0 {
@@ -3015,6 +3103,78 @@ fn the_agent_s_reading_follows_a_block_into_the_busy_task() {
     assert_eq!(
         (answer.task.as_deref(), answer.state.as_str()),
         (Some("task:1"), "blocked")
+    );
+}
+
+/// The agent's way's job, by `ppid`: once the chain leaves the main thread
+/// for a busy child, the rest of the job is what runs under that child's
+/// parent -- its siblings -- and neither a process elsewhere on the machine
+/// nor one whose parent the run never saw.
+#[test]
+fn the_agent_s_job_is_what_runs_under_the_chosen_child_s_parent() {
+    let busy = |key: &str, ns: f64| {
+        json!({"key": key, "whole": {"amount": ns}, "rows": [
+            {"state": "on-cpu", "amount": ns, "source": "cpu.profile", "evidence": "sampled"}]})
+    };
+    let raw = |tid: u64, pid: u64, ppid: Option<u64>| {
+        let mut attrs = vec![json!({"name": "pid", "value": pid})];
+        if let Some(ppid) = ppid {
+            attrs.push(json!({"name": "ppid", "value": ppid}));
+        }
+        json!({"keys": [{"task": {"tid": tid}}], "attrs": attrs})
+    };
+    let answer_doc = json!({
+        "read_back": {
+            "decompositions": [{"id": "where-the-time-went", "tables": [
+                {"key": "task:100", "whole": {"amount": 4e9, "resolution": 1e6}, "rows": [
+                    {"state": "on-cpu", "amount": 1e8, "source": "cpu.profile", "evidence": "sampled"},
+                    {"state": "blocked: sleeping", "amount": 3.9e9, "resolution": 1e6,
+                     "source": "sched.offcpu", "evidence": "exact"}]},
+                busy("task:200", 3e9),
+                busy("task:300", 1e9),
+                busy("task:400", 2e9),
+                busy("task:500", 5e8)
+            ]}],
+            "requests": [{"label": "blocked", "result": {
+                "source": "sched.offcpu",
+                "outputs": [{"emit": "raw", "events": [
+                    raw(100, 100, Some(1)),
+                    raw(200, 200, Some(100)),
+                    raw(300, 300, Some(100)),
+                    raw(400, 400, Some(1)),
+                    raw(500, 500, Some(450))]}]}}]
+        }
+    });
+    let answer = read_mcp(&answer_doc, &[], None).unwrap();
+    assert_eq!(
+        answer.task.as_deref(),
+        Some("task:200"),
+        "{:?}",
+        answer.followed
+    );
+    // task:300 is the chosen child's sibling; task:400 is the machine's,
+    // task:500's parent 450 was never seen.
+    assert_eq!(
+        answer.job.get("on-cpu").copied(),
+        Some(1e9),
+        "{:?}",
+        answer.job
+    );
+
+    // With no `ppid` in the run, every other busy task: the upper bound.
+    let mut unparented = answer_doc.clone();
+    for event in unparented["read_back"]["requests"][0]["result"]["outputs"][0]["events"]
+        .as_array_mut()
+        .unwrap()
+    {
+        event["attrs"].as_array_mut().unwrap().truncate(1);
+    }
+    let answer = read_mcp(&unparented, &[], None).unwrap();
+    assert_eq!(
+        answer.job.get("on-cpu").copied(),
+        Some(3.5e9),
+        "{:?}",
+        answer.job
     );
 }
 
