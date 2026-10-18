@@ -262,7 +262,7 @@
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
-  keys: [task, cgroup, cpu, func, within, insn]
+  keys: [task, cgroup, cpu, func, within, insn, object]
   filter_fields: [comm, cpu]
   determinism: low
   caveats:
@@ -282,7 +282,7 @@
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
-  keys: [task, cgroup, cpu, func, within, insn]
+  keys: [task, cgroup, cpu, func, within, insn, object]
   filter_fields: [comm, cpu]
   determinism: low
   caveats:
@@ -302,7 +302,7 @@
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
-  keys: [task, cgroup, cpu, func, within, insn]
+  keys: [task, cgroup, cpu, func, within, insn, object]
   filter_fields: [comm, cpu]
   determinism: low
   caveats:

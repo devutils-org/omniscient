@@ -1272,10 +1272,15 @@ pub enum KeyKind {
     /// `cache:<name>`, a slab cache (`mem.slab`'s `dentry`, `kmalloc-64`):
     /// what `slabtop` prints a row of. Read off the `cache` attribute.
     Cache,
+    /// `object:<file>`, the object a sample's leaf was in (`libc.so.6`,
+    /// `[kernel]`): `perf report --sort dso`. Derived from the stack's
+    /// provenance as `func` is from its labels; a leaf no mapping covered is
+    /// `object:?`.
+    Object,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 26] = [
+    pub const ALL: [KeyKind; 27] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -1302,6 +1307,7 @@ impl KeyKind {
         KeyKind::Within,
         KeyKind::Insn,
         KeyKind::Cache,
+        KeyKind::Object,
     ];
 
     /// The keys no collector attaches and the emit layer derives from what
@@ -1319,6 +1325,7 @@ impl KeyKind {
                 | KeyKind::Within
                 | KeyKind::Insn
                 | KeyKind::Cache
+                | KeyKind::Object
         )
     }
 
@@ -1350,6 +1357,7 @@ impl KeyKind {
             KeyKind::Within => "within",
             KeyKind::Insn => "insn",
             KeyKind::Cache => "cache",
+            KeyKind::Object => "object",
         }
     }
 }

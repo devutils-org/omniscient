@@ -124,6 +124,8 @@ pub struct OffCpuCollector {
     /// the flame and the triage charge off-cpu stacks as they charge
     /// `cpu.profile`'s.
     named_by: BTreeMap<u64, Vec<Option<NamedBy>>>,
+    /// Each frame's object, under the same ids, for `--keys object`.
+    objects: BTreeMap<u64, Vec<Option<String>>>,
     /// The process each stack's task belonged to, by the `task:<tid>` key a
     /// result writes, for the file each executed.
     task_processes: BTreeMap<String, i32>,
@@ -183,6 +185,7 @@ impl OffCpuCollector {
             leaf: super::LeafCallers::default(),
             leaving: BTreeSet::new(),
             named_by: BTreeMap::new(),
+            objects: BTreeMap::new(),
             task_processes: BTreeMap::new(),
             left_perf_maps: Vec::new(),
             left_executables: BTreeMap::new(),
@@ -443,15 +446,18 @@ impl OffCpuCollector {
         }
         let mut frames: Vec<String> = stack.frames.iter().rev().map(Frame::label).collect();
         let mut named_by = stack.named_by_root_first();
+        let mut objects = stack.objects_root_first();
         if truncated {
             // Root first, so the missing frames are the ones before the first
             // one here. Said rather than left to be inferred from a stack that
             // begins in the middle of a program.
             frames.insert(0, "[truncated]".to_owned());
             named_by.insert(0, None);
+            objects.insert(0, None);
         }
         self.stacks.insert(resolved, frames);
         self.named_by.insert(resolved, named_by);
+        self.objects.insert(resolved, objects);
         Some(resolved)
     }
 
@@ -670,6 +676,7 @@ impl Collector for OffCpuCollector {
             named_by: self.named_by.clone(),
             perf_maps,
             executables,
+            objects: self.objects.clone(),
         }
     }
 

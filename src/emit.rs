@@ -1027,6 +1027,15 @@ pub fn aggregate(
         ));
         original = Some(std::mem::replace(&mut collection.events, inside));
     }
+    if request.keys.contains(&KeyKind::Object) {
+        let unplaced = derive_object(&mut collection);
+        if unplaced > 0 {
+            degradations.push(format!(
+                "{unplaced} of {} events carried no stack, or a leaf in no mapping, so `--keys object` holds them as `object:?`",
+                collection.events.len()
+            ));
+        }
+    }
     if request.keys.contains(&KeyKind::Func) {
         let stackless = derive_func(&mut collection);
         if stackless > 0 {
@@ -1249,6 +1258,29 @@ fn derive_func(collection: &mut Collection) -> usize {
             .push(crate::event::Attr::text(name, leaf.clone()));
     }
     stackless
+}
+
+/// Puts the object of each event's leaf frame on it as `object`, from the
+/// provenance's objects under its stack id. Returns how many events had no
+/// stack or a leaf no mapping covered.
+fn derive_object(collection: &mut Collection) -> usize {
+    let name = KeyKind::Object.as_str();
+    let mut unplaced = 0;
+    for event in &mut collection.events {
+        let leaf = stack_id(event).and_then(|id| {
+            collection
+                .provenance
+                .objects
+                .get(&id)
+                .and_then(|objects| objects.last().cloned().flatten())
+        });
+        event.attrs.retain(|attr| attr.name != name);
+        match leaf {
+            Some(object) => event.attrs.push(crate::event::Attr::text(name, object)),
+            None => unplaced += 1,
+        }
+    }
+    unplaced
 }
 
 /// Each event once for every distinct function on its stack, carrying that
@@ -2712,6 +2744,7 @@ mod tests {
                 ino: 2,
             }],
             executables: BTreeMap::from([("task:7".to_owned(), "/usr/bin/python3.12".to_owned())]),
+            objects: BTreeMap::from([(1, vec![Some("python3.12".to_owned())])]),
         };
         let results = aggregate(&resolved, said, Unit::Bytes, "bytes").unwrap();
         let json = serde_json::to_value(&results).unwrap();
@@ -3482,6 +3515,53 @@ mod tests {
             "{:?}",
             results.degradations
         );
+    }
+
+    /// `--keys object` reads the leaf's object out of the provenance: two
+    /// functions of one library are one row, and a leaf no mapping covered
+    /// is `object:?`, counted.
+    #[test]
+    fn the_object_key_is_the_leaf_frame_s_file() {
+        let sampled = |id: u64| {
+            let mut one = event(id, 7, 1);
+            one.attrs.push(Attr::uint(STACK_ID_ATTR, id));
+            one
+        };
+        let events = vec![
+            sampled(1),
+            sampled(2),
+            sampled(2),
+            sampled(3),
+            event(9, 7, 1),
+        ];
+        let mut collection = quiet(events, 1_000);
+        collection.provenance.objects = BTreeMap::from([
+            (
+                1,
+                vec![Some("prog".to_owned()), Some("libc.so.6".to_owned())],
+            ),
+            (
+                2,
+                vec![Some("prog".to_owned()), Some("libc.so.6".to_owned())],
+            ),
+            (3, vec![Some("prog".to_owned()), None]),
+        ]);
+        let resolved = rss_request(vec![Emit::TopK { k: 10, by: None }], vec![KeyKind::Object]);
+        let results = aggregate(&resolved, collection, Unit::Count, "bytes").unwrap();
+        let Output::TopK { series, .. } = &results.outputs[0] else {
+            panic!("a ranking");
+        };
+        let rows: Vec<(String, f64)> = series
+            .iter()
+            .map(|one| (one.key.to_string(), one.total))
+            .collect();
+        assert_eq!(
+            rows,
+            [("object:libc.so.6".into(), 3.0), ("object:?".into(), 2.0)]
+        );
+        assert!(results.degradations.iter().any(
+            |note| note.starts_with("2 of 5 events carried no stack, or a leaf in no mapping")
+        ));
     }
 
     /// `--keys within` is the inclusive share: a sample counts once in the

@@ -254,6 +254,17 @@ pub struct Provenance {
     /// (`task:<tid>`, `proc:<pidns>+<pid>`), read while it was alive.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub executables: BTreeMap<String, String>,
+    /// Each stack's frames' objects, root first, frame for frame with the
+    /// labels: the file's name (`libc.so.6`), `[kernel]` for a kernel frame,
+    /// `null` for an address no mapping covered. What `--keys object` reads,
+    /// `perf report --sort dso`'s column: a named frame's label says the
+    /// function and not the file it is in.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "stack_ids"
+    )]
+    pub objects: BTreeMap<u64, Vec<Option<String>>>,
 }
 
 /// A map keyed by stack id, read back from JSON's string keys.
@@ -281,13 +292,17 @@ where
 
 impl Provenance {
     pub fn is_empty(&self) -> bool {
-        self.named_by.is_empty() && self.perf_maps.is_empty() && self.executables.is_empty()
+        self.named_by.is_empty()
+            && self.perf_maps.is_empty()
+            && self.executables.is_empty()
+            && self.objects.is_empty()
     }
 
     /// Only the stacks a result kept: a collector's table can hold stacks
     /// no emitted row names.
     pub fn keep_stacks(&mut self, stacks: &BTreeMap<u64, Vec<String>>) {
         self.named_by.retain(|id, _| stacks.contains_key(id));
+        self.objects.retain(|id, _| stacks.contains_key(id));
     }
 }
 
@@ -322,6 +337,20 @@ fn is_zero(value: &u64) -> bool {
 }
 
 impl Frame {
+    /// The object the frame is in, as `perf report --sort dso` names it: the
+    /// file's name, `[kernel]` for the kernel, `None` where no mapping
+    /// covered the address.
+    pub fn object(&self) -> Option<String> {
+        if self.context == Context::Kernel {
+            return Some("[kernel]".to_owned());
+        }
+        let module = self.module.as_deref()?;
+        Some(Path::new(module).file_name().map_or_else(
+            || module.to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        ))
+    }
+
     /// The frame with nothing resolved, which is what an address with no
     /// mapping honestly reduces to.
     fn unresolved(addr: u64, context: Context) -> Self {
@@ -468,6 +497,12 @@ impl Stack {
     /// stores.
     pub fn labels_root_first(&self) -> Vec<String> {
         self.frames.iter().rev().map(Frame::label).collect()
+    }
+
+    /// Each frame's object, root first, in the order of
+    /// [`Stack::labels_root_first`]: see [`Provenance::objects`].
+    pub fn objects_root_first(&self) -> Vec<Option<String>> {
+        self.frames.iter().rev().map(Frame::object).collect()
     }
 
     /// Each frame's [`NamedBy`], root first, in the order of

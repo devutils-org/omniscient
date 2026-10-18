@@ -1039,19 +1039,19 @@ impl Collector for ProfileCollector {
     /// Who named each frame of [`Collector::stacks`], under the same ids, and
     /// the file each sampled task executed.
     fn provenance(&self) -> crate::stack::Provenance {
-        let named_by = self
-            .stack_origins
-            .iter()
-            .enumerate()
-            .filter_map(|(run_id, (pid, local))| {
-                let stack = self
-                    .unwinders
-                    .get(pid)?
-                    .table()
-                    .get(crate::stack::StackId(*local))?;
-                Some((run_id as u64, stack.named_by_root_first()))
-            })
-            .collect();
+        let mut named_by = BTreeMap::new();
+        let mut objects = BTreeMap::new();
+        for (run_id, (pid, local)) in self.stack_origins.iter().enumerate() {
+            let Some(stack) = self
+                .unwinders
+                .get(pid)
+                .and_then(|unwinder| unwinder.table().get(crate::stack::StackId(*local)))
+            else {
+                continue;
+            };
+            named_by.insert(run_id as u64, stack.named_by_root_first());
+            objects.insert(run_id as u64, stack.objects_root_first());
+        }
         // The unwinders' own: the perf map each read, with the file's device
         // and inode, and the file each process executes as last read -- after
         // an `execve` the new one.
@@ -1072,6 +1072,7 @@ impl Collector for ProfileCollector {
             named_by,
             perf_maps,
             executables,
+            objects,
         }
     }
 
