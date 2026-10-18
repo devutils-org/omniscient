@@ -1168,12 +1168,14 @@ explains it. So this phase does two things at once, on purpose:
       with the distribution's own witnesses.
       *`distroproof-reference.toml`: Debian 12 and 13, Ubuntu 24.04, Rocky 9,
       Fedora 44, Arch.*
-- [~] `docs/distroproof.md` lists every finding with its `envprobe`
+- [x] `docs/distroproof.md` lists every finding with its `envprobe`
       difference and its fix, and distroproof's README points to it.
-      *The document is written; the README's link is distroproof's to merge.*
-- [~] Every defect of distroproof's met on the way is filed, and fixed, in
+      *Its README's "In practice: Omniscient" section, on distroproof's main
+      since 412d873.*
+- [x] Every defect of distroproof's met on the way is filed, and fixed, in
       distroproof.
-      *Fixed in devutils-org/distroproof#4 and #5, open for review.*
+      *On distroproof's main since 412d873: the images (#4) and `file_caps`,
+      `collect`, `DP_TARGET` and the two envprobe facts (#5).*
 
 Not this phase's, and why: aarch64 and containers (item 5 of `STATE.md`'s
 "What remains" asks for both) wait on distroproof booting them; the hardware
