@@ -97,6 +97,28 @@
        neither kept nor left out as another process's. A --tid keeps the
        connections that thread owns, and its siblings' are left out."
 
+- id: net.sockstat
+  family: net
+  summary: "The machine's sockets by transport, what ss -s prints"
+  unit: count
+  backends:
+    - {id: "fs:proc", requires: ["/proc/net/sockstat"], cost: free}
+  modes: [poll, snapshot]
+  emits: [raw, summary, timeline]
+  targets: {system: native}
+  keys: [counter]
+  filter_fields: [counter, inuse, ipv4, ipv6, orphan, tw]
+  determinism: medium
+  caveats:
+    - "One row per transport, keyed `counter`: `TCP`, `UDP`, `RAW`, `FRAG`,
+       and `sockets` (every socket of every family, ss -s's Total). The value
+       is the sockets in use over IPv4 and IPv6 together, with `ipv4` and
+       `ipv6` beside it; the TCP row carries `orphan`, `tw` (time-wait),
+       `alloc` and `mem` (pages of buffers). `omn trace net.sockstat -m
+       snapshot -e raw --system` is `ss -s`."
+    - "ss -s's TCP headline (estab, closed) is counted over sock_diag, not
+       these files: per-state counts are `net.sockets`."
+
 - id: net.tcp.rtt
   family: net
   summary: "RTT, congestion window and congestion state"

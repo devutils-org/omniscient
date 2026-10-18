@@ -22,6 +22,7 @@ mod retransmit;
 mod snmp;
 mod socket;
 mod sockets;
+mod sockstat;
 mod softirq;
 mod softirqs;
 mod tcp_rtt;
@@ -98,6 +99,9 @@ pub fn factories() -> Vec<Factory> {
             Ok(Box::new(backlog::Prepare(resolved.request.mode)))
         }),
         Factory::new("net.sockets", "netlink", |_| Ok(Box::new(sockets::Prepare))),
+        Factory::new("net.sockstat", "fs:proc", |resolved| {
+            Ok(Box::new(sockstat::Prepare(resolved.request.mode)))
+        }),
         Factory::new("net.snmp", "fs:proc", |resolved| {
             Ok(Box::new(snmp::Prepare(resolved.request.mode)))
         }),

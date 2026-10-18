@@ -499,6 +499,7 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `net.iface` | errors, drops, pause frames, `mcast`, `missed` | `netlink` ethtool -S · `fs:proc` /proc/net/dev | poll | iface | free / low | medium |
 | `net.snmp` | every protocol counter, by `nstat`'s name | `fs:proc` /proc/net/snmp, netstat, snmp6 | count, poll, snapshot | system | free | medium |
 | `net.sockets` | every TCP and UDP socket, its state, queues and owner (`ss -tuanp`) | `netlink` sock_diag | snapshot, poll | pid, system | low | medium |
+| `net.sockstat` | the machine's sockets by transport (`ss -s`) | `fs:proc` /proc/net/sockstat, sockstat6 | poll, snapshot | system | free | medium |
 
 **Caveats**
 
