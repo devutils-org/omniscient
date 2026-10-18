@@ -1369,6 +1369,24 @@ mod tests {
              {kallsyms}: it read the kernel's symbols for frames it will never see"
         );
         let (read, _) = answer("both-halves");
+        // `kptr_restrict` zeroes every address or none, and a zeroed table is
+        // known from its first line: priming it reads that far and no further.
+        let zeroed = std::fs::read_to_string("/proc/kallsyms")
+            .ok()
+            .and_then(|text| {
+                let first = text.split_whitespace().next()?.to_owned();
+                u64::from_str_radix(&first, 16).ok()
+            })
+            == Some(0);
+        if zeroed {
+            assert!(
+                read > 0 && read < kallsyms / 4,
+                "a profile whose stacks have a kernel half, on a machine whose /proc/kallsyms \
+                 is zeroed, read {read} bytes of its {kallsyms} as it started: its first line \
+                 says the table names nothing"
+            );
+            return;
+        }
         assert!(
             read >= kallsyms * 9 / 10,
             "a profile whose stacks have a kernel half read {read} bytes as it started, and \

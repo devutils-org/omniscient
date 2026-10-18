@@ -1524,6 +1524,24 @@ struct KernelSymbols {
 
 impl KernelSymbols {
     fn read() -> Option<Self> {
+        // `kptr_restrict` zeroes every address or none, so the first line
+        // says which: a zeroed table is not read further. Parsing all of it
+        // took 870 ms of a debug build's drain, on a run whose kernel frames
+        // could not be named anyway.
+        let mut first = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(std::fs::File::open("/proc/kallsyms").ok()?),
+            &mut first,
+        )
+        .ok()?;
+        if first
+            .split_whitespace()
+            .next()
+            .and_then(|addr| u64::from_str_radix(addr, 16).ok())
+            == Some(0)
+        {
+            return Some(Self::of(Vec::new()));
+        }
         let text = std::fs::read_to_string("/proc/kallsyms").ok()?;
         let symbols: Vec<(u64, String)> = text
             .lines()

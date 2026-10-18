@@ -14225,3 +14225,22 @@ run here skipped. None is a regression; each is to be taken up.
   `http-server-stdlib/a-large-listing` (`on-cpu` 1.31 s against the
   handler's 2.09 s, 22 ms allowed); `cpython-perf-map` and
   `sqlite3-stripped` miss by a few milliseconds, run to run.
+
+### Taken up the same day: a zeroed `/proc/kallsyms` was parsed whole
+
+With CAP_PERFMON, a profile's callchains carry a kernel half, and the first
+drain that met one parsed all of `/proc/kallsyms` (18 MB, 395 000 lines):
+867 ms of a debug build's round, inside the window, on a machine where
+`kptr_restrict` zeroes every address and no kernel frame can be named. That
+one round was groups 2, 3 and 4 above: the profile's ring overflowed during
+it (`flame_functions_weigh_...`: 120 samples of 798; `dwarf_recovers_...`:
+280 in `spin`), the cost tests' steady window opened after it and saw 0.0 ms
+(`each_mode_copies_...`), and every poller of the session waited on it
+(`a_session_reads_its_slow_requests_...`: 7 readings of 18). A zeroed table
+is now known from its first line (`KernelSymbols::read`); `cpu.profile` on a
+spinner went from 958 ms of cpu to 129 ms, and the four tests pass with the
+capabilities. A live `omn top` still has rounds of 0.7 to 1 s in the debug
+build -- 19 machine-wide sources, 2.7 s of cpu in 3 s -- and none in
+release (`cpu.util@system` 12 readings of 12, 1.5 s of cpu), where only the
+10 ms drains (`cpu.profile`, `mem.faults`, `sched.wakeup`, `io.latency`)
+run late, 76 to 79 times, by at most 170 ms.
