@@ -54,6 +54,7 @@ pub mod render;
 pub mod request;
 pub mod resolve;
 pub mod scalar;
+pub mod selftest;
 pub mod session;
 pub mod stack;
 pub mod style;

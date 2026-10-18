@@ -93,7 +93,8 @@ impl Cli {
             | Command::Formats(_)
             | Command::Validate(_)
             | Command::Diff(_)
-            | Command::Join(_) => false,
+            | Command::Join(_)
+            | Command::Selftest(_) => false,
         };
         (!launches).then(|| {
             format!(
@@ -124,11 +125,15 @@ pub enum Command {
     Top(Box<TopArgs>),
     /// Apply join rules to a stored run: the query tier, after the run.
     Join(JoinArgs),
+    /// What this machine serves: every source listed, and run briefly, with why
+    /// each one that does not attach does not.
+    Selftest(SelftestArgs),
 }
 
 /// The subcommand names, used to tell `omn io.latency` from `omn list`.
-pub const SUBCOMMANDS: [&str; 10] = [
-    "trace", "list", "formats", "validate", "latency", "saturate", "diff", "top", "join", "help",
+pub const SUBCOMMANDS: [&str; 11] = [
+    "trace", "list", "formats", "validate", "latency", "saturate", "diff", "top", "join",
+    "selftest", "help",
 ];
 
 #[derive(Debug, Args)]
@@ -403,6 +408,42 @@ pub struct ListArgs {
     /// out of, the requests spelled as a session's.
     #[arg(long, conflicts_with = "verify_attach")]
     pub defaults: bool,
+}
+
+/// `omn selftest`: the portability matrix's sweep, as a command
+/// (`src/selftest.rs`).
+#[derive(Debug, Args)]
+pub struct SelftestArgs {
+    /// `text` for a person, `json` for the matrix's judges.
+    #[arg(long, value_name = "FORMAT", default_value = "text", value_parser = ["text", "json"])]
+    pub format: String,
+
+    /// How long each source runs on each target.
+    #[arg(short = 'd', long, value_name = "DURATION", default_value = "300ms")]
+    pub duration: Duration,
+
+    /// Only these sources, comma-separated. Every source, when omitted.
+    #[arg(long, value_name = "SOURCE,...", value_delimiter = ',')]
+    pub sources: Vec<String>,
+
+    /// The cell's name in the document; `here-<config>` by default, as
+    /// `scripts/matrix.sh` names a cell that is not a guest.
+    #[arg(long, value_name = "NAME")]
+    pub cell: Option<String>,
+
+    /// What the machine was made to be (`caps`, `nocaps`, `nobtf`, ...), as the
+    /// matrix names its configurations.
+    #[arg(long, value_name = "CONFIG", default_value = "host")]
+    pub config: String,
+
+    /// A checkout's `target/`, holding the USDT fixture and the vertical
+    /// case's server the program-probe sources are run on.
+    #[arg(long, value_name = "DIR")]
+    pub fixtures: Option<PathBuf>,
+
+    /// Exit 1 when a source listed usable here is refused at start.
+    #[arg(long)]
+    pub strict: bool,
 }
 
 #[derive(Debug, Args)]

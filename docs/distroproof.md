@@ -22,8 +22,12 @@ cd dp && distroproof run --target rocky-8 --workdir . -- sh smoke.sh
 ```
 
 `smoke.sh` is whatever is being checked; the first run's is in the finding
-below. The matrix over every image (`distroproof.toml`) is task 3 of the
-phase and not written yet.
+below. What a guest runs for the matrix is the sweep, which the release
+carries: `omn selftest --format json --cell <image> --config <variant>`
+lists every source with its reasons and runs each for 300 ms on a launched
+program and on the machine, about two minutes, and its document is the cell
+`tests/portability.rs` judges on the host. The matrix over every image
+(`distroproof.toml`) is task 3 of the phase and not written yet.
 
 ## The distributions
 

@@ -92,8 +92,11 @@ The two removals run as root so each differs from `root` by exactly the thing
 removed: as uid 1000 tracefs is already unreadable, and hiding it would change
 nothing the tool can see.
 
-- **The sweep** is `sweep_this_machine`, an `#[ignore]` test in
-  `tests/portability.rs`, run inside the guest as the configured user. It asks
+- **The sweep** is `omn selftest --format json` (since 2026-10-18; it was the
+  body of `sweep_this_machine`, an `#[ignore]` test in `tests/portability.rs`,
+  which now runs the command and writes the cell), run inside the guest as
+  the configured user. A machine needs the release and nothing else for it,
+  which is what a distroproof guest has (`docs/distroproof.md`). It asks
   `omn list <source>` for every source and records the listing verbatim, then
   runs each source on up to two targets -- a launched program and the whole
   machine, the two that need no setup; a source that takes neither is run on a

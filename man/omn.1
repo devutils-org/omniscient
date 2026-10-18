@@ -59,6 +59,12 @@ omn \- one vocabulary for system observability
 .I run
 .RB [ \-\-against
 .IR run ]
+.br
+.B omn selftest
+.RB [ \-\-format
+.IR text | json ]
+.RB [ \-\-sources
+.IR source,... ]
 .SH DESCRIPTION
 .B omn
 describes a measurement along five axes and refuses the combinations that cannot
@@ -327,6 +333,33 @@ An interactive terminal view of what
 .B omn
 measures, live or from a recording. See
 .BR "THE VIEW" .
+.TP
+.B selftest \fR[\fB\-\-format\fR text|json] [\fB\-\-sources\fR \fIsource,...\fR] [\fB\-d\fR \fIduration\fR]
+What this machine serves. Every source is listed, as
+.B omn list
+answers it with its reasons, and run for
+.I duration
+(300ms by default) on a launched program and on the machine, by this same
+binary as a separate program, so that the answer is the one a user meets
+with the capabilities the binary carries. Prints one line a source -- usable
+or not here, and for each target whether it attached or why not -- and
+counts the sources listed usable that were refused at start, which should be
+none.
+.B \-\-format json
+writes the portability matrix's cell, which
+.B scripts/matrix.sh
+and distroproof's guests record and the suite's judges read
+(\fIdocs/portability.md\fR, \fIdocs/distroproof.md\fR);
+.B \-\-cell
+and
+.B \-\-config
+name it,
+.B \-\-fixtures
+points at a checkout's \fItarget/\fR for the program-probe sources' fixtures,
+and
+.B \-\-strict
+exits 1 when a source listed usable is refused at start. A full sweep takes
+about two minutes.
 .SH OPTIONS
 .SS Target
 .TP

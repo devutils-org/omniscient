@@ -10,8 +10,9 @@
 //!
 //! Two halves, the way the bench is built:
 //!
-//! - **`sweep_this_machine`** is `#[ignore]`: it measures whatever machine it
-//!   runs on and writes the cell's documents under `target/matrix/cells/`.
+//! - **`sweep_this_machine`** is `#[ignore]`: it runs `omn selftest` on
+//!   whatever machine it runs on (`src/selftest.rs`, the sweep made a
+//!   command) and writes the cell's documents under `target/matrix/cells/`.
 //!   `scripts/matrix.sh` runs it inside each guest; the CI runs it on the
 //!   hosted runner, which is a cell of its own.
 //! - **Everything else runs in the suite and is cheap**: it reads the cells on
@@ -25,10 +26,8 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -225,18 +224,26 @@ fn parse_listing(text: &str) -> (Here, Option<String>, Vec<Backend>) {
             // A requirement may carry a prototype, which has spaces in it --
             // `raw_tracepoint:kfree(long unsigned int, void *)` -- so it ends at
             // the first space outside parentheses, not at the first space.
-            let mut depth = 0usize;
-            let end = rest
-                .char_indices()
-                .find(|&(_, c)| {
-                    match c {
-                        '(' => depth += 1,
-                        ')' => depth = depth.saturating_sub(1),
-                        _ => {}
-                    }
-                    depth == 0 && c.is_whitespace()
-                })
-                .map_or(rest.len(), |(at, _)| at);
+            // `fentry:do_fsync or vfs_fsync` names alternatives, and is one
+            // requirement for as long as an ` or <name>` follows.
+            let word_end = |from: usize| {
+                let mut depth = 0usize;
+                rest[from..]
+                    .char_indices()
+                    .find(|&(_, c)| {
+                        match c {
+                            '(' => depth += 1,
+                            ')' => depth = depth.saturating_sub(1),
+                            _ => {}
+                        }
+                        depth == 0 && c.is_whitespace()
+                    })
+                    .map_or(rest.len(), |(at, _)| from + at)
+            };
+            let mut end = word_end(0);
+            while rest[end..].starts_with(" or ") {
+                end = word_end(end + " or ".len());
+            }
             let (needs, answer) = rest.split_at(end);
             let answer = answer.trim();
             let (state, detail) = if answer == "available" {
@@ -293,352 +300,6 @@ fn omn() -> PathBuf {
         .unwrap_or_else(|| root().join("target/debug/omn"))
 }
 
-/// Runs a command with a watchdog, and returns its exit code (`None` when it
-/// had to be killed), its output and how long it took.
-fn run_bounded(command: &mut Command, limit: Duration) -> (Option<i32>, String, String, u64) {
-    let started = Instant::now();
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|error| panic!("cannot run {command:?}: {error}"));
-    // Read both pipes on threads, so a chatty child cannot fill one and block
-    // while the watchdog waits on the other.
-    let mut out = child.stdout.take().expect("piped");
-    let mut err = child.stderr.take().expect("piped");
-    let out = std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = out.read_to_end(&mut buffer);
-        buffer
-    });
-    let err = std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = err.read_to_end(&mut buffer);
-        buffer
-    });
-    let code = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.code(),
-            Ok(None) if started.elapsed() > limit => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(error) => panic!("waiting on {command:?}: {error}"),
-        }
-    };
-    let out = String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned();
-    let err = String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned();
-    (code, out, err, started.elapsed().as_millis() as u64)
-}
-
-/// The program a launched run starts: a little cpu, a few files, a sleep --
-/// enough for every launch-capable collector to have something to attach to,
-/// and long enough that the run's duration ends it rather than its exit.
-const WORKLOAD: [&str; 3] = [
-    "/bin/sh",
-    "-c",
-    "i=0; while [ $i -lt 3000 ]; do i=$((i+1)); done; cat /proc/self/status >/dev/null; \
-     ls / >/dev/null; sleep 2",
-];
-
-/// One way to run a source: the target kind, what goes before the options
-/// the sweep chooses (`trace <id>` and any filter), and the target itself,
-/// which goes last because a launched program's `--` ends the options.
-struct Request {
-    target: String,
-    head: Vec<String>,
-    tail: Vec<String>,
-}
-
-/// The requests a source is run with: one per target kind that needs no
-/// setup.
-///
-/// A few sources are about a property of the target rather than the machine
-/// -- USDT probes a program has to carry -- and are given the repository's own
-/// fixtures, which `scripts/matrix.sh` builds. Without the fixture, the run
-/// refuses by naming the probes it looked for, and the judge reports it.
-fn requests(entry: &serde_json::Value) -> Vec<Request> {
-    let id = entry["id"].as_str().unwrap_or_default();
-    let targets = entry["targets"].as_object().cloned().unwrap_or_default();
-
-    let fixture = root().join("target/omn-usdt-fixture/fixture");
-    let fixture = fixture.to_string_lossy().into_owned();
-    let server = root().join("target/omn-vertical/server");
-    let server = server.to_string_lossy().into_owned();
-    let (launch, extra): (Vec<String>, Vec<String>) = match id {
-        "runtime.gc" => (vec![fixture, "gc".into(), "5".into(), "20".into()], vec![]),
-        "runtime.alloc" => (vec![fixture, "alloc".into(), "50".into()], vec![]),
-        "runtime.custom" => (
-            vec![fixture, "ticks".into(), "50".into()],
-            vec![
-                "--filter".into(),
-                "provider == 'omn_fixture' && probe == 'tick'".into(),
-            ],
-        ),
-        "net.request" => (
-            vec![server, "/tmp/omn-matrix-server-data".into(), "0:0".into()],
-            vec![],
-        ),
-        _ => (WORKLOAD.iter().map(|s| s.to_string()).collect(), vec![]),
-    };
-    let head: Vec<String> = ["trace".to_owned(), id.to_owned()]
-        .into_iter()
-        .chain(extra)
-        .collect();
-
-    let mut out = Vec::new();
-    let mut push = |target: &str, tail: Vec<String>| {
-        out.push(Request {
-            target: target.to_owned(),
-            head: head.clone(),
-            tail,
-        })
-    };
-    // Launch and system are the two targets every machine can offer without
-    // setting anything up, and they reach different code: a launched program
-    // goes through the gate, a system target through per-cpu events. A
-    // source that declares neither is run on the first target it does declare.
-    if targets.contains_key("launch") {
-        push(
-            "launch",
-            std::iter::once("--".to_owned()).chain(launch).collect(),
-        );
-    }
-    if targets.contains_key("system") {
-        push("system", vec!["--system".to_owned()]);
-    }
-    if !targets.contains_key("launch") && !targets.contains_key("system") {
-        let fallback = [
-            ("cpu", vec!["--cpu".to_owned(), "0".into()]),
-            ("iface", vec!["--iface".to_owned(), "lo".into()]),
-            ("pid", vec!["--pid".to_owned(), "1".into()]),
-            ("cgroup", vec!["--cgroup".to_owned(), "/".into()]),
-        ];
-        if let Some((kind, tail)) = fallback
-            .into_iter()
-            .find(|(kind, _)| targets.contains_key(*kind))
-        {
-            push(kind, tail);
-        }
-    }
-    out
-}
-
-/// The mode and emit a request is run with: the first combination the
-/// validator accepts that this machine also resolves, or failing that the
-/// first the validator accepts, so the refusal is recorded.
-///
-/// Validation is asked without the machine (`--no-resolve`): which
-/// combinations mean something is the catalog's question. Resolution is then
-/// asked per combination because `omn list` answers for a source, not for a
-/// mode -- `mem.numa` is usable here through `/proc` and its first mode,
-/// `sample`, needs a PMU -- and the claim under test is that a source listed
-/// usable has *some* request that runs.
-fn choose(omn: &PathBuf, entry: &serde_json::Value, request: &Request) -> Vec<String> {
-    let list = |key: &str| -> Vec<String> {
-        entry[key]
-            .as_array()
-            .map(|all| {
-                all.iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let emits = list("emits");
-    let mut preferred: Vec<String> = [
-        "summary", "hist", "rate", "timeline", "topk", "raw", "stack",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .filter(|e| emits.contains(e))
-    .collect();
-    let rest: Vec<String> = emits
-        .into_iter()
-        .filter(|e| !preferred.contains(e))
-        .collect();
-    preferred.extend(rest);
-    let modes = list("modes");
-    let options = |mode: &str, emit: &str| -> Vec<String> {
-        ["-m", mode, "-e", emit, "-d", "300ms"]
-            .map(str::to_owned)
-            .to_vec()
-    };
-    let mut valid = None;
-    for mode in &modes {
-        for emit in &preferred {
-            let args: Vec<String> = request
-                .head
-                .iter()
-                .cloned()
-                .chain(options(mode, emit))
-                .chain(["--no-resolve".into(), "--dump-request".into()])
-                .chain(request.tail.iter().cloned())
-                .collect();
-            let (code, _, _, _) =
-                run_bounded(Command::new(omn).args(&args), Duration::from_secs(20));
-            if code != Some(0) {
-                continue;
-            }
-            valid.get_or_insert_with(|| options(mode, emit));
-            let resolve: Vec<String> = request
-                .head
-                .iter()
-                .cloned()
-                .chain(options(mode, emit))
-                .chain(["--dump-resolved".into()])
-                .chain(request.tail.iter().cloned())
-                .collect();
-            let (code, _, _, _) =
-                run_bounded(Command::new(omn).args(&resolve), Duration::from_secs(20));
-            if code == Some(0) {
-                return options(mode, emit);
-            }
-            // One emit is enough to learn whether this mode resolves.
-            break;
-        }
-    }
-    valid.unwrap_or_else(|| {
-        options(
-            modes.first().map_or("trace", String::as_str),
-            preferred.first().map_or("summary", String::as_str),
-        )
-    })
-}
-
-fn sweep(name: &str, config: &str) -> Sweep {
-    let started = Instant::now();
-    let omn = omn();
-    assert!(
-        omn.exists(),
-        "{} does not exist: run `make` first",
-        omn.display()
-    );
-    let catalog = Command::new(&omn)
-        .args(["list", "--format", "json"])
-        .output()
-        .expect("omn list runs");
-    assert!(catalog.status.success(), "omn list --format json failed");
-    let catalog: Vec<serde_json::Value> =
-        serde_json::from_slice(&catalog.stdout).expect("the catalog is JSON");
-
-    let mut sources = Vec::new();
-    let mut environment = serde_json::Value::Null;
-    for entry in &catalog {
-        let id = entry["id"].as_str().expect("an id").to_owned();
-        let listing = Command::new(&omn)
-            .args(["list", &id, "--color", "never"])
-            .output()
-            .expect("omn list <source> runs");
-        let listing = String::from_utf8_lossy(&listing.stdout).into_owned();
-        let degraded: BTreeMap<String, String> = entry["backends"]
-            .as_array()
-            .map(|all| {
-                all.iter()
-                    .filter_map(|b| {
-                        Some((
-                            b["id"].as_str()?.to_owned(),
-                            b["degraded"].as_str()?.to_owned(),
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let mut runs = Vec::new();
-        for request in requests(entry) {
-            let options = choose(&omn, entry, &request);
-            let args: Vec<String> = request
-                .head
-                .iter()
-                .chain(&options)
-                .chain(&request.tail)
-                .cloned()
-                .collect();
-            // Resolve first, for the backend's id: a run's own output names
-            // it too, but in prose.
-            let resolve: Vec<String> = request
-                .head
-                .iter()
-                .chain(&options)
-                .cloned()
-                .chain(["--dump-resolved".into(), "--format".into(), "json".into()])
-                .chain(request.tail.iter().cloned())
-                .collect();
-            let (code, out, _, _) =
-                run_bounded(Command::new(&omn).args(&resolve), Duration::from_secs(20));
-            let resolved: Option<serde_json::Value> = (code == Some(0))
-                .then(|| serde_json::from_str(&out).ok())
-                .flatten();
-            let backend = resolved
-                .as_ref()
-                .and_then(|r| r[0]["backend"]["id"].as_str().map(str::to_owned));
-            if environment.is_null() {
-                if let Some(r) = &resolved {
-                    environment = r[0]["environment"].clone();
-                }
-            }
-            let (code, stdout, stderr, elapsed_ms) =
-                run_bounded(Command::new(&omn).args(&args), Duration::from_secs(30));
-            runs.push(Run {
-                target: request.target,
-                args,
-                backend,
-                code,
-                elapsed_ms,
-                stdout: stdout.lines().take(40).collect::<Vec<_>>().join("\n"),
-                stderr: stderr.chars().take(6000).collect(),
-            });
-        }
-        let mut source = Source {
-            id,
-            here: Here::No,
-            here_backend: None,
-            backends: Vec::new(),
-            runs,
-            listing,
-            degraded,
-        };
-        source.reparse();
-        sources.push(source);
-    }
-
-    let kernel_release = fs::read_to_string("/proc/sys/kernel/osrelease")
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    let flag = |name: &str| std::env::var(name).is_ok_and(|v| v == "1");
-    Sweep {
-        cell: Cell {
-            name: name.to_owned(),
-            kernel_release,
-            config: config.to_owned(),
-            uid: unsafe { libc::getuid() },
-            btf_hidden: flag("OMN_MATRIX_BTF_HIDDEN"),
-            tracefs_hidden: flag("OMN_MATRIX_TRACEFS_HIDDEN"),
-            environment,
-            elapsed_s: started.elapsed().as_secs_f64(),
-            build: build_of(&omn),
-        },
-        sources,
-    }
-}
-
-/// A 64-bit FNV-1a hash of a binary's bytes, in hex: enough to tell two builds
-/// apart, and nothing to depend on.
-fn build_of(binary: &std::path::Path) -> Option<String> {
-    let bytes = fs::read(binary).ok()?;
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    Some(format!("{hash:016x}"))
-}
-
 /// Measures whatever machine this runs on, and writes the cell.
 ///
 /// `OMN_MATRIX_CELL` names the cell and `OMN_MATRIX_CONFIG` its
@@ -647,13 +308,33 @@ fn build_of(binary: &std::path::Path) -> Option<String> {
 #[test]
 #[ignore = "measures the machine it runs on; scripts/matrix.sh runs it in each guest"]
 fn sweep_this_machine() {
-    let release = fs::read_to_string("/proc/sys/kernel/osrelease")
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
     let config = std::env::var("OMN_MATRIX_CONFIG").unwrap_or_else(|_| "host".into());
-    let name = std::env::var("OMN_MATRIX_CELL").unwrap_or_else(|_| format!("{release}-{config}"));
-    let sweep = sweep(&name, &config);
+    let name = std::env::var("OMN_MATRIX_CELL").unwrap_or_else(|_| format!("here-{config}"));
+    let omn = omn();
+    assert!(
+        omn.exists(),
+        "{} does not exist: run `make` first",
+        omn.display()
+    );
+    // The sweep is `omn selftest` (`src/selftest.rs`), the same command a
+    // distroproof guest or a user runs; this test only names the cell and
+    // writes it where the judges read cells.
+    let fixtures = root().join("target");
+    let output = Command::new(&omn)
+        .args([
+            "selftest", "--format", "json", "--cell", &name, "--config", &config,
+        ])
+        .arg("--fixtures")
+        .arg(&fixtures)
+        .output()
+        .expect("omn selftest runs");
+    assert!(
+        output.status.success(),
+        "omn selftest failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut sweep: Sweep = serde_json::from_slice(&output.stdout).expect("the sweep is a cell");
+    sweep.sources.iter_mut().for_each(Source::reparse);
     let dir = cells_dir().join(&name);
     fs::create_dir_all(&dir).expect("the cell's directory");
     let path = dir.join("sweep.json");
@@ -2406,6 +2087,44 @@ sched.lock — Kernel lock contention
     assert_eq!(backends[1].requires[0].detail, "tracefs is not mounted");
     assert_eq!(backends[1].requires[1].state, State::Unverified);
     assert_eq!(backends[1].requires[1].needs, "symbols:x");
+}
+
+/// `omn selftest --format json` is a cell the judges read: the command a
+/// distroproof guest or a user runs writes the document this file judges, so
+/// the two cannot drift apart. One source, so it costs a second.
+#[test]
+fn a_selftest_of_one_source_is_a_cell_the_judges_read() {
+    let output = Command::new(omn())
+        .args([
+            "selftest",
+            "--format",
+            "json",
+            "--sources",
+            "cpu.util",
+            "-d",
+            "200ms",
+        ])
+        .output()
+        .expect("omn selftest runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut sweep: Sweep =
+        serde_json::from_slice(&output.stdout).expect("the selftest's document is a cell");
+    sweep.sources.iter_mut().for_each(Source::reparse);
+    assert_eq!(sweep.cell.name, "here-host");
+    assert_eq!(sweep.sources.len(), 1);
+    let source = &sweep.sources[0];
+    assert_eq!(source.id, "cpu.util");
+    assert_eq!(source.here, Here::Yes, "{}", source.listing);
+    assert!(
+        source.runs.iter().any(Run::attached),
+        "cpu.util reads /proc/stat and attaches anywhere: {:?}",
+        source.runs
+    );
+    assert!(judge(&sweep, KNOWN).values().all(Vec::is_empty));
 }
 
 /// The parser is checked against the binary's real listing too: a change to

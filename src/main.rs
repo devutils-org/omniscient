@@ -268,6 +268,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Saturate(args) => saturate(args),
         Command::Diff(args) => diff(args),
         Command::Top(args) => top(*args),
+        Command::Selftest(args) => selftest(args),
         Command::Join(args) => match omn::cli::join(&args) {
             Ok(out) => {
                 print!("{out}");
@@ -2518,6 +2519,30 @@ fn print_session(
         }
     }
     Ok(())
+}
+
+/// `omn selftest`: every source listed and run briefly by this same binary,
+/// as a separate program, so that the answer is the one a user meets.
+fn selftest(args: omn::cli::SelftestArgs) -> anyhow::Result<ExitCode> {
+    let omn = std::env::current_exe()?;
+    let options = omn::selftest::Options {
+        cell: args.cell,
+        config: args.config,
+        duration: std::time::Duration::from_nanos(args.duration.as_nanos()),
+        sources: args.sources,
+        fixtures: args.fixtures,
+    };
+    let sweep = omn::selftest::sweep(&omn, &options).map_err(anyhow::Error::msg)?;
+    if args.format == "json" {
+        println!("{}", serde_json::to_string_pretty(&sweep)?);
+    } else {
+        print!("{}", sweep.text());
+    }
+    Ok(if args.strict && !sweep.refused_after_yes().is_empty() {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 fn list(args: ListArgs) -> anyhow::Result<ExitCode> {
