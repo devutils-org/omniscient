@@ -238,17 +238,21 @@
   backends:
     - {id: "fs:proc", requires: ["/proc/net/snmp", "/proc/net/netstat"], cost: free}
   modes: [count, poll, snapshot]
-  emits: [raw]
+  emits: [raw, summary, rate, timeline]
   targets: {system: native}
-  keys: []
-  filter_fields: [name, section]
+  keys: [counter]
+  filter_fields: [name, counter, section]
   determinism: medium
   caveats:
     - "Every counter of /proc/net/snmp, /proc/net/netstat and /proc/net/snmp6,
        named as `nstat` names it, the section and the field run together:
        `TcpRetransSegs`, `TcpExtListenOverflows`, `Ip6InReceives`. Each event
        is one counter, `name` and `section` beside its `value`; ask for one
-       with `--filter 'name == \"TcpRetransSegs\"'`."
+       with `--filter 'name == \"TcpRetransSegs\"'`. Keyed on `counter`, a run
+       is one series per counter: `-m count -k counter -e summary` over a
+       workload is `nstat` before and after it, and `-m poll -k counter -e
+       rate` is `nstat` every interval. A gauge (below) is a level, not an
+       increment, and its rate means nothing."
     - "A poll or a count reports increments, and only of the counters that
        moved, as `nstat` does: a counter absent from an interval moved by zero
        in it. The baseline is read before the observed program starts. A

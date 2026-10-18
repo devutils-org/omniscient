@@ -152,6 +152,9 @@ impl SnmpCollector {
         let mut attrs = vec![
             value,
             Attr::text("name", name),
+            // The `counter` key reads this: one series per counter, so a run
+            // keyed on it is `nstat`'s table.
+            Attr::text("counter", name),
             Attr::text("section", counter.section.clone()),
         ];
         if is_gauge(name) {
