@@ -35,6 +35,11 @@
     - "Reads are attributable to the submitter (IDENTITY); writes are not, they
        leave through writeback in a kworker and fall back to file:dev+ino (KEY)."
     - "Request pointers get recycled: the key is (ptr, open_ts), not the pointer."
+    - "A request held in a scheduler queue or a plug is issued by kblockd's
+       kworker, not by the task that submitted it: the task that inserted it
+       is stamped at block_rq_insert and is the one charged at the issue, so a
+       dispatched request stays the program's. One issued straight to the
+       device was never inserted, and its issuer is its submitter."
     - "A cold run and a warm run differ by an order of magnitude. Declare which
        one the protocol wants and enforce it."
     - "`--emit hist` alone, in `trace`, with no filter and no key but `dev`, is

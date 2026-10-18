@@ -22,7 +22,19 @@ Branch `feat/w25-io`. Done sequentially by one agent.
   CAP_BPF. Wanted: `omn trace io.vfs -m count -k op -e rate --system -d 2s`
   beside `vfsstat`.
 
-## Not done
+## Added after the wave's first pass
+
+3. **A `kworker`-dispatched block request charged to its submitter**: a
+   third program, on `block_rq_insert`, stamps who inserted each request in
+   an LRU map; `io.latency`'s issue program reads the stamp before it
+   compares the target and records the inserter in place of the kworker.
+   Reasoned: the program builds against this kernel and an instruction test
+   checks the stamp is taken before the comparison. Wanted: the system-wide
+   run that showed `kworker/13:1H` issuing other programs' writes, rerun
+   (`omn trace io.latency -e raw --system -d 10s` beside a buffered `dd ...
+   conv=fsync`), every write charged to `dd`.
+
+## Not done (as it stood before)
 
 1. **A `kworker`-dispatched block request charged to the bio's submitter**:
    a `block_rq_insert` program carrying the submitter to the issue, in the

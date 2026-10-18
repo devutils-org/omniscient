@@ -285,6 +285,20 @@ pub const NO_OPEN: u32 = 2;
 const ENTRY_KEY_BYTES: usize = 8;
 const ENTRY_VALUE_BYTES: usize = 40;
 
+/// Who inserted a request into its queue, read at `block_rq_insert` in that
+/// task's context: thread id, process id and name, 24 bytes.
+///
+/// `io.latency` opens at `block_rq_issue`, and the task current there is the
+/// submitter only when it issued its own request. A request held in a
+/// scheduler queue or a plug and dispatched later is issued by kblockd's
+/// `kworker`, and charging it to the kworker loses it from the program's
+/// rows. The insert stamp is what the issue reads first.
+const SUBMITTER_VALUE_BYTES: usize = 24;
+/// Requests inserted and not yet issued at once; an LRU, so one never issued
+/// is evicted rather than held.
+const MAX_SUBMITTERS: u32 = 16384;
+const BPF_MAP_TYPE_LRU_HASH: u32 = 9;
+
 const VAL_OPEN_TS: i16 = 0;
 const VAL_TID: i16 = 8;
 const VAL_TGID: i16 = 12;
@@ -513,6 +527,35 @@ fn check_signature(btf: &Btf, tracepoint: &str, accepted: &[&[&str]]) -> Result<
 /// run never sees leaves its entry behind, and `still_in_flight` reports how
 /// many there were rather than letting them look like requests that took no
 /// time.
+/// The program on `block_rq_insert`: who put the request in the queue.
+fn insert_instructions(btf: &Btf, submitters_fd: i32) -> Result<Vec<Insn>, String> {
+    check_signature(btf, "block_rq_insert", &[&REQUEST_SIGNATURE])?;
+    const KEY: i16 = -8;
+    const VALUE: i16 = -32;
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::ldx(BPF_DW, 1, 6, 0));
+    program.push(Insn::stx(BPF_DW, R10, KEY, 1));
+    program.push(Insn::call(helper::GET_CURRENT_PID_TGID));
+    program.push(Insn::stx(BPF_DW, R10, VALUE, 0));
+    program.push(Insn::mov64_reg(1, R10));
+    program.push(Insn::add64_imm(1, (VALUE + 8) as i32));
+    program.push(Insn::mov64_imm(2, 16));
+    program.push(Insn::call(helper::GET_CURRENT_COMM));
+    program.extend(Insn::load_map_fd(1, submitters_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
 fn open_instructions(
     btf: &Btf,
     stage: Stage,
@@ -520,6 +563,7 @@ fn open_instructions(
     inflight_fd: i32,
     counters_fd: i32,
     storage_fd: Option<i32>,
+    submitters_fd: Option<i32>,
 ) -> Result<Vec<Insn>, String> {
     let tracepoint = stage
         .opens_at()
@@ -543,17 +587,40 @@ fn open_instructions(
     program.push(Insn::rsh64_imm(0, 32));
     program.push(Insn::stx(BPF_W, R10, ENTRY_VALUE + VAL_TGID, 0));
 
-    // A run observes one process. The thread group is known before the program
-    // loads and never changes, so the comparison is written into the
-    // instruction stream rather than looked up in a map.
-    kept.push(&mut program, ENTRY_VALUE, "done", "open_kept");
-
     // `bpf_get_current_comm` writes all sixteen bytes or zeroes them, so the
     // entry carries no stack left over from whatever ran before.
     program.push(Insn::mov64_reg(1, R10));
     program.push(Insn::add64_imm(1, (ENTRY_VALUE + VAL_COMM) as i32));
     program.push(Insn::mov64_imm(2, 16));
     program.push(Insn::call(helper::GET_CURRENT_COMM));
+
+    // Who inserted it, where `block_rq_insert` saw it: the submitter of a
+    // request a kworker dispatched, in place of the kworker. A request that
+    // skipped the queue was never inserted, and its issuer is its submitter.
+    if let Some(submitters) = submitters_fd {
+        program.push(Insn::stx(BPF_DW, R10, ENTRY_KEY, 7));
+        program.extend(Insn::load_map_fd(1, submitters));
+        program.push(Insn::mov64_reg(2, R10));
+        program.push(Insn::add64_imm(2, ENTRY_KEY as i32));
+        program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+        program.jump_to("submitter_known", Insn::jeq_imm(0, 0, 0));
+        program.push(Insn::ldx(BPF_DW, 1, 0, 0));
+        program.push(Insn::stx(BPF_DW, R10, ENTRY_VALUE + VAL_TID, 1));
+        program.push(Insn::ldx(BPF_DW, 1, 0, 8));
+        program.push(Insn::stx(BPF_DW, R10, ENTRY_VALUE + VAL_COMM, 1));
+        program.push(Insn::ldx(BPF_DW, 1, 0, 16));
+        program.push(Insn::stx(BPF_DW, R10, ENTRY_VALUE + VAL_COMM + 8, 1));
+        program.extend(Insn::load_map_fd(1, submitters));
+        program.push(Insn::mov64_reg(2, R10));
+        program.push(Insn::add64_imm(2, ENTRY_KEY as i32));
+        program.push(Insn::call(helper::MAP_DELETE_ELEM));
+        program.label("submitter_known");
+    }
+
+    // A run observes one process. The thread group is known before the program
+    // loads and never changes, so the comparison is written into the
+    // instruction stream rather than looked up in a map.
+    kept.push(&mut program, ENTRY_VALUE, "done", "open_kept");
 
     // The request, from the same task at the same moment. Zero when there is
     // no map to read, so the entry never carries stack left over.
@@ -1106,6 +1173,10 @@ pub struct BlockProgram {
     pub status_is_errno: bool,
     /// The processes a process target started, followed from the fork.
     descendants: Option<Descendants>,
+    /// `io.latency`'s insert stamp: the map, the program and its link.
+    _submitters: Option<OwnedFd>,
+    insert_program: Option<OwnedFd>,
+    insert_link: Option<OwnedFd>,
 }
 
 impl BlockProgram {
@@ -1224,6 +1295,32 @@ impl BlockProgram {
         // happened to open after it, which is the same thing one tick later.
         // What neither order can produce is a measurement from an entry nobody
         // wrote, because the lookup that fails is the only path to it.
+        // `io.latency`'s submitters, stamped at the insert, attached before
+        // the issue that reads them.
+        let (submitters, insert_program, insert_link) = if stage == Stage::Latency
+            && histogram.is_none()
+            && btf.has_type("btf_trace_block_rq_insert")
+        {
+            let map = syscall::map_create(
+                BPF_MAP_TYPE_LRU_HASH,
+                ENTRY_KEY_BYTES as u32,
+                SUBMITTER_VALUE_BYTES as u32,
+                MAX_SUBMITTERS,
+                "omn_blk_subm",
+            )
+            .map_err(|error| map_failure("block submitter map", error))?;
+            let program = load(
+                &insert_instructions(btf, map.as_raw_fd())?,
+                "omn_blk_insert",
+            )?;
+            let link = syscall::raw_tracepoint_open("block_rq_insert", program.as_raw_fd())
+                .map_err(|error| {
+                    format!("cannot attach to the `block_rq_insert` tracepoint: {error}")
+                })?;
+            (Some(map), Some(program), Some(link))
+        } else {
+            (None, None, None)
+        };
         let (open_program, open_link) = match stage.opens_at() {
             Some(tracepoint) => {
                 let open = if histogram.is_some() {
@@ -1242,6 +1339,7 @@ impl BlockProgram {
                         inflight_fd,
                         counters.as_raw_fd(),
                         storage_fd,
+                        submitters.as_ref().map(AsRawFd::as_raw_fd),
                     )?
                 };
                 let program = load(&open, "omn_blk_open")?;
@@ -1272,6 +1370,9 @@ impl BlockProgram {
             no_request_identity,
             status_is_errno,
             descendants,
+            _submitters: submitters,
+            insert_program,
+            insert_link,
         })
     }
 
@@ -1317,6 +1418,7 @@ impl BlockProgram {
     /// requests. Detached, they run no more; loaded, their account stays
     /// readable until the collector is dropped.
     pub fn detach(&mut self) {
+        self.insert_link = None;
         self.open_link = None;
         self.close_link = None;
     }
@@ -1388,6 +1490,7 @@ impl BlockProgram {
         crate::bpf::attach::fentry::skipped(
             self.open_program
                 .iter()
+                .chain(self.insert_program.iter())
                 .chain(std::iter::once(&self.close_program)),
         ) + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
@@ -1625,7 +1728,7 @@ mod tests {
                 ];
             if stage.opens_at().is_some() {
                 programs.push(
-                    open_instructions(btf, stage, Kept::only(Submitter::Any), 3, 5, Some(6))
+                    open_instructions(btf, stage, Kept::only(Submitter::Any), 3, 5, Some(6), None)
                         .unwrap_or_else(|reason| panic!("{stage:?} open: {reason}")),
                 );
                 programs.push(
@@ -1708,6 +1811,35 @@ mod tests {
         }
     }
 
+    /// The issue reads who inserted the request before it compares the
+    /// target: the submitter of a request a kworker dispatched is the one
+    /// compared and recorded, and the insert program builds against this
+    /// kernel.
+    #[test]
+    fn the_issue_reads_the_insert_s_submitter_before_the_target_is_compared() {
+        let Some(btf) = kernel_btf() else { return };
+        insert_instructions(btf, 7).expect("the insert program");
+        let open = open_instructions(
+            btf,
+            Stage::Latency,
+            Kept::only(Submitter::Process(4242)),
+            3,
+            5,
+            Some(6),
+            Some(7),
+        )
+        .expect("a program");
+        let deleted = open
+            .iter()
+            .position(|insn| insn.code == 0x85 && insn.imm == helper::MAP_DELETE_ELEM)
+            .expect("the stamp taken");
+        let compared = open
+            .iter()
+            .position(|insn| insn.imm == 4242)
+            .expect("the comparison");
+        assert!(deleted < compared);
+    }
+
     /// A machine-wide program keeps every request on the machine, so it must
     /// carry no comparison against a process; a targeted one must carry
     /// exactly one, at the moment the submitting task is the current task.
@@ -1721,6 +1853,7 @@ mod tests {
             3,
             5,
             Some(6),
+            None,
         )
         .expect("a program");
         assert!(
@@ -1734,6 +1867,7 @@ mod tests {
             3,
             5,
             Some(6),
+            None,
         )
         .expect("a program");
         assert_eq!(
@@ -1760,7 +1894,7 @@ mod tests {
                 .filter(|helper| **helper == helper::MAP_LOOKUP_ELEM)
                 .count()
         };
-        let open = open_instructions(btf, Stage::Latency, kept, 3, 5, Some(6)).expect("open");
+        let open = open_instructions(btf, Stage::Latency, kept, 3, 5, Some(6), None).expect("open");
         let open_alone = open_instructions(
             btf,
             Stage::Latency,
@@ -1768,6 +1902,7 @@ mod tests {
             3,
             5,
             Some(6),
+            None,
         )
         .expect("open");
         assert_eq!(open.iter().filter(|insn| insn.imm == 4242).count(), 1);
@@ -1785,7 +1920,7 @@ mod tests {
             descendants: Some(9),
         };
         let open_thread =
-            open_instructions(btf, Stage::Latency, thread, 3, 5, Some(6)).expect("open");
+            open_instructions(btf, Stage::Latency, thread, 3, 5, Some(6), None).expect("open");
         assert_eq!(lookups(&open_thread), lookups(&open_alone));
     }
 
@@ -2067,6 +2202,7 @@ mod tests {
             3,
             5,
             Some(6),
+            None,
         )
         .unwrap();
         assert!(reads(&issue), "the issue runs in the submitter's context");
@@ -2099,8 +2235,16 @@ mod tests {
         assert!(reads(&size));
 
         // No map, no read, and the entry's slot is still written.
-        let bare =
-            open_instructions(btf, Stage::Latency, Kept::only(Submitter::Any), 3, 5, None).unwrap();
+        let bare = open_instructions(
+            btf,
+            Stage::Latency,
+            Kept::only(Submitter::Any),
+            3,
+            5,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(!reads(&bare));
         assert!(bare
             .iter()
