@@ -22,12 +22,24 @@ cd dp && distroproof run --target rocky-8 --workdir . -- sh smoke.sh
 ```
 
 `smoke.sh` is whatever is being checked; the first run's is in the finding
-below. What a guest runs for the matrix is the sweep, which the release
-carries: `omn selftest --format json --cell <image> --config <variant>`
-lists every source with its reasons and runs each for 300 ms on a launched
-program and on the machine, about two minutes, and its document is the cell
-`tests/portability.rs` judges on the host. The matrix over every image
-(`distroproof.toml`) is task 3 of the phase and not written yet.
+below. The matrix is `distroproof.toml`, at the repository's root:
+
+```console
+scripts/release.sh                       # the archives, glibc 2.17 and musl
+scripts/distroproof/fixtures.sh          # the USDT fixtures, static
+distroproof up --no-tui --jobs 4 --json target/matrix/distroproof.json
+scripts/distroproof/cells.py target/matrix/distroproof.json
+cargo test --test portability            # the judges, over every cell
+```
+
+Each guest gets the archives, the fixtures and two scripts, never the
+checkout. `setup` installs the archive a user would (musl where there is no
+glibc loader) and grants the file capabilities on it -- or says that a kernel
+before 5.8 has none to grant -- and the command is `omn selftest --format
+json`, every source listed and run for 300 ms on a launched program and on
+the machine, as user `test`. `cells.py` writes each guest's document as a
+cell, with distroproof's `envprobe` report of the same guest beside it. 21
+targets, four at a time, take about twelve minutes.
 
 ## The distributions
 
@@ -46,6 +58,35 @@ Every other image distroproof boots (Debian 10 to 13, Ubuntu 20.04 to 24.04,
 Rocky 9, Fedora) has a glibc between 2.28 and the host's, so the same archive
 starts there; that is the glibc floor's argument, and the matrix will show it
 image by image.
+
+### The matrix, 2026-10-19
+
+| Target | Kernel | Configuration | Listed usable (of 123) |
+|---|---|---|---|
+| `debian-10` | 4.19.0-27 | nocaps (no CAP_BPF before 5.8) | 36 |
+| `debian-11` | 5.10.0-46 | caps | 41 |
+| `debian-12` | 6.1.0-54 | caps | 76 |
+| `debian-13` | 6.12.113 | caps | 82 |
+| `debian-sid` | 7.2.11 | caps | 82 |
+| `ubuntu-18.04` | 4.15.0-212 | nocaps | 36 |
+| `ubuntu-20.04` | 5.4.0-216 | nocaps | 39 |
+| `ubuntu-22.04` | 5.15.0-198 | caps | 85 |
+| `ubuntu-24.04` | 6.8.0-147 | caps | 93 |
+| `rocky-8` | 4.18.0-553 (RHEL) | caps | 59 |
+| `rocky-9` | 5.14.0-687 (RHEL) | caps | 86 |
+| `fedora-previous` | 6.17.1 | caps | 96 |
+| `fedora-latest` | 6.19.10 | caps | 96 |
+| `arch` | 7.2.9 | caps | 96 |
+| `gentoo` | 6.18.54 | caps | 96 |
+| `alpine` (musl archive) | 6.18.35-virt | caps | 85 |
+| `ubuntu-24.04-paranoid3` | 6.8.0-147 | `perf_event_paranoid` 3 | 93 |
+| `debian-12-kptr2` | 6.1.0-54 | `kptr_restrict` 2 | 76 |
+| `fedora-latest-lockdown` | 6.19.10 | `lockdown=confidentiality` | 55 |
+| `debian-12-nopmu` | 6.1.0-54 | no PMU | 76 |
+| `debian-12-root` | 6.1.0-54 | root | 94 |
+
+Every cell holds the matrix's invariants: what is listed usable attaches,
+and every refusal names its reason (`tests/portability.rs`, 26 judges).
 
 ## Findings
 
@@ -126,4 +167,41 @@ polls `cpu.util` ten times a second, attaches `sched.runqlat` over
 `bpf:raw_tp`, and the shim reads the allocations of what a shell starts.
 `debian-sid` is the first image whose `perf_event_paranoid` is 3, Debian's
 own patch, and the first on a 7.2 kernel other than the development host's.
+
+### 3. The first matrix: 158 claims the kernel then refused, five defects (fixed)
+
+The first run over the 21 targets found 158 runs of a source `omn list`
+called usable that the kernel refused at start -- the one answer worse than
+a refusal. Sorted, they were six classes; five were the tool's, each a probe
+that asked a narrower question than the attach:
+
+| Class | Where | What distroproof showed | Fix |
+|---|---|---|---|
+| Maps charged to `RLIMIT_MEMLOCK` | `debian-11` (5.10), ~45 runs | the user's limit is 64 KiB, soft and hard; before memory-cgroup accounting (5.11) BPF maps are charged to it, and the kernel's EPERM read as "needs CAP_BPF", which the binary held | the `bpf` probe creates a 1 MiB map and says the limit and its remedies where it is refused (`maps_charged_to_memlock`); `map_failure` says the same |
+| Lockdown withholds `bpf_probe_read_kernel` | `fedora-latest-lockdown`, ~45 runs | every program reading a struct rejected by the verifier | the `bpf` probe loads the smallest program calling the helper (`kernel_reads_locked_down`) |
+| No ftrace | `alpine` (`virt` kernel), 16 runs | fentry programs loaded and every attach refused with EBUSY; the kernel's config has no `CONFIG_FUNCTION_TRACER` | an fentry requirement is missing where the kernel's BTF lacks `register_ftrace_function` |
+| `folio._folio_nr_pages` | `debian-13` (6.12), 4 runs | the member is `_folio_nr_pages` on 6.8 and 6.12, `_nr_pages` from 6.17 | the page-cache programs read either |
+| Per-size THP statistics | `ubuntu-24.04` (6.8), 2 runs | `hugepages-2048kB/stats` absent where the catalog promised them from `kernel>=6.8` | the backend asks for the directory, not the version; the resolver falls back to `fs:proc` |
+
+Two more were found before this run and fixed with it: `perf_event_paranoid`
+3 (`debian-12`) refuses every perf event to a process without CAP_SYS_ADMIN,
+CAP_PERFMON included -- Debian's and Ubuntu's patch -- and the `kprobe`
+requirement now opens an event to see it, every refusal at that level saying
+so; and the guests' roots were too small for the payload (`alpine`), which
+distroproof now grows (its pull request #4).
+
+The sixth class was the matrix's own: the program-probe sources had no
+fixture in the guests. The fixtures are built statically with zig now
+(`scripts/distroproof/fixtures.sh`) and carried with the archives.
+
+**And two judges were wrong.** The uprobe-multi judge required a fallback
+below 6.6, and `rocky-9`'s 5.14 attaches through the multi link without one:
+RHEL backported it. The tool asks the kernel; the judge asked the version,
+and now does not. The gaps judge, which explains every difference between two
+cells by their resolved records, was written for cells of one userspace;
+between distributions the differences are ftrace, cgroup v2, PSI -- facts
+envprobe's report carries -- and it now leaves distroproof's cells to the
+envprobe judge (task 4).
+
+**After.** 21 of 21 targets, every cell holding the invariants.
 

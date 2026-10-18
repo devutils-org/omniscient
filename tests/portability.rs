@@ -734,17 +734,11 @@ fn uprobe_multi_by_kernel(sweep: &Sweep) -> Vec<String> {
             // The fallback's own words, not the phrase: a caveat that says a
             // source needs uprobe-multi is printed on every run of it.
             let fell_back = run.text().contains("refused a uprobe-multi link");
-            if kernel < (6, 6) && !fell_back {
-                out.push(format!(
-                    "{} ({}): attached through USDT on {}.{} without saying it fell back from \
-                     uprobe-multi:\n{}",
-                    source.id,
-                    run.target,
-                    kernel.0,
-                    kernel.1,
-                    run.text().trim()
-                ));
-            }
+            // Below 6.6 a run that did not fall back is not judged: a vendor
+            // kernel may carry uprobe-multi from a later release, and Rocky 9's
+            // 5.14 does -- it attached through the multi link, without a word
+            // of falling back, which is right. The tool asks the kernel, and a
+            // judge that asks the version would be the one wrong.
             if kernel >= (6, 6) && fell_back {
                 out.push(format!(
                     "{} ({}): fell back from uprobe-multi on {}.{}, which has it",
@@ -1378,7 +1372,16 @@ fn gaps_between(a: &Sweep, b: &Sweep, gaps: &mut Gaps) {
 /// and said, not failed, until the matrix is swept again.
 #[test]
 fn every_gap_between_two_cells_is_explained_by_their_resolved_records() {
-    let cells = cells_on_disk();
+    // The cells of one userspace, the virtme-ng guests' and the host's: there
+    // a gap is the kernel's or the configuration's, which the resolved records
+    // carry. A distroproof cell (an `envprobe.json` beside it) differs from
+    // another by its distribution too -- ftrace built or not, cgroup v2
+    // mounted or not -- facts envprobe's report carries and these records do
+    // not, so those are judged against envprobe (docs/distroproof.md).
+    let cells: Vec<_> = cells_on_disk()
+        .into_iter()
+        .filter(|(path, _)| !path.with_file_name("envprobe.json").exists())
+        .collect();
     if cells.len() < 2 {
         eprintln!(
             "skipped: {} matrix cell(s) under {}, and a gap needs two",
@@ -2036,10 +2039,16 @@ fn below_the_floor_a_version_requirement_names_the_kernel() {
     );
 }
 
+/// Below 6.6 a USDT source may attach through the multi link without falling
+/// back -- Rocky 9's 5.14 carries uprobe-multi backported -- or fall back and
+/// say so; on 6.6 and later a fallback is the defect.
 #[test]
-fn a_usdt_source_below_six_six_must_say_it_fell_back() {
+fn a_usdt_source_falls_back_from_uprobe_multi_only_where_the_kernel_lacks_it() {
     let mut cell = honest_cell("6.1", "root");
-    assert!(violations(&cell, &[]).contains_key("uprobe-multi is 6.6"));
+    assert!(
+        violations(&cell, &[]).is_empty(),
+        "a backport is not a defect"
+    );
     source(&mut cell, "runtime.custom").runs[0].stderr =
         "note: this kernel refused a uprobe-multi link (EINVAL), which Linux 6.6 introduced".into();
     assert!(violations(&cell, &[]).is_empty());
