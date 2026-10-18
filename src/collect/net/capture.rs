@@ -306,8 +306,17 @@ impl Collector for CaptureCollector {
     fn stop(&mut self) -> Vec<Event> {
         // A ring is drained one last time, unlike a polled counter: what is in
         // it now was captured inside the window, and leaving it there would
-        // lose the run's final milliseconds.
-        let events = self.sample(u64::MAX / 2).unwrap_or_default();
+        // lose the run's final milliseconds. The kernel hands a partly filled
+        // block over only once its timeout has passed, so the drain waits for
+        // that first: a run of 6 ms had 28 frames counted by the socket and
+        // none delivered. Frames that arrived during the wait are past the
+        // window's end, and are left out.
+        let closed_ns = crate::clock::monotonic_ns();
+        std::thread::sleep(StdDuration::from_millis(
+            2 * u64::from(super::afpacket::RETIRE_TOV_MS),
+        ));
+        let mut events = self.sample(u64::MAX / 2).unwrap_or_default();
+        events.retain(|event| event.ts_ns <= closed_ns + event.ts_err_ns as u64);
         self.capture = None;
         events
     }

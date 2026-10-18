@@ -61,8 +61,16 @@ Branches `feat/w25-net` (the capture header, merged first) and
   `getsockname()`: 48928 and 34084 on both sides, established and refused.
 - Accept on a launched tree: the `http.server` that `sh` started is kept
   (1 accept, `sport=8765`, `max_backlog=5`, `socketserver`'s queue size).
-- pcap: not run. `make CAPTURE=1` needs `cap_net_raw`, which the sudoers line
-  does not grant, and `tcpdump` is not installed.
+- pcap (2026-10-18, once `cap_net_raw` and `tcpdump` were granted):
+  **defect found and fixed**. A capture of `curl localhost` (6 ms) read 0
+  events while the socket said it saw 28 frames and dropped none: TPACKETv3
+  hands a partly filled block over only after its 5 ms timeout, and the last
+  drain ran before it. `stop()` now waits two timeouts, drains, and keeps
+  the frames stamped inside the window: 28 of 28, 30 of 30, and `tcpdump
+  -nr results.pcap` reads the 28. On `lo` each packet is there twice, its
+  outgoing and its incoming copy, where `tcpdump -i lo` shows one (libpcap
+  drops the outgoing copy on loopback); `--filter 'direction != "outgoing"'`
+  is the same capture, as the reference pair reads it (1851 against 1851).
 
 ## Not done
 

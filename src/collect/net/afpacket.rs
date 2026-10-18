@@ -95,7 +95,7 @@ const FRAME_SIZE: u32 = 2048;
 /// How long the kernel may hold a partly filled block before handing it over.
 /// Shorter than the drain interval, so a quiet link still reports within one
 /// tick rather than at the end of the run.
-const RETIRE_TOV_MS: u32 = 5;
+pub const RETIRE_TOV_MS: u32 = 5;
 
 /// What the kernel says it did with the ring since the last time it was asked.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
