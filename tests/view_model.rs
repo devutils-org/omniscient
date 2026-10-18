@@ -274,7 +274,7 @@ fn the_lifetime_mirror_keeps_every_field() {
         left_running: 1,
         adopted_ended: 3,
         exit_code: None,
-        signal: None,
+        signal: Some(9),
     };
     let value = serde_json::to_value(written).unwrap();
     let results = omn_view::model::Results {
@@ -286,4 +286,19 @@ fn the_lifetime_mirror_keeps_every_field() {
     let back: omn::collect::Lifetime =
         serde_json::from_value(serde_json::to_value(&read).unwrap()).unwrap();
     assert_eq!(back, written);
+    assert_eq!(read.signal, Some(9));
+    assert_eq!(read.ending().as_deref(), Some("stopped by the run"));
+    let exited = omn_view::model::Lifetime {
+        exit_code: Some(3),
+        ..read.clone()
+    };
+    assert_eq!(
+        omn_view::model::Lifetime {
+            terminated: false,
+            ..exited
+        }
+        .ending()
+        .as_deref(),
+        Some("exited 3")
+    );
 }

@@ -1343,6 +1343,16 @@ fn header(
         ));
     }
     said.push(units::duration(axis.span()));
+    // How it ended, once it has: a failure reads as one before anything else.
+    if let Some(ending) = data
+        .run
+        .results
+        .iter()
+        .filter(|_| data.live.is_none())
+        .find_map(|results| results.launched()?.ending())
+    {
+        said.push(ending);
+    }
     let mut spans = vec![
         Span::raw(" "),
         Span::styled(name, Style::new().add_modifier(Modifier::BOLD)),

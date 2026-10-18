@@ -139,6 +139,27 @@ pub struct Lifetime {
     /// `omn`, that the end of the run ended.
     #[serde(default)]
     pub adopted_ended: u32,
+    /// The program's exit code, when it exited rather than died of a signal.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    /// The signal that ended it, when one did: `9` for one the run stopped.
+    #[serde(default)]
+    pub signal: Option<i32>,
+}
+
+impl Lifetime {
+    /// How the program ended, in the words a shell would use: `exited 0`,
+    /// `killed by signal 11`, `stopped by the run`; `None` before the reap.
+    pub fn ending(&self) -> Option<String> {
+        if self.terminated {
+            return Some("stopped by the run".to_owned());
+        }
+        match (self.exit_code, self.signal) {
+            (Some(code), _) => Some(format!("exited {code}")),
+            (None, Some(signal)) => Some(format!("killed by signal {signal}")),
+            (None, None) => None,
+        }
+    }
 }
 
 impl Results {
