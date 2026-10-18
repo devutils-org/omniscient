@@ -445,8 +445,10 @@
     - "Counts by default; `-m trace` names the victims through oom:mark_victim
        (pid, comm, uid, oom_score_adj, and total_vm, rss, anon_rss, file_rss,
        shmem_rss and swap in bytes, what the kernel log's \"Killed process\"
-       line prints). The sizes are the tracepoint's own, the shared part of each
-       counter without the cpus' unflushed pages. A pid target names that
+       line names). The sizes are the tracepoint's own, the shared part of each
+       counter without the cpus' unflushed pages; a kernel whose kill line sums
+       every cpu's part prints a few dozen pages more (7.2 on 24 cpus: 208 KiB
+       of anon_rss, 152 KiB of file_rss). A pid target names that
        process alone, not the children it started: a launched build whose
        compiler is killed is a --cgroup question."
     - "A pid names its cgroup: the kernel counts kills per cgroup, never per

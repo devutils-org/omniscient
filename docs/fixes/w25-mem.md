@@ -70,6 +70,15 @@ Branch `feat/w25-mem`. Done sequentially by one agent, in the main checkout.
 - `mem.slab`: `sudo -n omn trace mem.slab -m snapshot -e raw` against
   `sudo -n slabtop -o -s c | head -20` (CACHE SIZE per cache).
 
+**Run (2026-10-18, with CAP_BPF):** the victim is named: pid, comm, uid,
+`oom_score_adj` and `total_vm` (148588 kB) as `journalctl -k`'s "Killed
+process" line has them. Its `anon-rss` and `file-rss` read 208 and 152 KiB
+more than `omn`'s: on this kernel (7.2, 24 cpus) the line sums every cpu's
+unflushed part, and the program reads the shared counter, as its doc says.
+The caveat said "what the kernel log's line prints"; it now gives the gap.
+`mem.slab` not run: `slabtop` and `/proc/slabinfo` are root's, and neither
+is in the sudoers line.
+
 ## Tests
 
 `--lib collect::mem bpf::mem_oom request`, `--test family_mem --test
