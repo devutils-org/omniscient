@@ -14115,3 +14115,15 @@ For the flaky tally, each red once in the full run and passing alone:
 `scenario_gpu::a_target_that_exits_before_the_duration_ends_the_run_and_names_it`,
 `scenario_mem::every_mode_and_emit_of_the_counter_sources_is_served_or_refused_by_the_right_code`.
 
+A second full run after the finishing pass (2026-10-18): 3 141 passed, 14
+failed. Two were the pass's and are fixed (`encode::tests::every_format_does_what_its_declared_status_says`:
+the TOML list wrap sent every document through `toml::Value`, which a map
+with non-string keys cannot pass; `bench_gpu::every_gpu_tracer_served_on_a_launch_alone_is_in_the_record`:
+`gpu.api` on `vendor:cupti` has no bench row, now named in `AWAITING_BENCH`
+until one lands). Two GPU scenarios failed and fail again alone while the
+board is busy with another program (37 % utilisation, the memory clock
+held at its maximum): `scenario_gpu::the_held_clocks_share_separates_an_idle_board_from_a_running_kernel`
+and `the_memory_clock_is_a_series_that_a_kernel_lifts_and_the_maximum_bounds`
+assume an idle board, and passed in the first run when it was. The rest are
+the first run's eight machine failures and its flaky tally.
+

@@ -291,16 +291,21 @@ impl OutputFormat {
                 // A TOML document is a table: a list -- `omn list`'s entries,
                 // the defaults -- is written as the array of tables
                 // `[[entries]]`, which is what the format offers for one.
-                let tree = toml::Value::try_from(value).map_err(to_parse_error("TOML output"))?;
-                let tree = match tree {
-                    toml::Value::Array(items) => {
-                        let mut table = toml::map::Map::new();
-                        table.insert("entries".to_owned(), toml::Value::Array(items));
-                        toml::Value::Table(table)
-                    }
-                    other => other,
-                };
-                toml::to_string_pretty(&tree).map_err(to_parse_error("TOML output"))
+                // A table serializes as it is; only a document whose top is a
+                // list is rewritten, since a map with non-string keys cannot
+                // pass through `toml::Value`.
+                match toml::to_string_pretty(value) {
+                    Ok(text) => Ok(text),
+                    Err(direct) => match toml::Value::try_from(value) {
+                        Ok(toml::Value::Array(items)) => {
+                            let mut table = toml::map::Map::new();
+                            table.insert("entries".to_owned(), toml::Value::Array(items));
+                            toml::to_string_pretty(&toml::Value::Table(table))
+                                .map_err(to_parse_error("TOML output"))
+                        }
+                        _ => Err(to_parse_error("TOML output")(direct)),
+                    },
+                }
             }
             OutputFormat::Text => Err(ParseError::new(
                 "text output is rendered by the caller, not serialized",
