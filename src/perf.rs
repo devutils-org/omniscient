@@ -2544,8 +2544,9 @@ pub fn per_cpu_refusal(cpu: u32, error: &io::Error) -> String {
     };
     format!(
         "counting cpu {cpu} observes every task on it, which needs \
-         /proc/sys/kernel/perf_event_paranoid at 0 or below ({level}) or CAP_PERFMON on \
-         this binary; a per-task count is not the same measurement and is not substituted"
+         /proc/sys/kernel/perf_event_paranoid at 0 or below ({level}{}) or CAP_PERFMON on \
+         this binary; a per-task count is not the same measurement and is not substituted",
+        crate::capabilities::paranoid_beyond_capabilities()
     )
 }
 

@@ -459,6 +459,69 @@ fn withheld_reason(
 /// Why a perf kprobe would be refused to a process holding `privileges`, or
 /// `None` when the kernel lets it open one. Privileges that cannot be read
 /// answer nothing here: the type probe still runs, and the attach says the rest.
+/// Why this process may open no perf event at all, if it may not: a
+/// disabled software `dummy` event on this thread, which counts nothing and is
+/// refused only by the kernel's door itself.
+fn perf_event_refused() -> Option<String> {
+    use perf_event_open_sys::bindings as perf;
+    let mut attr: perf::perf_event_attr = unsafe { std::mem::zeroed() };
+    attr.type_ = perf::PERF_TYPE_SOFTWARE;
+    attr.size = std::mem::size_of::<perf::perf_event_attr>() as u32;
+    attr.config = perf::PERF_COUNT_SW_DUMMY as u64;
+    attr.set_disabled(1);
+    attr.set_exclude_kernel(1);
+    attr.set_exclude_hv(1);
+    // SAFETY: a zeroed attr with its size set, opened on this thread.
+    let fd = unsafe {
+        perf_event_open_sys::perf_event_open(
+            &mut attr,
+            0,
+            -1,
+            -1,
+            perf::PERF_FLAG_FD_CLOEXEC as u64,
+        )
+    };
+    if fd >= 0 {
+        // SAFETY: closing a descriptor just opened here.
+        unsafe { libc::close(fd) };
+        return None;
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EACCES) | Some(libc::EPERM) => {
+            let paranoid = read_trimmed("/proc/sys/kernel/perf_event_paranoid")
+                .unwrap_or_else(|| "unknown".into());
+            Some(format!(
+                "perf_event_open refuses this process every event ({error}): \
+                 perf_event_paranoid is {paranoid}{}",
+                paranoid_beyond_capabilities()
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// What `perf_event_paranoid` above 2 means, appended where a refusal names
+/// the level: Debian's and Ubuntu's kernels read 3 and above as refusing every
+/// `perf_event_open` to a process without CAP_SYS_ADMIN -- a patch older than
+/// CAP_PERFMON, which therefore does not lift it. Empty at 2 and below, where
+/// the level means what the kernel's own documentation says.
+pub fn paranoid_beyond_capabilities() -> String {
+    paranoid_explanation(
+        read_trimmed("/proc/sys/kernel/perf_event_paranoid").and_then(|v| v.parse::<i32>().ok()),
+    )
+}
+
+fn paranoid_explanation(level: Option<i32>) -> String {
+    match level {
+        Some(level) if level > 2 => ", which this kernel reads as refusing every perf event to \
+             a process without CAP_SYS_ADMIN, CAP_PERFMON included (Debian's and Ubuntu's \
+             patch); `sysctl kernel.perf_event_paranoid=2` lets CAP_PERFMON in"
+            .to_owned(),
+        _ => String::new(),
+    }
+}
+
 fn kprobe_not_permitted(privileges: Option<&Privileges>) -> Option<String> {
     let privileges = privileges?;
     let holds = |name: &str| privileges.effective.iter().any(|held| held == name);
@@ -924,6 +987,14 @@ impl Capabilities {
         if requirement == "kprobe" {
             if let Some(missing) = kprobe_not_permitted(privileges().as_ref()) {
                 return Probe::Missing(missing);
+            }
+            // The capability held is not the kernel letting it in: Debian's and
+            // Ubuntu's `perf_event_paranoid` 3 refuses every event to a process
+            // without CAP_SYS_ADMIN, CAP_PERFMON included. So an event is
+            // opened, the cheapest there is; debian-12 listed `mem.swap`'s
+            // counting kprobe usable and refused it at start until it was.
+            if let Some(refused) = perf_event_refused() {
+                return Probe::Missing(format!("a kprobe is a perf event, and {refused}"));
             }
         }
         if let Some(support) = crate::bpf::attach::probe_type_support(requirement) {
@@ -1486,7 +1557,8 @@ fn probe_pmu(event: &str) -> Probe {
              perf_event_paranoid at 1 or below, or CAP_PERFMON on this binary"
         )),
         Some(libc::EACCES) | Some(libc::EPERM) => Probe::Missing(format!(
-            "perf_event_open was refused for `{event}`: perf_event_paranoid is {paranoid}"
+            "perf_event_open was refused for `{event}`: perf_event_paranoid is {paranoid}{}",
+            paranoid_beyond_capabilities()
         )),
         Some(libc::ENOENT) | Some(libc::EOPNOTSUPP) => {
             Probe::Missing(format!("`{event}` is not available on this cpu"))
@@ -1802,6 +1874,20 @@ mod tests {
     /// A perf kprobe is let in by `CAP_PERFMON`, `CAP_SYS_ADMIN` or root, and
     /// refused with that reason otherwise: the `kprobe` PMU existing is not
     /// enough, which is how `mem.swap` was listed usable on the nocaps cells.
+    /// Above 2 the level is Debian's and Ubuntu's, and the refusal says that
+    /// CAP_PERFMON does not lift it; at 2 and below it says nothing more.
+    #[test]
+    fn a_paranoid_level_above_two_is_said_to_need_cap_sys_admin() {
+        let said = super::paranoid_explanation(Some(3));
+        assert!(
+            said.contains("CAP_SYS_ADMIN") && said.contains("CAP_PERFMON included"),
+            "{said}"
+        );
+        assert_eq!(super::paranoid_explanation(Some(2)), "");
+        assert_eq!(super::paranoid_explanation(Some(-1)), "");
+        assert_eq!(super::paranoid_explanation(None), "");
+    }
+
     #[test]
     fn a_kprobe_is_missing_without_perfmon_whatever_the_pmu_says() {
         let holding = |uid: u32, effective: &[&str]| Privileges {
