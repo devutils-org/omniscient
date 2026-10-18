@@ -192,7 +192,10 @@ pub fn load_support() -> &'static Support {
             "omn_probe",
             "Dual MIT/GPL",
         ) {
-            Ok(_) => Support::Yes,
+            Ok(_) => match maps_charged_to_memlock().or_else(kernel_reads_locked_down) {
+                Some(reason) => Support::No(reason.to_owned()),
+                None => Support::Yes,
+            },
             Err(error) if error.is_permission() => {
                 Support::No(permission_advice("loading a tracing program"))
             }
@@ -202,6 +205,95 @@ pub fn load_support() -> &'static Support {
             )),
         }
     })
+}
+
+/// Why no program may read kernel memory here, when the kernel is locked down
+/// for confidentiality: `bpf_probe_read_kernel` is then withheld, and every
+/// program that reads a struct -- nearly all of this tool's -- is rejected by
+/// the verifier as calling an unknown function. fedora-latest booted with
+/// `lockdown=confidentiality` listed every eBPF source usable and refused each
+/// at start. Asked by loading the smallest program that calls the helper,
+/// since `/sys/kernel/security/lockdown` is root's to read.
+fn kernel_reads_locked_down() -> Option<&'static str> {
+    static ANSWER: OnceLock<Option<String>> = OnceLock::new();
+    ANSWER
+        .get_or_init(|| {
+            use insn::{helper, Insn, BPF_DW, R10};
+            let probe = [
+                Insn::st_imm(BPF_DW, R10, -8, 0),
+                Insn::mov64_reg(1, R10),
+                Insn::add64_imm(1, -8),
+                Insn::mov64_imm(2, 8),
+                Insn::mov64_imm(3, 0),
+                Insn::call(helper::PROBE_READ_KERNEL),
+                Insn::mov64_imm(0, 0),
+                Insn::exit(),
+            ];
+            match syscall::prog_load(
+                syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+                &probe,
+                "omn_probe_read",
+                "Dual MIT/GPL",
+            ) {
+                Err(error) if error.error.raw_os_error() == Some(libc::EINVAL) => Some(
+                    "the kernel withholds bpf_probe_read_kernel from eBPF programs, which is \
+                     what kernel lockdown in confidentiality mode does (`lockdown=confidentiality`, \
+                     or a distribution's Secure Boot policy): every program that reads a kernel \
+                     struct is rejected, and these sources all do"
+                        .to_owned(),
+                ),
+                _ => None,
+            }
+        })
+        .as_deref()
+}
+
+/// Why this process cannot create the maps its programs need, when the
+/// kernel charges them to `RLIMIT_MEMLOCK`: kernels before memory-cgroup
+/// accounting of BPF memory (5.11) do, and a distribution's default limit is
+/// 64 KiB (Debian 11), which a ring buffer exceeds. The kernel answers EPERM,
+/// which reads as a missing capability, and debian-11 listed every eBPF source
+/// usable and refused half of them at start. Asked of the kernel, not of its
+/// version: a 1 MiB map refused where a small one is created is the charge.
+pub fn maps_charged_to_memlock() -> Option<&'static str> {
+    static ANSWER: OnceLock<Option<String>> = OnceLock::new();
+    ANSWER
+        .get_or_init(|| {
+            const BPF_MAP_TYPE_ARRAY: u32 = 2;
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: a valid pointer to an rlimit this frame owns.
+            if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) } != 0
+                || limit.rlim_cur == libc::RLIM_INFINITY
+            {
+                return None;
+            }
+            let large = syscall::map_create(BPF_MAP_TYPE_ARRAY, 4, 4096, 256, "omn_memlock");
+            let refused = matches!(&large, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied);
+            if !refused {
+                return None;
+            }
+            syscall::map_create(BPF_MAP_TYPE_ARRAY, 4, 8, 1, "omn_memlock").ok()?;
+            let kib = |bytes: libc::rlim_t| {
+                if bytes == libc::RLIM_INFINITY {
+                    "unlimited".to_owned()
+                } else {
+                    format!("{} KiB", bytes / 1024)
+                }
+            };
+            Some(format!(
+                "this kernel charges eBPF maps to RLIMIT_MEMLOCK (as kernels before 5.11 do), \
+                 and this process may lock {} (hard limit {}): a 1 MiB map was refused where a \
+                 small one was created, so the ring buffers these sources need cannot be. Raise \
+                 it -- `ulimit -l unlimited`, `LimitMEMLOCK=infinity` in a unit, an entry in \
+                 /etc/security/limits.conf -- or grant CAP_SYS_RESOURCE, which lifts it",
+                kib(limit.rlim_cur),
+                kib(limit.rlim_max)
+            ))
+        })
+        .as_deref()
 }
 
 /// Whether a raw tracepoint exists on the running kernel, and -- when the

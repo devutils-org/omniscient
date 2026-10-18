@@ -21,7 +21,7 @@
 //! context of the task whose read triggered it -- synchronous and asynchronous
 //! readahead both run in the reader. A folio may be larger than a page, so the
 //! page count is read out of the folio: one page unless the head flag says it
-//! is large, and `_nr_pages` then.
+//! is large, and `_nr_pages` (`_folio_nr_pages` before it was renamed) then.
 //!
 //! **A page a write creates is not a miss, and it is told apart.** An append
 //! adds a folio to the cache too, and nothing was looked up or read for it: the
@@ -255,13 +255,19 @@ impl Offsets {
             folio_flags: btf.member_offset("folio", "flags")?,
             folio_mapping: btf.member_offset("folio", "mapping")?,
             folio_index: btf.member_offset("folio", "index")?,
-            folio_nr_pages: btf.member_offset("folio", "_nr_pages").map_err(|reason| {
-                format!(
-                    "{reason}: this kernel does not keep a large folio's page count where this \
-                     program reads it, and counting every folio as one page would report a \
-                     two-megabyte fill as four kilobytes"
-                )
-            })?,
+            // `_folio_nr_pages` until the kernels after 6.12 renamed it
+            // `_nr_pages` (6.8 and 6.12 have the first, 6.17 and later the
+            // second, as distroproof's images showed).
+            folio_nr_pages: btf
+                .member_offset("folio", "_nr_pages")
+                .or_else(|_| btf.member_offset("folio", "_folio_nr_pages"))
+                .map_err(|reason| {
+                    format!(
+                        "{reason} (nor `_folio_nr_pages`): this kernel does not keep a large \
+                         folio's page count where this program reads it, and counting every \
+                         folio as one page would report a two-megabyte fill as four kilobytes"
+                    )
+                })?,
             pg_head: pg_head(btf)?,
             mapping_host: btf.member_offset("address_space", "host")?,
             i_ino: btf.member_offset("inode", "i_ino")?,

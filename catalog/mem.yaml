@@ -596,7 +596,7 @@
   summary: "Transparent huge pages: promotions and current mode"
   unit: count
   backends:
-    - {id: "fs:sys", requires: ["/sys/kernel/mm/transparent_hugepage/enabled", "/proc/vmstat", "kernel>=6.8"], cost: low}
+    - {id: "fs:sys", requires: ["/sys/kernel/mm/transparent_hugepage/enabled", "/sys/kernel/mm/transparent_hugepage/hugepages-2048kB/stats", "/proc/vmstat"], cost: low}
     - {id: "fs:proc", requires: ["/proc/vmstat"], cost: low,
        degraded: "promotion counters only, not the configured mode"}
   modes: [poll, snapshot]

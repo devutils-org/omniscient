@@ -452,6 +452,18 @@ fn exists(function: &str) -> Support {
             ))
         }
     };
+    // A kernel built without ftrace compiles its functions with no `__fentry__`
+    // call site, and a trampoline has nowhere to go: Alpine's `virt` kernel
+    // loaded every fentry program and refused each attach with EBUSY. Its
+    // BTF then lacks ftrace's own functions, which is free to ask.
+    if index.function("register_ftrace_function").is_err() {
+        return Support::No(
+            "this kernel was built without ftrace (no CONFIG_FUNCTION_TRACER: \
+             `register_ftrace_function` is not in its BTF), so its functions carry no call \
+             site a trampoline can be installed on and no fentry program attaches"
+                .to_owned(),
+        );
+    }
     let found = match index.function(function) {
         Ok(found) => found,
         Err(reason) => return Support::No(reason),

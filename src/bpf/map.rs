@@ -55,6 +55,11 @@ use super::syscall::{
 /// `what` is the map, without its article: "off-cpu in-flight map".
 pub fn map_failure(what: &str, error: io::Error) -> String {
     if error.kind() == io::ErrorKind::PermissionDenied {
+        // EPERM is also the answer of a kernel that charges maps to
+        // RLIMIT_MEMLOCK, which no capability this tool asks for lifts.
+        if let Some(reason) = super::maps_charged_to_memlock() {
+            return format!("cannot create the {what}: {reason}");
+        }
         super::permission_advice(&format!("creating the {what}"))
     } else {
         format!("cannot create the {what}: {error}")
