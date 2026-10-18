@@ -3,7 +3,9 @@
 # tolerance. Read by tests/reference.rs through the shared runner, never by
 # omn itself. Schema: catalog/references/README.md.
 #
-# Every tool here is a script in /usr/share/bpftrace/tools/, system-wide, and
+# Every tool here is a script in /usr/share/bpftrace/tools/ (Arch, Fedora) or
+# /usr/sbin (Debian, Ubuntu: each command looks there when the first is
+# absent, found with distroproof), system-wide, and
 # needs root: `privileged: true` on each, so every pair skips where `sudo -n`
 # does not grant root.
 #
@@ -107,7 +109,7 @@
   run: alongside
   settle_ms: 2000
   reference:
-    command: [sh, -c, 'exec timeout --preserve-status -s INT 6 $SUDO bpftrace "$1"', sh, /usr/share/bpftrace/tools/execsnoop.bt]
+    command: [sh, -c, 't=$1; [ -e "$t" ] || t=/usr/sbin/$(basename "$t"); exec timeout --preserve-status -s INT 6 $SUDO bpftrace "$t"', sh, /usr/share/bpftrace/tools/execsnoop.bt]
     parse: execsnoop
     requires: [bpftrace, timeout]
     privileged: true
@@ -184,6 +186,10 @@
   reference:
     command: [sh, tests/reference/workloads/bpftrace/under.sh, /usr/share/bpftrace/tools/runqlat.bt, --]
     parse: bpftrace_hist_usecs
+    # The script includes the kernel's headers, and where the installed ones
+    # do not match the kernel bpftrace cannot build it (Debian 12: "unknown
+    # type name", found with distroproof): the witness refused, not the pair.
+    refused_when: ["error: unknown type name"]
     requires: [bpftrace]
     privileged: true
     sudo: bpftrace
@@ -239,7 +245,7 @@
   run: alongside
   settle_ms: 2000
   reference:
-    command: [sh, -c, 'exec timeout --preserve-status -s INT 6 $SUDO bpftrace "$1"', sh, /usr/share/bpftrace/tools/tcplife.bt]
+    command: [sh, -c, 't=$1; [ -e "$t" ] || t=/usr/sbin/$(basename "$t"); exec timeout --preserve-status -s INT 6 $SUDO bpftrace "$t"', sh, /usr/share/bpftrace/tools/tcplife.bt]
     parse: tcplife
     requires: [bpftrace, timeout]
     privileged: true

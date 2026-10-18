@@ -263,12 +263,57 @@ fn killsnoop(stdout: &str, stderr: &str) -> Result<Values, String> {
         let Some(comm) = comm(&words, 2, 3) else {
             continue;
         };
-        let sig = words[words.len() - 3];
+        let sig = signal_name(words[words.len() - 3]);
+        let sig = sig.as_str();
         values[0].1 += 1.0;
         add(&mut values, sig, 1.0);
         add(&mut values, &format!("{comm}/{sig}"), 1.0);
     }
     Ok(values)
+}
+
+/// A signal by name: bpftrace's killsnoop.bt prints the name (Arch's) or the
+/// number (Debian's and Ubuntu's older bpftrace, found with distroproof:
+/// `omnref/12` where `omnref/SIGUSR2` was looked for). Linux's numbers on
+/// x86-64 and arm64, which agree for these.
+fn signal_name(sig: &str) -> String {
+    const NAMES: [&str; 31] = [
+        "SIGHUP",
+        "SIGINT",
+        "SIGQUIT",
+        "SIGILL",
+        "SIGTRAP",
+        "SIGABRT",
+        "SIGBUS",
+        "SIGFPE",
+        "SIGKILL",
+        "SIGUSR1",
+        "SIGSEGV",
+        "SIGUSR2",
+        "SIGPIPE",
+        "SIGALRM",
+        "SIGTERM",
+        "SIGSTKFLT",
+        "SIGCHLD",
+        "SIGCONT",
+        "SIGSTOP",
+        "SIGTSTP",
+        "SIGTTIN",
+        "SIGTTOU",
+        "SIGURG",
+        "SIGXCPU",
+        "SIGXFSZ",
+        "SIGVTALRM",
+        "SIGPROF",
+        "SIGWINCH",
+        "SIGIO",
+        "SIGPWR",
+        "SIGSYS",
+    ];
+    match sig.parse::<usize>() {
+        Ok(n @ 1..=31) => NAMES[n - 1].to_owned(),
+        _ => sig.to_owned(),
+    }
 }
 
 /// `PID COMM FD ERR PATH`: one line per open/openat/openat2 returned,
@@ -564,6 +609,15 @@ mod tests {
         assert_eq!(get(&v, "SIGUSR2"), 12.0);
         assert_eq!(get(&v, "Web Content/SIGTERM"), 1.0);
         assert_eq!(get(&v, ""), 13.0);
+    }
+
+    /// An older bpftrace prints the signal's number: it is counted by name.
+    #[test]
+    fn killsnoop_names_a_signal_printed_as_its_number() {
+        assert_eq!(signal_name("12"), "SIGUSR2");
+        assert_eq!(signal_name("15"), "SIGTERM");
+        assert_eq!(signal_name("SIGUSR2"), "SIGUSR2");
+        assert_eq!(signal_name("64"), "64");
     }
 
     #[test]

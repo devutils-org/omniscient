@@ -66,11 +66,25 @@ fn percent(text: &str) -> Option<f64> {
 fn function_key(object: &str, symbol: &str) -> String {
     let symbol = symbol.trim().trim_end_matches(" [recovered]").trim();
     if symbol.starts_with("0x") {
-        return object.trim().to_string();
+        return soname(object.trim());
     }
     match symbol.rsplit_once("+0x") {
-        Some((object, _)) => object.to_string(),
+        Some((object, _)) => soname(object),
         None => symbol.to_string(),
+    }
+}
+
+/// A library by its soname, `libX.so.N`: both sides name the file the
+/// process mapped, which is `libcrypto.so.3` on Arch and the symlink's target
+/// `libcrypto.so.3.5.5` on Fedora (found with distroproof), so a pair keyed
+/// by one held on one distribution only.
+fn soname(object: &str) -> String {
+    match object.split_once(".so.") {
+        Some((base, versions)) => {
+            let major = versions.split('.').next().unwrap_or(versions);
+            format!("{base}.so.{major}")
+        }
+        None => object.to_string(),
     }
 }
 
@@ -364,6 +378,12 @@ mod tests {
             "libcrypto.so.3"
         );
         assert_eq!(function_key("", "main [recovered]"), "main");
+        // Fedora maps the symlink's target; the soname is the key.
+        assert_eq!(
+            function_key("", "libcrypto.so.3.5.5+0x3f666b"),
+            "libcrypto.so.3"
+        );
+        assert_eq!(function_key("libz.so.1.3.1.zlib-ng", "0x7c19"), "libz.so.1");
         assert_eq!(
             function_key("[kernel.kallsyms]", "psi_account_irqtime"),
             "psi_account_irqtime"
