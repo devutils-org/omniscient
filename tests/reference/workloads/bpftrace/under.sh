@@ -12,6 +12,15 @@
 set -eu
 tool=$1
 shift
+# The script where this distribution installs it: Arch and Fedora under
+# /usr/share/bpftrace/tools, Debian and Ubuntu in /usr/sbin (found with
+# distroproof's ref-debian-12, where every path the pairs named was absent).
+if [ ! -e "$tool" ]; then
+	name=${tool##*/}
+	for dir in /usr/share/bpftrace/tools /usr/sbin /usr/share/doc/bpftrace/tools /usr/local/share/bpftrace/tools; do
+		[ -e "$dir/$name" ] && { tool="$dir/$name"; break; }
+	done
+fi
 args=""
 while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
 	args="$args $1"

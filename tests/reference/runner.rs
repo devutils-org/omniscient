@@ -677,6 +677,19 @@ pub fn run_pair(pair: &Pair, parsers: &[Parser], omn: &Path) -> Outcome {
         };
         let result = match result {
             Ok(r) => r,
+            // A setup the machine refused -- a cgroup a guest's user may not
+            // create (distroproof's ref-debian-12), a privilege it lacks -- is
+            // the machine's, as a refused tool is, and skips quoting it.
+            Err(e)
+                if e.starts_with("`setup`")
+                    && REFUSALS
+                        .iter()
+                        .map(|s| s.to_string())
+                        .chain(pair.reference.refused_when.iter().cloned())
+                        .any(|phrase| e.contains(&phrase)) =>
+            {
+                return Outcome::Skip("the machine refused the pair's setup".into(), vec![e]);
+            }
             Err(e) => return Outcome::Fail(e),
         };
         if let Some(status) = result.workload.filter(|s| !s.success()) {

@@ -250,6 +250,21 @@ fn perf_trace_summary(stdout: &str, stderr: &str) -> Result<Values, String> {
 /// avg_delay_ns}` summed by command, the average weighted by the switches
 /// it is over, and `total.{runtime_ns,switches}` from the footer.
 fn perf_sched_latency(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    // A task is one row per name it ran under, `name:pid`, and which name
+    // carries a renamed workload's switches is perf's version: 7.2 files them
+    // under the last name, Debian 12's 6.1 under the first (one switch under
+    // `omnref-sleep`, a hundred under `python3`, found with distroproof). So
+    // every row of a pid that ever named itself `omnref*` counts under that
+    // name, whichever perf this is.
+    let mut renamed: BTreeMap<&str, &str> = BTreeMap::new();
+    for line in stdout.lines() {
+        let task = line.split('|').next().unwrap_or_default().trim();
+        if let Some((comm, pid)) = task.rsplit_once(':') {
+            if comm.starts_with("omnref") {
+                renamed.insert(pid, comm);
+            }
+        }
+    }
     let mut acc = Acc::default();
     for line in stdout.lines() {
         let cols: Vec<&str> = line.split('|').map(str::trim).collect();
@@ -266,7 +281,10 @@ fn perf_sched_latency(stdout: &str, _stderr: &str) -> Result<Values, String> {
             acc.set("total", "switches", switches);
             continue;
         }
-        let comm = cols[0].rsplit_once(':').map_or(cols[0], |(comm, _)| comm);
+        let comm = match cols[0].rsplit_once(':') {
+            Some((comm, pid)) => renamed.get(pid).copied().unwrap_or(comm),
+            None => cols[0],
+        };
         let field = |i: usize, label: &str| -> Result<f64, String> {
             let v = cols
                 .get(i)
@@ -508,6 +526,25 @@ mod tests {
         // A command with a colon in it keeps it; only the pid is cut.
         assert_eq!(value(&v, "kworker/10:1-mm.switches"), 2.0);
         assert_eq!(value(&v, "total.switches"), 949.0);
+    }
+
+    /// Debian 12's perf 6.1 files a renamed task's switches under its first
+    /// name: the rows of one pid are summed under the workload's name.
+    #[test]
+    fn perf_sched_latency_sums_a_renamed_task_s_rows_by_pid() {
+        let out = "\
+ -------------------------------------------------------------------------------------------------------------------------------------------
+  Task                  |   Runtime ms  | Switches | Avg delay ms    | Max delay ms    | Max delay start           | Max delay end          |
+ -------------------------------------------------------------------------------------------------------------------------------------------
+  python3:4242          |      9.000 ms |      100 | avg:    0.005 ms | max:    0.012 ms | max start:   100.000000 s | max end:   100.000012 s
+  omnref-sleep:4242     |      1.000 ms |        1 | avg:    0.005 ms | max:    0.004 ms | max start:   101.000000 s | max end:   101.000004 s
+  python3:5000          |      2.000 ms |        7 | avg:    0.001 ms | max:    0.001 ms | max start:   102.000000 s | max end:   102.000001 s
+ -----------------------------------------------------------------------------------------------------------------
+  TOTAL:                |     12.000 ms |      108 |
+";
+        let v = perf_sched_latency(out, "").unwrap();
+        assert_eq!(value(&v, "omnref-sleep.switches"), 101.0);
+        assert_eq!(value(&v, "python3.switches"), 7.0);
     }
 
     #[test]

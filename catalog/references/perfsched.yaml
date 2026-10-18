@@ -244,6 +244,9 @@
     command: [perf, lock, contention, -b, -t, --]
     parse: perf_lock_contention
     requires: [perf]
+    # A perf built without its BPF skeletons has no `-b` (Debian 12's 6.1):
+    # the tool this machine has, refused, not a pair that failed.
+    refused_when: ["not built-in because no BUILD_BPF_SKEL"]
     privileged: true
   compare:
     key: comm:omnref-lock.contended
