@@ -592,10 +592,10 @@ fn max_stack_depth() -> u16 {
 
 /// The smallest ring worth trying. Below this, a burst of faults would be
 /// mostly loss, and a mostly-lost measurement is worse than a refusal.
-const MIN_RING_PAGES: usize = 8;
+pub const MIN_RING_PAGES: usize = 8;
 
 /// Whether an error means "that ring is bigger than you are allowed to map".
-fn is_ring_too_large(error: &io::Error) -> bool {
+pub fn is_ring_too_large(error: &io::Error) -> bool {
     let text = error.to_string();
     text.contains("mmap")
         && (text.contains("Operation not permitted") || text.contains("Cannot allocate memory"))
@@ -2111,7 +2111,7 @@ impl ThreadSampler {
                     pages /= 2;
                 }
                 Err((cpu, error)) if is_ring_too_large(&error) => {
-                    return Err(ring_budget_refusal(cpu, cpus.len(), pages, &error))
+                    return Err(ring_budget_refusal(Some(cpu), cpus.len(), pages, &error))
                 }
                 Err((cpu, error)) => return Err(per_cpu_refusal(cpu, &error)),
             }
@@ -2605,7 +2605,19 @@ fn memlock_kib() -> Option<u64> {
 /// refused on 5.15. The rings of this user's other perf sessions count against
 /// the same budget, which is why the refusal says what the budget is rather
 /// than predicting it.
-pub fn ring_budget_refusal(cpu: u32, cpus: usize, pages: usize, error: &io::Error) -> String {
+///
+/// `cpu` is the one refused, where the opener knows it; a sampler that opens
+/// its rings in one call does not.
+pub fn ring_budget_refusal(
+    cpu: Option<u32>,
+    cpus: usize,
+    pages: usize,
+    error: &io::Error,
+) -> String {
+    let refused = match cpu {
+        Some(cpu) => format!("cpu {cpu} was refused"),
+        None => "one was refused".to_owned(),
+    };
     let page_kib = page_size() / 1024;
     let asked_kib = cpus * (pages + 1) * page_kib;
     let per_cpu = match kernel_sysctl("perf_event_mlock_kb") {
@@ -2617,8 +2629,8 @@ pub fn ring_budget_refusal(cpu: u32, cpus: usize, pages: usize, error: &io::Erro
         None => "unlimited".to_owned(),
     };
     format!(
-        "the sampling rings of {cpus} cpus do not fit what this user may lock: cpu {cpu} was \
-         refused a ring of {pages} pages ({error}), after the others took theirs, {asked_kib} \
+        "the sampling rings of {cpus} cpus do not fit what this user may lock: {refused} a \
+         ring of {pages} pages ({error}), after the others took theirs, {asked_kib} \
          KiB in all at that size. The kernel lets a user lock \
          /proc/sys/kernel/perf_event_mlock_kb per online cpu ({per_cpu} here) and charges the \
          rest to RLIMIT_MEMLOCK ({memlock} here; `ulimit -l`), unless perf_event_paranoid is \
@@ -2947,7 +2959,7 @@ mod tests {
     #[test]
     fn a_ring_that_does_not_fit_names_what_the_kernel_charged_it_to() {
         let error = io::Error::other("mmap of 8 ring pages: Operation not permitted (os error 1)");
-        let refusal = ring_budget_refusal(3, 4, 8, &error);
+        let refusal = ring_budget_refusal(Some(3), 4, 8, &error);
         for words in [
             "cpu 3",
             "4 cpus",

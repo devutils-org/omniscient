@@ -66,6 +66,22 @@ python3 -c "import json;[print(r['label'],r['events_seen'],r['losses']) for r in
 how many readings never ran. And `omn trace io.fsync -- <fsync loop>` for
 the after-window clause.
 
+**Run (2026-10-18, with CAP_BPF and CAP_PERFMON):** `omn top --headless -d 3s`:
+`cpu.util@system` read 9 events where 12 were due, and its losses now say
+it: 2 late ticks, "5 more readings fell due meanwhile and never ran". The
+starvation itself is still there: every source's rounds outran their tick,
+worst 0.81 to 1.06 s, so one shared round holds them all ("Still to run",
+item 13, alone on a quiet machine, is the place to find what). The same run
+found **`sched.switches` refused with the wrong advice**: its sampler, the
+last of the run's perf sources to open, was refused its 8-page rings by the
+user's lock budget (`perf_event_mlock_kb` 516 KiB a cpu, then
+`RLIMIT_MEMLOCK`), and the refusal sent the reader to `perf_event_paranoid`
+and CAP_PERFMON, which the binary holds and which does not lift it. It now
+gives `perf::ring_budget_refusal`'s words, as the per-cpu samplers do. Alone,
+`sched.switches -m trace --system` reads 21 894 switches a second. `io.fsync`
+is refused on this kernel (`vfs_fsync` inlined, so a trampoline would count
+nothing), so the after-window clause was not run.
+
 ## Tests
 
 `cargo test --bin omn` (11, two new or rewritten), `cargo test --lib

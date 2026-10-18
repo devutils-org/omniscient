@@ -253,6 +253,22 @@ impl Collector for SwitchCollector {
             Callchain::Off,
         );
         let event = self.open(&spec).map_err(|error| {
+            // A ring the kernel would not lock is the user's ring budget,
+            // which the run's other perf sources share and CAP_PERFMON does
+            // not lift: one ring per cpu, whatever is followed, each refused
+            // at the smallest size the sampler halves to.
+            if crate::perf::is_ring_too_large(&error) {
+                let cpus = match &self.followed {
+                    Followed::Cpus(cpus) => cpus.len(),
+                    _ => crate::perf::online_cpus().map_or(0, |cpus| cpus.len()),
+                };
+                return crate::perf::ring_budget_refusal(
+                    None,
+                    cpus,
+                    crate::perf::MIN_RING_PAGES,
+                    &error,
+                );
+            }
             let what = match &self.followed {
                 Followed::Process(pid) => format!("process {pid}"),
                 Followed::Task(tid) => format!("task {tid}"),
