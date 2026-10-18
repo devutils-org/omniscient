@@ -77,7 +77,7 @@
       equivalent: true
   modes: [trace]
   emits: [hist, topk, raw, timeline, summary]
-  targets: {system: native, pid: native, launch: native}
+  targets: {system: native, pid: native, tid: native, launch: native}
   keys: [sock, task]
   filter_fields: [comm, saddr, sport, daddr, dport, family, cookie, attributed]
   determinism: low
@@ -92,7 +92,8 @@
        a child that exited before it was ever seen is counted as a loss, not
        placed in the tree or out of it. So is an `at_close` connection: the
        task its close interrupted says nothing about who held it, so it is
-       neither kept nor left out as another process's."
+       neither kept nor left out as another process's. A --tid keeps the
+       connections that thread owns, and its siblings' are left out."
 
 - id: net.tcp.rtt
   family: net

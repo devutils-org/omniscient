@@ -60,10 +60,17 @@ impl Prepared for Prepare {
                 self.mode
             ));
         }
+        let mut thread = None;
         let tree = match target {
             Target::System => None,
             // A launch arrives here as its child's pid.
             Target::Pid(pids) if !pids.is_empty() => Some(Tree::new(pids)),
+            // One thread: the connections it connected or closed first, by
+            // the kernel's id of it, which is what the program records.
+            Target::Tid(tids) if !tids.is_empty() => {
+                thread = Some(crate::bpf::pidns::kernel_tid(tids[0] as u32)?);
+                None
+            }
             other => {
                 return Err(not_built(format!(
                     "a {} target cannot be served here: a connection is attributed to the \
@@ -76,6 +83,7 @@ impl Prepared for Prepare {
         };
         let mut collector = LifetimeCollector::new(self.filter);
         collector.tree = tree;
+        collector.thread = thread;
         Ok(Box::new(collector))
     }
 }
@@ -102,6 +110,8 @@ pub struct LifetimeCollector {
     filtered_out: u64,
     /// A process target: the tree whose connections are kept.
     tree: Option<Tree>,
+    /// A thread target, by its kernel id.
+    thread: Option<u32>,
     /// Connections of other processes, left out under a process target.
     outside: u64,
     /// Connections whose task had exited before it could be placed in or
@@ -196,6 +206,7 @@ impl LifetimeCollector {
             filtered_in: 0,
             filtered_out: 0,
             tree: None,
+            thread: None,
             outside: 0,
             unplaced: 0,
             unowned: 0,
@@ -268,9 +279,9 @@ impl LifetimeCollector {
     /// target's connections and keep strangers'. So under a process target it
     /// is a counted loss, as a connection whose owner had exited is.
     fn in_target(&mut self, closed: &TcpLifetime) -> bool {
-        let Some(tree) = self.tree.as_mut() else {
+        if self.tree.is_none() && self.thread.is_none() {
             return true;
-        };
+        }
         if closed.owned == 0 {
             self.unowned += 1;
             self.losses.dropped += 1;
@@ -281,6 +292,16 @@ impl LifetimeCollector {
             );
             return false;
         }
+        if let Some(thread) = self.thread {
+            if closed.tid == thread {
+                return true;
+            }
+            self.outside += 1;
+            return false;
+        }
+        let Some(tree) = self.tree.as_mut() else {
+            return true;
+        };
         // The program wrote the kernel's id, and the tree is read from
         // `/proc` in this namespace's: the same process under two numbers
         // inside a container, and nothing kept until this.
@@ -438,7 +459,7 @@ impl Collector for LifetimeCollector {
              TCP_CLOSE, which the kernel's timer or a reset makes whoever was interrupted"
                 .to_owned(),
         );
-        if self.tree.is_some() {
+        if self.tree.is_some() || self.thread.is_some() {
             notes.push(format!(
                 "{} connections of processes outside the target were left out, by the process \
                  each is attributed to",
@@ -682,6 +703,30 @@ mod tests {
         let mut system = LifetimeCollector::new(None);
         assert!(system.in_target(&inside_by_chance));
         assert!(system.losses().is_clean());
+    }
+
+    /// A thread target keeps the connections that thread owns, by the
+    /// kernel's id, and leaves its siblings' out.
+    #[test]
+    fn a_thread_target_keeps_its_own_connections_only() {
+        let me = std::process::id() as i32;
+        let prepared = Box::new(Prepare {
+            mode: Mode::Trace,
+            filter: None,
+        });
+        assert!(prepared.attach(&Target::Tid(vec![me])).is_ok());
+        let mut collector = LifetimeCollector::new(None);
+        collector.thread = Some(4242);
+        let mut own = closed();
+        own.tid = 4242;
+        own.owned = 1;
+        assert!(collector.in_target(&own));
+        own.tid = 4243;
+        assert!(!collector.in_target(&own));
+        assert_eq!(collector.outside, 1);
+        own.owned = 0;
+        assert!(!collector.in_target(&own));
+        assert_eq!(collector.unowned, 1);
     }
 
     /// A connection still open at the end of the run is a fact about the
