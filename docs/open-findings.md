@@ -14127,3 +14127,39 @@ and `the_memory_clock_is_a_series_that_a_kernel_lifts_and_the_maximum_bounds`
 assume an idle board, and passed in the first run when it was. The rest are
 the first run's eight machine failures and its flaky tally.
 
+
+## The twenty-fifth wave's privileged runs (2026-10-18)
+
+The handoffs' "Privileged runs wanted", run with CAP_BPF and CAP_PERFMON on
+`omn` (`perf_event_paranoid` 2, no CAP_SYSLOG, no `perf`, `bpftrace`,
+`strace`, `tcpdump`, `stress-ng`, `powertop` or `slabtop` on the machine).
+What each found is in its handoff (`docs/fixes/w25-<stream>.md`, "Run").
+
+### Fixed
+
+- **`mem.heap.alloc` on `bpf:uprobe` read 0 events from a static binary and
+  said nothing**: the C library was read from the gate's maps, still `omn`'s.
+- **`net.tcp.connect` on `bpf:raw_tp` read `sport=0` on every refusal**:
+  `inet_put_port` zeroes `skc_num` before the `TCP_CLOSE` tracepoint fires.
+- **`proc.calls` and `proc.syscall` kept none of a launched program's forked
+  children**: the root's thread group was compared as a constant.
+- **`sched.lock`'s `caller` was the first kernel frame when `/proc/kallsyms`
+  is zeroed**, which is the tracing's own (an address in the module range,
+  where BPF programs are JIT'd): every wait charged to one hex address.
+- `scenario_proc::a_launched_programs_execs_are_its_tree_and_nothing_beside_it`
+  had only ever skipped; with CAP_BPF it failed on `command -v echo`.
+
+### Open: a loss reason's count is the rounds it was noted in, not the losses
+
+`Losses::reasons` is documented as each reason "with how often each
+occurred", and the summary prints it as `{count}x {reason}`. But 186 of the
+218 `losses.note(..)` call sites add a delta to a counter (`dropped += fresh
+- before`) and note the reason **once per drain**. So `sched.lock` under
+eight pipe writers printed `LOSS: 13005 dropped` above `23x a thread began
+waiting for a second lock ...` and `5x the kernel skipped a run ...`: a
+reader takes 23 and 5 for the losses, and cannot find the other 12 977. The
+total is right; the split is not readable. A fix is in the shared layer: a
+`Losses` method that adds to a counter and notes the reason that many times,
+and the 186 sites moved onto it (mechanical: each pairs `+= n` with one
+`note`). Then `--format json`'s `reasons` sums to the counters, which a test
+can hold.

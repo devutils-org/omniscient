@@ -35,6 +35,15 @@ Branch `feat/w25-power`. Done sequentially by one agent, in the main checkout.
   that share of `package_joules`; compare with `powertop --time=5 --csv`'s
   per-process power estimate for the same command.
 
+**Run (2026-10-18, with CAP_PERFMON):** four shell spinners for 5 s:
+`process_cpu_ns` 19.81 s, `machine_busy_ns` 29.08 s, `share` 0.681,
+`joules` 291.5 of `package_joules` 427.8 (0.681 of it, as the estimate
+says). The machine's other 9 s were a spinner left from an earlier attempt.
+No `powertop` or `stress-ng` here, so no comparison with powertop's
+estimate. (With CAP_PERFMON missing -- a `cargo test` relinked the binary
+-- both `power.energy` and this source are refused, naming
+`perf_event_paranoid`.)
+
 ## Not done
 
 Nothing of the stream's list.
