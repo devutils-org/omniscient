@@ -1469,6 +1469,15 @@ open line is settled: `cpu.profile`'s `pmu` row, as the brief decided.
 | A document that is a list, in TOML | **The array of tables `[[entries]]`.** | A TOML document is a table. |
 | A heap source on `bpf:uprobe` | **The same collectors as on `preload`**, reading a `heap::Feed`; the records are the same facts. | One collector per question, whatever road the records took. |
 
+## Settled after the twenty-fifth wave: the distribution matrix
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Where the distribution matrix runs | **On distroproof** (`../distroproof`), every image on its own kernel and userspace; `scripts/matrix.sh` stays for kernel × configuration on the host's userspace. | The two vary different things: mainline kernels and removed features on one side, vendor kernels, libcs and defaults on the other. distroproof is built for the second, by the same author. |
+| What the matrix is for distroproof | **Its living proof**: this project's portability findings, each with the `envprobe` difference distroproof named and its fix, in `docs/distroproof.md`, linked from distroproof's README. | A tool for portability is shown by a real kernel-facing program ported with it, not by its own dogfooding. |
+| Capabilities in a guest | **File capabilities, granted by `setup` on the copied binary**, not distroproof's `caps =`. | `caps =` raises ambient capabilities, which every program `omn` launches would inherit: not the deployment `make` and `docs/install.md` describe. |
+| A defect of distroproof's | **Filed and fixed in distroproof**, never worked around here. | A workaround here would hide from distroproof's users what this project found. |
+
 ## Open
 
 - **The phase 6 criterion for the in-kernel histogram** (io, pending the

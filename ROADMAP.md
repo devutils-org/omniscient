@@ -1082,6 +1082,92 @@ triage follows, and two ways run with different privileges are not compared
 
 ---
 
+## Phase 13 — Every distribution, checked by distroproof
+
+The kernel matrix (`scripts/matrix.sh`, `docs/portability.md`) varies the
+kernel and the privileges and nothing else: Ubuntu's mainline builds, the
+host's binary and the host's userspace over virtiofs. What a user meets first
+is none of those. It is a distribution: its own kernel, configured and patched
+by its vendor (RHEL's 4.18 with a decade of backports), its own glibc or musl,
+its own defaults (`perf_event_paranoid` 3 or 4, `kptr_restrict`, lockdown,
+SELinux or AppArmor), its own package names for the witnesses. Every probe
+this project writes asks a feature and never a version, precisely because of
+those differences, and none has been checked against them.
+
+[distroproof](../distroproof) (`devutils-org/distroproof`, the same author) is
+built for exactly this: it boots each distribution's official cloud image on
+its **own kernel** in QEMU/KVM, runs a command in it as a chosen user with
+chosen sysctls and kernel command line, attaches an `envprobe` report of the
+environment to every result, and ties each failure to the difference that
+explains it. So this phase does two things at once, on purpose:
+
+- **Omniscient is developed against every distribution distroproof boots**,
+  and what fails there is a finding filed and fixed where it lives, like any
+  other.
+- **Omniscient is distroproof's living proof**: a real, kernel-facing program
+  (eBPF, perf, BTF, capabilities, a preload shim) whose portability work is
+  done with it, in the open, with every finding, its cause as `envprobe`
+  named it, and its fix linked from a document. A defect of distroproof's
+  found on the way is filed and fixed in distroproof, not worked around here.
+
+### Tasks
+
+1. **A release that starts everywhere it claims to.** `scripts/release.sh`'s
+   `GLIBC_FLOOR` is 2.34: the archive does not start on Rocky 8, Debian 10
+   and 11, Ubuntu 18.04 and 20.04, nor on musl. Lower the floor (a build
+   against an older glibc, `cargo zigbuild --target
+   x86_64-unknown-linux-gnu.2.17` or the like) and decide musl: a static
+   build cannot `dlopen` NVML or CUPTI, and the preload shim must match the
+   libc of the program it is injected into.
+2. **The sweep as a command of `omn`'s**, not a `cargo test`: what
+   `tests/portability.rs::sweep_this_machine` does -- list every source, run
+   each on a launched program and the machine for 300 ms -- printed as one JSON
+   document on stdout, so a guest needs the release and nothing else. It is
+   also a user's first diagnostic: what this machine serves, and why not the
+   rest.
+3. **`distroproof.toml` in this repository**: every image distroproof has
+   (Debian 10 to 13, Ubuntu 18.04 to 24.04, Rocky 8 and 9, Fedora, Arch,
+   Alpine), and the variants that matter to this tool -- `perf_event_paranoid`
+   3, `kptr_restrict` 2, `lockdown=confidentiality`, no PMU. `setup` grants the
+   file capabilities on the copied binary as root (`setcap`), as a user's
+   install does; distroproof's `caps =`, ambient capabilities, would hand
+   CAP_BPF to every program `omn` launches, which is not the deployment.
+4. **The judges on the host**: the matrix's (`tests/portability.rs`) read
+   distroproof's outputs as they read a virtme-ng cell, and one more judge
+   that only this setup allows -- **every reason `omn` gives is checked
+   against `envprobe`'s fact** for the same machine: "no BTF" where
+   `btf.vmlinux` is unavailable, "paranoid 3" where the sysctl reads 3, and
+   never the one without the other.
+5. **The witnesses per distribution**: `setup` installs `perf`, `bpftrace`,
+   `strace`, the bcc tools from each distribution's own packages, and the
+   reference pairs (`tests/reference.rs`) run where they install.
+6. **`docs/distroproof.md`, the living proof**: how the matrix is run, the
+   table of distributions by result, and for each finding the `envprobe`
+   difference distroproof named, whether that was the cause, and the commit
+   that fixed it. distroproof's README links it as its first real user.
+
+### Exit criteria
+
+- [ ] `distroproof up` in this repository runs the sweep on every image and
+      variant above, and the host's judges pass on each: available means it
+      attaches, and every refusal names its reason.
+- [ ] On every image, every reason `omn` gives agrees with `envprobe`'s
+      report of the same machine.
+- [ ] The release starts on every image distroproof boots, or the images it
+      does not start on are named in `docs/install.md` with the reason.
+- [ ] The reference pairs run on at least Debian, Ubuntu, Rocky and Fedora,
+      with the distribution's own witnesses.
+- [ ] `docs/distroproof.md` lists every finding with its `envprobe`
+      difference and its fix, and distroproof's README points to it.
+- [ ] Every defect of distroproof's met on the way is filed, and fixed, in
+      distroproof.
+
+Not this phase's, and why: aarch64 and containers (item 5 of `STATE.md`'s
+"What remains" asks for both) wait on distroproof booting them; the hardware
+sources (IBS, RAPL, a GPU) stay checked on the host, as in the kernel matrix.
+
+---
+
 ## Cross-cutting test strategy
 
 To be put in place from phase 3, not at the end. A tracer is hard to test because
@@ -1091,7 +1177,7 @@ it has no "obviously wrong" output.
 |---|---|
 | Ground truth | synthetic workloads with known behavior (`usleep`, `dm-delay`, `tc netem`, fixed-size IO) |
 | Cost regression | the phase 8 harness, in CI (built, and run by hand on a quiet machine; not in CI, since its variance gate exists to refuse a loaded one) |
-| Portability | a VM kernel matrix: floor, LTS, recent, no BTF (built in the eleventh wave: `scripts/matrix.sh`, `docs/portability.md`) |
+| Portability | a VM kernel matrix: floor, LTS, recent, no BTF (built in the eleventh wave: `scripts/matrix.sh`, `docs/portability.md`); every distribution on its own kernel and userspace through distroproof (phase 13, `docs/distroproof.md`) |
 | Join robustness | injection of disorder, losses, recycled pointers |
 | Reference tools | `omn` against each tool it replaces, on the same workload within a declared tolerance: pairs as data (`catalog/references/`), the tools as witnesses only, one runner (`tests/reference.rs`), a verdict table per family (`docs/replaces.md`). Built in the twenty-second wave; every pair through the runner since the twenty-third; at the twenty-fourth wave's merge, 115 pairs, 111 held, 1 skipped (`tcpdump-captured` without `make CAPTURE=1`), 1 gap, 0 known defects, 2 failed (`cpu.cycles.system`, `perf-trace-count`, both filed) in the quiet run, none skipped on root (`STATE.md`, "What remains", items 1 and 2) |
 | Degradation | run without privileges, without BTF, without tracefs — check that it degrades **while saying so** (built with the matrix, one configuration each; the CI is the unprivileged cell) |
