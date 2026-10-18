@@ -391,7 +391,6 @@ mod tests {
         assert!(fio_json("{\"jobs\": []}", "").is_err());
     }
 
-    #[test]
     /// The busiest device on both sides: iostat's `%util` as it printed it,
     /// and a real `io.util --system` run over a 1 GiB direct write.
     #[test]
