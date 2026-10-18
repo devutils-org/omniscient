@@ -147,6 +147,17 @@ library is found. A walk ends `Complete`, `CutByCopy` (the next return address
 lies past the copied bytes), `Failed` or `DepthLimit` (127), and each is
 counted and said.
 
+**After an `execve`, the image the target runs now.** A launched program's
+unwinder is built at the gate, while the target is still a fork of `omn`, so
+the first maps it reads are `omn`'s. A walk whose instruction pointer is in no
+module the unwinder holds re-reads the target's maps before it gives up
+(`Cfi::reread_for`), and a module is kept by its start, end and file, so a
+mapping replaced at the same address (a non-PIE `execve`) is dropped rather
+than walked. Bounded: eight re-reads that bring nothing and it stops asking,
+so a JIT's anonymous code does not read `/proc/<pid>/maps` per sample. Before
+it, every sample from the `execve` to the next tick ended at its leaf
+("stopped early": 110 of 41 246 stacks in 41 runs of `CALLTREE`, 0 after).
+
 **Why `framehop`**: pure Rust, no system library to find at install time (libdw
 would tie the release to elfutils' ABI), `.eh_frame_hdr`-indexed lookups with a
 rule cache, correct in prologues and epilogues, and the unwinder `samply` has
@@ -345,6 +356,14 @@ scenario runs the real binary at 1999 Hz over about a second of work and holds
 every sample in `spin` to its branch's whole path from `main` (at most 1 %
 broken) and each branch to its share, within four binomial standard deviations
 of the samples taken plus two points for the callers' own loops.
+
+**The pad between batches.** `CALLTREE` runs a pseudo-random number of
+iterations (a xorshift count below 2^19, about one 500 us sampling period)
+outside `spin` between its batches; `-DPAD_MASK=0` builds without it. Without
+it a batch's length beat against the sampling period: at rates from 1000 to
+1040 Hz a branch read up to 22.9 points off its built share and 8 of 41 runs
+fell outside the slack; with it the worst was 3.9 points and none fell out.
+The pad costs a quarter more cpu a batch, which fewer batches take back.
 
 | scenario | build | mode | holds |
 |---|---|---|---|

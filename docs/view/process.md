@@ -122,9 +122,10 @@ No `-f`: the run asks what every view asks, which is what a live `omn top --
 
 ## What it does not show
 
-- **A recording's capacity.** CPU and memory are coloured only live; a
-  recording would need its machine's cores and memory written beside it
-  (requested of run and views in `docs/fixes/w21-process.md`).
+- **The capacity of a recording made before the twenty-fifth wave.** A
+  recording now carries its machine's cores and memory beside it
+  (`Beside::capacity`), so a replay colours CPU and memory as a live run does;
+  an older one has none, and its lines stay neutral and say so.
 - **Disk and network fill.** A device's busy time and a link's speed are not
   read by any source the views ask for; the lines stay neutral.
 - **The process's own retransmissions** where the run holds only the

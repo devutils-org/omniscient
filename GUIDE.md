@@ -43,6 +43,33 @@ the tool is.
 
 ---
 
+## The shape of a run
+
+Every demonstration below is one of four shapes on the command line, and a
+session file is the same thing written down (`--dump-request` prints it):
+
+- **A program alone is the target**: `omn trace sched.offcpu -e stack --
+  prog`. It is held at a gate until every collector is attached, measured for
+  its life, and its exit code and signal are in the result's `lifetime`.
+- **A target beside a program**: `omn trace cpu.cycles --system -m count -e
+  summary -- prog`. The target (`--system`, `--cpu`, `--cgroup`, `--iface`,
+  `--pid`, `--tid`, `--container`) is what is measured; the program is the
+  window, as `perf stat -a -- prog` and `turbostat prog` measure. In a session
+  file it is `launch: [prog, args]` beside the requests. A source that cannot
+  follow a program says so and names this spelling.
+- **Several sources over one window**: `omn trace cpu.instructions,cpu.cycles
+  -- prog`, one request per source, the same target and axes.
+- **The same run N times**: `-r N`, each with its own launch, every
+  `summary` value given its mean, spread and relative error, as `perf stat -r`.
+
+When a run cannot be served, the last line of stderr says which of three it
+was: the request means nothing (exit 2), this build has not written it (exit
+3), or this machine cannot serve it (exit 1). `omn latency` and `omn saturate`
+exit 1 too when a collector broke the program they measured, the answer still
+printed.
+
+---
+
 ## The four kinds of session
 
 Every family's sessions cover the same four, because each catches a different

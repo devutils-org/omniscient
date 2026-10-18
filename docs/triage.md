@@ -93,6 +93,28 @@ carries one). A verdict read off a program that printed its usage and exited
 2 decomposes two milliseconds of startup, and read exactly like a real answer
 until it said so.
 
+Two more things travel beside the verdict when there are any. **`failures`**:
+what a collector said it broke in the program -- each sentence once, over
+every run of both passes -- because a verdict read off a program the tool
+broke is not an answer; the text says so above the table, and `omn latency`
+exits 1 (as `omn -f` does, since the twenty-fifth wave), the answer still
+printed. **`program_stderr`**: with `--program-stderr FILE` (or
+`OMN_PROGRAM_STDERR`) and several launches, where each kept its standard
+error, `FILE.1` to `FILE.N` in the order they ran, `FILE` itself the last
+one's, as after one run.
+
+When the way the wait was followed into a child's work ends in the child's
+process, the **job** beside it (`followed.job`) is what else was busy for it:
+- **`under`**: the process the job was restricted to -- the chosen child's
+  parent, and everything under it -- when the run's events carry `ppid` (the
+  sched sources do); absent, the job is every busy task off the way, an
+  upper bound the text says ("may be more");
+- **`unplaced`** and **`unplaced_on_cpu`**: busy tasks whose parents the run
+  did not say far enough to place under `under` or beside it, busiest first,
+  and their time on a cpu: neither counted in the job nor dropped from it,
+  and said in the text (`and N busy task(s) off the way the run did not
+  place ...`).
+
 Three things the table alone does not say, all read off the same run:
 
 - **Which task.** A program's latency is its main thread's life — the thread
@@ -172,6 +194,9 @@ rate times the mean wait, and the text prints both.
   undecided when two fall in the same one. The histogram's `Shortfall` is
   carried — finding 37 exists for this reader — and a lossy run's percentile is
   marked a lower bound.
+- **failures**, as for `omn latency`: what the collectors broke in the
+  workload, said above the uses, and `omn saturate` exits 1 with the answer
+  printed.
 - **energy** reads `power.energy` per domain and credits the workload with the
   package's energy times its share of the machine's busy cpu time
   (`cpu.util`), marked TEMPORAL because the meter is the package's. The disk's

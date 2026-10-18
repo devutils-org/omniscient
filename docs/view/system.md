@@ -200,9 +200,9 @@ at 60x20, with the sections that did not fit counted on one line.
 
 - **Per cpu.** `cpu.util` is asked for the machine as one series. A per-cpu
   heat strip would need a per-cpu request, which the needs do not make.
-- **Every process on the machine.** The process list is the target's tasks
-  only, as the per-task sources saw them. With no target there is no list:
-  the machine-wide per-task source is refused on this build.
+- **Processes beyond what `proc.tasks` polled.** With no target the list is
+  the machine's processes as `proc.tasks` read them each poll; one born and
+  gone between two polls is in no row.
 - **Which thread belongs to which process.** `cpu.oncpu_time` on `fs:proc`,
   `mem.rss` and `gpu.mem` read a process (`/proc/<pid>`, its threads
   summed); faults, the sched sources and `io.syscall` report threads. Both
@@ -212,8 +212,9 @@ at 60x20, with the sections that did not fit counted on one line.
   row.
 - **The RAPL domains by name, once a run has ended**: one timeline holds
   them all, as above.
-- **In apart from out, names, by state, once a run has ended**, for the
-  reason above.
+- **Names and states, once a run has ended**, for the reason above. In and
+  out are kept apart: a source keyed on `dir` draws one line per direction
+  and its device's sum beside them (`fold_dirs`).
 - **GPU engines.** NVML gives one whole-device figure (`degraded`, said on
   the rule).
 - **Device names.** A disk is its `major:minor` (`259:0`), because that is
@@ -222,6 +223,5 @@ at 60x20, with the sections that did not fit counted on one line.
 **Verdict:** it shows every resource of the machine on one time axis, drawn
 in the trust style with the GPU's one-second sampling error as a ruler at
 its real width and each collector's price beside it, which no system monitor
-does; it does not show per-cpu load, processes other than the target's, or,
-once a run has ended, the splits (by state, in/out, read/written) that only
-live events carry.
+does; it does not show per-cpu load, or, once a run has ended, the splits by
+state and name that only live events carry.

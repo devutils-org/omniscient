@@ -14,7 +14,9 @@ a duration, never on a program.
 | How long in each idle state? | `power.cstate` | `trace` or `poll` |
 | How hot? | `power.temp` | `poll@1s` |
 | Did it throttle (thermal, power limit)? | `power.throttle` | `poll` |
-| How often does my process wake up (powertop)? | `power.wakeups` | `poll@1s` (the one per-process source) |
+| How often does my process wake up (powertop)? | `power.wakeups` | `poll@1s`; `--system -k comm -e summary` for every process |
+| How much of the package's energy is my process's? | `power.process_energy` | `count -e raw` (an estimate: its share of busy cpu time, said on every event) |
+| How idle was each cpu over a command? | `power.cstate` | `count -e rate --system -- cmd` |
 
 ## Examples
 
@@ -34,9 +36,11 @@ measures. It is not the program's energy.
 ## Targets
 
 **RAPL is per package: `--pid` is refused**, never answered with the machine's
-number labelled as a process's. A per-process energy would be an estimate
-(share of cycles) and has to be labelled as one. `power.freq`, `power.cstate`
-take `--cpu`; `power.wakeups` is the only per-process source.
+number labelled as a process's. A per-process energy is an estimate (its
+share of the machine's busy cpu time), and `power.process_energy` is that
+estimate, labelled as one on every event. `power.freq`, `power.cstate` take
+`--cpu`; `power.wakeups` and `power.process_energy` are the per-process
+sources.
 
 ## Backends and privilege
 

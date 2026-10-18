@@ -147,8 +147,11 @@ that has requests.
   and infers nothing from a connection, so a server that fires no
   `request__start`/`request__done` has no requests here -- by design, said on
   screen.
-- Bytes on the network. `net.request` gives the network's time on either side
-  of a request, not its volume; the `flows` view is where bytes are.
+- Bytes on the wire. What a request read and queued on its socket is said
+  under its waterfall (`512 B read · 4.1 KiB queued`), from `net.request`'s
+  `rx_bytes` and `tx_bytes`, with `?` where its start was not seen and a
+  dimmed line on a recording made before they were counted; that is the
+  socket's account, not the interface's, which the `flows` view draws.
 - Which lock. The waker's tid is named; the lock's address and the stack
   that took it are not in `net.request`. `wake` and `lanes` (`l`) are the
   next step.

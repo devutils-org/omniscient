@@ -17,7 +17,8 @@ Lazy default: `omn net -- ./prog` (`net.socket` histogram; `--cost med` adds
 | Bytes and packets per interface | `net.bytes`, `net.packets` | `poll@1s -e timeline` |
 | Interface errors, drops, pause frames | `net.iface` | `poll` |
 | Every TCP/UDP socket now (`ss -tuanp`) | `net.sockets` | `snapshot -e raw` |
-| Every protocol counter (`nstat`) | `net.snmp` | `count -e raw` |
+| Every protocol counter (`nstat`) | `net.snmp` | `count -k counter -e summary` (one row per counter), `poll -k counter -e rate` |
+| Sockets by transport (`ss -s`) | `net.sockstat` | `snapshot -e raw` |
 | Accept and SYN queue overflows | `net.backlog` | `count` |
 | Transmit queueing in the qdisc | `net.qdisc` | `trace -e hist` |
 | Time in network softirq | `net.softirq` | `trace` |

@@ -285,15 +285,35 @@ way reads it so, and the way `omn latency` reads the same run
   slept. Up to eight steps. The verdict's `task` says which task the person's
   way named, and the run's line prints the agent's path (`followed: task:1
   blocked 5346.0 ms -> task:9`).
+- **A thread blocked on a connection, beside the block.** When nothing ran
+  in the block, a thread of the same process whose `sched.offcpu` blocks went
+  through a connection's frames (a socket send or receive, a `connect`) for
+  at least a quarter of it is what the program waited on: it is named beside
+  the block (`task:10 blocked 2300.0 ms beside, blocked on a connection:
+  task:11`), its whole its own rows, and no job follows from it. A thread of
+  another process is not the program's wait.
+- **The job, by `ppid`.** Once the path left the main thread for a busy
+  child, the rest of the job is every busy task whose process runs under
+  that child's parent, read off the raw events' `pid` and `ppid` (the sched
+  sources carry both); one whose parents stop short of an answer is left out,
+  as the person's way keeps it apart (`unplaced`). With no `ppid` in the run,
+  every other busy task: the upper bound.
 - **Its stack, its own.** A `stack` output adds up every task's events, so
   the stack of a followed task cannot be read from it. The approved session
   asks `raw` beside each `stack`, and the agent reads the request's every
   event (`read_run`, `max_events: 0`) for the task it reads: off the cpu, the
   stack with the most blocked nanoseconds (`total_ns` less `queued_ns`); on
-  it, each sample charged to the innermost frame a perf map named
-  (`/tmp/perf-<pid>.map`, cited by the profile's names note, and last
-  written once the run was asked for: an older map is an earlier process's
-  with the same pid, not read and said), or to its leaf.
+  it, each sample charged to the innermost frame a perf map named, or to its
+  leaf. Which frames a perf map named is read first off the result's
+  `named_by` (each frame's namer, beside its stacks); only a result without
+  it sends the agent to `/tmp/perf-<pid>.map` (cited by the profile's names
+  note, and last written once the run was asked for: an older map is an
+  earlier process's with the same pid, not read and said).
+- **The tool's own samples are set aside.** A sample whose stack ran one of
+  the tool's eBPF programs (`bpf_prog_*`, `__bpf_trace_*`, a trampoline) is
+  the tool's cost on the program's cpu, never its suspect: charged to no
+  function and counted in the answer's unseen lines, as `diff::hottest`
+  sets it aside for the person's way.
 - **A flat interpreter profile names nothing.** When the program is an
   interpreter -- by the name a word of its command goes by, or by the module
   of the unnamed frames of half its samples -- and the hottest function was

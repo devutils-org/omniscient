@@ -26,7 +26,7 @@ answers "which allocation cost memory" (`make demo`, question 3).
 | Question | Source | Mode |
 |---|---|---|
 | Is it growing? | `mem.rss` (cheap: `statm`; full: `smaps_rollup`) | `poll@100ms -e timeline` |
-| Who allocates, from where? | `mem.heap.alloc` | `trace -e stack` or `topk` |
+| Who allocates, from where? | `mem.heap.alloc` | `trace -e stack` (through `bpf:uprobe`: the shim takes no stacks) or `topk` |
 | Is it leaking? | `mem.heap.live` beside `mem.rss` | `poll@100ms` |
 | Fragmentation? | `mem.heap.retained` | `poll` |
 | Page faults, and where? | `mem.faults` | `count`, `sample -e stack` |
@@ -35,7 +35,9 @@ answers "which allocation cost memory" (`make demo`, question 3).
 | Is the machine short of memory? | `mem.system` (what `free` prints), `mem.pressure` (PSI) | `poll@1s` |
 | Is it swapping? | `mem.swap` | `poll` |
 | Direct reclaim and compaction stalls? | `mem.reclaim`, `mem.compaction` | `trace -e hist` |
-| OOM kills | `mem.oom` | `count` |
+| OOM kills | `mem.oom` | `count`; `trace -e raw` names each victim, what it held and its `oom_score_adj` |
+| Which slab cache holds the kernel's memory (`slabtop`) | `mem.slab` | `snapshot -e raw` (root: `/proc/slabinfo`) |
+| Which mapping holds the footprint (`pmap -X`) | `mem.pss`, `mem.uss` | `snapshot -k mapping -e summary --backend force:fs:proc:smaps` |
 | Kernel allocations | `mem.page_alloc`, `mem.kmalloc` | `trace -e topk` (system-wide) |
 | Transparent huge pages | `mem.thp` | `poll` |
 

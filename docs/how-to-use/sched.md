@@ -23,6 +23,7 @@ peer). The two have different sources and different cures.
 | Time in interrupt handlers | `sched.irq` | `trace -e topk` |
 | Interrupt counts per cpu and line | `sched.interrupts` | `poll` (`mpstat -I`) |
 | Runnable and blocked task counts, load average | `sched.runqueue` | `poll@1s` (vmstat's `r` and `b`) |
+| Each cpu's run queue length (`runqlen`) | `sched.runqlen` | `sample -k cpu -e hist` |
 | NUMA balancing decisions | `sched.numa_balance` | `trace` |
 
 And when you want the whole picture of one task: `omn latency -- ./prog`

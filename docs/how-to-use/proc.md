@@ -22,6 +22,7 @@ omn trace proc.syscall -m count -k syscall -e summary -- ./prog
 omn trace proc.syscall -m count -e topk:10@syscall --system -d 5s
 omn trace proc.calls -m trace -e raw --filter "syscall == 'openat'" -- ./prog
 omn trace proc.calls -m trace -e raw --filter 'errno != 0' -- ./prog
+omn trace proc.calls -m trace -e raw --filter "syscall == 'execve'" -- make   # execsnoop
 omn trace proc.exec -m trace -e raw -- make -j8
 omn trace proc.exit -m trace -e raw --filter 'group_dead == 1' --system -d 30s
 omn trace proc.fd,proc.threads -m poll@1s -e timeline --pid 1234 -d 1m

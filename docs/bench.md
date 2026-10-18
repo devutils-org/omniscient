@@ -856,6 +856,15 @@ comes back under it and the reason is no longer needed. The fixed cost is
 still the tool's, and still counted by `cost.json` against `--budget`: a short
 run of either under a tight budget stops. That is filed, not hidden.
 
+**What the share was, found after this table.** A profile of the attach
+(`docs/fixes/w24-io.md`) put most of `io.fsync`'s share in the trampolines'
+*unlink*, which `stop()` used to do inside the window: since the twenty-fourth
+wave its programs stay attached until the collector is dropped, after the
+window, and the share above is the table's, not today's. `net.tcp.connect`'s
+39 % is the same unlink (six trampolines), still inside its window; its
+`bpf:raw_tp` road (the twenty-fifth wave) attaches one raw tracepoint and no
+trampoline. Both rows want the next table to say what is left.
+
 **An equivalent backend is not cheaper than what it stands in for.** A
 backend declared `equivalent` is the same measurement, and `bpf:tp` beside
 `bpf:raw_tp` is the same tracepoint and the same collector. Raising only the
