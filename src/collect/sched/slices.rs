@@ -62,6 +62,8 @@ struct Opened {
     /// The wait on the queue: the stamp's part, and what the kernel closed of
     /// it on other cpus. `None` when neither can be told.
     queue_ns: Option<u64>,
+    /// The wait by the tracepoints, from the wakeup or preemption.
+    wake_ns: Option<u64>,
 }
 
 /// One task's state between two of its switches.
@@ -85,6 +87,8 @@ pub(crate) struct Slice {
     pub out_ns: u64,
     pub run_ns: u64,
     pub queue_ns: Option<u64>,
+    /// The same wait by the tracepoints: `perf sched timehist`'s `sch delay`.
+    pub wake_ns: Option<u64>,
     pub off_ns: Option<u64>,
     pub state: u32,
     pub preempted: bool,
@@ -120,6 +124,9 @@ pub(crate) struct Ends {
     /// `rq->clock - last_queued` of the task coming in, `None` when it held
     /// no stamp, which is not a zero wait.
     pub queue_ns: Option<u64>,
+    /// The wait since its wakeup or preemption by the tracepoints, `None`
+    /// when the run saw neither.
+    pub wake_ns: Option<u64>,
     /// `sched_info.run_delay` of each end.
     pub prev_delay: u64,
     pub next_delay: u64,
@@ -157,6 +164,7 @@ impl Pairing {
                 out_ns: ends.ts_ns,
                 run_ns: ends.run_ns,
                 queue_ns,
+                wake_ns: opened.and_then(|opened| opened.wake_ns),
                 off_ns,
                 state: ends.prev_state,
                 preempted: ends.preempt,
@@ -183,6 +191,7 @@ impl Pairing {
             task.opened = Some(Opened {
                 in_ns: ends.ts_ns,
                 queue_ns,
+                wake_ns: ends.wake_ns,
             });
         }
         closed
@@ -217,6 +226,9 @@ fn event(slice: &Slice, id: &CollectorId, seq: u64) -> Event {
     }
     if let Some(off_ns) = slice.off_ns {
         attrs.push(Attr::uint("off_ns", off_ns));
+    }
+    if let Some(wake_ns) = slice.wake_ns {
+        attrs.push(Attr::uint("wake_ns", wake_ns));
     }
     Event {
         ts_ns: slice.out_ns,
@@ -282,6 +294,7 @@ impl SlicesCollector {
                     next_matched: switch.matched & 1 != 0,
                     run_ns: switch.run_ns,
                     queue_ns: switch.queue(),
+                    wake_ns: switch.wake(),
                     prev_delay: switch.prev_delay,
                     next_delay: switch.next_delay,
                 })
@@ -444,6 +457,7 @@ mod tests {
             next_matched: next == 7,
             run_ns,
             queue_ns,
+            wake_ns: queue_ns.map(|ns| ns + 3_000),
             prev_delay: 0,
             next_delay: 0,
         }
@@ -468,6 +482,9 @@ mod tests {
             .expect("the target's slice");
         assert_eq!(second.run_ns, 3_990);
         assert_eq!(second.queue_ns, Some(300));
+        // The tracepoints' wait travels from the switch in that opened it.
+        assert_eq!(second.wake_ns, Some(3_300));
+        assert_eq!(first.wake_ns, None);
         // Off at 1 000, in at 5 000: 3 700 off the cpu, then 300 queued.
         assert_eq!(second.off_ns, Some(3_700));
         assert_eq!(second.next_comm, "t3");

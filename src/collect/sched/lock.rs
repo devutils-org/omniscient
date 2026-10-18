@@ -220,7 +220,6 @@ impl LockCollector {
                 }
                 self.filtered_in += row.count;
             }
-            let mut event = event;
             if let Some(id) = self.resolve_stack(&row) {
                 event.attrs.push(Attr::uint(STACK_ID_ATTR, id));
             }

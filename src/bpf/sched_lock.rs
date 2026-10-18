@@ -386,6 +386,7 @@ fn begin_instructions(
 
 /// The program on `contention_end`: the thread has the lock, and the wait has
 /// a length.
+#[allow(clippy::too_many_arguments)]
 fn end_instructions(
     btf: &Btf,
     followed: &Followed,

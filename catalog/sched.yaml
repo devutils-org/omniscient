@@ -421,12 +421,12 @@
     # One ring record per switch either end of which is the target's, the
     # leaving task's run and the coming task's queue wait read from the
     # kernel's own `sched_info` stamps: `perf sched timehist`'s line.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"], cost: high}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_wakeup(task_struct *)", "raw_tracepoint:sched_wakeup_new(task_struct *)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"], cost: high}
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
   keys: [task, cpu]
-  filter_fields: [comm, pid, ppid, cpu, state, next_comm, run_ns, queue_ns, off_ns]
+  filter_fields: [comm, pid, ppid, cpu, state, next_comm, run_ns, queue_ns, off_ns, wake_ns]
   determinism: low
   caveats:
     - "An event is one slice of one task on one cpu, stamped where it left the
@@ -445,7 +445,10 @@
        `schedstat` counts it: a task woken onto an idle cpu reads 0 there, where
        the scheduler did not move its clock between the wakeup and the switch,
        and `perf sched timehist`'s `sch delay`, timed between the tracepoints,
-       reads a few microseconds. It costs a ring record per switch of the target, which on a
+       reads a few microseconds. `wake_ns` is that wait timed between the
+       tracepoints, as timehist does: from the task's `sched_wakeup` (or its
+       preemption, a switch out still runnable) to its switch in, absent where
+       the run saw neither. It costs a ring record per switch of the target, which on a
        machine-wide run is every switch of the machine."
 
 - id: sched.runqueue

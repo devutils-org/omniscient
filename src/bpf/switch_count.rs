@@ -33,6 +33,16 @@ use super::insn::{
     count_drop, helper, read_field, Insn, Program, Subject, TaskFields, Whose, BPF_DW, BPF_W, R10,
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Rows};
+
+/// `BPF_MAP_TYPE_LRU_HASH`: a wakeup stamp whose task never ran under the
+/// program is evicted rather than kept forever.
+const BPF_MAP_TYPE_LRU_HASH: u32 = 9;
+
+/// How many woken, not yet running tasks are stamped at once.
+const MAX_WOKEN: u32 = 16384;
+
+/// `sched_wakeup(task_struct *)`, and `sched_wakeup_new` the same.
+const WAKEUP_SIGNATURE: [&str; 1] = ["task_struct *"];
 use super::ring::{ring_bytes, RingBuffer};
 use super::sched_common::{
     push_followed_filter, push_last_queued, push_rq_clock, push_run_delay, Descendants, Followed,
@@ -413,9 +423,18 @@ pub struct Switch {
     /// this wait: what grew since it left is the part of the wait spent on a
     /// cpu it was moved away from, which `queue_ns` alone does not see.
     pub next_delay: u64,
+    /// How long the task coming in waited since the tracepoints saw it become
+    /// runnable -- its `sched_wakeup`, or its preemption -- which
+    /// [`WAKE_STAMPED`] tells from no stamp: `perf sched timehist`'s `sch
+    /// delay`, timed where timehist times it.
+    pub wake_ns: u64,
 }
 
-const SWITCH_BYTES: usize = 104;
+const SWITCH_BYTES: usize = 112;
+
+/// The bit of [`Switch::matched`] set when the task coming in carried a
+/// wakeup (or preemption) stamp, so `wake_ns` is a wait.
+const WAKE_STAMPED: u32 = 8;
 
 /// The bit of [`Switch::matched`] set when the task coming in held a queue
 /// stamp no later than its run queue's clock, so `queue_ns` is a wait and not
@@ -435,6 +454,12 @@ impl Switch {
     /// held no stamp to tell: not the same as a zero wait.
     pub fn queue(&self) -> Option<u64> {
         (self.matched & QUEUE_STAMPED != 0).then_some(self.queue_ns)
+    }
+
+    /// How long the task coming in waited from its wakeup by the
+    /// tracepoints, or `None` when the run saw it become runnable nowhere.
+    pub fn wake(&self) -> Option<u64> {
+        (self.matched & WAKE_STAMPED != 0).then_some(self.wake_ns)
     }
 
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -463,6 +488,7 @@ impl Switch {
             next_comm,
             prev_delay: long(88),
             next_delay: long(96),
+            wake_ns: long(104),
         })
     }
 }
@@ -483,11 +509,14 @@ const SW_PREV_COMM: i16 = SW_EVENT + 56;
 const SW_NEXT_COMM: i16 = SW_EVENT + 72;
 const SW_PREV_DELAY: i16 = SW_EVENT + 88;
 const SW_NEXT_DELAY: i16 = SW_EVENT + 96;
+const SW_WAKE: i16 = SW_EVENT + 104;
 const SW_NOW: i16 = SW_EVENT - 8;
 const SW_STAMP: i16 = SW_NOW - 8;
 const SW_CLOCK_SCRATCH: i16 = SW_STAMP - 8;
 const SW_DROP_KEY: i16 = SW_CLOCK_SCRATCH - 8;
 const SW_FILTER_SCRATCH: i16 = SW_DROP_KEY - 16;
+const SW_WAKE_KEY: i16 = SW_FILTER_SCRATCH - 8;
+const SW_WAKE_VALUE: i16 = SW_WAKE_KEY - 8;
 const ARG_NEXT: i16 = 16;
 
 /// The per-switch program: one ring record per switch either end of which
@@ -499,6 +528,7 @@ fn stream_instructions(
     followed: Followed,
     ring_fd: i32,
     drops_fd: i32,
+    woken_fd: i32,
 ) -> Result<Vec<Insn>, String> {
     let whose = followed.whose;
     let signature = btf.tracepoint_signature("sched_switch")?;
@@ -532,7 +562,7 @@ fn stream_instructions(
     program.push(Insn::stx(BPF_W, R10, SW_PREEMPT, 1));
     program.push(Insn::ldx(BPF_DW, 1, 6, ARG_PREV_STATE));
     program.push(Insn::stx(BPF_W, R10, SW_STATE, 1));
-    for slot in [SW_RUN, SW_QUEUE] {
+    for slot in [SW_RUN, SW_QUEUE, SW_WAKE] {
         program.push(Insn::st_imm(BPF_DW, R10, slot, 0));
     }
     for (into, size, task, offset) in [
@@ -632,6 +662,56 @@ fn stream_instructions(
     }
 
     program.label("emit");
+    // The tracepoints' wait of the task coming in, when it is the target's:
+    // from the stamp its wakeup (or its preemption) left, to now.
+    program.push(Insn::ldx(BPF_W, 1, R10, SW_MATCHED));
+    program.push(Insn::and64_imm(1, 1));
+    program.jump_to("wake_done", Insn::jeq_imm(1, 0, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, SW_WAKE_KEY, 0));
+    program.push(Insn::ldx(BPF_W, 1, R10, SW_NEXT_TID));
+    program.push(Insn::stx(BPF_W, R10, SW_WAKE_KEY, 1));
+    program.extend(Insn::load_map_fd(1, woken_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, SW_WAKE_KEY as i32));
+    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+    program.jump_to("wake_done", Insn::jeq_imm(0, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 2, 0, 0));
+    program.push(Insn::ldx(BPF_DW, 1, R10, SW_EVENT));
+    // A stamp later than now is not this wait's; it is dropped unread.
+    program.jump_to("wake_delete", Insn::jgt_reg(2, 1, 0));
+    program.push(Insn::sub64_reg(1, 2));
+    program.push(Insn::stx(BPF_DW, R10, SW_WAKE, 1));
+    program.push(Insn::ldx(BPF_W, 1, R10, SW_MATCHED));
+    program.push(Insn::or64_imm(1, WAKE_STAMPED as i32));
+    program.push(Insn::stx(BPF_W, R10, SW_MATCHED, 1));
+    program.label("wake_delete");
+    program.extend(Insn::load_map_fd(1, woken_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, SW_WAKE_KEY as i32));
+    program.push(Insn::call(helper::MAP_DELETE_ELEM));
+    program.label("wake_done");
+    // A target's task leaving still runnable is preempted, and its wait for
+    // the cpu begins now, as `perf sched timehist` times it.
+    program.push(Insn::ldx(BPF_W, 1, R10, SW_MATCHED));
+    program.push(Insn::and64_imm(1, 2));
+    program.jump_to("stamp_done", Insn::jeq_imm(1, 0, 0));
+    program.push(Insn::ldx(BPF_W, 1, R10, SW_STATE));
+    program.jump_to("stamp_done", Insn::jne_imm(1, 0, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, SW_WAKE_KEY, 0));
+    program.push(Insn::ldx(BPF_W, 1, R10, SW_PREV_TID));
+    program.jump_to("stamp_done", Insn::jeq_imm(1, 0, 0));
+    program.push(Insn::stx(BPF_W, R10, SW_WAKE_KEY, 1));
+    program.push(Insn::ldx(BPF_DW, 1, R10, SW_EVENT));
+    program.push(Insn::stx(BPF_DW, R10, SW_WAKE_VALUE, 1));
+    program.extend(Insn::load_map_fd(1, woken_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, SW_WAKE_KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, SW_WAKE_VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.label("stamp_done");
+
     program.extend(Insn::load_map_fd(1, ring_fd));
     program.push(Insn::mov64_reg(2, R10));
     program.push(Insn::add64_imm(2, SW_EVENT as i32));
@@ -651,6 +731,61 @@ fn stream_instructions(
     Ok(instructions)
 }
 
+/// The program on `sched_wakeup` and `sched_wakeup_new`: a target's task
+/// became runnable, and the moment is stamped for the switch that runs it.
+fn wakeup_instructions(btf: &Btf, followed: Followed, woken_fd: i32) -> Result<Vec<Insn>, String> {
+    for tracepoint in ["sched_wakeup", "sched_wakeup_new"] {
+        let signature = btf.tracepoint_signature(tracepoint)?;
+        if signature != WAKEUP_SIGNATURE {
+            return Err(format!(
+                "this kernel declares `{tracepoint}({})`, and the wakeup stamp is written for \
+                 `{tracepoint}({})`",
+                signature.join(", "),
+                WAKEUP_SIGNATURE.join(", "),
+            ));
+        }
+    }
+    const KEY: i16 = -8;
+    const VALUE: i16 = -16;
+    const SCRATCH: i16 = -32;
+    let pid_offset = btf.member_offset("task_struct", "pid")?;
+    let tgid_offset = btf.member_offset("task_struct", "tgid")?;
+    let fields = TaskFields::locate(btf, followed.whose)?;
+    let mut program = Program::new();
+    program.push(Insn::mov64_reg(6, 1));
+    program.push(Insn::ldx(BPF_DW, 7, 6, 0));
+    program.push(Insn::st_imm(BPF_DW, R10, KEY, 0));
+    read_field(&mut program, KEY, 4, 7, pid_offset);
+    // Thread zero is every cpu's idle task, never a woken one.
+    program.push(Insn::ldx(BPF_W, 1, R10, KEY));
+    program.jump_to("done", Insn::jeq_imm(1, 0, 0));
+    push_followed_filter(
+        &mut program,
+        &fields,
+        &followed,
+        Subject::task(7),
+        tgid_offset,
+        SCRATCH,
+        "done",
+        "woken_kept",
+    );
+    program.push(Insn::call(helper::KTIME_GET_NS));
+    program.push(Insn::stx(BPF_DW, R10, VALUE, 0));
+    program.extend(Insn::load_map_fd(1, woken_fd));
+    program.push(Insn::mov64_reg(2, R10));
+    program.push(Insn::add64_imm(2, KEY as i32));
+    program.push(Insn::mov64_reg(3, R10));
+    program.push(Insn::add64_imm(3, VALUE as i32));
+    program.push(Insn::mov64_imm(4, 0));
+    program.push(Insn::call(helper::MAP_UPDATE_ELEM));
+    program.label("done");
+    program.push(Insn::mov64_imm(0, 0));
+    program.push(Insn::exit());
+    let instructions = program.build();
+    super::insn::audit(&instructions)?;
+    Ok(instructions)
+}
+
 /// A loaded, attached per-switch program and the ring it writes.
 struct SwitchStreamProgram {
     descendants: Option<Descendants>,
@@ -658,6 +793,11 @@ struct SwitchStreamProgram {
     drops: Counters,
     program: OwnedFd,
     _link: OwnedFd,
+    /// The wakeup stamps and the program writing them, attached to both
+    /// wakeup tracepoints.
+    _woken: OwnedFd,
+    wakeup_program: OwnedFd,
+    _wakeup_links: [OwnedFd; 2],
 }
 
 impl SwitchStreamProgram {
@@ -678,8 +818,29 @@ impl SwitchStreamProgram {
             .map_or(Followed::only(whose), |descendants| {
                 descendants.followed(whose)
             });
-        let instructions =
-            stream_instructions(btf, followed, ring_map.as_raw_fd(), drops.as_raw_fd())?;
+        let woken = syscall::map_create(BPF_MAP_TYPE_LRU_HASH, 4, 8, MAX_WOKEN, "omn_sws_woken")
+            .map_err(|error| map_failure("wakeup stamp map", error))?;
+        let instructions = stream_instructions(
+            btf,
+            followed,
+            ring_map.as_raw_fd(),
+            drops.as_raw_fd(),
+            woken.as_raw_fd(),
+        )?;
+        let wakeup = wakeup_instructions(btf, followed, woken.as_raw_fd())?;
+        let wakeup_program = syscall::prog_load(
+            syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
+            &wakeup,
+            "omn_sws_wake",
+            LICENSE,
+        )
+        .map_err(|error| {
+            if error.is_permission() {
+                super::permission_advice("loading a raw tracepoint program")
+            } else {
+                format!("the kernel refused the wakeup stamp program: {error}")
+            }
+        })?;
         let program = syscall::prog_load(
             syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
             &instructions,
@@ -693,6 +854,16 @@ impl SwitchStreamProgram {
                 format!("the kernel refused the per-switch program: {error}")
             }
         })?;
+        // The wakeups first, so a switch never looks for a stamp nobody could
+        // have written yet.
+        let wakeup_link = |tracepoint: &str| {
+            syscall::raw_tracepoint_open(tracepoint, wakeup_program.as_raw_fd())
+                .map_err(|error| format!("cannot attach to the `{tracepoint}` tracepoint: {error}"))
+        };
+        let wakeup_links = [
+            wakeup_link("sched_wakeup")?,
+            wakeup_link("sched_wakeup_new")?,
+        ];
         let link = syscall::raw_tracepoint_open("sched_switch", program.as_raw_fd())
             .map_err(|error| format!("cannot attach to the `sched_switch` tracepoint: {error}"))?;
         let ring = RingBuffer::map(ring_map, bytes)
@@ -703,6 +874,9 @@ impl SwitchStreamProgram {
             drops,
             program,
             _link: link,
+            _woken: woken,
+            wakeup_program,
+            _wakeup_links: wakeup_links,
         })
     }
 
@@ -722,7 +896,7 @@ impl SwitchStreamProgram {
 
     /// Runs the kernel skipped; see `SwitchCountProgram::skipped`.
     pub fn skipped(&self) -> u64 {
-        crate::bpf::attach::fentry::skipped([&self.program])
+        crate::bpf::attach::fentry::skipped([&self.program, &self.wakeup_program])
             + self.descendants.as_ref().map_or(0, Descendants::skipped)
     }
 
@@ -742,6 +916,38 @@ impl SwitchStreamProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The per-switch program and the wakeup stamp build against this kernel;
+    /// the switch looks a stamp up and deletes it, and the wakeup program
+    /// compares the target before it stamps.
+    #[test]
+    fn the_wakeup_stamp_and_its_reader_build_against_this_kernel() {
+        let Ok(btf) = crate::bpf::kernel_btf() else {
+            eprintln!("skipped: no kernel BTF");
+            return;
+        };
+        let stream = stream_instructions(btf, Followed::only(Whose::Any), 3, 4, 5)
+            .expect("the per-switch program");
+        let calls = |program: &[Insn], helper: i32| {
+            program
+                .iter()
+                .filter(|insn| insn.code == 0x85 && insn.imm == helper)
+                .count()
+        };
+        assert!(calls(&stream, helper::MAP_LOOKUP_ELEM) >= 1);
+        assert_eq!(calls(&stream, helper::MAP_DELETE_ELEM), 1);
+        let wakeup = wakeup_instructions(btf, Followed::only(Whose::Process(4242)), 5)
+            .expect("the wakeup program");
+        let compared = wakeup
+            .iter()
+            .position(|insn| insn.imm == 4242)
+            .expect("the comparison");
+        let stamped = wakeup
+            .iter()
+            .position(|insn| insn.code == 0x85 && insn.imm == helper::MAP_UPDATE_ELEM)
+            .expect("the stamp");
+        assert!(compared < stamped);
+    }
 
     /// The program writes the record at stack offsets and `from_bytes`
     /// reads it at struct offsets; nothing else connects the two.
@@ -764,6 +970,7 @@ mod tests {
             (SW_NEXT_COMM, offset_of!(Switch, next_comm)),
             (SW_PREV_DELAY, offset_of!(Switch, prev_delay)),
             (SW_NEXT_DELAY, offset_of!(Switch, next_delay)),
+            (SW_WAKE, offset_of!(Switch, wake_ns)),
         ] {
             assert_eq!((stack - SW_EVENT) as usize, field);
         }
