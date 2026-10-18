@@ -1001,20 +1001,33 @@ const OMN_RUN_FAILED: &str = "exit 1: the run failed after it started";
 /// runs alone; the tool refused there is the machine's, and the skip stands.
 fn workload_fails_alone(pair: &Pair) -> Option<Outcome> {
     let launched = pair.run == RunMode::OmnLaunchesTool;
-    let tmp = if launched { scratch(0).ok() } else { None };
+    // In a scratch directory of its own, with the pair's `setup` and
+    // `teardown` around it, as each observed run has them: a workload that
+    // joins a cgroup the setup makes fails alone without it.
+    let tmp = scratch(0).ok();
     let program: Vec<String> = match &tmp {
-        Some(tmp) => tool_argv(pair, &pair.reference.command, tmp, None)
+        Some(tmp) if launched => tool_argv(pair, &pair.reference.command, tmp, None)
             .into_iter()
             .chain(pair.workload.iter().cloned())
             .collect(),
+        Some(tmp) => substitute(&pair.workload, tmp, None),
         None if launched => return None,
         None => pair.workload.clone(),
     };
     if program.is_empty() {
         return None;
     }
+    if let Some(tmp) = &tmp {
+        if let Err(why) = run_setup(pair, tmp) {
+            let _ = std::fs::remove_dir_all(tmp);
+            return Some(Outcome::Fail(format!(
+                "the pair's setup fails alone: {why}"
+            )));
+        }
+    }
     let side = spawn(&mut command_of(&program)).and_then(|child| finish(child, timeout(pair)));
     if let Some(tmp) = &tmp {
+        let _ = run_teardown(pair, tmp);
         let _ = std::fs::remove_dir_all(tmp);
     }
     let what = if launched {
@@ -1152,9 +1165,20 @@ fn nopasswd_grants(listing: &str, path: &str) -> bool {
             && entries.split(',').any(|entry| {
                 let mut words = entry.split_whitespace();
                 let command = words.next().unwrap_or("");
-                (command == path && words.next().is_none()) || command == "ALL"
+                (same_file(command, path) && words.next().is_none()) || command == "ALL"
             })
     })
+}
+
+/// Whether two paths name one file, as `sudo` matches a command: Arch's
+/// `/usr/sbin` is a link to `/usr/bin`, so `PATH` finds `/usr/sbin/perf`
+/// where the grant says `/usr/bin/perf`.
+fn same_file(a: &str, b: &str) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
 }
 
 /// A program's path as `PATH` finds it, or the argument itself when it
@@ -1787,6 +1811,16 @@ mod tests {
         // An entry bound to its arguments does not grant the tool.
         assert!(!nopasswd_grants(listing, "/usr/bin/setcap"));
         assert!(nopasswd_grants("    (ALL) NOPASSWD: ALL\n", "/usr/bin/sh"));
+        // One file by two paths, as `sudo` sees it: `/usr/sbin` is a link to
+        // `/usr/bin` on Arch, and `PATH` may find the first.
+        if std::fs::canonicalize("/usr/sbin/sh").ok() == std::fs::canonicalize("/usr/bin/sh").ok()
+            && std::path::Path::new("/usr/sbin/sh").exists()
+        {
+            assert!(nopasswd_grants(
+                "    (root) NOPASSWD: /usr/bin/sh\n",
+                "/usr/sbin/sh"
+            ));
+        }
     }
 
     fn stdout_scalar(stdout: &str, _: &str) -> Result<Values, String> {

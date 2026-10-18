@@ -87,9 +87,14 @@
   run: separate
   runs: 5
   reference:
-    command: [perf, stat, -x, ",", -e, branch-misses, --]
+    # As root, so that perf counts the kernel's part as omn (CAP_PERFMON)
+    # does: unprivileged, at perf_event_paranoid 2, it counts user mode only,
+    # and read 0 switches and 0 migrations where omn read 2003 and 503.
+    command: [sh, -c, '$SUDO perf stat -x , -e branch-misses -- "$@"', sh]
     parse: perf_stat_csv
-    requires: [perf]
+    requires: [perf, sh]
+    privileged: true
+    sudo: perf
   compare:
     key: branch-misses
     omn: results.0.outputs[emit=summary].series.*.last
@@ -105,9 +110,14 @@
   run: separate
   runs: 5
   reference:
-    command: [perf, stat, -x, ",", -e, cache-misses, --]
+    # As root, so that perf counts the kernel's part as omn (CAP_PERFMON)
+    # does: unprivileged, at perf_event_paranoid 2, it counts user mode only,
+    # and read 0 switches and 0 migrations where omn read 2003 and 503.
+    command: [sh, -c, '$SUDO perf stat -x , -e cache-misses -- "$@"', sh]
     parse: perf_stat_csv
-    requires: [perf]
+    requires: [perf, sh]
+    privileged: true
+    sudo: perf
   compare:
     key: cache-misses
     omn: results.0.outputs[emit=summary].series.*.last
@@ -141,9 +151,14 @@
   run: separate
   runs: 3
   reference:
-    command: [perf, stat, -x, ",", -e, context-switches, --]
+    # As root, so that perf counts the kernel's part as omn (CAP_PERFMON)
+    # does: unprivileged, at perf_event_paranoid 2, it counts user mode only,
+    # and read 0 switches and 0 migrations where omn read 2003 and 503.
+    command: [sh, -c, '$SUDO perf stat -x , -e context-switches -- "$@"', sh]
     parse: perf_stat_csv
-    requires: [perf]
+    requires: [perf, sh]
+    privileged: true
+    sudo: perf
   compare:
     key: context-switches
     omn: results.0.outputs[emit=summary].series.*.last
@@ -159,9 +174,14 @@
   run: separate
   runs: 3
   reference:
-    command: [perf, stat, -x, ",", -e, cpu-migrations, --]
+    # As root, so that perf counts the kernel's part as omn (CAP_PERFMON)
+    # does: unprivileged, at perf_event_paranoid 2, it counts user mode only,
+    # and read 0 switches and 0 migrations where omn read 2003 and 503.
+    command: [sh, -c, '$SUDO perf stat -x , -e cpu-migrations -- "$@"', sh]
     parse: perf_stat_csv
-    requires: [perf]
+    requires: [perf, sh]
+    privileged: true
+    sudo: perf
   compare:
     key: cpu-migrations
     omn: results.0.outputs[emit=summary].series.*.last
@@ -241,9 +261,13 @@
   settle_ms: 700
   omn: [trace, cpu.instructions, --cgroup, "../../..{tmp}/cg", -d, 3s, -m, count, -e, summary, --format, json, -o, "{out}"]
   reference:
-    command: [perf, stat, -a, -x, ",", -e, instructions, -G, "../../..{tmp}/cg", --, sleep, "3"]
+    # As root: a count over every cpu is refused to an unprivileged perf at
+    # perf_event_paranoid 2, where omn holds CAP_PERFMON.
+    command: [sh, -c, '$SUDO perf stat -a -x , -e instructions -G "../../..{tmp}/cg" -- sleep 3', sh]
     parse: perf_stat_csv
-    requires: [perf]
+    requires: [perf, sh]
+    privileged: true
+    sudo: perf
   compare:
     key: instructions
     omn: results.0.outputs[emit=summary].series.*.last

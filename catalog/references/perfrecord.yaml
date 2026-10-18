@@ -111,6 +111,10 @@
     report: [perf, script, -i, "{tmp}/perf.data", -F, weight]
     parse: perf_script_weight_mean
     requires: [perf, cc]
+    # AMD's op sampler (IBS) records a whole machine only: per thread,
+    # `perf mem record` says "Invalid event (ibs_op//u) in per-thread mode,
+    # enable system wide", which is this cpu refusing the pair's shape.
+    refused_when: ["in per-thread mode, enable system wide"]
   compare:
     key: ""
     omn_parse: omn_hist_mean

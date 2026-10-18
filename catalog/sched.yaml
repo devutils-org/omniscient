@@ -426,7 +426,7 @@
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
-  keys: [task, cpu]
+  keys: [task, cpu, comm]
   filter_fields: [comm, pid, ppid, cpu, state, next_comm, run_ns, queue_ns, off_ns, wake_ns]
   determinism: low
   caveats:

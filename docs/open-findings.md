@@ -14274,3 +14274,40 @@ have their slack widened. `make-sqlite`'s critical path is its registered
 open finding. The two triage tests of the first capped run
 (`a_job_s_wait_...`, `the_same_program_is_cpu_bound_...`) pass alone, twice
 each, and in the suite: the 870 ms round was theirs too.
+
+### The reference pairs with the witnesses installed (2026-10-18)
+
+`perf`, `bpftrace`, the bcc tools, `tcpdump`, `turbostat`, `cpupower`,
+`slabtop`, `powertop`, `strace`, `stress-ng` and `sysstat` installed, the
+root ones granted in `/etc/sudoers.d/omniscient-witnesses`;
+`cargo test --test reference -- --test-threads=1` after `make CAPTURE=1`.
+What it found, fixed:
+
+- **The runner read no grant for any tool**: `PATH` finds `/usr/sbin/perf`,
+  the grant names `/usr/bin/perf`, and on Arch one is a link to the other.
+  It compares canonical paths now, as `sudo` matches a file; every pair that
+  wanted `sudo` had skipped.
+- **Four `perf stat` pairs compared two different counts**: unprivileged, at
+  `perf_event_paranoid` 2, `perf` counts user mode only (0 switches, 0
+  migrations) where `omn` with CAP_PERFMON counts both. They run `$SUDO perf`
+  now: 2003/2001 switches, 504/501 migrations, branch misses within 0.7 %.
+  The cgroup pair, refused `-a` the same way, reads 4 736 792 700 against
+  4 736 791 799 instructions.
+- **A skip turned into a failure**: before granting one, the runner runs the
+  workload alone, and did so without the pair's `setup`, so a workload that
+  joins the cgroup its setup makes failed there. The check runs `setup` and
+  `teardown` around it now.
+- **`perf-sched-timehist-delay` was refused by `omn`**: `sched.slices` did
+  not declare `comm` as a key, nor put it on its events. It does both now,
+  and the pair holds (`wake_ns` 2.2 us against timehist's 7.3 us, its
+  recording's own cost).
+- `load-latency` skips with AMD's reason: IBS records a whole machine only.
+
+Open: **`cpu.cache_misses`** reads 0.96 to 0.98 M through the runner on
+every run, where root `perf` reads 1.13 to 1.15 M; by hand, the same `omn`
+command, `-o` and stdin included, reads 1.13 to 1.17 M, beside `perf`'s 1.11
+to 1.17 M. Something of the runner's environment lowers `omn`'s count of a
+workload whose misses follow its page faults; not found. The two
+`tool_wraps_omn` system pairs (`cpu.cycles.system`,
+`cpu.context_switches.system`) skip: through `sudo`, `omn` itself would run
+as root.

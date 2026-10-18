@@ -234,7 +234,11 @@ fn event(slice: &Slice, id: &CollectorId, seq: u64) -> Event {
         ts_ns: slice.out_ns,
         ts_err_ns: 0,
         kind: "sched.slices".to_owned(),
-        keys: vec![KeyValue::task(slice.tid as i32), KeyValue::cpu(slice.cpu)],
+        keys: vec![
+            KeyValue::task(slice.tid as i32),
+            KeyValue::cpu(slice.cpu),
+            KeyValue::comm(slice.comm.clone()),
+        ],
         attrs,
         collector_id: id.clone(),
         seq,
