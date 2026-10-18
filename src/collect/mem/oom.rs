@@ -7,9 +7,9 @@
 //! also counts the times the cgroup ran out (`oom`, which a successful reclaim
 //! can end without a kill) and the times it touched its hard limit (`max`).
 //!
-//! These are counts. Which task died, what it held and what allocation
-//! triggered it are in the `oom:mark_victim` tracepoint, which a program in
-//! the kernel would read; that backend is not built, and these name no victim.
+//! These are counts. Which task died and what it held are in the
+//! `oom:mark_victim` tracepoint, which `victims.rs` reads in trace mode; these
+//! name no victim.
 //!
 //! `memory.events` is hierarchical: a cgroup's counts include every cgroup
 //! below it, which is what a target that names a service wants. The root has

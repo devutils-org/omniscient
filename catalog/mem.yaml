@@ -14,8 +14,8 @@
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, tid: native, cgroup: native, launch: native, container: native}
-  keys: [task, proc, cgroup]
-  filter_fields: [comm]
+  keys: [task, proc, cgroup, user]
+  filter_fields: [comm, user]
   determinism: medium
   caveats:
     - "malloc() allocates nothing: RSS only rises on first write. An
@@ -38,33 +38,40 @@
   summary: "Proportional footprint (shared pages divided by the number of mappers)"
   unit: bytes
   backends:
-    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: med}
+    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: med,
+       keys: [task, proc, cgroup, mem, user]}
     - {id: "fs:proc:smaps", requires: ["/proc/[pid]/smaps"], cost: med,
        degraded: "walks every VMA: expensive on large address spaces"}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, cgroup: native, launch: native, container: native}
-  keys: [task, proc, cgroup, mem]
-  filter_fields: [comm]
+  keys: [task, proc, cgroup, mem, user, mapping]
+  filter_fields: [comm, user]
   determinism: medium
   caveats:
     - "PSS is the only one of the three footprints that sums across processes
        without double counting: RSS counts a shared page in full in every
        process that maps it."
+    - "`--keys mapping` is one row per mapping name -- a file, `[heap]`,
+       `[stack]`, `[anon]` -- read from smaps, the only file that holds them:
+       `omn trace mem.pss -m snapshot -k mapping -e summary --backend
+       force:fs:proc:smaps --pid N` is
+       `pmap -X N`'s Pss column grouped by name."
 
 - id: mem.uss
   family: mem
   summary: "Private footprint (what dies with the process)"
   unit: bytes
   backends:
-    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: med}
+    - {id: "fs:proc:smaps_rollup", requires: ["/proc/[pid]/smaps_rollup"], cost: med,
+       keys: [task, proc, mem, user]}
     - {id: "fs:proc:smaps", requires: ["/proc/[pid]/smaps"], cost: med,
        degraded: "walks every VMA: expensive on large address spaces"}
   modes: [poll, snapshot]
   emits: [timeline, raw, summary]
   targets: {pid: native, launch: native}
-  keys: [task, proc, mem]
-  filter_fields: [comm]
+  keys: [task, proc, mem, user, mapping]
+  filter_fields: [comm, user]
   determinism: medium
   caveats:
     - "The kernel publishes no USS line: this is Private_Clean + Private_Dirty,
@@ -255,7 +262,7 @@
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
-  keys: [task, cgroup, cpu]
+  keys: [task, cgroup, cpu, func, within, insn]
   filter_fields: [comm, cpu]
   determinism: low
   caveats:
@@ -275,7 +282,7 @@
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
-  keys: [task, cgroup, cpu]
+  keys: [task, cgroup, cpu, func, within, insn]
   filter_fields: [comm, cpu]
   determinism: low
   caveats:
@@ -295,7 +302,7 @@
   modes: [count, sample]
   emits: [summary, rate, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native}
-  keys: [task, cgroup, cpu]
+  keys: [task, cgroup, cpu, func, within, insn]
   filter_fields: [comm, cpu]
   determinism: low
   caveats:
@@ -318,7 +325,7 @@
   modes: [sample]
   emits: [hist, topk, stack, raw]
   targets: {system: native, cgroup: native, pid: native, tid: native, cpu: native, launch: native, container: native}
-  keys: [task, mem, cpu]
+  keys: [task, mem, cpu, level]
   filter_fields: [comm, cpu, addr, level]
   determinism: low
   caveats:
@@ -415,24 +422,57 @@
   summary: "OOM kills, for the machine or one cgroup"
   unit: count
   backends:
-    - {id: "fs:cgroup", requires: ["cgroup2:memory.events"], cost: free,
+    - {id: "fs:cgroup", requires: ["cgroup2:memory.events"], cost: free, keys: [cgroup], filter_fields: [], modes: [count, poll],
        targets: {cgroup: native, container: native, pid: native, tid: native, launch: native}}
-    - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free, equivalent: true, targets: {system: native}}
-  modes: [count, poll]
+    - {id: "fs:proc", requires: ["/proc/vmstat"], cost: free, equivalent: true, keys: [cgroup], filter_fields: [], modes: [count, poll],
+       targets: {system: native}}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:mark_victim(task_struct *, uid_t)|(task_struct *)", "kernel>=5.8"],
+       cost: low, modes: [trace], drained: true, keys: [task, comm],
+       filter_fields: [comm, pid, tid, uid, oom_score_adj, rss, anon_rss, total_vm],
+       targets: {system: native, cgroup: native, pid: native, tid: native, launch: native},
+       degraded: "the victims, not the counts: a kill the kernel made before the program attached is in no event"}
+  modes: [count, poll, trace]
   emits: [summary, timeline, rate, raw]
   targets: {system: native, cgroup: native, container: native, pid: native, tid: native, launch: native}
-  keys: [cgroup]
-  filter_fields: []
+  keys: [cgroup, task, comm]
+  filter_fields: [comm, pid, tid, uid, oom_score_adj, rss, anon_rss, total_vm]
   determinism: low
   caveats:
-    - "Counts, not victims: which task died, what it held and the allocation
-       that triggered the kill are in the oom:mark_victim tracepoint, which no
-       backend here reads yet."
+    - "Counts by default; `-m trace` names the victims through oom:mark_victim
+       (pid, comm, uid, oom_score_adj, and total_vm, rss, anon_rss, file_rss,
+       shmem_rss and swap in bytes, what the kernel log's \"Killed process\"
+       line prints). The sizes are the tracepoint's own, the shared part of each
+       counter without the cpus' unflushed pages. A pid target names that
+       process alone, not the children it started: a launched build whose
+       compiler is killed is a --cgroup question."
     - "A pid names its cgroup: the kernel counts kills per cgroup, never per
        process, and memory.events includes every cgroup below the one named.
        Beside `kills` the cgroup backend carries `oom` (times it ran out,
        which reclaim can end without a kill) and `max` (times it touched its
        hard limit)."
+
+- id: mem.slab
+  family: mem
+  summary: "The kernel's slab caches, one row per cache (what slabtop prints)"
+  unit: bytes
+  backends:
+    - {id: "fs:proc", requires: ["/proc/slabinfo"], cost: low}
+  modes: [poll, snapshot]
+  emits: [timeline, raw, summary]
+  targets: {system: native}
+  keys: [cache]
+  filter_fields: [cache, bytes, active_bytes, objsize, use]
+  determinism: low
+  caveats:
+    - "/proc/slabinfo is root's (mode 0400) on every distribution that ships
+       it: without root the source is missing with that reason, and the slab
+       total is `mem.system`'s `slab_bytes`. `omn trace mem.slab -m snapshot
+       -e raw` is `slabtop -o`, and `-k cache -e timeline` follows each cache
+       over a run."
+    - "The value is the cache's size as slabtop's CACHE SIZE computes it,
+       slabs times pages per slab, free objects included; `active_bytes` is
+       its live objects and `use` their share. Caches the allocator merged
+       (SLUB's aliasing) are one row under one name."
 
 - id: mem.system
   family: mem
@@ -452,8 +492,8 @@
        without swapping, cache and reclaimable slab included. Total minus free
        would call every cached page used."
     - "The slab is the machine's total, split into its reclaimable and
-       unreclaimable halves; the split per cache that slabtop prints is in
-       /proc/slabinfo, which only root can read."
+       unreclaimable halves; the split per cache that slabtop prints is
+       `mem.slab`, over /proc/slabinfo, which only root can read."
 
 - id: mem.wss
   family: mem

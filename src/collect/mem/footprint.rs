@@ -99,6 +99,7 @@ pub struct Prepare {
     metric: Metric,
     source: Source,
     interval: Duration,
+    by_mapping: bool,
 }
 
 impl Prepare {
@@ -113,7 +114,16 @@ impl Prepare {
             metric,
             source,
             interval,
+            by_mapping: false,
         })
+    }
+
+    /// One event per mapping rather than one per process, where the file is
+    /// `smaps` (`--keys mapping`): which file, or `[heap]`, `[stack]`,
+    /// `[anon]`, holds the footprint.
+    pub fn by_mapping(mut self: Box<Self>, by_mapping: bool) -> Box<Self> {
+        self.by_mapping = by_mapping && self.source == Source::Smaps;
+        self
     }
 }
 
@@ -125,12 +135,9 @@ impl Prepared for Prepare {
                 target.kind()
             )
         })?;
-        Ok(Box::new(FootprintCollector::new(
-            pid,
-            self.metric,
-            self.source,
-            self.interval,
-        )))
+        let mut collector = FootprintCollector::new(pid, self.metric, self.source, self.interval);
+        collector.by_mapping = self.by_mapping;
+        Ok(Box::new(collector))
     }
 }
 
@@ -148,6 +155,10 @@ pub struct FootprintCollector {
     page_size: u64,
     /// `comm` is a declared filter field on all three footprint sources.
     comm: Comm,
+    /// The name of the user the process runs as, read once: `user` is a key.
+    user: Option<String>,
+    /// One event per mapping of `smaps` (`--keys mapping`).
+    by_mapping: bool,
     /// When to publish, which is not how often the run asks: a session whose
     /// fastest collector drains a ring every ten milliseconds asks everyone
     /// else just as often.
@@ -165,6 +176,8 @@ impl FootprintCollector {
             path: source.path(pid),
             page_size: page_size(),
             comm: Comm::of(pid),
+            user: user_of(pid),
+            by_mapping: false,
             cadence: Cadence::new(interval),
         }
     }
@@ -320,6 +333,9 @@ impl Collector for FootprintCollector {
         if !self.cadence.due(monotonic_ns()) {
             return Ok(Vec::new());
         }
+        if self.by_mapping {
+            return self.sample_by_mapping(seq);
+        }
         // The timestamp is taken after the read, so it bounds the read rather
         // than preceding it: the value existed at or before this instant.
         let bytes = self.read_bytes()?;
@@ -334,6 +350,9 @@ impl Collector for FootprintCollector {
         if let Some(comm) = self.comm.get() {
             attrs.push(Attr::text("comm", comm));
         }
+        if let Some(user) = &self.user {
+            attrs.push(Attr::text("user", user.clone()));
+        }
         Ok(vec![Event {
             ts_ns,
             ts_err_ns: 0,
@@ -346,6 +365,110 @@ impl Collector for FootprintCollector {
             seq,
         }])
     }
+}
+
+impl FootprintCollector {
+    /// One event per mapping name: every mapping of one file, or every
+    /// anonymous one, adds up into one row, as `pmap -X` would group them.
+    fn sample_by_mapping(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+        let text = self.text(|| std::fs::read_to_string(&self.path))?;
+        let ts_ns = monotonic_ns();
+        let rows = by_mapping(&text, self.metric.fields());
+        if rows.is_empty() {
+            return Err(SampleError::Transient(format!(
+                "no mapping with a {} line in {}",
+                self.metric.fields().join(" or "),
+                self.path.display()
+            )));
+        }
+        let comm = self.comm.get();
+        Ok(rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, (mapping, bytes))| {
+                let mut attrs = vec![
+                    Attr::uint("bytes", bytes),
+                    Attr::text("mapping", mapping),
+                    Attr::text("read_from", self.source.label()),
+                ];
+                if let Some(comm) = comm {
+                    attrs.push(Attr::text("comm", comm));
+                }
+                if let Some(user) = &self.user {
+                    attrs.push(Attr::text("user", user.clone()));
+                }
+                Event {
+                    ts_ns,
+                    ts_err_ns: 0,
+                    kind: self.metric.source_id().to_owned(),
+                    keys: std::iter::once(KeyValue::task(self.pid))
+                        .chain(self.proc_key.clone())
+                        .collect(),
+                    attrs,
+                    collector_id: self.id.clone(),
+                    seq: seq + index as u64,
+                }
+            })
+            .collect())
+    }
+}
+
+/// `smaps`'s fields added up per mapping name, in bytes, largest first.
+///
+/// A mapping opens with its header line, `start-end perms offset dev inode
+/// [name]`; the name is a path, or `[heap]`, `[stack]`, `[vdso]`, and a
+/// mapping with none is anonymous memory, `[anon]`.
+fn by_mapping(text: &str, fields: &[&str]) -> Vec<(String, u64)> {
+    let mut rows: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        let first = words.next().unwrap_or_default();
+        let is_header = first.split_once('-').is_some_and(|(start, end)| {
+            u64::from_str_radix(start, 16).is_ok() && u64::from_str_radix(end, 16).is_ok()
+        });
+        if is_header {
+            let name: Vec<&str> = words.skip(4).collect();
+            current = Some(if name.is_empty() {
+                "[anon]".to_owned()
+            } else {
+                name.join(" ")
+            });
+            continue;
+        }
+        let (Some(mapping), Some(bytes)) = (&current, sum_fields(line, fields)) else {
+            continue;
+        };
+        *rows.entry(mapping.clone()).or_default() += bytes;
+    }
+    let mut rows: Vec<(String, u64)> = rows.into_iter().filter(|(_, bytes)| *bytes > 0).collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows
+}
+
+/// The name of the user `pid` runs as: its real uid from `status`, named by
+/// `/etc/passwd`, or the number where the file does not name it.
+fn user_of(pid: i32) -> Option<String> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let uid: u32 = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+    Some(user_name(&passwd, uid).unwrap_or_else(|| uid.to_string()))
+}
+
+/// The login name `/etc/passwd` gives `uid`.
+fn user_name(passwd: &str, uid: u32) -> Option<String> {
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        let id: u32 = fields.nth(1)?.parse().ok()?;
+        (id == uid).then(|| name.to_owned())
+    })
 }
 
 /// Adds up every occurrence of the named `smaps` fields, in bytes.
@@ -414,6 +537,36 @@ fn page_size() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mappings of our own `smaps`, added up per name, sum to what the
+    /// whole file sums to, and the heap and the test binary are rows of it.
+    #[test]
+    fn the_rows_by_mapping_add_up_to_the_process() {
+        let me = std::process::id() as i32;
+        let text = std::fs::read_to_string(format!("/proc/{me}/smaps")).expect("our smaps");
+        let rows = by_mapping(&text, Metric::Pss.fields());
+        let total = sum_fields(&text, Metric::Pss.fields()).expect("a total");
+        assert_eq!(rows.iter().map(|(_, bytes)| bytes).sum::<u64>(), total);
+        assert!(rows.windows(2).all(|pair| pair[0].1 >= pair[1].1));
+        let exe = std::fs::read_link("/proc/self/exe").expect("our binary");
+        let exe = exe.to_string_lossy();
+        assert!(rows.iter().any(|(name, _)| *name == exe), "{rows:?}");
+
+        let mut collector = FootprintCollector::new(me, Metric::Pss, Source::Smaps, Duration::ZERO);
+        collector.by_mapping = true;
+        let events = collector.sample(0).expect("our footprint by mapping");
+        assert!(events.len() > 1);
+        assert!(events.iter().all(|event| event.attr("mapping").is_some()));
+    }
+
+    #[test]
+    fn a_user_is_named_by_passwd_or_by_number() {
+        let passwd = "root:x:0:0::/root:/bin/bash\nmoha:x:1000:1000::/home/moha:/bin/zsh\n";
+        assert_eq!(user_name(passwd, 1000).as_deref(), Some("moha"));
+        assert_eq!(user_name(passwd, 0).as_deref(), Some("root"));
+        assert_eq!(user_name(passwd, 7), None);
+        assert!(user_of(std::process::id() as i32).is_some());
+    }
 
     fn read(metric: Metric, source: Source) -> Option<f64> {
         let mut collector =

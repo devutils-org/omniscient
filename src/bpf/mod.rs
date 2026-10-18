@@ -35,6 +35,7 @@ mod io_pagecache;
 mod io_writeback;
 mod map;
 mod mem_alloc;
+mod mem_oom;
 mod mem_program;
 mod mem_stall;
 mod migrate;
@@ -78,6 +79,7 @@ pub use io::{BlockEvent, BlockProgram, HistRow, Stage, Submitter, NO_OPEN, SCOPE
 pub use io_pagecache::{Narrowing as PageCacheNarrowing, PageCacheProgram, PageCacheRow};
 pub use io_writeback::{Writeback, WritebackProgram};
 pub use mem_alloc::{AllocProgram, AllocRow, Allocator};
+pub use mem_oom::{Victim, VictimProgram, NO_UID};
 pub use mem_stall::{Stall, StallDrops, StallProgram, StallRow, SCOPE_CGROUP, SCOPE_GLOBAL};
 pub use migrate::{Migration, MigrationProgram};
 pub use net_drops::{DropProgram, PacketDrop};

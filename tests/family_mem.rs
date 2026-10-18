@@ -564,7 +564,7 @@ const BREADTH_SOURCES: [(&str, &str); 8] = [
     ("mem.cgroup", "fs:cgroup"),
     ("mem.numa", "fs:proc, fs:sys"),
     ("mem.wss", "fs:proc:clear_refs"),
-    ("mem.oom", "fs:proc, fs:cgroup"),
+    ("mem.oom", "fs:proc, fs:cgroup, bpf:raw_tp"),
     ("mem.system", "fs:proc"),
 ];
 

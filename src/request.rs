@@ -1269,10 +1269,13 @@ pub enum KeyKind {
     /// (perfrecord 7). Read off the `insn` attribute the profile puts on a
     /// sample with a stack; an unnamed leaf is its object and offset.
     Insn,
+    /// `cache:<name>`, a slab cache (`mem.slab`'s `dentry`, `kmalloc-64`):
+    /// what `slabtop` prints a row of. Read off the `cache` attribute.
+    Cache,
 }
 
 impl KeyKind {
-    pub const ALL: [KeyKind; 25] = [
+    pub const ALL: [KeyKind; 26] = [
         KeyKind::Req,
         KeyKind::Task,
         KeyKind::Proc,
@@ -1298,6 +1301,7 @@ impl KeyKind {
         KeyKind::Counter,
         KeyKind::Within,
         KeyKind::Insn,
+        KeyKind::Cache,
     ];
 
     /// The keys no collector attaches and the emit layer derives from what
@@ -1314,6 +1318,7 @@ impl KeyKind {
                 | KeyKind::Counter
                 | KeyKind::Within
                 | KeyKind::Insn
+                | KeyKind::Cache
         )
     }
 
@@ -1344,6 +1349,7 @@ impl KeyKind {
             KeyKind::Counter => "counter",
             KeyKind::Within => "within",
             KeyKind::Insn => "insn",
+            KeyKind::Cache => "cache",
         }
     }
 }

@@ -1215,7 +1215,8 @@ counts cycles between tags and `omn` counts ops: a different mix of loads.
   `used_bytes` is total minus available; `buff_cache_bytes`, the slab split,
   swap and the commit figures ride on the event. Against `free -b` the moment
   after: total and buff/cache to the byte, used within 4 MB on a busy machine.
-  The per-cache split of `slabtop` needs `/proc/slabinfo` (root): not here.
+  The per-cache split of `slabtop` is `mem.slab` since the twenty-fifth wave,
+  over `/proc/slabinfo` (root).
 - **`mem.numa --system`** (sysstat 7): `numastat`'s allocation counters per
   node, as deltas per poll, through a new `fs:sys` backend. Reasoned only: on
   a one-node machine with fifteen other streams allocating, no workload of
@@ -1223,7 +1224,7 @@ counts cycles between tags and `omn` counts ops: a different mix of loads.
 - **`mem.oom`**: kills, for the machine (`/proc/vmstat`) or one cgroup
   (`memory.events`, with `oom` and `max`). A child that touched 128 MiB under
   a 32 MiB `memory.max` with no swap ended on SIGKILL and the count read one
-  kill. No victim: that is `oom:mark_victim`, not built.
+  kill. No victim then; the twenty-fifth wave added it (below).
 - **A process's own swap-ins** (bpftrace 5): `mem.swap --backend
   force:perf:kprobe`, a counting kprobe on `swap_read_folio` on the
   program's threads. A Python process thrashing alone in a systemd scope
@@ -1244,6 +1245,32 @@ counts cycles between tags and `omn` counts ops: a different mix of loads.
   report`'s Pareto table read (`0x0`, `0x8`, `0x401230`, no store refs).
 - **`mem.faults`' few early faults** (perfstat 6): a caveat. `/bin/true`
   read 60-62 against `perf stat`'s 57-58.
+
+## What the twenty-fifth wave added
+
+- **`mem.oom -m trace`, the victims** (bpftrace 5): a `bpf:raw_tp` backend on
+  `oom:mark_victim`, one event per victim with `pid`, `tid`, `comm`, `uid`
+  (where the tracepoint passes it, since 6.8), `oom_score_adj`, and
+  `total_vm`, `rss`, `anon_rss`, `file_rss`, `shmem_rss` and `swap` in bytes
+  -- the kernel log's "Killed process" line. The counting backends now
+  declare `modes: [count, poll]`, so `-m trace` without CAP_BPF is refused
+  naming the program rather than landing on `/proc/vmstat` and failing at the
+  attach. Reasoned: the program builds against this kernel's BTF (7.2, the
+  `percpu_counter` layout of `rss_stat`) and is checked by unit tests; the
+  attach needs CAP_BPF, not granted here.
+- **`mem.slab`** (slabtop): one event per cache from `/proc/slabinfo`, the
+  value slabtop's CACHE SIZE (slabs x pages per slab), with `active_bytes`,
+  `objs`, `objsize` and `use`, keyed `cache`. Root's file: missing here with
+  that reason; the parser is checked against three lines of a real 6.x file.
+- **Keys**: `level` on `mem.latency`; `func`, `within`, `insn` on
+  `mem.cache_l1`, `mem.cache_llc`, `mem.cache_tlb` (a Python loop's L1 misses
+  ranked by function, 204 samples); `user` on the three footprints (from
+  `status`' `Uid` and `/etc/passwd`); `mapping` on `mem.pss` and `mem.uss`
+  through `smaps`, one row per mapping name. Against `pmap -X` of a `sleep`:
+  `libc.so.6` 57 KiB, `/usr/bin/sleep` 48 KiB, `ld-linux` 17 KiB of PSS,
+  the same three numbers. The rollup backend does not carry `mapping`, so the
+  run is refused there with `--backend force:fs:proc:smaps` named, the
+  resolver's rule for a key another backend attaches.
 
 ## What this leaves for the coordinator
 

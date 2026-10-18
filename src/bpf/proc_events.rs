@@ -330,7 +330,7 @@ const SIG_FILTER: i16 = SIG_EVENT - 24;
 /// records that it existed -- the BPF ring buffer does not report its own
 /// overflows. So the program counts them itself, which is the only reason a
 /// stream missing a third of its events does not look like a quiet machine.
-fn publish(
+pub(super) fn publish(
     program: &mut Program,
     ring_fd: i32,
     drops_fd: i32,
@@ -681,7 +681,7 @@ impl EventStream {
 
     /// Creates the two maps, builds the program with their descriptors, loads
     /// it and attaches it to `tracepoint`.
-    fn load(
+    pub(super) fn load(
         tracepoint: &str,
         name: &str,
         requested_ring_bytes: usize,
@@ -726,7 +726,7 @@ impl EventStream {
 
     /// Hands every record this reader recognises to `handle`, and counts the
     /// ones it does not rather than reinterpreting them.
-    fn drain<T>(
+    pub(super) fn drain<T>(
         &mut self,
         decode: impl Fn(&[u8]) -> Option<T>,
         mut handle: impl FnMut(T),

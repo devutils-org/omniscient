@@ -10,6 +10,7 @@ mod numa;
 mod oom;
 mod page_faults;
 mod pressure;
+mod slab;
 mod stall;
 mod swap;
 mod swapin;
@@ -17,6 +18,7 @@ mod system;
 #[cfg(test)]
 mod testing;
 mod thp;
+mod victims;
 mod wss;
 
 use super::Factory;
@@ -53,11 +55,15 @@ pub fn factories() -> Vec<Factory> {
             ))
         }),
         Factory::new("mem.pss", "fs:proc:smaps", |resolved| {
-            Ok(footprint::Prepare::new(
-                Metric::Pss,
-                Source::Smaps,
-                resolved.request.mode,
-            ))
+            Ok(
+                footprint::Prepare::new(Metric::Pss, Source::Smaps, resolved.request.mode)
+                    .by_mapping(
+                        resolved
+                            .request
+                            .keys
+                            .contains(&crate::request::KeyKind::Mapping),
+                    ),
+            )
         }),
         Factory::new("mem.uss", "fs:proc:smaps_rollup", |resolved| {
             Ok(footprint::Prepare::new(
@@ -67,11 +73,15 @@ pub fn factories() -> Vec<Factory> {
             ))
         }),
         Factory::new("mem.uss", "fs:proc:smaps", |resolved| {
-            Ok(footprint::Prepare::new(
-                Metric::Uss,
-                Source::Smaps,
-                resolved.request.mode,
-            ))
+            Ok(
+                footprint::Prepare::new(Metric::Uss, Source::Smaps, resolved.request.mode)
+                    .by_mapping(
+                        resolved
+                            .request
+                            .keys
+                            .contains(&crate::request::KeyKind::Mapping),
+                    ),
+            )
         }),
         Factory::new("mem.faults", "pmu:sw", |resolved| {
             Ok(Box::new(page_faults::Prepare(resolved.request.mode)))
@@ -151,6 +161,15 @@ pub fn factories() -> Vec<Factory> {
                 oom::Scope::Cgroup,
                 resolved.request.mode,
             )?))
+        }),
+        Factory::new("mem.oom", "bpf:raw_tp", |resolved| {
+            Ok(Box::new(victims::Prepare {
+                mode: resolved.request.mode,
+                filter: resolved.request.filter.clone(),
+            }))
+        }),
+        Factory::new("mem.slab", "fs:proc", |resolved| {
+            Ok(Box::new(slab::Prepare::new(resolved.request.mode)?))
         }),
         Factory::new("mem.system", "fs:proc", |resolved| {
             Ok(Box::new(system::Prepare::new(resolved.request.mode)?))

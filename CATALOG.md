@@ -393,7 +393,8 @@ never unless asked. Each frame says which of them named it (`elf`,
 | `mem.swap` | swap in/out | `fs:proc` vmstat · `fs:cgroup` memory.swap.current · `perf:kprobe` swap_read_folio (pid) | poll, count | system, cgroup, pid | free / low | low |
 | `mem.pressure` | PSI memory | `fs:proc` /proc/pressure/memory | poll | system, cgroup | free | low |
 | `mem.system` | the machine's memory as `free` prints it: used, available, buff/cache, slab and its split, swap | `fs:proc` /proc/meminfo | poll, snapshot | system | free | low |
-| `mem.oom` | OOM kills | `fs:cgroup` memory.events (kills, oom, oom_group_kill, max) · `fs:proc` vmstat (the machine) | count, poll | cgroup, pid, launch, system | free | low |
+| `mem.oom` | OOM kills, and in trace mode the victims | `fs:cgroup` memory.events (kills, oom, oom_group_kill, max) · `fs:proc` vmstat (the machine) · `bpf:raw_tp` oom:mark_victim (who, uid, oom_score_adj, what it held) | count, poll, trace | cgroup, pid, launch, system | free / low | low |
+| `mem.slab` | the slab caches, one row per cache, as slabtop | `fs:proc` /proc/slabinfo (root's) | poll, snapshot | system | low | low |
 
 **Caveats**
 
