@@ -193,6 +193,25 @@
     tolerance: {log2_buckets: 1}
     why: "both the machine's run queue waits for as long as the workload runs (two busy children per cpu for two seconds), separate runs: runqlat.bt launched by bpftrace -c, omn by --system beside the program; a median on two log2 grids a factor 1000/1024 apart (the header), one bucket being the grids' offset. Separate runs of a machine-wide histogram move with the machine's load, so the medians of three runs are compared: one run each read 16384 against 1024000 ns once under the twenty-fourth wave's load, and held twice. The twenty-third wave's gap was omn reading the program's waits alone (2097152 ns against the machine's 128000 on a quiet machine)"
 
+- id: runqlen
+  source: sched.runqlen
+  tool: runqlen.bt
+  use: "runqlen.bt: run queue length, sampled at 99 Hz"
+  workload: [tests/reference/workloads/bpftrace/omnref, tests/reference/workloads/bpftrace/act.py, spin, "2"]
+  omn: [trace, sched.runqlen, --system, -m, sample, -e, "hist:linear:1", --format, json]
+  runs: 3
+  reference:
+    command: [sh, tests/reference/workloads/bpftrace/under.sh, /usr/share/bpftrace/tools/runqlen.bt, --]
+    parse: bpftrace_hist
+    requires: [bpftrace]
+    privileged: true
+    sudo: bpftrace
+  compare:
+    key: "@runqlen/p50"
+    omn_parse: omn_hist_runqlen
+    tolerance: {abs: 1}
+    why: "both sample every cpu's cfs queue at 99 Hz while the workload keeps two busy children per cpu, runqlen.bt launched by bpftrace -c and omn by --system beside the program, separate runs; the median queue length of three runs each, a length apart at most because two samplers on two clocks catch the queue at different instants. runqlen.bt reads nr_queued as it stands where omn subtracts the task running, so the reference's median sits one above when the queue never empties; the band is that one"
+
 - id: tcpconnect
   source: net.tcp.connect
   tool: tcpconnect.bt

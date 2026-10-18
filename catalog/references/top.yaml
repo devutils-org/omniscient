@@ -128,6 +128,30 @@
       so the pair fails naming defect 2 if the read comes back rather than
       passing on the reads around it.
 
+- id: top-batch-cpus
+  source: cpu.util
+  tool: top
+  use: "top -b -n 2 -d 2, the %Cpu(s) line, beside omn top --batch's machine row"
+  run: alongside
+  workload: []
+  omn: [top, --batch, -d, 3s]
+  reference:
+    command: [sh, tests/reference/workloads/top/at.sh, '1', '0', top, -b, -n,
+      '2', -d, '2']
+    parse: top_batch_cpus
+    requires: [top]
+  compare:
+    key: busy
+    omn_parse: omn_top_batch_busy
+    tolerance: {abs: 0.05}
+    why: >-
+      The machine on both sides, as top-cpus compares it, through the batch
+      table a script reads: omn top --batch's cpu.util row is its mean busy
+      share over three seconds of /proc/stat polls, top's last %Cpu(s) line the
+      two seconds from one second in. The windows differ by a second at the
+      start and omn's startup, which on a machine whose load changes by the
+      second is the band.
+
 - id: pmap-x-rss
   source: mem.rss
   tool: pmap

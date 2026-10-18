@@ -1,0 +1,68 @@
+{
+  "results": [
+    {
+      "label": "power.wakeups",
+      "source": "power.wakeups",
+      "unit": "count",
+      "backend": "fs:proc",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "proc:4026531836+873109",
+              "count": 2,
+              "min": 918.727597158441,
+              "max": 941.1727627883565,
+              "mean": 929.9501799733987,
+              "last": 918.727597158441
+            }
+          ]
+        }
+      ],
+      "events_seen": 2,
+      "observed_ns": 1065326829,
+      "window": {
+        "run_opened_ns": 37950259043647,
+        "opened_ns": 37950259043647,
+        "closed_ns": 37951324370476,
+        "attached": true
+      },
+      "stopped_because": "the launched program exited with exit status 0",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "lifetime": {
+        "released_ns": 37950259010056,
+        "exited_ns": 37951324243664,
+        "exited_err_ns": 64081630,
+        "cpu_ns": 13012000,
+        "exit_code": 0
+      },
+      "degradations": [
+        "the value is `per_second`, as asked, not `wakeups`: read in count, from its name"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 658000,
+        "attributed_cpu_ns": 658000,
+        "observed_cpu_ns": 12887340,
+        "observed_from": "the launched program's cpu time and its descendants' (the scheduler's own nanoseconds, or clock ticks where it could not be read, of 873109 and of every process it started while they ran, its orphans adopted by omn included, and getrusage(RUSAGE_CHILDREN) in microseconds once it was reaped, the helpers omn ran itself left out)",
+        "wall_ns": 1065433791,
+        "measurement_ns": 31740,
+        "measurements": 2,
+        "in_target_cpu_ns": 0,
+        "in_target_from": "nothing of this collector runs in the target's context: it reads the kernel's account, or a file, from its own",
+        "before_window_cpu_ns": 56550000,
+        "after_window_cpu_ns": 61000
+      },
+      "served_by": [
+        "fs:proc"
+      ],
+      "value_attr": "per_second"
+    }
+  ]
+}

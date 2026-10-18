@@ -209,6 +209,24 @@
     why: "as perf sched latency's switches: a task sched in once for every
       time it was switched out, the last excepted"
 
+- id: perf-sched-timehist-delay
+  source: sched.slices
+  tool: perf sched timehist
+  use: "perf sched timehist  (sch delay: from a task's wakeup to its switch in)"
+  workload: [python3, tests/reference/workloads/perfsched/sleeper.py, "100", "2"]
+  omn: [trace, sched.slices, -m, trace, -k, comm, -e, summary, --value, wake_ns, --format, json, -o, "{out}"]
+  reference:
+    command: [sh, -c, 'd=$(mktemp -d) && $SUDO perf sched record -q -o "$d/perf.data" -- "$@" >/dev/null 2>&1 && $SUDO perf sched timehist -M -f -i "$d/perf.data"; r=$?; rm -rf "$d"; exit $r', sh]
+    parse: perf_sched_timehist_rows
+    requires: [perf, sh]
+    privileged: true
+    sudo: perf
+  compare:
+    key: omnref-sleep.delay_mean_ns
+    omn: results[source=sched.slices].outputs[emit=summary].series[key=comm:omnref-sleep].mean
+    tolerance: {abs: 20000}
+    why: "both time each wait from the tracepoints: perf sched timehist from sched_wakeup (or a preemption) to the sched_switch that runs the task, sched.slices' wake_ns from the same two events in its programs; separate runs of a sleeper woken 100 times a second, whose waits are a few microseconds on a quiet machine (sched.slices' kernel-clock queue_ns reads 0 for the same wake from idle, which is why this pair is wake_ns's). 20 us is the runs' spread under another program's load"
+
 # --- perf lock contention -----------------------------------------------------
 
 - id: perf-lock-contention

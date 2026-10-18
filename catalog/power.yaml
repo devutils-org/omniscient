@@ -201,7 +201,7 @@
   emits: [timeline, raw, summary]
   targets: {pid: native, launch: native, system: native}
   keys: [proc, task, comm]
-  filter_fields: [pid, comm]
+  filter_fields: [pid, comm, per_second, threads]
   determinism: medium
   caveats:
     - "A wakeup is counted as the end of a voluntary sleep: the kernel counts, per

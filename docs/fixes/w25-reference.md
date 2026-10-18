@@ -21,6 +21,21 @@ checkout.
    (`net.sockstat` against `ss -s`), with the parsers `ss_s_transport` and
    `omn_sockstat`.
 
+5. **More pairs, after the wave's first pass**: `vmstat-in`
+   (`sched.interrupts --filter 'kind == "hard"'` against vmstat's `in`:
+   19 930 against 20 013 a second; with the softirqs, 17 % over, which is
+   why `kind` is now a filter field of `sched.interrupts`), `vmstat-r`
+   (`sched.runqueue` against `r`), `ss-tuan-sockets` (`net.sockets`
+   against `ss -tuan`: 56 against 56), `top-batch-cpus` (`omn top --batch`'s
+   machine row against `top -b`: 0.091 against 0.083), all held here
+   unprivileged; and, for the privileged run, `iostat-util` (`io.util`
+   against `%util`, the omn side checked on a real capture of a 1 GiB direct
+   write, 14.3 %), `pidstat-w-wakeups` (`power.wakeups --value per_second`,
+   930/s captured over `switch.py 1000`), `perf-sched-timehist-delay`
+   (`sched.slices`' `wake_ns` against `sch delay`, the timehist parser now
+   reading that column), and `runqlen` (`sched.runqlen` against
+   runqlen.bt, its omn capture awaiting the first privileged run).
+
 ## Shown vs reasoned
 
 - Both new pairs held on this machine, unprivileged: TcpActiveOpens omn 65
@@ -31,12 +46,12 @@ checkout.
 
 ## Not done
 
-1. **The other pairs listed for what landed** (`io.util`/iostat,
-   `io.vfs`/vfsstat, `sched.interrupts`/vmstat `in`, `sched.runqueue`/`r` and
-   `b`, `sched.slices`/timehist, turbostat, `pidstat -w`, `mpstat`,
-   `top -b`/`omn top --batch`): iostat, mpstat, pidstat, turbostat, perf and
-   bpftrace are not installed on this machine, so none could be written and
-   held once; written blind, a pair's parser and band are guesses.
+1. **The pairs left of the list**: `io.vfs` against vfsstat or `strace -c`,
+   runqlat's mean against `wake_to_run_mean_ns`, `perf lock contention`'s
+   type against `topk@kind`, turbostat's `Busy%`/`Avg_MHz`, `energy-core`
+   against `perf stat -a`, `ss -ti`'s other fields, tcpaccept, tcplife per
+   launch, the drop stacks: each wants a root tool this machine has neither
+   installed nor granted, and no capture of it to write a parser against.
 2. **The pairs rewritten as `omn ... --system -- workload`** (perfstat 3,
    power 1, io 3, top 6, net): each needs its privileged tool to be shown
    unchanged; not touched blind.

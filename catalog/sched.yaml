@@ -401,7 +401,7 @@
   emits: [rate, topk, timeline, raw, summary]
   targets: {system: native, cpu: native}
   keys: [cpu]
-  filter_fields: [cpu, irq, line, name]
+  filter_fields: [cpu, irq, line, name, kind]
   determinism: low
   caveats:
     - "A count, not a time: how many interrupts each cpu took between two reads
@@ -409,9 +409,10 @@
        -I` report them. `sched.irq` is how long they ran. A row carries `kind`
        (`hard` or `soft`), `line` (the label the file gives it: a number, or
        `LOC`, `RES`, `TIMER`) and `name` (the handler's, or the label); a row
-       that did not move in a window is not reported. `kind` is not a filter
-       field yet: the filter reads it as the source's own kind; `line` and
-       `name` tell the halves apart."
+       that did not move in a window is not reported. `--filter 'kind ==
+       \"hard\"'` keeps the hardware interrupts alone, what vmstat's `in`
+       counts (the filter reads an attribute named `kind` before the event's
+       own since the twenty-fifth wave)."
 
 - id: sched.slices
   family: sched

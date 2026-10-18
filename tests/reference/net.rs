@@ -50,10 +50,37 @@ pub fn parsers() -> Vec<Parser> {
             parse: ss_s_transport,
         },
         Parser {
+            name: "ss_tuan_count",
+            parse: ss_tuan_count,
+        },
+        Parser {
             name: "omn_sockstat",
             parse: omn_sockstat,
         },
     ]
+}
+
+/// `ss -tuan`: one line per TCP or UDP socket under its header, as
+/// `sockets`, and per netid (`tcp`, `udp`).
+fn ss_tuan_count(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let mut lines = stdout.lines();
+    let header = lines.next().unwrap_or_default();
+    if !header.starts_with("Netid") {
+        return Err("no `Netid` header: not the output of `ss -tuan`".into());
+    }
+    let (mut tcp, mut udp) = (0.0, 0.0);
+    for line in lines {
+        match line.split_whitespace().next() {
+            Some("tcp") => tcp += 1.0,
+            Some("udp") => udp += 1.0,
+            _ => {}
+        }
+    }
+    Ok(vec![
+        ("sockets".into(), tcp + udp),
+        ("tcp".into(), tcp),
+        ("udp".into(), udp),
+    ])
 }
 
 /// `ss -s`: `Total: N`, and its transport table's Total column, one key per
@@ -411,6 +438,15 @@ fn omn_captured(stdout: &str, _stderr: &str) -> Result<Values, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ss_tuan_counts_sockets_by_netid() {
+        let ss = "Netid State  Recv-Q Send-Q Local Address:Port Peer Address:Port\ntcp   LISTEN 0 128 127.0.0.1:631 0.0.0.0:*\nudp   UNCONN 0 0 0.0.0.0:5353 0.0.0.0:*\ntcp   ESTAB 0 0 [::1]:22 [::1]:4242\n";
+        let v = ss_tuan_count(ss, "").unwrap();
+        assert_eq!(get(&v, "sockets"), 3.0);
+        assert_eq!(get(&v, "udp"), 1.0);
+        assert!(ss_tuan_count("nothing", "").is_err());
+    }
 
     /// `ss -s` on this machine, 2026-10-18, and `net.sockstat`'s snapshot of
     /// the same files.

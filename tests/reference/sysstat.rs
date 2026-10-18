@@ -44,6 +44,10 @@ pub fn parsers() -> Vec<Parser> {
             parse: psi_window,
         },
         Parser {
+            name: "omn_interrupts_per_second",
+            parse: omn_interrupts_per_second,
+        },
+        Parser {
             name: "omn_cpu_util",
             parse: omn_cpu_util,
         },
@@ -450,6 +454,28 @@ fn renamed(means: &Values, names: &[(&str, &str)]) -> Values {
 
 /// `cpu.util --system`'s busy share, as `busy` (vmstat's key) and `all`
 /// (mpstat's, sar's and iostat's).
+/// `sched.interrupts --system`'s summary as vmstat's `in`: every cpu's and
+/// line's interrupts added up, over the time the run observed.
+fn omn_interrupts_per_second(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| format!("omn's output is not JSON: {e}"))?;
+    let result = &doc["results"][0];
+    let seconds = result["observed_ns"]
+        .as_f64()
+        .filter(|ns| *ns > 0.0)
+        .ok_or("omn's result observed no time")?
+        / 1e9;
+    let total: f64 = result["outputs"]
+        .as_array()
+        .and_then(|outputs| outputs.iter().find(|o| o["emit"] == "summary"))
+        .and_then(|o| o["series"].as_array())
+        .ok_or("omn's result has no `summary` output")?
+        .iter()
+        .filter_map(|series| series["total"].as_f64())
+        .sum();
+    Ok(vec![("in".to_owned(), total / seconds)])
+}
+
 fn omn_cpu_util(stdout: &str, _stderr: &str) -> Result<Values, String> {
     let means = raw_means(stdout)?;
     Ok(renamed(&means, &[("busy", "busy"), ("busy", "all")]))
@@ -563,6 +589,16 @@ mod tests {
     fn pidstat_r_takes_the_largest_interval_rss() {
         let v = pidstat_r(&capture("pidstat-r.txt"), "").unwrap();
         assert!(close(get(&v, "python3"), 139840.0 * 1024.0));
+    }
+
+    /// `pidstat-w-wakeups`' omn side on a real `power.wakeups` run over the
+    /// same workload: about a thousand wakeups a second.
+    #[test]
+    fn the_wakeups_pair_reads_its_omn_side() {
+        let doc = crate::runner::parse_json(&capture("omn-power-wakeups.json")).unwrap();
+        let rate = crate::runner::eval_path(&doc, "results.0.outputs[emit=summary].series.0.mean")
+            .unwrap();
+        assert!((900.0..1000.0).contains(&rate), "{rate}");
     }
 
     #[test]

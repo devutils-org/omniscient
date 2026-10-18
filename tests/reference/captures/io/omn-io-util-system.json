@@ -1,0 +1,76 @@
+{
+  "results": [
+    {
+      "label": "io.util",
+      "source": "io.util",
+      "unit": "ratio",
+      "backend": "fs:proc",
+      "outputs": [
+        {
+          "emit": "summary",
+          "series": [
+            {
+              "key": "dev:253+0",
+              "count": 1,
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "last": 0.0
+            },
+            {
+              "key": "dev:259+0",
+              "count": 1,
+              "min": 0.14275569318388723,
+              "max": 0.14275569318388723,
+              "mean": 0.14275569318388723,
+              "last": 0.14275569318388723
+            }
+          ]
+        }
+      ],
+      "events_seen": 2,
+      "observed_ns": 420130591,
+      "window": {
+        "run_opened_ns": 37874724468553,
+        "opened_ns": 37874724468553,
+        "closed_ns": 37875144599144,
+        "attached": true
+      },
+      "stopped_because": "the launched program exited with exit status 0",
+      "losses": {
+        "dropped": 0,
+        "failed_reads": 0,
+        "late_ticks": 0,
+        "undecoded": 0,
+        "throttled": 0
+      },
+      "lifetime": {
+        "released_ns": 37874724435663,
+        "exited_ns": 37875144583694,
+        "exited_err_ns": 420002669,
+        "cpu_ns": 200252000,
+        "exit_code": 0
+      },
+      "degradations": [
+        "fs:proc: per device, at the kernel's tick granularity"
+      ],
+      "overhead": {
+        "collector_cpu_ns": 396000,
+        "attributed_cpu_ns": 396000,
+        "observed_cpu_ns": 980000000,
+        "observed_from": "everything but idle on every cpu (/proc/stat)",
+        "wall_ns": 420450597,
+        "measurement_ns": 92710,
+        "measurements": 2,
+        "in_target_cpu_ns": 0,
+        "in_target_from": "nothing of this collector runs in the target's context: it reads the kernel's account, or a file, from its own",
+        "before_window_cpu_ns": 55166000,
+        "after_window_cpu_ns": 111000
+      },
+      "served_by": [
+        "fs:proc"
+      ],
+      "value_attr": "util"
+    }
+  ]
+}

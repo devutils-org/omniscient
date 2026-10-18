@@ -221,3 +221,20 @@
       tolerance: {abs: 1}
       why: "the same files' RAW inuse, IPv4 and IPv6 added up"
 
+- id: ss-tuan-sockets
+  source: net.sockets
+  tool: ss -tuan
+  use: "ss -tuan (every TCP and UDP socket, one line each)"
+  workload: []
+  omn: [trace, net.sockets, --system, -m, snapshot, -e, raw, --format, json, -o, "{out}"]
+  run: separate
+  reference:
+    command: [ss, -tuan]
+    parse: ss_tuan_count
+    requires: [ss]
+  compare:
+    key: sockets
+    omn: results.0.events_seen
+    tolerance: {abs: 4}
+    why: "both ask sock_diag for every TCP and UDP socket, IPv4 and IPv6, in every state, and print one row each; two snapshots moments apart, and a connection opened or closed between them is on one side only"
+

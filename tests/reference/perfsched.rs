@@ -318,12 +318,29 @@ fn perf_sched_timehist_rows(stdout: &str, _stderr: &str) -> Result<Values, Strin
         let task = f[2..f.len() - 3].join(" ");
         acc.add(comm(&task), "sched_in", 1.0);
         acc.add(comm(&task), "run_ns", num(f[f.len() - 1])? * 1e6);
+        // `sch delay`: from the wakeup (or the preemption) to this switch in.
+        acc.add(comm(&task), "delay_ns", num(f[f.len() - 2])? * 1e6);
         rows += 1;
     }
     if rows == 0 {
         return Err("no perf sched timehist rows in the tool's output".into());
     }
-    acc.into_values("perf sched timehist -M")
+    let mut values = acc.into_values("perf sched timehist -M")?;
+    // The mean scheduling delay per command, which a sum over a different
+    // number of slices cannot be compared by.
+    let means: Vec<(String, f64)> = values
+        .iter()
+        .filter_map(|(key, delay)| {
+            let stem = key.strip_suffix(".delay_ns")?;
+            let slices = values
+                .iter()
+                .find(|(k, _)| *k == format!("{stem}.sched_in"))?
+                .1;
+            (slices > 0.0).then(|| (format!("{stem}.delay_mean_ns"), delay / slices))
+        })
+        .collect();
+    values.extend(means);
+    Ok(values)
 }
 
 /// `perf lock contention` (tracepoints or `-b`): one row per caller (or per
@@ -503,6 +520,13 @@ mod tests {
         // A `migrated:` line names the moved task, not the migration thread.
         assert!(v.iter().all(|(k, _)| k != "migration/0.migrations"));
         assert!(value(&v, "omnref-migrate.run_ns") > 0.0);
+        // The scheduling delay, summed and as a mean per slice.
+        assert!(value(&v, "omnref-migrate.delay_ns") >= 0.0);
+        let mean = value(&v, "omnref-migrate.delay_mean_ns");
+        assert!(
+            (mean - value(&v, "omnref-migrate.delay_ns") / 202.0).abs() < 1e-6,
+            "{mean}"
+        );
     }
 
     #[test]

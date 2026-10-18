@@ -55,6 +55,10 @@ pub fn parsers() -> Vec<Parser> {
             parse: tcplife,
         },
         Parser {
+            name: "omn_hist_runqlen",
+            parse: omn_hist_runqlen,
+        },
+        Parser {
             name: "omn_hist_usecs",
             parse: omn_hist_usecs,
         },
@@ -347,6 +351,16 @@ fn tcplife(stdout: &str, stderr: &str) -> Result<Values, String> {
 /// bucket, all in nanoseconds, omn's unit. Every `hist` output of every
 /// result is merged, its series' buckets added by their lower bound: one
 /// series per device or task, where the tool's map is one histogram.
+/// `sched.runqlen`'s histogram, every cpu's merged, under runqlen.bt's
+/// `@runqlen` map: the same linear buckets, a queue length each.
+fn omn_hist_runqlen(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let values = omn_hist_usecs(stdout, _stderr)?;
+    Ok(values
+        .into_iter()
+        .map(|(key, value)| (key.replacen("@usecs", "@runqlen", 1), value))
+        .collect())
+}
+
 fn omn_hist_usecs(stdout: &str, _stderr: &str) -> Result<Values, String> {
     let doc: serde_json::Value =
         serde_json::from_str(stdout).map_err(|e| format!("omn's output is not JSON: {e}"))?;
@@ -616,10 +630,18 @@ mod tests {
             ("tcpconnect", 10.0),
             ("tcplife", 20.0),
         ];
+        // Pairs whose omn side has no capture yet: their source needs the
+        // privileges this checkout's machine does not grant, and a capture
+        // is a real run's output, never written by hand. Each is recaptured
+        // on the first privileged run.
+        let awaiting = ["runqlen"];
         let pairs = crate::runner::load("bpftrace").unwrap();
-        assert_eq!(pairs.len(), expected.len());
+        assert_eq!(pairs.len(), expected.len() + awaiting.len());
         for pair in &pairs {
             let id = pair.id.as_deref().expect("every bpftrace pair has an id");
+            if awaiting.contains(&id) {
+                continue;
+            }
             let want = expected
                 .iter()
                 .find(|(i, _)| *i == id)

@@ -250,3 +250,23 @@
       through the runner at a load of 12 to 23 (2026-10-05): six of six
       within 1.8 %, five within 0.3 %. Without end_fsync, 3.4 % below and
       7.7 % above on two runs"
+
+- id: iostat-util
+  source: io.util
+  tool: iostat
+  use: "iostat -dx 4: %util, the share of the window a device was busy"
+  workload: [fio, --output=/dev/null, tests/reference/workloads/io/randread.fio]
+  omn: [trace, io.util, --system, -m, count, -e, summary, -d, 4s, --format, json, -o, "{out}"]
+  run: alongside
+  settle_ms: 1000
+  setup: [fio, --create_only=1, --output=/dev/null, tests/reference/workloads/io/randread.fio]
+  reference:
+    command: [iostat, -d, -x, -y, -o, JSON, "4", "1"]
+    parse: iostat_json
+    requires: [iostat, fio]
+  compare:
+    key: busiest.util
+    omn_parse: omn_util_busiest
+    tolerance: {abs: 5}
+    why: "alongside: both divide /proc/diskstats' io_ticks (the milliseconds a device had a request in flight) by the window, iostat over its four seconds, omn over its counted four; the busiest device on each side, since the two name a device differently. The windows start omn's start-up apart, and a share of a few seconds moves by the milliseconds at their ends: five points"
+

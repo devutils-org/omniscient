@@ -43,6 +43,10 @@ pub fn parsers() -> Vec<Parser> {
             parse: omn_cpu_share,
         },
         Parser {
+            name: "omn_top_batch_busy",
+            parse: omn_top_batch_busy,
+        },
+        Parser {
             name: "omn_cpu_util_polls",
             parse: omn_cpu_util_polls,
         },
@@ -64,6 +68,22 @@ const TICK_NS: f64 = 10_000_000.0;
 /// (`c13eb51`), so the pair fails, naming the defect, if it comes back,
 /// rather than passing on the reads around it. Every other read covers one
 /// poll interval, so their plain mean is the share over their span.
+/// `omn top --batch`'s table: the machine's `cpu.util` row, its mean busy
+/// share over the run, as `busy`.
+fn omn_top_batch_busy(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let row = stdout
+        .lines()
+        .find(|line| line.starts_with("machine cpu.util "))
+        .ok_or("no `machine cpu.util` row: not the output of `omn top --batch`")?;
+    let mean = row
+        .split_whitespace()
+        .find_map(|cell| cell.strip_prefix("mean="))
+        .ok_or_else(|| format!("no mean on `{row}`"))?
+        .parse::<f64>()
+        .map_err(|_| format!("the mean on `{row}` is not a number"))?;
+    Ok(vec![("busy".into(), mean)])
+}
+
 fn omn_cpu_util_polls(stdout: &str, _stderr: &str) -> Result<Values, String> {
     let doc: Value =
         serde_json::from_str(stdout).map_err(|e| format!("omn's output is not JSON: {e}"))?;
@@ -343,6 +363,14 @@ fn smem_uss_pss_rss(stdout: &str, _stderr: &str) -> Result<Values, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omn_top_batch_reads_the_machine_s_cpu_row() {
+        let table = "# omn top --batch: live: the machine\n# span_ns 2019292252\nmachine cpu.util system mean=0.0755 peak=0.1049 last=0.0630 total=0.6037\nmachine io.bytes 259+0 mean=0 peak=0 last=0 total=0\n";
+        let v = omn_top_batch_busy(table, "").unwrap();
+        assert_eq!(v, vec![("busy".to_owned(), 0.0755)]);
+        assert!(omn_top_batch_busy("nothing", "").is_err());
+    }
 
     fn capture(name: &str) -> String {
         let path = format!(

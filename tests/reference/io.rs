@@ -48,6 +48,10 @@ pub fn parsers() -> Vec<Parser> {
             parse: omn_summary_as_iostat,
         },
         Parser {
+            name: "omn_util_busiest",
+            parse: omn_util_busiest,
+        },
+        Parser {
             name: "omn_hist_as_fio",
             parse: omn_hist_as_fio,
         },
@@ -155,6 +159,14 @@ fn iostat_json(stdout: &str, stderr: &str) -> Result<Values, String> {
         }
         out.push((format!("{name}.util"), col("util")?));
     }
+    // A device's busy share is not summed across devices: the busiest one's
+    // is what a machine-wide reading names, by no device's name.
+    let busiest = out
+        .iter()
+        .filter(|(k, _)| k.ends_with(".util"))
+        .map(|(_, v)| *v)
+        .fold(0.0, f64::max);
+    out.push(("busiest.util".to_owned(), busiest));
     for (i, c) in SUMMED.iter().enumerate() {
         out.push((format!("all.{c}"), sums[i]));
     }
@@ -316,6 +328,28 @@ fn omn_hist_as_fio(stdout: &str, stderr: &str) -> Result<Values, String> {
     ])
 }
 
+/// `io.util`'s summary as iostat's `%util`: the busiest device's share of
+/// the window, in percent, as `busiest.util` (device names differ between
+/// the two: `dev:259+0` against `nvme0n1`).
+fn omn_util_busiest(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let doc: Value =
+        serde_json::from_str(stdout).map_err(|e| format!("omn's output is not JSON: {e}"))?;
+    let series = doc
+        .pointer("/results/0/outputs")
+        .and_then(Value::as_array)
+        .and_then(|outputs| outputs.iter().find(|o| o["emit"] == "summary"))
+        .and_then(|o| o["series"].as_array())
+        .ok_or("omn's result has no `summary` output")?;
+    let busiest = series
+        .iter()
+        .filter_map(|one| one["last"].as_f64())
+        .fold(None, |most: Option<f64>, v| {
+            Some(most.map_or(v, |m| m.max(v)))
+        })
+        .ok_or("omn's summary has no device")?;
+    Ok(vec![("busiest.util".to_owned(), busiest * 100.0)])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +389,18 @@ mod tests {
     fn fio_json_refuses_what_is_not_a_report() {
         assert!(fio_json("", "fio: file not found").is_err());
         assert!(fio_json("{\"jobs\": []}", "").is_err());
+    }
+
+    #[test]
+    /// The busiest device on both sides: iostat's `%util` as it printed it,
+    /// and a real `io.util --system` run over a 1 GiB direct write.
+    #[test]
+    fn the_busiest_device_s_util_is_read_on_both_sides() {
+        let v = iostat_json(IOSTAT, "").unwrap();
+        assert_eq!(get(&v, "busiest.util"), 34.77);
+        let o = omn_util_busiest(include_str!("captures/io/omn-io-util-system.json"), "").unwrap();
+        assert!((get(&o, "busiest.util") - 14.275569318388723).abs() < 1e-9);
+        assert!(omn_util_busiest("{}", "").is_err());
     }
 
     #[test]

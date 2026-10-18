@@ -75,6 +75,22 @@
           counter. Two separate runs of a deterministic count; 0.15 for the
           sleep's overshoot, which differs between the runs."
 
+- id: pidstat-w-wakeups
+  source: power.wakeups
+  tool: pidstat
+  use: "pidstat -w: cswch/s, a process's voluntary switches per second (powertop's wakeups)"
+  workload: [python3, tests/reference/workloads/sysstat/switch.py, "1000"]
+  omn: [power.wakeups, -m, poll@1s, -e, summary, --value, per_second, --format, json]
+  reference:
+    command: [env, LC_ALL=C, pidstat, -w, "1", -e]
+    parse: pidstat_w
+    requires: [pidstat, env]
+  compare:
+    key: python3.cswch/s
+    omn: "results.0.outputs[emit=summary].series.0.mean"
+    tolerance: {rel: 0.15}
+    why: "a thread that sleeps 1 ms a thousand times wakes about a thousand times a second; pidstat reads the voluntary switches of /proc/<pid>/status, power.wakeups the same counter of every thread, each poll's rate over its own interval (930/s here, against pidstat's 913 switches of both kinds in its capture). Two separate runs of a deterministic count; 0.15 for the sleep's overshoot, which differs between the runs"
+
 # --- system pairs: the machine, observed in the same seconds ----------------
 
 - id: vmstat-busy
@@ -98,6 +114,42 @@
           same sum plus steal. vmstat's first row (since boot) and omn's
           few-ms leading window are left out. The two pollers' seconds start a
           few ms apart, which on a loaded machine is the 0.03."
+
+- id: vmstat-in
+  source: sched.interrupts
+  tool: vmstat
+  use: "vmstat 1 (in: interrupts per second, the machine's)"
+  run: alongside
+  settle_ms: 200
+  workload: [python3, tests/reference/workloads/sysstat/spin.py, "5"]
+  omn: [sched.interrupts, --system, -m, poll@1s, -e, summary, --filter, "kind == \"hard\"", -d, 4s, --format, json]
+  reference:
+    command: [vmstat, -n, "1", "5"]
+    parse: vmstat
+    requires: [vmstat]
+  compare:
+    key: in
+    omn_parse: omn_interrupts_per_second
+    tolerance: {rel: 0.15}
+    why: "the same seconds of the machine's hardware interrupts: vmstat reads /proc/stat's intr total, sched.interrupts /proc/interrupts per cpu and line (softirqs left out by the filter, which vmstat never counts: 17 % more with them, the first run), added up over the time it observed. The two files count the same interrupts, the architecture's own lines included (4498 against 4498 over one second here); the pollers' seconds start a few ms apart and the rate moves with the machine, which is the band"
+
+- id: vmstat-r
+  source: sched.runqueue
+  tool: vmstat
+  use: "vmstat 1 (r: runnable tasks)"
+  run: alongside
+  settle_ms: 200
+  workload: [python3, tests/reference/workloads/sysstat/spin.py, "5"]
+  omn: [sched.runqueue, --system, -m, poll@1s, -e, summary, -d, 4s, --format, json]
+  reference:
+    command: [vmstat, -n, "1", "5"]
+    parse: vmstat
+    requires: [vmstat]
+  compare:
+    key: r
+    omn: "results.0.outputs[emit=summary].series.0.mean"
+    tolerance: {abs: 2}
+    why: "both read /proc/stat's procs_running once a second over the same seconds of a machine running one spinning program: a level sampled at instants a few ms apart, each sample counting its own reader, so two tasks either way"
 
 - id: vmstat-si
   source: mem.swap
