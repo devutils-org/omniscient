@@ -65,6 +65,11 @@ root's.
   echo` names the builtin, so the script ran no `echo` binary. The test looks
   the binaries up on PATH now; ten execs, as it says.
 
+**Against `strace -f` (2026-10-18, installed):** `sh -c '/bin/true;
+/usr/bin/env true; cat /etc/hostname'`, every `execve` and `openat` path
+with its count: the same 25 (call, path) pairs both ways, the forked
+children's included.
+
 ## Not done
 
 Nothing of the stream's list (`proc.tasks` in lazy's `low` band was done by

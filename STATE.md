@@ -1791,7 +1791,16 @@ count.
   passed, 5 failed, all in the flaky tally or wanting an idle GPU, but the
   cases' finding. A live `omn top` still runs late in the debug build (none
   of it in release, where only the 10 ms drains run late, by 170 ms at
-  most).
+  most). With the witnesses installed and granted the same evening
+  (`perf`, `bpftrace`, the bcc tools, `tcpdump`, `strace`, `turbostat`,
+  `cpupower`, `slabtop`, `powertop`, `stress-ng`, `sysstat`): the reference
+  runner read no grant (Arch's `/usr/sbin` is `/usr/bin`), four `perf stat`
+  pairs compared user mode against both, a short capture lost its last
+  block (0 of 28 frames), `sched.slices` had no `comm` key -- all fixed; the
+  pairs run 174 held, `cpu.cache_misses` open (the runner's environment, not
+  found). Still lacking: `fio`, `nsys`, `ncu`, `valgrind`, `smem`,
+  `heaptrack` (their pairs skip), root for `omn` itself (`mem.slab`), and a
+  battery for powertop's power column.
 - **The full suite at the end** (2026-10-18, `cargo test --workspace
   --no-fail-fast`, the machine quiet): 3 132 passed, 12 failed. One was this
   wave's (`bpf::tests::every_program_that_attaches_a_raw_tracepoint_...`:

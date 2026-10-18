@@ -44,6 +44,14 @@ estimate. (With CAP_PERFMON missing -- a `cargo test` relinked the binary
 -- both `power.energy` and this source are refused, naming
 `perf_event_paranoid`.)
 
+**Against powertop (2026-10-18, installed and granted):** `stress-ng --cpu 4
+-t 5s` under `power.process_energy`: `share` 0.909, 269.9 of 297.1 J. Beside
+it, `powertop --time=6 --csv` gives no per-process power on this machine:
+its "Power est." column needs a battery's discharge to calibrate against,
+and a desktop has none. Its usage column (four `stress-ng-cpu` at 56 to 57 %
+of its 6 s window) agrees on who drew the package, not on a number. No pair
+to write here.
+
 ## Not done
 
 Nothing of the stream's list.
