@@ -61,14 +61,30 @@ pub fn factories() -> Vec<Factory> {
                 .request
                 .keys
                 .contains(&crate::request::KeyKind::Dir);
-            Ok(Box::new(dev::Prepare(dev::Counted::Bytes, by_direction)))
+            let interval = match resolved.request.mode {
+                crate::request::Mode::Poll { interval } => Some(interval.as_nanos()),
+                _ => None,
+            };
+            Ok(Box::new(dev::Prepare(
+                dev::Counted::Bytes,
+                by_direction,
+                interval,
+            )))
         }),
         Factory::new("net.packets", "fs:proc", |resolved| {
             let by_direction = resolved
                 .request
                 .keys
                 .contains(&crate::request::KeyKind::Dir);
-            Ok(Box::new(dev::Prepare(dev::Counted::Packets, by_direction)))
+            let interval = match resolved.request.mode {
+                crate::request::Mode::Poll { interval } => Some(interval.as_nanos()),
+                _ => None,
+            };
+            Ok(Box::new(dev::Prepare(
+                dev::Counted::Packets,
+                by_direction,
+                interval,
+            )))
         }),
         Factory::new("net.tcp.rtt", "netlink", |_| Ok(Box::new(tcp_rtt::Prepare))),
         // Both of these read counters, and both declare `snapshot`. The mode

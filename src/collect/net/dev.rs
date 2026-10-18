@@ -57,7 +57,9 @@ impl Counted {
 
 /// What to count, and whether the request is keyed on `dir`: then each
 /// interface's increase is one event per direction rather than one with both.
-pub struct Prepare(pub Counted, pub bool);
+/// What is counted, whether by direction, and the poll interval in
+/// nanoseconds when the run polls.
+pub struct Prepare(pub Counted, pub bool, pub Option<u64>);
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
@@ -82,6 +84,8 @@ impl Prepared for Prepare {
             only,
             previous: BTreeMap::new(),
             pass_first_tick: false,
+            interval_ns: self.2,
+            baseline_ns: 0,
             losses: Losses::default(),
         }))
     }
@@ -101,6 +105,10 @@ pub struct DevCollector {
     /// microseconds long, so it is passed over and the next tick measures
     /// from the baseline.
     pass_first_tick: bool,
+    /// The poll interval, when the run polls.
+    interval_ns: Option<u64>,
+    /// When the baseline was read.
+    baseline_ns: u64,
     losses: Losses,
 }
 
@@ -187,11 +195,27 @@ impl Collector for DevCollector {
                 .insert(line.name, (line.received, line.transmitted));
         }
         self.pass_first_tick = !self.previous.is_empty();
+        self.baseline_ns = monotonic_ns();
         Ok(())
     }
 
     fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
         if std::mem::take(&mut self.pass_first_tick) {
+            // The first tick opens the window. A baseline older than one
+            // interval was read while the rest of the run was attaching, and
+            // the bytes since are from before the window: retaken here, as
+            // `io.bytes` does. A launched program's baseline, read just before
+            // its release, is younger, and keeps the release's bytes.
+            if let Some(interval) = self.interval_ns {
+                let now = monotonic_ns();
+                if now.saturating_sub(self.baseline_ns) > interval {
+                    for line in self.read()? {
+                        self.previous
+                            .insert(line.name, (line.received, line.transmitted));
+                    }
+                    self.baseline_ns = now;
+                }
+            }
             return Ok(Vec::new());
         }
         let lines = self.read()?;
@@ -286,7 +310,7 @@ mod tests {
     use super::*;
 
     fn collector(counted: Counted) -> Box<dyn Collector> {
-        Box::new(Prepare(counted, false))
+        Box::new(Prepare(counted, false, None))
             .attach(&Target::System)
             .expect("a system target is readable")
     }
@@ -305,7 +329,7 @@ mod tests {
     /// `dir:tx`, under the interface; together they are its one event's bytes.
     #[test]
     fn a_request_keyed_on_direction_gets_one_series_per_direction() {
-        let mut collector = Box::new(Prepare(Counted::Bytes, true))
+        let mut collector = Box::new(Prepare(Counted::Bytes, true, None))
             .attach(&Target::Iface("lo".to_owned()))
             .expect("loopback is readable");
         assert!(collector.sample(0).unwrap().is_empty());
@@ -346,7 +370,7 @@ mod tests {
     #[test]
     fn what_moves_before_the_first_tick_is_measured_from_the_start() {
         const VOLUME: usize = 4 << 20;
-        let mut collector = Box::new(Prepare(Counted::Bytes, false))
+        let mut collector = Box::new(Prepare(Counted::Bytes, false, None))
             .attach(&Target::Iface("lo".to_owned()))
             .expect("loopback is readable");
         collector.start().expect("the baseline is readable");
@@ -369,6 +393,41 @@ mod tests {
                 "{direction}: {moved} bytes, {VOLUME} pushed before the first tick"
             );
         }
+    }
+
+    /// A baseline older than an interval at the first tick is retaken there;
+    /// a young one is kept (top, finding 2, the `io.bytes` fix for net).
+    #[test]
+    fn a_stale_baseline_is_retaken_at_the_window_s_opening() {
+        let attach = |interval| {
+            Box::new(Prepare(Counted::Bytes, false, interval))
+                .attach(&Target::System)
+                .expect("a system target")
+        };
+        let mut stale = DevCollector {
+            id: CollectorId::new("net.bytes/fs:proc"),
+            counted: Counted::Bytes,
+            by_direction: false,
+            only: None,
+            previous: BTreeMap::new(),
+            pass_first_tick: false,
+            interval_ns: Some(1_000_000),
+            baseline_ns: 0,
+            losses: Losses::default(),
+        };
+        stale.start().expect("readable");
+        stale.baseline_ns = 1;
+        stale
+            .previous
+            .values_mut()
+            .for_each(|value| *value = (0, 0));
+        assert!(stale.sample(0).unwrap().is_empty());
+        assert!(stale.baseline_ns > 1, "retaken");
+        assert!(stale.previous.values().any(|value| *value != (0, 0)));
+
+        let mut young = attach(Some(60_000_000_000));
+        young.start().expect("readable");
+        assert!(young.sample(0).unwrap().is_empty());
     }
 
     #[test]
@@ -408,7 +467,7 @@ mod tests {
 
     #[test]
     fn an_interface_target_narrows_to_that_interface() {
-        let mut collector = Box::new(Prepare(Counted::Bytes, false))
+        let mut collector = Box::new(Prepare(Counted::Bytes, false, None))
             .attach(&Target::Iface("lo".to_owned()))
             .expect("loopback exists");
         collector.sample(0).unwrap();
@@ -441,7 +500,8 @@ mod tests {
 
     #[test]
     fn a_process_target_is_refused_with_the_reason() {
-        let Err(error) = Box::new(Prepare(Counted::Bytes, false)).attach(&Target::Pid(vec![1]))
+        let Err(error) =
+            Box::new(Prepare(Counted::Bytes, false, None)).attach(&Target::Pid(vec![1]))
         else {
             panic!("a process target has no interface counters and must be refused");
         };
@@ -450,7 +510,7 @@ mod tests {
 
     #[test]
     fn an_interface_that_does_not_exist_ends_the_run() {
-        let mut collector = Box::new(Prepare(Counted::Bytes, false))
+        let mut collector = Box::new(Prepare(Counted::Bytes, false, None))
             .attach(&Target::Iface("definitely-not-an-interface".to_owned()))
             .expect("attaching does not read the file");
         match collector.sample(0) {
