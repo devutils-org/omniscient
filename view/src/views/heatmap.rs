@@ -1768,17 +1768,17 @@ impl Losses {
         }
         let mut words = String::new();
         if self.evicted > 0 {
-            words.push_str(&format!(" -{} let go", units::count(self.evicted as f64)));
+            words.push_str(&format!(" {} let go", units::count(self.evicted as f64)));
         }
         if self.placed() > 0 {
             words.push_str(&format!(
-                " -{} dropped, ▓ at the drain that found them",
+                " {} dropped, ▓ at the drain that found them",
                 units::count(self.placed() as f64)
             ));
         }
         if self.unplaced > 0 {
             words.push_str(&format!(
-                " -{} lost, when unknown",
+                " {} lost, when unknown",
                 units::count(self.unplaced as f64)
             ));
         }
@@ -2185,7 +2185,7 @@ mod tests {
         // drawn.
         assert_eq!(shaded, vec![10, 39], "{text}");
         assert!(!text.contains('░'), "{text}");
-        assert!(text.contains("-10 dropped"), "{text}");
+        assert!(text.contains(" 10 dropped"), "{text}");
     }
 
     /// The loss strip's words survive a narrow screen: the shading gives way.
@@ -2214,7 +2214,7 @@ mod tests {
                 .collect();
             assert!(text.chars().count() <= usize::from(width), "{text:?}");
             assert!(
-                text.ends_with(" -56 let go -1.23k lost, when unknown"),
+                text.ends_with(" 56 let go 1.23k lost, when unknown"),
                 "{text:?}"
             );
             assert!(text.starts_with('▒'), "{text:?}");

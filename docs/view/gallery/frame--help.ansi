@@ -21,7 +21,7 @@
  [0m[1m        [0m[38;5;67m  █[0m│                                                                                              │            [0m
  [0m[1m        [0m[38;5;67m ▂█[0m│[0m[1mHow far a figure can be trusted[0m                                                               │            [0m
  [0m[1m        [0m[38;5;67m▁██[0m│  [0m[2mdimmed[0m     not to be read at face value; its badge says why                                 │            [0m
- [0m[1;2mGPU     [0m   │  [0m[33m-12 lost[0m   12 records were lost: every figure built from them is a lower bound              │            [0m
+ [0m[1;2mGPU     [0m   │  [0m[33m12 lost[0m    12 records were lost: every figure built from them is a lower bound              │            [0m
  [0m[1mEnergy  [0m[38;5;67m▁▆▆[0m│  [0m[33m3 late[0m     3 rounds of reads came late: nothing is missing, but the series is not spaced as │            [0m
  [0m[1m        [0m[38;5;67m███[0m│asked                                                                                         │            [0m
  [0m[1m        [0m[38;5;67m███[0m│  [0m[36m±2.50µs[0m    timestamps were converted from another clock and may be off by up to 2.50µs      │            [0m

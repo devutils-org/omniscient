@@ -185,7 +185,7 @@ One style, every view, never decided by a view on its own:
 
 | Mark | Badge | Dims | When |
 |---|---|---|---|
-| `Lost` | `-12 lost (3.1%)` | yes | records dropped, unread, undecoded, throttled or evicted |
+| `Lost` | `12 lost (3.1%)` | yes | records dropped, unread, undecoded, throttled or evicted |
 | `TimeError` | `±2.50µs` | yes | an event's `ts_err_ns` is non-zero: its time came from another clock |
 | `TimeErrorUnknown` | `±?` | yes | nothing says the figure's time error: it holds aggregates only, from a recording without a `view.json` |
 | `LowDeterminism` | `~low det` | yes | the catalog says the source is `low` determinism |

@@ -26,7 +26,7 @@ The snapshot `process--process-run`, on the recording below:
 ──────────────────────────────────────────────────────────────────────────
  CPU     ▇████▆▆▆▄▃▂▁▁▁▂▂▂▂▅▁▁▁▁▁   0.0249 cores   avg 0.375   peak 0.993  2 late ~low det
  Memory  ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃████     46.7MiB        +13.7MiB/s   peak 46.7MiB  1 late
- Disk    ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█▁▁▁▁▁▁▁   R 0B/s         W 1.71MiB/s   p99 926µs  -79 lost (67.5%) ...
+ Disk    ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█▁▁▁▁▁▁▁   R 0B/s         W 1.71MiB/s   p99 926µs  79 lost (67.5%) ...
  Network ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▆██▂▁▁▁▁▁▁   ↓ 108KiB/s     ↑ 431KiB/s   0 retrans (machine)  ...
  GPU                                no kernel launched   VRAM 0B
  Energy  ▄▄▄▄▄▇▇▇████████████████   145 W          avg 127 W   the machine's, not apportioned  2 late
@@ -76,7 +76,7 @@ machine's -- keeps one neutral hue, and the lines under the suspect say
 which and why.
 
 **Trust does not wash the colour out**: a figure with a loss, a late tick, a
-time error or low determinism keeps its hue, and its badges (`-79 lost
+time error or low determinism keeps its hue, and its badges (`79 lost
 (67.5%)`, `2 late`, `~low det`) stand after the line's figures.
 
 The three steps and the neutral hue are local to `process.rs` until the

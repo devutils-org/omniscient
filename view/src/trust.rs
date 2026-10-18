@@ -142,17 +142,18 @@ impl Mark {
         !matches!(self, Mark::Degraded { .. } | Mark::Late { .. })
     }
 
-    /// A badge of a few cells.
+    /// A badge of a few cells. A loss is a count of what is missing, written
+    /// without a sign: `-58 lost` read as a negative count.
     pub fn badge(&self) -> Span<'static> {
         match self {
             Mark::Lost { missing, fraction } => Span::styled(
                 match fraction {
                     Some(fraction) => format!(
-                        "-{} lost ({})",
+                        "{} lost ({})",
                         units::count(*missing as f64),
                         units::percent(fraction * 100.0)
                     ),
-                    None => format!("-{} lost", units::count(*missing as f64)),
+                    None => format!("{} lost", units::count(*missing as f64)),
                 },
                 Style::new().fg(palette::LOSS),
             ),

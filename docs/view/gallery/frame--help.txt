@@ -21,7 +21,7 @@ omn top │ fixture http-server │ 2.85s                             view: snap
            █│                                                                                              │
           ▂█│How far a figure can be trusted                                                               │
          ▁██│  dimmed     not to be read at face value; its badge says why                                 │
- GPU        │  -12 lost   12 records were lost: every figure built from them is a lower bound              │
+ GPU        │  12 lost    12 records were lost: every figure built from them is a lower bound              │
  Energy  ▁▆▆│  3 late     3 rounds of reads came late: nothing is missing, but the series is not spaced as │
          ███│asked                                                                                         │
          ███│  ±2.50µs    timestamps were converted from another clock and may be off by up to 2.50µs      │

@@ -12,7 +12,7 @@ omn top │ fixture sqlite-latency │ 334ms                          view: snap
 │                                                                                    ││                                │
 │                                                                                    ││                                │
 │                                                                                    ││                                │
-│RUN QUEUE ~low det degraded  ON LOCKS -58 lost ~low det                             ││                                │
+│RUN QUEUE ~low det degraded  ON LOCKS 58 lost ~low det                              ││                                │
 └────────────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────┘
 
 
