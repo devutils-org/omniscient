@@ -21,10 +21,15 @@ pub struct Parser {
     pub parse: fn(stdout: &str, stderr: &str) -> Result<Values, String>,
 }
 
-/// The repository's root, where every pair's relative path resolves.
+/// The repository's root, where every pair's relative path resolves:
+/// `$OMN_REFERENCE_ROOT` where it is set -- a distroproof guest, which carries
+/// `catalog/references` and the workloads and not the checkout
+/// (docs/distroproof.md) -- the checkout otherwise.
 #[allow(dead_code)]
 pub fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    std::env::var_os("OMN_REFERENCE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
 }
 
 /// A tool's output captured for a family's parser tests:

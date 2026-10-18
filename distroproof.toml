@@ -115,6 +115,11 @@ as_user = "root"
 setup = "sh scripts/distroproof/setup.sh"
 command = "sh scripts/distroproof/sweep.sh"
 as_user = "test"
+# What a user's install grants: file capabilities on the installed binary,
+# never ambient ones (`caps`), which every program omn launches would inherit.
+file_caps = { "/opt/omn/bin/omn" = ["bpf", "perfmon"] }
+# The cell, brought back to .distroproof/collect/<target>/sweep.json.
+collect = ["sweep.json"]
 # The archives, the fixtures and the scripts, never the checkout: the guest
 # runs what a user installs.
 exclude = ["*"]

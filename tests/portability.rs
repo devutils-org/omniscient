@@ -803,6 +803,10 @@ struct Facts {
     lockdown: Option<String>,
     tracefs_mounted: Option<bool>,
     cgroup_v2: Option<bool>,
+    /// `CONFIG_FUNCTION_TRACER` is `y`: whether a trampoline has a call site.
+    function_tracer: Option<bool>,
+    /// The soft `RLIMIT_MEMLOCK`, in bytes; `None` where unlimited or unread.
+    memlock_soft: Option<i64>,
 }
 
 impl Facts {
@@ -834,6 +838,8 @@ impl Facts {
             cgroup_v2: ok("cgroups/mode")
                 .map(|mode| mode == "v2")
                 .or_else(|| entries.contains_key("cgroups/mode").then_some(false)),
+            function_tracer: ok("kernel/CONFIG_FUNCTION_TRACER").map(|v| v == "y"),
+            memlock_soft: number("privileges/memlock_soft"),
         }
     }
 }
@@ -961,6 +967,51 @@ fn reasons_disagree_with_envprobe(sweep: &Sweep, facts: &Facts) -> Vec<String> {
             }
         }
     }
+    if let Some(tracer) = facts.function_tracer {
+        let said = texts
+            .iter()
+            .find(|(_, text)| text.contains("built without ftrace"))
+            .map(|(whose, _)| whose.clone());
+        match (tracer, &said) {
+            (true, Some(whose)) => out.push(format!(
+                "{whose}: says the kernel was built without ftrace, and envprobe read \
+                 CONFIG_FUNCTION_TRACER=y"
+            )),
+            (false, None) => {
+                for (source, state, _) in requirement_states(&|needs| needs.starts_with("fentry:"))
+                {
+                    if state == State::Available {
+                        out.push(format!(
+                            "{source}: an fentry requirement answered available, and envprobe \
+                             read no CONFIG_FUNCTION_TRACER"
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(soft) = facts.memlock_soft {
+        // "this process may lock 64 KiB": the limit omn names when it says the
+        // kernel charges maps to RLIMIT_MEMLOCK.
+        let pattern = "this process may lock ";
+        for (whose, text) in &texts {
+            for (at, _) in text.match_indices(pattern) {
+                let kib: String = text[at + pattern.len()..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                if let Ok(kib) = kib.parse::<i64>() {
+                    if kib * 1024 != soft {
+                        out.push(format!(
+                            "{whose}: says this process may lock {kib} KiB, and envprobe read \
+                             a soft RLIMIT_MEMLOCK of {soft} bytes"
+                        ));
+                    }
+                }
+            }
+        }
+    }
     if let Some(v2) = facts.cgroup_v2 {
         let said = texts
             .iter()
@@ -1013,11 +1064,23 @@ fn the_envprobe_judge_catches_a_reason_that_names_the_wrong_cause() {
         lockdown: Some("none".into()),
         tracefs_mounted: Some(true),
         cgroup_v2: Some(true),
+        function_tracer: Some(true),
+        memlock_soft: Some(65536),
     };
     assert!(reasons_disagree_with_envprobe(&cell, &facts).is_empty());
     source(&mut cell, "runtime.custom").runs[0].stderr =
-        "perf_event_open was refused: perf_event_paranoid is 3; tracefs is not mounted".into();
+        "perf_event_open was refused: perf_event_paranoid is 3; tracefs is not mounted; this \
+         kernel was built without ftrace; this process may lock 8192 KiB"
+            .into();
     let found = reasons_disagree_with_envprobe(&cell, &facts);
+    assert!(
+        found.iter().any(|f| f.contains("without ftrace")),
+        "{found:?}"
+    );
+    assert!(
+        found.iter().any(|f| f.contains("may lock 8192 KiB")),
+        "{found:?}"
+    );
     assert!(
         found.iter().any(|f| f.contains("perf_event_paranoid is 3")),
         "{found:?}"

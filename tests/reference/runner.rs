@@ -519,7 +519,11 @@ pub fn tally_file(family: &str) -> PathBuf {
 pub fn run_family(family: &str, parsers: &[Parser]) {
     let pairs = load(family).unwrap_or_else(|e| panic!("{e}"));
     let only = std::env::var("OMN_REFERENCE_PAIR").ok();
-    let omn = PathBuf::from(env!("CARGO_BIN_EXE_omn"));
+    // `$OMN_REFERENCE_BIN` where it is set: a guest runs the release a user
+    // installed, not the build tree's binary.
+    let omn = std::env::var_os("OMN_REFERENCE_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_omn")));
     let mut failures = Vec::new();
     let mut tally = Tally::default();
     for pair in &pairs {

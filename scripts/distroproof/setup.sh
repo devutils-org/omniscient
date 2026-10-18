@@ -1,7 +1,6 @@
 #!/bin/sh
 # distroproof's `setup`, as root in each guest (distroproof.toml): installs
-# the release archive the way a user does and grants the capabilities on the
-# installed file, as docs/install.md says to. The guest gets the archives
+# the release archive the way a user does. The guest gets the archives
 # alone (target/dist), never the build tree.
 set -eu
 
@@ -13,26 +12,7 @@ mkdir -p /opt/omn
 tar -C /opt/omn --strip-components=1 -xzf "$archive"
 echo "setup: installed $(basename "$archive") in /opt/omn"
 
-# CAP_PERFMON (38) and CAP_BPF (39) arrived in Linux 5.8: a kernel that
-# predates them has nothing of the deployment to grant -- its setcap does not
-# know the names (Debian 10, Ubuntu 18.04 and 20.04) -- and omn runs without
-# them, as it does for a user there. cells.py reads this line.
-last=$(cat /proc/sys/kernel/cap_last_cap 2>/dev/null || echo 0)
-if [ "$last" -lt 39 ]; then
-    echo "setup: nothing to grant: this kernel predates CAP_PERFMON and CAP_BPF (cap_last_cap $last)"
-    exit 0
-fi
-
-# setcap, from whatever this distribution packages it in.
-if ! command -v setcap >/dev/null 2>&1; then
-    if command -v apk >/dev/null 2>&1; then apk add -q libcap-utils
-    elif command -v apt-get >/dev/null 2>&1; then apt-get install -qq -y libcap2-bin >/dev/null
-    elif command -v dnf >/dev/null 2>&1; then dnf install -q -y libcap >/dev/null
-    elif command -v pacman >/dev/null 2>&1; then pacman -Sq --noconfirm libcap >/dev/null
-    fi
-fi
-# Granted on the installed file, never ambient: what `make` and
-# docs/install.md do, and what distroproof's `caps =` would not be (every
-# program omn launches would inherit them).
-setcap cap_bpf,cap_perfmon+ep /opt/omn/bin/omn
-echo "setup: $(getcap /opt/omn/bin/omn)"
+# The capabilities are distroproof's to grant (`file_caps` in
+# distroproof.toml), on the installed file, as docs/install.md says to. A
+# kernel before 5.8 has neither CAP_PERFMON nor CAP_BPF, and distroproof's
+# agent then warns that setcap was refused; cells.py reads that.

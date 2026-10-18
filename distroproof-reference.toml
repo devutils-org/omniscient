@@ -1,0 +1,45 @@
+# The reference pairs (tests/reference.rs, docs/replaces.md) on distributions
+# other than the development machine's, each with the witnesses its own
+# packages carry (ROADMAP.md phase 13, task 5; docs/distroproof.md).
+#
+#   scripts/release.sh && scripts/distroproof/reference-build.sh
+#   distroproof up -f distroproof-reference.toml --no-tui --jobs 3 --json target/matrix/reference.json
+#   scripts/distroproof/reference-tally.py target/matrix/reference.json
+
+[defaults]
+memory = "3G"
+cpus = 2
+timeout = "60m"
+
+[[target]]
+name = "ref-debian-12"
+image = "debian-12"
+
+[[target]]
+name = "ref-debian-13"
+image = "debian-13"
+
+[[target]]
+name = "ref-ubuntu-24.04"
+image = "ubuntu-24.04"
+
+[[target]]
+name = "ref-rocky-9"
+image = "rocky-9"
+
+[[target]]
+name = "ref-fedora-latest"
+image = "fedora-latest"
+
+[[target]]
+name = "ref-arch"
+image = "arch"
+
+[run]
+setup = "sh scripts/distroproof/witnesses.sh"
+command = "sh scripts/distroproof/reference.sh"
+as_user = "test"
+file_caps = { "/opt/omn/bin/omn" = ["bpf", "perfmon", "net_raw"] }
+collect = ["reference.log"]
+exclude = ["*"]
+include = ["target/dist", "target/dp-reference", "scripts/distroproof", "catalog/references", "tests/reference/workloads"]

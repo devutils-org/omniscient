@@ -3,8 +3,9 @@
 
     scripts/distroproof/cells.py target/matrix/distroproof.json
 
-Each target's command printed `omn selftest --format json` on standard
-output (scripts/distroproof/sweep.sh). That document is a cell; this names it
+Each target's command wrote `omn selftest --format json` to sweep.json
+(scripts/distroproof/sweep.sh), which distroproof brought back (`collect`).
+That document is a cell; this names it
 after the distroproof target, says which configuration the target was, and
 writes it where tests/portability.rs reads cells
 (target/matrix/cells/<target>/sweep.json), with distroproof's envprobe report
@@ -26,8 +27,9 @@ def config_of(target):
     name = target["name"]
     if variant.get("user") == "root":
         return "root"
-    setup = (target.get("setup") or {}).get("stdout") or ""
-    if "nothing to grant" in setup:
+    # distroproof's agent warns when the kernel refused the file capabilities
+    # (`file_caps`): one before 5.8 has neither CAP_PERFMON nor CAP_BPF.
+    if any("file_caps:" in w for w in target.get("warnings") or []):
         return "nocaps"
     for suffix in ("paranoid3", "kptr2", "lockdown", "nopmu"):
         if name.endswith("-" + suffix):
@@ -44,7 +46,8 @@ def main(path):
     for target in report["targets"]:
         name = target["name"]
         command = target.get("command") or {}
-        stdout = command.get("stdout") or ""
+        collected = [p for p in target.get("collected") or [] if p.endswith("/sweep.json")]
+        stdout = open(collected[0]).read() if collected else command.get("stdout") or ""
         try:
             sweep = json.loads(stdout)
         except json.JSONDecodeError:
