@@ -222,6 +222,21 @@ impl Btf {
         }
     }
 
+    /// The size in bytes of the struct named `struct_name`, for a program that
+    /// steps through an array of them: `mm_struct.rss_stat` is an array of
+    /// `percpu_counter`, whose size depends on the kernel's configuration.
+    pub fn struct_size(&self, struct_name: &str) -> Result<i32, String> {
+        self.by_name
+            .get(struct_name)
+            .and_then(|candidates| {
+                candidates
+                    .iter()
+                    .find(|index| self.types[**index].kind == KIND_STRUCT)
+            })
+            .map(|index| self.types[*index].size_or_type as i32)
+            .ok_or_else(|| format!("this kernel's BTF has no struct named `{struct_name}`"))
+    }
+
     pub fn member_offset(&self, struct_name: &str, member: &str) -> Result<i32, String> {
         let candidates = self
             .by_name
