@@ -93,6 +93,8 @@ pub struct LockCollector {
     /// caller found for each kernel stack id.
     kernel_symbols: Option<Symbolizer>,
     callers: HashMap<u32, Option<String>>,
+    /// `/proc/kallsyms` gave this process no addresses, so no caller was named.
+    callers_unnamed: bool,
     /// The callers frameless leaves left in the user link register.
     leaf: super::LeafCallers,
     /// Processes whose symbolizer outlived their place in the followed set
@@ -136,6 +138,7 @@ impl LockCollector {
             symbolizers: HashMap::new(),
             kernel_symbols: None,
             callers: HashMap::new(),
+            callers_unnamed: false,
             leaf: super::LeafCallers::default(),
             leaving: Vec::new(),
             wants_stacks,
@@ -271,6 +274,13 @@ impl LockCollector {
         let symbols = self
             .kernel_symbols
             .get_or_insert_with(|| Symbolizer::for_process(std::process::id() as i32));
+        // Without the kernel's names the tracing and the lock's own frames
+        // cannot be told from the caller, and the first address is this
+        // tool's own program: no caller rather than a wrong one.
+        if !symbols.kernel_symbols_available() {
+            self.callers_unnamed = true;
+            return None;
+        }
         let stack = symbols.symbolize(&RawStack {
             kernel: addresses,
             user: Vec::new(),
@@ -571,6 +581,14 @@ impl Collector for LockCollector {
 
     fn notes(&self) -> Vec<String> {
         let mut notes = self.notes.clone();
+        if self.callers_unnamed {
+            notes.push(
+                "/proc/kallsyms gives no addresses to this process (kptr_restrict, or \
+                 perf_event_paranoid above 1 without CAP_SYSLOG), so no wait carries a `caller`: \
+                 the lock's own frames cannot be told from the function that took it"
+                    .to_owned(),
+            );
+        }
         if self.filtered_out > 0 || self.filtered_in > 0 {
             notes.push(format!(
                 "the filter kept {} lock waits and removed {}; it is applied to drained rows \

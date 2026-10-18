@@ -50,6 +50,28 @@ All three shared changes are additions; nothing that was there changed.
 - `sched.offcpu -e stack --format json`'s `named_by` and `executables` on a
   Python program, beside `cpu.profile`'s.
 
+**Run (2026-10-18, with CAP_BPF; no `perf` or `bpftrace` here, so no
+witness):**
+
+- `sched.runqlen` under 48 spinners on 24 cpus: 495 ticks a cpu in 5 s (99
+  Hz), per-cpu means between 0.1 and 2.5 that follow `ps -eLo psr,stat`'s
+  running counts cpu by cpu (the 3900X does not spread them evenly), and
+  25.7 waiting in all: 48 spinners and the machine's own, less 24 running.
+- `wake_ns` for a 2 ms sleeper, 100 times: mean 2.7 us, median 2.1 us over
+  102 slices (100 `sleeping`), timehist's order for a wakeup onto an idle
+  cpu; `queue_ns` sums 18.9 us where the program's own `schedstat`
+  `run_delay` grew 5.9 us inside its loop.
+- `sched.lock`'s `caller`: **defect found and fixed**. `/proc/kallsyms` is
+  zeroed for this process (`perf_event_paranoid` 2, no CAP_SYSLOG), so no
+  frame could be told from the lock machinery, and the "caller" was the
+  first address, `0xffffffffc040813d`, in the module range where the
+  program itself is JIT'd: 8 581 of 8 618 waits charged to it. Without the
+  kernel's names no wait carries a `caller` now, and the run says why.
+  The run also showed the loss-count finding (`docs/open-findings.md`, "a
+  loss reason's count is the rounds it was noted in").
+- `sched.offcpu -e stack`'s `named_by` and `executables` on a Python
+  program: present, and the same shape as `cpu.profile`'s.
+
 ## Not done
 
 Nothing of the stream's list.
