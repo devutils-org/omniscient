@@ -2007,12 +2007,25 @@ mod tests {
             return;
         };
 
+        // Opened as `mem.latency`'s collector opens it: the kernel's ops left
+        // out where the unit can (`swfilt`), which perf_event_paranoid 2
+        // allows an unprivileged process; an event that keeps them it does
+        // not.
+        let spec = crate::perf::IbsOp::probe()
+            .expect("the unit's type was just read")
+            .spec(crate::perf::Rate::Period(1 << 20), true, false);
         let reference = {
             let mut attr: perf::perf_event_attr = unsafe { std::mem::zeroed() };
             attr.type_ = kind;
             attr.size = std::mem::size_of::<perf::perf_event_attr>() as u32;
+            attr.config = spec.config;
+            attr.__bindgen_anon_4.config2 = spec.config2;
             attr.__bindgen_anon_1.sample_period = 1 << 20;
             attr.set_disabled(1);
+            if spec.exclude_kernel {
+                attr.set_exclude_kernel(1);
+                attr.set_exclude_hv(1);
+            }
             // SAFETY: a zeroed attr with its size set, opened on this thread.
             let fd = unsafe {
                 perf_event_open_sys::perf_event_open(

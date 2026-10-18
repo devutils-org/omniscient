@@ -73,14 +73,17 @@ def write_file(path, size, chunk, fd):
     descriptor reports this file's apart from the interpreter's own reads at
     startup, which reuse the low numbers.
     """
-    block = bytes(range(256)) * (chunk // 256)
+    # Random bytes, a fresh block per write: a filesystem that compresses
+    # (btrfs with `compress=zstd`) would write a repeated pattern to the
+    # device as a few percent of its size, and the device column would be
+    # measuring the compressor.
     opened = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     os.dup2(opened, fd)
     os.close(opened)
     try:
         left = size
         while left:
-            left -= os.write(fd, block[: min(chunk, left)])
+            left -= os.write(fd, os.urandom(min(chunk, left)))
         os.fsync(fd)
     finally:
         os.close(fd)

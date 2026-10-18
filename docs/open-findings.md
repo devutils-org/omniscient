@@ -14163,3 +14163,29 @@ total is right; the split is not readable. A fix is in the shared layer: a
 and the 186 sites moved onto it (mechanical: each pairs `+= n` with one
 `note`). Then `--format json`'s `reasons` sums to the counters, which a test
 can hold.
+
+### The full run's eight "machine failures", rerun with the capabilities
+
+Six pass once `omn` holds CAP_BPF and CAP_PERFMON
+(`family_sched::a_counted_switch_rate_is_per_second_of_the_run`, both
+`scenario_net` refusals, `scenario_sched::a_source_with_no_collector_...`,
+`scenario_mem::a_stack_of_every_process_...`,
+`scenario_runtime::the_backends_this_build_does_not_implement_...`). The
+other two were not the machine's, and are fixed:
+
+- `capabilities::tests::the_op_sampler_is_available_exactly_when_it_opens`
+  runs in-process, so no capability reaches it. Its reference opened the IBS
+  op sampler keeping the kernel's ops, which `perf_event_paranoid` 2 refuses,
+  while the probe and `mem.latency`'s collector open it with `swfilt`, which
+  it allows: the probe was right. The reference opens it as they do now.
+- `view_workloads::system_panels_carry_at_least_the_manifests_cost` read 16
+  MiB fsynced and 741 KiB moved by the device: the workloads wrote
+  `bytes(range(256))` over and over, and `/home` is btrfs with
+  `compress=zstd:1`, so the device saw the compressor's output. They write
+  random bytes now; 14 of 14 pass.
+
+Also from the triage handoff: `make-sqlite`'s open finding ("the critical
+path is one job") still stands with `ppid` on the sched sources -- the
+person's way undecided, naming no state, the agent's `blocked` at `wait4`
+-- so `ppid` alone does not close it. `sqlite3-durability` skips: its
+reference counts syncs with `strace`, which this machine does not have.
