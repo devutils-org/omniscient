@@ -1001,12 +1001,17 @@ fn fill_machine(band: &mut Band, data: &Data, source: &str, prefix: &str) {
             };
             timelines += 1;
             for one in series {
-                let Some(name) = one.key.strip_prefix(prefix) else {
+                // A run keyed on `dir` as well holds one series per device
+                // and direction: they fold into one sink per device, as the
+                // system view folds them (`system::fold_dirs`), the bytes of
+                // both directions added up.
+                let Some(device) = one.key.split(' ').find(|part| part.starts_with(prefix)) else {
                     continue;
                 };
+                let name = &device[prefix.len()..];
                 let sink = sinks.entry(name.to_owned()).or_insert_with(|| Sink {
                     name: name.replace('+', ":"),
-                    key: one.key.clone(),
+                    key: device.to_owned(),
                     spark: vec![0.0; BINS],
                     ..Sink::default()
                 });
@@ -2049,6 +2054,53 @@ mod tests {
 
     fn total(band: &Band) -> f64 {
         (band.out_bytes() + band.in_bytes()) as f64
+    }
+
+    /// A machine source keyed on `dir` too holds a series per interface and
+    /// direction: they fold into one sink per interface, its bytes both
+    /// directions' (top's request, as `system::fold_dirs` does).
+    #[test]
+    fn a_series_per_direction_folds_into_one_sink_per_interface() {
+        let data = file_server();
+        let focus = Focus::default();
+        let whole = network(&ctx(&data, &focus));
+        assert!(!whole.sinks.is_empty(), "the recording has interfaces");
+        let mut split = data.clone();
+        for results in split
+            .run
+            .results
+            .iter_mut()
+            .filter(|results| results.source == "net.bytes")
+        {
+            for output in &mut results.outputs {
+                let Output::Timeline { series, .. } = output else {
+                    continue;
+                };
+                let halves: Vec<crate::model::Series> = series
+                    .drain(..)
+                    .flat_map(|one| {
+                        ["rx", "tx"].map(|dir| crate::model::Series {
+                            key: format!("{} dir:{dir}", one.key),
+                            points: one
+                                .points
+                                .iter()
+                                .map(|point| crate::model::Point {
+                                    value: point.value / 2.0,
+                                    ..*point
+                                })
+                                .collect(),
+                        })
+                    })
+                    .collect();
+                *series = halves;
+            }
+        }
+        let folded = network(&ctx(&split, &focus));
+        let names = |band: &Band| -> Vec<String> {
+            band.sinks.iter().map(|sink| sink.name.clone()).collect()
+        };
+        assert_eq!(names(&folded), names(&whole));
+        assert!((folded.machine_bytes() - whole.machine_bytes()).abs() < 1.0);
     }
 
     #[test]
