@@ -24,7 +24,7 @@
   emits: [raw, topk, timeline, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
   keys: [task, cgroup]
-  filter_fields: [comm, pid, cpu]
+  filter_fields: [comm, pid, ppid, cpu]
   determinism: low
   caveats:
     - "The only way to attribute latency across a block without instrumenting the
@@ -89,7 +89,7 @@
   emits: [hist, topk, raw, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, cpu: native, launch: bpf_only}
   keys: [task, cgroup, cpu]
-  filter_fields: [comm, pid, cpu, prio]
+  filter_fields: [comm, pid, ppid, cpu, prio]
   determinism: low
   caveats:
     - "On a contended program this source shortens what it measures: the bench
@@ -132,7 +132,7 @@
   emits: [hist, stack, topk, raw, summary]
   targets: {pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only, system: native}
   keys: [task, cgroup]
-  filter_fields: [comm, pid, state, queued_ns, blocked_ns]
+  filter_fields: [comm, pid, ppid, state, queued_ns, blocked_ns]
   determinism: low
   caveats:
     - "On a contended program this source shortens what it measures: the bench
@@ -214,6 +214,7 @@
     # nothing inside a cgroup.
     - {id: "pmu:sw", requires: ["pmu:PERF_COUNT_SW_CONTEXT_SWITCHES"], cost: free,
        targets: {system: native, pid: native, tid: native, cpu: native, launch: native},
+       filter_fields: [comm, pid, cpu],
        degraded: "one sample per switch for the observed task, with no second party:
                   it says a switch happened and when, never what ran next or why
                   the task left the cpu"}
@@ -224,15 +225,15 @@
     # `sched.wakeup` needs, and `pmu:sw` records.
     - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"], cost: low,
        modes: [count], targets: {system: native, pid: native, tid: native, launch: native, cgroup: native},
-       filter_fields: [comm, pid], equivalent: true, drained: true}
+       filter_fields: [comm, pid, ppid], equivalent: true, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low,
        modes: [count], targets: {system: native, pid: native, tid: native, launch: native, cgroup: native},
-       filter_fields: [comm, pid], equivalent: true}
+       filter_fields: [comm, pid, ppid], equivalent: true}
   modes: [count, trace]
   emits: [rate, summary, topk, raw]
   targets: {system: native, pid: native, tid: native, cpu: native, launch: native, cgroup: native}
   keys: [task, cgroup, cpu]
-  filter_fields: [comm, pid, cpu]
+  filter_fields: [comm, pid, ppid, cpu]
   determinism: low
   caveats:
     - "A switch count is a symptom, not a cause: a voluntary switch is a task
@@ -254,7 +255,7 @@
   emits: [rate, topk, raw, summary]
   targets: {system: native, pid: bpf_only, cgroup: bpf_only}
   keys: [task, cgroup]
-  filter_fields: [comm, pid, cpu]
+  filter_fields: [comm, pid, ppid, cpu]
   determinism: low
 
 - id: sched.lock
@@ -270,7 +271,7 @@
   emits: [hist, topk, stack, raw, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
   keys: [task]
-  filter_fields: [comm, pid, kind]
+  filter_fields: [comm, pid, ppid, kind]
   determinism: low
   caveats:
     - "On a contended program this source shortens what it measures: the bench
@@ -299,7 +300,7 @@
   emits: [hist, topk, stack, raw, summary]
   targets: {pid: native, tid: native, launch: native, cgroup: bpf_only}
   keys: [task]
-  filter_fields: [comm, pid, addr]
+  filter_fields: [comm, pid, ppid, addr]
   determinism: low
   caveats:
     - "An event is one bucket of one window, and it is stamped at the moment the
@@ -419,7 +420,7 @@
   emits: [hist, topk, raw, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
   keys: [task, cpu]
-  filter_fields: [comm, pid, cpu, state, next_comm, run_ns, queue_ns, off_ns]
+  filter_fields: [comm, pid, ppid, cpu, state, next_comm, run_ns, queue_ns, off_ns]
   determinism: low
   caveats:
     - "An event is one slice of one task on one cpu, stamped where it left the

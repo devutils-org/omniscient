@@ -111,6 +111,8 @@ pub struct LockCollector {
     window_opened_ns: u64,
     /// The request's predicate, applied to each row as it is drained.
     predicate: Option<FilterExpr>,
+    /// Each waiting process's parent, for `ppid`.
+    parents: super::Parents,
     /// Waits the predicate removed, and waits it kept. Counted in waits rather
     /// than in rows, because a row is not one measurement here.
     filtered_out: u64,
@@ -137,6 +139,7 @@ impl LockCollector {
             skipped_idle: 0,
             window_opened_ns: 0,
             predicate,
+            parents: super::Parents::default(),
             filtered_out: 0,
             filtered_in: 0,
         }
@@ -172,7 +175,7 @@ impl LockCollector {
         }
 
         for (index, row) in rows.into_iter().enumerate() {
-            let event = Event {
+            let mut event = Event {
                 // Stamped where the row's window began rather than at the
                 // drain that read it, which is finding 44: a join that opens on
                 // a bucketed source would otherwise open at the window's close.
@@ -193,6 +196,9 @@ impl LockCollector {
                 collector_id: self.id.clone(),
                 seq: seq + index as u64,
             };
+            if let Some(ppid) = self.parents.of(row.tgid) {
+                event.attrs.push(Attr::uint("ppid", u64::from(ppid)));
+            }
             // The predicate runs before the stack is symbolized: resolving the
             // frames of a row about to be thrown away costs a read of a
             // process's mappings for nothing.
@@ -596,7 +602,9 @@ mod tests {
             .expect("sched.lock is in the catalog")
             .filter_fields;
         assert!(!declared.is_empty(), "the entry declares filter fields");
-        for field in declared {
+        // `ppid` is put on the event by the collector, from the process's
+        // parent (`super::Parents`), not by the row's attributes.
+        for field in declared.iter().filter(|field| *field != "ppid") {
             assert!(
                 attributes.iter().any(|attr| attr.name == *field),
                 "the catalog offers a `{field}` filter and no event carries one"

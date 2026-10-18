@@ -65,6 +65,9 @@ pub struct SwitchCountCollector {
     /// The window's totals, by `(tid, voluntary)`.
     counted: BTreeMap<(u32, bool), SwitchCount>,
     predicate: Option<FilterExpr>,
+    /// Each process's parent, for the rows' `ppid`: asked from `event`,
+    /// which only reads the collector.
+    parents: std::cell::RefCell<super::Parents>,
     filtered_in: u64,
     filtered_out: u64,
     renames: Option<Renames>,
@@ -83,6 +86,7 @@ impl SwitchCountCollector {
             opened_ns: 0,
             counted: BTreeMap::new(),
             predicate,
+            parents: Default::default(),
             filtered_in: 0,
             filtered_out: 0,
             renames: None,
@@ -91,12 +95,16 @@ impl SwitchCountCollector {
     }
 
     fn event(&self, row: &SwitchCount, ts_ns: u64, window_ns: u64, seq: u64) -> Event {
+        let mut attrs = attributes(row, window_ns);
+        if let Some(ppid) = self.parents.borrow_mut().of(row.tgid) {
+            attrs.push(Attr::uint("ppid", u64::from(ppid)));
+        }
         Event {
             ts_ns,
             ts_err_ns: 0,
             kind: "sched.switches".to_owned(),
             keys: vec![KeyValue::task(row.tid as i32)],
-            attrs: attributes(row, window_ns),
+            attrs,
             collector_id: self.id.clone(),
             seq,
         }
@@ -119,6 +127,8 @@ impl SwitchCountCollector {
         let Some(program) = self.program.as_ref() else {
             return;
         };
+        // What the kernel saw the target fork, before `/proc` is asked.
+        self.parents.borrow_mut().absorb(program.parents());
         let (mut rows, drain_losses) = match program.drain() {
             Ok(drained) => drained,
             Err(reason) => {
@@ -305,6 +315,30 @@ mod tests {
         }
     }
 
+    /// A row of a live process carries its parent as `ppid`, and a
+    /// predicate over it keeps that process's rows: `--filter 'ppid == N'`
+    /// is "the children of N".
+    #[test]
+    fn a_row_carries_its_process_s_parent_and_a_predicate_reads_it() {
+        let me = std::process::id();
+        let parent = std::os::unix::process::parent_id();
+        let row = SwitchCount {
+            tgid: me,
+            ..row(true)
+        };
+        let collector = SwitchCountCollector::new(
+            Whose::Any,
+            Some(format!("ppid == {parent}").parse().expect("a predicate")),
+        );
+        let event = collector.event(&row, 1, 1, 0);
+        assert_eq!(
+            event.attr("ppid").and_then(|value| value.as_f64()),
+            Some(f64::from(parent))
+        );
+        let mut collector = collector;
+        assert!(collector.keeps(&row, 1));
+    }
+
     /// `count` is this backend's one mode, and the refusal of the other names
     /// the backend that serves it.
     #[test]
@@ -343,7 +377,9 @@ mod tests {
             .clone()
             .unwrap_or_else(|| entry.filter_fields.clone());
         assert!(!fields.is_empty());
-        for field in fields {
+        // `ppid` is put on the event by the collector, from the process's
+        // parent (`super::Parents`), not by the row's attributes.
+        for field in fields.into_iter().filter(|field| field != "ppid") {
             assert!(
                 attributes.iter().any(|attr| attr.name == field),
                 "the catalog offers a `{field}` filter on this backend and no event carries one"

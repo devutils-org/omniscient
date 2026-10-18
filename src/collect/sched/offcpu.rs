@@ -399,8 +399,10 @@ impl OffCpuCollector {
         }
         // Every task with a stack, for the file it executed: a stack two
         // tasks share is resolved once, and both tasks are named.
-        self.task_processes
-            .insert(KeyValue::task(entry.tid as i32).to_string(), entry.tgid as i32);
+        self.task_processes.insert(
+            KeyValue::task(entry.tid as i32).to_string(),
+            entry.tgid as i32,
+        );
         let id = match entry.stack {
             Some(id) => id,
             None if entry.stack_error == Some(libc::EEXIST) => {
@@ -843,7 +845,9 @@ mod tests {
             .expect("sched.offcpu is in the catalog")
             .filter_fields;
         assert!(!declared.is_empty(), "the entry declares filter fields");
-        for field in declared {
+        // `ppid` is put on the event by the collector, from the process's
+        // parent (`super::Parents`), not by the row's attributes.
+        for field in declared.iter().filter(|field| *field != "ppid") {
             assert!(
                 attributes.iter().any(|attr| attr.name == *field),
                 "the catalog offers a `{field}` filter and no event carries one"

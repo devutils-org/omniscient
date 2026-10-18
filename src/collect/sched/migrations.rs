@@ -87,6 +87,8 @@ pub struct MigrationCollector {
     counted: BTreeMap<(u32, u32), Migration>,
     /// The request's predicate, and the migrations it kept and removed.
     predicate: Option<FilterExpr>,
+    /// Each process's parent, for the rows' `ppid`.
+    parents: std::cell::RefCell<super::Parents>,
     filtered_in: u64,
     filtered_out: u64,
     /// The names tasks took at exec, applied to the rows of the window.
@@ -109,6 +111,7 @@ impl MigrationCollector {
             run_opened_ns: 0,
             counted: BTreeMap::new(),
             predicate: None,
+            parents: Default::default(),
             filtered_in: 0,
             filtered_out: 0,
             renames: None,
@@ -129,7 +132,13 @@ impl MigrationCollector {
                 KeyValue::task(row.tid as i32),
                 KeyValue::cpu(row.dest_cpu),
             ],
-            attrs: attributes(row, window_ns),
+            attrs: {
+                let mut attrs = attributes(row, window_ns);
+                if let Some(ppid) = self.parents.borrow_mut().of(row.tgid) {
+                    attrs.push(Attr::uint("ppid", u64::from(ppid)));
+                }
+                attrs
+            },
             collector_id: self.id.clone(),
             seq,
         }
@@ -455,7 +464,9 @@ mod tests {
             .expect("sched.migrations is in the catalog")
             .filter_fields;
         assert!(!declared.is_empty(), "the entry declares filter fields");
-        for field in declared {
+        // `ppid` is put on the event by the collector, from the process's
+        // parent (`super::Parents`), not by the row's attributes.
+        for field in declared.iter().filter(|field| *field != "ppid") {
             assert!(
                 attributes.iter().any(|attr| attr.name == *field),
                 "the catalog offers a `{field}` filter and no event carries one"

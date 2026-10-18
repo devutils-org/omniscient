@@ -110,6 +110,8 @@ pub struct WakeupCollector {
     dropped: u64,
     /// The request's predicate, and what it kept and removed.
     predicate: Option<FilterExpr>,
+    /// Each woken process's parent, for `ppid`.
+    parents: super::Parents,
     filtered_in: u64,
     filtered_out: u64,
     /// Wakeups issued from an interrupt, whose waker is the interrupt.
@@ -132,6 +134,7 @@ impl WakeupCollector {
             skipped: 0,
             dropped: 0,
             predicate: None,
+            parents: super::Parents::default(),
             filtered_in: 0,
             filtered_out: 0,
             from_interrupts: 0,
@@ -148,13 +151,14 @@ impl WakeupCollector {
         let mut index = seq;
         let mut undecoded = 0;
         let predicate = self.predicate.as_ref();
+        let parents = &mut self.parents;
         let (mut kept, mut removed, mut from_interrupts) = (0u64, 0u64, 0u64);
         program.drain(
             |wakeup: Wakeup| {
                 if wakeup.context().is_interrupt() {
                     from_interrupts += 1;
                 }
-                let event = Event {
+                let mut event = Event {
                     ts_ns: wakeup.ts_ns,
                     ts_err_ns: 0,
                     kind: "sched.wakeup".to_owned(),
@@ -166,6 +170,10 @@ impl WakeupCollector {
                     collector_id: id.clone(),
                     seq: index,
                 };
+                // The woken task's parent, as the other sched sources give it.
+                if let Some(ppid) = parents.of(wakeup.wakee_pid) {
+                    event.attrs.push(Attr::uint("ppid", u64::from(ppid)));
+                }
                 if let Some(predicate) = predicate {
                     if !crate::filter::matches(predicate, &event) {
                         removed += 1;

@@ -564,7 +564,9 @@ mod tests {
             .expect("sched.futex is in the catalog")
             .filter_fields;
         assert!(!declared.is_empty());
-        for field in declared {
+        // `ppid` is put on the event by the collector, from the process's
+        // parent (`super::Parents`), not by the row's attributes.
+        for field in declared.iter().filter(|field| *field != "ppid") {
             assert!(
                 attributes.iter().any(|attr| attr.name == *field),
                 "the catalog offers a `{field}` filter and no event carries one"
