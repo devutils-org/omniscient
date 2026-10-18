@@ -61,17 +61,19 @@ pub mod palette {
 /// speed) is drawn in [`usage::NEUTRAL`] and its section says why.
 ///
 /// The ramp is six steps of the 256-colour cube chosen to read on a dark and
-/// on a light background alike: no step is near-white or near-black.
+/// on a light background alike: every step is at least 3:1 against both
+/// (`tests/view_gradient.rs`). The brighter cube's yellows were 2.1:1 on
+/// white; these are the same hues a shade deeper.
 pub mod usage {
     use ratatui::style::{Color, Style};
 
     /// Free to full, in even steps of the share.
     pub const RAMP: [Color; 6] = [
-        Color::Indexed(34),  // #00af00
-        Color::Indexed(106), // #87af00
-        Color::Indexed(178), // #d7af00
-        Color::Indexed(208), // #ff8700
-        Color::Indexed(202), // #ff5f00
+        Color::Indexed(28),  // #008700
+        Color::Indexed(64),  // #5f8700
+        Color::Indexed(100), // #878700
+        Color::Indexed(136), // #af8700
+        Color::Indexed(166), // #d75f00
         Color::Indexed(160), // #d70000
     ];
 

@@ -132,12 +132,10 @@ fn the_ramp_reads_on_a_dark_terminal() {
     }
 }
 
-/// Measured 2026-10-05: on white, 34 is 2.94:1, 106 2.57:1, 178 2.10:1, 208
-/// 2.41:1; on #fdf6e3, 202 too (2.83:1). The yellow middle of the ramp is
-/// the faintest. Kept as a test that fails until the ramp changes, which is
-/// another stream's file.
+/// Failed until the twenty-fifth wave: on white, 34 was 2.94:1, 106 2.57:1,
+/// 178 2.10:1, 208 2.41:1; on #fdf6e3, 202 too (2.83:1). The ramp is now
+/// the one proposed below.
 #[test]
-#[ignore = "fails today: usage::RAMP's yellow steps are under 3:1 on a light terminal (178 is 2.10:1 on white); the fix is in view/src/trust.rs, filed"]
 fn the_ramp_reads_on_a_light_terminal() {
     for (name, background) in LIGHT {
         let low = below(&ramp(), background);
