@@ -757,11 +757,16 @@ impl ConnectProgram {
 
     /// Runs the kernel skipped; see `fentry::Link::misses`.
     pub fn missed(&self) -> u64 {
-        fentry::misses(&self.links)
-            + self
-                .state
-                .as_ref()
-                .map_or(0, |(program, _)| fentry::skipped([program]))
+        fentry::misses(&self.links) + self.skipped()
+    }
+
+    /// Runs of the `inet_sock_set_state` road's program the kernel skipped
+    /// because one was already running on that cpu; zero on the fentry road,
+    /// whose misses are the links'.
+    pub fn skipped(&self) -> u64 {
+        self.state
+            .as_ref()
+            .map_or(0, |(program, _)| fentry::skipped([program]))
     }
 
     /// Handshakes stamped and not closed: still in `SYN_SENT`, or abandoned by
