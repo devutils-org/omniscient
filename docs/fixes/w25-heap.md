@@ -38,6 +38,17 @@ no CAP_BPF.
 - A static binary the shim cannot reach (`musl-gcc -static`), where the
   uprobe is the only road.
 
+**Run (2026-10-18, with CAP_BPF):** the 64 MiB Python run reads 5152 events
+and 67.4 MiB through `bpf:uprobe`, 5153 and 67.4 MiB through `preload`;
+`-e stack` charges 63 MiB under `PyEval_EvalCode`. A static binary
+(`gcc -static`, 64 `malloc(1 MiB)`) read **0 events and said nothing** on
+`bpf:uprobe` -- a silent loss: the C library was read from the gate's maps,
+which are still `omn`'s own before the exec, so the uprobes sat in a libc the
+program never maps. Fixed: a launched program's allocator is read from what
+it will map (`objects::of_launch`, as the USDT sources do), its executable
+when it maps no C library; now 74 events, 64.0 MiB, and `mem.heap.live`
+ends at 64.0 MiB. `preload` still reads none there, and says so.
+
 2. **`mem.heap.live` and `mem.heap.retained` on `bpf:uprobe`** (added after
    the wave's first pass): both collectors read a `heap::Feed` -- the shim's
    `Stream` or the uprobes' `UprobeFeed` -- the same way; a unit test feeds

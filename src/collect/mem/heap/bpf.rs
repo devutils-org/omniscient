@@ -8,12 +8,16 @@
 //! count times its size.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
 use super::alloc::event_of;
 use super::state::LiveSet;
 use super::{Record, OP_ALLOC, OP_FREE};
-use crate::bpf::mem_heap::{HeapCall, HeapProgram, OP_FREE as CALL_FREE, OP_REALLOC};
+use crate::bpf::mem_heap::{
+    allocator_among, allocator_of, HeapCall, HeapProgram, OP_FREE as CALL_FREE, OP_REALLOC,
+};
+use crate::collect::runtime::objects;
 use crate::collect::task::Comms;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::STACK_ID_ATTR;
@@ -27,6 +31,29 @@ const RING_BYTES: usize = 4 * 1024 * 1024;
 pub struct Prepare {
     pub mode: Mode,
     pub emits: Vec<Emit>,
+    /// The target as asked, before a launch is bound to its gate's pid: what
+    /// a launched program will map is read from it.
+    pub target: Target,
+}
+
+/// The file whose allocator the uprobes are placed on: for a launched
+/// program, the C library it will map, or its own executable when it maps
+/// none (a static binary), since at the gate its maps are still this tool's;
+/// for a running process, the one it has mapped.
+fn allocator(asked: &Target, pid: i32) -> Result<PathBuf, String> {
+    match asked {
+        Target::Launch(argv) => {
+            let objects = objects::of_launch(argv)?;
+            let paths: Vec<PathBuf> = objects
+                .scanned
+                .iter()
+                .map(|scanned| scanned.path.clone())
+                .collect();
+            allocator_among(&paths)
+                .ok_or_else(|| format!("`{}` names no file to place the uprobes in", argv[0]))
+        }
+        _ => allocator_of(pid),
+    }
 }
 
 impl Prepared for Prepare {
@@ -43,9 +70,11 @@ impl Prepared for Prepare {
                 target.kind()
             )
         })?;
+        let library = allocator(&self.target, pid)?;
         Ok(Box::new(HeapUprobes {
             id: CollectorId::new("mem.heap.alloc/bpf:uprobe"),
             pid,
+            library,
             wants_stacks: self.emits.contains(&Emit::Stack),
             program: None,
             live: LiveSet::default(),
@@ -62,6 +91,8 @@ impl Prepared for Prepare {
 pub struct HeapUprobes {
     id: CollectorId,
     pid: i32,
+    /// The file the uprobes are placed in.
+    library: PathBuf,
     wants_stacks: bool,
     program: Option<HeapProgram>,
     live: LiveSet,
@@ -181,7 +212,11 @@ impl Collector for HeapUprobes {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(HeapProgram::load(self.pid, RING_BYTES)?);
+        self.program = Some(HeapProgram::load(
+            self.pid,
+            self.library.clone(),
+            RING_BYTES,
+        )?);
         Ok(())
     }
 
@@ -226,15 +261,17 @@ impl Collector for HeapUprobes {
 /// and no stacks (a total has no use for one).
 pub struct UprobeFeed {
     pid: i32,
+    library: PathBuf,
     program: Option<HeapProgram>,
     losses: Losses,
     dropped: (u64, u64),
 }
 
 impl UprobeFeed {
-    pub fn new(pid: i32) -> Self {
+    pub fn new(pid: i32, library: PathBuf) -> Self {
         Self {
             pid,
+            library,
             program: None,
             losses: Losses::default(),
             dropped: (0, 0),
@@ -252,7 +289,11 @@ impl super::Feed for UprobeFeed {
     }
 
     fn start(&mut self) -> Result<(), String> {
-        self.program = Some(HeapProgram::load(self.pid, RING_BYTES)?);
+        self.program = Some(HeapProgram::load(
+            self.pid,
+            self.library.clone(),
+            RING_BYTES,
+        )?);
         Ok(())
     }
 
@@ -297,6 +338,8 @@ impl super::Feed for UprobeFeed {
 pub struct LivePrepare {
     pub which: super::Which,
     pub mode: Mode,
+    /// The target as asked, as [`Prepare::target`].
+    pub target: Target,
 }
 
 impl Prepared for LivePrepare {
@@ -317,7 +360,7 @@ impl Prepared for LivePrepare {
                 target.kind()
             )
         })?;
-        let feed = UprobeFeed::new(pid);
+        let feed = UprobeFeed::new(pid, allocator(&self.target, pid)?);
         match self.which {
             super::Which::Retained => super::retained::RetainedCollector::new(feed, interval)
                 .map(|collector| collector as Box<dyn Collector>),

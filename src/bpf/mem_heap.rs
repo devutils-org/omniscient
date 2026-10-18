@@ -304,20 +304,36 @@ fn free_instructions(
 pub fn allocator_of(pid: i32) -> Result<PathBuf, String> {
     let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))
         .map_err(|error| format!("cannot read process {pid}'s maps: {error}"))?;
-    let mappings = super::usdt::parse_maps(&maps);
-    let libc = mappings.iter().find(|mapping| {
-        mapping
-            .path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("libc.so") || name.starts_with("libc-"))
-    });
-    match libc {
-        Some(mapping) => Ok(mapping.path.clone()),
+    let paths: Vec<PathBuf> = super::usdt::parse_maps(&maps)
+        .into_iter()
+        .map(|mapping| mapping.path)
+        .collect();
+    match the_c_library(&paths) {
+        Some(path) => Ok(path),
         None => std::fs::read_link(format!("/proc/{pid}/exe")).map_err(|error| {
             format!("process {pid} maps no C library and its binary cannot be read: {error}")
         }),
     }
+}
+
+/// The C library among the files a program will map, the executable first:
+/// the file whose name starts `libc.so` or `libc-`, else the executable
+/// itself, which is what a static binary's allocator is in. A launched
+/// program is read this way because at the gate its maps are still this
+/// tool's own, and a static program never maps the C library they name.
+pub fn allocator_among(paths: &[PathBuf]) -> Option<PathBuf> {
+    the_c_library(paths).or_else(|| paths.first().cloned())
+}
+
+fn the_c_library(paths: &[PathBuf]) -> Option<PathBuf> {
+    paths
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("libc.so") || name.starts_with("libc-"))
+        })
+        .cloned()
 }
 
 fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
@@ -352,10 +368,10 @@ pub struct HeapProgram {
 }
 
 impl HeapProgram {
-    pub fn load(pid: i32, requested_ring_bytes: usize) -> Result<Self, String> {
+    /// The programs, placed on `library`'s allocator and kept to `pid`.
+    pub fn load(pid: i32, library: PathBuf, requested_ring_bytes: usize) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
         let tgid = super::pidns::kernel_tgid(pid as u32)?;
-        let library = allocator_of(pid)?;
         let offset = |name: &str| {
             crate::stack::symbol_file_offset(&library, name).ok_or_else(|| {
                 format!(
@@ -467,6 +483,27 @@ mod tests {
         assert_eq!(call.bytes(), 240);
         assert_eq!(call.stack, -14);
         assert!(HeapCall::from_bytes(&bytes[..40]).is_none());
+    }
+
+    /// A launched program's allocator is its C library when it will map one,
+    /// and its own executable when it maps none, as a static binary does.
+    #[test]
+    fn a_static_program_s_allocator_is_its_own_executable() {
+        let dynamic = [
+            PathBuf::from("/usr/bin/python3.14"),
+            PathBuf::from("/usr/lib/libpython3.14.so.1.0"),
+            PathBuf::from("/usr/lib/libc.so.6"),
+        ];
+        assert_eq!(
+            allocator_among(&dynamic),
+            Some(PathBuf::from("/usr/lib/libc.so.6"))
+        );
+        let static_binary = [PathBuf::from("/tmp/alloc-static")];
+        assert_eq!(
+            allocator_among(&static_binary),
+            Some(PathBuf::from("/tmp/alloc-static"))
+        );
+        assert_eq!(allocator_among(&[]), None);
     }
 
     /// The five programs build against this kernel, and this test process's
