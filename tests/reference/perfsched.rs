@@ -7,7 +7,7 @@
 //! and a table that lists one name several times (one row per process) is
 //! summed into one key, so a pair compares a name rather than a pid.
 
-use crate::common::{Parser, Values};
+use crate::common::{Parser, Values, INCOMPLETE};
 use std::collections::BTreeMap;
 
 pub fn parsers() -> Vec<Parser> {
@@ -212,7 +212,7 @@ fn perf_trace_summary(stdout: &str, stderr: &str) -> Result<Values, String> {
         .sum();
     if lost > 0 {
         return Err(format!(
-            "perf trace lost {lost} events: its summary counts the survivors only"
+            "{INCOMPLETE}perf trace lost {lost} events: its summary counts the survivors only"
         ));
     }
     let mut acc = Acc::default();
@@ -467,6 +467,8 @@ mod tests {
         let text = format!("LOST 628 events!\n{}", capture("perf-trace-s.txt"));
         let e = perf_trace_summary("", &text).unwrap_err();
         assert!(e.contains("lost 628 events"), "{e}");
+        // Which the runner reads as a skip, not as omn's failure.
+        assert!(e.starts_with(INCOMPLETE), "{e}");
     }
 
     #[test]

@@ -7,6 +7,13 @@ use std::path::{Path, PathBuf};
 
 pub type Values = Vec<(String, f64)>;
 
+/// What a parser's error starts with when the tool says its own output is
+/// incomplete -- perf's `LOST N events!` -- rather than that it cannot be
+/// read: the pair skips, quoting it, since a reference that lost events is
+/// not one to hold `omn` to, and failing would blame `omn` for it.
+#[allow(dead_code)]
+pub const INCOMPLETE: &str = "the reference is incomplete: ";
+
 #[allow(dead_code)]
 pub struct Parser {
     /// The name a pair's `reference.parse` field gives.

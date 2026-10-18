@@ -189,10 +189,14 @@
 - id: cpu.cycles.system
   source: cpu.cycles
   tool: perf stat
-  use: "perf stat -a -e cycles -- sleep N (system-wide)"
-  workload: []
+  use: "perf stat -a -e cycles -- prog (system-wide)"
+  # Eight spinning interpreters: the machine's cycles over the window are
+  # theirs, so omn's own start and exit outside it -- about 0.1 s of cpu,
+  # 0.4 to 0.5e9 cycles -- are a fixed share of a known load rather than of
+  # whatever the machine idled at.
+  workload: [sh, -c, "for i in 1 2 3 4 5 6 7 8; do env PYTHONHASHSEED=0 python3 -S tests/reference/workloads/perfstat/spin.py 3000000 & done; wait"]
   run: tool_wraps_omn
-  omn: [trace, cpu.cycles, --system, -d, 2s, -m, count, -e, summary, --format, json, -o, "{out}"]
+  omn: [trace, cpu.cycles, --system, -m, count, -e, summary, --format, json, -o, "{out}"]
   reference:
     command: [perf, stat, -a, -x, ",", -e, cycles, --]
     parse: perf_stat_csv
@@ -201,7 +205,7 @@
     key: cycles
     omn: results.0.outputs[emit=summary].series.*.last
     tolerance: {rel: 0.08, side: below}
-    why: "one run: perf counts every cpu for as long as omn lives, omn for its 2 s window inside that, so perf's window is omn's plus omn's start and exit and omn can only read less (measured 3 to 5 % less on a loaded machine)"
+    why: "one run: perf counts every cpu for as long as omn lives, omn over the program it launched inside that, so perf's window is omn's plus omn's start and exit and omn can only read less. With the machine idle the difference was most of the count (-26 to -39 %, omn's start and exit against 0.4 to 0.9e9 idle cycles); over eight spinners it is a fixed 0.5e9 cycles against tens of billions, which the 8 % band holds whatever the machine idles at"
 
 - id: cpu.context_switches.system
   source: cpu.context_switches

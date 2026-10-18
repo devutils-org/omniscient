@@ -45,7 +45,71 @@ pub fn parsers() -> Vec<Parser> {
             name: "omn_captured",
             parse: omn_captured,
         },
+        Parser {
+            name: "ss_s_transport",
+            parse: ss_s_transport,
+        },
+        Parser {
+            name: "omn_sockstat",
+            parse: omn_sockstat,
+        },
     ]
+}
+
+/// `ss -s`: `Total: N`, and its transport table's Total column, one key per
+/// row (`TCP`, `UDP`, `RAW`, `INET`, `FRAG`).
+fn ss_s_transport(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let mut out = Values::new();
+    for line in stdout.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        match words.as_slice() {
+            ["Total:", total, ..] => out.push((
+                "Total".into(),
+                total.parse().map_err(|_| format!("`{line}`"))?,
+            )),
+            [name @ ("TCP" | "UDP" | "RAW" | "INET" | "FRAG"), total, _ip, _ipv6] => {
+                out.push((
+                    (*name).into(),
+                    total.parse().map_err(|_| format!("`{line}`"))?,
+                ));
+            }
+            _ => {}
+        }
+    }
+    if out.iter().all(|(key, _)| key != "TCP") {
+        return Err("no transport table: not the output of `ss -s`".into());
+    }
+    Ok(out)
+}
+
+/// `net.sockstat`'s raw events, one per transport: `inuse` by `counter`, and
+/// `sockets` as `Total`, the keys `ss_s_transport` gives.
+fn omn_sockstat(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let result = omn_result(stdout)?;
+    let events = result["outputs"]
+        .as_array()
+        .and_then(|o| o.iter().find(|o| o["emit"] == "raw"))
+        .and_then(|o| o["events"].as_array())
+        .ok_or("omn's result has no `raw` output")?;
+    let mut out = Values::new();
+    for event in events {
+        let (Some(counter), Some(inuse)) = (
+            attr(event, "counter"),
+            event["attrs"]
+                .as_array()
+                .and_then(|attrs| attrs.iter().find(|a| a["name"] == "inuse"))
+                .and_then(|a| a["value"].as_f64()),
+        ) else {
+            continue;
+        };
+        let key = if counter == "sockets" {
+            "Total"
+        } else {
+            counter
+        };
+        out.push((key.into(), inuse));
+    }
+    Ok(out)
 }
 
 /// The line `around.py` prints between the reading before the workload and
@@ -347,6 +411,24 @@ fn omn_captured(stdout: &str, _stderr: &str) -> Result<Values, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ss -s` on this machine, 2026-10-18, and `net.sockstat`'s snapshot of
+    /// the same files.
+    #[test]
+    fn ss_s_and_omn_sockstat_name_the_same_rows() {
+        let ss = "Total: 284\nTCP:   38 (estab 8, closed 27, orphaned 1, timewait 26)\n\nTransport Total     IP        IPv6\nRAW\t  1         0         1        \nUDP\t  4         2         2        \nTCP\t  11        5         6        \nINET\t  16        7         9        \nFRAG\t  0         0         0        \n";
+        let v = ss_s_transport(ss, "").unwrap();
+        assert_eq!(get(&v, "TCP"), 11.0);
+        assert_eq!(get(&v, "Total"), 284.0);
+        assert_eq!(get(&v, "RAW"), 1.0);
+        let omn = r#"{"results":[{"outputs":[{"emit":"raw","events":[
+            {"attrs":[{"name":"inuse","value":285},{"name":"counter","value":"sockets"}]},
+            {"attrs":[{"name":"inuse","value":12},{"name":"counter","value":"TCP"}]}]}]}]}"#;
+        let o = omn_sockstat(omn, "").unwrap();
+        assert_eq!(get(&o, "TCP"), 12.0);
+        assert_eq!(get(&o, "Total"), 285.0);
+        assert!(ss_s_transport("nothing", "").is_err());
+    }
 
     fn get(v: &Values, k: &str) -> f64 {
         v.iter()

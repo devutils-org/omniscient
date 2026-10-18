@@ -4,7 +4,7 @@
 //! `catalog/references/README.md`; this file is its only reader, and a field
 //! it does not read is refused rather than ignored.
 
-use crate::common::{installed, root, Parser, Values};
+use crate::common::{installed, root, Parser, Values, INCOMPLETE};
 use serde::Deserialize;
 use serde_json::Value as Json;
 use std::collections::BTreeMap;
@@ -733,6 +733,9 @@ pub fn run_pair(pair: &Pair, parsers: &[Parser], omn: &Path) -> Outcome {
         });
         match (parser.parse)(&result.tool.stdout, &result.tool.stderr) {
             Ok(values) => tool_values.push(values),
+            Err(e) if e.starts_with(INCOMPLETE) => {
+                return Outcome::Skip(e, tail(&result.tool.stderr, 3));
+            }
             Err(e) => {
                 let mut why = format!("parser `{}`: {e}", parser.name);
                 if !result.tool.status.success() {

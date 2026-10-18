@@ -177,3 +177,47 @@
     omn_parse: omn_captured
     tolerance: {rel: 0.01}
     why: "both are AF_PACKET sockets on lo with a filter on the destination port, open over the same five seconds, the workload inside both. lo hands a packet socket every frame twice, `outgoing` and `host`; omn keeps both and libpcap drops the outgoing copy on a loopback device, so omn_captured counts each frame on lo once (by hand, 2026-10-04: 3562 omn events against 1781 tcpdump packets, 3608 against 1804, exactly twice)"
+
+- id: nstat-active-opens
+  source: net.snmp
+  tool: nstat
+  use: "nstat -saz TcpActiveOpens, before and after (net.snmp keyed on counter)"
+  workload: [python3, tests/reference/workloads/net/backlog.py, "64", "1"]
+  omn: [trace, net.snmp, --system, -m, count, -k, counter, -e, summary, --filter, "counter == \"TcpActiveOpens\"", --format, json, --duration, 4s]
+  run: alongside
+  settle_ms: 1000
+  reference:
+    command: [python3, tests/reference/workloads/net/around.py, "4", nstat, -saz, TcpActiveOpens]
+    parse: nstat_delta
+    requires: [nstat, python3]
+  compare:
+    key: TcpActiveOpens
+    omn: results.0.outputs[emit=summary].series.*.total
+    tolerance: {abs: 3}
+    why: "both read /proc/snmp's Tcp ActiveOpens over the same four seconds, omn as one counted window keyed on the counter, nstat before and after; the workload opens 64 connections, and another program's connect in the milliseconds the windows differ by lands on one side only"
+
+- id: ss-s-transports
+  source: net.sockstat
+  tool: ss -s
+  use: "ss -s (the transport table's Total column)"
+  workload: []
+  omn: [trace, net.sockstat, --system, -m, snapshot, -e, raw, --format, json, -o, "{out}"]
+  run: separate
+  reference:
+    command: [ss, -s]
+    parse: ss_s_transport
+    requires: [ss]
+  compare:
+    - key: TCP
+      omn_parse: omn_sockstat
+      tolerance: {abs: 4}
+      why: "ss -s sums /proc/net/sockstat's and sockstat6's TCP inuse, the two numbers net.sockstat reads and adds up; the two snapshots are moments apart, and a connection opened or closed between them is on one side only"
+    - key: UDP
+      omn_parse: omn_sockstat
+      tolerance: {abs: 2}
+      why: "the same files' UDP inuse, IPv4 and IPv6 added up"
+    - key: RAW
+      omn_parse: omn_sockstat
+      tolerance: {abs: 1}
+      why: "the same files' RAW inuse, IPv4 and IPv6 added up"
+
