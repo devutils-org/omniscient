@@ -47,6 +47,9 @@ impl Prepare {
 
 impl Prepared for Prepare {
     fn attach(self: Box<Self>, target: &Target) -> Result<Box<dyn Collector>, String> {
+        if matches!(target, Target::System) {
+            return Ok(Box::new(MachineWakeups::new(PathBuf::from("/proc"))));
+        }
         let pid = target.first_pid().ok_or_else(|| {
             format!(
                 "wakeups through procfs are a process's, and a {} target names none: use --pid \
@@ -182,15 +185,24 @@ impl Collector for Wakeups {
             );
         }
         let interval_ns = ts_ns.saturating_sub(before_ns).max(1);
+        let comm = std::fs::read_to_string(self.proc_root.join(self.pid.to_string()).join("comm"))
+            .map(|name| name.trim_end().to_owned())
+            .unwrap_or_default();
         Ok(vec![Event {
             ts_ns,
             ts_err_ns: 0,
             kind: "power.wakeups".to_owned(),
-            keys: self.proc_key.clone().into_iter().collect(),
+            keys: self
+                .proc_key
+                .clone()
+                .into_iter()
+                .chain([KeyValue::task(self.pid), KeyValue::comm(comm.clone())])
+                .collect(),
             attrs: vec![
                 Attr::uint("wakeups", wakeups),
                 Attr::float("per_second", wakeups as f64 * 1e9 / interval_ns as f64),
                 Attr::uint("pid", self.pid as u64),
+                Attr::text("comm", comm),
                 Attr::uint("threads", threads.len() as u64),
                 Attr::uint("threads_exited", exited),
                 Attr::uint("interval_ns", interval_ns),
@@ -198,6 +210,135 @@ impl Collector for Wakeups {
             collector_id: self.id.clone(),
             seq,
         }])
+    }
+
+    fn losses(&self) -> Losses {
+        self.losses.clone()
+    }
+}
+
+/// `--system`: every process on the machine, one event per process that
+/// woke in the interval -- powertop's list, sorted by the reader.
+///
+/// Each read walks `/proc` and every thread of every process; a process
+/// present at one read and gone at the next took its last interval with it,
+/// counted as dropped like a thread is under a process target, and a process
+/// born since the previous read is a baseline, as the first read is.
+/// Every process's name and its threads' voluntary switches, by pid.
+type Processes = BTreeMap<i32, (String, BTreeMap<i32, u64>)>;
+
+pub struct MachineWakeups {
+    id: CollectorId,
+    proc_root: PathBuf,
+    /// Each process's threads' voluntary switches at the previous read, and
+    /// its name.
+    previous: Option<(u64, Processes)>,
+    losses: Losses,
+}
+
+impl MachineWakeups {
+    fn new(proc_root: PathBuf) -> Self {
+        Self {
+            id: CollectorId::new("power.wakeups/fs:proc"),
+            proc_root,
+            previous: None,
+            losses: Losses::default(),
+        }
+    }
+
+    fn read(&self) -> Result<Processes, SampleError> {
+        let entries = std::fs::read_dir(&self.proc_root).map_err(|error| {
+            SampleError::Transient(format!("{}: {error}", self.proc_root.display()))
+        })?;
+        let mut processes = BTreeMap::new();
+        for entry in entries.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            let one = Wakeups::new(self.proc_root.clone(), pid);
+            // Gone between the listing and the read: not in this read.
+            let Ok(threads) = one.read() else {
+                continue;
+            };
+            let comm = std::fs::read_to_string(entry.path().join("comm"))
+                .map(|name| name.trim_end().to_owned())
+                .unwrap_or_default();
+            processes.insert(pid, (comm, threads));
+        }
+        Ok(processes)
+    }
+}
+
+impl Collector for MachineWakeups {
+    fn id(&self) -> &CollectorId {
+        &self.id
+    }
+
+    fn value_attr(&self) -> &'static str {
+        "wakeups"
+    }
+
+    fn sample(&mut self, seq: u64) -> Result<Vec<Event>, SampleError> {
+        let processes = self.read()?;
+        let ts_ns = monotonic_ns();
+        let Some((before_ns, before)) = self.previous.replace((ts_ns, processes.clone())) else {
+            return Ok(Vec::new());
+        };
+        let interval_ns = ts_ns.saturating_sub(before_ns).max(1);
+        let mut exited_threads = 0u64;
+        let mut gone = 0u64;
+        for (pid, (_, threads)) in &before {
+            if !processes.contains_key(pid) {
+                gone += 1;
+                exited_threads += threads.len() as u64;
+            }
+        }
+        let mut events = Vec::new();
+        for (pid, (comm, threads)) in &processes {
+            let Some((_, earlier)) = before.get(pid) else {
+                continue;
+            };
+            let (wakeups, exited) = wakeups_between(earlier, threads);
+            exited_threads += exited;
+            if wakeups == 0 {
+                continue;
+            }
+            events.push(Event {
+                ts_ns,
+                ts_err_ns: 0,
+                kind: "power.wakeups".to_owned(),
+                // `proc` where the namespace link is readable (this user's
+                // processes), and always the pid and the name: another user's
+                // process has no `proc` key for an unprivileged reader.
+                keys: KeyValue::proc_of(*pid)
+                    .into_iter()
+                    .chain([KeyValue::task(*pid), KeyValue::comm(comm.clone())])
+                    .collect(),
+                attrs: vec![
+                    Attr::uint("wakeups", wakeups),
+                    Attr::float("per_second", wakeups as f64 * 1e9 / interval_ns as f64),
+                    Attr::uint("pid", *pid as u64),
+                    Attr::text("comm", comm.clone()),
+                    Attr::uint("threads", threads.len() as u64),
+                    Attr::uint("threads_exited", exited),
+                    Attr::uint("interval_ns", interval_ns),
+                ],
+                collector_id: self.id.clone(),
+                seq: seq + events.len() as u64,
+            });
+        }
+        if exited_threads > 0 {
+            self.losses.dropped += exited_threads;
+            self.losses.note(format!(
+                "threads that exited between two reads took their wakeups since the earlier one \
+                 with them ({gone} whole processes among them, by the last interval)"
+            ));
+        }
+        Ok(events)
     }
 
     fn losses(&self) -> Losses {
@@ -281,18 +422,36 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_target_is_sent_to_the_source_that_sees_every_wakeup() {
+    fn a_machine_target_lists_every_process_that_woke() {
+        let root = scratch::tree("wakeups-machine");
+        status(&root, 10, 10, 100);
+        status(&root, 10, 11, 5);
+        status(&root, 20, 20, 7);
+        status(&root, 30, 30, 1);
+        scratch::write(&root, "10/comm", "busy\n");
+        let mut collector = MachineWakeups::new(root.clone());
+        assert!(collector.sample(0).unwrap().is_empty(), "a baseline");
+        status(&root, 10, 10, 150);
+        status(&root, 10, 11, 15);
+        // 20 did not wake; 30 is gone; 40 is new.
+        std::fs::remove_dir_all(root.join("30")).unwrap();
+        status(&root, 40, 40, 3);
+        let events = collector.sample(1).unwrap();
+        assert_eq!(events.len(), 1, "only the process that woke: {events:?}");
+        assert_eq!(events[0].attr("wakeups").unwrap().as_f64(), Some(60.0));
+        assert_eq!(
+            events[0].attr("comm").map(|value| value.to_string()),
+            Some("busy".to_owned())
+        );
+        assert_eq!(collector.losses().dropped, 1, "the gone process's thread");
+
         let prepared = Box::new(
             Prepare::new(Mode::Poll {
                 interval: Mode::DEFAULT_POLL_INTERVAL,
             })
             .unwrap(),
         );
-        let refused = prepared
-            .attach(&Target::System)
-            .err()
-            .expect("no process named");
-        assert!(refused.contains("sched.wakeup"), "{refused}");
+        assert!(prepared.attach(&Target::System).is_ok());
         assert!(Prepare::new(Mode::Count).is_err());
     }
 

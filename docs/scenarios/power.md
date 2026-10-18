@@ -707,6 +707,22 @@ one reading per cpu, at the close.
 
 ---
 
+## What the twenty-fifth wave added
+
+- **`power.cstate -m count`**: a baseline at the start and one closing read,
+  so `-e rate` is each cpu's idle share of a command's window (`-- sleep 1`:
+  most cpus between 0.78 and 1.02 s/s, the crediting caveat's spread). Unit
+  tested on a scratch cpuidle tree.
+- **`power.wakeups --system`**: every process at each read, one event per
+  process that woke, keyed `task` and `comm` (and `proc` where this user can
+  read the namespace). A Python loop of 5 ms sleeps, picked out by `--filter
+  'pid == N'` from the machine's list: 194 and 196 wakeups a second.
+- **`power.process_energy`**: the package's counted energy times the
+  process's share of the machine's busy cpu time, every event marked
+  `estimate`, the package total beside it. Reasoned: RAPL is closed to this
+  user here (paranoid 2, `energy_uj` root's); the arithmetic and the
+  `/proc` parsing are unit tested.
+
 ## Running them
 
 ```console

@@ -18,6 +18,7 @@ mod energy;
 mod energy_pmu;
 mod freq;
 mod freq_pmu;
+mod process_energy;
 mod sysfs;
 mod temp;
 mod throttle;
@@ -37,6 +38,13 @@ pub fn factories() -> Vec<Factory> {
                 resolved.request.mode,
                 by_domain,
             )?))
+        }),
+        // The package's counted window, shared out by cpu time: an estimate.
+        Factory::new("power.process_energy", "pmu", |resolved| {
+            Ok(Box::new(process_energy::Prepare {
+                inner: Box::new(energy_pmu::Prepare::new(resolved.request.mode, false)?),
+                mode: resolved.request.mode,
+            }))
         }),
         Factory::new("power.energy", "fs:sys", |resolved| {
             Ok(Box::new(energy::Prepare::new(resolved.request.mode)?))

@@ -629,10 +629,11 @@ invisible to every CPU profiler.
 |---|---|---|---|---|---|---|
 | `power.energy` | pkg / cores / dram / gpu | `pmu` RAPL (power/energy-*/) · `fs:sys` powercap energy_uj | count, poll | **system / package** | free | medium |
 | `power.freq` | effective frequency, busy and idle shares, average | `bpf:raw_tp` · `bpf:tp` power:cpu_frequency (trace) · `pmu` msr/aperf/, msr/mperf/, msr/tsc/ · `fs:sys` cpuinfo_avg_freq + /proc/stat | poll, trace | cpu, system | free / low | low |
-| `power.cstate` | idle state residency | `bpf:tp` power:cpu_idle · `fs:sys` | trace, poll | cpu | low / high | low |
+| `power.cstate` | idle state residency | `bpf:tp` power:cpu_idle · `fs:sys` | trace, poll, count | cpu | low / high | low |
 | `power.temp` | temperatures | `fs:sys` hwmon | poll | system | low | low |
 | `power.throttle` | thermal / PL1-PL2 throttling | `fs:sys` · MSR · `bpf:tp` thermal:* | poll, trace | system | free | medium |
-| `power.wakeups` | how often a process's threads wake (powertop's wakeups per process) | `fs:proc` voluntary_ctxt_switches per thread | poll | pid, launch | low | medium |
+| `power.wakeups` | how often a process's threads wake (powertop's wakeups per process) | `fs:proc` voluntary_ctxt_switches per thread | poll | pid, launch, system | low | medium |
+| `power.process_energy` | a process's **estimated** share of the package's energy | `pmu` RAPL package × its share of busy cpu time (`/proc`) | count | pid, launch | free | low |
 
 **Caveats**
 

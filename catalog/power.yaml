@@ -38,7 +38,7 @@
        (`power_core`): the `cores` domain is every core's counter summed, and
        `counters` says how many."
     - "RAPL is per package: --pid is invalid. Per-process attribution is a derived
-       estimate (share of cycles) and must be labelled as such."
+       estimate, `power.process_energy`, labelled as such on every event."
     - "`energy_uj` is readable only by root on current kernels: the counter was
        shown to leak what the machine was computing. Present and out of reach is
        not the same as absent -- it calls for privileges, not for different
@@ -49,6 +49,29 @@
     - "RAPL domains nest: `intel-rapl:0:0` is the cores inside package
        `intel-rapl:0`. Only top-level domains are summed, and the event names
        which ones."
+
+- id: power.process_energy
+  family: power
+  summary: "A process's estimated share of the package's energy (powertop's power estimate)"
+  unit: joules
+  backends:
+    - {id: "pmu", requires: ["pmu:power/energy-pkg/", "/proc/stat"], cost: free}
+  modes: [count]
+  emits: [summary, raw]
+  targets: {pid: native, launch: native}
+  keys: [task]
+  filter_fields: [pid]
+  determinism: low
+  caveats:
+    - "An estimate, and every event says so (`estimate`): the package's
+       energy over the window times this process's share of the machine's
+       busy cpu time (`utime + stime`, reaped children included, over
+       /proc/stat's non-idle time). It does not know that one busy cycle can
+       cost more than another -- frequency, vector units, the uncore a
+       memory-bound loop keeps awake -- and it shares the package's idle floor
+       out with the rest. The measured package total is `package_joules`."
+    - "Both cpu times are counted in 10 ms ticks: a window of a few ticks has
+       no share worth the name, and the run says so."
 
 - id: power.freq
   family: power
@@ -176,9 +199,9 @@
     - {id: "fs:proc", requires: ["/proc/[pid]/status"], cost: low}
   modes: [poll]
   emits: [timeline, raw, summary]
-  targets: {pid: native, launch: native}
-  keys: [proc]
-  filter_fields: [pid]
+  targets: {pid: native, launch: native, system: native}
+  keys: [proc, task, comm]
+  filter_fields: [pid, comm]
   determinism: medium
   caveats:
     - "A wakeup is counted as the end of a voluntary sleep: the kernel counts, per
@@ -193,6 +216,11 @@
     - "These are the process's own wakeups, not the cpu wakeups it causes in
        other tasks: a timer it arms that wakes someone else is theirs. Every
        wakeup on the machine, with who woke whom, is `sched.wakeup`."
+    - "`--system` walks every process at each read, one event per process
+       that woke, keyed `task` (the pid) and `comm`, and `proc` where this user
+       may read the namespace: `-k comm -e summary` is powertop's list. A process born since the previous read is its baseline; one gone
+       since took its last interval with it, counted as dropped. The walk
+       reads every thread's status file, a few thousand files a read."
 
 # The family's default: what `omn trace power --system -d 5s` composes.
 # Every power source reads the whole machine, so this default reads it too,

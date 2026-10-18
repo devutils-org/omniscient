@@ -71,8 +71,8 @@ impl Prepared for Prepare {
             other => Err(format!(
                 "RAPL counts the energy of a whole package, so a {} target has no number here. \
                  Attributing a share of it to one process means multiplying by that process's \
-                 share of cycles, which is an estimate this tool does not present as a \
-                 measurement",
+                 share of cpu time, which is an estimate, and `power.process_energy` is that \
+                 estimate, labelled as one",
                 other.kind()
             )),
         }
@@ -523,6 +523,6 @@ mod tests {
         let Err(reason) = prepare.attach(&Target::Pid(vec![1])) else {
             panic!("there is no per-process energy in the hardware");
         };
-        assert!(reason.contains("share of cycles"), "{reason}");
+        assert!(reason.contains("power.process_energy"), "{reason}");
     }
 }

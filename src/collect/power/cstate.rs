@@ -348,7 +348,10 @@ mod tests {
         write(9_000, 4);
         let events = collector.stop();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].attr("idle_ns").unwrap().as_f64(), Some(8_000_000.0));
+        assert_eq!(
+            events[0].attr("idle_ns").unwrap().as_f64(),
+            Some(8_000_000.0)
+        );
         assert_eq!(events[0].attr("entries").unwrap().as_f64(), Some(3.0));
     }
 
