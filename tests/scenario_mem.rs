@@ -2096,7 +2096,7 @@ fn a_source_this_build_does_not_collect_exits_three_and_says_what_is_missing() {
     assert_eq!(code(&output), EXIT_NO_COLLECTOR, "{}", stderr(&output));
     let message = stderr(&output);
     assert!(
-        message.contains("mem.heap.alloc") && message.contains("bpf:uprobe"),
+        message.contains("mem.heap.alloc") && message.contains("bpf:usdt"),
         "the refusal has to name the source and the backend that is missing: {message}"
     );
     assert!(
@@ -2126,15 +2126,15 @@ fn a_source_this_build_does_not_collect_exits_three_and_says_what_is_missing() {
 #[test]
 fn the_three_refusals_are_told_apart() {
     let rejected = run(&["mem.bandwidth", "--pid", "1", "-m", "count", "-e", "rate"]);
-    // A pinned uprobe rather than a source with no collector at all: the
+    // A pinned USDT probe rather than a source with no collector at all: the
     // three refusals can only be told apart where the machine is not itself a
     // fourth answer, and this family's last two sources nothing collected --
     // `mem.latency` and `mem.sharing` -- are collected through IBS since the
-    // ninth wave. The uprobe is eBPF, which this machine serves.
+    // ninth wave. It was the uprobe until the twenty-fifth wave wrote it.
     let not_built = run(&[
         "mem.heap.alloc",
         "--backend",
-        "force:bpf:uprobe",
+        "force:bpf:usdt",
         "-m",
         "trace",
         "-e",

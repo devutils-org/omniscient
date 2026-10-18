@@ -35,6 +35,8 @@ mod io_pagecache;
 mod io_writeback;
 mod map;
 mod mem_alloc;
+// The heap stream's: `mem.heap.alloc` through uprobes on the allocator.
+pub mod mem_heap;
 mod mem_oom;
 mod mem_program;
 mod mem_stall;

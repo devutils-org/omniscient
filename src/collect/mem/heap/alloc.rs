@@ -34,73 +34,82 @@ impl AllocCollector {
 
     fn events(&mut self, seq: u64) -> Vec<Event> {
         let records = self.stream.drain();
-        let comms = &mut self.comms;
-        let live = &mut self.live;
         let mut index = seq;
         records
             .into_iter()
             .map(|record| {
-                let allocated = record.op == OP_ALLOC;
-                // `bytes` stays what was allocated, zero on a free, because it
-                // is the value every sum and mean of this source is taken over;
-                // the size a free gave back rides beside it.
-                let freed = if allocated {
-                    live.allocated_at(record.ptr, record.size, record.ts_ns);
-                    None
-                } else {
-                    Some(
-                        live.freed_at(record.ptr, record.ts_ns)
-                            .map(|((start, end), lifetime)| (end - start, lifetime)),
-                    )
-                };
-                let event = Event {
-                    ts_ns: record.ts_ns,
-                    ts_err_ns: 0,
-                    kind: "mem.heap.alloc".to_owned(),
-                    keys: vec![
-                        KeyValue::task(record.tid as i32),
-                        // The range this allocation owns. A free carries a
-                        // one-byte range at the same base, which is what closes
-                        // the interval it opened.
-                        KeyValue::Mem {
-                            base: record.ptr,
-                            len: if allocated { record.size.max(1) } else { 1 },
-                        },
-                    ],
-                    attrs: {
-                        let mut attrs = vec![
-                            Attr::uint("bytes", if allocated { record.size } else { 0 }),
-                            Attr::text("op", if allocated { "alloc" } else { "free" }),
-                            Attr::uint("ptr", record.ptr),
-                        ];
-                        match freed {
-                            Some(Some((size, lifetime))) => {
-                                attrs.push(Attr::uint("freed_bytes", size));
-                                // How long the block it ends lived: the pair
-                                // heaptrack's temporaries and dhat's lifetimes
-                                // are made of.
-                                if let Some(lifetime) = lifetime {
-                                    attrs.push(Attr::uint("lifetime_ns", lifetime));
-                                }
-                            }
-                            // A free of something allocated before the shim was
-                            // reporting, or whose record was lost: the size is
-                            // unknown, and saying so beats a zero.
-                            Some(None) => attrs.push(Attr::uint("freed_untracked", 1)),
-                            None => {}
-                        }
-                        if let Some(comm) = comms.get(record.tid as i32) {
-                            attrs.push(Attr::text("comm", comm));
-                        }
-                        attrs
-                    },
-                    collector_id: self.id.clone(),
-                    seq: index,
-                };
+                let event = event_of(&record, &mut self.live, &mut self.comms, &self.id, index);
                 index += 1;
                 event
             })
             .collect()
+    }
+}
+
+/// One allocation or free as an event, the live set kept up to date: shared
+/// by the preload backend and the uprobe one (`super::bpf`), whose records
+/// are the same facts.
+pub(super) fn event_of(
+    record: &super::Record,
+    live: &mut LiveSet,
+    comms: &mut Comms,
+    id: &CollectorId,
+    seq: u64,
+) -> Event {
+    let allocated = record.op == OP_ALLOC;
+    // `bytes` stays what was allocated, zero on a free, because it is the
+    // value every sum and mean of this source is taken over; the size a free
+    // gave back rides beside it.
+    let freed = if allocated {
+        live.allocated_at(record.ptr, record.size, record.ts_ns);
+        None
+    } else {
+        Some(
+            live.freed_at(record.ptr, record.ts_ns)
+                .map(|((start, end), lifetime)| (end - start, lifetime)),
+        )
+    };
+    Event {
+        ts_ns: record.ts_ns,
+        ts_err_ns: 0,
+        kind: "mem.heap.alloc".to_owned(),
+        keys: vec![
+            KeyValue::task(record.tid as i32),
+            // The range this allocation owns. A free carries a one-byte range
+            // at the same base, which is what closes the interval it opened.
+            KeyValue::Mem {
+                base: record.ptr,
+                len: if allocated { record.size.max(1) } else { 1 },
+            },
+        ],
+        attrs: {
+            let mut attrs = vec![
+                Attr::uint("bytes", if allocated { record.size } else { 0 }),
+                Attr::text("op", if allocated { "alloc" } else { "free" }),
+                Attr::uint("ptr", record.ptr),
+            ];
+            match freed {
+                Some(Some((size, lifetime))) => {
+                    attrs.push(Attr::uint("freed_bytes", size));
+                    // How long the block it ends lived: the pair heaptrack's
+                    // temporaries and dhat's lifetimes are made of.
+                    if let Some(lifetime) = lifetime {
+                        attrs.push(Attr::uint("lifetime_ns", lifetime));
+                    }
+                }
+                // A free of something allocated before the run was
+                // reporting, or whose record was lost: the size is unknown,
+                // and saying so beats a zero.
+                Some(None) => attrs.push(Attr::uint("freed_untracked", 1)),
+                None => {}
+            }
+            if let Some(comm) = comms.get(record.tid as i32) {
+                attrs.push(Attr::text("comm", comm));
+            }
+            attrs
+        },
+        collector_id: id.clone(),
+        seq,
     }
 }
 

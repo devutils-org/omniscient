@@ -93,6 +93,12 @@ pub fn factories() -> Vec<Factory> {
                 resolved.request.mode,
             )?))
         }),
+        Factory::new("mem.heap.alloc", "bpf:uprobe", |resolved| {
+            Ok(Box::new(heap::UprobePrepare {
+                mode: resolved.request.mode,
+                emits: resolved.request.emit.clone(),
+            }))
+        }),
         Factory::new("mem.heap.live", "preload", |resolved| {
             Ok(Box::new(heap::HeapPrepared::new(
                 Which::Live,

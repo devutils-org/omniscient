@@ -1272,6 +1272,16 @@ counts cycles between tags and `omn` counts ops: a different mix of loads.
   run is refused there with `--backend force:fs:proc:smaps` named, the
   resolver's rule for a key another backend attaches.
 
+- **`mem.heap.alloc` through `bpf:uprobe`** (heap 2, the heap stream):
+  uprobe-multi links on the target's `malloc`, `calloc`, `realloc` (entry
+  and return) and `free`, found by symbol in the C library its maps name;
+  the events are the preload backend's (one builder, `alloc::event_of`), a
+  `realloc` a free and an allocation, each allocation with its user stack.
+  Reasoned: the five programs build against this kernel and this test
+  process's libc defines the four functions; the link needs CAP_BPF and a
+  6.6 kernel's uprobe-multi link. The not-built example now pins
+  `bpf:usdt`.
+
 ## What this leaves for the coordinator
 
 Three things that are not `mem`'s to fix and that this stream found:

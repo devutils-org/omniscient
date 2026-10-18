@@ -6,10 +6,10 @@
 #
 # Allocations can be watched three ways, and the catalog names all three for
 # `mem.heap.alloc`: a preloaded shim, a USDT probe in the allocator, and a
-# uprobe on `malloc` itself. Only the shim is written. The uprobe is attached
-# through eBPF, which this build does for thirty other sources and which this
-# machine serves -- so pinning it asks for something the machine could do and
-# nobody has written.
+# uprobe on `malloc` itself. The shim and the uprobe are written (the uprobe
+# since the twenty-fifth wave); the USDT probe is not. It is attached through
+# eBPF, which this build does for thirty other sources -- so pinning it asks
+# for something the machine could do and nobody has written.
 #
 # The code is 3 and not 1, and the difference is the difference between "your
 # machine cannot do this" and "we have not written it". Reading the wrong one of
@@ -25,15 +25,15 @@
 # exits 0 and measures load latency (`examples/mem-load-latency.yml`). A source
 # stops being an illustration of this answer the day someone writes it, which is
 # the point of the answer, so the session now pins one backend of a source that
-# has a collector for another: that illustration lasts as long as the uprobe is
-# unwritten, and says so the day it is not.
-name: an allocation uprobe, which nothing here collects
+# has a collector for another. It was the uprobe until the twenty-fifth wave
+# wrote it; it is the USDT probe now, and lasts as long as that is unwritten.
+name: an allocator USDT probe, which nothing here collects
 format: text
 
 requests:
-  - label: allocations by uprobe
+  - label: allocations by USDT
     source: mem.heap.alloc
-    backend: force:bpf:uprobe
+    backend: force:bpf:usdt
     target: {launch: ["/bin/sh", "-c", "sleep 0.05"]}
     mode: trace
     emit: [summary]

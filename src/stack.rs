@@ -2168,6 +2168,24 @@ fn read_u64(bytes: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
 }
 
+/// The file offset of the function `name` in the ELF at `path`, by its
+/// `.symtab` or `.dynsym`: where a uprobe on it is placed. `None` when the
+/// file cannot be read or does not define it.
+pub fn symbol_file_offset(path: &Path, name: &str) -> Option<u64> {
+    let mapped = Mapped::of(path)?;
+    let elf = Elf::parse(mapped.bytes())?;
+    for (symbols, strings) in elf.symbol_tables() {
+        for symbol in elf.symbol_entries(symbols, strings) {
+            if symbol.value != 0
+                && read_str(mapped.bytes(), symbol.name_at).as_deref() == Some(name)
+            {
+                return elf.file_offset_of(symbol.value);
+            }
+        }
+    }
+    None
+}
+
 fn read_str(bytes: &[u8], at: usize) -> Option<String> {
     let rest = bytes.get(at..)?;
     let end = rest.iter().position(|byte| *byte == 0)?;

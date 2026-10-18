@@ -30,6 +30,9 @@
 //! [`Stream`].
 
 mod alloc;
+mod bpf;
+
+pub use bpf::Prepare as UprobePrepare;
 mod live;
 mod pagemap;
 mod retained;
@@ -48,8 +51,8 @@ use crate::request::{Mode, Target};
 /// same layout from its side.
 const RECORD_SIZE: usize = 40;
 
-const OP_ALLOC: u8 = 1;
-const OP_FREE: u8 = 2;
+pub(super) const OP_ALLOC: u8 = 1;
+pub(super) const OP_FREE: u8 = 2;
 const OP_DROPPED: u8 = 3;
 pub const OP_MUTEX: u8 = 4;
 pub const OP_GPU_CALL: u8 = 5;

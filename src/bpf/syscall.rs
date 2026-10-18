@@ -392,6 +392,31 @@ pub fn link_uprobe_multi(
     semaphore: Option<u64>,
     pid: i32,
 ) -> io::Result<OwnedFd> {
+    link_uprobe_multi_flags(prog_fd, path, offset, semaphore, pid, 0)
+}
+
+/// `BPF_F_UPROBE_MULTI_RETURN`: the link fires when the function returns.
+const BPF_F_UPROBE_MULTI_RETURN: u32 = 1;
+
+/// [`link_uprobe_multi`] on the function's return: a uretprobe, where the
+/// return value is in the context.
+pub fn link_uretprobe_multi(
+    prog_fd: RawFd,
+    path: &std::path::Path,
+    offset: u64,
+    pid: i32,
+) -> io::Result<OwnedFd> {
+    link_uprobe_multi_flags(prog_fd, path, offset, None, pid, BPF_F_UPROBE_MULTI_RETURN)
+}
+
+fn link_uprobe_multi_flags(
+    prog_fd: RawFd,
+    path: &std::path::Path,
+    offset: u64,
+    semaphore: Option<u64>,
+    pid: i32,
+    multi_flags: u32,
+) -> io::Result<OwnedFd> {
     let path = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| io::Error::other("a path has no interior NUL"))?;
     let offsets = [offset];
@@ -407,6 +432,7 @@ pub fn link_uprobe_multi(
             0
         },
         cnt: 1,
+        multi_flags,
         pid: pid as u32,
         ..Default::default()
     };
