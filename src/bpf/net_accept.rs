@@ -75,6 +75,8 @@ const R_MAX_BACKLOG: i16 = 72;
 /// Four bytes of padding at 76, cleared with the rest and never read.
 const R_COMM: i16 = 80;
 const DROP_KEY: i16 = -100;
+/// The accepting thread group, looked up in the descendants map.
+const TGID_KEY: i16 = -104;
 
 /// `AF_INET6`, from the frozen `socket(2)` numbering.
 const AF_INET6: i32 = 10;
@@ -168,6 +170,7 @@ impl Offsets {
 fn instructions(
     function: &Function,
     narrowing: Narrowing,
+    descendants: Option<i32>,
     at: &Offsets,
     ring_fd: i32,
     drops_fd: i32,
@@ -187,7 +190,26 @@ fn instructions(
     if let Some(tgid) = narrowing.tgid {
         program.push(Insn::mov64_reg(1, 0));
         program.push(Insn::rsh64_imm(1, 32));
-        program.jump_to("done", Insn::jne_imm(1, tgid as i32, 0));
+        match descendants {
+            None => {
+                program.jump_to("done", Insn::jne_imm(1, tgid as i32, 0));
+            }
+            // The root compared first; a process it started since is in the
+            // map `sched_process_fork` fills (`sched_common::Descendants`), so
+            // a server a launched script forks is followed as the script is.
+            Some(map) => {
+                program.push(Insn::mov64_reg(9, 0));
+                program.jump_to("followed", Insn::jeq_imm(1, tgid as i32, 0));
+                program.push(Insn::stx(BPF_W, R10, TGID_KEY, 1));
+                program.extend(Insn::load_map_fd(1, map));
+                program.push(Insn::mov64_reg(2, R10));
+                program.push(Insn::add64_imm(2, TGID_KEY as i32));
+                program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+                program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+                program.label("followed");
+                program.push(Insn::mov64_reg(0, 9));
+            }
+        }
     }
     program.push(Insn::stx(BPF_W, R10, EVENT + R_TID, 0));
     program.push(Insn::rsh64_imm(0, 32));
@@ -246,6 +268,8 @@ pub struct AcceptProgram {
     ring: RingBuffer,
     drops: Counters,
     links: Vec<Link>,
+    /// The processes a process target started, followed in the kernel.
+    descendants: Option<crate::bpf::sched_common::Descendants>,
 }
 
 impl AcceptProgram {
@@ -259,9 +283,16 @@ impl AcceptProgram {
                 .map_err(|error| map_failure("accept ring buffer", error))?;
         let drops = Counters::create(1, "omn_acc_drop")
             .map_err(|error| map_failure("accept drop counter", error))?;
+        let descendants = match narrowing.tgid {
+            Some(root) => Some(crate::bpf::sched_common::Descendants::follow(root)?),
+            None => None,
+        };
         let program = instructions(
             &accept,
             narrowing,
+            descendants
+                .as_ref()
+                .map(crate::bpf::sched_common::Descendants::map_fd),
             &offsets,
             ring_map.as_raw_fd(),
             drops.as_raw_fd(),
@@ -269,7 +300,12 @@ impl AcceptProgram {
         let links = vec![fentry::attach(&accept, Side::Exit, &program, "omn_accept")?];
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the accept ring buffer: {error}"))?;
-        Ok(Self { ring, drops, links })
+        Ok(Self {
+            ring,
+            drops,
+            links,
+            descendants,
+        })
     }
 
     pub fn drain(&mut self, mut handle: impl FnMut(Accept), undecoded: &mut u64) {
@@ -284,9 +320,23 @@ impl AcceptProgram {
         self.drops.read(DROP_RING)
     }
 
-    /// Runs the kernel skipped; see `fentry::Link::misses`.
+    /// Runs the kernel skipped; see `fentry::Link::misses`. The descendants'
+    /// fork programs' skipped runs are in it: a fork not followed is an
+    /// accept not kept.
     pub fn missed(&self) -> u64 {
         fentry::misses(&self.links)
+            + self
+                .descendants
+                .as_ref()
+                .map_or(0, crate::bpf::sched_common::Descendants::skipped)
+    }
+
+    /// Processes the target started that the descendants map had no room
+    /// for, so whose accepts no program kept.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants
+            .as_ref()
+            .map_or(0, crate::bpf::sched_common::Descendants::missed)
     }
 }
 
@@ -350,6 +400,33 @@ mod tests {
             return;
         };
         let offsets = Offsets::read(btf).expect("the members are named");
-        instructions(&accept, Narrowing::default(), &offsets, 3, 4).expect("a program");
+        instructions(&accept, Narrowing::default(), None, &offsets, 3, 4).expect("a program");
+        // A process target with its descendants: the root a constant, the
+        // map looked up for the others, before the record is written.
+        let followed = instructions(
+            &accept,
+            Narrowing {
+                tgid: Some(4242),
+                tid: None,
+            },
+            Some(7),
+            &offsets,
+            3,
+            4,
+        )
+        .expect("a program");
+        let root = followed
+            .iter()
+            .position(|insn| insn.imm == 4242)
+            .expect("the root");
+        let lookup = followed
+            .iter()
+            .position(|insn| insn.code == 0x85 && insn.imm == helper::MAP_LOOKUP_ELEM)
+            .expect("the descendants lookup");
+        let output = followed
+            .iter()
+            .position(|insn| insn.code == 0x85 && insn.imm == helper::RINGBUF_OUTPUT)
+            .expect("the record");
+        assert!(root < lookup && lookup < output);
     }
 }

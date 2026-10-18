@@ -56,8 +56,10 @@
        reads the accepted socket instead, which copied the listener's queue
        when its SYN arrived: six queued connections accepted in turn are
        `5` to `0` here and `0/16` to `5/16` there."
-    - "A --pid or launched target keeps the accepts of that one process, not
-       of its children."
+    - "A --pid or launched target keeps the accepts of its process tree: the
+       processes it starts are followed in the kernel from `sched_process_fork`,
+       as the timed pairs do, so a launched script's server is kept; a child the
+       map had no room for is counted as a loss. A --tid keeps one thread's."
     - "An accept that failed or would have blocked returned no socket and is
        no event."
 

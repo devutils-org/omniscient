@@ -39,6 +39,7 @@ impl Prepared for Prepare {
             predicate: self.filter,
             dropped_ring: 0,
             missed: 0,
+            unfollowed: 0,
             accepted: 0,
             filtered_out: 0,
         }))
@@ -53,6 +54,8 @@ pub struct AcceptCollector {
     predicate: Option<FilterExpr>,
     dropped_ring: u64,
     missed: u64,
+    /// Processes the target started that the descendants map could not hold.
+    unfollowed: u64,
     accepted: u64,
     filtered_out: u64,
 }
@@ -144,6 +147,15 @@ impl AcceptCollector {
                  on that cpu, so an accept went unseen",
             );
             self.missed = missed;
+        }
+        let unfollowed = program.unfollowed();
+        if unfollowed > self.unfollowed {
+            self.losses.dropped += unfollowed - self.unfollowed;
+            self.losses.note(
+                "a process the target started found the descendants map full, so its accepts \
+                 were not kept",
+            );
+            self.unfollowed = unfollowed;
         }
     }
 }
