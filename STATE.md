@@ -1764,6 +1764,25 @@ count.
   against the preload shim, `power.process_energy` against powertop; and the
   cases `make-sqlite` (its open finding should now fail as passing) and
   `sqlite3-durability`.
+  **Run on 2026-10-18** with CAP_BPF and CAP_PERFMON (each handoff's "Run",
+  and `docs/open-findings.md`, "The twenty-fifth wave's privileged runs").
+  Six defects found and fixed: the heap's uprobes on a static binary (0
+  events, silent), the connect state road's `sport=0` on a refusal,
+  `proc.calls` and `proc.syscall` keeping none of a launched program's
+  children, `sched.lock`'s `caller` naming the tracing's own frame without
+  kernel symbols, `sched.switches`' ring-budget refusal blaming
+  `perf_event_paranoid`, and the OOM caveat's sizes; two stale tests. Held:
+  the OOM victim, connect on both roads, accept on a launched tree, the
+  exact exec tree, `sched.runqlen`, `wake_ns`, the off-cpu provenance, the
+  heap's uprobes against the shim, the energy estimate's arithmetic. Not
+  held: `make-sqlite`'s finding stands with `ppid`. **Left, for what this
+  machine lacks** -- root (`mem.slab`, `/proc/slabinfo`), `cap_net_raw` in
+  the sudoers line (pcap), and the witnesses `tcpdump`, `strace` (the
+  classic `bpf:tp` road's id files are root's too, and `sqlite3-durability`
+  skips without it), `perf`, `bpftrace`, `stress-ng`, `powertop`,
+  `slabtop`. Found and open: a loss reason's `Nx` counts drains, not losses
+  (186 sites, the shared layer); a live `omn top`'s rounds still take 0.8
+  to 1 s.
 - **The full suite at the end** (2026-10-18, `cargo test --workspace
   --no-fail-fast`, the machine quiet): 3 132 passed, 12 failed. One was this
   wave's (`bpf::tests::every_program_that_attaches_a_raw_tracepoint_...`:

@@ -42,6 +42,16 @@ Branch `feat/w25-io`. Done sequentially by one agent.
    that shows the loss on a launched program (twelve runs attributed 32 of
    32 writes). Ranked first for the next wave with privileges.
 
+   **Run (2026-10-18, with CAP_BPF):** 64 MiB of buffered random writes
+   under `/home` (btrfs, `compress=zstd:1`), then `sync`, beside
+   `io.latency -m trace -e topk@comm --system`: `kworker/u99:4` 2 503
+   requests, `sync` 1 429, the writer in no top-8 row. Not a defect of the
+   insert road: btrfs compresses and submits its data writeback from its own
+   workqueues, so the task that inserts the request is a kworker, and no
+   block tracepoint names the task that dirtied the pages. That is
+   `io.writeback`'s question (`src/bpf/io_writeback.rs`), not the block
+   sources'.
+
 ## Needs from another stream
 
 - **net**: `net.bytes` on `fs:proc` may take its baseline the same way;
