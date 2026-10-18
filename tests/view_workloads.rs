@@ -146,6 +146,24 @@ fn measure(view: &str) -> Option<Vec<Value>> {
     measure_text(view, &for_this_machine(&session_text(view)))
 }
 
+/// Why `gpu.kernel` cannot be served here, as the binary's own listing says:
+/// a board with no CUPTI beside its driver has a device and no kernel tracer.
+fn kernels_unavailable() -> Option<String> {
+    let output = Command::new(BINARY)
+        .args(["list", "gpu", "--format", "json"])
+        .output()
+        .expect("omn should run");
+    let entries: Value = serde_json::from_slice(&output.stdout).expect("the listing is JSON");
+    let entry = entries
+        .as_array()
+        .expect("a list of entries")
+        .iter()
+        .find(|entry| entry["id"] == "gpu.kernel")
+        .expect("gpu.kernel is in the catalog");
+    let availability = entry["here"]["availability"].as_str().unwrap_or("unknown");
+    (availability != "ready").then(|| format!("`gpu.kernel` is {availability} here"))
+}
+
 /// Whether this kernel publishes PSI: one built without `CONFIG_PSI`, or
 /// booted with `psi=0`, has no `/proc/pressure` and no pressure in any cgroup.
 fn psi_here() -> bool {
@@ -1029,10 +1047,13 @@ fn lanes_schedule_is_the_manifests() {
     let truth = manifest("lanes");
     let mut session = session_text("lanes");
     let mut gpu = true;
-    if !Path::new("/dev/nvidia0").exists() {
-        eprintln!(
-            "the lanes workload runs without its device part: this machine has no NVIDIA device"
-        );
+    let device = if !Path::new("/dev/nvidia0").exists() {
+        Some("this machine has no NVIDIA device".to_owned())
+    } else {
+        kernels_unavailable()
+    };
+    if let Some(reason) = device {
+        eprintln!("the lanes workload runs without its device part: {reason}");
         let cut = session
             .find("  # Last, so that a machine with no device")
             .expect("the kernels request is last");
