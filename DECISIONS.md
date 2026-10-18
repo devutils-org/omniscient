@@ -1439,6 +1439,32 @@ lazy mode's are above. No open line is settled. One is opened (`cpu.profile`'s
 | A copied stack whose ip is in no known module | **Re-reads the target's maps before giving up**, a bounded number of times. | A launched program's unwinder is built before its `execve`. |
 | A workload holding a profile's shares | **Decorrelates its phase from the sampling period by construction** (a pseudo-random pad outside the measured branches, at least one period wide). | A period no divisor of the workload did not hold: 22.9 points off a share. |
 
+## Settled in the twenty-fifth wave
+
+From the decision lines of the eighteen handoffs (`docs/fixes/w25-*.md`). One
+open line is settled: `cpu.profile`'s `pmu` row, as the brief decided.
+
+| Decision | Choice | Reason |
+|---|---|---|
+| `cpu.profile`'s `pmu` (cycles) row | **Stays, as a pointer**: no collector, and its caveat names `cpu.cycles -m sample -e stack` (stream cpu wrote it). | Made a collector, it would turn every on-cpu time profile into a cycles profile `omn latency` and `omn diff` read as nanoseconds; removed, `omn list` would no longer say where the cycles profile is. |
+| A frequency-mode sample | **Weighs the period the kernel chose for it** (`PERF_SAMPLE_PERIOD`). | A share is then perf's, and the sum estimates the count. |
+| Keys read off an attribute | **Derived keys**: a family puts the attribute on its events and the key's name in `keys:`; no `KeyValue` variant. `op`, `level`, `mapping`, `user`, `counter`, `insn`, `cache` are. | One mechanism for every key a collector can name in an attribute. |
+| `within` | **The one key that puts an event in several series**; raw output and `events_seen` stay the run's own events. | The inclusive share counts a sample in each function it was inside. |
+| `--value` | **Changes the unit by the attribute's name**, and says so. | A reduced attribute is not the collector's own value. |
+| A frame's object | **Travels in the provenance**, frame for frame with the labels; `--keys object` reads it. | A label stays the function's name; nothing parses a file out of it. |
+| `bytes_per_second` | **A level, like `watts`**: no sum over readings. | A rate added over readings is not a rate. |
+| Whose stacks a source carries | **The entry's `stacks:`** (`device`), not a list in code. | A family's property belongs in its own catalog file. |
+| A throttle share against undefined clocks | **Left out, with the driver's answer.** | A share of nothing is not a measurement. |
+| A composed default's band | **Chooses the backend** where the chain has a later one that keeps the band, the move said with what it degrades; a pinned request is never moved. `omn-mcp` composes through the command line's parser. | The band is a promise about cost; two parsers drift. |
+| A late round's swallowed readings | **Counted beside the late tick**, not as late ticks. | The tick count stays "rounds that overran". |
+| A recording's capacity | **In `view.json`**; a recording without one draws no gradient rather than the replaying machine's. | The replaying machine is not the recorded one. |
+| A source whose backends answer different questions by mode | **Each backend declares its `modes:`** (`mem.oom`: counts on `count`/`poll`, victims on `trace`). | A mode lands only on a backend that serves it, and is refused with the reason elsewhere. |
+| A raw-tracepoint road beside a fentry one | **A fallback, degraded by what it cannot see** (an outcome, a generated cookie), asked for by name when the trampolines' cost is the question (`net.tcp.connect`). | The cheaper road is not the same measurement. |
+| A per-process energy number | **Its own source, `power.process_energy`**, every event saying it is an estimate; `power.energy` keeps refusing a process target. | A package meter has no per-process reading. |
+| A kernel address naming an object for its lifetime | **An attribute, never a key** (`sched.lock`'s `addr`). | A key outlives the object; the address is recycled. |
+| `ppid` | **Put on an event by its collector**, from the program's fork records or `/proc`, and a filter field wherever an event carries it. | The kernel's fork record is exact; a field no event carries is refused. |
+| A reference tool that lost events | **The pair skips, quoting it**, rather than fails (`common::INCOMPLETE`). | The tool's shortfall is not `omn`'s. |
+
 ## Open
 
 - **The phase 6 criterion for the in-kernel histogram** (io, pending the
@@ -1505,17 +1531,6 @@ lazy mode's are above. No open line is settled. One is opened (`cpu.profile`'s
   answers who it waited on with no frame names, at the price of one more
   source in the cheap pass. Leaving it open costs C servers whose libc frames
   are unnamed their slow client.
-
-- **`cpu.profile`'s `pmu` (cycles) row** (twenty-fourth wave, stream cpu).
-  The cycles profile is `cpu.cycles -m sample -e stack` now, and
-  `cpu.profile` stays the on-cpu time profile (settled above), so the row
-  has no collector on purpose: made the chain's first served backend, it
-  would turn every `cpu.profile` into a cycles profile that `omn latency` and
-  `omn diff` read as nanoseconds. Either the row is removed from the chain,
-  or it stays as a pointer whose refusal names `cpu.cycles -m sample`.
-  Leaving it open costs nothing measured: `omn list` counts one more
-  backend without a collector, and a request pinned to it is refused as the
-  build's gap rather than pointed at the source that serves it.
 
 A new open line goes here with what it costs to leave it open, which is the
 habit that kept this section honest.

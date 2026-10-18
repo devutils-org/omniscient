@@ -1692,62 +1692,89 @@ cpu in the debug build), 45 % of it `emit::values_add_up` parsing the
 embedded catalog a second time. The decisions are in `DECISIONS.md`,
 "Settled in the twenty-fourth wave".
 
-**The twenty-fifth wave, where it stopped (2026-10-17).** Run one stream at a
-time, by hand, after the parallel run used up its budget. Seven of the
-eighteen streams of `BRIEF.md` are merged, each with its handoff
-(`docs/fixes/w25-<stream>.md`); the other eleven never started, and their
-items are still item 1's bullets below. The full suite was **not** run at
-the end: run it once, on a quiet machine, before the next wave.
+**The twenty-fifth wave, merged (2026-10-17 to 2026-10-18).** All eighteen
+streams of `BRIEF.md` are on `main`, run one at a time by hand, each with its
+handoff (`docs/fixes/w25-<stream>.md`). This machine grants no CAP_BPF and
+no `sudo -n`, so every eBPF half landed is shown by its program building
+against this kernel's BTF and by instruction-order tests, and its attach is a
+privileged run below; what runs unprivileged was shown against an independent
+count.
 
-- **Merged**: **run** (a poll round that never ran counted beside its late
-  tick; `omn latency`/`saturate` exit 1 on `failures`; `Update::Described`
-  sent on every change; `Beside::capacity` written and read on replay, the
-  views' half included; the cpu after a window closed in the cost line;
-  the `--emit` and `--program-stderr` help), **emit** (`filter.rs` reads an
-  attribute named `kind` first; timeline and rate count a value-less event
-  as unmeasured; keys `op`, `level`, `mapping`, `user`, `counter`, `within`
-  -- the inclusive share -- read off attributes; `--value ATTR`; `--sum
-  ATTR` on a summary; `--format pcap`), **lazy** (the JSON listing's
-  `defaults` and per-backend `emits`; `omn-mcp` composing a family's
-  default; the band choosing the backend where the chain keeps it;
-  `net.tcp.lifetime` and `proc.tasks` in their defaults), **narrow** (the
-  fentry timed pairs follow a process target's children; reconciled at the
-  merge with origin's `fe847b9`, one descendants map a program), **cpu**
-  (`PERF_SAMPLE_PERIOD` weights; `cpu.context_switches -e rate` over the
-  run; kallsyms read beside the window; `perf_maps` and `executables` from
-  the unwinders; an `insn` key; `func`, `within`, `insn` on the sampling
-  sources; `mem.cache_*` sampled on their misses; the `pmu` row's and
-  `cpu.oncpu_time`'s caveats), **gpu** (`gpu.throttle`'s shares against
-  undefined application clocks left out; `bytes_per_second` and
-  `gpu.pcie`; entry-level `stacks: device`, `DEVICE_STACKS` gone; launch
-  facts as values; `cuMemsetD8`, `cuModuleLoadData`, `cuCtxCreate`, NVTX
-  ranges in `gpu.api`), **io** (`io.bytes`'s first interval from a stale
-  baseline; `io.vfs -k op`).
-- **Not started**: mem, heap, net, power, proc, sched, reference, views (but
-  `Beside::capacity`, done in run), triage, unwind, docs. Their lists are
-  `BRIEF.md`'s, unchanged. Found on the way, for them: mem's three "listed
-  usable, refused at the run" sources are already fixed on `main` (served or
-  refused with the reason here); `mem.oom`'s victim and a per-cache slab
-  need root here (`/dev/kmsg`, `/proc/slabinfo` and `/sys/kernel/slab` are
-  all root's); `mem.cache_*` want `func`, `within`, `insn` in their keys,
-  `mem.latency` `level`, `net.snmp` `counter`, and `net.capture` the
-  `header` hex (with `realtime_ns`) that `--format pcap` writes; `net.bytes`
-  on `fs:proc` may take its baseline as `io.bytes` did.
-- **Left by the merged streams** (their handoffs, "Not done"): the `object`
-  key (needs every frame's object from the unwinder); `omn list --format
-  toml` fails on a top-level array (it did before the wave); a
-  `kworker`-dispatched block request charged to the bio's submitter (a
-  `block_rq_insert` program nobody could load here); `net.tcp.accept`
-  following a launched tree; a CUPTI callback backend; `gpu.freq`'s three
-  clock calls stay three (the one combined call saves 4 % and drops the SM
-  clock, measured).
-- **Privileged runs these streams want** (this machine grants no CAP_BPF):
-  the starvation of a live `omn top`'s pollers, now counted
-  (`docs/fixes/w25-run.md`); `io.syscall` on a script's children against
-  `strace -f -c` (`w25-narrow.md`); `cpu.profile --pid`'s attach delay with
-  a kernel half (`w25-cpu.md`); `io.vfs -k op` against `vfsstat`
-  (`w25-io.md`); `--format pcap` through `tcpdump -r` once net fills
-  `header` (`w25-emit.md`).
+- **Landed, by stream**:
+  - **run, emit, lazy, narrow, cpu, gpu, io** (2026-10-17): as their
+    handoffs say.
+  - **mem**: `mem.oom -m trace` names each victim (`oom:mark_victim`: pid,
+    uid, `oom_score_adj`, what it held), the counting backends declaring
+    `modes:` so a trace without CAP_BPF is refused by name; `mem.slab`
+    (`/proc/slabinfo`, root's); `level` on `mem.latency`, `func`, `within`,
+    `insn` on `mem.cache_*`, `user` on the footprints, `mapping` on
+    `mem.pss`/`mem.uss` (`pmap -X`'s numbers to the KiB).
+  - **net**: `net.capture` carries `header`, `realtime_ns`, `linktype` for
+    pcap (cut at the headers' end); `net.snmp -k counter`; `net.sockstat`
+    (`ss -s`); `net.bytes`/`net.packets`' stale first baseline (defect);
+    `net.tcp.lifetime --tid`; `net.tcp.accept` follows a launched tree in the
+    kernel; `net.tcp.connect` over `bpf:raw_tp` (no trampolines, no
+    `failed`).
+  - **power**: `power.cstate -m count` (`-e rate`); `power.wakeups --system`
+    (a 5 ms sleeper read 194-196 a second); `power.process_energy`, an
+    estimate labelled as one.
+  - **proc**: `proc.calls` reads every open's and exec's path (an exec's at
+    the entry) and runs on `bpf:tp`; `proc.exec`'s tree exact through
+    `sched_process_fork`.
+  - **sched**: `sched.offcpu`'s provenance (`named_by`, `perf_maps`,
+    `executables`); `ppid` on switches, migrations, wakeup and lock, and a
+    filter field wherever carried; `sched.lock`'s `addr` and `caller`;
+    `sched.slices`' `wake_ns` (timehist's `sch delay`); `sched.runqlen`, a
+    per-cpu queue length on a 99 Hz cpu clock (the layer's first
+    `BPF_PROG_TYPE_PERF_EVENT`).
+  - **heap**: `mem.heap.alloc` through uprobe-multi links on the allocator,
+    the preload backend's events with each allocation's stack.
+  - **unwind**: every frame's object in the provenance, `--keys object`.
+  - **triage**: the agent's way reads the job by `ppid`.
+  - **views**: the usage ramp at 3:1 on a light terminal (test un-ignored);
+    the `Lifetime` mirror's exit code and signal, said in the process
+    header; loss badges without a minus sign; a sleep row's futex waits as
+    a lock in the suspect; flows' `dir` fold.
+  - **reference**: a reference that lost events skips; `load-latency`'s
+    `why`; `cpu.cycles.system` over eight spinners; `nstat-active-opens`
+    (65 against 65) and `ss-s-transports` (exact), held here.
+  - **docs**: `docs/triage.md`, `docs/cases.md`, `docs/unwind.md`,
+    `docs/view/*`, `GUIDE.md` ("The shape of a run"), `docs/bench.md`,
+    `docs/how-to-use/`.
+- **Left, from the handoffs' "Not done"**: flows' file -> device ribbon (a
+  two-layer junction, a design not started); a placed drop on screen (a
+  recording that overruns a heatmap source's ring); `mem.heap.live` and
+  `mem.heap.retained` on the uprobes (a second constructor each); a
+  `kworker`-dispatched block request charged to its bio's submitter; a
+  CUPTI callback backend; `omn list --format toml` on a top-level array; the
+  reference pairs whose tools are not installed here (iostat, mpstat,
+  pidstat, turbostat, perf, bpftrace) and the pairs to rewrite as `omn ...
+  --system -- workload`; a `mem.slab` pair once slabtop is granted.
+- **Privileged runs these streams want** (each handoff gives the command):
+  every eBPF attach above -- the OOM victims against `journalctl -k`, the
+  slab caches against `slabtop`, pcap through `tcpdump -r`, the connect
+  state road against the fentry road, accept on a launched tree, the exec
+  paths and the classic `bpf:tp` road against `strace`, the exact exec tree,
+  `sched.runqlen` against `runqlen.bt`, `wake_ns` against timehist,
+  `sched.lock`'s caller against `perf lock contention`, the heap's uprobes
+  against the preload shim, `power.process_energy` against powertop; and the
+  cases `make-sqlite` (its open finding should now fail as passing) and
+  `sqlite3-durability`.
+- **The full suite at the end** (2026-10-18, `cargo test --workspace
+  --no-fail-fast`, the machine quiet): 3 132 passed, 12 failed. One was this
+  wave's (`bpf::tests::every_program_that_attaches_a_raw_tracepoint_...`:
+  the connect state road did not say its skipped runs) and is fixed. Three
+  are in the flaky tally and passed alone
+  (`collect::cpu::counters::tests::task_clock_counts_the_cpu_time_the_thread_ran`,
+  `scenario_gpu::a_target_that_exits_before_the_duration_ends_the_run_and_names_it`,
+  `scenario_mem::every_mode_and_emit_of_the_counter_sources_...`). Eight fail
+  the same way on `main` on this machine, for want of CAP_BPF, CAP_PERFMON
+  or a quiet disk: `family_sched::a_counted_switch_rate_is_per_second_of_the_run`,
+  `scenario_net`'s two refusal tests, `scenario_sched::a_source_with_no_collector_...`,
+  `scenario_mem::a_stack_of_every_process_...`,
+  `capabilities::tests::the_op_sampler_is_available_exactly_when_it_opens`,
+  `scenario_runtime::the_backends_this_build_does_not_implement_...` and
+  `view_workloads::system_panels_carry_at_least_the_manifests_cost`.
 
 **After the twenty-fourth wave, in order:**
 
@@ -1975,14 +2002,14 @@ Below the milestones, and not scheduled:
   A consumer of one more format, not a source: `DECISIONS.md` boundary 6 says
   why LTTng is a peer rather than a backend. Low priority; nothing depends on
   it and no measurement here is worse without it.
-- **Five decisions are open** (`DECISIONS.md`): the phase 6 criterion for
+- **Four decisions are open** (`DECISIONS.md`): the phase 6 criterion for
   the in-kernel histogram, pending what `tp_btf` leaves; what the budget's
   first check may stop a run on (its one-time half landed in the twentieth
   wave, the 10 ms slack proposed with numbers); a cost per regime in the
   catalog's schema (proposed with numbers); and since the twentieth wave,
   whether the latency session asks
-  `sched.wakeup`; and since the twenty-fourth wave, whether `cpu.profile`'s
-  `pmu` row stays as a pointer to `cpu.cycles -m sample` or goes. How a reference pair reads a value `omn` computes was
+  `sched.wakeup`. `cpu.profile`'s `pmu` row was settled in the
+  twenty-fifth wave: it stays, as a pointer to `cpu.cycles -m sample`. How a reference pair reads a value `omn` computes was
   settled before the twenty-third wave: a parser of `omn`'s output. How a byte counter's direction becomes a
   series was settled in the twenty-first wave: a key, `dir`.
 - **An `lbr` collector** waits on a cpu with a branch call stack (Intel from

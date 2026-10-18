@@ -106,7 +106,8 @@ What comes out:
 Correlation keys to attach:
 .BR req ", " task ", " proc ", " file ", " sock ", " blk ", " mem ", " gpu ", "
 .BR cgroup ", " iface ", " dev ", " cpu ", " node ", " dir ", " syscall ", "
-.BR comm ", " domain ", " func .
+.BR comm ", " domain ", " func ", " op ", " level ", " mapping ", " user ", "
+.BR counter ", " within ", " insn ", " cache ", " object .
 .B dir
 splits a byte or request counter by direction,
 .B syscall
@@ -121,6 +122,25 @@ by RAPL domain, and
 is derived from each event's stack (its leaf frame), not attached by a
 collector; a source offers it by listing it in its catalog
 .BR keys: .
+.B within
+is every function on the stack, the inclusive share
+.RB ( "perf report \-\-children" ),
+the one key that counts an event in several series;
+.B insn
+the leaf's instruction and
+.B object
+the file it is in
+.RB ( "perf report \-\-sort dso" ).
+.BR op ", " level ", " mapping ", " user ", " counter " and " cache
+are read off the event attribute of that name: an operation, a memory level,
+a mapping
+.RB ( "pmap \-X" ),
+a user
+.RB ( top 's
+USER), a counter
+.RB ( nstat ),
+a slab cache
+.RB ( slabtop ).
 .PP
 A bare
 .BI "omn " source
@@ -480,6 +500,19 @@ Asking for two emits costs one collection.
 .BI \-k ", " \-\-keys " KEY"
 Correlation keys to attach, comma-separated.
 .TP
+.BI \-\-value " ATTR"
+Reduce that attribute instead of the collector's own value, in the unit its
+name says; said in the degradations.
+.TP
+.BI \-\-sum " ATTR[,ATTR]"
+Beside a
+.BR summary ,
+add up the named attributes per series:
+.B "proc.syscall \-k syscall \-e summary \-\-sum errors"
+is
+.BR "strace \-c" 's
+table with its errors column.
+.TP
 .BI \-\-filter " EXPR"
 A predicate:
 .RB ` "bytes > 4KiB && rwbs == 'R'" '.
@@ -656,7 +689,12 @@ In a session file, a request's
 .TP
 .BI \-\-format " FORMAT"
 .BR text " (default), " json ", " yaml ", " toml ", " ndjson ", " folded ", "
-.BR speedscope ", " pprof ", " chrome .
+.BR speedscope ", " pprof ", " chrome ", " pcap .
+.B pcap
+writes the frames
+.B net.capture
+copied (their headers only), with the kernel's own stamp, for
+.BR "tcpdump \-r" .
 A result format only accepts the emits it can express;
 .B omn formats
 says which, and which encoders exist.
@@ -1319,6 +1357,20 @@ omn net.snmp \-\-system \-m count \-e raw \-d 5s
 omn net.sockets \-\-system \-m snapshot \-e raw
 omn mem.system \-\-system \-m snapshot \-e summary
 omn sched.interrupts,sched.runqueue \-\-system \-m poll@1s \-e timeline \-d 5s
+omn net.snmp \-\-system \-m count \-k counter \-e summary \-\- ./client
+omn net.sockstat \-\-system \-m snapshot \-e raw
+.EE
+.TP
+What \fBslabtop\fR, \fBrunqlen\fR and \fBpowertop\fR print:
+.EX
+omn mem.slab \-\-system \-m snapshot \-e raw
+omn sched.runqlen \-\-system \-m sample \-k cpu \-e hist \-d 5s
+omn power.wakeups \-\-system \-m poll@1s \-k comm \-e summary \-d 5s
+.EE
+.TP
+Which tasks the OOM killer chose, and what each held:
+.EX
+omn mem.oom \-\-system \-m trace \-e raw \-d 1h
 .EE
 .TP
 Each time slice of a program, as \fBperf sched timehist\fR:

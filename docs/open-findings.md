@@ -13048,6 +13048,9 @@ matrix sweep refreshes them.
 
 ### Open: `cpu.cycles.system` cannot hold on a quiet machine, and `omn trace` now parses the catalog twice
 
+**The twenty-fifth wave**: the catalog is parsed once a process (fixed after the twenty-fourth wave), and the pair runs over eight spinners as its window, so omn's start and exit are a fixed share of a known load (`docs/fixes/w25-reference.md`). Open until a privileged run holds it.
+
+
 Red in both runs and alone (omn 0.72e9 against `perf stat -a` 1.18e9 cycles,
 -39 % where -8 % is allowed). The pair's band is omn's start and exit inside
 perf's window, and on an idle 24-cpu machine those are most of the
@@ -13067,7 +13070,10 @@ embedded one should be parsed once per process for every caller. The pair
 itself wants a band that does not depend on the machine's idle rate (omn's
 own measured cpu outside its window as slack, or a busy workload beside it).
 
-### Open: `perf-trace-count` refused on every run by perf's own losses
+### ~~Open: `perf-trace-count` refused on every run by perf's own losses~~ -- **fixed in the twenty-fifth wave**
+
+A parser error starting `common::INCOMPLETE` is a skip quoting the tool now, and `perf_trace_summary`'s lost-events refusal is one (`docs/fixes/w25-reference.md`).
+
 
 Stream reference's `c9d188f` made `perf_trace_summary` refuse a run whose
 `perf trace -s` reported lost events. On this machine it reports them every
@@ -14085,4 +14091,27 @@ Still open, each a defect or a question:
   engine cannot know when the read returned.
 - `omn top`'s `system` panel truncates `lo@netns:<inode>` to `lo@netns:`,
   which keeps the qualifier and loses the namespace it names.
+
+## The twenty-fifth wave's full run (2026-10-18)
+
+Eight tests fail on this machine on `main` and after the wave alike, for want
+of CAP_BPF, CAP_PERFMON or a quiet disk: they expect a served or a
+build-refused answer (exit 3) where an unprivileged machine answers exit 1,
+or a device that moved every fsynced byte. They are not regressions; each is
+listed in `STATE.md`, "The twenty-fifth wave, merged". They are worth a
+privileged rerun, where they are expected to pass:
+`family_sched::a_counted_switch_rate_is_per_second_of_the_run`,
+`scenario_net::a_net_source_this_build_does_not_collect_exits_three_and_names_the_backend`,
+`scenario_net::the_three_answers_an_ebpf_net_request_can_be_refused_with`,
+`scenario_sched::a_source_with_no_collector_is_refused_with_its_own_exit_code`,
+`scenario_mem::a_stack_of_every_process_is_refused_by_the_build_and_the_rest_is_served`,
+`capabilities::tests::the_op_sampler_is_available_exactly_when_it_opens`,
+`scenario_runtime::the_backends_this_build_does_not_implement_exit_three_and_name_themselves`,
+`view_workloads::system_panels_carry_at_least_the_manifests_cost`.
+
+For the flaky tally, each red once in the full run and passing alone:
+`collect::cpu::counters::tests::task_clock_counts_the_cpu_time_the_thread_ran`
+(202.2 ms against 200.0, 1.1 % where 1 % is allowed, again),
+`scenario_gpu::a_target_that_exits_before_the_duration_ends_the_run_and_names_it`,
+`scenario_mem::every_mode_and_emit_of_the_counter_sources_is_served_or_refused_by_the_right_code`.
 
