@@ -215,6 +215,8 @@ pub struct SyscallCollector {
     losses: Losses,
     /// The kernel's skipped runs of the program, cumulative, as last read.
     skipped: u64,
+    /// Processes the target started that were not followed, so far.
+    unfollowed: u64,
     /// The target's calls to other syscalls, which the pushed-down comparison
     /// declined to time, as the program counted them at `stop`.
     declined: u64,
@@ -248,6 +250,7 @@ impl SyscallCollector {
             program: None,
             losses: Losses::default(),
             skipped: 0,
+            unfollowed: 0,
             declined: 0,
             notes: Vec::new(),
             dropped_pending: 0,
@@ -407,6 +410,15 @@ impl SyscallCollector {
                  upper bound on the target's share, and every total here is a lower bound",
             );
             self.skipped = skipped;
+        }
+        let unfollowed = program.unfollowed();
+        if unfollowed > self.unfollowed {
+            self.losses.dropped += unfollowed - self.unfollowed;
+            self.losses.note(
+                "a process the target started was not followed: the map of the processes it \
+                 started was full, so its calls are in no total",
+            );
+            self.unfollowed = unfollowed;
         }
         let (pending, rows) = program.dropped();
         if pending > self.dropped_pending {

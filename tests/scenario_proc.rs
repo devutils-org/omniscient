@@ -2920,17 +2920,16 @@ fn a_task_that_renames_itself_is_counted_under_each_name_with_its_errors() {
 #[test]
 fn a_launched_programs_execs_are_its_tree_and_nothing_beside_it() {
     // `true` and `echo` are shell builtins: naming them unqualified in a
-    // script would skip the exec this test is counting. `command -v` finds
-    // each one's external binary wherever this machine's PATH keeps it.
+    // script would skip the exec this test is counting. Each one's external
+    // binary is looked up on PATH here, since the shell's `command -v` names
+    // the builtin, not the file.
     let which = |name: &str| -> String {
-        let out = Command::new("sh")
-            .args(["-c", &format!("command -v {name}")])
-            .output()
-            .expect("sh runs");
-        String::from_utf8(out.stdout)
-            .expect("utf8")
-            .trim()
-            .to_owned()
+        std::env::split_paths(&std::env::var_os("PATH").expect("a PATH"))
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| panic!("no `{name}` on PATH"))
+            .to_string_lossy()
+            .into_owned()
     };
     let (echo, r#true, cat) = (which("echo"), which("true"), which("cat"));
     let script = std::env::temp_dir().join(format!("omn-exec-tree-{}.sh", std::process::id()));
@@ -2975,6 +2974,56 @@ fn a_launched_programs_execs_are_its_tree_and_nothing_beside_it() {
         names,
         ["cat", "echo", "echo", "echo", "echo", "echo", "sh", "true", "true", "true"],
         "the script's ten execs, and none of the loop beside it"
+    );
+}
+
+/// `proc.calls` follows a launched program into the processes it forks, as
+/// `strace -f` does. Ground truth is the script: a shell that forks `true`
+/// three times and runs nothing else outside itself, so three execs of that
+/// path, each from a process that is not the shell. Before the programs
+/// followed descendants, the shell's own calls were all a run kept.
+#[test]
+fn the_calls_of_a_launched_programs_forked_children_are_recorded() {
+    let r#true = std::env::split_paths(&std::env::var_os("PATH").expect("a PATH"))
+        .map(|dir| dir.join("true"))
+        .find(|path| path.is_file())
+        .expect("a `true` on PATH")
+        .to_string_lossy()
+        .into_owned();
+    let output = omn(&[
+        "proc.calls",
+        "--emit",
+        "raw",
+        "--format",
+        "json",
+        "--filter",
+        "syscall == \"execve\"",
+        "--",
+        "sh",
+        "-c",
+        &format!("{true}; {true}; {true}; exit 0", true = r#true),
+    ]);
+    if skipped_without_bpf(&output) || machine_cannot_trace(&output) {
+        return;
+    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    let doc = document(&output);
+    let rows = events(&doc["results"][0]);
+    let pid_of = |row: &serde_json::Value| attr(row, "pid").and_then(|pid| pid.as_u64());
+    let shell = rows
+        .iter()
+        .find(|row| attr_text(row, "comm").as_deref() == Some("sh"))
+        .and_then(pid_of)
+        .expect("the shell's own exec");
+    let children: Vec<_> = rows
+        .iter()
+        .filter(|row| attr_text(row, "path").as_deref() == Some(r#true.as_str()))
+        .filter(|row| pid_of(row).is_some_and(|pid| pid != shell))
+        .collect();
+    assert_eq!(
+        children.len(),
+        3,
+        "the three forked execs of `true`: {rows:#?}"
     );
 }
 

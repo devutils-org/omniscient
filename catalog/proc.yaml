@@ -57,7 +57,8 @@
        `execve` and `execveat` carry `path` read when the call begins, since a
        successful exec returns into an image where the old path is gone:
        `execsnoop`'s. `proc.syscall` is the cheap
-       aggregate of the same calls."
+       aggregate of the same calls. Both follow a process target into the
+       processes it starts, from their fork, as `strace -f` does."
     - "Every call is a ring write, so a target making hundreds of thousands of
        calls a second fills the ring and the program counts what it could not
        publish. A predicate naming one syscall (`syscall == \"openat\"`) is

@@ -27,10 +27,11 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use super::btf::Btf;
-use super::insn::{count_drop, helper, push_current_filter, read_field, Insn, Program, Whose};
+use super::insn::{count_drop, helper, read_field, Insn, Program, Whose};
 use super::insn::{BPF_DW, BPF_W, R10};
 use super::map::{map_failure, Counters, Hash};
 use super::ring::{ring_bytes, RingBuffer};
+use super::sched_common::{push_current_followed_filter, Descendants, Followed};
 use super::syscall::{self, BPF_MAP_TYPE_RINGBUF};
 
 /// `bpf_probe_read_user_str(dst, size, unsafe_ptr)`, which `insn::helper`
@@ -243,6 +244,7 @@ impl Context<'_> {
 fn enter_instructions(
     context: Context,
     narrowing: CallsNarrowing,
+    followed: &Followed,
     pending_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
@@ -260,7 +262,9 @@ fn enter_instructions(
 
     let mut program = Program::new();
     program.push(Insn::mov64_reg(6, 1));
-    push_current_filter(&mut program, narrowing.whose, FILTER_SCRATCH, "done");
+    // A process target is followed into the processes it starts, as `strace
+    // -f` follows them: a shell's children make the calls the shell runs.
+    push_current_followed_filter(&mut program, followed, 7, FILTER_SCRATCH, "done", "kept");
 
     // The syscall number.
     program.push(Insn::ldx(BPF_DW, 9, 6, context.nr_at()));
@@ -448,6 +452,8 @@ pub struct CallsProgram {
     pending: Hash,
     drops: Counters,
     attached: Attached,
+    /// The processes a process target started, followed from their fork.
+    descendants: Option<Descendants>,
 }
 
 /// The two programs and what holds them attached.
@@ -500,6 +506,17 @@ impl CallsProgram {
         requested_ring_bytes: usize,
         classic: bool,
     ) -> Result<Self, String> {
+        // A process target is followed into every process it starts, as the
+        // `sched` sources follow it (`sched_common::Descendants`).
+        let descendants = match narrowing.whose {
+            Whose::Process(root) => Some(Descendants::follow(root)?),
+            _ => None,
+        };
+        let followed = descendants
+            .as_ref()
+            .map_or(Followed::only(narrowing.whose), |descendants| {
+                descendants.followed(narrowing.whose)
+            });
         let bytes = ring_bytes(requested_ring_bytes);
         let pending = Hash::create(
             PEND_KEY_BYTES,
@@ -517,7 +534,7 @@ impl CallsProgram {
             (pending.as_raw_fd(), ring_map.as_raw_fd(), drops.as_raw_fd());
         let attached = if classic {
             let context = classic_context()?;
-            let enter = enter_instructions(context, narrowing, pending_fd, drops_fd)?;
+            let enter = enter_instructions(context, narrowing, &followed, pending_fd, drops_fd)?;
             let exit = exit_instructions(context, pending_fd, ring_fd, drops_fd)?;
             // Entry first, for the reason `proc_syscall.rs` gives. The
             // programs compare the task themselves, so the events span the
@@ -540,7 +557,13 @@ impl CallsProgram {
             Attached::Classic { enter, exit }
         } else {
             let btf = super::kernel_btf()?;
-            let enter = enter_instructions(Context::Raw(btf), narrowing, pending_fd, drops_fd)?;
+            let enter = enter_instructions(
+                Context::Raw(btf),
+                narrowing,
+                &followed,
+                pending_fd,
+                drops_fd,
+            )?;
             let exit = exit_instructions(Context::Raw(btf), pending_fd, ring_fd, drops_fd)?;
             let enter_program = load(&enter, "omn_call_enter")?;
             let exit_program = load(&exit, "omn_call_exit")?;
@@ -565,7 +588,14 @@ impl CallsProgram {
             pending,
             drops,
             attached,
+            descendants,
         })
+    }
+
+    /// Processes the target started that were not followed, because the map
+    /// of them was full.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants.as_ref().map_or(0, Descendants::missed)
     }
 
     /// Hands every record to `handle`, counting the ones it cannot read.
@@ -588,16 +618,18 @@ impl CallsProgram {
 
     /// Runs the kernel skipped because one was already running on that cpu.
     pub fn skipped(&self) -> u64 {
-        match &self.attached {
-            Attached::Raw {
-                enter_program,
-                exit_program,
-                ..
-            } => crate::bpf::attach::fentry::skipped([enter_program, exit_program]),
-            Attached::Classic { enter, exit } => {
-                crate::bpf::attach::fentry::skipped([enter.program(), exit.program()])
+        let following = self.descendants.as_ref().map_or(0, Descendants::skipped);
+        following
+            + match &self.attached {
+                Attached::Raw {
+                    enter_program,
+                    exit_program,
+                    ..
+                } => crate::bpf::attach::fentry::skipped([enter_program, exit_program]),
+                Attached::Classic { enter, exit } => {
+                    crate::bpf::attach::fentry::skipped([enter.program(), exit.program()])
+                }
             }
-        }
     }
 
     /// Threads inside a call when asked, whose call has no end yet.
@@ -689,8 +721,13 @@ mod tests {
                 open(322, 1, true),
             ],
         };
-        let enter =
-            enter_instructions(Context::Raw(&btf), narrowing, 3, 4).expect("the entry program");
+        // A process target's children are looked up in the descendants map.
+        let followed = Followed {
+            whose: narrowing.whose,
+            descendants: Some(9),
+        };
+        let enter = enter_instructions(Context::Raw(&btf), narrowing, &followed, 3, 4)
+            .expect("the entry program");
         // The two execs read their path at the entry; the four opens do not.
         let reads = enter
             .iter()
@@ -705,7 +742,8 @@ mod tests {
             args_at: 16,
             ret_at: 16,
         };
-        let enter = enter_instructions(classic, narrowing, 3, 4).expect("the classic entry");
+        let enter =
+            enter_instructions(classic, narrowing, &followed, 3, 4).expect("the classic entry");
         assert!(enter.contains(&Insn::ldx(BPF_DW, 9, 6, 8)));
         assert!(
             enter.contains(&Insn::ldx(BPF_DW, 1, 6, 16 + 8)),

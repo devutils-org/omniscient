@@ -42,6 +42,29 @@ root's.
   keeps `/bin/true`, whose parent subshell never exec'd and exits before the
   drain; `failed_reads` stays 0.
 
+**Run (2026-10-18, with CAP_BPF):**
+
+- Paths: `execve` carries `path` at the entry (`/usr/sbin/sh`,
+  `/usr/bin/env`, and `env`'s nine PATH probes with errno 2), but **the
+  forked `/bin/true` was missing**: `proc.calls` and `proc.syscall` compared
+  the root's thread group as a constant and kept none of the processes it
+  started. Both now follow a process target through
+  `sched_common::Descendants`, as the `sched` and `io` programs do, and count
+  a full map as a loss. `sh -c '/bin/true; /bin/true; /usr/bin/env true'`
+  under `proc.syscall -k task` reads three tasks (248, 40 and 40 calls)
+  where it read one; the scenario
+  `the_calls_of_a_launched_programs_forked_children_are_recorded` read 0 of
+  3 forked execs before, 3 after.
+- `bpf:tp`: refused, with its reason: the `raw_syscalls` `id` files are
+  root's even after `/sys/kernel/tracing` is remounted 755, and CAP_BPF with
+  CAP_PERFMON does not read them. Not compared.
+- The exact tree: `sh -c '(sleep 0.05; /bin/true) & wait'` keeps
+  `/bin/true` under its subshell, which never exec'd; no loss.
+- `a_launched_programs_execs_are_its_tree_and_nothing_beside_it` failed on
+  `main` once the binary had CAP_BPF (it had always skipped): `command -v
+  echo` names the builtin, so the script ran no `echo` binary. The test looks
+  the binaries up on PATH now; ten execs, as it says.
+
 ## Not done
 
 Nothing of the stream's list (`proc.tasks` in lazy's `low` band was done by

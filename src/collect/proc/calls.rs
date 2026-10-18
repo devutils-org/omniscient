@@ -68,6 +68,7 @@ impl Prepared for Prepare {
             predicate: self.filter.map(numbers_read_as_nr),
             losses: Losses::default(),
             dropped_pending: 0,
+            unfollowed: 0,
             dropped_ring: 0,
             skipped: 0,
             unread_paths: 0,
@@ -87,6 +88,8 @@ pub struct CallsCollector {
     predicate: Option<FilterExpr>,
     losses: Losses,
     dropped_pending: u64,
+    /// Processes the target started that were not followed, so far.
+    unfollowed: u64,
     dropped_ring: u64,
     skipped: u64,
     /// `openat` calls whose path could not be read out of the caller.
@@ -224,6 +227,15 @@ impl CallsCollector {
                  that cpu, so a call was never seen; the count is the machine's",
             );
             self.skipped = skipped;
+        }
+        let unfollowed = program.unfollowed();
+        if unfollowed > self.unfollowed {
+            self.losses.dropped += unfollowed - self.unfollowed;
+            self.losses.note(
+                "a process the target started was not followed: the map of the processes it \
+                 started was full, so its calls are in no record",
+            );
+            self.unfollowed = unfollowed;
         }
         let (pending, ring) = program.dropped();
         if pending > self.dropped_pending {

@@ -39,6 +39,7 @@ use super::insn::{
     R10,
 };
 use super::map::{map_failure, row_map, select_rows, Counters, Hash, Rows};
+use super::sched_common::Descendants;
 use super::syscall;
 
 /// Helper numbers this family needs and the shared `insn::helper` module does
@@ -271,6 +272,7 @@ pub struct Narrowing {
 fn enter_instructions(
     btf: &Btf,
     narrowing: Narrowing,
+    descendants: Option<i32>,
     pending_fd: i32,
     drops_fd: i32,
 ) -> Result<Vec<Insn>, String> {
@@ -291,9 +293,25 @@ fn enter_instructions(
     match narrowing.whose {
         Whose::Any => {}
         // The thread group is the high half of what is still in r0.
+        // With `descendants`, the processes the target started are looked up
+        // in the map `sched_process_fork` fills, after the root's constant.
         Whose::Process(tgid) => {
             program.push(Insn::rsh64_imm(0, 32));
-            program.jump_to("done", Insn::jne_imm(0, tgid as i32, 0));
+            match descendants {
+                None => {
+                    program.jump_to("done", Insn::jne_imm(0, tgid as i32, 0));
+                }
+                Some(map) => {
+                    program.push(Insn::stx(BPF_W, R10, FILTER_SCRATCH, 0));
+                    program.jump_to("followed", Insn::jeq_imm(0, tgid as i32, 0));
+                    program.extend(Insn::load_map_fd(1, map));
+                    program.push(Insn::mov64_reg(2, R10));
+                    program.push(Insn::add64_imm(2, FILTER_SCRATCH as i32));
+                    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+                    program.jump_to("done", Insn::jeq_imm(0, 0, 0));
+                    program.label("followed");
+                }
+            }
         }
         // The thread id is the low half, already on the stack as the key.
         Whose::Thread(tid) => {
@@ -477,6 +495,8 @@ pub struct SyscallProgram {
     _enter_link: OwnedFd,
     exit_program: OwnedFd,
     _exit_link: OwnedFd,
+    /// The processes a process target started, followed from their fork.
+    descendants: Option<Descendants>,
 }
 
 /// What one drain found, beside the measurements.
@@ -496,10 +516,23 @@ impl SyscallProgram {
     /// program's own counters can say an occurrence was never seen.
     pub fn skipped(&self) -> u64 {
         crate::bpf::attach::fentry::skipped([&self.enter_program, &self.exit_program])
+            + self.descendants.as_ref().map_or(0, Descendants::skipped)
+    }
+
+    /// Processes the target started that were not followed, because the map
+    /// of them was full.
+    pub fn unfollowed(&self) -> u64 {
+        self.descendants.as_ref().map_or(0, Descendants::missed)
     }
 
     pub fn load(narrowing: Narrowing) -> Result<Self, String> {
         let btf = super::kernel_btf()?;
+        // A process target is followed into every process it starts, as the
+        // `sched` sources follow it (`sched_common::Descendants`).
+        let descendants = match narrowing.whose {
+            Whose::Process(root) => Some(Descendants::follow(root)?),
+            _ => None,
+        };
 
         let pending = Hash::create(
             PEND_KEY_BYTES,
@@ -513,7 +546,13 @@ impl SyscallProgram {
         let drops = Counters::create(3, "omn_sys_drop")
             .map_err(|error| map_failure("syscall drop counter", error))?;
 
-        let enter = enter_instructions(btf, narrowing, pending.as_raw_fd(), drops.as_raw_fd())?;
+        let enter = enter_instructions(
+            btf,
+            narrowing,
+            descendants.as_ref().map(Descendants::map_fd),
+            pending.as_raw_fd(),
+            drops.as_raw_fd(),
+        )?;
         let exit = exit_instructions(
             btf,
             pending.as_raw_fd(),
@@ -544,6 +583,7 @@ impl SyscallProgram {
             _enter_link: enter_link,
             exit_program,
             _exit_link: exit_link,
+            descendants,
         })
     }
 
@@ -687,7 +727,7 @@ mod tests {
         const KTIME_GET_BOOT_NS: i32 = 125;
         let Some(btf) = kernel_btf() else { return };
         for program in [
-            enter_instructions(&btf, Narrowing::default(), 3, 4).expect("a program"),
+            enter_instructions(&btf, Narrowing::default(), None, 3, 4).expect("a program"),
             exit_instructions(&btf, 3, 4, 5).expect("a program"),
         ] {
             let called = helpers_called(&program);
@@ -703,7 +743,8 @@ mod tests {
     #[test]
     fn a_syscall_predicate_is_written_into_the_instruction_stream() {
         let Some(btf) = kernel_btf() else { return };
-        let everything = enter_instructions(&btf, Narrowing::default(), 3, 4).expect("a program");
+        let everything =
+            enter_instructions(&btf, Narrowing::default(), None, 3, 4).expect("a program");
         assert!(
             !everything.iter().any(|insn| insn.imm == 257),
             "a run that named no syscall compares against none"
@@ -714,6 +755,7 @@ mod tests {
                 whose: Whose::Any,
                 syscall_nr: Some(257),
             },
+            None,
             3,
             4,
         )
@@ -741,6 +783,7 @@ mod tests {
                 whose: Whose::Process(4242),
                 syscall_nr: Some(257),
             },
+            None,
             3,
             4,
         )
@@ -785,7 +828,7 @@ mod tests {
     fn both_programs_are_built_against_the_running_kernel() {
         let Some(btf) = kernel_btf() else { return };
         for program in [
-            enter_instructions(&btf, Narrowing::default(), 3, 4).expect("a program"),
+            enter_instructions(&btf, Narrowing::default(), None, 3, 4).expect("a program"),
             exit_instructions(&btf, 3, 4, 5).expect("a program"),
         ] {
             assert_eq!(program.last().copied(), Some(Insn::exit()));
