@@ -791,6 +791,253 @@ fn cells_on_disk() -> Vec<(PathBuf, Sweep)> {
 
 // ------------------------------------------------------------ the cells on disk
 
+// ------------------------------------------------------------ against envprobe
+
+/// What distroproof's `envprobe` saw of the same guest, the facts `omn`'s
+/// reasons are held against. Each is `None` where envprobe could not say.
+#[derive(Debug, Default)]
+struct Facts {
+    btf: Option<bool>,
+    paranoid: Option<i64>,
+    unprivileged_bpf_disabled: Option<i64>,
+    lockdown: Option<String>,
+    tracefs_mounted: Option<bool>,
+    cgroup_v2: Option<bool>,
+}
+
+impl Facts {
+    /// From an envprobe report: `sections[].entries[]` of `key`, `status` and
+    /// `value`, where `status` is `ok` for a value and anything else for none.
+    fn of(report: &serde_json::Value) -> Facts {
+        let mut entries = BTreeMap::new();
+        for section in report["sections"].as_array().into_iter().flatten() {
+            let name = section["name"].as_str().unwrap_or_default();
+            for entry in section["entries"].as_array().into_iter().flatten() {
+                let key = format!("{name}/{}", entry["key"].as_str().unwrap_or_default());
+                entries.insert(key, (entry["status"].clone(), entry["value"].clone()));
+            }
+        }
+        let ok = |key: &str| -> Option<String> {
+            let (status, value) = entries.get(key)?;
+            (status == "ok").then(|| match value {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            })
+        };
+        let number = |key: &str| ok(key).and_then(|v| v.trim().parse::<i64>().ok());
+        Facts {
+            btf: entries.get("btf/vmlinux").map(|(status, _)| status == "ok"),
+            paranoid: number("sysctl/kernel.perf_event_paranoid"),
+            unprivileged_bpf_disabled: number("sysctl/kernel.unprivileged_bpf_disabled"),
+            lockdown: ok("security/lockdown"),
+            tracefs_mounted: ok("tracing/tracefs").map(|v| v != "not mounted"),
+            cgroup_v2: ok("cgroups/mode")
+                .map(|mode| mode == "v2")
+                .or_else(|| entries.contains_key("cgroups/mode").then_some(false)),
+        }
+    }
+}
+
+/// Every reason `omn` gave in a cell agrees with what envprobe saw of the
+/// same guest, both ways: a number it quotes is envprobe's number, a fact it
+/// refuses for is a fact envprobe reports, and a fact envprobe reports is one
+/// it refuses for. Two tools reading one machine independently; a
+/// disagreement is a probe asking the wrong question, or a reason naming the
+/// wrong cause.
+fn reasons_disagree_with_envprobe(sweep: &Sweep, facts: &Facts) -> Vec<String> {
+    let mut out = Vec::new();
+    let texts: Vec<(String, String)> = sweep
+        .sources
+        .iter()
+        .flat_map(|source| {
+            let mut texts = vec![(source.id.clone(), source.listing.clone())];
+            texts.extend(
+                source
+                    .runs
+                    .iter()
+                    .map(|run| (format!("{} ({})", source.id, run.target), run.text())),
+            );
+            texts
+        })
+        .collect();
+    let quoted = |pattern: &str, fact: Option<i64>, name: &str, out: &mut Vec<String>| {
+        let Some(fact) = fact else { return };
+        for (whose, text) in &texts {
+            for (at, _) in text.match_indices(pattern) {
+                let rest = &text[at + pattern.len()..];
+                let digits: String = rest
+                    .chars()
+                    .skip_while(|c| *c == ' ' || *c == '`')
+                    .take_while(|c| c.is_ascii_digit() || *c == '-')
+                    .collect();
+                if let Ok(said) = digits.parse::<i64>() {
+                    if said != fact {
+                        out.push(format!(
+                            "{whose}: says {name} is {said}, and envprobe read {fact}"
+                        ));
+                    }
+                }
+            }
+        }
+    };
+    quoted(
+        "perf_event_paranoid is",
+        facts.paranoid,
+        "perf_event_paranoid",
+        &mut out,
+    );
+    quoted(
+        "unprivileged_bpf_disabled` is",
+        facts.unprivileged_bpf_disabled,
+        "unprivileged_bpf_disabled",
+        &mut out,
+    );
+
+    let requirement_states = |needs: &dyn Fn(&str) -> bool| -> Vec<(String, State, String)> {
+        sweep
+            .sources
+            .iter()
+            .flat_map(|source| {
+                source
+                    .requirements()
+                    .filter(|r| needs(&r.needs))
+                    .map(|r| (source.id.clone(), r.state, r.detail.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    if let Some(btf) = facts.btf {
+        for (source, state, detail) in requirement_states(&|needs| needs == "btf") {
+            match (btf, state) {
+                (true, State::Missing) => out.push(format!(
+                    "{source}: `btf` missing ({detail}), and envprobe found /sys/kernel/btf/vmlinux"
+                )),
+                (false, State::Available) => out.push(format!(
+                    "{source}: `btf` available, and envprobe found no /sys/kernel/btf/vmlinux"
+                )),
+                _ => {}
+            }
+        }
+    }
+    if let Some(lockdown) = &facts.lockdown {
+        let confidential = lockdown == "confidentiality";
+        let said = texts
+            .iter()
+            .any(|(_, text)| text.contains("withholds bpf_probe_read_kernel"));
+        if confidential && !said {
+            out.push(
+                "envprobe read lockdown=confidentiality, and no reason says the kernel withholds \
+                 bpf_probe_read_kernel"
+                    .to_owned(),
+            );
+        }
+        if !confidential && said {
+            out.push(format!(
+                "a reason says the kernel withholds bpf_probe_read_kernel, and envprobe read \
+                 lockdown={lockdown}"
+            ));
+        }
+    }
+    if let Some(mounted) = facts.tracefs_mounted {
+        let said = texts
+            .iter()
+            .filter(|(_, text)| text.contains("tracefs is not mounted"))
+            .map(|(whose, _)| whose.clone())
+            .next();
+        if let (true, Some(whose)) = (mounted, &said) {
+            out.push(format!(
+                "{whose}: says tracefs is not mounted, and envprobe found it mounted"
+            ));
+        }
+        if !mounted {
+            for (source, state, _) in requirement_states(&|needs| needs.starts_with("tracepoint:"))
+            {
+                if state == State::Available {
+                    out.push(format!(
+                        "{source}: a classic tracepoint answered available, and envprobe found \
+                         tracefs not mounted"
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(v2) = facts.cgroup_v2 {
+        let said = texts
+            .iter()
+            .find(|(_, text)| text.contains("cgroup v2 is not mounted"))
+            .map(|(whose, _)| whose.clone());
+        if let (true, Some(whose)) = (v2, &said) {
+            out.push(format!(
+                "{whose}: says cgroup v2 is not mounted, and envprobe read the unified hierarchy"
+            ));
+        }
+    }
+    out
+}
+
+/// Every distroproof cell's reasons agree with envprobe's report of the same
+/// guest (`envprobe.json`, written beside the cell by
+/// `scripts/distroproof/cells.py`).
+#[test]
+fn every_distroproof_cell_s_reasons_agree_with_envprobe() {
+    let mut failures = Vec::new();
+    let mut judged = 0;
+    for (path, sweep) in cells_on_disk() {
+        let Ok(text) = fs::read_to_string(path.with_file_name("envprobe.json")) else {
+            continue;
+        };
+        let report: serde_json::Value = serde_json::from_str(&text).expect("envprobe's report");
+        judged += 1;
+        for disagreement in reasons_disagree_with_envprobe(&sweep, &Facts::of(&report)) {
+            failures.push(format!("[{}] {disagreement}", sweep.cell.name));
+        }
+    }
+    eprintln!("envprobe: {judged} distroproof cell(s) judged");
+    assert!(
+        failures.is_empty(),
+        "{} disagreement(s):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// The judge is checked first against a cell with planted disagreements: a
+/// judge that passes everything proves nothing about the cells it passed.
+#[test]
+fn the_envprobe_judge_catches_a_reason_that_names_the_wrong_cause() {
+    let mut cell = honest_cell("6.1", "caps");
+    let facts = Facts {
+        btf: Some(true),
+        paranoid: Some(2),
+        unprivileged_bpf_disabled: Some(2),
+        lockdown: Some("none".into()),
+        tracefs_mounted: Some(true),
+        cgroup_v2: Some(true),
+    };
+    assert!(reasons_disagree_with_envprobe(&cell, &facts).is_empty());
+    source(&mut cell, "runtime.custom").runs[0].stderr =
+        "perf_event_open was refused: perf_event_paranoid is 3; tracefs is not mounted".into();
+    let found = reasons_disagree_with_envprobe(&cell, &facts);
+    assert!(
+        found.iter().any(|f| f.contains("perf_event_paranoid is 3")),
+        "{found:?}"
+    );
+    assert!(
+        found.iter().any(|f| f.contains("tracefs is not mounted")),
+        "{found:?}"
+    );
+    let locked = Facts {
+        lockdown: Some("confidentiality".into()),
+        ..Facts::default()
+    };
+    assert!(
+        reasons_disagree_with_envprobe(&cell, &locked)
+            .iter()
+            .any(|f| f.contains("lockdown=confidentiality")),
+        "a lockdown no reason names is a disagreement"
+    );
+}
+
 #[test]
 fn every_cell_on_disk_holds_the_invariants() {
     let cells = cells_on_disk();
