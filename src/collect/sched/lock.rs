@@ -89,6 +89,10 @@ pub struct LockCollector {
     /// Every stack the run resolved, by the id the kernel gave it.
     stacks: BTreeMap<u64, Vec<String>>,
     symbolizers: HashMap<i32, Symbolizer>,
+    /// Kernel symbols, for the caller of each wait's lock primitive, and the
+    /// caller found for each kernel stack id.
+    kernel_symbols: Option<Symbolizer>,
+    callers: HashMap<u32, Option<String>>,
     /// The callers frameless leaves left in the user link register.
     leaf: super::LeafCallers,
     /// Processes whose symbolizer outlived their place in the followed set
@@ -130,6 +134,8 @@ impl LockCollector {
             notes: Vec::new(),
             stacks: BTreeMap::new(),
             symbolizers: HashMap::new(),
+            kernel_symbols: None,
+            callers: HashMap::new(),
             leaf: super::LeafCallers::default(),
             leaving: Vec::new(),
             wants_stacks,
@@ -199,6 +205,9 @@ impl LockCollector {
             if let Some(ppid) = self.parents.of(row.tgid) {
                 event.attrs.push(Attr::uint("ppid", u64::from(ppid)));
             }
+            if let Some(caller) = self.caller(&row) {
+                event.attrs.push(Attr::text("caller", caller));
+            }
             // The predicate runs before the stack is symbolized: resolving the
             // frames of a row about to be thrown away costs a read of a
             // process's mappings for nothing.
@@ -247,6 +256,34 @@ impl LockCollector {
         }
         let symbolizers = &self.symbolizers;
         self.leaf.retain(|tgid| symbolizers.contains_key(&tgid));
+    }
+
+    /// The function that called the lock primitive: the first frame of the
+    /// wait's kernel stack that is neither the tracing machinery nor a lock
+    /// or scheduler function -- what `perf lock contention` prints as the
+    /// caller. Once per kernel stack id; `None` where the kernel walked no
+    /// stack or evicted it.
+    fn caller(&mut self, row: &LockWait) -> Option<String> {
+        let id = row.kernel_stack?;
+        if let Some(known) = self.callers.get(&id) {
+            return known.clone();
+        }
+        let addresses = self.program.as_ref()?.kernel_stack(id)?;
+        let symbols = self
+            .kernel_symbols
+            .get_or_insert_with(|| Symbolizer::for_process(std::process::id() as i32));
+        let stack = symbols.symbolize(&RawStack {
+            kernel: addresses,
+            user: Vec::new(),
+            elsewhere: Vec::new(),
+        });
+        let caller = stack
+            .frames
+            .iter()
+            .map(Frame::label)
+            .find(|label| !is_lock_machinery(label));
+        self.callers.insert(id, caller.clone());
+        caller
     }
 
     /// Symbolizes the stack behind a row, once per distinct id.
@@ -397,6 +434,44 @@ impl LockCollector {
 /// fields: a predicate over a field no event carries is false everywhere,
 /// which empties the series and looks exactly like a workload that never
 /// contended anything.
+/// Whether a kernel frame is the lock's own machinery rather than its caller:
+/// the tracing that recorded the wait, the lock primitives, and the scheduler
+/// a sleeping lock blocks in.
+fn is_lock_machinery(label: &str) -> bool {
+    const PREFIXES: [&str; 22] = [
+        "bpf_",
+        "__bpf",
+        "__traceiter",
+        "trace_",
+        "__mutex_lock",
+        "mutex_lock",
+        "__rwsem",
+        "rwsem_down",
+        "down_read",
+        "down_write",
+        "_raw_spin",
+        "_raw_read",
+        "_raw_write",
+        "queued_spin",
+        "queued_read",
+        "queued_write",
+        "native_queued",
+        "__pv_queued",
+        "rt_mutex",
+        "rt_spin",
+        "osq_lock",
+        "percpu_down",
+    ];
+    let name = label.trim_start_matches('[');
+    PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+        || name.starts_with("schedule")
+        || name.starts_with("__schedule")
+        || name.starts_with("preempt_schedule")
+        || name.starts_with("io_schedule")
+        || name.starts_with("__percpu_down")
+        || name.contains("contention")
+}
+
 fn attributes(row: &LockWait, window_ns: u64) -> Vec<Attr> {
     vec![
         // The value. The low bound of the bucket rather than its mean, because
@@ -424,6 +499,9 @@ fn attributes(row: &LockWait, window_ns: u64) -> Vec<Attr> {
         // one must still be able to show it.
         Attr::text("kind", row.kind()),
         Attr::uint("flags", u64::from(row.flags)),
+        // The lock's address, as `perf lock contention -l` prints it: valid
+        // while the lock exists, so an attribute and never a key.
+        Attr::text("addr", format!("{:#x}", row.addr)),
     ]
 }
 
@@ -533,6 +611,29 @@ impl Collector for LockCollector {
 mod tests {
     use super::*;
 
+    /// A mutex wait's kernel stack, leaf first, as `contention_end` sees it:
+    /// the caller is the first frame past the tracing and the lock.
+    #[test]
+    fn the_caller_is_the_first_frame_past_the_lock_and_the_tracing() {
+        let stack = [
+            "bpf_prog_omn_lock_end",
+            "__bpf_trace_contention_end",
+            "__traceiter_contention_end",
+            "__mutex_lock.constprop.0",
+            "__mutex_lock_slowpath",
+            "mutex_lock",
+            "pipe_write",
+            "vfs_write",
+        ];
+        assert_eq!(
+            stack.iter().find(|label| !is_lock_machinery(label)),
+            Some(&"pipe_write")
+        );
+        assert!(is_lock_machinery("rwsem_down_write_slowpath"));
+        assert!(is_lock_machinery("_raw_spin_lock_irqsave"));
+        assert!(!is_lock_machinery("ext4_buffered_write_iter"));
+    }
+
     fn row() -> LockWait {
         LockWait {
             tid: 11,
@@ -540,6 +641,8 @@ mod tests {
             flags: 1 << 5,
             bucket: 12,
             stack: None,
+            kernel_stack: None,
+            addr: 0xffff_8881_0000_1000,
             lr: 0,
             count: 7,
             total_ns: 30_000,
@@ -602,9 +705,12 @@ mod tests {
             .expect("sched.lock is in the catalog")
             .filter_fields;
         assert!(!declared.is_empty(), "the entry declares filter fields");
-        // `ppid` is put on the event by the collector, from the process's
-        // parent (`super::Parents`), not by the row's attributes.
-        for field in declared.iter().filter(|field| *field != "ppid") {
+        // `ppid` and `caller` are put on the event by the collector, from the
+        // process's parent and the kernel stack, not by the row's attributes.
+        for field in declared
+            .iter()
+            .filter(|field| *field != "ppid" && *field != "caller")
+        {
             assert!(
                 attributes.iter().any(|attr| attr.name == *field),
                 "the catalog offers a `{field}` filter and no event carries one"

@@ -43,12 +43,14 @@ use super::syscall;
 
 /// Arguments of the two tracepoints, in the raw tracepoint's context.
 ///
-/// Slot zero holds the lock's address on both, and neither program reads it.
-/// A kernel address is recycled the moment the structure holding it is freed,
-/// so it identifies a lock only for as long as that lock exists -- the same
-/// argument the catalog makes about block request pointers, and the reason the
-/// `blk` key is a pair rather than a number. What a reader can act on is which
-/// *kind* of lock was waited on and from where, and both of those are here.
+/// Slot zero holds the lock's address on both. A kernel address is recycled
+/// the moment the structure holding it is freed, so it identifies a lock only
+/// for as long as that lock exists -- the same argument the catalog makes
+/// about block request pointers -- and it is carried as an attribute (`addr`,
+/// what `perf lock contention -l` groups by), never as a key that would
+/// outlive the lock. The begin program records it; the end program puts it in
+/// the row.
+const ARG_LOCK: i16 = 0;
 const ARG_FLAGS: i16 = 8;
 
 /// The prototypes these programs are written against, checked against the
@@ -90,15 +92,15 @@ const COUNTER_SLOTS: u32 = 7;
 
 /// Where each map's key and value live on the program's stack.
 const ROW_VALUE: i16 = -128;
-const ROW_KEY: i16 = -88;
-const WAIT_VALUE: i16 = -56;
+const ROW_KEY: i16 = -168;
+const WAIT_VALUE: i16 = -64;
 const WAIT_KEY: i16 = -40;
 const DROP_KEY: i16 = -32;
 /// Where the program keeps the row map it looked up through the generation
 /// slot, once per run; see `map::select_rows`.
-const ROWS_SLOT: i16 = -136;
+const ROWS_SLOT: i16 = -176;
 /// Eight bytes for a cgroup target's comparison, `insn::push_current_filter`.
-const FILTER_SCRATCH: i16 = -144;
+const FILTER_SCRATCH: i16 = -184;
 
 /// The layout of a row key, as byte offsets within it.
 const KEY_TID: i16 = 0;
@@ -115,12 +117,15 @@ const KEY_BUCKET: i16 = 12;
 /// kernel saying it could not walk the stack, which is the ordinary answer for
 /// a kernel worker and not an error to hide.
 const KEY_STACK: i16 = 16;
-/// Four bytes of padding, written as zero: the kernel hashes them too.
-const KEY_PAD: i16 = 20;
+/// The kernel stack of the wait, as `bpf_get_stackid` returned it: where the
+/// caller of the lock primitive is (`perf lock contention`'s caller column).
+const KEY_KSTACK: i16 = 20;
 /// The user link register the wait ended with, on aarch64, or zero; the
 /// caller a frameless leaf left there. See `sched_common::push_user_lr`.
 const KEY_LR: i16 = 24;
-const ROW_KEY_BYTES: usize = 32;
+/// The lock's address, from `contention_begin`.
+const KEY_ADDR: i16 = 32;
+const ROW_KEY_BYTES: usize = 40;
 
 /// The layout of a row value.
 const VALUE_COUNT: i16 = 0;
@@ -149,7 +154,8 @@ const WAIT_KEY_BYTES: usize = 4;
 const WAIT_TS: i16 = 0;
 const WAIT_FLAGS: i16 = 8;
 const WAIT_PAD: i16 = 12;
-const WAIT_VALUE_BYTES: usize = 16;
+const WAIT_ADDR: i16 = 16;
+const WAIT_VALUE_BYTES: usize = 24;
 
 /// Labels for the unrolled log2, which must be unique within one program.
 const LOG2: Log2Labels = [
@@ -176,6 +182,10 @@ pub struct LockWait {
     pub bucket: u32,
     /// The stack the kernel interned, or none when it could not walk one.
     pub stack: Option<u32>,
+    /// The kernel stack of the wait, or none.
+    pub kernel_stack: Option<u32>,
+    /// The lock's kernel address.
+    pub addr: u64,
     /// The user link register the wait ended with, on aarch64, or zero; see
     /// `KEY_LR`.
     pub lr: u64,
@@ -237,6 +247,7 @@ impl LockWait {
         let long =
             |bytes: &[u8], at: usize| u64::from_ne_bytes(bytes[at..at + 8].try_into().expect("8"));
         let stack = word(key, KEY_STACK as usize) as i32;
+        let kernel_stack = word(key, KEY_KSTACK as usize) as i32;
         Some(Self {
             tid: word(key, KEY_TID as usize),
             tgid: word(key, KEY_TGID as usize),
@@ -245,6 +256,8 @@ impl LockWait {
             // A negative id is the kernel's errno for a stack it could not
             // walk, and it must not be handed on as a stack number.
             stack: (stack >= 0).then_some(stack as u32),
+            kernel_stack: (kernel_stack >= 0).then_some(kernel_stack as u32),
+            addr: long(key, KEY_ADDR as usize),
             lr: long(key, KEY_LR as usize),
             count: long(value, VALUE_COUNT as usize),
             total_ns: long(value, VALUE_TOTAL_NS as usize),
@@ -324,6 +337,8 @@ fn begin_instructions(
     // Every byte of the value is written: the four this layout does not use
     // would otherwise travel whatever was on the stack.
     program.push(Insn::st_imm(BPF_W, R10, WAIT_VALUE + WAIT_PAD, 0));
+    program.push(Insn::ldx(BPF_DW, 1, 6, ARG_LOCK));
+    program.push(Insn::stx(BPF_DW, R10, WAIT_VALUE + WAIT_ADDR, 1));
 
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::stx(BPF_DW, R10, WAIT_VALUE + WAIT_TS, 0));
@@ -378,6 +393,7 @@ fn end_instructions(
     rows_fd: i32,
     drops_fd: i32,
     stacks_fd: i32,
+    kernel_stacks_fd: i32,
     leaf_lr: bool,
 ) -> Result<Vec<Insn>, String> {
     check(btf, "contention_end", &END_SIGNATURE)?;
@@ -404,6 +420,8 @@ fn end_instructions(
     program.push(Insn::ldx(BPF_DW, 9, 0, WAIT_TS));
     program.push(Insn::ldx(BPF_W, 1, 0, WAIT_FLAGS));
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_FLAGS, 1));
+    program.push(Insn::ldx(BPF_DW, 1, 0, WAIT_ADDR));
+    program.push(Insn::stx(BPF_DW, R10, ROW_KEY + KEY_ADDR, 1));
 
     program.extend(Insn::load_map_fd(1, waiting_fd));
     program.push(Insn::mov64_reg(2, R10));
@@ -435,8 +453,13 @@ fn end_instructions(
     program.push(Insn::mov64_imm(3, BPF_F_USER_STACK));
     program.push(Insn::call(helper::GET_STACKID));
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_STACK, 0));
+    // The kernel half, for the caller of the lock primitive.
+    program.push(Insn::mov64_reg(1, 6));
+    program.extend(Insn::load_map_fd(2, kernel_stacks_fd));
+    program.push(Insn::mov64_imm(3, 0));
+    program.push(Insn::call(helper::GET_STACKID));
+    program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_KSTACK, 0));
     push_user_lr(&mut program, ROW_KEY + KEY_LR, leaf_lr);
-    program.push(Insn::st_imm(BPF_W, R10, ROW_KEY + KEY_PAD, 0));
 
     push_log2_bucket(&mut program, 9, &LOG2);
     program.push(Insn::stx(BPF_W, R10, ROW_KEY + KEY_BUCKET, 3));
@@ -543,6 +566,7 @@ pub struct LockProgram {
     rows: Rows,
     drops: Counters,
     stacks: StackTraces,
+    kernel_stacks: StackTraces,
     /// Why the user link register is not read, where the architecture has
     /// one.
     leaf_lr_missing: Option<String>,
@@ -605,6 +629,8 @@ impl LockProgram {
             .map_err(|error| map_failure("lock drop counter", error))?;
         let stacks = StackTraces::create(MAX_STACKS, MAX_STACK_DEPTH, "omn_lock_stk")
             .map_err(|error| map_failure("lock stack map", error))?;
+        let kernel_stacks = StackTraces::create(MAX_STACKS, MAX_STACK_DEPTH, "omn_lock_kstk")
+            .map_err(|error| map_failure("lock kernel stack map", error))?;
 
         let begin = begin_instructions(btf, &followed, waiting.as_raw_fd(), drops.as_raw_fd())?;
         let begin_program = load(&begin, "omn_lock_begin")?;
@@ -618,6 +644,7 @@ impl LockProgram {
                     rows.as_raw_fd(),
                     drops.as_raw_fd(),
                     stacks.as_raw_fd(),
+                    kernel_stacks.as_raw_fd(),
                     leaf_lr,
                 )
             },
@@ -645,6 +672,7 @@ impl LockProgram {
             rows,
             drops,
             stacks,
+            kernel_stacks,
             leaf_lr_missing,
             begin_program,
             _begin_link: begin_link,
@@ -676,6 +704,11 @@ impl LockProgram {
     /// The addresses behind a stack id, or none if the kernel has evicted it.
     pub fn stack(&self, id: u32) -> Option<Vec<u64>> {
         self.stacks.get(id).ok().flatten()
+    }
+
+    /// The kernel addresses behind a kernel stack id, leaf first.
+    pub fn kernel_stack(&self, id: u32) -> Option<Vec<u64>> {
+        self.kernel_stacks.get(id).ok().flatten()
     }
 
     /// How deep a stack this build asked the kernel to walk, so that a stack
@@ -743,7 +776,7 @@ mod tests {
     }
 
     fn end_program(btf: &Btf, target: Whose) -> Vec<Insn> {
-        end_instructions(btf, &Followed::only(target), 3, 4, 5, 6, true).expect("a program")
+        end_instructions(btf, &Followed::only(target), 3, 4, 5, 6, 7, true).expect("a program")
     }
 
     /// A wait is the gap between two events, so both programs have to read the
@@ -846,8 +879,9 @@ mod tests {
             (KEY_FLAGS, 4),
             (KEY_BUCKET, 4),
             (KEY_STACK, 4),
-            (KEY_PAD, 4),
+            (KEY_KSTACK, 4),
             (KEY_LR, 8),
+            (KEY_ADDR, 8),
         ];
         let row_value = [
             (VALUE_COUNT, 8),
@@ -855,7 +889,7 @@ mod tests {
             (VALUE_FIRST_NS, 8),
             (VALUE_COMM, COMM_BYTES as i16),
         ];
-        let wait_value = [(WAIT_TS, 8), (WAIT_FLAGS, 4), (WAIT_PAD, 4)];
+        let wait_value = [(WAIT_TS, 8), (WAIT_FLAGS, 4), (WAIT_PAD, 4), (WAIT_ADDR, 8)];
         for (fields, bytes, what) in [
             (&row_key[..], ROW_KEY_BYTES, "the row key"),
             (&row_value[..], ROW_VALUE_BYTES, "the row value"),
@@ -936,6 +970,8 @@ mod tests {
                 flags,
                 bucket: 3,
                 stack: None,
+                kernel_stack: None,
+                addr: 0xffff_8881_0000_1000,
                 lr: 0,
                 count: 1,
                 total_ns: 4,
@@ -959,7 +995,7 @@ mod tests {
     #[test]
     fn the_row_map_is_taken_from_the_slot_once_per_run() {
         let Some(btf) = kernel_btf() else { return };
-        let program = end_instructions(&btf, &Followed::only(Whose::Any), 3, 4, 5, 6, true)
+        let program = end_instructions(&btf, &Followed::only(Whose::Any), 3, 4, 5, 6, 7, true)
             .expect("a program");
         crate::bpf::map::assert_rows_taken_once(&program, 4);
     }

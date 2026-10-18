@@ -271,7 +271,7 @@
   emits: [hist, topk, stack, raw, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
   keys: [task]
-  filter_fields: [comm, pid, ppid, kind]
+  filter_fields: [comm, pid, ppid, kind, addr, caller]
   determinism: low
   caveats:
     - "On a contended program this source shortens what it measures: the bench
@@ -288,6 +288,12 @@
     - "A process target is followed into every process it starts, as
        `sched.offcpu` follows it: a program on `sched_process_fork` adds a child
        to the set before it has run."
+    - "Each event carries `addr`, the lock's kernel address (valid while the
+       lock exists, so never a key), and `caller`, the first function of the
+       wait's kernel stack past the tracing, the lock primitives and the
+       scheduler -- `perf lock contention`'s caller column. The caller is named
+       through /proc/kallsyms: where this user may not read its addresses it is
+       an address, and `-k task -e topk:10@caller` ranks by it either way."
 
 - id: sched.futex
   family: sched
