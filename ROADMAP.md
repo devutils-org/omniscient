@@ -1148,19 +1148,32 @@ explains it. So this phase does two things at once, on purpose:
 
 ### Exit criteria
 
-- [ ] `distroproof up` in this repository runs the sweep on every image and
+*2026-10-19: the matrix and the reference runs, `docs/distroproof.md`.*
+
+- [x] `distroproof up` in this repository runs the sweep on every image and
       variant above, and the host's judges pass on each: available means it
       attaches, and every refusal names its reason.
-- [ ] On every image, every reason `omn` gives agrees with `envprobe`'s
+      *21 targets -- 16 images, 5 variants -- 21 cells, every judge passing;
+      the first run had 158 claims the kernel refused, five defects fixed.*
+- [x] On every image, every reason `omn` gives agrees with `envprobe`'s
       report of the same machine.
-- [ ] The release starts on every image distroproof boots, or the images it
+      *`every_distroproof_cell_s_reasons_agree_with_envprobe`: paranoid,
+      `unprivileged_bpf_disabled`, BTF, lockdown, tracefs, cgroup v2, ftrace,
+      memlock. It caught one probe of the phase's own (ftrace on 5.10).*
+- [x] The release starts on every image distroproof boots, or the images it
       does not start on are named in `docs/install.md` with the reason.
-- [ ] The reference pairs run on at least Debian, Ubuntu, Rocky and Fedora,
+      *The glibc archive (2.17) on every glibc image; Alpine through the
+      musl archive, or the glibc one with `gcompat`.*
+- [x] The reference pairs run on at least Debian, Ubuntu, Rocky and Fedora,
       with the distribution's own witnesses.
-- [ ] `docs/distroproof.md` lists every finding with its `envprobe`
+      *`distroproof-reference.toml`: Debian 12 and 13, Ubuntu 24.04, Rocky 9,
+      Fedora 44, Arch.*
+- [~] `docs/distroproof.md` lists every finding with its `envprobe`
       difference and its fix, and distroproof's README points to it.
-- [ ] Every defect of distroproof's met on the way is filed, and fixed, in
+      *The document is written; the README's link is distroproof's to merge.*
+- [~] Every defect of distroproof's met on the way is filed, and fixed, in
       distroproof.
+      *Fixed in devutils-org/distroproof#4 and #5, open for review.*
 
 Not this phase's, and why: aarch64 and containers (item 5 of `STATE.md`'s
 "What remains" asks for both) wait on distroproof booting them; the hardware

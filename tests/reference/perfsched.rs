@@ -250,12 +250,12 @@ fn perf_trace_summary(stdout: &str, stderr: &str) -> Result<Values, String> {
 /// avg_delay_ns}` summed by command, the average weighted by the switches
 /// it is over, and `total.{runtime_ns,switches}` from the footer.
 fn perf_sched_latency(stdout: &str, _stderr: &str) -> Result<Values, String> {
-    // A task is one row per name it ran under, `name:pid`, and which name
-    // carries a renamed workload's switches is perf's version: 7.2 files them
-    // under the last name, Debian 12's 6.1 under the first (one switch under
-    // `omnref-sleep`, a hundred under `python3`, found with distroproof). So
-    // every row of a pid that ever named itself `omnref*` counts under that
-    // name, whichever perf this is.
+    // A task is one row per name it ran under, `name:pid`: perf 7.2 files the
+    // few switches before a workload's rename under `python3` and the rest
+    // under `omnref-*`. So every row of a pid that ever named itself
+    // `omnref*` counts under that name. (Debian 12's perf 6.1, run with
+    // distroproof, gives one row and 10 switches for the whole machine over
+    // two seconds: it undercounts, which no parsing recovers.)
     let mut renamed: BTreeMap<&str, &str> = BTreeMap::new();
     for line in stdout.lines() {
         let task = line.split('|').next().unwrap_or_default().trim();
@@ -528,8 +528,8 @@ mod tests {
         assert_eq!(value(&v, "total.switches"), 949.0);
     }
 
-    /// Debian 12's perf 6.1 files a renamed task's switches under its first
-    /// name: the rows of one pid are summed under the workload's name.
+    /// A renamed task's rows, one per name, are summed by pid under the
+    /// workload's name.
     #[test]
     fn perf_sched_latency_sums_a_renamed_task_s_rows_by_pid() {
         let out = "\

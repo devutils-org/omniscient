@@ -1477,6 +1477,9 @@ open line is settled: `cpu.profile`'s `pmu` row, as the brief decided.
 | What the matrix is for distroproof | **Its living proof**: this project's portability findings, each with the `envprobe` difference distroproof named and its fix, in `docs/distroproof.md`, linked from distroproof's README. | A tool for portability is shown by a real kernel-facing program ported with it, not by its own dogfooding. |
 | Capabilities in a guest | **File capabilities, granted by `setup` on the copied binary**, not distroproof's `caps =`. | `caps =` raises ambient capabilities, which every program `omn` launches would inherit: not the deployment `make` and `docs/install.md` describe. |
 | A defect of distroproof's | **Filed and fixed in distroproof**, never worked around here. | A workaround here would hide from distroproof's users what this project found. |
+| A refusal reason | **Held against `envprobe`'s independent reading of the same guest** (`every_distroproof_cell_s_reasons_agree_with_envprobe`), both ways. | A reason can name the wrong cause and still read well; two tools disagreeing is the only way to see it. It caught a probe of this phase's own (ftrace on 5.10). |
+| A probe that could ask a version | **Asks the feature**, even in the test suite: the catalog's `kernel>=6.8`, a judge's "uprobe-multi is 6.6" and a BTF that should name ftrace's functions were each disproved by a distribution. | Distributions backport and configure; a version is a guess about both. |
+| The reference pairs | **Run on six distributions** with their own witnesses (`distroproof-reference.toml`), the runner reading its pairs and the release from `OMN_REFERENCE_ROOT` and `OMN_REFERENCE_BIN`; a witness's own shortfall (lost events, a missing subcommand, headers it cannot build against) skips. | A pair that holds on one distribution only was measuring the development machine. |
 
 ## Open
 

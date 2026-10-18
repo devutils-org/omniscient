@@ -1,28 +1,35 @@
-# Omniscient on every distribution, with distroproof
+# What distroproof found in Omniscient
 
-Omniscient is a kernel-facing program: eBPF assembled by hand, perf events,
-BTF, file capabilities, a preload shim injected into other programs. Every one
-of those depends on the distribution it runs on -- its kernel, configured and
-patched by its vendor, its libc, its defaults. This document is how its
-portability is worked on with [distroproof](https://github.com/devutils-org/distroproof),
-which boots each distribution's official cloud image on **its own kernel** and
-runs a command in it, and what that found. It is meant to be read as
-distroproof's living proof: a real program ported with it, every finding with
-the environment difference distroproof showed and the commit that fixed it.
+[Omniscient](../README.md) is a Linux observability tool that talks to the
+kernel directly: eBPF programs assembled by hand, perf events, BTF, file
+capabilities, a preload shim injected into other programs. All of that
+depends on the machine it runs on -- the kernel, as its distribution configured
+and patched it, the C library, the defaults an administrator never changed.
+For twenty-five waves of development it was tested on one machine.
 
-The plan is `ROADMAP.md`, phase 13; the decisions are `DECISIONS.md`, "Settled
-after the twenty-fifth wave: the distribution matrix".
+[distroproof](https://github.com/devutils-org/distroproof) boots each
+distribution's official cloud image **on its own kernel** in QEMU/KVM, runs a
+command in it, and attaches to every result an `envprobe` report of the
+machine -- kernel config, sysctls, LSMs, capabilities, BPF and perf support,
+libc -- so that a failure comes with the facts that explain it.
 
-## Running it
+This document is what happened when Omniscient was run through it: every
+finding, the evidence distroproof put in front of it, the cause, and the
+commit that fixed it. It is meant to be read as distroproof's living proof.
 
-```console
-scripts/release.sh                                   # the archive, linked against glibc 2.17
-mkdir dp && tar -C dp -xzf target/dist/omn-*.tar.gz  # what a user extracts
-cd dp && distroproof run --target rocky-8 --workdir . -- sh smoke.sh
-```
+## At a glance
 
-`smoke.sh` is whatever is being checked; the first run's is in the finding
-below. The matrix is `distroproof.toml`, at the repository's root:
+| | |
+|---|---|
+| Distributions | **16** images on their own kernels -- Debian 10, 11, 12, 13 and sid; Ubuntu 18.04, 20.04, 22.04, 24.04; Rocky 8 and 9; Fedora 43 and 44; Arch; Gentoo; Alpine -- and **5** variants (paranoid 3, `kptr_restrict` 2, lockdown, no PMU, root) |
+| Kernels | 4.15 to 7.2, RHEL's 4.18 and 5.14 with their backports |
+| Time | the 21 targets in about **12 minutes**, four at a time, from one command |
+| Findings in Omniscient | **16 defects** no test on the development machine had shown: **9 in the tool** (the release, the probes, the catalog, a collector) and **7 in its test suite** (a judge, six reference pairs) |
+| Claims refuted | **158** runs of a source Omniscient called usable that the kernel refused at start, in the first matrix; **0** after |
+| Cross-checked | every reason Omniscient gives for a refusal agrees with envprobe's independent reading of the same guest, on all 21 targets |
+| Back into distroproof | 3 images (Gentoo, Debian sid, Fedora 43), 2 boot fixes, 3 `[run]` options, 2 envprobe facts (pull requests [#4](https://github.com/devutils-org/distroproof/pull/4), [#5](https://github.com/devutils-org/distroproof/pull/5)) |
+
+## Reproducing it
 
 ```console
 scripts/release.sh                       # the archives, glibc 2.17 and musl
@@ -32,176 +39,319 @@ scripts/distroproof/cells.py target/matrix/distroproof.json
 cargo test --test portability            # the judges, over every cell
 ```
 
-Each guest gets the archives, the fixtures and two scripts, never the
-checkout. `setup` installs the archive a user would (musl where there is no
-glibc loader) and grants the file capabilities on it -- or says that a kernel
-before 5.8 has none to grant -- and the command is `omn selftest --format
-json`, every source listed and run for 300 ms on a launched program and on
-the machine, as user `test`. `cells.py` writes each guest's document as a
-cell, with distroproof's `envprobe` report of the same guest beside it. 21
-targets, four at a time, take about twelve minutes.
+[`distroproof.toml`](../distroproof.toml) is the matrix. Each guest gets the
+release archives, the fixtures and two scripts -- never the checkout. Its
+`setup` installs the archive a user would (the musl one where there is no
+glibc loader); distroproof grants the file capabilities on the installed
+binary (`file_caps`); the command is `omn selftest --format json`, every
+source listed with its reasons and run for 300 ms on a launched program and
+on the machine, as an ordinary user; distroproof brings the document back
+(`collect`) beside its envprobe report. On the host,
+[`tests/portability.rs`](../tests/portability.rs) judges every cell: what is
+listed usable attaches, every refusal names its reason, and every reason
+agrees with envprobe.
 
-## The distributions
+[`distroproof-reference.toml`](../distroproof-reference.toml) runs the
+reference pairs -- Omniscient against `perf`, `bpftrace`, `strace`, the bcc
+tools, on the same workload, within a declared tolerance -- on six
+distributions with the witnesses their own packages carry.
 
-| Image | glibc | Kernel | The release starts | Sources usable (no capability) |
-|---|---|---|---|---|
-| `rocky-8` | 2.28 | 4.18.0-553.el8_10 | yes | 62 of 123 |
-| `ubuntu-18.04` | 2.27 | 4.15.0-212 (no BTF) | yes | 52 of 123 |
-| `fedora-previous` (Fedora 43) | 2.42 | 6.17.1-300.fc43 | yes | 98 of 123 (root) |
-| `debian-sid` (forky/sid) | 2.43 | 7.2.11+deb14 (`perf_event_paranoid` 3) | yes | 98 of 123 (root) |
-| `gentoo` (OpenRC, dist-kernel) | 2.43 | 6.18.54 | yes | 98 of 123 (root) |
-| `alpine` (glibc archive) | musl 1.2.6 | 6.18.35-virt | **no**: `./omn/bin/omn: not found`; yes with `gcompat` | 91 of 123 (root) |
-| `alpine` (musl archive) | musl 1.2.6 | 6.18.35-virt | yes | 93 of 123 (root) |
-| Arch (the development host) | 2.44 | 7.2.9 | yes | 67 of 123 |
+## The matrix
 
-Every other image distroproof boots (Debian 10 to 13, Ubuntu 20.04 to 24.04,
-Rocky 9, Fedora) has a glibc between 2.28 and the host's, so the same archive
-starts there; that is the glibc floor's argument, and the matrix will show it
-image by image.
-
-### The matrix, 2026-10-19
-
-| Target | Kernel | Configuration | Listed usable (of 123) |
+| Target | Kernel | Configuration | Sources listed usable (of 123) |
 |---|---|---|---|
-| `debian-10` | 4.19.0-27 | nocaps (no CAP_BPF before 5.8) | 36 |
-| `debian-11` | 5.10.0-46 | caps | 41 |
-| `debian-12` | 6.1.0-54 | caps | 76 |
-| `debian-13` | 6.12.113 | caps | 82 |
-| `debian-sid` | 7.2.11 | caps | 82 |
-| `ubuntu-18.04` | 4.15.0-212 | nocaps | 36 |
-| `ubuntu-20.04` | 5.4.0-216 | nocaps | 39 |
-| `ubuntu-22.04` | 5.15.0-198 | caps | 85 |
-| `ubuntu-24.04` | 6.8.0-147 | caps | 93 |
-| `rocky-8` | 4.18.0-553 (RHEL) | caps | 59 |
-| `rocky-9` | 5.14.0-687 (RHEL) | caps | 86 |
-| `fedora-previous` | 6.17.1 | caps | 96 |
-| `fedora-latest` | 6.19.10 | caps | 96 |
-| `arch` | 7.2.9 | caps | 96 |
-| `gentoo` | 6.18.54 | caps | 96 |
-| `alpine` (musl archive) | 6.18.35-virt | caps | 85 |
-| `ubuntu-24.04-paranoid3` | 6.8.0-147 | `perf_event_paranoid` 3 | 93 |
-| `debian-12-kptr2` | 6.1.0-54 | `kptr_restrict` 2 | 76 |
-| `fedora-latest-lockdown` | 6.19.10 | `lockdown=confidentiality` | 55 |
-| `debian-12-nopmu` | 6.1.0-54 | no PMU | 76 |
-| `debian-12-root` | 6.1.0-54 | root | 94 |
+| `debian-10` | 4.19 | no capabilities (none before 5.8) | 36 |
+| `debian-11` | 5.10 | file capabilities | 41 |
+| `debian-12` | 6.1 | file capabilities | 76 |
+| `debian-13` | 6.12 | file capabilities | 82 |
+| `debian-sid` | 7.2.11 | file capabilities | 82 |
+| `ubuntu-18.04` | 4.15 | no capabilities | 36 |
+| `ubuntu-20.04` | 5.4 | no capabilities | 39 |
+| `ubuntu-22.04` | 5.15 | file capabilities | 85 |
+| `ubuntu-24.04` | 6.8 | file capabilities | 93 |
+| `rocky-8` | 4.18 (RHEL) | file capabilities | 59 |
+| `rocky-9` | 5.14 (RHEL) | file capabilities | 86 |
+| `fedora-previous` | 6.17 (Fedora 43) | file capabilities | 96 |
+| `fedora-latest` | 6.19 (Fedora 44) | file capabilities | 96 |
+| `arch` | 7.2.9 | file capabilities | 96 |
+| `gentoo` | 6.18 | file capabilities | 96 |
+| `alpine` (musl archive) | 6.18 `virt` | file capabilities | 85 |
+| `ubuntu-24.04-paranoid3` | 6.8 | `perf_event_paranoid` 3 | 93 |
+| `debian-12-kptr2` | 6.1 | `kptr_restrict` 2 | 76 |
+| `fedora-latest-lockdown` | 6.19 | `lockdown=confidentiality` | 55 |
+| `debian-12-nopmu` | 6.1 | no PMU | 76 |
+| `debian-12-root` | 6.1 | root | 94 |
 
-Every cell holds the matrix's invariants: what is listed usable attaches,
-and every refusal names its reason (`tests/portability.rs`, 26 judges).
+The spread is the point: the same binary serves 36 sources on Ubuntu 18.04
+and 96 on Fedora, and says, source by source, why.
 
 ## Findings
 
-### 1. The release did not start on half the images (fixed)
+Each finding is what was seen, what distroproof showed, the cause, the fix,
+and what the next run said.
 
-**What distroproof showed.** Before any VM: the archive's binaries imported
-`GLIBC_2.39` symbols (`scripts/release.sh floor`), because a binary needs the
-newest glibc it was linked against and the build machine runs 2.44; the
-documented floor was 2.34. distroproof's images put numbers on it: `rocky-8`
-and `debian-10` ship 2.28, `ubuntu-18.04` 2.27, `debian-11` and
-`ubuntu-20.04` 2.31 -- five of the thirteen images, and every RHEL 8 machine.
+### 1. The release did not start on a third of the images
 
-**The fix** (`scripts/release.sh`, `src/collect/mem/heap/mod.rs`). The
-archive is linked against glibc 2.17 through zig (`cargo zigbuild --target
-x86_64-unknown-linux-gnu.2.17`), whatever the build machine runs. One call
-needed changing: `memfd_create`, whose glibc wrapper appeared in 2.27, is
-made as the system call. The symbols glibc added later that the standard
-library uses (`gettid`, `statx`, `getrandom`, `copy_file_range`) are weak
-references it replaces with the system call where they are absent. `verify`
-holds the floor at 2.17 and the documents to it.
+**Seen.** `./omn/bin/omn --version` on Rocky 8: nothing but a loader error.
 
-**Checked with distroproof.** `rocky-8` (glibc 2.28, RHEL's 4.18) and
-`ubuntu-18.04` (glibc 2.27, 4.15 without BTF): the archive starts, lists the
-catalog with each refusal's reason, polls `cpu.util` ten times in a second,
-and the preload shim reads the allocations of every process a shell starts.
+**What distroproof showed.** The images put numbers on a promise nobody had
+checked: Rocky 8 and Debian 10 ship glibc 2.28, Ubuntu 18.04 2.27, Debian 11
+and Ubuntu 20.04 2.31 -- and the archive imported `GLIBC_2.39` symbols,
+because a binary needs the newest glibc it was linked against and the build
+machine ran 2.44. The documented floor said 2.34; it was already false.
 
-**Then musl (fixed the same day).** On `alpine` the glibc binary was "not
-found", the shell's word for a missing program interpreter
-(`/lib64/ld-linux-x86-64.so.2`). Both answers were measured on Alpine 3.24,
-and both are kept:
+**Fix** ([805ec52](https://github.com/moha-bekh/omniscient/commit/805ec52)).
+The archive is linked against glibc **2.17** through zig (`cargo zigbuild
+--target x86_64-unknown-linux-gnu.2.17`), whatever the build machine runs.
+One call changed: `memfd_create`, whose glibc wrapper is 2.27's, is made as
+the system call. `scripts/release.sh verify` holds the floor.
 
-- **The glibc archive with `gcompat`** (`apk add gcompat`): it starts, 91
-  sources usable as root, `cpu.util` 10 polls in 10, and the glibc shim
-  injected into musl programs reads them -- 67.6 MiB in `python3`, busybox
-  `sh`'s allocations. A fallback that costs nothing to build.
-- **A second archive, `-linux-musl`**: `omn` and `omn-mcp` linked statically
-  (`cargo zigbuild --target x86_64-unknown-linux-musl`), and the shim as a
-  dynamic library against zig's musl (`-C target-feature=-crt-static`; built
-  with the host's linker it depended on glibc's `libc.so.6`). Without
-  `gcompat`: 93 sources usable, `sched.runqlat` attaches over `bpf:raw_tp`,
-  and the musl shim reads 67.6 MiB in `python3`. A static binary loads no
-  library into its process, so the NVIDIA sources are refused -- and the
-  refusal now says the build is the reason, where the loader's "Dynamic
-  loading not supported" read as the machine's lack. Two lines of the code
-  needed changing for musl: `pthread_t` is a pointer there, and `time_t` is
-  named through its field.
+**After.** The archive starts on every glibc image, Rocky 8's 2.28 and Ubuntu
+18.04's 2.27 included.
 
-`verify` checks the musl archive's linking (no program interpreter, the shim
-needing musl's `libc.so` alone) and leaves running it to an Alpine guest,
-since on a glibc host its shim would be injected into glibc programs.
+### 2. Alpine: "not found"
 
-### 2. Gentoo, and two images more, added to distroproof (fixed in distroproof)
+**Seen.** `./omn/bin/omn: not found` -- the shell's words for a missing
+program interpreter, on a file that is plainly there.
 
-**Why.** The distributions the phase names include Gentoo, which distroproof
-did not boot, and a rolling Debian and a second Fedora make the matrix's
-two ends -- the next kernel a distribution ships, and the release a user
-still runs. Each was added to distroproof's catalog
-([devutils-org/distroproof#4](https://github.com/devutils-org/distroproof/pull/4)),
-not worked around here (`DECISIONS.md`).
+**What distroproof showed.** envprobe's `libc` section: `musl`, interpreter
+`/lib/ld-musl-x86_64.so.1`.
 
-**What distroproof showed, and what was fixed there.**
+**Fix** ([d43c6de](https://github.com/moha-bekh/omniscient/commit/d43c6de)).
+Both answers were measured and both kept: the glibc archive runs once
+`gcompat` is installed, shim included; and a second archive, `-linux-musl`,
+links `omn` statically and the shim against musl (built with the host's
+linker, it had depended on glibc's `libc.so.6`). A static binary loads no
+library, so the NVIDIA sources are refused -- and the refusal now says the
+build is the reason, where the loader's "Dynamic loading not supported" read
+as the machine's lack.
 
-- `gentoo` (the autobuilds' `di-amd64-cloudinit` image): the VM read **512
-  bytes** of its disk in four minutes at 100 % cpu -- distroproof's metrics,
-  the only signal, since nothing reached the serial console. The image is a
-  GPT disk with no BIOS boot code; it boots under UEFI.
-- Then `guest: kernel not found in /boot for 6.18.54`: distroproof extracts
-  the kernel on the first boot so that later runs boot it directly (and may
-  change its command line, which the `lockdown` variant needs). Gentoo's
-  `installkernel` writes `/boot/kernel-<release>`, and its
-  `modules/<release>/vmlinuz` is a link into a kernel source tree the image
-  does not ship. The agent looks for `/boot/kernel-<release>` now; direct
-  boot takes 13 s, against 18 s from the disk.
-- `debian-sid` and `fedora-previous` booted at once.
+**After.** Alpine, musl archive, nothing installed: 93 sources usable as
+root, eBPF attaching, the shim reading a musl `python3`'s allocations.
 
-**Checked.** On all three the glibc archive starts, lists the catalog,
-polls `cpu.util` ten times a second, attaches `sched.runqlat` over
-`bpf:raw_tp`, and the shim reads the allocations of what a shell starts.
-`debian-sid` is the first image whose `perf_event_paranoid` is 3, Debian's
-own patch, and the first on a 7.2 kernel other than the development host's.
+### 3. Debian's `perf_event_paranoid` 3: CAP_PERFMON is not enough
 
-### 3. The first matrix: 158 claims the kernel then refused, five defects (fixed)
+**Seen.** On `debian-12`, `mem.swap` listed usable, then refused at start:
+"the kernel refused a counting kprobe (Permission denied)" -- from a binary
+holding CAP_PERFMON.
 
-The first run over the 21 targets found 158 runs of a source `omn list`
-called usable that the kernel refused at start -- the one answer worse than
-a refusal. Sorted, they were six classes; five were the tool's, each a probe
-that asked a narrower question than the attach:
+**What distroproof showed.** envprobe: `kernel.perf_event_paranoid = 3`.
+Upstream Linux knows no level 3; Debian's and Ubuntu's kernels carry a patch,
+older than CAP_PERFMON, that refuses every perf event to a process without
+CAP_SYS_ADMIN. Ubuntu 22.04 and 24.04 ship 4.
 
-| Class | Where | What distroproof showed | Fix |
+**Fix** ([b38b6c2](https://github.com/moha-bekh/omniscient/commit/b38b6c2)).
+The `kprobe` requirement opens an event -- a disabled software counter, which
+costs nothing -- rather than trusting the capability held, and every refusal
+that names a level above 2 says what this kernel means by it and that
+`sysctl kernel.perf_event_paranoid=2` lets CAP_PERFMON in.
+
+### 4. Kernel 5.10: eBPF maps charged to a 64 KiB limit
+
+**Seen.** On `debian-11`, about 45 eBPF runs listed usable and refused:
+"creating the ring buffer needs CAP_BPF and CAP_PERFMON" -- both held.
+
+**What distroproof showed.** The test user's `RLIMIT_MEMLOCK` is 64 KiB, soft
+and hard. Before memory-cgroup accounting (Linux 5.11) every eBPF map is
+charged to it, and the kernel's EPERM reads exactly like a missing
+capability. envprobe now reports the limit (`privileges.memlock_soft`), which
+it did not before this finding.
+
+**Fix** ([42b9d4d](https://github.com/moha-bekh/omniscient/commit/42b9d4d)).
+The `bpf` requirement creates a 1 MiB map; refused where a small one is
+created, the maps are charged to the limit, and the requirement is missing
+with the limit and its remedies (`ulimit -l`, `LimitMEMLOCK=`, CAP_SYS_RESOURCE).
+The same words replace "needs CAP_BPF" wherever a map is refused.
+
+### 5. Lockdown withholds what every program reads
+
+**Seen.** On `fedora-latest-lockdown`, every eBPF source listed usable and
+refused by the verifier.
+
+**What distroproof showed.** envprobe: `security.lockdown = confidentiality`.
+In that mode the kernel withholds `bpf_probe_read_kernel`, and nearly every
+program of Omniscient's reads a kernel struct.
+
+**Fix** ([42b9d4d](https://github.com/moha-bekh/omniscient/commit/42b9d4d)).
+The `bpf` requirement loads the smallest program that calls the helper, and
+names lockdown when the verifier refuses it.
+
+**After.** 55 sources listed usable under lockdown, every one attaching.
+
+### 6. A kernel without ftrace -- and a probe that was right on 7.2 and wrong on 5.10
+
+**Seen.** On `alpine`, every fentry program loaded and every attach was
+refused with EBUSY.
+
+**What distroproof showed.** At first nothing: envprobe said
+`CONFIG_FTRACE=y`. Reading Alpine's kernel config in the guest showed no
+`CONFIG_FUNCTION_TRACER` -- functions compiled with no call site for a
+trampoline. envprobe now reports the function tracer and the dynamic-ftrace
+options ([#5](https://github.com/devutils-org/distroproof/pull/5)), and
+Alpine reads `CONFIG_FUNCTION_TRACER=n`.
+
+**The fix, twice.** The first one asked the kernel's BTF for
+`register_ftrace_function`. On the next run, the envprobe judge
+([below](#the-cross-check)) failed on `debian-11`: Omniscient said "built
+without ftrace" where envprobe read `CONFIG_FUNCTION_TRACER=y`. A 5.10 BTF,
+made by an older pahole, leaves most functions out, ftrace's with them. The
+second fix ([693fadb](https://github.com/moha-bekh/omniscient/commit/693fadb))
+reads `/proc/kallsyms` for `__fentry__`, which names its symbols even where
+their addresses are hidden.
+
+**After.** Alpine refuses every fentry source by name; Debian 11 keeps them.
+Two tools reading one machine independently caught a probe that one machine
+could not have.
+
+### 7. A kernel struct member renamed between 6.12 and 6.17
+
+**Seen.** On `debian-13`, `io.pagecache` and `io.readahead` refused at start:
+"this kernel's `folio` has no member named `_nr_pages`".
+
+**What distroproof showed.** The BTF of each guest: 6.8 and 6.12 name it
+`_folio_nr_pages`, 6.17 and later `_nr_pages`. Every kernel Omniscient had
+met was on one side.
+
+**Fix** ([42b9d4d](https://github.com/moha-bekh/omniscient/commit/42b9d4d)).
+The programs read whichever name the kernel has.
+
+### 8. "kernel>=6.8": a version the catalog believed
+
+**Seen.** On `ubuntu-24.04`, `mem.thp` refused: no per-size huge page
+statistics.
+
+**What distroproof showed.** Ubuntu's 6.8 does not publish
+`hugepages-2048kB/stats`, which the catalog promised from `kernel>=6.8`.
+
+**Fix** ([42b9d4d](https://github.com/moha-bekh/omniscient/commit/42b9d4d)).
+The backend asks for the directory, not the version, and the resolver falls
+back to `/proc/vmstat` where it is absent -- what the refusal had told users
+to do by hand.
+
+### 9. RHEL's backports: the test suite asked versions too
+
+**Seen.** On `rocky-9`, the judges failed: USDT sources attached through
+uprobe-multi links on 5.14 "without saying they fell back".
+
+**What distroproof showed.** They did not fall back: RHEL 9 carries
+uprobe-multi, a 6.6 feature, in its 5.14. Omniscient asks the kernel and was
+right; the judge assumed the version and was wrong.
+
+**Fix** ([db67711](https://github.com/moha-bekh/omniscient/commit/db67711)).
+The judge no longer asks the version.
+
+### 10. The reference pairs had only ever held on Arch
+
+Running the pairs on six distributions with their own witnesses found that
+several encoded the development machine:
+
+- **Paths.** The bpftrace pairs named `/usr/share/bpftrace/tools/*.bt`, Arch's
+  and Fedora's; Debian and Ubuntu install them in `/usr/sbin`.
+- **Interpreter versions.** The syscall workload slept with `time.sleep`,
+  which is `clock_nanosleep` from Python 3.11 and `select()` before -- on
+  Rocky 9's 3.9 the pairs counted a call that was never made. It calls
+  `clock_nanosleep` through libc now.
+- **Tool versions.** An older bpftrace prints `killsnoop`'s signal as a
+  number (`12`, not `SIGUSR2`); Debian's perf has no `lock contention -b`;
+  Fedora maps `libcrypto.so.3.5.5` where Arch maps `libcrypto.so.3`.
+- **Refusals counted as failures.** A `runqlat.bt` that cannot build against
+  the installed kernel headers (Debian 12), and a cgroup the guest's user may
+  not create, are the machine refusing, and now skip quoting it.
+
+Fixed in [87191de](https://github.com/moha-bekh/omniscient/commit/87191de)
+and [0de94c4](https://github.com/moha-bekh/omniscient/commit/0de94c4).
+The results, per distribution, are [below](#the-reference-pairs).
+
+## The cross-check
+
+envprobe and Omniscient read the same guest independently, so their answers
+can be held against each other. The judge
+`every_distroproof_cell_s_reasons_agree_with_envprobe` does, both ways:
+
+| Omniscient says | envprobe must read |
+|---|---|
+| `perf_event_paranoid is N` | `kernel.perf_event_paranoid = N` |
+| `unprivileged_bpf_disabled` is N | the same sysctl, N |
+| the `btf` requirement available / missing | `btf.vmlinux` present / absent |
+| the kernel withholds `bpf_probe_read_kernel` | `lockdown = confidentiality`, and only then |
+| tracefs / cgroup v2 not mounted | the same, and only then |
+| built without ftrace | `CONFIG_FUNCTION_TRACER` not `y`, and only then |
+| this process may lock N KiB | `memlock_soft` = N KiB |
+
+Over the 21 targets every reason agrees -- after the one it caught (finding 6).
+A planted cell checks that it fails on a wrong cause.
+
+## The reference pairs
+
+Every pair (`tests/reference.rs`, [`docs/replaces.md`](replaces.md)) on six
+distributions, one at a time, against the release a user installs, with the
+witnesses each distribution packages. Two runs: before and after the pairs'
+own portability fixes (finding 10).
+
+| Distribution | Kernel | First run: held / did not hold | After: held / did not hold / skipped |
 |---|---|---|---|
-| Maps charged to `RLIMIT_MEMLOCK` | `debian-11` (5.10), ~45 runs | the user's limit is 64 KiB, soft and hard; before memory-cgroup accounting (5.11) BPF maps are charged to it, and the kernel's EPERM read as "needs CAP_BPF", which the binary held | the `bpf` probe creates a 1 MiB map and says the limit and its remedies where it is refused (`maps_charged_to_memlock`); `map_failure` says the same |
-| Lockdown withholds `bpf_probe_read_kernel` | `fedora-latest-lockdown`, ~45 runs | every program reading a struct rejected by the verifier | the `bpf` probe loads the smallest program calling the helper (`kernel_reads_locked_down`) |
-| No ftrace | `alpine` (`virt` kernel), 16 runs | fentry programs loaded and every attach refused with EBUSY; the kernel's config has no `CONFIG_FUNCTION_TRACER` | an fentry requirement is missing where the kernel's BTF lacks `register_ftrace_function` |
-| `folio._folio_nr_pages` | `debian-13` (6.12), 4 runs | the member is `_folio_nr_pages` on 6.8 and 6.12, `_nr_pages` from 6.17 | the page-cache programs read either |
-| Per-size THP statistics | `ubuntu-24.04` (6.8), 2 runs | `hugepages-2048kB/stats` absent where the catalog promised them from `kernel>=6.8` | the backend asks for the directory, not the version; the resolver falls back to `fs:proc` |
+| Arch | 7.2.9 | 69 / 2 | **71 / 0** / 32 |
+| Fedora 44 | 6.19 | 68 / 3 | **68 / 3** / 32 |
+| Rocky 9 | 5.14 (RHEL) | 43 / 3 | **61 / 1** / 41 |
+| Ubuntu 24.04 | 6.8 | 57 / 5 | **60 / 2** / 39 |
+| Debian 13 | 6.12 | 52 / 4 | **55 / 0** / 46 |
+| Debian 12 | 6.1 | 49 / 7 | **51 / 4** / 46 |
 
-Two more were found before this run and fixed with it: `perf_event_paranoid`
-3 (`debian-12`) refuses every perf event to a process without CAP_SYS_ADMIN,
-CAP_PERFMON included -- Debian's and Ubuntu's patch -- and the `kprobe`
-requirement now opens an event to see it, every refusal at that level saying
-so; and the guests' roots were too small for the payload (`alpine`), which
-distroproof now grows (its pull request #4).
+(The two `opensnoop` runs whose bpftrace lost events -- 51 on Debian 13, 164
+on Rocky 9 -- are counted as skipped, by the rule the runner already applied
+to `perf trace`: a witness that lost events is no count.)
 
-The sixth class was the matrix's own: the program-probe sources had no
-fixture in the guests. The fixtures are built statically with zig now
-(`scripts/distroproof/fixtures.sh`) and carried with the archives.
+A skip says which witness the distribution lacks (`heaptrack`, `valgrind`,
+`fio`, `nsys`, `ncu` are not packaged everywhere) or which setting it holds
+(`perf_event_paranoid` 4 on Ubuntu refuses turbostat). What still does not
+hold is the witnesses' versions, not Omniscient's numbers:
 
-**And two judges were wrong.** The uprobe-multi judge required a fallback
-below 6.6, and `rocky-9`'s 5.14 attaches through the multi link without one:
-RHEL backported it. The tool asks the kernel; the judge asked the version,
-and now does not. The gaps judge, which explains every difference between two
-cells by their resolved records, was written for cells of one userspace;
-between distributions the differences are ftrace, cgroup v2, PSI -- facts
-envprobe's report carries -- and it now leaves distroproof's cells to the
-envprobe judge (task 4).
+- **Debian 12's bpftrace** prints `execsnoop`, `biosnoop` and `biolatency` in
+  shapes the parsers, written against Arch's 0.27, do not read; its **perf
+  6.1** `sched latency` counts 10 switches for the whole machine where the
+  workload made 100 (Omniscient: 103, as `perf sched timehist` and `strace`
+  count elsewhere).
+- **Ubuntu 24.04**: `biosnoop`'s output, and `perf top`, which drew no
+  screen in the guest.
+- **Fedora 44**: `opensnoop` counts 10 % fewer opens than Omniscient with the
+  same probes as Arch's (open, below); Fedora's `libcrypto` keeps its
+  symbols, so `perf` names functions where the pair expects the stripped
+  object; `task-clock` by 0.5 ms over its band.
+- **Rocky 9**: `perf lock contention`'s pair received no output from
+  Omniscient (open).
 
-**After.** 21 of 21 targets, every cell holding the invariants.
+## What Omniscient gave back to distroproof
 
+Porting a demanding program found what distroproof needed:
+
+| | Pull request |
+|---|---|
+| Three images: `gentoo` (the autobuilds' cloud-init image), `debian-sid` (the next kernel Debian ships), `fedora-previous` | [#4](https://github.com/devutils-org/distroproof/pull/4) |
+| Gentoo boots under UEFI (under SeaBIOS the VM read 512 bytes of its disk and spun -- distroproof's metrics were the only signal) and its kernel is found at `/boot/kernel-<release>`, so later runs boot it directly | [#4](https://github.com/devutils-org/distroproof/pull/4) |
+| Every overlay grows by 4 GiB: Alpine's root had 21 MiB free | [#4](https://github.com/devutils-org/distroproof/pull/4) |
+| `file_caps`: file capabilities on an installed binary, where `caps` raised ambient ones every child inherits | [#5](https://github.com/devutils-org/distroproof/pull/5) |
+| `collect`: files brought back from the guest, where a 1 MB document had to travel as standard output | [#5](https://github.com/devutils-org/distroproof/pull/5) |
+| `DP_TARGET` and `DP_IMAGE` in the guest | [#5](https://github.com/devutils-org/distroproof/pull/5) |
+| envprobe reports the function tracer and `RLIMIT_MEMLOCK`, the two causes it could not show (findings 4 and 6) | [#5](https://github.com/devutils-org/distroproof/pull/5) |
+
+## The lesson
+
+Ask the kernel, never its version. Three times a version was believed and
+three times a distribution disproved it: the catalog's `kernel>=6.8` for
+huge page statistics (Ubuntu's 6.8 has none), the judge's "uprobe-multi is
+6.6" (Rocky 9's 5.14 has it), and the BTF that should name ftrace's functions
+(5.10's leaves them out). Omniscient's probes already asked features for this
+reason; distroproof is what showed where they still did not, on machines one
+developer does not have.
+
+## Open
+
+- **`opensnoop`** counts 10 % fewer opens than Omniscient on Fedora 44, with
+  the same probes as Arch's where the pair holds; not explained.
+- **`perf lock contention`** on Rocky 9: Omniscient's side of the pair wrote
+  no document; not looked into yet.
+- **Debian 12's `perf sched latency`** counts 10 switches for the whole
+  machine over two seconds: the witness, not Omniscient (whose count agrees
+  with `perf sched timehist` and `strace` elsewhere).
+- Not covered yet: aarch64, containers, NixOS -- each waits on distroproof
+  booting it.

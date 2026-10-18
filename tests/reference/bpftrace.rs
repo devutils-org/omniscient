@@ -14,7 +14,7 @@
 //! which `omn` does not report and a path cannot compute. Every other value
 //! `omn` holds at one place, and the pairs name it by a path.
 
-use crate::common::{Parser, Values};
+use crate::common::{Parser, Values, INCOMPLETE};
 
 pub fn parsers() -> Vec<Parser> {
     vec![
@@ -218,8 +218,12 @@ fn lossless(stdout: &str, stderr: &str) -> Result<(), String> {
         })
         .sum();
     if lost > 0 {
+        // The witness lost events: the pair skips quoting it, as perf trace's
+        // does, rather than failing omn for the tool's shortfall (Debian 13
+        // and Rocky 9 lost 51 and 164 opens, run with distroproof).
         return Err(format!(
-            "bpftrace lost {lost} events: its output is short by them, so it is no count"
+            "{INCOMPLETE}bpftrace lost {lost} events: its output is short by them, so it is no \
+             count"
         ));
     }
     Ok(())
