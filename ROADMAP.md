@@ -520,6 +520,16 @@ Now, and not before: we have three real join types to generalize from.
       `null_blk` (8 queues of 256, 4 KiB): 295 and 262 ns a request in two
       runs (bare 3.21 M IOPS, 9.5 to 10.6 %), against 332 before `tp_btf`.
       Not met: 60 to 95 ns over.*
+      *Where the 262 to 295 ns go (2026-10-20, three runs each, programs cut
+      short for the measurement only): two programs that read the clock and
+      return cost 187 to 190 ns a request -- the floor of any pair on these
+      two tracepoints; the in-flight map's lookup and write bring it to 234 to
+      257; the histogram's row the rest, 30 to 40 ns. A per-cpu array in
+      place of the row's hash would save part of those 40 and leave the pair
+      over 200. The raw tracepoint fallback reads 349 to 387 on the same
+      runs. Under 200 takes one program, not two: the kernel's own
+      `rq->io_start_time_ns`, stamped where `block_rq_issue` fires when the
+      queue keeps statistics (`wbt` does, on both devices here).*
 - [x] Exceeding the budget produces an **announced** degradation, not a loss.
       *The runner checks every 100 ms and, over the ceiling, moves the
       collection onto the next cheaper backend of its chain that this machine
