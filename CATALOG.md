@@ -571,7 +571,7 @@ invisible to every CPU profiler.
 | `sched.wakeup` | **wakeup chain** (who unblocks whom) | `bpf:raw_tp` · `bpf:tp` sched_wakeup (waker context) | trace | pid, tid, cgroup, system, launch | med | low |
 | `sched.switches` | context switches | `pmu:sw` · `bpf:raw_tp` sched_switch (count, reached first for a cgroup) · `bpf:tp` | count, trace | all | free / low | low |
 | `sched.migrations` | migrations | `bpf:raw_tp` · `bpf:tp` sched_migrate_task | trace, count | pid, cgroup, system | low | low |
-| `sched.lock` | kernel lock contention | `bpf:raw_tp` · `bpf:tp` lock:contention_begin/end (≥6.1) · `bpf:kprobe` | trace | pid, tid, cgroup, system, launch | med / high | low |
+| `sched.lock` | kernel lock contention | `bpf:raw_tp` · `bpf:tp` lock:contention_begin/end (probed, mainline 6.1, backported by RHEL 9) · `bpf:kprobe` | trace | pid, tid, cgroup, system, launch | med / high | low |
 | `sched.futex` | userspace futex wait | `bpf:raw_tp` · `bpf:tp` raw_syscalls (futex) | trace | pid, tid, cgroup, launch | high | low |
 | `sched.mutex` | pthread contention | `preload` · `bpf:usdt` · `bpf:uprobe` pthread_mutex_* | trace | pid, tid | extreme | low |
 | `sched.irq` | time in interrupt handlers | `bpf:raw_tp` · `bpf:tp` irq:irq_handler_entry/exit | trace, count | cpu, system | med | low |
@@ -594,8 +594,9 @@ invisible to every CPU profiler.
   no `irq`.
 - `sched.offcpu` with stacks is expensive on switch-heavy workloads: plan for
   in-kernel aggregation (stack-id → counter) rather than a raw trace.
-- `lock:contention_*` is recent (≥ 6.1): fall back to futex + uprobes on older
-  kernels.
+- `lock:contention_*` is mainline 6.1, and backported elsewhere (RHEL 9's
+  5.14): the tracepoints are probed, never the version. Without them, fall
+  back to futex + uprobes.
 - A process target is followed into every process it starts (a descendants
   map the fork tracepoint fills): `sched.offcpu`, `sched.runqlat`,
   `sched.wakeup`, `sched.switches` through `bpf:raw_tp`, `sched.migrations`,

@@ -181,7 +181,7 @@
     # The `sched_stat_runtime` program: each thread's increments of the
     # scheduler's own `sum_exec_runtime` added up in the kernel, drained every
     # poll.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stat_runtime(task_struct *, u64)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"],
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_stat_runtime(task_struct *, u64)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"],
        cost: low, modes: [poll], drained: true,
        targets: {system: native, cgroup: native, pid: native, tid: native, launch: native}}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low, equivalent: true}

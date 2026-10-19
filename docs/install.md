@@ -254,17 +254,17 @@ binary.
 (`DECISIONS.md`, "Kernel floor", amended in the fifteenth wave), and the
 resolver probes it like any other requirement. Below a backend's version that
 backend is refused by name with the version
-(`kernel>=6.1: missing: kernel 5.15 is older than 6.1`), and the chain moves to
+(`kernel>=5.8: missing: kernel 5.4 is older than 5.8`), and the chain moves to
 the next backend that serves, never quietly. In the catalog today:
 
 | Requirement | Backends | Why that version |
 |---|---|---|
 | `kernel>=5.8` | 33 eBPF backends | the BPF ring buffer they publish through, and `CAP_BPF` / `CAP_PERFMON` |
-| `kernel>=6.1` | 5: the `bpf:raw_tp` backends of `sched.runqlat`, `sched.offcpu` and `sched.switches`, and both tracepoint backends of `sched.lock` | the four-argument `sched_switch`; `lock:contention_*` |
-| `kernel>=6.8` | 1: `mem.thp`'s `fs:sys` | its `fs:proc` fallback serves older kernels |
+| a tracepoint's prototype | the `sched` programs and `cpu.oncpu_time`'s `bpf:raw_tp`, which said `kernel>=6.1` until 2026-10-19 | the four-argument `sched_switch`, `lock:contention_*`: asked of the kernel's BTF, never its version, since RHEL 9's 5.14 has them (`docs/distroproof.md`, finding 11) |
+| the per-size statistics' directory | `mem.thp`'s `fs:sys`, which said `kernel>=6.8` until Ubuntu's 6.8 was found without it (`docs/distroproof.md`, finding 8) | its `fs:proc` fallback serves where the directory is absent |
 | `uprobe_multi` (6.6) | both backends of `net.request`, `bpf:usdt` and `bpf:usdt:threads` | every site is linked with one uprobe-multi link; **no fallback**: below 6.6 `net.request` is refused |
 
-Every one of the five 6.1 backends has a fallback below it in its chain (a
+Every one of those backends has a fallback below it in its chain (a
 `bpf:tp` program, or `sched.lock`'s `bpf:kprobe`), so on an older kernel the
 source is served by that fallback, with what it degrades stated. `net.request`
 is the exception: both of its backends need `uprobe_multi`, and the source has
@@ -275,10 +275,11 @@ no older route, so below 6.6 it is refused, naming the kernel's refusal
 **5.15 is served.** Under 5.15, 6.1, 6.6 and 7.2 with the capabilities,
 `omn list` calls 71, 74, 78 and 80 sources usable (7.2.7; measured in
 guests on 2026-10-02 with the build `cd394a8a8550c199`, `docs/portability.md`,
-"The sixteenth wave's sweep"); an earlier binary counted 86, 88, 88 and 89. No kernel between 5.15 and 6.1 has been measured, so
-whether the 6.1 backends would serve a 5.18 is not known; they keep 6.1 until
-a cell says otherwise. Below 5.8 nothing has been measured; the 33 backends
-that say `kernel>=5.8` are refused there by name.
+"The sixteenth wave's sweep"); an earlier binary counted 86, 88, 88 and 89.
+On 5.15 the `sched` programs are refused by the `sched_switch` prototype they
+read; on RHEL 9's 5.14 they attach (distroproof). Below 5.8 the 33 backends
+that say `kernel>=5.8` are refused by name (Debian 10, Ubuntu 18.04 and 20.04
+in distroproof's matrix, `docs/distroproof.md`).
 
 It also wants the kernel's own type information, `/sys/kernel/btf/vmlinux`
 (`CONFIG_DEBUG_INFO_BTF`). Without it the eBPF sources that read kernel
@@ -288,7 +289,7 @@ structures are refused, and a run attaches 53 sessions instead of 100 under
 | | Kernel | Every backend's `kernel>=` met | BTF |
 |---|---|---|---|
 | Ubuntu 24.04 | 6.8, later with HWE **(read from its documentation)**; the hosted runner is 6.17, measured | yes | yes, measured on the runner |
-| Ubuntu 22.04 | 5.15; 6.8 with the HWE kernel **(read from its documentation)** | with HWE; on 5.15 the six `kernel>=6.1`/`6.8` backends are refused and their fallbacks serve, and `net.request` is refused outright (`uprobe_multi` is missing and it has no fallback), measured in a 5.15.221 guest | yes **(read from its documentation)** |
+| Ubuntu 22.04 | 5.15; 6.8 with the HWE kernel **(read from its documentation)** | with HWE; on 5.15 the `sched` backends whose `sched_switch` prototype differs and `mem.thp`'s `fs:sys` are refused and their fallbacks serve, and `net.request` is refused outright (`uprobe_multi` is missing and it has no fallback), measured in a 5.15.221 guest | yes **(read from its documentation)** |
 | Fedora 40 and later | 6.8 and later **(read from its documentation)** | yes | yes **(read from its documentation)** |
 | Arch | the current stable kernel, 7.2.6 here, measured | yes | yes, measured |
 

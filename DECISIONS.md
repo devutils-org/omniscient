@@ -535,9 +535,14 @@ resolver reads requirements per backend. In the catalog today:
   `BPF_MAP_TYPE_RINGBUF`, which these programs publish through, and `CAP_BPF`
   and `CAP_PERFMON`. That is the kernel's history; the catalog lines do not say
   it, so this line does.
-- `kernel>=6.1` is on five: the three `sched` programs written against the
+- `kernel>=6.1` was on five: the three `sched` programs written against the
   four-argument `sched_switch` (`runqlat`, `offcpu`, `switches`'s count), and
-  `sched.lock`'s two backends, which need `lock:contention_*`.
+  `sched.lock`'s two backends, which need `lock:contention_*`. *Removed
+  2026-10-19*, with `sched.wakeup`'s and `cpu.oncpu_time`'s: distroproof's
+  Rocky 9 is the cell that said otherwise -- RHEL's 5.14 carries
+  `lock:contention_*`, and the four sources attach there
+  (`docs/distroproof.md`, finding 11). Each backend already asked the
+  prototypes it reads; those are what refuse 5.15 now.
 - `kernel>=6.8` is on one, `mem.thp`'s `fs:sys` (its `fs:proc` fallback serves
   older kernels).
 
@@ -547,7 +552,7 @@ older kernel", above). With the capabilities the matrix attaches 77 sessions
 on 5.15 and 100 on 7.2, and each difference in the listings is a requirement
 the catalog wrote, answered by name (`docs/portability.md`). The matrix has no kernel between 5.15 and 6.1,
 so whether the five 6.1 backends would serve a 5.18 is not known. They keep
-6.1 until a cell says otherwise. The original line's other argument, one
+6.1 until a cell says otherwise. (One did, 2026-10-19: above.) The original line's other argument, one
 fewer shape to test, is now paid on purpose: the portability matrix is where
 the second shape is tested (`scripts/matrix.sh`).
 

@@ -75,7 +75,7 @@
     # is what lets a `wakeup` join be refused before the run rather than
     # credit a hundred waits to the last wakeup before the drain.
     - id: "bpf:raw_tp"
-      requires: ["bpf", "btf", "raw_tracepoint:sched_wakeup(task_struct *)", "raw_tracepoint:sched_wakeup_new(task_struct *)", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"]
+      requires: ["bpf", "btf", "raw_tracepoint:sched_wakeup(task_struct *)", "raw_tracepoint:sched_wakeup_new(task_struct *)", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"]
       join: {key: "task:tid", match: eq, ttl: 10s}
       cost: med
       drained: true
@@ -124,7 +124,7 @@
     # BPF_RAW_TRACEPOINT_OPEN, which needs a name and BTF where the classic
     # path needs a numeric id out of tracefs. Ordered ahead of it for the
     # reason DECISIONS.md settled: strictly fewer requirements, same events.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_wakeup(task_struct *)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"], cost: med, drained: true,
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_wakeup(task_struct *)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"], cost: med, drained: true,
        degraded: "user stacks only: the kernel side of a block is always the scheduler, and what it was waiting for is the task state"}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: med, drained: true,
        degraded: "no stacks: tells you how long, not where"}
@@ -223,7 +223,7 @@
     # involuntary one by the kernel's own rule, for anyone who forces it.
     # `count` only: `trace` is a per-switch event, which the `woke` join from
     # `sched.wakeup` needs, and `pmu:sw` records.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"], cost: low,
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"], cost: low,
        modes: [count], targets: {system: native, pid: native, tid: native, launch: native, cgroup: native},
        filter_fields: [comm, pid, ppid], equivalent: true, drained: true}
     - {id: "bpf:tp", requires: ["tracepoint:sched:sched_switch", "bpf"], cost: low,
@@ -263,8 +263,8 @@
   summary: "Kernel lock contention"
   unit: ns
   backends:
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:contention_begin(void *, unsigned int)", "raw_tracepoint:contention_end(void *, int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"], cost: med, drained: true}
-    - {id: "bpf:tp", requires: ["tracepoint:lock:contention_begin", "tracepoint:lock:contention_end", "bpf", "kernel>=6.1"], cost: med, equivalent: true}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:contention_begin(void *, unsigned int)", "raw_tracepoint:contention_end(void *, int)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"], cost: med, drained: true}
+    - {id: "bpf:tp", requires: ["tracepoint:lock:contention_begin", "tracepoint:lock:contention_end", "bpf"], cost: med, equivalent: true}
     - {id: "bpf:kprobe", requires: ["kprobe", "bpf"], cost: high,
        degraded: "older kernels: futex and uprobe fallback, partial coverage"}
   modes: [trace]
@@ -422,7 +422,7 @@
     # One ring record per switch either end of which is the target's, the
     # leaving task's run and the coming task's queue wait read from the
     # kernel's own `sched_info` stamps: `perf sched timehist`'s line.
-    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_wakeup(task_struct *)", "raw_tracepoint:sched_wakeup_new(task_struct *)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)", "kernel>=6.1"], cost: high}
+    - {id: "bpf:raw_tp", requires: ["bpf", "btf", "raw_tracepoint:sched_switch(bool, task_struct *, task_struct *, unsigned int)", "raw_tracepoint:sched_wakeup(task_struct *)", "raw_tracepoint:sched_wakeup_new(task_struct *)", "raw_tracepoint:sched_process_fork(task_struct *, task_struct *)", "raw_tracepoint:sched_process_free(task_struct *)"], cost: high}
   modes: [trace]
   emits: [hist, topk, raw, summary]
   targets: {system: native, pid: bpf_only, tid: bpf_only, cgroup: bpf_only, launch: bpf_only}
