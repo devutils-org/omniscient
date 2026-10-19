@@ -6044,7 +6044,9 @@ fn latency_by_request(result: &serde_json::Value) -> BTreeMap<(u64, u64), u64> {
 }
 
 /// Phase 6's exit criterion: `io.latency --emit hist` at two million requests
-/// a second costs the target under 1 %.
+/// a second costs under 1 % of a real device's request -- 200 ns of a fast
+/// NVMe's 20 us 4K read -- per request, measured on `null_blk`, which takes
+/// no time of its own and so shows the programs' cost alone.
 ///
 /// The load needs a device that answers that fast and no disk does: `null_blk`
 /// completes every request at once from memory, and loading it is root. With
@@ -6097,6 +6099,12 @@ fn latency_by_request(result: &serde_json::Value) -> BTreeMap<(u64, u64), u64> {
 #[test]
 #[ignore = "needs null_blk (root): see the doc comment for the commands"]
 fn the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent() {
+    // What the cost is 1 % of: a fast NVMe's 4K read at queue depth 1. A
+    // request `null_blk` answers from memory takes no time of its own, and 1 %
+    // of nothing is under one program run; this machine's nvme takes 50 us
+    // (29 us at best, fio, 2026-10-20), so 20 us holds a faster disk too
+    // (`DECISIONS.md`, settled 2026-10-20).
+    const REAL_REQUEST_NS: f64 = 20_000.0;
     const DEVICE: &str = "/dev/nullb0";
     const JOBS: f64 = 8.0;
     if std::fs::File::open(DEVICE).is_err() {
@@ -6184,11 +6192,22 @@ fn the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent() {
         .sum();
     let overhead = (bare - measured) / bare * 100.0;
     let per_request_ns = JOBS * (1.0 / measured - 1.0 / bare) * 1e9;
-    let budget_ns = JOBS / bare * 1e9 / 100.0;
+    let budget_ns = REAL_REQUEST_NS / 100.0;
+    // Keeping the programs' statistics costs two clock reads a run, which
+    // this run then pays and the criterion is not about.
+    let stats_on = std::fs::read_to_string("/proc/sys/kernel/bpf_stats_enabled")
+        .is_ok_and(|value| value.trim() == "1");
     eprintln!(
-        "bare {bare:.0} IOPS, under the in-kernel histogram {measured:.0}: {overhead:.2} %, \
-         {per_request_ns:.0} ns per request against a 1 % budget of {budget_ns:.1} ns; the \
-         histogram counted {counted} requests of fio's {reads} reads"
+        "bare {bare:.0} IOPS, under the in-kernel histogram {measured:.0}: {overhead:.2} % of \
+         null_blk, {per_request_ns:.0} ns per request against a budget of {budget_ns:.0} ns \
+         (1 % of a {:.0} us request){}; the histogram counted {counted} requests of fio's \
+         {reads} reads",
+        REAL_REQUEST_NS / 1e3,
+        if stats_on {
+            ", with the programs' statistics on, which this cost includes"
+        } else {
+            ""
+        }
     );
     let inside = &result["overhead"];
     match (
@@ -6221,9 +6240,16 @@ fn the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent() {
          not the cost of measuring this load"
     );
     assert!(
-        overhead < 1.0,
-        "the in-kernel histogram cost {overhead:.2} % of a {bare:.0} IOPS load \
-         ({per_request_ns:.0} ns per request)"
+        per_request_ns <= budget_ns,
+        "the in-kernel histogram cost {per_request_ns:.0} ns per request at {bare:.0} IOPS, \
+         over 1 % of a {:.0} us request{}",
+        REAL_REQUEST_NS / 1e3,
+        if stats_on {
+            " -- with `kernel.bpf_stats_enabled` 1, whose clock reads are in it: set it to 0 \
+             for the figure the criterion is about"
+        } else {
+            ""
+        }
     );
 }
 

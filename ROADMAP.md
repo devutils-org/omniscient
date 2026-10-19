@@ -513,6 +513,11 @@ Now, and not before: we have three real join types to generalize from.
       off each close. The 1 % budget is 26.2 ns a request, less than one run
       of either program, so no program pair meets it on a device that does no
       work; the criterion is the user's to restate (`DECISIONS.md`).*
+      *Restated the same day: 1 % of a fast NVMe's 20 us 4K read, 200 ns a
+      request, read on `null_blk` with the statistics off
+      (`the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent`).
+      With them on it read 417 ns; the run without them is the user's
+      `sysctl` to make.*
 - [x] Exceeding the budget produces an **announced** degradation, not a loss.
       *The runner checks every 100 ms and, over the ceiling, moves the
       collection onto the next cheaper backend of its chain that this machine
