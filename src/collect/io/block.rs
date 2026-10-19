@@ -258,6 +258,8 @@ pub struct BlockCollector {
     status_is_errno: bool,
     /// Whether the programs count into a kernel-side histogram.
     in_kernel_histogram: bool,
+    /// Whether the histogram's closing program went through `tp_btf`.
+    close_is_tp_btf: bool,
     /// What the histogram held at the end: the requests it counted, and the
     /// rows they were reported as.
     histogram_requests: u64,
@@ -301,6 +303,7 @@ impl BlockCollector {
             no_request_identity: None,
             status_is_errno: false,
             in_kernel_histogram: false,
+            close_is_tp_btf: false,
             histogram_requests: 0,
             histogram_rows: 0,
             histogram_caveat: None,
@@ -667,6 +670,7 @@ impl Collector for BlockCollector {
         };
         self.no_request_identity = program.no_request_identity.clone();
         self.status_is_errno = program.status_is_errno;
+        self.close_is_tp_btf = program.close_is_tp_btf();
         self.program = Some(program);
         self.names = super::device_names();
         self.opened_ns = monotonic_ns();
@@ -757,8 +761,15 @@ impl Collector for BlockCollector {
              (device, log2 bucket), read once at the end, and no record per request crossed \
              to userspace; `latency_ns` on a row is its bucket's low bound and `total_ns` the \
              exact sum. Rows carry `dev` and no `blk`, `task` or `req` key -- ask for another \
-             emit beside `hist` to have the requests one at a time",
-            self.histogram_requests, self.histogram_rows,
+             emit beside `hist` to have the requests one at a time; the closing program \
+             read the device {}",
+            self.histogram_requests,
+            self.histogram_rows,
+            if self.close_is_tp_btf {
+                "through `tp_btf`, two loads"
+            } else {
+                "through the raw tracepoint, two helper calls, this kernel refusing `tp_btf`"
+            },
         )]
     }
 

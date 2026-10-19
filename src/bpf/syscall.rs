@@ -356,6 +356,28 @@ pub fn raw_tracepoint_open(name: &str, prog_fd: RawFd) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
 }
 
+/// Attaches a loaded tracing program where its load named: a `tp_btf`
+/// program to its tracepoint, an fentry to its function. The kernel takes
+/// the place from the program's `attach_btf_id`, and refuses a name here.
+pub fn tracing_open(prog_fd: RawFd) -> io::Result<OwnedFd> {
+    let mut attr = RawTracepointOpenAttr {
+        name: 0,
+        prog_fd: prog_fd as u32,
+        pad: 0,
+    };
+    let fd = unsafe {
+        bpf(
+            BPF_RAW_TRACEPOINT_OPEN,
+            &mut attr as *mut _ as *mut libc::c_void,
+            std::mem::size_of::<RawTracepointOpenAttr>() as u32,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
 #[repr(C)]
 #[derive(Default)]
 struct UprobeMultiAttr {

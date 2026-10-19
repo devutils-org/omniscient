@@ -163,6 +163,16 @@ impl Btf {
         self.by_name.contains_key(name)
     }
 
+    /// The type id of `btf_trace_<tracepoint>`, the typedef a `tp_btf`
+    /// program names as its `attach_btf_id`.
+    pub fn tracepoint_id(&self, tracepoint: &str) -> Option<u32> {
+        self.by_name
+            .get(&format!("btf_trace_{tracepoint}"))?
+            .iter()
+            .find(|index| self.types[**index].kind == KIND_TYPEDEF)
+            .map(|index| *index as u32)
+    }
+
     /// The type id of the `VAR` named `name`, for a `BPF_PSEUDO_BTF_ID` load:
     /// a program that reads a kernel variable -- `__preempt_count`, `pcpu_hot`
     /// -- names it by this id and the kernel resolves the address at load.

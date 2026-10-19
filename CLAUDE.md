@@ -141,8 +141,10 @@ not failed: a terminal that sets `RLIMIT_RTTIME` to 0 (DankMaterialShell's
 launcher passes it to everything it starts) gets its processes SIGKILLed by
 the kernel's CPU-time check now and then (`docs/open-findings.md`, "The
 SIGKILLs with no output"). `grep "realtime timeout" /proc/self/limits` says;
-`systemd-run --user --wait --pipe -p WorkingDirectory=$PWD --setenv=PATH="$PATH"
-make check` runs the suite without it. And a second agent working in the same
+`systemd-run --user --wait --pipe -p LimitNOFILE=524288 -p WorkingDirectory=$PWD
+--setenv=PATH="$PATH" make check` runs the suite without it -- the `LimitNOFILE`
+because a user unit's soft limit is 1024, and `net.socket`'s many-sockets
+fixture opens two thousand. And a second agent working in the same
 checkout rebuilds `target/debug/omn`, which drops its capabilities mid-run:
 work in a `git worktree` of your own (`omniscient*` paths are in the sudoers
 line) and run `make` there.

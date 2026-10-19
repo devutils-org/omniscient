@@ -974,12 +974,20 @@ fn histogram_open_instructions(
 /// own cpu (the kernel skips and counts the nested run, [`BlockProgram::skipped`]),
 /// so a load, an add and a store cannot be interleaved. The reader sums the
 /// copies, once, at the end.
+///
+/// **`direct`** builds it for a `tp_btf` attach, where the request is a
+/// typed kernel pointer the verifier lets the program load through: the two
+/// reads of the device are then two loads, where a raw tracepoint program
+/// pays a `bpf_probe_read_kernel` call for each. They were most of the
+/// program's 149 ns a run at two million requests a second (`ROADMAP.md`,
+/// phase 6).
 fn histogram_close_instructions(
     btf: &Btf,
     stage: Stage,
     inflight_fd: i32,
     hist_fd: i32,
     counters_fd: i32,
+    direct: bool,
 ) -> Result<Vec<Insn>, String> {
     if stage.opens_at().is_none() {
         return Err(format!(
@@ -1031,10 +1039,19 @@ fn histogram_close_instructions(
     // The device, or zero for a request that belongs to no partition -- the
     // same reading, and the same zero, as the ring path's.
     program.push(Insn::st_imm(BPF_DW, R10, HIST_KEY, 0));
-    read_field(&mut program, PART, 8, 7, part);
-    program.push(Insn::ldx(BPF_DW, 9, R10, PART));
-    program.jump_to("no_device", Insn::jeq_imm(9, 0, 0));
-    read_field(&mut program, HIST_KEY, 4, 9, bd_dev);
+    if direct {
+        // A load through a typed pointer that faults reads zero, which is
+        // the same zero the helper leaves on a failed read.
+        program.push(Insn::ldx(BPF_DW, 9, 7, part as i16));
+        program.jump_to("no_device", Insn::jeq_imm(9, 0, 0));
+        program.push(Insn::ldx(BPF_W, 1, 9, bd_dev as i16));
+        program.push(Insn::stx(BPF_W, R10, HIST_KEY, 1));
+    } else {
+        read_field(&mut program, PART, 8, 7, part);
+        program.push(Insn::ldx(BPF_DW, 9, R10, PART));
+        program.jump_to("no_device", Insn::jeq_imm(9, 0, 0));
+        read_field(&mut program, HIST_KEY, 4, 9, bd_dev);
+    }
     program.label("no_device");
 
     insn::push_log2_bucket(&mut program, 8, &LABELS);
@@ -1163,6 +1180,9 @@ pub struct BlockProgram {
     /// The kernel-side histogram, when the closing program counts into one
     /// rather than publishing a record per request.
     histogram: Option<PerCpuRows>,
+    /// Whether the closing program went through `tp_btf` rather than the raw
+    /// tracepoint: the same rows, with two helper calls fewer a request.
+    close_is_tp_btf: bool,
     /// Why the programs read no request identity, when they do not: this
     /// kernel would not give them a task-storage map. The measurement is the
     /// same; only `req` is missing from every event, and the run says so.
@@ -1266,25 +1286,48 @@ impl BlockProgram {
         } else {
             None
         };
-        let close = match &histogram {
+        // A histogram's close goes through `tp_btf` where the kernel loads
+        // it, and otherwise through the raw tracepoint: the same rows, read
+        // with two helper calls more.
+        let direct = match &histogram {
             Some(rows) => histogram_close_instructions(
                 btf,
                 stage,
                 inflight_fd,
                 rows.as_raw_fd(),
                 counters.as_raw_fd(),
-            )?,
-            None => close_instructions(
-                btf,
-                stage,
-                kept,
-                inflight_fd,
-                ring_map.as_raw_fd(),
-                counters.as_raw_fd(),
-                storage_fd,
-            )?,
+                true,
+            )
+            .ok()
+            .and_then(|close| load_tp_btf(btf, stage.closes_at(), &close, "omn_blk_close").ok()),
+            None => None,
         };
-        let close_program = load(&close, "omn_blk_close")?;
+        let close_is_tp_btf = direct.is_some();
+        let close_program = match direct {
+            Some(program) => program,
+            None => {
+                let close = match &histogram {
+                    Some(rows) => histogram_close_instructions(
+                        btf,
+                        stage,
+                        inflight_fd,
+                        rows.as_raw_fd(),
+                        counters.as_raw_fd(),
+                        false,
+                    )?,
+                    None => close_instructions(
+                        btf,
+                        stage,
+                        kept,
+                        inflight_fd,
+                        ring_map.as_raw_fd(),
+                        counters.as_raw_fd(),
+                        storage_fd,
+                    )?,
+                };
+                load(&close, "omn_blk_close")?
+            }
+        };
         let status_is_errno = stage.closes_at() == "block_rq_complete"
             && check_signature(btf, "block_rq_complete", &COMPLETE_SIGNATURES)? == 1;
 
@@ -1352,8 +1395,12 @@ impl BlockProgram {
         };
 
         let closes_at = stage.closes_at();
-        let close_link = syscall::raw_tracepoint_open(closes_at, close_program.as_raw_fd())
-            .map_err(|error| format!("cannot attach to the `{closes_at}` tracepoint: {error}"))?;
+        let close_link = if close_is_tp_btf {
+            syscall::tracing_open(close_program.as_raw_fd())
+        } else {
+            syscall::raw_tracepoint_open(closes_at, close_program.as_raw_fd())
+        }
+        .map_err(|error| format!("cannot attach to the `{closes_at}` tracepoint: {error}"))?;
 
         let ring = RingBuffer::map(ring_map, bytes)
             .map_err(|error| format!("cannot map the block ring buffer: {error}"))?;
@@ -1367,6 +1414,7 @@ impl BlockProgram {
             close_program,
             close_link: Some(close_link),
             histogram,
+            close_is_tp_btf,
             no_request_identity,
             status_is_errno,
             descendants,
@@ -1405,6 +1453,11 @@ impl BlockProgram {
     /// Whether the closing program counts into a kernel-side histogram.
     pub fn is_histogram(&self) -> bool {
         self.histogram.is_some()
+    }
+
+    /// Whether the closing program is attached through `tp_btf`.
+    pub fn close_is_tp_btf(&self) -> bool {
+        self.close_is_tp_btf
     }
 
     /// Detaches both programs and keeps them loaded.
@@ -1615,6 +1668,33 @@ fn sum_copies(copies: &[u8]) -> Vec<u8> {
     words.iter().flat_map(|word| word.to_ne_bytes()).collect()
 }
 
+/// `BPF_TRACE_RAW_TP`, from `include/uapi/linux/bpf.h`. Frozen UAPI.
+const BPF_TRACE_RAW_TP: u32 = 23;
+
+/// Loads `instructions` as a `tp_btf` program on `tracepoint`, unattached:
+/// the caller opens the link ([`syscall::tracing_open`]) after the opening
+/// program's, so the attach order is the same either way. A failure -- a
+/// kernel without the attach type, a verifier that refuses the loads -- is
+/// the caller's cue to fall back on the raw tracepoint.
+fn load_tp_btf(
+    btf: &Btf,
+    tracepoint: &str,
+    instructions: &[Insn],
+    name: &str,
+) -> Result<OwnedFd, String> {
+    let id = btf
+        .tracepoint_id(tracepoint)
+        .ok_or_else(|| format!("no `btf_trace_{tracepoint}` in this kernel's BTF"))?;
+    let function = super::attach::fentry::Function {
+        name: tracepoint.to_owned(),
+        id,
+        params: Vec::new(),
+        returns: "void".to_owned(),
+    };
+    super::attach::fentry::load_tracing(&function, BPF_TRACE_RAW_TP, instructions, name)
+        .map_err(|error| error.to_string())
+}
+
 fn load(instructions: &[Insn], name: &str) -> Result<OwnedFd, String> {
     syscall::prog_load(
         syscall::BPF_PROG_TYPE_RAW_TRACEPOINT,
@@ -1736,7 +1816,7 @@ mod tests {
                         .unwrap_or_else(|reason| panic!("{stage:?} histogram open: {reason}")),
                 );
                 programs.push(
-                    histogram_close_instructions(btf, stage, 3, 7, 5)
+                    histogram_close_instructions(btf, stage, 3, 7, 5, false)
                         .unwrap_or_else(|reason| panic!("{stage:?} histogram close: {reason}")),
                 );
             }
@@ -1979,7 +2059,7 @@ mod tests {
     fn a_histogram_close_writes_no_record_and_counts_its_row_without_an_atomic() {
         let Some(btf) = kernel_btf() else { return };
         let program =
-            histogram_close_instructions(btf, Stage::Latency, 3, 7, 5).expect("a program");
+            histogram_close_instructions(btf, Stage::Latency, 3, 7, 5, false).expect("a program");
         let helpers = helpers_called(&program);
         assert!(
             !helpers.contains(&helper::RINGBUF_OUTPUT),
@@ -2000,7 +2080,7 @@ mod tests {
             "each cpu adds to its own copy of the row"
         );
         // A stage with no interval has nothing to bucket.
-        let error = histogram_close_instructions(btf, Stage::Size, -1, 7, 5)
+        let error = histogram_close_instructions(btf, Stage::Size, -1, 7, 5, false)
             .expect_err("io.size has no interval");
         assert!(error.contains("measures none"), "{error}");
     }
@@ -2061,7 +2141,8 @@ mod tests {
             "the filter runs before the clock, so a refused request costs one helper"
         );
 
-        let close = histogram_close_instructions(btf, Stage::Latency, 3, 7, 5).expect("a program");
+        let close =
+            histogram_close_instructions(btf, Stage::Latency, 3, 7, 5, false).expect("a program");
         let close_helpers = helpers_called(&close);
         // Up to the row's first lookup, in order: what every paired
         // completion pays.
@@ -2086,6 +2167,46 @@ mod tests {
                 "the histogram close calls helper {absent}"
             );
         }
+    }
+
+    /// Built for `tp_btf`, the close reads the device with two loads and
+    /// no helper; and this kernel's verifier takes it, where the machine
+    /// lets the test load programs.
+    #[test]
+    fn the_tp_btf_close_reads_the_device_without_a_helper() {
+        let Some(btf) = kernel_btf() else {
+            return;
+        };
+        let close =
+            histogram_close_instructions(btf, Stage::Latency, 3, 7, 5, true).expect("a program");
+        let helpers = helpers_called(&close);
+        assert!(!helpers.contains(&helper::PROBE_READ_KERNEL), "{helpers:?}");
+        assert_eq!(
+            helpers[..3],
+            [
+                helper::KTIME_GET_NS,
+                helper::MAP_LOOKUP_ELEM,
+                helper::MAP_LOOKUP_ELEM
+            ]
+        );
+        assert!(btf.tracepoint_id("block_rq_complete").is_some());
+        assert_eq!(btf.tracepoint_id("no_such_tracepoint"), None);
+    }
+
+    /// On a kernel with BTF and the capabilities, a histogram's close is
+    /// attached through `tp_btf`; the ring path keeps its raw tracepoint.
+    #[test]
+    fn a_histogram_closes_through_tp_btf_where_the_kernel_loads_it() {
+        let program = match BlockProgram::load_histogram(Stage::Latency, Submitter::Any) {
+            Ok(program) => program,
+            Err(error) => {
+                eprintln!("skipped: the block programs did not load here: {error}");
+                return;
+            }
+        };
+        assert!(program.close_is_tp_btf());
+        let ring = BlockProgram::load(Stage::Latency, Submitter::Any, 0).expect("the ring path");
+        assert!(!ring.close_is_tp_btf());
     }
 
     /// A row's per-cpu copies are added word by word: the count with the
