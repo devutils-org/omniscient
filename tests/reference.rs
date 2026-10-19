@@ -65,10 +65,19 @@ fn parsers_of(family: &str) -> Vec<Parser> {
         .unwrap_or_else(|| panic!("no family `{family}`"))
 }
 
+/// One family's pairs at a time. The test harness runs a binary's tests on
+/// as many threads as there are cpus, and the families measure the machine:
+/// run together, a full run failed `vmstat-r`, `top-batch-cpus` and
+/// `perf-sched-timehist-delay`, which hold alone, each family's load in the
+/// others' numbers. A family waits for the one before it; the parsers' tests
+/// beside them still run at once.
+static ONE_FAMILY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 macro_rules! family_pairs {
     ($($test:ident => $family:literal),* $(,)?) => {$(
         #[test]
         fn $test() {
+            let _alone = ONE_FAMILY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             runner::run_family($family, &parsers_of($family));
         }
     )*};

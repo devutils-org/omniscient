@@ -135,3 +135,14 @@ eBPF layer: those tests skip, loudly. The integration tests run
 `target/debug/omn` and do take the privileged path once it carries them; the
 in-process unit tests cannot, because their binaries are rebuilt under a fresh
 hash every run.
+
+A test that fails with **nothing on stdout or stderr** may have been killed,
+not failed: a terminal that sets `RLIMIT_RTTIME` to 0 (DankMaterialShell's
+launcher passes it to everything it starts) gets its processes SIGKILLed by
+the kernel's CPU-time check now and then (`docs/open-findings.md`, "The
+SIGKILLs with no output"). `grep "realtime timeout" /proc/self/limits` says;
+`systemd-run --user --wait --pipe -p WorkingDirectory=$PWD --setenv=PATH="$PATH"
+make check` runs the suite without it. And a second agent working in the same
+checkout rebuilds `target/debug/omn`, which drops its capabilities mid-run:
+work in a `git worktree` of your own (`omniscient*` paths are in the sudoers
+line) and run `make` there.
