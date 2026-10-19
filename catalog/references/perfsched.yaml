@@ -48,13 +48,15 @@
   compare:
     key: total.calls
     omn: results[source=io.vfs].outputs[emit=summary].series[key=op:vfs_read].total
-    tolerance: {abs: 0}
+    tolerance: {abs: 3}
     why: "alternate runs of a deterministic workload: 20000 pread64 of one
       byte and python3's own reads at startup. read(2) and pread64(2) each
       call vfs_read once, so strace's total of the two is omn's vfs_read
       count of the launched program: 20191 against 20191 here, two runs. A
       read refused before it reaches the VFS (a bad descriptor) would be on
-      strace's side alone; the workload makes none"
+      strace's side alone; the workload makes none. The interpreter's own
+      startup reads move by a few between alternate runs: Fedora 44 +2,
+      Gentoo -1 (distroproof, 2026-10-19), the 20000 exact every time"
 
 - id: strace-c-latency
   source: proc.syscall

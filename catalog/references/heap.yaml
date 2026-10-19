@@ -41,8 +41,8 @@
   compare:
     key: total_bytes
     omn: results.0.outputs[emit=topk].series.0.total
-    tolerance: {rel: 0.001}
-    why: "both intercept malloc, calloc, realloc and memalign in the program and sum the bytes asked for; alternate runs, the workload's bytes identical to the byte and the interpreter's within ~200 bytes of 73.6 MB (valgrind's own startup adds a few small blocks)"
+    tolerance: {rel: 0.002, side: above}
+    why: "both intercept malloc, calloc, realloc and memalign in the program and sum the bytes asked for; alternate runs, the workload's bytes identical to the byte and the interpreter's within ~200 bytes of 73.6 MB (valgrind's own startup adds a few small blocks). The interpreter asks for less under valgrind, never more: omn over dhat by 0.03 % (Debian 12), 0.05 % (Arch) and 0.13 % on musl (Alpine 3.24), distroproof 2026-10-19"
 
 - id: dhat-total-blocks
   source: mem.heap.alloc
