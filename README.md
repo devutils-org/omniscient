@@ -16,8 +16,10 @@
 - Follow live measurements, compose sessions and correlate events with explicit evidence.
 - See collection loss, backend selection and measurement cost beside the results.
 
-In development. Linux 5.15+ is served; backend requirements and permissions vary.
-Impossible measurements are refused with the reason, rather than approximated.
+In development. Installed releases were tested on 16 distro images and 5
+variants, spanning Linux 4.15–7.2, with availability probed per source.
+Backend requirements and permissions vary; measurements that cannot be served
+are refused with the reason.
 
 ## Install
 
@@ -42,6 +44,20 @@ omn -f examples/allocation-cost.yml         # a composed measurement session
 
 Replace `./build.sh` with your program. Sessions also accept JSON and TOML;
 `omn formats` lists output formats and their supported measurements.
+
+## Portability, tested with distroproof
+
+The latest [distroproof campaign](docs/distroproof.md) found 16 defects that
+one development machine had not shown: 9 in the tool and 7 in its tests.
+After the fixes, none of the source runs advertised as usable refused at
+start, and every refusal reason agreed with envprobe on all 21 targets.
+This checks availability and refusal reasons; reference comparisons against
+distro-packaged tools on six distributions still have open differences.
+aarch64, containers and NixOS are not covered by this campaign.
+
+Release archives target **glibc 2.17+**, with a separate **musl** archive for
+Alpine. The static musl build cannot load NVIDIA's libraries and refuses
+those sources explicitly. See [installation](docs/install.md).
 
 ## Documentation
 
