@@ -2003,9 +2003,8 @@ count.
    root's):
 
    ```console
-   sudo mount -o remount,mode=755 /sys/kernel/tracing          # after each boot
-   sudo chmod o+r /sys/class/powercap/intel-rapl:0/energy_uj   # after each boot
-   cd /home/moha/repos/omniscient && make CAPTURE=1
+   scripts/after-boot.sh      # after each boot: tracefs, RAPL, bpf_stats_enabled
+   make CAPTURE=1
    cargo test --test reference -- --test-threads=1 --nocapture
    ```
 
