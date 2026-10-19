@@ -44,6 +44,7 @@ image = "alpine"
 [[target]]
 name = "chain-gentoo"
 image = "gentoo"
+timeout = "120m"
 
 [run]
 setup = "sh scripts/distroproof/witnesses.sh"

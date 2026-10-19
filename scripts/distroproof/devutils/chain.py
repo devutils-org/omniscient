@@ -150,7 +150,7 @@ def main():
         env=dict(os.environ, OMN_REFERENCE_ROOT=os.getcwd(),OMN_REFERENCE_BIN='/opt/omn/bin/omn')
         # Streamed to the file, so a hung pair still leaves the log up to it.
         with open('reference.log','w') as log:
-            p=subprocess.Popen(['target/devutils-input/reference','--test-threads=1','--nocapture','pairs_'],
+            p=subprocess.Popen(['/opt/devutils/reference','--test-threads=1','--nocapture','pairs_'],
                                stdout=log,stderr=subprocess.STDOUT,env=env)
             try:p.wait(timeout=2400)
             except subprocess.TimeoutExpired:

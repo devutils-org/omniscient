@@ -33,7 +33,8 @@ def main():
         def add(path, name):
             shutil.copy2(path, stage / name)
             manifest['files'][name] = digest(stage / name)
-        add(ROOT / 'target/dp-reference/reference', 'reference')
+        add(ROOT / 'target/dp-reference/reference', 'reference-gnu')
+        add(ROOT / 'target/dp-reference/reference-musl', 'reference-musl')
         add(args.vmanyware / 'examples/kernel-lab.yaml', 'environment.yaml')
         for flavor in ('gnu', 'musl'):
             archives = list((ROOT / 'target/dist').glob('omn-*-x86_64-linux-' + flavor + '.tar.gz'))

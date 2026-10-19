@@ -7,6 +7,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 
 XPAC = '/opt/xpac/xpac'
 
@@ -32,6 +33,15 @@ def candidate(provider, package):
         result = run(['pacman', '-Si', '--', package])
         absent = 'was not found' in result['stderr'] or 'target not found' in result['stderr']
         return result, result['code'] == 0, result['code'] == 0 or absent
+    if provider == 'apk':
+        # apk policy exits 0 for an unknown name too, printing nothing.
+        result = run(['apk', 'policy', package])
+        return result, 'policy:' in result['stdout'], result['code'] == 0
+    if provider == 'portage':
+        # Masked, missing or (with --getbinpkgonly) not built as a binary:
+        # emerge refuses with 1 and says which.
+        result = run(['emerge', '--pretend', '--quiet', '--nospinner', '--color=n', '--', package])
+        return result, result['code'] == 0, True
     result = run(['dnf', 'repoquery', '--available', '--qf', '%{name}', package])
     return result, bool(result['stdout'].strip()) and result['code'] == 0, result['code'] == 0
 
@@ -48,21 +58,36 @@ def main():
                           if '=' in line and not line.startswith('#'))
         identity = os_release.get('ID', '').strip('"')
         family = ('ubuntu' if identity == 'ubuntu' else 'debian' if shutil.which('apt-get') else
-                  'arch' if shutil.which('pacman') else 'fedora' if shutil.which('dnf') else None)
+                  'arch' if shutil.which('pacman') else 'fedora' if shutil.which('dnf') else
+                  'alpine' if shutil.which('apk') else 'gentoo' if shutil.which('emerge') else None)
         report['xpac_version'] = run([XPAC, '--version'])
         report['providers'] = run([XPAC, 'providers', '--json'])
         if not family:
             report['engine'] = 'unsupported_native_provider'
-            report['reason'] = 'xpac has no APK/Portage adapter; companion binaries remain testable'
+            report['reason'] = 'no native package manager xpac drives'
         else:
             selection = json.loads(Path('scripts/distroproof/devutils/packages.json').read_text())[family]
             provider = selection['provider']
             report['provider'] = provider
             report['engine'] = 'dnf4-bootstrap' if provider == 'dnf' and not shutil.which('dnf5') else 'xpac'
+            if provider == 'portage':
+                # Binaries from the stage's configured host, and nothing built
+                # from source: a witness with no binary is unavailable here.
+                with open('/etc/portage/make.conf', 'a') as conf:
+                    conf.write('FEATURES="${FEATURES} getbinpkg"\nEMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --getbinpkgonly"\n')
             refresh = (['apt-get', 'update', '-qq'] if provider == 'apt' else
-                       ['pacman', '-Sy', '--noconfirm'] if provider == 'pacman' else ['dnf', 'makecache', '-y'])
-            result = run(refresh)
+                       ['pacman', '-Sy', '--noconfirm'] if provider == 'pacman' else
+                       ['apk', 'update'] if provider == 'apk' else
+                       ['emerge', '--sync', '--quiet'] if provider == 'portage' else ['dnf', 'makecache', '-y'])
+            result = run(refresh, timeout=900)
             report['bootstrap'].append(result)
+            for pause in (30, 60):
+                # A Gentoo mirror caught mid-update fails manifest verification.
+                if result['code'] == 0 or provider != 'portage':
+                    break
+                time.sleep(pause)
+                result = run(refresh, timeout=900)
+                report['bootstrap'].append(result)
             if result['code'] != 0:
                 raise ValueError('native metadata refresh failed: ' + result['stderr'][-1200:])
             for required, packages in [(True, selection['required']), (False, selection['optional'])]:
@@ -95,7 +120,7 @@ def main():
                             report['errors'].append(package + ': preview failed')
                             continue
                         entry['apply'] = run([XPAC, 'apply', '-f', str(manifest), '--yes', '--state-dir',
-                                              '/var/lib/xpac-devutils', '--json'], timeout=600)
+                                              '/var/lib/xpac-devutils', '--json'], timeout=1800)
                     if entry['apply']['code'] != 0:
                         entry['reason'] = 'installation failed despite an available candidate'
                         report['errors'].append(package + ': installation failed')

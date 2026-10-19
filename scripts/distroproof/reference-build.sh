@@ -16,3 +16,12 @@ mkdir -p target/dp-reference
 cp "$binary" target/dp-reference/reference
 echo "reference-build: target/dp-reference/reference ($(objdump -T target/dp-reference/reference \
     | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -n 1))"
+# The same runner for musl systems (Alpine), which have no glibc loader for
+# the one above: exec there fails with "No such file or directory".
+musl=$(cargo zigbuild --release --locked --test reference --target "$(uname -m)-unknown-linux-musl" \
+    --message-format=json 2>/dev/null \
+    | jq -r 'select(.executable != null and .target.name == "reference") | .executable' \
+    | tail -n 1)
+[ -n "$musl" ] || { echo "reference-build: the musl runner did not build" >&2; exit 1; }
+cp "$musl" target/dp-reference/reference-musl
+echo "reference-build: target/dp-reference/reference-musl"

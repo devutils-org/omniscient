@@ -36,7 +36,8 @@ def judge(target, cell, witnesses, manifest, reference_log):
     require(all(c['status']=='pass' for c in checks.values()),'scenario failed: '+repr([(c['name'],c.get('error')) for c in checks.values() if c['status']!='pass']))
     engine=witnesses['engine']
     if engine=='unsupported_native_provider':
-        require(target['image'] in {'alpine','gentoo'},'unjustified missing native provider')
+        # xpac drives every image's package manager since ADR 014 and 015.
+        require(False,'unjustified missing native provider')
         require(bool(checks['omn-reference-pairs']['detail'].get('not_applicable')),'missing reference exclusion')
         pairs={'held':0,'skipped':0,'scope':'native provisioning unavailable'}
     else:

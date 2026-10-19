@@ -29,6 +29,7 @@ if [ -e /lib/ld-musl-x86_64.so.1 ]; then chain_libc=musl; else chain_libc=gnu; f
 tar -xzf "target/devutils-input/omn-$chain_libc.tar.gz" -C /opt/omn --strip-components=1
 cp "target/devutils-input/atfq-$chain_libc" /opt/devutils/atfq
 cp "target/devutils-input/vmanyware-server-$chain_libc" /opt/devutils/vmanyware-server
+cp "target/devutils-input/reference-$chain_libc" /opt/devutils/reference
 chmod 755 /opt/devutils/*
 ln -sf /opt/xpac/xpac /usr/local/bin/xpac
 printf '%s\n' "$DP_TARGET" > /etc/devutils-distroproof-guest
