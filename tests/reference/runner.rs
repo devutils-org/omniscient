@@ -1113,16 +1113,17 @@ const REFUSALS: &[&str] = &[
 ];
 
 /// The tool's stderr lines that say the machine refused it.
+/// The lines that say the tool was refused: the general phrases on stderr,
+/// and the pair's own `refused_when` on either stream, since a tool may report
+/// its refusal on stdout (`ncu`'s `==ERROR== ERR_NVGPUCTRPERM`), where the
+/// general phrases would read the tool's data as a refusal.
 fn refused_lines(pair: &Pair, side: &Side) -> Vec<String> {
+    let own = |l: &str| pair.reference.refused_when.iter().any(|s| l.contains(s));
+    let general = |l: &str| REFUSALS.iter().any(|s| l.contains(s));
     side.stderr
         .lines()
-        .filter(|l| {
-            REFUSALS
-                .iter()
-                .map(|s| s.to_string())
-                .chain(pair.reference.refused_when.iter().cloned())
-                .any(|s| l.contains(&s))
-        })
+        .filter(|l| general(l) || own(l))
+        .chain(side.stdout.lines().filter(|l| own(l)))
         .map(|l| l.trim().to_string())
         .take(8)
         .collect()
@@ -2316,6 +2317,29 @@ compare: {omn: a, omn_jq: ".a", tolerance: {abs: 0, side: above, band: 2}, why: 
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A pair's own `refused_when` is read on stdout too, where `ncu` writes
+    /// `==ERROR== ERR_NVGPUCTRPERM`; a general phrase there is the tool's
+    /// data, not a refusal.
+    #[test]
+    fn a_pair_s_own_refusal_is_read_on_stdout_too() {
+        let mut p = pair(BASE);
+        p.reference.refused_when = vec!["ERR_NVGPUCTRPERM".into()];
+        p.reference.command[2] = "echo '==ERROR== ERR_NVGPUCTRPERM - no access'; exit 1".into();
+        match run_pair(&p, &parsers(), Path::new(SH)) {
+            Outcome::Skip(reason, quoted) => {
+                assert!(reason.contains("was refused"), "{reason}");
+                assert_eq!(quoted, ["==ERROR== ERR_NVGPUCTRPERM - no access"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        p.reference.refused_when.clear();
+        p.reference.command[2] = "echo 'Permission denied'; exit 1".into();
+        assert!(
+            !matches!(run_pair(&p, &parsers(), Path::new(SH)), Outcome::Skip(..)),
+            "a general phrase on stdout is no refusal"
+        );
     }
 
     /// `alongside`: `attach` with no `{pid}`, the workload optional.

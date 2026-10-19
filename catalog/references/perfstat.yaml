@@ -234,7 +234,11 @@
   source: cpu.context_switches
   tool: perf stat
   use: "perf stat -a -e context-switches -- sleep N (system-wide)"
-  workload: [sleep, "2"]
+  # 40000 sleeps of 50 us: about as many switches of the workload's own,
+  # so sudo's and perf's start and exit, a thousand switches on a quiet
+  # machine, are a few percent of the count rather than a fifth of an idle
+  # machine's 5600 (2026-10-19).
+  workload: [python3, tests/reference/workloads/perfsched/sleeper.py, "40000", "0.05"]
   run: omn_launches_tool
   omn: [trace, cpu.context_switches, --system, -m, count, -e, summary, --format, json, -o, "{out}"]
   reference:
@@ -247,7 +251,7 @@
     key: context-switches
     omn: results.0.outputs[emit=summary].series.*.last
     tolerance: {rel: 0.15, abs: 500, side: above}
-    why: "one run, as for cycles: perf's window is inside omn's, so omn can only read more; switches are bursty, and sudo's and perf's start and exit switch a lot, so the time outside perf's window weighs more than for a steady counter (+4.2, +2.8, +1.9 % over three runs here, of 85 000 to 131 000). Those switches are a count of their own, not a share: on distroproof's quiet two-cpu Fedora 44 guest the machine made 1715 in the window and omn read 328 more, hence 500 beside the 15 %"
+    why: "one run, as for cycles: perf's window is inside omn's, so omn can only read more; switches are bursty, and sudo's and perf's start and exit switch a lot, so the time outside perf's window weighs more than for a steady counter (+886 to +1013 of 111 000 to 191 000 with the sleeper, +0.5 to +0.8 %, three runs here). Those switches are a count of their own, not a share: on distroproof's quiet two-cpu Fedora 44 guest the machine made 1715 in the window and omn read 328 more, hence 500 beside the 15 %"
 
 - id: cpu.instructions.cgroup
   source: cpu.instructions

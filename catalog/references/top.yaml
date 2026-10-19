@@ -277,14 +277,17 @@
   compare:
     key: pss
     omn: results[source=mem.pss].outputs[emit=summary].series.*.last
-    tolerance: {rel: 0.02, side: above}
+    tolerance: {rel: 0.02, abs: 2621440, side: above}
     why: >-
       As pmap's Pss, on one run, with one mapper more on smem's side: smem
       is itself a python3, mapping the interpreter while it reads, so the
       workload's share of every page they both map falls, and only falls.
       omn may exceed smem, never fall short; by at most half the pages the
       workload shares (RSS less USS, about 7 MiB here, so 3.4 MiB or 4.8 %).
-      Measured 0.45-0.89 % with smem 1.5-8 installed; the band is 2 %. The
+      Measured 0.45-0.89 % with smem 1.5-8 at first; Arch's python3 maps
+      libpython3.14.so, whose file pages are
+      the workload's alone until smem's python3 maps them too: 1.9 MB under,
+      every run (2026-10-19), hence 2.5 MiB beside the 2 %. The
       poll is omn's last, the one nearest smem's read: PSS moves whenever
       another process on the machine maps the interpreter or lets it go.
 
@@ -304,6 +307,12 @@
   compare:
     key: uss
     omn: results[source=mem.uss].outputs[emit=summary].series.*.max
-    tolerance: {rel: 0.01}
+    tolerance: {rel: 0.01, abs: 5242880, side: above}
     why: >-
-      The private pages are the workload's alone; one run, as the pmap pairs.
+      One run, as the pmap pairs. A private page is the workload's alone only
+      while no other process maps it: libpython3.14.so's file pages, which
+      Arch's python3 maps, are private to the workload until smem -- itself a
+      python3 -- maps them to read, and its USS falls by them (72636 kB
+      before smem started, 69108 kB while it ran; 3.8 MB under omn's largest
+      poll, every run, 2026-10-19). omn may exceed smem by them, never fall
+      short: 5 MiB beside the 1 %.
