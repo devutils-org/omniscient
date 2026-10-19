@@ -1398,11 +1398,12 @@ mod tests {
             eprintln!("skipped: this machine refuses unprivileged perf counting");
             return;
         }
+        // `black_box` on every step: on the sum alone, a release build folds
+        // the loop into its closed form and 170 instructions were counted.
         let mut total = 0u64;
         for index in 0..100_000u64 {
-            total = total.wrapping_add(index);
+            total = std::hint::black_box(total.wrapping_add(index));
         }
-        std::hint::black_box(total);
 
         let events = collector.stop();
         assert_eq!(events.len(), 1, "a counted window produces one value");
