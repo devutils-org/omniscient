@@ -1,6 +1,9 @@
 # Cross-tool installed-artifact campaign, using only disposable QEMU guests.
 # sh scripts/distroproof/devutils-build.sh
-# distroproof up -f distroproof-devutils.toml --no-tui --jobs 3 --json target/matrix/devutils.json
+# distroproof up -f distroproof-devutils.toml --no-tui --jobs 1 --json target/matrix/devutils.json
+# One cell at a time, as distroproof-reference.toml: cpu.cache_misses,
+# runqlat and every other pair read across the machine missed their band with
+# three guests sharing the host's cache and cpus (2026-10-19).
 [defaults]
 memory = "3G"
 cpus = 2
