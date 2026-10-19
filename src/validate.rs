@@ -1007,6 +1007,28 @@ mod tests {
         validate_request(&catalog(), request, OutputFormat::Text).unwrap_err()
     }
 
+    /// The examples `--value`'s help gives are attributes their sources
+    /// declare: `--value busy` on `power.freq` was refused as undeclared, the
+    /// help's own example, until the catalog listed `busy`, `idle` and
+    /// `avg_hz` (found writing turbostat's `Busy%` pair).
+    #[test]
+    fn the_value_attributes_the_help_names_are_declared() {
+        for (source, mode, value) in [
+            ("power.freq", "poll", "busy"),
+            ("power.freq", "poll", "avg_hz"),
+            ("proc.syscall", "count", "errors"),
+        ] {
+            let mut r = request(source, Target::System, mode, "summary");
+            r.value = Some(value.to_owned());
+            if let Err(rejections) = validate_request(&catalog(), &r, OutputFormat::Text) {
+                panic!("`{source} --value {value}`: {rejections:?}");
+            }
+        }
+        let mut r = request("power.freq", Target::System, "poll", "summary");
+        r.value = Some("bussy".to_owned());
+        assert!(format!("{:?}", reject(&r)).contains("does not declare"));
+    }
+
     /// `topk:N@<attr>` over an attribute the entry declares is kept; over one
     /// it does not, it is refused naming the ones it could have used -- the
     /// filter check's answer, for a ranking.

@@ -94,7 +94,7 @@
   emits: [timeline, hist, raw, summary]
   targets: {system: native, cpu: native}
   keys: [cpu]
-  filter_fields: [cpu]
+  filter_fields: [cpu, busy, idle, avg_hz]
   determinism: low
   caveats:
     - "The requested frequency is what the governor asked for; the effective one
