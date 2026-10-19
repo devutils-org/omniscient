@@ -316,3 +316,29 @@
       before smem started, 69108 kB while it ran; 3.8 MB under omn's largest
       poll, every run, 2026-10-19). omn may exceed smem by them, never fall
       short: 5 MiB beside the 1 %.
+
+- id: slabtop-cache-size
+  source: mem.slab
+  tool: slabtop
+  use: slabtop -o -s c, every cache's CACHE SIZE
+  run: alongside
+  settle_ms: 0
+  omn: [trace, mem.slab, -m, snapshot, -e, raw, --format, json]
+  omn_sudo: true
+  reference:
+    command: [sh, -c, '$SUDO slabtop -o -s c']
+    parse: slabtop_cache_size
+    requires: [slabtop, sh]
+    privileged: true
+    sudo: slabtop
+  compare:
+    key: cache_size
+    omn_parse: omn_slab_bytes
+    tolerance: {rel: 0.01}
+    why: >-
+      Both read /proc/slabinfo, root's, at nearly the same instant: slabtop's
+      CACHE SIZE is each cache's slabs times its pages, as omn's `bytes` is,
+      summed over every cache (813428 KiB against 813428 by hand, 2026-10-19).
+      The slabs move between the two reads with the machine's allocations,
+      and 1 % holds that. omn runs through `sudo -n` (`omn_sudo`), granted
+      for `omn trace mem.slab` alone.

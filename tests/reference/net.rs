@@ -14,6 +14,10 @@ use serde_json::Value as Json;
 pub fn parsers() -> Vec<Parser> {
     vec![
         Parser {
+            name: "libbpf_tcplife",
+            parse: libbpf_tcplife,
+        },
+        Parser {
             name: "ip_s_link_delta",
             parse: ip_s_link_delta,
         },
@@ -349,6 +353,31 @@ fn add(out: &mut Values, key: String, v: f64) {
         Some((_, sum)) => *sum += v,
         None => out.push((key, v)),
     }
+}
+
+/// libbpf-tools' `tcplife -p PID`: `PID COMM LADDR LPORT RADDR RPORT TX_KB
+/// RX_KB MS`, one row per TCP session the process closed, counted under
+/// `sessions` and its volumes summed under `tx_kb` and `rx_kb`.
+fn libbpf_tcplife(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let mut out = Values::new();
+    let mut sessions = 0.0;
+    for line in stdout.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if words.len() < 9 || words[0].parse::<u64>().is_err() {
+            continue;
+        }
+        let n = words.len();
+        let kb = |at: usize| {
+            words[at]
+                .parse::<f64>()
+                .map_err(|_| format!("`{}` is no size", words[at]))
+        };
+        add(&mut out, "tx_kb".into(), kb(n - 3)?);
+        add(&mut out, "rx_kb".into(), kb(n - 2)?);
+        sessions += 1.0;
+    }
+    add(&mut out, "sessions".into(), sessions);
+    Ok(out)
 }
 
 /// omn's `net.bytes`, `net.packets` or `net.iface` summary in `ip -s

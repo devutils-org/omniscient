@@ -65,6 +65,11 @@ pub struct Pair {
     /// marker would then outlive the defect.
     #[serde(default)]
     pub known_defect: Option<String>,
+    /// `omn` itself runs through `sudo -n`: a source only root may read
+    /// (`mem.slab`'s `/proc/slabinfo`). Granted per command in the sudoers
+    /// file; where it is not, `sudo` refuses and the pair skips with that.
+    #[serde(default)]
+    pub omn_sudo: bool,
     #[serde(flatten)]
     pub unknown: Unknown,
 }
@@ -1280,7 +1285,13 @@ fn omn_command(
     program: &[String],
     pid: Option<u32>,
 ) -> Command {
-    let mut cmd = Command::new(omn);
+    let mut cmd = if pair.omn_sudo {
+        let mut sudo = Command::new("sudo");
+        sudo.arg("-n").arg(omn);
+        sudo
+    } else {
+        Command::new(omn)
+    };
     cmd.args(substitute(&pair.omn, tmp, pid));
     if !program.is_empty() {
         cmd.arg("--").args(program);

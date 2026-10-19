@@ -1754,7 +1754,7 @@ count.
   overruns a heatmap source's ring), the reference pairs whose root tools
   are neither installed nor captured, the pairs to rewrite as `omn ...
   --system -- workload` (each to be shown unchanged under its tool), and a
-  `mem.slab` pair once slabtop is granted.
+  `mem.slab` pair once slabtop is granted (done 2026-10-19: `slabtop-cache-size`, exact, omn through `sudo -n`).
 - **Privileged runs these streams want** (each handoff gives the command):
   every eBPF attach above -- the OOM victims against `journalctl -k`, the
   slab caches against `slabtop`, pcap through `tcpdump -r`, the connect

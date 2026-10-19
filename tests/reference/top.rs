@@ -31,6 +31,14 @@ pub fn parsers() -> Vec<Parser> {
             parse: pmap_xx_total,
         },
         Parser {
+            name: "slabtop_cache_size",
+            parse: slabtop_cache_size,
+        },
+        Parser {
+            name: "omn_slab_bytes",
+            parse: omn_slab_bytes,
+        },
+        Parser {
             name: "smem_uss_pss_rss",
             parse: smem_uss_pss_rss,
         },
@@ -333,6 +341,54 @@ fn pmap_xx_total(stdout: &str, _stderr: &str) -> Result<Values, String> {
         values.push(("uss".into(), clean + dirty));
     }
     Ok(values)
+}
+/// `slabtop -o`: the sum of the table's CACHE SIZE column, in bytes, under
+/// `cache_size` -- each cache's slabs times its pages, free objects included,
+/// which is what `mem.slab`'s `bytes` are. Not the header's "Total Size",
+/// which is objects times their size, 1.4 % less here.
+fn slabtop_cache_size(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let mut kib = 0.0;
+    let mut rows = 0;
+    for line in stdout.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        // OBJS ACTIVE USE OBJ_SIZE SLABS OBJ/SLAB CACHE_SIZE NAME
+        if words.len() < 8 || words[0].parse::<u64>().is_err() {
+            continue;
+        }
+        kib += words[6]
+            .trim_end_matches('K')
+            .parse::<f64>()
+            .map_err(|_| format!("a slabtop row's CACHE SIZE `{}` is no number", words[6]))?;
+        rows += 1;
+    }
+    if rows == 0 {
+        return Err("slabtop printed no cache row".into());
+    }
+    Ok(vec![("cache_size".into(), kib * 1024.0)])
+}
+
+/// `omn trace mem.slab -m snapshot -e raw`: every cache's `bytes`, summed,
+/// under `cache_size`.
+fn omn_slab_bytes(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| format!("omn's output is not JSON: {e}"))?;
+    let events = doc["results"][0]["outputs"][0]["events"]
+        .as_array()
+        .ok_or("omn's mem.slab has no raw events")?;
+    let bytes: f64 = events
+        .iter()
+        .filter_map(|event| {
+            event["attrs"]
+                .as_array()?
+                .iter()
+                .find(|attr| attr["name"] == "bytes")?["value"]
+                .as_f64()
+        })
+        .sum();
+    if events.is_empty() {
+        return Err("omn read no slab cache".into());
+    }
+    Ok(vec![("cache_size".into(), bytes)])
 }
 
 /// `smem -H -c "uss pss rss" -P REGEX`: one row per matched process, three

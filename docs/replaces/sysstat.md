@@ -20,7 +20,7 @@ separate`) are two runs of a deterministic workload.
 | `free` | none | no | no pair: no system memory source | `mem.system` from `/proc/meminfo`: total, used, free, shared, buff/cache, available, swap |
 | `numastat -p PID` | `omn mem.numa -m poll -- prog` (series `node:<n>`, pages) | yes | within 3 %: seen 0.05 %, `numastat-p` | MB as numastat prints them (omn counts pages, THP regions in 2 MiB pages) |
 | `numastat` (system: numa_hit, numa_miss, ...) | none | no | no pair: `mem.numa` is per process | a system source from `/sys/devices/system/node/node*/numastat` |
-| `slabtop` | none (`mem.kmalloc` counts allocation flow, not the slab stock) | no | no pair: `/proc/slabinfo` is root-only, and no source reads it | a `mem.slab` source from `/proc/slabinfo` (privileged) |
+| `slabtop` | `omn trace mem.slab -m snapshot -e raw` (root: `/proc/slabinfo` is 0400) | yes | no pair here: the pair is `top`'s (`slabtop-cache-size`, `docs/replaces/top.md`) | -- |
 | `uptime`: load average | none | no | no pair: no source reads `/proc/loadavg` | a `sched.load` source from `/proc/loadavg` |
 | `cat /proc/pressure/cpu` | `omn cpu.pressure --system -m poll@1s -e raw` (`some`) | in part | within 0.02 (abs): seen below 0.0001 at a 6 % share, `psi-cpu-some` | `full` as a share of the window (only `full_avg10` and `full_total_us` are given); its attribute names differ from `mem.pressure`/`io.pressure` |
 | `cat /proc/pressure/memory` | `omn mem.pressure --system -m poll@1s -e raw` (`stall_ratio`) | yes | within 0.02, `psi-memory-some`; shown only at zero (no memory pressure) | nothing |

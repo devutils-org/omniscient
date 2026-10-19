@@ -55,7 +55,45 @@ pub fn parsers() -> Vec<Parser> {
             name: "omn_hist_as_fio",
             parse: omn_hist_as_fio,
         },
+        Parser {
+            name: "vfsstat_totals",
+            parse: vfsstat_totals,
+        },
     ]
+}
+
+/// `vfsstat 1 N`: one row a second of each VFS function's calls per second,
+/// summed over the rows into a count per column, by its name in lower case
+/// without the `/s` (`read`, `write`, `open`, ...). A row is one second, so
+/// its rate is that second's count.
+fn vfsstat_totals(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut totals: Vec<f64> = Vec::new();
+    let mut rows = 0;
+    for line in stdout.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if words.first() == Some(&"TIME") {
+            names = words[1..]
+                .iter()
+                .map(|name| name.trim_end_matches("/s").to_lowercase())
+                .collect();
+            totals = vec![0.0; names.len()];
+            continue;
+        }
+        if names.is_empty() || words.len() != names.len() + 1 {
+            continue;
+        }
+        for (total, value) in totals.iter_mut().zip(&words[1..]) {
+            *total += value
+                .parse::<f64>()
+                .map_err(|_| format!("a vfsstat rate `{value}` is no number"))?;
+        }
+        rows += 1;
+    }
+    if rows == 0 {
+        return Err("vfsstat printed no row".into());
+    }
+    Ok(names.into_iter().zip(totals).collect())
 }
 
 /// The JSON document in a tool's output, stdout first: fio may print a
@@ -506,6 +544,15 @@ mod tests {
         assert_eq!(get(&v, "read.total_ios"), 19212.0);
         assert_eq!(get(&v, "read.clat_p50_ns"), 32768.0);
         assert!(omn_hist_as_fio(OMN_LAUNCH, "").is_err());
+    }
+
+    #[test]
+    fn vfsstat_rows_are_summed_per_column() {
+        let out = "TIME         READ/s  WRITE/s  FSYNC/s   OPEN/s\n20:04:00:       252      195        0       42\n20:04:01:       184      186        0       31\n";
+        let v = vfsstat_totals(out, "").unwrap();
+        assert!(v.contains(&("read".to_string(), 436.0)), "{v:?}");
+        assert!(v.contains(&("open".to_string(), 73.0)), "{v:?}");
+        assert!(vfsstat_totals("TIME READ/s\n", "").is_err());
     }
 
     #[test]

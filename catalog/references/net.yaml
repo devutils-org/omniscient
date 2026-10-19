@@ -238,3 +238,24 @@
     tolerance: {abs: 4}
     why: "both ask sock_diag for every TCP and UDP socket, IPv4 and IPv6, in every state, and print one row each; two snapshots moments apart, and a connection opened or closed between them is on one side only"
 
+- id: tcplife-pid
+  source: net.tcp.lifetime
+  tool: tcplife
+  use: "tcplife -p PID (one process's TCP sessions, libbpf-tools)"
+  workload: [python3, tests/reference/workloads/bpftrace/act.py, connect, "10"]
+  run: attach
+  settle_ms: 1500
+  omn: [trace, net.tcp.lifetime, --pid, "{pid}", -d, 5s, -m, trace, -e, summary, --format, json, -o, "{out}"]
+  reference:
+    command: [sh, -c, 'exec timeout --preserve-status -s INT 5 $SUDO tcplife -p "$1"', sh, "{pid}"]
+    parse: libbpf_tcplife
+    requires: [tcplife, timeout, sh]
+    privileged: true
+    sudo: tcplife
+  compare:
+    key: sessions
+    omn: results.0.outputs[emit=summary].series.*.count
+    tolerance: {abs: 0}
+    why: "one run, both attached to the workload's pid before it is let go:
+      10 local connections are 20 sockets closed, both ends the workload's,
+      one tcplife row and one omn session each"

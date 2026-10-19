@@ -34,3 +34,4 @@ development machine with the twenty-third wave's other streams loading it.
 | `smem` (no `-P`), every process of the machine | none | none | no pair | a system-wide target for `mem.pss` and `mem.uss` (they take pid, cgroup, launch; `mem.uss` pid and launch only) |
 | `smem -u` / `smem -m`, per user / per mapping | none | none | no pair | a user key; the per-mapping key above |
 | `smem -w`, the machine's memory by kind | the sysstat family (`free`) | see `docs/replaces/sysstat.md` | no pair: this is the sysstat family's `free`, see `docs/replaces/sysstat.md` | -- |
+| `slabtop -o -s c`: every slab cache and its size | `omn trace mem.slab -m snapshot -e raw`, as root (`sudo -n omn trace mem.slab ...`) | yes: one row per cache, `bytes` as the CACHE SIZE column | **yes**, exactly: 832999424 bytes summed over every cache on both sides, three runs (pair `slabtop-cache-size`, `rel: 0.01`) | -- |

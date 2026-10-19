@@ -270,3 +270,28 @@
     tolerance: {abs: 5}
     why: "alongside: both divide /proc/diskstats' io_ticks (the milliseconds a device had a request in flight) by the window, iostat over its four seconds, omn over its counted four; the busiest device on each side, since the two name a device differently. The windows start omn's start-up apart, and a share of a few seconds moves by the milliseconds at their ends: five points"
 
+- id: vfsstat-reads
+  source: io.vfs
+  tool: vfsstat
+  use: "vfsstat 1 4 (vfs_read calls a second, the whole machine)"
+  workload: [python3, tests/reference/workloads/bpftrace/act.py, vfsread, "300000"]
+  run: alongside
+  # Both counting before the workload is let go: a debug build of omn takes
+  # most of a second to attach, and 300 ms let it miss a third of the reads.
+  settle_ms: 1000
+  omn: [trace, io.vfs, --system, -m, count, -k, op, -e, summary, -d, 4s, --format, json]
+  reference:
+    command: [sh, -c, '$SUDO vfsstat 1 4']
+    parse: vfsstat_totals
+    requires: [vfsstat, sh]
+    privileged: true
+    sudo: vfsstat
+  compare:
+    key: read
+    omn: results[source=io.vfs].outputs[emit=summary].series[key=op:vfs_read].total
+    tolerance: {rel: 0.03}
+    why: "one run, both the whole machine over 4 s through a counting program
+      on vfs_read: 300000 one-byte reads by the workload, let go once both
+      count, and the machine's own few hundred a second over two windows
+      offset by the tools' starts: 305466 against 307114, 304266 against
+      306386, 304252 against 306083 (within 0.7 %)"

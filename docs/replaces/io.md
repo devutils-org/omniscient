@@ -26,3 +26,4 @@ pairs_io`), measured on the development machine, NVMe under btrfs, kernel
 | `iostat -dx`: `rareq-sz` | `io.size -e summary` | yes, per request | no pair: the workload's requests are all 4 KiB, which would hold whatever omn read | |
 | `iostat -dx`: `d/s`, `f/s` | `io.iops -k dir` (`discard`, `flush` series) | yes | no pair: the workload neither discards nor flushes | |
 | `fio`: `disk_util` | `io.iops`/`io.bytes`/`io.inflight` per device | -- | no pair: fio cannot map a btrfs file to its device and prints no `disk_util` here | |
+| `vfsstat 1 N` (libbpf-tools): VFS calls a second, the whole machine | `omn trace io.vfs --system -m count -k op -e summary -d Ns` | yes: `op:vfs_read`, `vfs_write`, `vfs_open`, ... as series | **yes**, within 0.7 %: 305466 against 307114 reads over 4 s with 300000 of a workload (pair `vfsstat-reads`, `rel: 0.03`) | -- |
