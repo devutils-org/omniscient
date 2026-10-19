@@ -1776,7 +1776,7 @@ count.
   the OOM victim, connect on both roads, accept on a launched tree, the
   exact exec tree, `sched.runqlen`, `wake_ns`, the off-cpu provenance, the
   heap's uprobes against the shim, the energy estimate's arithmetic. Not
-  held: `make-sqlite`'s finding stands with `ppid`. **Left, for what this
+  held: `make-sqlite`'s finding stands with `ppid` (closed 2026-10-19 in six runs of seven, `b2cc5b1`: the profile's late-found cpu and lost samples in each task's on-cpu row, and `ppid` on every sample; left, a process that starts and ends inside one late round of the debug build). **Left, for what this
   machine lacks** -- root (`mem.slab`, `/proc/slabinfo`), `cap_net_raw` in
   the sudoers line (pcap), and the witnesses `tcpdump`, `strace` (the
   classic `bpf:tp` road's id files are root's too, and `sqlite3-durability`
