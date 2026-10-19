@@ -42,9 +42,13 @@ def getppid(n):
 
 
 def open_(n):
+    # One open a millisecond: 500 back to back overran opensnoop.bt's output
+    # buffer, and bpftrace 0.24 on Rocky 9 dropped 118 of them without always
+    # saying so (distroproof, 2026-10-19). The sleeps are no opens.
     with tempfile.NamedTemporaryFile(dir="/var/tmp") as f:
         for _ in range(n):
             os.close(os.open(f.name, os.O_RDONLY))
+            time.sleep(0.001)
 
 
 def signal_(n):

@@ -162,6 +162,10 @@
   use: "biolatency.bt: block I/O latency histogram"
   workload: [tests/reference/workloads/bpftrace/omnref, tests/reference/workloads/bpftrace/act.py, read, "500"]
   omn: [trace, io.latency, -m, trace, -e, "hist:log2", --filter, 'comm == "omnref"', --format, json]
+  # A guest's disk is a file on the host's: one run's median moved two
+  # buckets either way with the host busy (Arch 16 ms against 128, Debian 13
+  # 32 against 16, distroproof, 2026-10-19), so three runs' medians.
+  runs: 3
   reference:
     command: [sh, tests/reference/workloads/bpftrace/under.sh, /usr/share/bpftrace/tools/biolatency.bt, --]
     parse: bpftrace_hist_usecs

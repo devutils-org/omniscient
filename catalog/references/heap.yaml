@@ -60,8 +60,8 @@
   compare:
     key: total_blocks
     omn: results.0.outputs[emit=topk].series.0.events
-    tolerance: {rel: 0.01, abs: 1000, side: above}
-    why: "one event per allocation call against dhat's block count, every realloc a block on both sides (152 blocks for 152 calls of a test program under dhat); alternate runs. Under valgrind the interpreter makes fewer calls than it does alone: libc's own count of the workload by bpftrace, with neither tool, is 36385 malloc, 410 calloc and 982 realloc, 37777, where omn reads 37778 and dhat 37025, every run (2026-10-19). omn may exceed dhat by those, never fall short"
+    tolerance: {rel: 0.04, side: above}
+    why: "one event per allocation call against dhat's block count, every realloc a block on both sides (152 blocks for 152 calls of a test program under dhat); alternate runs. Under valgrind the interpreter makes fewer calls than it does alone: libc's own count of the workload by bpftrace, with neither tool, is 36385 malloc, 410 calloc and 982 realloc, 37777, where omn reads 37778 and dhat 37025, every run (2026-10-19). omn may exceed dhat by those, never fall short. A share, not a count: 2.0 % on Arch, 2.7 to 2.9 % on Fedora 44 (dhat 37044 every run, omn 38052 to 38116, four runs in distroproof)"
 
 - id: dhat-gmax
   source: mem.heap.live
