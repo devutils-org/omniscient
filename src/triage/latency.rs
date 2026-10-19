@@ -64,10 +64,13 @@ pub const RUNNABLE: &str = "runnable";
 pub const BLOCKED: &str = "blocked";
 pub const FUTEX: &str = "futex";
 pub const MUTEX: &str = "mutex";
+/// Who woke whom: the thread whose wakeups ended a block names what the
+/// block waited on when no frame does (`DECISIONS.md`, settled 2026-10-19).
+pub const WAKEUP: &str = "wakeup";
 
 /// The requests this mode can do without: they name a wait, and a table
 /// without them is still a table.
-pub const OPTIONAL: [&str; 2] = [FUTEX, MUTEX];
+pub const OPTIONAL: [&str; 3] = [FUTEX, MUTEX, WAKEUP];
 
 /// The decomposition's id in the session this mode writes.
 pub const DECOMPOSITION: &str = "where-the-time-went";
@@ -230,6 +233,7 @@ impl Ask {
             request(RUNNABLE, "sched.runqlat", "trace", "summary"),
             blocked,
             request(FUTEX, "sched.futex", "trace", "summary"),
+            request(WAKEUP, "sched.wakeup", "trace", "summary"),
         ];
         if mutex {
             requests.push(request(MUTEX, "sched.mutex", "trace", "summary"));
@@ -1832,6 +1836,27 @@ impl Tasks<'_> {
                 }
             }
         }
+        // Nor is any named on a connection: the thread of the process that
+        // woke the main thread through its block, blocked itself for a
+        // quarter of it, is what it waited on. A C server's send and receive are libc
+        // frames with no name, and only who ended the wait says which thread.
+        let mut woken_by = None;
+        // The main thread's block only: a thread followed for its own block
+        // was woken by the request it serves, which is the answer already.
+        if chosen.is_none() && depth == 0 {
+            if let Some((table, wakeups)) = self.woken_by(process, &reading.task) {
+                let blocked: f64 = table
+                    .rows
+                    .iter()
+                    .filter(|row| row.state.starts_with(BLOCKED))
+                    .filter_map(|row| row.amount)
+                    .sum();
+                if blocked >= block * RAN_IN_IT {
+                    woken_by = Some((wakeups, blocked));
+                    chosen = Some((Relation::Waiting, table));
+                }
+            }
+        }
         let Some((relation, table)) = chosen else {
             return;
         };
@@ -1897,7 +1922,16 @@ impl Tasks<'_> {
                         .map(|row| row.resolution)
                         .sum::<Option<f64>>(),
                 },
-                {
+                if let Some((wakeups, blocked)) = woken_by {
+                    format!(
+                        "the thread of the process that woke {} {wakeups} times while it was \
+                         `{during}` and no thread ran in it, itself blocked {}: named by who \
+                         ended the wait, its frames naming no connection; its whole is what its \
+                         own rows account for",
+                        reading.task,
+                        span(blocked)
+                    )
+                } else {
                     let (frame, amount) = on_connection.clone().unwrap_or_default();
                     format!(
                         "the thread of the process blocked longest on a connection ({} in \
@@ -2142,6 +2176,37 @@ impl Tasks<'_> {
 
     /// The busiest other thread of `process`: the most time on a cpu or
     /// waiting for one.
+    /// The other thread of `process` that woke `task` most often, and how
+    /// many times, by `sched.wakeup`'s events: the task is the wakee, the
+    /// waker a thread a source placed in the same process.
+    fn woken_by(&self, process: Option<u64>, task: &str) -> Option<(&Breakdown, u64)> {
+        let process = process?;
+        let mut wakers: BTreeMap<String, u64> = BTreeMap::new();
+        for event in self
+            .run
+            .events_of("sched.wakeup")
+            .filter(|e| is_task(e, task))
+        {
+            let Some(waker) = attr(event, "waker_tid").filter(|tid| *tid > 0.0) else {
+                continue;
+            };
+            let waker = format!("task:{}", waker as u64);
+            if waker != task {
+                *wakers.entry(waker).or_default() += attr(event, "count").unwrap_or(1.0) as u64;
+            }
+        }
+        wakers
+            .into_iter()
+            .filter(|(waker, _)| {
+                self.pid_of.get(waker) == Some(&process) && !self.seen.contains(waker)
+            })
+            .filter_map(|(waker, wakeups)| {
+                let table = self.tables.iter().find(|table| table.key == waker)?;
+                Some((table, wakeups))
+            })
+            .max_by_key(|(_, wakeups)| *wakeups)
+    }
+
     fn busiest_thread(&self, process: Option<u64>, task: &str) -> Option<&Breakdown> {
         let process = process?;
         self.tables
@@ -3376,6 +3441,93 @@ mod tests {
         let reading = read_launched(&run);
         assert!(reading.followed.is_none(), "{:?}", reading.followed);
         assert_eq!(latency(&reading, 1).limit, Some(Limit::Sleep));
+    }
+    /// A C server's thread blocked in libc frames with no name, beside the
+    /// main thread's block: no frame says connection, and the thread whose
+    /// wakeups ended the block is what it waited on (`sched.wakeup`). With
+    /// no wakeup seen, nothing is followed.
+    #[test]
+    fn the_thread_that_woke_the_block_is_followed_when_no_frame_names_it() {
+        let blocked_in = |tid: i32, sleep: f64, stack: u64| {
+            event(
+                "sched.offcpu",
+                tid,
+                vec![
+                    Attr::uint("pid", 100),
+                    Attr::uint("tid", tid as u64),
+                    Attr::text("state", "sleeping"),
+                    Attr::float("total_ns", sleep),
+                    Attr::float("queued_ns", 0.0),
+                    Attr::uint(STACK_ID_ATTR, stack),
+                ],
+            )
+        };
+        let woke = |waker: u64| {
+            event(
+                "sched.wakeup",
+                100,
+                vec![
+                    Attr::uint("count", 1),
+                    Attr::uint("wakee_tid", 100),
+                    Attr::uint("waker_tid", waker),
+                    Attr::uint("pid", 100),
+                ],
+            )
+        };
+        let with_stacks = |mut run: Run| {
+            let offcpu = run
+                .output
+                .results
+                .iter_mut()
+                .find(|results| results.source == "sched.offcpu")
+                .expect("sched.offcpu");
+            offcpu.label = BLOCKED.to_owned();
+            offcpu.stacks = BTreeMap::from([
+                (1, vec!["main".to_owned(), "libc.so.6+0x11d0e2".to_owned()]),
+                (
+                    2,
+                    vec![
+                        "libc.so.6+0x9ca94".to_owned(),
+                        "libc.so.6+0x11e2f0".to_owned(),
+                    ],
+                ),
+            ]);
+            run
+        };
+        let tables = || {
+            vec![
+                main_table(),
+                table("task:101", 2.0 * MS, Some(0.0), Some(250.0 * MS)),
+            ]
+        };
+        let mut events = vec![
+            blocked_in(100, 300.0 * MS, 1),
+            blocked_in(101, 250.0 * MS, 2),
+        ];
+        let run = with_stacks(run_of(tables(), events.clone(), false));
+        let reading = read_launched(&run);
+        assert!(
+            reading.followed.is_none(),
+            "no frame and no wakeup names it"
+        );
+
+        events.extend([woke(101), woke(101), woke(101)]);
+        let run = with_stacks(run_of(tables(), events, false));
+        let reading = read_launched(&run);
+        let followed = reading
+            .followed
+            .as_deref()
+            .expect("the thread that woke it");
+        assert_eq!(followed.relation, Relation::Waiting);
+        assert_eq!(followed.reading.task, "task:101");
+        assert!(
+            followed
+                .reading
+                .chosen_because
+                .contains("woke task:100 3 times"),
+            "{}",
+            followed.reading.chosen_because
+        );
     }
 
     /// `http-server-stdlib`'s slow client: the main thread in `select` for

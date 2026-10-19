@@ -2051,16 +2051,10 @@ Below the milestones, and not scheduled:
   A consumer of one more format, not a source: `DECISIONS.md` boundary 6 says
   why LTTng is a peer rather than a backend. Low priority; nothing depends on
   it and no measurement here is worse without it.
-- **Four decisions are open** (`DECISIONS.md`): the phase 6 criterion for
-  the in-kernel histogram, pending what `tp_btf` leaves; what the budget's
-  first check may stop a run on (its one-time half landed in the twentieth
-  wave, the 10 ms slack proposed with numbers); a cost per regime in the
-  catalog's schema (proposed with numbers); and since the twentieth wave,
-  whether the latency session asks
-  `sched.wakeup`. `cpu.profile`'s `pmu` row was settled in the
-  twenty-fifth wave: it stays, as a pointer to `cpu.cycles -m sample`. How a reference pair reads a value `omn` computes was
-  settled before the twenty-third wave: a parser of `omn`'s output. How a byte counter's direction becomes a
-  series was settled in the twenty-first wave: a key, `dir`.
+- **The four open decisions were settled on 2026-10-19** (`DECISIONS.md`,
+  "Settled on 2026-10-19"): the budget's 10 ms slack and `sched.wakeup` in
+  the latency session landed the same day; `cost_by_regime` and `tp_btf` for
+  the device reads (then the `null_blk` run, which needs a password) are next.
 - **An `lbr` collector** waits on a cpu with a branch call stack (Intel from
   Haswell) to be tested against, and **`sframe`** on a kernel that reads
   `.sframe` (none through 7.2).

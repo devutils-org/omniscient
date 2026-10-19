@@ -69,6 +69,18 @@ requests:
   keys:
   - task
   label: futex
+- source: sched.wakeup
+  target:
+    launch:
+    - target/omn-triage-fixture/workload
+    - cpu
+    - '300'
+  mode: trace
+  emit:
+  - summary
+  keys:
+  - task
+  label: wakeup
 decompose:
 - id: where-the-time-went
   whole: lifetime

@@ -838,6 +838,19 @@ impl Overhead {
         Some((self.running_cpu_ns() + inside) as f64 * 100.0 / work as f64)
     }
 
+    /// How far over `ceiling` (a percentage) this collection is, in cpu
+    /// nanoseconds: what it spent, less what the ceiling allows of the work
+    /// the target did. `None` where [`Overhead::percent`] is.
+    pub fn excess_ns(&self, ceiling: f64) -> Option<f64> {
+        let observed = self.observed_cpu_ns.filter(|observed| *observed > 0)?;
+        let inside = self.in_target_cpu_ns.unwrap_or(0);
+        let work = match observed.checked_sub(inside) {
+            Some(work) if work > 0 => work,
+            _ => observed,
+        };
+        Some((self.running_cpu_ns() + inside) as f64 - ceiling / 100.0 * work as f64)
+    }
+
     /// The tool's share less what it spent once: the rate a budget weighs.
     pub fn running_cpu_ns(&self) -> u64 {
         self.attributed_cpu_ns.saturating_sub(self.one_time_cpu_ns)
@@ -3210,6 +3223,9 @@ fn share_launches(prepared: &mut [Box<dyn Prepared>], launching: &[bool]) {
         }
     }
 }
+/// How far over its ceiling, in the tool's cpu, a collection may be before
+/// the budget acts: once per run at most, 10 ms of cpu over the budget.
+const BUDGET_SLACK_NS: u64 = 10_000_000;
 
 /// How often a run carrying a budget looks at what it is spending.
 ///
@@ -3570,6 +3586,19 @@ impl<'a> Spending<'a> {
             };
 
             if percent <= ceiling {
+                continue;
+            }
+            // Over by less than the slack is not over yet: a program that
+            // waits has burnt a few milliseconds by the first check, and the
+            // collection's first drains are most of its account then (5 runs
+            // of 6 of a waiting program stopped 0.1 s in, at 45 to 310 %,
+            // where their whole windows read 16 to 26 %). A collection over
+            // its ceiling at its running rate passes the slack within a
+            // second or two of a busy target (`DECISIONS.md`).
+            if spent
+                .excess_ns(ceiling)
+                .is_some_and(|excess| excess < BUDGET_SLACK_NS as f64)
+            {
                 continue;
             }
             let source = self.serving[index].request.source.to_string();
@@ -5513,6 +5542,25 @@ mod tests {
             ..overhead
         };
         assert!(everywhere.percent().unwrap() > 200.0);
+    }
+
+    /// The budget acts once a collection is over its ceiling by the slack,
+    /// not before: 7.3 ms over at the first check of a waiting program is not
+    /// over yet; 10.9 ms is (two of the five runs that used to stop).
+    #[test]
+    fn a_collection_over_its_ceiling_by_less_than_the_slack_is_not_over_yet() {
+        let at = |spent_ns: u64| Overhead {
+            attributed_cpu_ns: spent_ns,
+            observed_cpu_ns: Some(20_000_000),
+            in_target_cpu_ns: Some(0),
+            ..Overhead::default()
+        };
+        // 10 % of 20 ms is 2 ms: 9.3 ms spent is 7.3 ms over, 12.9 ms is 10.9.
+        let under = at(9_300_000).excess_ns(10.0).unwrap();
+        let over = at(12_900_000).excess_ns(10.0).unwrap();
+        assert!((under - 7_300_000.0).abs() < 1.0, "{under}");
+        assert!(under < BUDGET_SLACK_NS as f64 && over >= BUDGET_SLACK_NS as f64);
+        assert_eq!(Overhead::default().excess_ns(10.0), None);
     }
 
     /// A table loaded once inside the window is weighed apart from the rate:

@@ -1486,72 +1486,21 @@ open line is settled: `cpu.profile`'s `pmu` row, as the brief decided.
 | A probe that could ask a version | **Asks the feature**, even in the test suite: the catalog's `kernel>=6.8`, a judge's "uprobe-multi is 6.6" and a BTF that should name ftrace's functions were each disproved by a distribution. | Distributions backport and configure; a version is a guess about both. |
 | The reference pairs | **Run on six distributions** with their own witnesses (`distroproof-reference.toml`), the runner reading its pairs and the release from `OMN_REFERENCE_ROOT` and `OMN_REFERENCE_BIN`; a witness's own shortfall (lost events, a missing subcommand, headers it cannot build against) skips. | A pair that holds on one distribution only was measuring the development machine. |
 
+## Settled on 2026-10-19: the four that were open
+
+The user settled them on the recommendations below, each with what it took
+or still takes.
+
+| Question | Decision | Where it stands |
+|---|---|---|
+| The phase 6 criterion for the in-kernel histogram | **`tp_btf` for the two device reads first**, then the criterion is judged on what is left (a per-request cost in nanoseconds if 1 % of a device that does no work stays meaningless). | To do: the programs, then the `null_blk` run, which loads a module and so needs the user's password. |
+| What the budget's first check may stop a run on | **No stop while a collection is over its ceiling by less than 10 ms of the tool's cpu** (spent - ceiling x target < 10 ms): of the five waiting runs stopped 0.1 s in, three were 4 to 7.3 ms over (not stopped now) and two 10.9 and 75 ms (still stopped). | Landed: `BUDGET_SLACK_NS` and `Overhead::excess_ns` in `src/collect/mod.rs`, unit-tested. |
+| A cost per regime in the catalog's schema | **`cost_by_regime` beside `cost`**: `cost` stays the worst regime's band, the one the bench gates and the resolver ranks by; a backend may add `{launch: extreme, compute: med, memory: low}`, checked by the bench row by row, read by the budget and printed by the cost line. | To do: the schema, the loader's check, the bench's rows, the budget's reading. |
+| Whether the latency session asks `sched.wakeup` | **Yes, in the cheap pass, optional**: when the main thread slept while no thread ran and no frame names a connection, the thread of the process that woke it most, itself blocked for a quarter of the block, is followed, and the answer says it was named by who ended the wait. The main thread's block only: a thread followed for its own block was woken by the request it serves. | Landed: `WAKEUP` in `src/triage/latency.rs`, unit-tested both ways; the example sessions ask it. |
+
 ## Open
 
-- **The phase 6 criterion for the in-kernel histogram** (io, pending the
-  coordinator's `null_blk` run, `STATE.md` "Needs privilege" item 2). The
-  eighteenth wave found why the program statistics read 0 runs (the block
-  programs were closed at the stop, before the run read their account) and
-  keeps them loaded until the close, so the run can now say how much of the
-  348 ns a request is the programs' own. If it is a small part, the criterion
-  becomes a per-request cost in nanoseconds on that load, since 1 % of a
-  device that does no work is 25 ns for two tracepoint dispatches and two
-  clock reads; if it is most of it, as stream io reasons (150 to 300 ns),
-  `tp_btf` for the two device reads is next (`docs/fixes/w18-io.md`).
-  Leaving it open costs phase 6 its last box. **Measured after the
-  eighteenth wave** (`STATE.md`, "Needs privilege"): 11.54 %, 332 ns a
-  request; with the statistics on, 457 ns a request of which the programs
-  ran 298.5 (149.3 ns a run, twice a request), and less the statistics' own
-  cost about 173 of the 332. Most of it, so `tp_btf` is the next cut, by the
-  rule above; whether the criterion becomes a per-request cost is still
-  open, to be judged on what `tp_btf` leaves.
-- **What the budget's first check may stop a run on** (eighteenth wave,
-  profile and bench, filed to `src/collect/mod.rs`). The first check, 0.1 s
-  into a launched run, weighs a one-time cost -- the first debuginfod symbol
-  load, about 25 ms of a debug build; `bpf:fentry`'s 55 ms attach -- against
-  the few milliseconds a waiting target has burnt, and stopped `cpu.profile`
-  at 116 to 179 % where its rate is under 30 %. **Half landed in the
-  twentieth wave** (stream budget, `docs/fixes/w20-budget.md`): a one-time
-  load the tool can name is weighed apart from the rate
-  (`overhead.one_time_cpu_ns`, settled above), which brought a debuginfod
-  profile's first check from about 142-152 % to 45-51 %. It does not settle
-  it: the first 100 ms of a profile of a waiting program still carry 8 to 80
-  ms of other first-drain work against the 18 to 25 ms the program burnt, and
-  5 runs of 6 were stopped 0.1 s in, at 44.69 to 310.44 %, where the same
-  program's whole windows read 16 to 26 %. **Proposed**: no stop while the
-  collection is over its ceiling by less than 10 ms of the tool's cpu
-  (spent - ceiling x target < 10 ms). On the five stopped runs the excess was
-  7.3, 5.4 and about 4 ms (not stopped under the rule) and 10.9 and 75 ms
-  (stopped); a collector over its ceiling at its running rate passes 10 ms
-  within a second or two of a busy target. A slack in milliseconds rather
-  than a floor on the target's cpu, because a floor never stops anything on
-  a program that waits 99 % of the time; its cost is bounded, 10 ms of the
-  tool's cpu over budget once per run. Leaving it open costs every budgeted
-  run of a waiting program at 99 Hz its answer at the first check.
-
-- **A cost per regime, or a `cost_note`, in the catalog's schema** (nineteenth
-  wave, bench). A band is a backend's worst regime, so `gpu.kernel` is
-  `extreme` for its +67 % on a launch-bound program though it costs under
-  1 % on long kernels. **Proposed with numbers in the twentieth wave**
-  (stream gpu, `docs/fixes/w20-gpu.md`), from the bench's two tables:
-  `gpu.kernel` through `vendor:cupti` +64.5 % `launch`, +1.81 % `compute`,
-  +0.15 % `memory`; `gpu.api` through `preload` +10.5 / +2.75 / +0.01 %;
-  `gpu.counters` +282 934 / +351 / +1 841 % -- one backend's bands two orders
-  of magnitude apart by regime. The proposal: `cost` stays the worst regime's
-  band, the one the bench gates and the resolver ranks by, and a backend may
-  add `cost_by_regime: {launch: extreme, compute: med, memory: low}`, checked
-  by the bench row by row, read by the budget's first check and printed by
-  the run's cost line beside the measured figure. Leaving it open costs every
-  `--budget` under 20 % its `gpu.kernel` on a program of long kernels,
-  refused for a cost it would not pay, and the cost line saying `extreme`
-  where the measurement says `med`.
-- **Whether the latency session asks `sched.wakeup`** (twentieth wave,
-  triage). A thread blocked on a connection beside the main thread's block is
-  recognised by its stack's send and receive frames; a C program's `send`
-  shows as an unnamed libc frame, so it is not. Who woke the main thread
-  answers who it waited on with no frame names, at the price of one more
-  source in the cheap pass. Leaving it open costs C servers whose libc frames
-  are unnamed their slow client.
+Nothing is open since 2026-10-19 (above).
 
 A new open line goes here with what it costs to leave it open, which is the
 habit that kept this section honest.

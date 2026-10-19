@@ -81,9 +81,14 @@ objective the tool cannot measure would be answered by one it can.
 ## `omn latency` — why is this slow
 
 TSA, which `examples/join-decompose-compute.yml` already produced as a table,
-asked as a question. The session has five requests — `cpu.profile` (on-cpu),
+asked as a question. The session has six requests — `cpu.profile` (on-cpu),
 `sched.runqlat` (runnable), `sched.offcpu` (blocked, with stacks),
-`sched.futex` and `sched.mutex` (optional: what a sleep was waiting on) — and
+`sched.futex` and `sched.mutex` (optional: what a sleep was waiting on) and
+`sched.wakeup` (optional: who woke whom, so that when the main thread slept
+while no thread ran and no frame names a connection -- a C server's unnamed
+libc `recv` -- the thread of the process that woke it, itself blocked for a
+quarter of the block, is the one followed, and the answer says it was named
+by who ended the wait) — and
 one `decompose:` over the program's lifetime, or the window for `--pid`.
 
 **The on-cpu row is a task's whole time on a cpu**, to the period: its
