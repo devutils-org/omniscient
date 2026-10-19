@@ -47,8 +47,8 @@ Replace `./build.sh` with your program. Sessions also accept JSON and TOML;
 
 ## Portability, tested with distroproof
 
-The latest [distroproof campaign](docs/distroproof.md) found 16 defects that
-one development machine had not shown: 9 in the tool and 7 in its tests.
+The latest [distroproof campaign](docs/distroproof.md) found 24 defects that
+one development machine had not shown: 10 in the tool and 14 in its tests.
 After the fixes, none of the source runs advertised as usable refused at
 start, and every refusal reason agreed with envprobe on all 21 targets.
 This checks availability and refusal reasons; reference comparisons against

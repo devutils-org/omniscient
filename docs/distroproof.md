@@ -24,7 +24,7 @@ commit that fixed it. It is meant to be read as distroproof's living proof.
 | Distributions | **16** images on their own kernels -- Debian 10, 11, 12, 13 and sid; Ubuntu 18.04, 20.04, 22.04, 24.04; Rocky 8 and 9; Fedora 43 and 44; Arch; Gentoo; Alpine -- and **5** variants (paranoid 3, `kptr_restrict` 2, lockdown, no PMU, root) |
 | Kernels | 4.15 to 7.2, RHEL's 4.18 and 5.14 with their backports |
 | Time | the 21 targets in about **12 minutes**, four at a time, from one command |
-| Findings in Omniscient | **16 defects** no test on the development machine had shown: **9 in the tool** (the release, the probes, the catalog, a collector) and **7 in its test suite** (a judge, six reference pairs) |
+| Findings in Omniscient | **24 defects** no test on the development machine had shown: **10 in the tool** (the release, the probes, the catalog, a collector) and **14 in its test suite** (a judge, the reference runner, twelve reference pairs) |
 | Claims refuted | **158** runs of a source Omniscient called usable that the kernel refused at start, in the first matrix; **0** after |
 | Cross-checked | every reason Omniscient gives for a refusal agrees with envprobe's independent reading of the same guest, on all 21 targets |
 | Back into distroproof | 3 images (Gentoo, Debian sid, Fedora 43), 2 boot fixes, 3 `[run]` options, 2 envprobe facts (pull requests [#4](https://github.com/devutils-org/distroproof/pull/4), [#5](https://github.com/devutils-org/distroproof/pull/5)) |
@@ -70,7 +70,7 @@ distributions with the witnesses their own packages carry.
 | `ubuntu-22.04` | 5.15 | file capabilities | 85 |
 | `ubuntu-24.04` | 6.8 | file capabilities | 93 |
 | `rocky-8` | 4.18 (RHEL) | file capabilities | 59 |
-| `rocky-9` | 5.14 (RHEL) | file capabilities | 86 |
+| `rocky-9` | 5.14 (RHEL) | file capabilities | 90 |
 | `fedora-previous` | 6.17 (Fedora 43) | file capabilities | 96 |
 | `fedora-latest` | 6.19 (Fedora 44) | file capabilities | 96 |
 | `arch` | 7.2.9 | file capabilities | 96 |
@@ -262,6 +262,50 @@ Fixed in [87191de](https://github.com/moha-bekh/omniscient/commit/87191de)
 and [0de94c4](https://github.com/moha-bekh/omniscient/commit/0de94c4).
 The results, per distribution, are [below](#the-reference-pairs).
 
+### 11. "kernel>=6.1": the version the kernel floor was chosen at
+
+**Seen.** On `rocky-9`, `perf lock contention -b` counted the workload's
+lock waits, and Omniscient refused `sched.lock` beside it: "kernel>=6.1:
+missing: kernel 5.14 is older than 6.1". The reference pair read it as no
+output at all (below).
+
+**What distroproof showed.** RHEL 9's 5.14 carries `lock:contention_begin`
+and `contention_end`, mainline 6.1 tracepoints, as it carries uprobe-multi
+(finding 9). Six backends said `kernel>=6.1` -- `sched.lock`'s two,
+`sched.runqlat`, `sched.offcpu`, `sched.wakeup`, `sched.switches`' count and
+`cpu.oncpu_time`'s -- beside the tracepoint prototypes they read, which the
+probes already ask by name; the version was the floor's leftover
+(`DECISIONS.md`, "The kernel floor": "they keep 6.1 until a cell says
+otherwise").
+
+**Fix.** The version is gone from the six; the prototypes stay. On
+`rocky-9` the four sources it held back attach, on a launched program and on
+the machine (86 sources usable, now 90), and 19 292 lock waits were counted
+in the diagnostic run; on 5.15 and older the same sources are still refused,
+now by the prototype that differs. The pair's empty output was the runner's
+defect too: wrapped by a tool that exits 0, omn's refusal was on the shared
+stderr and read as "not JSON"; it is read there now, and skips quoting it.
+
+### 12. Seven defects of the pairs and their runner: a distribution, a tool version, a count read as a share
+
+Found by the second and third runs, all in the test suite:
+
+- `stripped-library` compared perf's per-function rows with an object: on
+  Fedora `libcrypto` keeps its symbols, so perf named functions. Both sides
+  are keyed by object now (`perf report --sort dso`, `omn -k object`).
+- `execsnoop.bt` of bpftrace 0.17 prints `TIME(ms) PID ARGS`; the parser
+  reads the header for the column.
+- `biosnoop.bt` and `biolatency.bt` of bpftrace 0.17 and 0.20 attach no
+  probe on 6.1 and 6.8: the tool refused, a skip quoting its probes.
+- bpftrace with `-c` drops what is left in its buffer when its child exits
+  (Rocky 9: 474 and 575 of 604 opens, no `Lost` line); the workloads linger
+  half a second after their last action. A loss bpftrace reports at exit
+  (`Total lost event count`) is read as one.
+- `task-clock`'s band was a share; perf's own start is a count (16 ms on
+  Fedora's guest), now an absolute floor beside it.
+- The GPU pairs failed in every guest: their workload file was not copied.
+- A tool that exits 0 over omn's refusal (finding 11).
+
 ## The cross-check
 
 envprobe and Omniscient read the same guest independently, so their answers
@@ -285,40 +329,44 @@ A planted cell checks that it fails on a wrong cause.
 
 Every pair (`tests/reference.rs`, [`docs/replaces.md`](replaces.md)) on six
 distributions, one at a time, against the release a user installs, with the
-witnesses each distribution packages. Two runs: before and after the pairs'
-own portability fixes (finding 10).
+witnesses each distribution packages. Three runs: before and after the pairs'
+own portability fixes (finding 10), and after findings 11 and 12, with the
+pairs added since (128 in all, the GPU ones now skipping for want of a GPU
+rather than failing for want of their workload file in the guest).
 
-| Distribution | Kernel | First run: held / did not hold | After: held / did not hold / skipped |
-|---|---|---|---|
-| Arch | 7.2.9 | 69 / 2 | **71 / 0** / 32 |
-| Fedora 44 | 6.19 | 68 / 3 | **68 / 3** / 32 |
-| Rocky 9 | 5.14 (RHEL) | 43 / 3 | **61 / 1** / 41 |
-| Ubuntu 24.04 | 6.8 | 57 / 5 | **60 / 2** / 39 |
-| Debian 13 | 6.12 | 52 / 4 | **55 / 0** / 46 |
-| Debian 12 | 6.1 | 49 / 7 | **51 / 4** / 46 |
+| Distribution | Kernel | First run: held / did not hold | Second: held / did not hold / skipped | Third (2026-10-19) |
+|---|---|---|---|---|
+| Arch | 7.2.9 | 69 / 2 | 71 / 0 / 32 | **74 / 1** / 50 |
+| Fedora 44 | 6.19 | 68 / 3 | 68 / 3 / 32 | **72 / 2** / 51 (75 / 0 the run before) |
+| Rocky 9 | 5.14 (RHEL) | 43 / 3 | 61 / 1 / 41 | **66 / 0** / 59 |
+| Ubuntu 24.04 | 6.8 | 57 / 5 | 60 / 2 / 39 | **61 / 1** / 61 |
+| Debian 13 | 6.12 | 52 / 4 | 55 / 0 / 46 | **57 / 0** / 66 |
+| Debian 12 | 6.1 | 49 / 7 | 51 / 4 / 46 | **53 / 1** / 69 |
 
-(The two `opensnoop` runs whose bpftrace lost events -- 51 on Debian 13, 164
-on Rocky 9 -- are counted as skipped, by the rule the runner already applied
-to `perf trace`: a witness that lost events is no count.)
+(An `opensnoop` run whose bpftrace lost events is counted as skipped, by the
+rule the runner already applied to `perf trace`: a witness that lost events
+is no count -- 80 and 115 lost in the third run.)
 
 A skip says which witness the distribution lacks (`heaptrack`, `valgrind`,
-`fio`, `nsys`, `ncu` are not packaged everywhere) or which setting it holds
-(`perf_event_paranoid` 4 on Ubuntu refuses turbostat). What still does not
-hold is the witnesses' versions, not Omniscient's numbers:
+`fio`, `nsys`, `ncu` are not packaged everywhere), which setting it holds
+(`perf_event_paranoid` 4 on Ubuntu refuses turbostat), or that the witness
+cannot attach on that kernel (Debian 12's and Ubuntu's `biosnoop.bt` and
+`biolatency.bt` probe `blk_account_io_*`, which their kernels no longer
+have). What still does not hold:
 
-- **Debian 12's bpftrace** prints `execsnoop`, `biosnoop` and `biolatency` in
-  shapes the parsers, written against Arch's 0.27, do not read; its **perf
-  6.1** `sched latency` counts 10 switches for the whole machine where the
-  workload made 100 (Omniscient: 103, as `perf sched timehist` and `strace`
-  count elsewhere).
-- **Ubuntu 24.04**: `biosnoop`'s output, and `perf top`, which drew no
-  screen in the guest.
-- **Fedora 44**: `opensnoop` counts 10 % fewer opens than Omniscient with the
-  same probes as Arch's (open, below); Fedora's `libcrypto` keeps its
-  symbols, so `perf` names functions where the pair expects the stripped
-  object; `task-clock` by 0.5 ms over its band.
-- **Rocky 9**: `perf lock contention`'s pair received no output from
-  Omniscient (open).
+- **Debian 12's perf 6.1** `sched latency` counts 1 or 2 switches for the
+  workload where it made 100 (Omniscient: 101, as `perf sched timehist` and
+  `strace` count elsewhere): the witness.
+- **Ubuntu 24.04**: `perf top`, which draws no screen in the guest.
+- **Fedora 44** (third run only): `cpu.ipc`, 3.37 against perf's 3.69 on
+  separate runs, held in the two runs before it; `cpu.context_switches.system`,
+  328 over perf's 1715 where 257 were allowed -- the pair's band was a share
+  only, and sudo's and perf's own switches are a count: it has an absolute
+  floor now.
+- **Arch** (guest): `cpu.cache_misses`, omn 17 % over perf on separate runs,
+  where on the development machine the same pair reads omn under perf
+  (`docs/open-findings.md`): a shared last-level cache counted by two
+  separate runs.
 
 ## What Omniscient gave back to distroproof
 
@@ -346,12 +394,10 @@ developer does not have.
 
 ## Open
 
-- **`opensnoop`** counts 10 % fewer opens than Omniscient on Fedora 44, with
-  the same probes as Arch's where the pair holds; not explained.
-- **`perf lock contention`** on Rocky 9: Omniscient's side of the pair wrote
-  no document; not looked into yet.
-- **Debian 12's `perf sched latency`** counts 10 switches for the whole
-  machine over two seconds: the witness, not Omniscient (whose count agrees
+- **Debian 12's `perf sched latency`** counts 1 or 2 switches for the
+  workload over two seconds: the witness, not Omniscient (whose count agrees
   with `perf sched timehist` and `strace` elsewhere).
+- **`cpu.cache_misses`** reads apart from perf on separate runs, in opposite
+  directions here and in the Arch guest; **`cpu.ipc`** missed once on Fedora.
 - Not covered yet: aarch64, containers, NixOS -- each waits on distroproof
   booting it.

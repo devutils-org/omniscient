@@ -152,7 +152,15 @@ open_findings:
       cpu, the followed compile's `runnable` is 6.7 s against the job's
       7.3 s. Since docs/fixes/w21-docs.md the row adds the rest of the job
       (`followed.job`), which is every busy task off the way, not only the
-      critical job's: 7.0 s against 5.2 s, over by the build's other work
+      critical job's: 7.0 s against 5.2 s, over by the build's other work.
+      Rerun with `ppid` on the sched sources (2026-10-19, six runs, with the
+      capabilities): the person's way now reads under, 3.8 to 4.4 s against
+      5.3 to 5.6 s -- the profile finds the second compile on a tick after it
+      began (one run: 10 tasks, 1282.5 ms of cpu by then, said in the run's
+      notes and read from `schedstat`, but in no task's row) and drops
+      samples (808 that run); the agent's way still reads over, 6.9 to 7.7 s,
+      its job wider than the critical job. Closing it needs the profile's
+      per-task unsampled cpu carried into each task's on-cpu row
   - check: the-first-suspect-is-the-known-cause
     cause: the-critical-path-is-one-job
     sometimes: true
@@ -162,7 +170,10 @@ open_findings:
       5.2 to 5.4 s), the job's other compile in no row, so the person's
       verdict names `on-cpu` when this `cc1` is the longer half and is
       undecided ("2.799s of the wall clock is in no row that was read") when
-      it is the shorter: one run in three here
+      it is the shorter: one run in three here. With `ppid` (2026-10-19): two
+      runs of six undecided, the other four naming `on-cpu` both ways; the job
+      the wait covered is named in the sentence and not weighed in the
+      decision
   - check: both-ways-name-the-same-suspect
     cause: the-critical-path-is-one-job
     sometimes: true
