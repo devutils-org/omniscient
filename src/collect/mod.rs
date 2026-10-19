@@ -2645,6 +2645,11 @@ fn run_core(
         .as_ref()
         .and_then(|child| child.exit_fd())
         .or_else(|| exits.as_ref().and_then(launch::Exits::wake_fd));
+    // A launched program the kernel gives no pidfd for (before Linux 5.3) is
+    // asked between slices of the run's sleep instead.
+    let notice_exit = child
+        .as_ref()
+        .is_some_and(|child| child.exit_fd().is_none());
     // A recording weighs its budget over a rolling span rather than the
     // whole run, which has no fixed end to be a share of.
     let budget_interval_ns = recorder.as_ref().map(|recorder| {
@@ -2669,6 +2674,7 @@ fn run_core(
         &plans,
         &about_workload,
         wake,
+        notice_exit,
         &mut spending,
         escalation,
         recording.as_mut(),
@@ -4050,6 +4056,7 @@ fn drive(
     plans: &[Plan],
     about_workload: &[bool],
     wake: Option<RawFd>,
+    notice_exit: bool,
     spending: &mut Spending<'_>,
     mut escalation: Option<&mut dyn Escalate>,
     mut recording: Option<&mut Recording<'_, '_>>,
@@ -4343,7 +4350,11 @@ fn drive(
         if let Some(next_due_ns) = next_due_ns {
             let remaining_ns = next_due_ns.saturating_sub(monotonic_ns());
             if remaining_ns > 0 {
-                sleep_or_wake(remaining_ns, wake);
+                if notice_exit && wake.is_none() {
+                    sleep_noticing_exit(remaining_ns, &mut ended);
+                } else {
+                    sleep_or_wake(remaining_ns, wake);
+                }
             }
         }
     };
@@ -5206,6 +5217,36 @@ fn read_value_as(
     }
 }
 
+/// How long a run without a descriptor to wake on sleeps before it asks
+/// again whether the launched program exited.
+const EXIT_SLICE_NS: u64 = 10_000_000;
+
+/// Sleeps for `ns`, or until `ended` says the run is over, asking it every
+/// [`EXIT_SLICE_NS`].
+///
+/// For a launched program with no pidfd (Linux before 5.3), whose exit only
+/// the next round noticed: the closing round came up to a whole pace after
+/// the exit, and every polled rate's last interval was divided by time the
+/// program was no longer there for -- `power.wakeups` at `poll@1s` read 75 a
+/// second for the last interval of a program that woke 930 times a second to
+/// its end (Ubuntu 18.04's 4.15, distroproof). Asking also moves the last time
+/// the program was seen alive, which is what bounds its exit's uncertainty.
+fn sleep_noticing_exit(ns: u64, ended: &mut impl FnMut() -> Option<String>) {
+    let until_ns = monotonic_ns().saturating_add(ns);
+    loop {
+        let now_ns = monotonic_ns();
+        if now_ns >= until_ns {
+            return;
+        }
+        std::thread::sleep(StdDuration::from_nanos(
+            (until_ns - now_ns).min(EXIT_SLICE_NS),
+        ));
+        if ended().is_some() {
+            return;
+        }
+    }
+}
+
 /// Sleeps for `ns`, or until `wake` becomes readable if that is sooner.
 ///
 /// A readable `wake` is not consumed: a pidfd stays readable once its process
@@ -5396,6 +5437,7 @@ mod tests {
             &plans,
             about_workload,
             wake,
+            false,
             spending,
             None,
             None,
@@ -6698,6 +6740,44 @@ mod tests {
         }
     }
 
+    /// Without a pidfd, the exit of a launched program is asked between
+    /// slices of the sleep: a run polled at one second whose program exits at
+    /// 50 ms closes then, not at the next read a second later.
+    #[test]
+    fn a_launched_program_without_a_pidfd_is_noticed_between_reads() {
+        let reads_ns = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut slots = vec![Slot::Attached(Box::new(Clocked {
+            id: CollectorId::new("clocked"),
+            reads_ns: reads_ns.clone(),
+            stopped_ns: std::rc::Rc::new(std::cell::Cell::new(0u64)),
+        }) as Box<dyn Collector>)];
+        let mut paces = vec![Pace {
+            interval: StdDuration::from_secs(1),
+            snapshot: false,
+        }];
+        let started_ns = monotonic_ns();
+        let exit_ns = started_ns + 50_000_000;
+        let driven = drive(
+            &mut slots,
+            &mut paces,
+            &[Plan::default()],
+            &[true],
+            None,
+            true,
+            &mut Spending::unweighed(1),
+            None,
+            None,
+            || (monotonic_ns() >= exit_ns).then(|| "the program exited".to_owned()),
+        );
+        assert_eq!(driven.stopped_because, "the program exited");
+        let closing_ns = *reads_ns.borrow().last().unwrap();
+        assert!(
+            closing_ns < started_ns + 500_000_000,
+            "the closing read came {} ms after the start, where the exit was at 50",
+            (closing_ns - started_ns) / 1_000_000
+        );
+    }
+
     /// The runner closes the window, so a collector must not close it again.
     ///
     /// This is the measurement behind that decision rather than an assertion
@@ -6983,6 +7063,7 @@ mod tests {
             &plans,
             &[true, true],
             None,
+            false,
             &mut spending,
             None,
             None,
@@ -7088,6 +7169,7 @@ mod tests {
             &plans,
             &[true, true],
             None,
+            false,
             &mut spending,
             None,
             None,
@@ -7152,6 +7234,7 @@ mod tests {
             &plans,
             &[true, true],
             None,
+            false,
             &mut spending,
             None,
             None,
@@ -7260,6 +7343,7 @@ mod tests {
             &plans,
             &[true, true],
             None,
+            false,
             &mut spending,
             None,
             None,
@@ -7336,6 +7420,7 @@ mod tests {
             &plans,
             &[true, true],
             None,
+            false,
             &mut spending,
             None,
             None,
@@ -7392,6 +7477,7 @@ mod tests {
             &plans,
             &[true, true],
             None,
+            false,
             &mut spending,
             None,
             None,
@@ -7648,6 +7734,7 @@ mod tests {
             &plans,
             &[true, true, true],
             None,
+            false,
             &mut spending,
             Some(&mut script),
             None,
@@ -7734,6 +7821,7 @@ mod tests {
             &plans,
             &[true, true],
             None,
+            false,
             &mut spending,
             Some(&mut script),
             None,
@@ -7794,6 +7882,7 @@ mod tests {
                 &plans,
                 &[true, true],
                 None,
+                false,
                 &mut spending,
                 Some(&mut script),
                 None,
@@ -7985,6 +8074,7 @@ mod tests {
             &plans,
             &[true],
             None,
+            false,
             &mut spending,
             None,
             Some(&mut recording),
