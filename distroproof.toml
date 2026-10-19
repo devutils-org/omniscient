@@ -4,6 +4,7 @@
 # granted in `setup`, and `omn selftest` sweeps the guest as the user `test`.
 #
 #   scripts/release.sh                                     # the archives, glibc 2.17 and musl
+#   ARCH=aarch64 scripts/release.sh                        # the same for the arm64 guests
 #   scripts/distroproof/fixtures.sh                        # the USDT fixtures, static
 #   distroproof up --no-tui --json target/matrix/distroproof.json
 #   scripts/distroproof/cells.py target/matrix/distroproof.json
@@ -84,6 +85,28 @@ image = "gentoo"
 [[target]]
 name = "alpine"
 image = "alpine"
+
+# --- aarch64, emulated on an x86_64 host (TCG): the arm64 kernels and
+# userspaces of three publishers, with the aarch64 archives
+# (`ARCH=aarch64 scripts/release.sh`). Slower by an order of magnitude, hence
+# the longer timeout; a hardware counter is what TCG emulates, not a core's.
+[[target]]
+name = "debian-13-arm64"
+image = "debian-13-arm64"
+cpus = 4
+timeout = "90m"
+
+[[target]]
+name = "ubuntu-24.04-arm64"
+image = "ubuntu-24.04-arm64"
+cpus = 4
+timeout = "90m"
+
+[[target]]
+name = "fedora-latest-aarch64"
+image = "fedora-latest-aarch64"
+cpus = 4
+timeout = "90m"
 
 # --- Variants: what a distribution or an administrator sets, one at a time
 [[target]]

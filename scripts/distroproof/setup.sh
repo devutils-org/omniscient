@@ -4,10 +4,12 @@
 # alone (target/dist), never the build tree.
 set -eu
 
-# musl or glibc: the archive whose loader this system has.
-if [ -e /lib/ld-musl-x86_64.so.1 ]; then libc=musl; else libc=gnu; fi
-archive=$(ls target/dist/omn-*-x86_64-linux-$libc.tar.gz 2>/dev/null | head -n 1)
-[ -n "$archive" ] || { echo "setup: no $libc archive under target/dist; run scripts/release.sh" >&2; exit 1; }
+# This machine's architecture, and musl or glibc: the archive whose loader
+# this system has.
+arch=$(uname -m)
+if [ -e "/lib/ld-musl-$arch.so.1" ]; then libc=musl; else libc=gnu; fi
+archive=$(ls target/dist/omn-*-"$arch"-linux-$libc.tar.gz 2>/dev/null | head -n 1)
+[ -n "$archive" ] || { echo "setup: no $arch $libc archive under target/dist; run ARCH=$arch scripts/release.sh" >&2; exit 1; }
 mkdir -p /opt/omn
 tar -C /opt/omn --strip-components=1 -xzf "$archive"
 echo "setup: installed $(basename "$archive") in /opt/omn"

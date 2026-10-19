@@ -57,9 +57,12 @@ GLIBC_FLOOR=2.17
 # Ubuntu 18.04's 2.27. 2.17 is the oldest the Rust standard library supports.
 # `make release` stays the host's own build, for this machine alone.
 LIBC=gnu
-TARGET="$(uname -m)-unknown-linux-gnu"
+# The machine the archive is for: this one's, or `ARCH=aarch64` to build the
+# arm64 archives from an x86_64 host (zig cross-links both libcs).
+ARCH="${ARCH:-$(uname -m)}"
+TARGET="$ARCH-unknown-linux-gnu"
 BUILT="$ROOT/target/$TARGET/release"
-MUSL_TARGET="$(uname -m)-unknown-linux-musl"
+MUSL_TARGET="$ARCH-unknown-linux-musl"
 # The musl shim is a dynamic library inside a static build's target: built
 # apart, with the C runtime dynamic, against zig's musl.
 MUSL_SHIM="$ROOT/target/musl-dylib/$MUSL_TARGET/release/libomn_preload.so"
@@ -70,7 +73,7 @@ version() {
 }
 
 name() {
-    echo "omn-$(version)-$(uname -m)-linux-$LIBC"
+    echo "omn-$(version)-$ARCH-linux-$LIBC"
 }
 
 # The contents, in the order they are written. Everything the archive holds is
