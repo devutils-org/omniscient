@@ -47,16 +47,17 @@ Replace `./build.sh` with your program. Sessions also accept JSON and TOML;
 
 ## Portability, tested with distroproof
 
-The latest [distroproof campaign](docs/distroproof.md) found 24 defects that
-one development machine had not shown: 10 in the tool and 14 in its tests.
+The latest [distroproof campaign](docs/distroproof.md) found 26 defects that
+one development machine had not shown: 12 in the tool and 14 in its tests.
 After the fixes, none of the source runs advertised as usable refused at
-start, and every refusal reason agreed with envprobe on all 21 targets.
+start, and every refusal reason agreed with envprobe on all 32 targets: 21
+x86_64 distributions and variants, 3 arm64 images and 8 rootless containers.
 This checks availability and refusal reasons; reference comparisons against
 distro-packaged tools on six distributions still have open differences.
-aarch64, containers and NixOS are not covered by this campaign.
+NixOS is not covered by this campaign.
 
 Release archives target **glibc 2.17+**, with a separate **musl** archive for
-Alpine. The static musl build cannot load NVIDIA's libraries and refuses
+Alpine, for x86_64 and aarch64. The static musl build cannot load NVIDIA's libraries and refuses
 those sources explicitly. See [installation](docs/install.md).
 
 ## Documentation

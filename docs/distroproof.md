@@ -21,10 +21,10 @@ commit that fixed it. It is meant to be read as distroproof's living proof.
 
 | | |
 |---|---|
-| Distributions | **16** images on their own kernels -- Debian 10, 11, 12, 13 and sid; Ubuntu 18.04, 20.04, 22.04, 24.04; Rocky 8 and 9; Fedora 43 and 44; Arch; Gentoo; Alpine -- and **5** variants (paranoid 3, `kptr_restrict` 2, lockdown, no PMU, root) |
+| Distributions | **16** images on their own kernels -- Debian 10, 11, 12, 13 and sid; Ubuntu 18.04, 20.04, 22.04, 24.04; Rocky 8 and 9; Fedora 43 and 44; Arch; Gentoo; Alpine -- and **5** variants (paranoid 3, `kptr_restrict` 2, lockdown, no PMU, root); **3** arm64 images (Debian 13, Ubuntu 24.04, Fedora 44, emulated); **8** rootless podman containers (Debian and Alpine, four privilege levels) |
 | Kernels | 4.15 to 7.2, RHEL's 4.18 and 5.14 with their backports |
 | Time | the 21 targets in about **12 minutes**, four at a time, from one command |
-| Findings in Omniscient | **24 defects** no test on the development machine had shown: **10 in the tool** (the release, the probes, the catalog, a collector) and **14 in its test suite** (a judge, the reference runner, twelve reference pairs) |
+| Findings in Omniscient | **26 defects** no test on the development machine had shown: **12 in the tool** (the release, the probes, the catalog, a collector) and **14 in its test suite** (a judge, the reference runner, twelve reference pairs) |
 | Claims refuted | **158** runs of a source Omniscient called usable that the kernel refused at start, in the first matrix; **0** after |
 | Cross-checked | every reason Omniscient gives for a refusal agrees with envprobe's independent reading of the same guest, on all 21 targets |
 | Back into distroproof | 3 images (Gentoo, Debian sid, Fedora 43), 2 boot fixes, 3 `[run]` options, 2 envprobe facts (pull requests [#4](https://github.com/devutils-org/distroproof/pull/4), [#5](https://github.com/devutils-org/distroproof/pull/5)) |
@@ -33,9 +33,11 @@ commit that fixed it. It is meant to be read as distroproof's living proof.
 
 ```console
 scripts/release.sh                       # the archives, glibc 2.17 and musl
-scripts/distroproof/fixtures.sh          # the USDT fixtures, static
+ARCH=aarch64 scripts/release.sh          # the same for the arm64 guests
+scripts/distroproof/fixtures.sh          # the USDT fixtures, static, per architecture
 distroproof up --no-tui --jobs 4 --json target/matrix/distroproof.json
 scripts/distroproof/cells.py target/matrix/distroproof.json
+scripts/containers.sh                    # the rootless podman cells, on this machine
 cargo test --test portability            # the judges, over every cell
 ```
 
@@ -81,9 +83,25 @@ distributions with the witnesses their own packages carry.
 | `fedora-latest-lockdown` | 6.19 | `lockdown=confidentiality` | 55 |
 | `debian-12-nopmu` | 6.1 | no PMU | 76 |
 | `debian-12-root` | 6.1 | root | 94 |
+| `debian-13-arm64` | 6.12 arm64, emulated | file capabilities | 82 |
+| `ubuntu-24.04-arm64` | 6.8 arm64, emulated | file capabilities | 86 |
+| `fedora-latest-aarch64` | 6.19 aarch64, emulated | file capabilities | 88 |
+| `podman-{debian,alpine}-root` | the host's 7.2, rootless podman | root of the container | 44 |
+| `podman-{debian,alpine}-user` | the same | uid 1000 in the container | 44 |
+| `podman-{debian,alpine}-capadd` | the same | `--cap-add CAP_BPF,CAP_PERFMON,CAP_SYS_ADMIN` | 57 |
+| `podman-{debian,alpine}-privileged` | the same | `--privileged` | 59 |
 
 The spread is the point: the same binary serves 36 sources on Ubuntu 18.04
 and 96 on Fedora, and says, source by source, why.
+
+The arm64 cells run the aarch64 archives (`ARCH=aarch64 scripts/release.sh`)
+in guests distroproof emulates (TCG): 7 to 8 minutes a cell. The container
+cells run on this machine's kernel through rootless podman
+(`scripts/containers.sh`): a user namespace whose capabilities are its own,
+podman's default seccomp profile, and no tracefs. No eBPF source attaches in
+any of them -- `unprivileged_bpf_disabled` is 2 and a namespace's CAP_BPF is
+not the machine's -- and the perf sources are refused by the seccomp filter
+until CAP_PERFMON or CAP_SYS_ADMIN is added, which lifts it.
 
 ## Findings
 
@@ -306,6 +324,37 @@ Found by the second and third runs, all in the test suite:
 - The GPU pairs failed in every guest: their workload file was not copied.
 - A tool that exits 0 over omn's refusal (finding 11).
 
+### 13. arm64: a kernel with ftrace and no symbol for it
+
+**Seen.** On `debian-13-arm64`, `ubuntu-24.04-arm64` and
+`fedora-latest-aarch64`, `io.vfs`, `io.fs` and the other fentry sources were
+refused: "this kernel was built without ftrace".
+
+**What distroproof showed.** envprobe read `CONFIG_FUNCTION_TRACER=y` on all
+three. The probe (finding 6) looked for the call site's symbol, `__fentry__`
+on x86 and `_mcount` on arm64; an arm64 kernel that patches its function
+entries (`-fpatchable-function-entry`, `DYNAMIC_FTRACE_WITH_CALL_OPS`) has
+none, and has the tracer's own `ftrace_caller` and `function_trace_call`,
+which x86 has too and Alpine's `virt` kernel, built without ftrace, lacks
+(read from `/proc/kallsyms` in the four guests).
+
+**Fix.** The probe accepts any of the four. The arm64 cells went from 76, 80
+and 82 sources usable to 82, 86 and 88, every one attaching.
+
+### 14. A container's seccomp filter, blamed on perf_event_paranoid
+
+**Seen.** In every rootless podman container, the perf sources were refused
+with "perf_event_paranoid is 2" -- a level at which a process may count its
+own user mode.
+
+**What envprobe showed.** `seccomp: filter`: podman's default profile refuses
+`perf_event_open` unless the container is given CAP_PERFMON or
+CAP_SYS_ADMIN, and the 13 perf sources came back as soon as it was.
+
+**Fix.** An EPERM where the level allows the event, under a filter
+(`Seccomp: 2` in `/proc/self/status`), is said to be the filter's, with what
+lifts it; the envprobe judge holds that reason to envprobe's `seccomp`.
+
 ## The cross-check
 
 envprobe and Omniscient read the same guest independently, so their answers
@@ -399,5 +448,10 @@ developer does not have.
   with `perf sched timehist` and `strace` elsewhere).
 - **`cpu.cache_misses`** reads apart from perf on separate runs, in opposite
   directions here and in the Arch guest; **`cpu.ipc`** missed once on Fedora.
-- Not covered yet: aarch64, containers, NixOS -- each waits on distroproof
-  booting it.
+- **NixOS** is not covered. It publishes no image a NoCloud seed configures:
+  Hydra's only cloud image is Amazon's, set up from EC2's metadata service,
+  which distroproof would have to serve, and building one needs `nix`. On
+  NixOS itself the glibc archive would not start (there is no
+  `/lib64/ld-linux-x86-64.so.2`); the static musl one would.
+- **aarch64 on hardware**: the arm64 cells are emulated, so their hardware
+  counters are TCG's, not a core's.

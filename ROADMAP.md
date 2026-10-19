@@ -1177,9 +1177,13 @@ explains it. So this phase does two things at once, on purpose:
       *On distroproof's main since 412d873: the images (#4) and `file_caps`,
       `collect`, `DP_TARGET` and the two envprobe facts (#5).*
 
-Not this phase's, and why: aarch64 and containers (item 5 of `STATE.md`'s
-"What remains" asks for both) wait on distroproof booting them; the hardware
-sources (IBS, RAPL, a GPU) stay checked on the host, as in the kernel matrix.
+Added 2026-10-19, beyond the criteria: aarch64 (three arm64 images distroproof
+now emulates, with the aarch64 archives) and rootless podman containers (eight
+cells, `scripts/containers.sh`), each judged like the rest; two defects found
+(`docs/distroproof.md`, findings 13 and 14). Not this phase's, and why: NixOS,
+which publishes no image a NoCloud seed configures (the same document, "Open");
+the hardware sources (IBS, RAPL, a GPU) stay checked on the host, as in the
+kernel matrix.
 
 ---
 
