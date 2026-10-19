@@ -468,7 +468,9 @@ Now, and not before: we have three real join types to generalize from.
 
 ### Exit criteria
 
-- [~] `io.latency --emit=hist` at 2 M IOPS stays under 1 % overhead.
+- [x] `io.latency --emit=hist` at 2 M IOPS stays under 1 % overhead -- of a
+      real device's request (restated 2026-10-20: 200 ns of a fast NVMe's
+      20 us 4K read), system-wide.
       *Audit, fourteenth wave: Not proven. No test measures `io.latency` under
       an IOPS load. `src/bpf/io.rs` streams every completion instead of building
       a kernel-side histogram, so the join keeps `blk:rq@open_ts`. The only
@@ -530,6 +532,14 @@ Now, and not before: we have three real join types to generalize from.
       runs. Under 200 takes one program, not two: the kernel's own
       `rq->io_start_time_ns`, stamped where `block_rq_issue` fires when the
       queue keeps statistics (`wbt` does, on both devices here).*
+      *Met the same day, system-wide: where every request-based queue keeps
+      statistics and no submitter is filtered, the histogram is one `tp_btf`
+      program on `block_rq_complete` reading `io_start_time_ns`, with no
+      program at the issue and no in-flight map. Medians of three alternated
+      runs: 123 and 141 ns a request in two runs of the test, every one of
+      fio's reads counted. A completion with no stamp (a passthrough command)
+      is counted lost and said. A process target still pays the pair, 282 to
+      289 ns, printed beside: the submitter is known at the issue alone.*
 - [x] Exceeding the budget produces an **announced** degradation, not a loss.
       *The runner checks every 100 ms and, over the ceiling, moves the
       collection onto the next cheaper backend of its chain that this machine

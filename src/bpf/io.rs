@@ -244,7 +244,12 @@ const UNPAIRED: u32 = 2;
 /// A completion the kernel-side histogram had no row for and could not make
 /// one: the map was full. Lost from the histogram, and counted.
 const DROP_HIST: u32 = 3;
-const DROP_SLOTS: u32 = 4;
+/// A completion whose request the kernel never stamped at its issue, when
+/// the histogram reads the kernel's stamp instead of making its own: a
+/// passthrough request, or a queue that stopped keeping statistics. Not
+/// measured, and counted as lost.
+const UNSTAMPED: u32 = 4;
+const DROP_SLOTS: u32 = 5;
 
 /// Rows the kernel-side histogram may hold: one per `(device, log2 bucket)`,
 /// so 64 devices each with a completion in every one of 64 buckets. A machine
@@ -958,6 +963,17 @@ fn histogram_open_instructions(
     Ok(instructions)
 }
 
+/// Where a kernel-side histogram's interval starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistStart {
+    /// The opening program's stamp, in the in-flight map under this fd.
+    Paired(i32),
+    /// The kernel's own `request.io_start_time_ns`, at this offset: stamped
+    /// in `blk_mq_start_request`, where `block_rq_issue` fires, on a queue
+    /// that keeps statistics. One program instead of two, and no map.
+    Kernel(i32),
+}
+
 /// The closing program of a kernel-side histogram: subtract, bucket, count.
 ///
 /// What it reads out of the request is the device, because that is half the
@@ -981,14 +997,20 @@ fn histogram_open_instructions(
 /// pays a `bpf_probe_read_kernel` call for each. They were most of the
 /// program's 149 ns a run at two million requests a second (`ROADMAP.md`,
 /// phase 6).
+///
+/// **`HistStart::Kernel`** takes the start from the request itself, which only
+/// a `direct` program can load.
 fn histogram_close_instructions(
     btf: &Btf,
     stage: Stage,
-    inflight_fd: i32,
+    start: HistStart,
     hist_fd: i32,
     counters_fd: i32,
     direct: bool,
 ) -> Result<Vec<Insn>, String> {
+    if matches!(start, HistStart::Kernel(_)) && !direct {
+        return Err("the kernel's issue stamp is read through `tp_btf` alone".to_owned());
+    }
     if stage.opens_at().is_none() {
         return Err(format!(
             "a kernel-side histogram is of an interval, and `{}` alone measures none",
@@ -1021,20 +1043,37 @@ fn histogram_close_instructions(
     program.push(Insn::call(helper::KTIME_GET_NS));
     program.push(Insn::mov64_reg(8, 0));
 
-    program.push(Insn::stx(BPF_DW, R10, LOOKUP_KEY, 7));
-    program.extend(Insn::load_map_fd(1, inflight_fd));
-    program.push(Insn::mov64_reg(2, R10));
-    program.push(Insn::add64_imm(2, LOOKUP_KEY as i32));
-    program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
-    // No entry, or one whose time was consumed: this run never saw the
-    // request open, because it opened before the attach or belongs to a task
-    // the open program refused.
-    program.jump_to("unpaired", Insn::jeq_imm(0, 0, 0));
-    program.push(Insn::ldx(BPF_DW, 9, 0, VAL_OPEN_TS));
-    program.jump_to("unpaired", Insn::jeq_imm(9, 0, 0));
-    program.push(Insn::st_imm(BPF_DW, 0, VAL_OPEN_TS, 0));
+    match start {
+        HistStart::Paired(inflight_fd) => {
+            program.push(Insn::stx(BPF_DW, R10, LOOKUP_KEY, 7));
+            program.extend(Insn::load_map_fd(1, inflight_fd));
+            program.push(Insn::mov64_reg(2, R10));
+            program.push(Insn::add64_imm(2, LOOKUP_KEY as i32));
+            program.push(Insn::call(helper::MAP_LOOKUP_ELEM));
+            // No entry, or one whose time was consumed: this run never saw
+            // the request open, because it opened before the attach or
+            // belongs to a task the open program refused.
+            program.jump_to("unpaired", Insn::jeq_imm(0, 0, 0));
+            program.push(Insn::ldx(BPF_DW, 9, 0, VAL_OPEN_TS));
+            program.jump_to("unpaired", Insn::jeq_imm(9, 0, 0));
+            program.push(Insn::st_imm(BPF_DW, 0, VAL_OPEN_TS, 0));
+        }
+        HistStart::Kernel(offset) => {
+            // Zeroed when the request is set up, written at the issue only
+            // where the queue keeps statistics.
+            program.push(Insn::ldx(BPF_DW, 9, 7, offset as i16));
+            program.jump_to("unstamped", Insn::jeq_imm(9, 0, 0));
+        }
+    }
     // The interval, kept in r8 across every helper call below.
     program.push(Insn::sub64_reg(8, 9));
+    // A stamp the kernel took from a plug's cached clock is never later than
+    // this read; a negative interval would be a stamp from somewhere else.
+    if matches!(start, HistStart::Kernel(_)) {
+        program.jump_to("stamp_ok", Insn::jsge_imm(8, 0, 0));
+        program.push(Insn::mov64_imm(8, 0));
+        program.label("stamp_ok");
+    }
 
     // The device, or zero for a request that belongs to no partition -- the
     // same reading, and the same zero, as the ring path's.
@@ -1106,8 +1145,18 @@ fn histogram_close_instructions(
     count(&mut program, counters_fd, CLOSE_DROP_KEY, DROP_HIST, "done");
     program.jump_to("done", Insn::ja());
 
-    program.label("unpaired");
-    count(&mut program, counters_fd, CLOSE_DROP_KEY, UNPAIRED, "done");
+    // Only the start in use has a path here: a block nothing jumps to is code
+    // the verifier refuses as unreachable.
+    match start {
+        HistStart::Paired(_) => {
+            program.label("unpaired");
+            count(&mut program, counters_fd, CLOSE_DROP_KEY, UNPAIRED, "done");
+        }
+        HistStart::Kernel(_) => {
+            program.label("unstamped");
+            count(&mut program, counters_fd, CLOSE_DROP_KEY, UNSTAMPED, "done");
+        }
+    }
 
     program.label("done");
     program.push(Insn::mov64_imm(0, 0));
@@ -1116,6 +1165,35 @@ fn histogram_close_instructions(
     let instructions = program.build();
     super::insn::audit(&instructions)?;
     Ok(instructions)
+}
+
+/// Whether every request-based block device keeps queue statistics, which
+/// is what has the kernel stamp `io_start_time_ns` at each issue: writeback
+/// throttling keeps them, and says so with a non-zero `wbt_lat_usec`. A
+/// bio-based device (no `mq` directory: zram) issues no request and does not
+/// count. A device that answers nothing here is taken for one without.
+fn queues_keep_statistics() -> bool {
+    let Ok(devices) = std::fs::read_dir("/sys/block") else {
+        return false;
+    };
+    let mut any = false;
+    for device in devices.flatten() {
+        let path = device.path();
+        let request_based =
+            std::fs::read_dir(path.join("mq")).is_ok_and(|mut queues| queues.next().is_some());
+        if !request_based {
+            continue;
+        }
+        any = true;
+        let keeps = std::fs::read_to_string(path.join("queue/wbt_lat_usec"))
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .is_some_and(|usec| usec > 0);
+        if !keeps {
+            return false;
+        }
+    }
+    any
 }
 
 /// One `(device, log2 bucket)` row of the kernel-side latency histogram, over
@@ -1183,6 +1261,8 @@ pub struct BlockProgram {
     /// Whether the closing program went through `tp_btf` rather than the raw
     /// tracepoint: the same rows, with two helper calls fewer a request.
     close_is_tp_btf: bool,
+    /// Whether it reads the kernel's issue stamp, with no opening program.
+    close_reads_kernel_stamp: bool,
     /// Why the programs read no request identity, when they do not: this
     /// kernel would not give them a task-storage map. The measurement is the
     /// same; only `req` is missing from every event, and the run says so.
@@ -1289,11 +1369,37 @@ impl BlockProgram {
         // A histogram's close goes through `tp_btf` where the kernel loads
         // it, and otherwise through the raw tracepoint: the same rows, read
         // with two helper calls more.
+        // One program, reading the kernel's issue stamp, where every queue
+        // keeps it and no submitter is to be told apart at the issue.
+        let stamped = match &histogram {
+            Some(rows)
+                if stage == Stage::Latency
+                    && submitter == Submitter::Any
+                    && queues_keep_statistics() =>
+            {
+                btf.member_offset("request", "io_start_time_ns")
+                    .and_then(|offset| {
+                        histogram_close_instructions(
+                            btf,
+                            stage,
+                            HistStart::Kernel(offset),
+                            rows.as_raw_fd(),
+                            counters.as_raw_fd(),
+                            true,
+                        )
+                    })
+                    .and_then(|close| load_tp_btf(btf, stage.closes_at(), &close, "omn_blk_close"))
+                    .ok()
+            }
+            _ => None,
+        };
+        let close_reads_kernel_stamp = stamped.is_some();
         let direct = match &histogram {
+            _ if stamped.is_some() => stamped,
             Some(rows) => histogram_close_instructions(
                 btf,
                 stage,
-                inflight_fd,
+                HistStart::Paired(inflight_fd),
                 rows.as_raw_fd(),
                 counters.as_raw_fd(),
                 true,
@@ -1310,7 +1416,7 @@ impl BlockProgram {
                     Some(rows) => histogram_close_instructions(
                         btf,
                         stage,
-                        inflight_fd,
+                        HistStart::Paired(inflight_fd),
                         rows.as_raw_fd(),
                         counters.as_raw_fd(),
                         false,
@@ -1365,6 +1471,8 @@ impl BlockProgram {
             (None, None, None)
         };
         let (open_program, open_link) = match stage.opens_at() {
+            // The kernel stamps the issue itself: nothing to open.
+            Some(_) if close_reads_kernel_stamp => (None, None),
             Some(tracepoint) => {
                 let open = if histogram.is_some() {
                     histogram_open_instructions(
@@ -1415,6 +1523,7 @@ impl BlockProgram {
             close_link: Some(close_link),
             histogram,
             close_is_tp_btf,
+            close_reads_kernel_stamp,
             no_request_identity,
             status_is_errno,
             descendants,
@@ -1458,6 +1567,18 @@ impl BlockProgram {
     /// Whether the closing program is attached through `tp_btf`.
     pub fn close_is_tp_btf(&self) -> bool {
         self.close_is_tp_btf
+    }
+
+    /// Whether the histogram's interval starts at the kernel's own issue
+    /// stamp, read by the closing program alone.
+    pub fn close_reads_kernel_stamp(&self) -> bool {
+        self.close_reads_kernel_stamp
+    }
+
+    /// Completions the stamped close could not measure: their request
+    /// carried no issue stamp.
+    pub fn unstamped(&self) -> u64 {
+        self.counters.read(UNSTAMPED)
     }
 
     /// Detaches both programs and keeps them loaded.
@@ -1816,7 +1937,7 @@ mod tests {
                         .unwrap_or_else(|reason| panic!("{stage:?} histogram open: {reason}")),
                 );
                 programs.push(
-                    histogram_close_instructions(btf, stage, 3, 7, 5, false)
+                    histogram_close_instructions(btf, stage, HistStart::Paired(3), 7, 5, false)
                         .unwrap_or_else(|reason| panic!("{stage:?} histogram close: {reason}")),
                 );
             }
@@ -2059,7 +2180,8 @@ mod tests {
     fn a_histogram_close_writes_no_record_and_counts_its_row_without_an_atomic() {
         let Some(btf) = kernel_btf() else { return };
         let program =
-            histogram_close_instructions(btf, Stage::Latency, 3, 7, 5, false).expect("a program");
+            histogram_close_instructions(btf, Stage::Latency, HistStart::Paired(3), 7, 5, false)
+                .expect("a program");
         let helpers = helpers_called(&program);
         assert!(
             !helpers.contains(&helper::RINGBUF_OUTPUT),
@@ -2080,8 +2202,9 @@ mod tests {
             "each cpu adds to its own copy of the row"
         );
         // A stage with no interval has nothing to bucket.
-        let error = histogram_close_instructions(btf, Stage::Size, -1, 7, 5, false)
-            .expect_err("io.size has no interval");
+        let error =
+            histogram_close_instructions(btf, Stage::Size, HistStart::Paired(-1), 7, 5, false)
+                .expect_err("io.size has no interval");
         assert!(error.contains("measures none"), "{error}");
     }
 
@@ -2142,7 +2265,8 @@ mod tests {
         );
 
         let close =
-            histogram_close_instructions(btf, Stage::Latency, 3, 7, 5, false).expect("a program");
+            histogram_close_instructions(btf, Stage::Latency, HistStart::Paired(3), 7, 5, false)
+                .expect("a program");
         let close_helpers = helpers_called(&close);
         // Up to the row's first lookup, in order: what every paired
         // completion pays.
@@ -2178,7 +2302,8 @@ mod tests {
             return;
         };
         let close =
-            histogram_close_instructions(btf, Stage::Latency, 3, 7, 5, true).expect("a program");
+            histogram_close_instructions(btf, Stage::Latency, HistStart::Paired(3), 7, 5, true)
+                .expect("a program");
         let helpers = helpers_called(&close);
         assert!(!helpers.contains(&helper::PROBE_READ_KERNEL), "{helpers:?}");
         assert_eq!(
@@ -2207,6 +2332,44 @@ mod tests {
         assert!(program.close_is_tp_btf());
         let ring = BlockProgram::load(Stage::Latency, Submitter::Any, 0).expect("the ring path");
         assert!(!ring.close_is_tp_btf());
+    }
+
+    /// Started at the kernel's issue stamp, the close reads the clock and
+    /// looks up the row and nothing else: no in-flight map, no helper read;
+    /// and only a `tp_btf` program can load the stamp.
+    #[test]
+    fn a_close_on_the_kernel_s_stamp_looks_up_its_row_alone() {
+        let Some(btf) = kernel_btf() else {
+            return;
+        };
+        let offset = btf
+            .member_offset("request", "io_start_time_ns")
+            .expect("this kernel's request carries an issue stamp");
+        let close = histogram_close_instructions(
+            btf,
+            Stage::Latency,
+            HistStart::Kernel(offset),
+            7,
+            5,
+            true,
+        )
+        .expect("a program");
+        let helpers = helpers_called(&close);
+        assert_eq!(
+            helpers[..2],
+            [helper::KTIME_GET_NS, helper::MAP_LOOKUP_ELEM],
+            "{helpers:?}"
+        );
+        assert!(!helpers.contains(&helper::PROBE_READ_KERNEL), "{helpers:?}");
+        assert!(histogram_close_instructions(
+            btf,
+            Stage::Latency,
+            HistStart::Kernel(offset),
+            7,
+            5,
+            false
+        )
+        .is_err());
     }
 
     /// A row's per-cpu copies are added word by word: the count with the

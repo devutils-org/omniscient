@@ -216,6 +216,8 @@ pub struct BlockCollector {
     /// The programs' counters are cumulative, so what is new is the difference.
     dropped_inflight: u64,
     dropped_ring: u64,
+    /// Completions the stamped close found no issue stamp on, as last read.
+    unstamped: u64,
     skipped: u64,
     /// Requests seen closing that this run never saw open. Not a loss.
     unpaired: u64,
@@ -260,6 +262,8 @@ pub struct BlockCollector {
     in_kernel_histogram: bool,
     /// Whether the histogram's closing program went through `tp_btf`.
     close_is_tp_btf: bool,
+    /// Whether it read the kernel's issue stamp, with no opening program.
+    close_reads_kernel_stamp: bool,
     /// What the histogram held at the end: the requests it counted, and the
     /// rows they were reported as.
     histogram_requests: u64,
@@ -284,6 +288,7 @@ impl BlockCollector {
             losses: Losses::default(),
             dropped_inflight: 0,
             dropped_ring: 0,
+            unstamped: 0,
             skipped: 0,
             unpaired: 0,
             direct: 0,
@@ -304,6 +309,7 @@ impl BlockCollector {
             status_is_errno: false,
             in_kernel_histogram: false,
             close_is_tp_btf: false,
+            close_reads_kernel_stamp: false,
             histogram_requests: 0,
             histogram_rows: 0,
             histogram_caveat: None,
@@ -553,6 +559,17 @@ impl BlockCollector {
                 .note("the block ring was full: requests completed faster than they were drained");
             self.dropped_ring = ring;
         }
+        let unstamped = program.unstamped();
+        if unstamped > self.unstamped {
+            self.losses.dropped += unstamped - self.unstamped;
+            self.losses.note_times(
+                "a request completed with no issue stamp from the kernel -- a passthrough \
+                 command, or a queue that stopped keeping statistics -- so the histogram, which \
+                 reads that stamp, could not time it",
+                unstamped - self.unstamped,
+            );
+            self.unstamped = unstamped;
+        }
         let skipped = program.skipped();
         if skipped > self.skipped {
             self.losses.dropped += skipped - self.skipped;
@@ -671,6 +688,7 @@ impl Collector for BlockCollector {
         self.no_request_identity = program.no_request_identity.clone();
         self.status_is_errno = program.status_is_errno;
         self.close_is_tp_btf = program.close_is_tp_btf();
+        self.close_reads_kernel_stamp = program.close_reads_kernel_stamp();
         self.program = Some(program);
         self.names = super::device_names();
         self.opened_ns = monotonic_ns();
@@ -765,7 +783,13 @@ impl Collector for BlockCollector {
              read the device {}",
             self.histogram_requests,
             self.histogram_rows,
-            if self.close_is_tp_btf {
+            if self.close_reads_kernel_stamp {
+                "through `tp_btf`, two loads, and took the start from the kernel's own stamp at \
+                 the issue (`io_start_time_ns`, kept by every queue here), so no program ran at \
+                 the issue. That stamp is the kernel's clock read at the issue, or the one a \
+                 plugged batch read first and kept: a request issued from a plug may read long \
+                 by the time its batch took to issue"
+            } else if self.close_is_tp_btf {
                 "through `tp_btf`, two loads"
             } else {
                 "through the raw tracepoint, two helper calls, this kernel refusing `tp_btf`"
