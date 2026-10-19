@@ -685,7 +685,10 @@ mod tests {
         let open = "RmProfilingAdminOnly: 0\n";
         assert!(matches!(profiling_allowed(restricted, false),
             Probe::Missing(why) if why.contains("NVreg_RestrictProfilingToAdminUsers=0")));
-        assert!(matches!(profiling_allowed(restricted, true), Probe::Available));
+        assert!(matches!(
+            profiling_allowed(restricted, true),
+            Probe::Available
+        ));
         assert!(matches!(profiling_allowed(open, false), Probe::Available));
         assert!(matches!(profiling_allowed("", false), Probe::Unknown(_)));
     }

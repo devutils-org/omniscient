@@ -86,6 +86,19 @@ asked as a question. The session has five requests — `cpu.profile` (on-cpu),
 `sched.futex` and `sched.mutex` (optional: what a sleep was waiting on) — and
 one `decompose:` over the program's lifetime, or the window for `--pid`.
 
+**The on-cpu row is a task's whole time on a cpu**, to the period: its
+samples times the period, the samples its own ring lost (the kernel counted
+them; each ring is one task's), and the cpu it had used before the profile
+found it, which the profile reads from the task's `schedstat` when it finds
+it (`unsampled_ns:task:<tid>` in the profile's `fields`). The row's note says
+each part. A task the target starts is found on a tick, and in a debug build a
+tick can run late by a second: `make`'s second compile had a second of cpu in
+no row until 2026-10-19 (`cases/make-sqlite`). A row is still a lower bound
+where the kernel throttled the sampling, which no count recovers. And every
+sample carries the process's `ppid`, read once from `/proc/<pid>/stat`, so a
+task that computes and never blocks still has a parent: the job a wait for a
+child covers is read under the right driver both ways.
+
 A launched program that failed -- exited with a status other than zero, or
 died of a signal the run did not send it -- is said as a warning under the
 verdict, and carried as `program_failed` (one line per run; `omn saturate`

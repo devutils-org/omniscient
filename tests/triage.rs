@@ -656,24 +656,24 @@ fn cpu_or_queue(oncpu: f64, queued: f64) -> (&'static str, bool) {
 /// A followed task's on-cpu row against the kernel's own figure for it.
 ///
 /// The profile finds a task the target started on a tick after it began, and
-/// says how much cpu it had used by then; the row is short by that. The bound
-/// below is the kernel's alone, with a fixed allowance for it -- a quarter of
-/// the task's cpu -- so a note claiming more missed cpu does not widen it.
-/// And the note's figure is itself held against the kernel: what the row
-/// read plus what the note says it missed is no more than the kernel's
-/// figure (and 10 ms for the other tasks found late, which spin nothing).
+/// its row adds the cpu the task had used by then (`schedstat`, read when it
+/// was found) and the samples its ring lost: the row is the task's whole time
+/// on a cpu, to the periods. Until 2026-10-19 the row was
+/// short by the first and the bound below was three quarters of the
+/// kernel's; it is nine tenths now. And the note's figure is held against
+/// the row: what the profile says it found late is inside the row, never
+/// beside it (10 ms for the other tasks found late, which spin nothing).
 fn assert_on_cpu_agrees(run: &Answered, task: &str, on_cpu: f64, truth: f64) {
     let tolerance = 3.0 * PERIOD_NS + truth * 0.02;
     let missed = run.missed_by_late_discovery();
     assert!(
-        on_cpu <= truth + tolerance && on_cpu >= truth * 0.75 - tolerance,
+        on_cpu <= truth + tolerance && on_cpu >= truth * 0.9 - tolerance,
         "{task}'s on-cpu {on_cpu} against the kernel's {truth}:\n{}",
         run.text
     );
     assert!(
-        on_cpu + missed <= truth + tolerance + 10e6,
-        "{task}'s on-cpu {on_cpu} and the {missed} the profile says it found late are more \
-         than the kernel's {truth}:\n{}",
+        missed <= on_cpu + 10e6,
+        "{task}'s on-cpu {on_cpu} does not hold the {missed} the profile says it found late:\n{}",
         run.text
     );
 }

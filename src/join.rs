@@ -2969,6 +2969,12 @@ impl Part {
 /// The `value` that means a sample count rather than an attribute.
 pub const SAMPLES: &str = "samples";
 
+/// The prefix of a sampling collector's `fields` that carry, per key, the cpu
+/// a task had used before the sampler found it (`unsampled_ns:task:4242`):
+/// its `schedstat`, read at the tick that found it. A `samples` row adds it,
+/// because no sample of the run covers that time and the kernel counted it.
+pub const UNSAMPLED_NS: &str = "unsampled_ns:";
+
 /// The `value` that means a part is read from a join rather than a source:
 /// its `from` names one of the session's `joins`, and the row is the time
 /// between the two ends of every pair that join made, summed per key.
@@ -3872,6 +3878,12 @@ struct Readout<'a> {
     /// Why the row could not be read at all, when that is decided before any
     /// event is: a join a part reads that failed on this run's events.
     unreadable: Option<String>,
+    /// For a sample count, per key, the cpu the task had used before the
+    /// sampler found it, in ns ([`UNSAMPLED_NS`]).
+    unsampled: BTreeMap<String, f64>,
+    /// For a sample count, per key, the samples its own ring lost: taken by
+    /// the kernel, which counted them, and never read.
+    lost: BTreeMap<String, u64>,
 }
 
 impl<'a> Readout<'a> {
@@ -3935,6 +3947,42 @@ impl<'a> Readout<'a> {
             absent_is_not_zero(source, result, short.as_ref(), run_closed_ns)
         });
 
+        // A ring per key: what each lost is that key's samples, taken and
+        // counted by the kernel and never read, so the row adds them. When the
+        // rings account for every loss of the run and nothing was throttled or
+        // unread, the row is whole again and not a lower bound.
+        let lost: BTreeMap<String, u64> = match served {
+            Some((_, result)) if value == SAMPLES => result
+                .by_ring
+                .iter()
+                .filter(|ring| ring.losses.dropped > 0)
+                .map(|ring| (ring.key.to_string(), ring.losses.dropped))
+                .collect(),
+            _ => BTreeMap::new(),
+        };
+        let short = match served {
+            Some((_, result))
+                if value == SAMPLES
+                    && result.losses.dropped > 0
+                    && lost.values().sum::<u64>() == result.losses.dropped
+                    && result.losses.throttled == 0
+                    && result.losses.undecoded == 0
+                    && result.losses.failed_reads == 0 =>
+            {
+                None
+            }
+            _ => short,
+        };
+        let unsampled = match served {
+            Some((_, result)) if value == SAMPLES => result
+                .fields
+                .iter()
+                .filter_map(|(name, ns)| {
+                    Some((name.strip_prefix(UNSAMPLED_NS)?.to_owned(), *ns as f64))
+                })
+                .collect(),
+            _ => BTreeMap::new(),
+        };
         Self {
             source: source.to_owned(),
             value: value.to_owned(),
@@ -3955,6 +4003,8 @@ impl<'a> Readout<'a> {
             via: None,
             paired: None,
             unreadable: None,
+            unsampled,
+            lost,
         }
     }
 
@@ -3976,7 +4026,11 @@ impl<'a> Readout<'a> {
                 ),
                 None => format!("no `{}` event carried `{}`", self.source, self.value),
             })
-        } else if events.is_empty() && !(self.filtered && self.seen.contains(key)) {
+        } else if events.is_empty()
+            && !(self.filtered && self.seen.contains(key))
+            && !self.unsampled.contains_key(key)
+            && !self.lost.contains_key(key)
+        {
             // The source had nothing at all for this key. That is a zero only
             // from a source that watched the whole run and lost nothing.
             self.absent_is_not_zero.clone()
@@ -4005,6 +4059,29 @@ impl<'a> Readout<'a> {
             (
                 Some(read(&self.value)),
                 Some(format!("{note}, {} pairs", events.len())),
+            )
+        } else if self.value == SAMPLES
+            && (self.unsampled.contains_key(key) || self.lost.contains_key(key))
+        {
+            let period = self.period_ns.unwrap_or(0.0);
+            let before = self.unsampled.get(key).copied().unwrap_or(0.0);
+            let lost = self.lost.get(key).copied().unwrap_or(0);
+            let mut note = format!("{} samples x {}", events.len(), period_label(period));
+            if lost > 0 {
+                note.push_str(&format!(
+                    ", {lost} more its ring lost, taken and counted by the kernel and never read"
+                ));
+            }
+            if before > 0.0 {
+                note.push_str(&format!(
+                    ", and {} the kernel counted (`schedstat`) before the profile found the \
+                     task, which no sample covers",
+                    period_label(before)
+                ));
+            }
+            (
+                Some((events.len() as u64 + lost) as f64 * period + before),
+                Some(note),
             )
         } else if events.is_empty() {
             (
@@ -6018,6 +6095,77 @@ mod tests {
         assert_eq!(table.whole.amount, Some(10_000_000.0));
         assert_eq!(table.residue, Some(-1_000_000.0), "negative: counted twice");
         assert_eq!(table.residue_resolution, Some(1_000_000.0));
+    }
+
+    /// A sample count adds the cpu the kernel counted for a task before the
+    /// sampler found it (`unsampled_ns:task:<tid>` in the result's fields):
+    /// `make`'s second compile, found on a late tick, was half a job's cpu in
+    /// no row. A task found and never sampled is that time, not missing.
+    #[test]
+    fn a_samples_row_adds_the_cpu_before_the_task_was_found() {
+        let spec = decomposition(
+            "{id: t, whole: window, parts: [\
+               {state: on-cpu, from: cpu.profile, value: samples},\
+               {state: blocked, from: sched.offcpu, value: total_ns}]}",
+        );
+        let requests = [
+            request("cpu.profile", "sample@1000hz"),
+            request("sched.offcpu", "trace"),
+        ];
+        let mut profile = result("cpu.profile", Unit::Count, 10_000_000);
+        profile
+            .fields
+            .insert(format!("{UNSAMPLED_NS}task:7"), 2_500_000);
+        profile
+            .fields
+            .insert(format!("{UNSAMPLED_NS}task:8"), 3_000_000);
+        // Task 7's ring lost 3 samples, all the run lost: the row adds them
+        // and is no lower bound.
+        profile.losses.dropped = 3;
+        profile.by_ring = vec![crate::collect::RingLoss {
+            key: KeyValue::task(7),
+            losses: crate::collect::Losses {
+                dropped: 3,
+                ..Default::default()
+            },
+        }];
+        let results = [profile, result("sched.offcpu", Unit::Ns, 9_000_000)];
+        let mut events: Vec<Event> = (0..4)
+            .map(|i| total(i, "cpu.profile", 7, vec![Attr::uint("count", 1)]))
+            .collect();
+        events.push(total(
+            5,
+            "sched.offcpu",
+            8,
+            vec![Attr::uint("total_ns", 1_000)],
+        ));
+
+        let output = decompose(&spec, &requests, &results, &events);
+        let row = |key: &str| {
+            output
+                .tables
+                .iter()
+                .find(|table| table.key == key)
+                .map(|table| table.rows[0].clone())
+                .unwrap_or_else(|| panic!("no table for {key}"))
+        };
+        let sampled = row("task:7");
+        assert_eq!(
+            sampled.amount,
+            Some(9_500_000.0),
+            "4 periods kept, 3 lost, and 2.5 ms before"
+        );
+        assert!(
+            sampled
+                .note
+                .as_deref()
+                .is_some_and(|n| n.contains("schedstat") && n.contains("3 more")),
+            "{sampled:?}"
+        );
+        assert!(sampled.short.is_none(), "{sampled:?}");
+        let never = row("task:8");
+        assert_eq!(never.missing, None);
+        assert_eq!(never.amount, Some(3_000_000.0));
     }
 
     /// The I/O crossing's table, declared: a part that is the distance

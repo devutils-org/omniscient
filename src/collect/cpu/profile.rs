@@ -264,6 +264,24 @@ fn max_frequency_hz() -> Option<u64> {
     (khz > 0).then_some(khz * 1_000)
 }
 
+/// A process's parent, the fourth field of its `/proc/<pid>/stat` (after the
+/// command, which may hold spaces and parentheses, so read past the last `)`).
+/// `None` once the process is gone, or for the kernel's own (`ppid` 0).
+fn parent_of(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parent_in_stat(&stat)
+}
+
+fn parent_in_stat(stat: &str) -> Option<u64> {
+    let after = &stat[stat.rfind(')')? + 1..];
+    after
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+        .filter(|ppid| *ppid > 0)
+}
+
 /// The cpu time a task had used when it was found, from the first field of
 /// its `schedstat`: nanoseconds on a cpu, the kernel's own account.
 fn cpu_before(task: Found) -> u64 {
@@ -526,6 +544,17 @@ pub struct ProfileCollector {
     /// then: time no sample of this run covers.
     found_late: usize,
     unsampled_ns: u64,
+    /// The same per task (`task:<tid>`), carried to the results' `fields`
+    /// ([`crate::join::UNSAMPLED_NS`]) so that the task's on-cpu row adds it:
+    /// `make`'s second compile, found on a late tick, had a second of cpu in
+    /// no row while the run's notes said so.
+    unsampled_by_task: BTreeMap<i32, u64>,
+    /// Each sampled process's parent, read from its `/proc/<pid>/stat` the
+    /// first time a sample of it arrives, while it runs, and carried on every
+    /// sample as `ppid`: a compile that only computes never blocks, so the
+    /// scheduler sources gave `make`'s busiest `cc1` no parent, and both ways
+    /// of reading a job took every busy task for it.
+    parents: BTreeMap<u32, Option<u64>>,
     unwinding: bool,
     /// How the stacks are unwound and why, when a chooser decided it.
     choice: Option<StackChoice>,
@@ -571,6 +600,8 @@ impl ProfileCollector {
             at_open: 0,
             found_late: 0,
             unsampled_ns: 0,
+            unsampled_by_task: BTreeMap::new(),
+            parents: BTreeMap::new(),
             unwinding: true,
             choice: None,
             debuginfod: None,
@@ -680,6 +711,7 @@ impl ProfileCollector {
         let callchain = self.callchain;
         let debuginfod = &self.debuginfod;
         let comms = &mut self.comms;
+        let parents = &mut self.parents;
         let kind = self.sampled.source;
         let mut dropped = 0u64;
         let mut undecoded = 0u64;
@@ -703,6 +735,12 @@ impl ProfileCollector {
                     ];
                     if let Some(period) = sample.period {
                         attrs.push(Attr::uint("period", period));
+                    }
+                    if let Some(ppid) = *parents
+                        .entry(sample.pid)
+                        .or_insert_with(|| parent_of(sample.pid))
+                    {
+                        attrs.push(Attr::uint("ppid", ppid));
                     }
                     if let Some(comm) = comms.get(sample.tid as i32) {
                         attrs.push(Attr::text("comm", comm));
@@ -920,8 +958,12 @@ impl Collector for ProfileCollector {
         // tick's samples came from (`drain_into`).
         if let Some(Sampler::Tasks(event)) = self.event.as_mut() {
             for task in event.discover() {
+                let before = cpu_before(task);
                 self.found_late += 1;
-                self.unsampled_ns += cpu_before(task);
+                self.unsampled_ns += before;
+                if before > 0 {
+                    *self.unsampled_by_task.entry(task.tid).or_default() += before;
+                }
             }
         }
         let mut events = Vec::new();
@@ -992,6 +1034,15 @@ impl Collector for ProfileCollector {
                     losses,
                 }
             })
+            .collect()
+    }
+
+    /// Each task found on a late tick, with the cpu it had used by then:
+    /// `unsampled_ns:task:<tid>`, read by a decomposition's `samples` row.
+    fn fields(&self) -> crate::emit::Fields {
+        self.unsampled_by_task
+            .iter()
+            .map(|(tid, ns)| (format!("{}task:{tid}", crate::join::UNSAMPLED_NS), *ns))
             .collect()
     }
 
@@ -1216,6 +1267,22 @@ fn describe_choice(choice: &StackChoice) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A process's parent is read past its command, whatever the command
+    /// holds: spaces and parentheses included.
+    #[test]
+    fn a_process_s_parent_is_read_past_its_command() {
+        assert_eq!(
+            parent_in_stat("678750 (cc1) R 678616 678613 0"),
+            Some(678616)
+        );
+        assert_eq!(parent_in_stat("42 (a (b) c) S 7 42 42"), Some(7));
+        assert_eq!(parent_in_stat("2 (kthreadd) S 0 0 0"), None);
+        assert_eq!(
+            parent_of(std::process::id()),
+            Some(std::os::unix::process::parent_id() as u64)
+        );
+    }
 
     /// At `perf_event_paranoid` 2 the kernel refuses an unprivileged sampler
     /// that includes it, stack or no stack: a user-only choice excludes the
