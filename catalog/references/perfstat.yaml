@@ -263,7 +263,9 @@
   # perf -G takes a path relative to /sys/fs/cgroup, hence `../../..` up to the root, and omn
   # takes the same spelling. teardown removes the cgroup once the run is
   # over, the workload long gone from it.
-  setup: [sh, -c, "c=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/omn-reference-perfstat; rmdir \"$c\" 2>/dev/null; mkdir \"$c\" && ln -sfn \"$c\" {tmp}/cg"]
+  # A v1 or hybrid hierarchy (Ubuntu 18.04) has one /proc/self/cgroup line
+  # per controller and no cgroup.controllers: refused, saying so.
+  setup: [sh, -c, "test -f /sys/fs/cgroup/cgroup.controllers || { echo 'no cgroup v2 unified hierarchy at /sys/fs/cgroup' >&2; exit 1; }; c=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/omn-reference-perfstat; rmdir \"$c\" 2>/dev/null; mkdir \"$c\" && ln -sfn \"$c\" {tmp}/cg"]
   teardown: [sh, -c, "c=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/omn-reference-perfstat; ! test -d \"$c\" || rmdir \"$c\""]
   workload: [sh, -c, "echo $$ > /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/omn-reference-perfstat/cgroup.procs && exec env PYTHONHASHSEED=0 python3 -S tests/reference/workloads/perfstat/spin.py 3000000"]
   run: alongside
@@ -275,6 +277,7 @@
     command: [sh, -c, '$SUDO perf stat -a -x , -e instructions -G "../../..{tmp}/cg" -- sleep 3', sh]
     parse: perf_stat_csv
     requires: [perf, sh]
+    refused_when: ["no cgroup v2 unified hierarchy"]
     privileged: true
     sudo: perf
   compare:

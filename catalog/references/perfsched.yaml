@@ -271,8 +271,10 @@
     parse: perf_lock_contention
     requires: [perf]
     # A perf built without its BPF skeletons has no `-b` (Debian 12's 6.1):
-    # the tool this machine has, refused, not a pair that failed.
-    refused_when: ["not built-in because no BUILD_BPF_SKEL"]
+    # the tool this machine has, refused, not a pair that failed. A perf
+    # older than `contention` (Ubuntu 18.04's 4.15) prints its usage, whose
+    # list of subcommands ends at `info`.
+    refused_when: ["not built-in because no BUILD_BPF_SKEL", "{record|report|script|info}"]
     privileged: true
   compare:
     key: comm:omnref-lock.contended
@@ -299,7 +301,7 @@
     command: [perf, lock, contention, -b, -t, -Y, "rwsem:W", --]
     parse: perf_lock_contention
     requires: [perf]
-    refused_when: ["not built-in because no BUILD_BPF_SKEL"]
+    refused_when: ["not built-in because no BUILD_BPF_SKEL", "{record|report|script|info}"]
     privileged: true
   compare:
     key: comm:omnref-lock.contended

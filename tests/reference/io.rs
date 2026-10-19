@@ -134,10 +134,14 @@ fn iostat_json(stdout: &str, stderr: &str) -> Result<Values, String> {
         return Err("iostat reported no disk".to_string());
     }
     const SUMMED: [&str; 6] = ["r/s", "w/s", "rkB/s", "wkB/s", "aqu-sz", "f/s"];
+    // Flushes are counted since Linux 5.5 and sysstat 12: sysstat 11.6
+    // (Ubuntu 18.04, 4.15) has no `f/s` column, which is absent, not zero.
+    const SINCE_5_5: &str = "f/s";
     // A mean per operation, weighted by the operations of the same row.
     const WEIGHTED: [(&str, &str); 2] = [("r_await", "r/s"), ("w_await", "w/s")];
     let mut out = Values::new();
     let mut sums = vec![0.0; SUMMED.len()];
+    let mut present = vec![false; SUMMED.len()];
     let mut weighted = [0.0; WEIGHTED.len()];
     for disk in disks {
         let name = disk
@@ -148,8 +152,12 @@ fn iostat_json(stdout: &str, stderr: &str) -> Result<Values, String> {
             number(disk.get(c).unwrap_or(&Value::Null), &format!("{name}.{c}"))
         };
         for (i, c) in SUMMED.iter().enumerate() {
+            if *c == SINCE_5_5 && disk.get(c).is_none() {
+                continue;
+            }
             let v = col(c)?;
             sums[i] += v;
+            present[i] = true;
             out.push((format!("{name}.{c}"), v));
         }
         for (i, (c, by)) in WEIGHTED.iter().enumerate() {
@@ -168,7 +176,9 @@ fn iostat_json(stdout: &str, stderr: &str) -> Result<Values, String> {
         .fold(0.0, f64::max);
     out.push(("busiest.util".to_owned(), busiest));
     for (i, c) in SUMMED.iter().enumerate() {
-        out.push((format!("all.{c}"), sums[i]));
+        if present[i] {
+            out.push((format!("all.{c}"), sums[i]));
+        }
     }
     for (i, (c, by)) in WEIGHTED.iter().enumerate() {
         let ops = sums[SUMMED.iter().position(|s| s == by).unwrap()];
@@ -414,6 +424,22 @@ mod tests {
         assert!((get(&v, "nvme0n1.r_await_ns") - 60_000.0).abs() < 1e-6);
         assert_eq!(get(&v, "nvme0n1.util"), 34.77);
         assert_eq!(get(&v, "zram0.util"), 0.0);
+    }
+
+    #[test]
+    fn iostat_json_reads_sysstat_11_without_flushes() {
+        // sysstat 11.6 (Ubuntu 18.04): no `f/s` column, on a kernel that
+        // counts no flushes. The other columns are read; `f/s` is absent.
+        let v = iostat_json(
+            r#"{"sysstat": {"hosts": [{"statistics": [{"disk": [{"disk_device": "vda",
+                "r/s": 10.0, "w/s": 2.0, "rkB/s": 40.0, "wkB/s": 8.0, "aqu-sz": 0.1,
+                "r_await": 0.5, "w_await": 1.0, "util": 3.0}]}]}]}}"#,
+            "",
+        )
+        .unwrap();
+        assert_eq!(get(&v, "all.r/s"), 10.0);
+        assert_eq!(get(&v, "busiest.util"), 3.0);
+        assert!(!v.iter().any(|(k, _)| k.ends_with("f/s")));
     }
 
     #[test]

@@ -18,17 +18,25 @@
 # (keyed by task, its `total` the bytes and its `events` the calls), because
 # omn's `summary` has no sum; the live pairs read `summary`'s `max` and `last`.
 # Every pair is `run: separate` (alternate runs, the default).
+# The valgrind pairs run the workload with PYTHONMALLOC=malloc on both sides: a
+# CPython built --with-valgrind (RHEL's) leaves pymalloc under valgrind alone,
+# so dhat saw 34256 blocks where omn, beside no valgrind, saw 1670 (Rocky 9,
+# distroproof, 2026-10-19). Without pymalloc the program allocates the same
+# way whoever watches it. valgrind follows `env`'s exec into python with
+# --trace-children=yes; without it python runs native and dhat prints nothing.
 
 - id: dhat-total-bytes
   source: mem.heap.alloc
   tool: valgrind --tool=dhat
   use: "valgrind --tool=dhat prog  # Total: N bytes in M blocks"
-  workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
+  workload: [env, PYTHONMALLOC=malloc, python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
   omn: [trace, mem.heap.alloc, --filter, 'op == "alloc"', -e, "topk:1", --format, json, -o, "{out}"]
   reference:
-    command: [valgrind, --tool=dhat, --run-libc-freeres=no, --dhat-out-file=/dev/null]
+    command: [valgrind, --tool=dhat, --trace-children=yes, --run-libc-freeres=no, --dhat-out-file=/dev/null]
     parse: dhat_summary
     requires: [valgrind, python3]
+    # valgrind before 3.15 (Ubuntu 18.04's 3.13) has it only as exp-dhat.
+    refused_when: ["failed to start tool 'dhat'"]
     privileged: false
   compare:
     key: total_bytes
@@ -40,12 +48,14 @@
   source: mem.heap.alloc
   tool: valgrind --tool=dhat
   use: "valgrind --tool=dhat prog  # Total: N bytes in M blocks"
-  workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
+  workload: [env, PYTHONMALLOC=malloc, python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
   omn: [trace, mem.heap.alloc, --filter, 'op == "alloc"', -e, "topk:1", --format, json, -o, "{out}"]
   reference:
-    command: [valgrind, --tool=dhat, --run-libc-freeres=no, --dhat-out-file=/dev/null]
+    command: [valgrind, --tool=dhat, --trace-children=yes, --run-libc-freeres=no, --dhat-out-file=/dev/null]
     parse: dhat_summary
     requires: [valgrind, python3]
+    # valgrind before 3.15 (Ubuntu 18.04's 3.13) has it only as exp-dhat.
+    refused_when: ["failed to start tool 'dhat'"]
     privileged: false
   compare:
     key: total_blocks
@@ -57,12 +67,14 @@
   source: mem.heap.live
   tool: valgrind --tool=dhat
   use: "valgrind --tool=dhat prog  # At t-gmax: the peak live heap"
-  workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
+  workload: [env, PYTHONMALLOC=malloc, python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
   omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json, -o, "{out}"]
   reference:
-    command: [valgrind, --tool=dhat, --run-libc-freeres=no, --dhat-out-file=/dev/null]
+    command: [valgrind, --tool=dhat, --trace-children=yes, --run-libc-freeres=no, --dhat-out-file=/dev/null]
     parse: dhat_summary
     requires: [valgrind, python3]
+    # valgrind before 3.15 (Ubuntu 18.04's 3.13) has it only as exp-dhat.
+    refused_when: ["failed to start tool 'dhat'"]
     privileged: false
   compare:
     key: gmax_bytes
@@ -74,12 +86,14 @@
   source: mem.heap.live
   tool: valgrind --tool=dhat
   use: "valgrind --tool=dhat prog  # At t-end: what was never freed"
-  workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
+  workload: [env, PYTHONMALLOC=malloc, python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
   omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json, -o, "{out}"]
   reference:
-    command: [valgrind, --tool=dhat, --run-libc-freeres=no, --dhat-out-file=/dev/null]
+    command: [valgrind, --tool=dhat, --trace-children=yes, --run-libc-freeres=no, --dhat-out-file=/dev/null]
     parse: dhat_summary
     requires: [valgrind, python3]
+    # valgrind before 3.15 (Ubuntu 18.04's 3.13) has it only as exp-dhat.
+    refused_when: ["failed to start tool 'dhat'"]
     privileged: false
   compare:
     key: end_bytes
@@ -91,10 +105,10 @@
   source: mem.heap.live
   tool: valgrind --tool=massif
   use: "valgrind --tool=massif prog; ms_print massif.out  # the peak snapshot"
-  workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
+  workload: [env, PYTHONMALLOC=malloc, python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
   omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json, -o, "{out}"]
   reference:
-    command: [valgrind, --tool=massif, --peak-inaccuracy=0, --depth=1, --detailed-freq=1000, --threshold=10, --run-libc-freeres=no, --massif-out-file=/dev/stdout]
+    command: [valgrind, --tool=massif, --trace-children=yes, --peak-inaccuracy=0, --depth=1, --detailed-freq=1000, --threshold=10, --run-libc-freeres=no, --massif-out-file=/dev/stdout]
     parse: massif_peak
     requires: [valgrind, python3]
     privileged: false
@@ -111,9 +125,14 @@
   workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
   omn: [trace, mem.heap.alloc, --filter, 'op == "alloc"', -e, "topk:1", --format, json, -o, "{out}"]
   reference:
-    command: [sh, -c, 'd=$(mktemp -d) && heaptrack --record-only -o "$d/ht" "$@" >/dev/null 2>&1 && heaptrack_print "$d"/ht.* ; rm -rf "$d"', heaptrack]
+    # heaptrack 1.4 (Debian 12) has no --record-only and records all the
+    # same; a failed recording is the command's exit, never an empty summary.
+    # heaptrack 1.0 (Ubuntu 18.04) has no --output either, and exits 1 saying
+    # nothing: its help is asked, and it is refused.
+    command: [sh, -c, 'heaptrack --help 2>&1 | grep -q -e --output || { echo "this heaptrack has no --output to write its data to" >&2; exit 1; }; d=$(mktemp -d) && ro= && { heaptrack --help 2>&1 | grep -q -e --record-only && ro=--record-only; }; heaptrack $ro -o "$d/ht" "$@" >/dev/null 2>&1 && heaptrack_print "$d"/ht.*; r=$?; rm -rf "$d"; exit $r', heaptrack]
     parse: heaptrack_summary
     requires: [heaptrack, heaptrack_print, python3]
+    refused_when: ["this heaptrack has no --output"]
     privileged: false
   compare:
     key: calls
@@ -128,9 +147,14 @@
   workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
   omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json, -o, "{out}"]
   reference:
-    command: [sh, -c, 'd=$(mktemp -d) && heaptrack --record-only -o "$d/ht" "$@" >/dev/null 2>&1 && heaptrack_print "$d"/ht.* ; rm -rf "$d"', heaptrack]
+    # heaptrack 1.4 (Debian 12) has no --record-only and records all the
+    # same; a failed recording is the command's exit, never an empty summary.
+    # heaptrack 1.0 (Ubuntu 18.04) has no --output either, and exits 1 saying
+    # nothing: its help is asked, and it is refused.
+    command: [sh, -c, 'heaptrack --help 2>&1 | grep -q -e --output || { echo "this heaptrack has no --output to write its data to" >&2; exit 1; }; d=$(mktemp -d) && ro= && { heaptrack --help 2>&1 | grep -q -e --record-only && ro=--record-only; }; heaptrack $ro -o "$d/ht" "$@" >/dev/null 2>&1 && heaptrack_print "$d"/ht.*; r=$?; rm -rf "$d"; exit $r', heaptrack]
     parse: heaptrack_summary
     requires: [heaptrack, heaptrack_print, python3]
+    refused_when: ["this heaptrack has no --output"]
     privileged: false
   compare:
     key: peak_bytes
@@ -145,9 +169,14 @@
   workload: [python3, tests/reference/workloads/heap/blocks.py, "64", "1048576", "4", "0.3"]
   omn: [trace, mem.heap.live, -m, poll@50ms, -e, summary, --format, json, -o, "{out}"]
   reference:
-    command: [sh, -c, 'd=$(mktemp -d) && heaptrack --record-only -o "$d/ht" "$@" >/dev/null 2>&1 && heaptrack_print "$d"/ht.* ; rm -rf "$d"', heaptrack]
+    # heaptrack 1.4 (Debian 12) has no --record-only and records all the
+    # same; a failed recording is the command's exit, never an empty summary.
+    # heaptrack 1.0 (Ubuntu 18.04) has no --output either, and exits 1 saying
+    # nothing: its help is asked, and it is refused.
+    command: [sh, -c, 'heaptrack --help 2>&1 | grep -q -e --output || { echo "this heaptrack has no --output to write its data to" >&2; exit 1; }; d=$(mktemp -d) && ro= && { heaptrack --help 2>&1 | grep -q -e --record-only && ro=--record-only; }; heaptrack $ro -o "$d/ht" "$@" >/dev/null 2>&1 && heaptrack_print "$d"/ht.*; r=$?; rm -rf "$d"; exit $r', heaptrack]
     parse: heaptrack_summary
     requires: [heaptrack, heaptrack_print, python3]
+    refused_when: ["this heaptrack has no --output"]
     privileged: false
   compare:
     key: leaked_bytes

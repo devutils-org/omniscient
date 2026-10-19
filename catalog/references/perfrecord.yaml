@@ -86,8 +86,10 @@
     # perf top --stdio reads its keys from stdin: a pipe that stays open keeps
     # it from stopping at its menu. It starts with omn, 2 s before the program
     # is let go, and is stopped with SIGINT 3 s into the program's 4: its
-    # last screen is the profile of that window.
-    command: [sh, -c, 'sleep 8 | timeout -s INT 5 perf top --stdio -p {pid} -F 997 -d 2 -E 10 -s dso,sym --no-children 2>/dev/null; true']
+    # last screen is the profile of that window. Stopped by `timeout`, it
+    # exits 124; any other status is perf's own, with its stderr kept, so
+    # Ubuntu's perf_event_paranoid 4 is a refusal, not an empty screen.
+    command: [sh, -c, 'sleep 8 | timeout -s INT 5 perf top --stdio -p {pid} -F 997 -d 2 -E 10 -s dso,sym --no-children; r=$?; [ $r -ne 124 ] || r=0; exit $r']
     parse: perf_top_self
     requires: [perf, cc, timeout]
   compare:

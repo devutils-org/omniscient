@@ -17,5 +17,5 @@ while True:
     time.sleep(interval)
     if time.monotonic() > end:
         break
-    sys.stdout.write(subprocess.run(tool, capture_output=True, text=True).stdout)
+    sys.stdout.write(subprocess.run(tool, stdout=subprocess.PIPE, universal_newlines=True).stdout)
     sys.stdout.flush()

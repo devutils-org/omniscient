@@ -15,7 +15,7 @@ import time
 MARKER = "==== omn-reference: the workload ran here ===="
 
 seconds, tool = float(sys.argv[1]), sys.argv[2:]
-sys.stdout.write(subprocess.run(tool, check=True, capture_output=True, text=True).stdout)
+sys.stdout.write(subprocess.run(tool, check=True, stdout=subprocess.PIPE, universal_newlines=True).stdout)
 print(MARKER, flush=True)
 time.sleep(seconds)
-sys.stdout.write(subprocess.run(tool, check=True, capture_output=True, text=True).stdout)
+sys.stdout.write(subprocess.run(tool, check=True, stdout=subprocess.PIPE, universal_newlines=True).stdout)
