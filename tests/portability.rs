@@ -807,6 +807,8 @@ struct Facts {
     function_tracer: Option<bool>,
     /// The soft `RLIMIT_MEMLOCK`, in bytes; `None` where unlimited or unread.
     memlock_soft: Option<i64>,
+    /// This process's seccomp mode: `filter` under a container's profile.
+    seccomp: Option<String>,
 }
 
 impl Facts {
@@ -840,6 +842,7 @@ impl Facts {
                 .or_else(|| entries.contains_key("cgroups/mode").then_some(false)),
             function_tracer: ok("kernel/CONFIG_FUNCTION_TRACER").map(|v| v == "y"),
             memlock_soft: number("privileges/memlock_soft"),
+            seccomp: ok("privileges/seccomp"),
         }
     }
 }
@@ -991,6 +994,22 @@ fn reasons_disagree_with_envprobe(sweep: &Sweep, facts: &Facts) -> Vec<String> {
             _ => {}
         }
     }
+    // A refusal blamed on a seccomp filter (a container's profile) is one
+    // envprobe sees too: the rootless podman cells, where it first read
+    // "perf_event_paranoid is 2".
+    if let Some(mode) = &facts.seccomp {
+        if let Some((whose, _)) = texts
+            .iter()
+            .find(|(_, text)| text.contains("runs under a seccomp filter"))
+        {
+            if mode != "filter" {
+                out.push(format!(
+                    "{whose}: says this process runs under a seccomp filter, and envprobe read \
+                     seccomp={mode}"
+                ));
+            }
+        }
+    }
     if let Some(soft) = facts.memlock_soft {
         // "this process may lock 64 KiB": the limit omn names when it says the
         // kernel charges maps to RLIMIT_MEMLOCK.
@@ -1066,11 +1085,13 @@ fn the_envprobe_judge_catches_a_reason_that_names_the_wrong_cause() {
         cgroup_v2: Some(true),
         function_tracer: Some(true),
         memlock_soft: Some(65536),
+        seccomp: Some("none".into()),
     };
     assert!(reasons_disagree_with_envprobe(&cell, &facts).is_empty());
     source(&mut cell, "runtime.custom").runs[0].stderr =
         "perf_event_open was refused: perf_event_paranoid is 3; tracefs is not mounted; this \
-         kernel was built without ftrace; this process may lock 8192 KiB"
+         kernel was built without ftrace; this process may lock 8192 KiB; and this process runs \
+         under a seccomp filter"
             .into();
     let found = reasons_disagree_with_envprobe(&cell, &facts);
     assert!(
@@ -1087,6 +1108,10 @@ fn the_envprobe_judge_catches_a_reason_that_names_the_wrong_cause() {
     );
     assert!(
         found.iter().any(|f| f.contains("tracefs is not mounted")),
+        "{found:?}"
+    );
+    assert!(
+        found.iter().any(|f| f.contains("seccomp=none")),
         "{found:?}"
     );
     let locked = Facts {

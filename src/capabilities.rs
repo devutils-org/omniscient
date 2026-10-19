@@ -488,6 +488,10 @@ fn perf_event_refused() -> Option<String> {
     }
     let error = std::io::Error::last_os_error();
     match error.raw_os_error() {
+        Some(libc::EPERM) if seccomp_refusal().is_some() => Some(format!(
+            "perf_event_open refuses this process every event ({error}): {}",
+            seccomp_refusal().unwrap_or_default()
+        )),
         Some(libc::EACCES) | Some(libc::EPERM) => {
             let paranoid = read_trimmed("/proc/sys/kernel/perf_event_paranoid")
                 .unwrap_or_else(|| "unknown".into());
@@ -520,6 +524,37 @@ fn paranoid_explanation(level: Option<i32>) -> String {
             .to_owned(),
         _ => String::new(),
     }
+}
+
+/// Why `perf_event_open` answered EPERM to an event this process asked of
+/// itself in user mode, when `perf_event_paranoid` would have allowed it: a
+/// seccomp filter, which is what a container's default profile is -- podman's
+/// and docker's refuse `perf_event_open` unless the container is given
+/// CAP_PERFMON or CAP_SYS_ADMIN. `None` when the level explains the refusal or
+/// no filter is installed. Found in a rootless podman container, where the
+/// refusal read "perf_event_paranoid is 2" and envprobe read `seccomp: filter`.
+pub fn seccomp_refusal() -> Option<String> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    seccomp_explanation(
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("Seccomp:"))
+            .and_then(|mode| mode.trim().parse().ok()),
+        read_trimmed("/proc/sys/kernel/perf_event_paranoid").and_then(|v| v.parse().ok()),
+    )
+}
+
+fn seccomp_explanation(mode: Option<u8>, paranoid: Option<i32>) -> Option<String> {
+    // Mode 2 is a filter; at 2 and below the level lets a process count its
+    // own user mode, so it is not what refused.
+    (mode == Some(2) && paranoid.is_some_and(|level| level <= 2)).then(|| {
+        format!(
+            "perf_event_paranoid {} allows it, and this process runs under a seccomp filter \
+             (`Seccomp: 2` in /proc/self/status), which refuses perf_event_open: a container's \
+             default profile does, unless the container is given CAP_PERFMON or CAP_SYS_ADMIN",
+            paranoid.unwrap_or_default()
+        )
+    })
 }
 
 fn kprobe_not_permitted(privileges: Option<&Privileges>) -> Option<String> {
@@ -1556,6 +1591,12 @@ fn probe_pmu(event: &str) -> Probe {
              zero, and perf_event_paranoid {paranoid} allows this process nothing else: it needs \
              perf_event_paranoid at 1 or below, or CAP_PERFMON on this binary"
         )),
+        Some(libc::EPERM) if !system_wide && seccomp_refusal().is_some() => {
+            Probe::Missing(format!(
+                "perf_event_open was refused for `{event}`: {}",
+                seccomp_refusal().unwrap_or_default()
+            ))
+        }
         Some(libc::EACCES) | Some(libc::EPERM) => Probe::Missing(format!(
             "perf_event_open was refused for `{event}`: perf_event_paranoid is {paranoid}{}",
             paranoid_beyond_capabilities()
@@ -1870,6 +1911,17 @@ pub fn parse_cpu_list(list: &str) -> Option<Vec<u32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A seccomp filter is named where the level would have allowed the
+    /// event, and only there: at 3 the level refuses it whatever the filter.
+    #[test]
+    fn a_seccomp_filter_is_named_where_the_level_allows_the_event() {
+        assert!(seccomp_explanation(Some(2), Some(2))
+            .is_some_and(|why| why.contains("seccomp filter") && why.contains("CAP_PERFMON")));
+        assert_eq!(seccomp_explanation(Some(2), Some(3)), None);
+        assert_eq!(seccomp_explanation(Some(0), Some(2)), None);
+        assert_eq!(seccomp_explanation(None, Some(1)), None);
+    }
 
     /// A perf kprobe is let in by `CAP_PERFMON`, `CAP_SYS_ADMIN` or root, and
     /// refused with that reason otherwise: the `kprobe` PMU existing is not

@@ -440,37 +440,53 @@ pub fn syscall_arch() -> Option<&'static str> {
     }
 }
 
-/// Whether the kernel was built with the function tracer, by the symbol it
-/// defines for every function's call site: `__fentry__` (x86), `_mcount`
-/// (arm64). `/proc/kallsyms` names its symbols even where `kptr_restrict`
-/// zeroes their addresses, and is read until the symbol turns up, so a
-/// kernel that has it pays a few lines. `None` where the file cannot be read.
+/// Whether the kernel was built with the function tracer, by the symbols it
+/// defines for it: a call site's (`__fentry__` on x86, `_mcount` on an arm64
+/// built with `-pg`) or the tracer's own (`ftrace_caller`,
+/// `function_trace_call`), which an arm64 kernel patching function entries
+/// has and no call-site symbol (`-fpatchable-function-entry`): distroproof's
+/// Debian 13, Ubuntu 24.04 and Fedora 44 arm64 were told they had no ftrace
+/// where envprobe read CONFIG_FUNCTION_TRACER=y. Alpine's `virt` kernel, built
+/// without it, has none of them. `/proc/kallsyms` names its symbols even where
+/// `kptr_restrict` zeroes their addresses, and is read until one turns up, so
+/// a kernel that has it pays a few lines. `None` where the file cannot be read.
 ///
 /// The kernel's BTF was the first question asked, and it does not answer on
 /// 5.10: its BTF, made by an older pahole, leaves most functions out, ftrace's
 /// with them, and debian-11 was told it had no ftrace where envprobe read
 /// CONFIG_FUNCTION_TRACER=y.
 fn kernel_has_function_tracer() -> Option<bool> {
-    use std::io::BufRead;
     static ANSWER: OnceLock<Option<bool>> = OnceLock::new();
     *ANSWER.get_or_init(|| {
         let file = std::fs::File::open("/proc/kallsyms").ok()?;
-        let wanted = if cfg!(target_arch = "aarch64") {
-            "_mcount"
-        } else {
-            "__fentry__"
-        };
-        let mut lines = 0usize;
-        for line in std::io::BufReader::new(file).lines() {
-            let line = line.ok()?;
-            lines += 1;
-            if line.split_whitespace().nth(2) == Some(wanted) {
-                return Some(true);
-            }
-        }
-        // An empty read is no answer.
-        (lines > 0).then_some(false)
+        function_tracer_in(std::io::BufReader::new(file))
     })
+}
+
+/// The symbols that say a kernel has the function tracer, as
+/// [`kernel_has_function_tracer`] reads them from a `/proc/kallsyms`.
+const FUNCTION_TRACER_SYMBOLS: [&str; 4] = [
+    "__fentry__",
+    "_mcount",
+    "ftrace_caller",
+    "function_trace_call",
+];
+
+fn function_tracer_in(kallsyms: impl std::io::BufRead) -> Option<bool> {
+    let mut lines = 0usize;
+    for line in kallsyms.lines() {
+        let line = line.ok()?;
+        lines += 1;
+        if line
+            .split_whitespace()
+            .nth(2)
+            .is_some_and(|name| FUNCTION_TRACER_SYMBOLS.contains(&name))
+        {
+            return Some(true);
+        }
+    }
+    // An empty read is no answer.
+    (lines > 0).then_some(false)
 }
 
 /// Whether `function` is in this kernel's BTF and, where this process may ask,
@@ -491,8 +507,9 @@ fn exists(function: &str) -> Support {
     if kernel_has_function_tracer() == Some(false) {
         return Support::No(
             "this kernel was built without ftrace (no CONFIG_FUNCTION_TRACER: /proc/kallsyms \
-             has no `__fentry__`), so its functions carry no call site a trampoline can be \
-             installed on and no fentry program attaches"
+             has no `__fentry__`, `_mcount`, `ftrace_caller` nor `function_trace_call`), so its \
+             functions carry no call site a trampoline can be installed on and no fentry \
+             program attaches"
                 .to_owned(),
         );
     }
@@ -1770,6 +1787,22 @@ pub fn function_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The function tracer is read off the symbols each architecture's ftrace
+    /// defines, as distroproof's guests printed them: x86 has `__fentry__`,
+    /// an arm64 patching function entries only the tracer's own, and
+    /// Alpine's `virt` kernel, built without ftrace, none.
+    #[test]
+    fn the_function_tracer_is_read_off_either_architecture_s_symbols() {
+        let read = |text: &str| function_tracer_in(std::io::Cursor::new(text.to_owned()));
+        let x86 = "0000000000000000 T __fentry__\n0000000000000000 T ftrace_caller\n";
+        let arm64 = "0000000000000000 t ftrace_stub\n0000000000000000 T ftrace_caller\n";
+        let virt = "0000000000000000 T vfs_read\n0000000000000000 T vfs_write\n";
+        assert_eq!(read(x86), Some(true));
+        assert_eq!(read(arm64), Some(true));
+        assert_eq!(read(virt), Some(false));
+        assert_eq!(read(""), None);
+    }
 
     /// The check counts a call that does reach its function: the syscall
     /// wrapper `write(2)` enters, which nothing inlines, sees the trigger's
