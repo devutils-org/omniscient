@@ -14311,3 +14311,34 @@ workload whose misses follow its page faults; not found. The two
 `tool_wraps_omn` system pairs (`cpu.cycles.system`,
 `cpu.context_switches.system`) skip: through `sudo`, `omn` itself would run
 as root.
+
+### The SIGKILLs with no output: the terminal's `RLIMIT_RTTIME` of 0 (2026-10-19)
+
+`scenario_io::every_mode_and_emit_the_catalog_offers_is_served_or_refused_by_name`
+failed one run in three, on a different source each time, "refused without
+naming what is missing" with nothing on stderr. Its 116 runs of `omn` at once
+reproduce it: 1 to 4 of them end on SIGKILL, every few rounds.
+
+**Who sends it.** The kernel, to `omn` itself: `signal:signal_generate`
+with `sig == 9` names the killed process as the sender, `code` 128
+(`SI_KERNEL`), and its kernel stack is `posix_cpu_timers_work ->
+send_signal_locked` -- the CPU-time limits' enforcement. `omn` sets no rlimit,
+arms no POSIX timer (`/proc/<pid>/timers` empty) and runs no realtime thread
+(one `TS` thread). What it inherits does: **`RLIMIT_RTTIME` is 0, soft and
+hard**, in every process under the terminal (`ghostty`), while `systemd
+--user`, its parent, and `niri` hold it unlimited. The limit's check compares
+the realtime cpu a task used, 0, with the hard limit, 0, and 0 is not below 0.
+
+**Shown.** The same 116 runs, 12 rounds, from a transient service of
+`systemd --user` (`systemd-run --user --wait --pipe`, where the limit is
+unlimited): 1392 runs, no SIGKILL. From the terminal: 1 to 4 a few rounds.
+
+**What it means.** Not a defect of `omn`, and nothing it may change: a hard
+limit is lowered by anyone and raised only with CAP_SYS_RESOURCE. Any
+program started from that terminal is exposed the same way when the kernel
+runs that check on it. The test suite's sporadic silent failures under load
+-- this one, and the others in the tally that end with no message -- are
+worth reading again with it in mind. To run the suite without it:
+`systemd-run --user --wait --pipe -p WorkingDirectory=$PWD make check`, or
+a terminal that leaves the limit alone. Which part of the terminal lowers it
+is not found: the transient scope `ghostty` runs in sets no limit.
