@@ -91,9 +91,12 @@ samples times the period, the samples its own ring lost (the kernel counted
 them; each ring is one task's), and the cpu it had used before the profile
 found it, which the profile reads from the task's `schedstat` when it finds
 it (`unsampled_ns:task:<tid>` in the profile's `fields`). The row's note says
-each part. A task the target starts is found on a tick, and in a debug build a
-tick can run late by a second: `make`'s second compile had a second of cpu in
-no row until 2026-10-19 (`cases/make-sqlite`). A row is still a lower bound
+each part. The tasks the target starts are found on a thread of the profile's
+own every 10 ms, their name and parent read there while they run, rather than
+on the drain's rounds, which a debug build symbolizing a large program ran
+260 ms late on average: until 2026-10-19 `make`'s second compile had a second
+of cpu in no row, and a 330 ms `as` could come and go unseen
+(`cases/make-sqlite`). A row is still a lower bound
 where the kernel throttled the sampling, which no count recovers. And every
 sample carries the process's `ppid`, read once from `/proc/<pid>/stat`, so a
 task that computes and never blocks still has a parent: the job a wait for a

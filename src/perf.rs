@@ -2218,6 +2218,94 @@ pub struct Found {
     pub tid: i32,
 }
 
+/// A task an event was opened on after the open, with the cpu it had used
+/// when its event began sampling: its `schedstat`, read right after the
+/// enable, so the two never overlap -- what the samples cover starts there.
+/// And its name and its process's parent, read then too: a short process is
+/// gone by the drain that decodes its samples, and its samples kept no name
+/// and no parent (`make`'s `as`, 280 ms, outside every job).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discovered {
+    pub task: Found,
+    pub cpu_before_ns: u64,
+    pub comm: Option<String>,
+    pub ppid: Option<u64>,
+}
+
+impl Discovered {
+    fn now(task: Found) -> Self {
+        Self {
+            task,
+            cpu_before_ns: cpu_before(task),
+            comm: std::fs::read_to_string(format!("/proc/{}/task/{}/comm", task.tgid, task.tid))
+                .ok()
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty()),
+            ppid: parent_of(task.tgid as u32),
+        }
+    }
+}
+
+/// A process's parent, the fourth field of its `/proc/<pid>/stat` (after the
+/// command, which may hold spaces and parentheses, so read past the last `)`).
+/// `None` once the process is gone, or for the kernel's own (`ppid` 0).
+pub fn parent_of(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parent_in_stat(&stat)
+}
+
+pub fn parent_in_stat(stat: &str) -> Option<u64> {
+    let after = &stat[stat.rfind(')')? + 1..];
+    after
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+        .filter(|ppid| *ppid > 0)
+}
+
+/// The cpu time a task had used, from the first field of its `schedstat`:
+/// nanoseconds on a cpu, the kernel's own account. 0 once it is gone.
+fn cpu_before(task: Found) -> u64 {
+    std::fs::read_to_string(format!("/proc/{}/task/{}/schedstat", task.tgid, task.tid))
+        .ok()
+        .and_then(|line| line.split_whitespace().next()?.parse().ok())
+        .unwrap_or(0)
+}
+
+/// How often the discovery thread looks for tasks the target started.
+const DISCOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// The thread that finds the tasks a target starts and opens their events,
+/// apart from the drain: a drain that symbolizes a large program ran 260 ms
+/// a round in a debug build, up to a second, and a task found only on the
+/// next round lost what it ran meanwhile -- a 330 ms `as` that started and
+/// ended inside one round was in no row at all (`cases/make-sqlite`).
+struct Discovery {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    found: std::sync::Arc<std::sync::Mutex<Vec<(Discovered, SampledEvent)>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Discovery {
+    fn stop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+
+    fn take(&self) -> Vec<(Discovered, SampledEvent)> {
+        std::mem::take(&mut *self.found.lock().expect("the discovery queue"))
+    }
+}
+
+impl Drop for Discovery {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// The processes `root` has started and not yet reaped, and root itself, each
 /// with its threads.
 ///
@@ -2277,6 +2365,9 @@ pub struct TaskSampler {
     rings: std::collections::BTreeMap<i32, SampledEvent>,
     enabled: bool,
     at_open: usize,
+    /// The thread that opens the events of tasks the target starts, once
+    /// [`TaskSampler::discover_in_background`] has started it.
+    discovery: Option<Discovery>,
     /// What the rings of tasks that have exited could not decode, kept when
     /// their rings are released.
     retired_undecoded: u64,
@@ -2311,6 +2402,7 @@ impl TaskSampler {
             rings: std::collections::BTreeMap::new(),
             enabled: false,
             at_open: 0,
+            discovery: None,
             retired_undecoded: 0,
             retired_throttled: std::collections::BTreeMap::new(),
             retired_lost: std::collections::BTreeMap::new(),
@@ -2348,9 +2440,19 @@ impl TaskSampler {
     }
 
     /// Opens an event on every task under the root that has none yet, and
-    /// returns them. A task that exited before its event could be opened is
-    /// passed over: it has nothing left to sample.
-    pub fn discover(&mut self) -> Vec<Found> {
+    /// returns them, each with the cpu it had used when its event began. A
+    /// task that exited before its event could be opened is passed over: it
+    /// has nothing left to sample. With the discovery thread running, the
+    /// tasks it found since the last call, their events already sampling.
+    pub fn discover(&mut self) -> Vec<Discovered> {
+        if let Some(discovery) = &self.discovery {
+            let mut found = Vec::new();
+            for (discovered, event) in discovery.take() {
+                self.rings.insert(discovered.task.tid, event);
+                found.push(discovered);
+            }
+            return found;
+        }
         if !self.follows {
             return Vec::new();
         }
@@ -2374,9 +2476,56 @@ impl TaskSampler {
                 continue;
             }
             self.rings.insert(task.tid, event);
-            found.push(task);
+            found.push(Discovered::now(task));
         }
         found
+    }
+
+    /// Finds the tasks the target starts on a thread of its own, every
+    /// [`DISCOVERY_INTERVAL`], whatever the drain is doing: each new task's
+    /// event is opened and enabled there and handed over at the next
+    /// [`TaskSampler::discover`]. Called once the events are enabled; nothing
+    /// when the sampler follows the root alone.
+    pub fn discover_in_background(&mut self) {
+        if !self.follows || self.discovery.is_some() {
+            return;
+        }
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let found = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut known: std::collections::BTreeSet<i32> = self.rings.keys().copied().collect();
+        let (spec, root, pages) = (self.spec, self.root, self.ring_pages);
+        let thread = {
+            let (stop, found) = (stop.clone(), found.clone());
+            std::thread::Builder::new()
+                .name("omn-discovery".into())
+                .spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                        for task in tasks_under(root) {
+                            if known.contains(&task.tid) {
+                                continue;
+                            }
+                            let opened = SampledEvent::open(&spec, Scope::Process(task.tid), pages)
+                                .and_then(|event| event.enable().map(|()| event));
+                            // Gone already, or refused: not looked at again.
+                            known.insert(task.tid);
+                            let Ok(event) = opened else { continue };
+                            let discovered = Discovered::now(task);
+                            found
+                                .lock()
+                                .expect("the discovery queue")
+                                .push((discovered, event));
+                        }
+                        std::thread::sleep(DISCOVERY_INTERVAL);
+                    }
+                })
+        };
+        if let Ok(thread) = thread {
+            self.discovery = Some(Discovery {
+                stop,
+                found,
+                thread: Some(thread),
+            });
+        }
     }
 
     /// The tasks an event was opened on at the open.
@@ -2398,6 +2547,14 @@ impl TaskSampler {
     }
 
     pub fn disable(&mut self) -> io::Result<()> {
+        // The thread stops first, and what it found is kept: a task found in
+        // the last round is sampled until here like the others.
+        if let Some(mut discovery) = self.discovery.take() {
+            discovery.stop();
+            for (discovered, event) in discovery.take() {
+                self.rings.insert(discovered.task.tid, event);
+            }
+        }
         self.enabled = false;
         // A task that has exited refuses nothing here: its event is still
         // open and is simply not running.
@@ -3912,6 +4069,73 @@ mod following_tests {
     /// from then on for the cpu it burns; the one that opened is sampled with
     /// its period whole, which is why this shape exists beside the inherited
     /// one.
+    /// With the discovery thread, a task that starts and ends between two
+    /// calls of `discover` is still found, named, and sampled: the drain
+    /// that calls it can be a second late (a debug build symbolizing a large
+    /// program), and `make`'s 330 ms `as` came and went inside one.
+    #[test]
+    fn a_task_that_comes_and_goes_between_two_discovers_is_found_by_the_thread() {
+        const HZ: u64 = 1000;
+        const BURN_NS: u64 = 100_000_000;
+        let spec = SampleSpec::software(
+            sys::bindings::PERF_COUNT_SW_CPU_CLOCK as u64,
+            1_000_000_000 / HZ,
+            Callchain::Off,
+        );
+        let mut sampler = match TaskSampler::open(&spec, std::process::id() as i32, true, 8, 8) {
+            Ok(sampler) => sampler,
+            Err(error) => {
+                eprintln!("skipped: this machine refuses unprivileged perf sampling: {error}");
+                return;
+            }
+        };
+        sampler.enable().unwrap();
+        sampler.discover_in_background();
+        let worker = std::thread::Builder::new()
+            .name("omn-shortlived".into())
+            .spawn(|| {
+                // Long enough for the thread's rounds to meet it.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let clock = || {
+                    let mut now = libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    };
+                    // SAFETY: `now` is a valid timespec for the kernel to write.
+                    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+                    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
+                };
+                let until = clock() + BURN_NS;
+                while clock() < until {
+                    std::hint::spin_loop();
+                }
+                // SAFETY: a read-only query of this thread's own id.
+                unsafe { libc::gettid() }
+            })
+            .unwrap();
+        let worker_tid = worker.join().unwrap();
+        // Only now, the task gone: what the thread found meanwhile.
+        let found = sampler.discover();
+        let worker = found
+            .iter()
+            .find(|found| found.task.tid == worker_tid)
+            .unwrap_or_else(|| panic!("the short-lived worker was not found: {found:?}"));
+        assert_eq!(worker.comm.as_deref(), Some("omn-shortlived"));
+        assert!(worker.cpu_before_ns < BURN_NS / 2, "{worker:?}");
+        sampler.disable().unwrap();
+        let mut samples = 0u64;
+        sampler.drain(|record| {
+            if matches!(record, Record::Sample(ref sample) if sample.tid == worker_tid as u32) {
+                samples += 1;
+            }
+        });
+        let expected = BURN_NS * HZ / 1_000_000_000;
+        assert!(
+            samples >= expected / 2,
+            "{samples} samples of the worker's {expected} periods"
+        );
+    }
+
     #[test]
     fn a_task_sampler_finds_a_thread_started_after_the_open_and_samples_it() {
         const HZ: u64 = 1000;
@@ -3952,7 +4176,7 @@ mod following_tests {
         let worker_tid = tid.recv().unwrap();
         let found = sampler.discover();
         assert!(
-            found.iter().any(|task| task.tid == worker_tid),
+            found.iter().any(|found| found.task.tid == worker_tid),
             "the worker was started after the open and not found: {found:?}"
         );
         go.send(()).unwrap();

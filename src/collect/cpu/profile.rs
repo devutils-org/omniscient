@@ -37,7 +37,7 @@ use perf_event_open_sys::bindings as perf;
 use crate::collect::{Collector, Losses, Prepared, SampleError};
 use crate::emit::STACK_ID_ATTR;
 use crate::event::{Attr, CollectorId, Event, KeyValue};
-use crate::perf::{Callchain, Found, Record, SampleSpec, TaskSampler, ThreadSampler};
+use crate::perf::{Callchain, Record, SampleSpec, TaskSampler, ThreadSampler};
 use crate::request::{Mode, Target};
 use crate::stack::unwind::Debuginfod;
 use crate::stack::{StackChoice, Unwinder};
@@ -264,32 +264,7 @@ fn max_frequency_hz() -> Option<u64> {
     (khz > 0).then_some(khz * 1_000)
 }
 
-/// A process's parent, the fourth field of its `/proc/<pid>/stat` (after the
-/// command, which may hold spaces and parentheses, so read past the last `)`).
-/// `None` once the process is gone, or for the kernel's own (`ppid` 0).
-fn parent_of(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    parent_in_stat(&stat)
-}
-
-fn parent_in_stat(stat: &str) -> Option<u64> {
-    let after = &stat[stat.rfind(')')? + 1..];
-    after
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
-        .filter(|ppid| *ppid > 0)
-}
-
-/// The cpu time a task had used when it was found, from the first field of
-/// its `schedstat`: nanoseconds on a cpu, the kernel's own account.
-fn cpu_before(task: Found) -> u64 {
-    std::fs::read_to_string(format!("/proc/{}/task/{}/schedstat", task.tgid, task.tid))
-        .ok()
-        .and_then(|line| line.split_whitespace().next()?.parse().ok())
-        .unwrap_or(0)
-}
+use crate::perf::parent_of;
 
 pub struct Prepare {
     pub mode: Mode,
@@ -945,6 +920,10 @@ impl Collector for ProfileCollector {
             )
         })?;
         event.enable().map_err(|error| error.to_string())?;
+        // The tasks the target starts are found on a thread of their own from
+        // here, not on the drain's ticks, which a large program's symbols
+        // make late.
+        event.discover_in_background();
         // Read while the events are open and kept: `stop` closes them, and
         // the notes are gathered afterwards.
         self.at_open = event.at_open();
@@ -957,12 +936,20 @@ impl Collector for ProfileCollector {
         // The mappings are re-read inside the drain, for the processes this
         // tick's samples came from (`drain_into`).
         if let Some(Sampler::Tasks(event)) = self.event.as_mut() {
-            for task in event.discover() {
-                let before = cpu_before(task);
+            for found in event.discover() {
+                // Named and parented now, while it runs: its samples may be
+                // decoded after it is gone.
+                if let Some(comm) = &found.comm {
+                    self.comms.prime(found.task.tid, comm);
+                }
+                if let Some(ppid) = found.ppid {
+                    self.parents.insert(found.task.tgid as u32, Some(ppid));
+                }
+                let before = found.cpu_before_ns;
                 self.found_late += 1;
                 self.unsampled_ns += before;
                 if before > 0 {
-                    *self.unsampled_by_task.entry(task.tid).or_default() += before;
+                    *self.unsampled_by_task.entry(found.task.tid).or_default() += before;
                 }
             }
         }
@@ -1273,11 +1260,14 @@ mod tests {
     #[test]
     fn a_process_s_parent_is_read_past_its_command() {
         assert_eq!(
-            parent_in_stat("678750 (cc1) R 678616 678613 0"),
+            crate::perf::parent_in_stat("678750 (cc1) R 678616 678613 0"),
             Some(678616)
         );
-        assert_eq!(parent_in_stat("42 (a (b) c) S 7 42 42"), Some(7));
-        assert_eq!(parent_in_stat("2 (kthreadd) S 0 0 0"), None);
+        assert_eq!(
+            crate::perf::parent_in_stat("42 (a (b) c) S 7 42 42"),
+            Some(7)
+        );
+        assert_eq!(crate::perf::parent_in_stat("2 (kthreadd) S 0 0 0"), None);
         assert_eq!(
             parent_of(std::process::id()),
             Some(std::os::unix::process::parent_id() as u64)

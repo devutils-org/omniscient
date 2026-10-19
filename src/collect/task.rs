@@ -131,6 +131,20 @@ impl Comms {
             .or_insert_with(|| Comm::of(tid))
             .get()
     }
+
+    /// A name read elsewhere while the task ran -- where it was found --
+    /// kept as the last one seen: read again when stale, and kept when the
+    /// task is gone, as [`Comm::get`] keeps what it read.
+    pub fn prime(&mut self, tid: i32, name: &str) {
+        self.by_tid.insert(
+            tid,
+            Comm {
+                tid,
+                name: Some(name.to_owned()),
+                read_at: Some(Instant::now()),
+            },
+        );
+    }
 }
 
 /// The thread group a thread belongs to: what a user means by "the process".

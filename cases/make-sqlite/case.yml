@@ -147,14 +147,13 @@ open_findings:
     cause: the-critical-path-is-one-job
     sometimes: true
     filed: >-
-      docs/fixes/w18-cases.md, "a job is a chain of processes", closed in all
-      but one run of seven (2026-10-19). The profile carries each task's cpu
-      from before it found it (`schedstat`, `unsampled_ns:task:<tid>`) and
-      each task's samples its ring lost, both into that task's on-cpu row,
-      and its samples carry `ppid`, so a compile that never blocks has a
-      parent and the job is the critical one both ways (person 5.2 to 5.6 s,
-      agent 5.3 to 5.9 s, against 5.3 to 6.2 s). What is left: in the debug
-      build a round of the profile's reads takes 260 ms on average and up to
-      a second, and a process that starts and ends inside one -- `as`, 330
-      ms -- is never found, so it is in no row: the agent's way read 5.36 s
-      once, under the reference by more than the rows' resolution
+      docs/fixes/w18-cases.md, "a job is a chain of processes", closed on
+      omn's side (2026-10-19): each task's on-cpu row holds its cpu from
+      before it was found and the samples its ring lost, every sample
+      carries `ppid`, and the tasks the target starts are found on a thread
+      of their own every 10 ms -- with the name and parent read there, while
+      they run -- rather than on the drain's late rounds. Both ways agreed
+      with the reference in five runs of six. What is left is the
+      reference's: once in six, watch.py's longest-lived job used 1.44 s of
+      cpu where the build's longest compile alone used 3.8 s, so omn's
+      5.34 s read as over by 3.9 s
