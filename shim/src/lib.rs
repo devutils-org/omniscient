@@ -141,6 +141,9 @@ thread_local! {
     /// and `Copy`, so touching it never allocates and never registers a
     /// destructor.
     static IN_HOOK: Cell<bool> = const { Cell::new(false) };
+    /// Set while this thread is inside `dlsym`, for the allocation `dlsym`
+    /// itself makes. Const-initialized, like `IN_HOOK`.
+    static RESOLVING: Cell<bool> = const { Cell::new(false) };
     /// This thread's id, read once: `gettid` is a system call, and it was half
     /// the price of a record. Zero until the first read, and zeroed again in a
     /// forked child, whose one thread has a new id.
@@ -208,8 +211,17 @@ fn resolve(slot: &AtomicUsize, name: &[u8]) -> usize {
     if cached != 0 {
         return cached;
     }
+    // Before glibc 2.34, `dlsym` calls `calloc` (in `_dlerror_run`), which is
+    // this shim's: resolving it again recursed until the stack ran out, and
+    // every program that allocated died before `main` (Ubuntu 18.04's 2.27,
+    // distroproof, 2026-10-19). A nested call is answered "not yet", and its
+    // hook serves it from the bootstrap region.
+    if RESOLVING.with(|resolving| resolving.replace(true)) {
+        return 0;
+    }
     // SAFETY: `name` is a NUL-terminated byte string.
     let address = unsafe { libc::dlsym(libc::RTLD_NEXT, name.as_ptr().cast::<c_char>()) } as usize;
+    RESOLVING.with(|resolving| resolving.set(false));
     slot.store(address, Ordering::Relaxed);
     address
 }
@@ -1057,6 +1069,19 @@ mod tests {
             "the blocks overlap"
         );
         assert!(is_bootstrap(first) && is_bootstrap(second));
+    }
+
+    /// What `dlsym` of glibc 2.27 does: allocate through this shim while it is
+    /// resolving. The nested resolution must answer "not yet" rather than
+    /// call `dlsym` again, and must leave the slot to the outer one.
+    #[test]
+    fn a_resolution_inside_dlsym_is_not_attempted_again() {
+        let slot = AtomicUsize::new(0);
+        RESOLVING.with(|resolving| resolving.set(true));
+        assert_eq!(resolve(&slot, b"malloc\0"), 0);
+        assert_eq!(slot.load(Ordering::Relaxed), 0);
+        RESOLVING.with(|resolving| resolving.set(false));
+        assert_ne!(resolve(&slot, b"malloc\0"), 0);
     }
 
     #[test]
