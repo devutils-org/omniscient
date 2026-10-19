@@ -993,6 +993,48 @@ mod tests {
         group.read_final().ok()
     }
 
+    /// Runs `measure` in a forked child, alone in its address space, and
+    /// hands back its two figures, or `None` when it measured nothing.
+    ///
+    /// A thread's cpu clock leaves out the time its cpu spent in interrupts
+    /// (IRQ time accounting), and the perf software clocks do not. Beside the
+    /// rest of the suite, whose threads unmap memory of this one process, a
+    /// million TLB-shootdown IPIs in seven seconds landed on a spin: task-clock
+    /// read 1.08 % over the thread's clock and cpu-clock 13 %. A child of its
+    /// own receives none of them. It reports through a pipe with `write`
+    /// alone, since a fork of a threaded process may not take stderr's lock.
+    fn alone(measure: impl FnOnce() -> Option<[u64; 2]>) -> Option<[u64; 2]> {
+        let mut pipe = [0; 2];
+        // SAFETY: a two-descriptor array this frame owns.
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0, "pipe");
+        // SAFETY: the child only measures, writes and exits.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork failed");
+        if child == 0 {
+            // A leading 1 says the figures after it were measured.
+            let figures = measure().map_or([0; 3], |[a, b]| [1, a, b]);
+            // SAFETY: writing 24 bytes this frame owns to the pipe, then
+            // leaving without running the parent's exit handlers.
+            unsafe {
+                libc::write(pipe[1], figures.as_ptr().cast(), 24);
+                libc::_exit(0);
+            }
+        }
+        // SAFETY: closing the write end this process does not use.
+        unsafe { libc::close(pipe[1]) };
+        let mut figures = [0u64; 3];
+        // SAFETY: reading at most 24 bytes into an array this frame owns.
+        let got = unsafe { libc::read(pipe[0], figures.as_mut_ptr().cast(), 24) };
+        let mut status = 0;
+        // SAFETY: reaping the child this test forked, and closing its pipe.
+        unsafe {
+            libc::waitpid(child, &mut status, 0);
+            libc::close(pipe[0]);
+        }
+        assert_eq!(got, 24, "the child wrote no figures");
+        (figures[0] == 1).then_some([figures[1], figures[2]])
+    }
+
     /// `cpu.cycles` on `pmu:sw` counts the task's cpu time, and the thread's
     /// own clock (`CLOCK_THREAD_CPUTIME_ID`, the scheduler's account of the
     /// same thread, read through another call) is the truth: a spin of 50 ms
@@ -1012,13 +1054,16 @@ mod tests {
             unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
             now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
         };
-        let mut spun = 0;
-        let Some(readings) = counted_on_this_thread(spec, || {
-            let from = thread_ns();
-            while thread_ns() - from < 50_000_000 {
-                std::hint::spin_loop();
-            }
-            spun = thread_ns() - from;
+        let Some([counted, spun]) = alone(|| {
+            let mut spun = 0;
+            let readings = counted_on_this_thread(spec, || {
+                let from = thread_ns();
+                while thread_ns() - from < 50_000_000 {
+                    std::hint::spin_loop();
+                }
+                spun = thread_ns() - from;
+            })?;
+            (readings[0].name == "cpu_clock_ns").then_some([readings[0].value, spun])
         }) else {
             eprintln!(
                 "skipped: {}: this machine refuses the software cpu clock to this process",
@@ -1026,8 +1071,7 @@ mod tests {
             );
             return;
         };
-        let counted = readings[0].value as f64;
-        assert_eq!(readings[0].name, "cpu_clock_ns");
+        let counted = counted as f64;
         assert!(
             (counted - spun as f64).abs() < spun as f64 * 0.1,
             "the thread ran {spun} ns by its own clock and the counter says {counted:.0}"
@@ -1541,7 +1585,7 @@ mod tests {
     /// Task-clock against the kernel's own per-thread cpu clock, read by
     /// `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` around the same work: the two
     /// are one scheduler figure read two ways, and they agree to well under a
-    /// percent of a 200 ms spin.
+    /// percent of a 200 ms spin. Measured [`alone`].
     #[test]
     fn task_clock_counts_the_cpu_time_the_thread_ran() {
         fn thread_cpu_ns() -> u64 {
@@ -1553,22 +1597,24 @@ mod tests {
             unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
             now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
         }
-        let Ok(group) = crate::perf::CounterGroup::open(&[TASK_CLOCK], Scope::Process(0)) else {
+        let Some(figures) = alone(|| {
+            let group = crate::perf::CounterGroup::open(&[TASK_CLOCK], Scope::Process(0)).ok()?;
+            group.enable().ok()?;
+            let before = thread_cpu_ns();
+            let mut spun = 0u64;
+            while thread_cpu_ns() - before < 200_000_000 {
+                spun = spun.wrapping_add(1);
+            }
+            std::hint::black_box(spun);
+            let after = thread_cpu_ns();
+            let readings = group.read_final().ok()?;
+            (readings[0].name == "task_clock_ns").then_some([readings[0].value, after - before])
+        }) else {
             eprintln!("skipped: this machine refuses perf counting");
             return;
         };
-        group.enable().expect("enable");
-        let before = thread_cpu_ns();
-        let mut spun = 0u64;
-        while thread_cpu_ns() - before < 200_000_000 {
-            spun = spun.wrapping_add(1);
-        }
-        std::hint::black_box(spun);
-        let after = thread_cpu_ns();
-        let readings = group.read_final().expect("read");
-        assert_eq!(readings[0].name, "task_clock_ns");
-        let counted = readings[0].value as f64;
-        let ran = (after - before) as f64;
+        let counted = figures[0] as f64;
+        let ran = figures[1] as f64;
         let error = (counted - ran).abs() / ran;
         assert!(
             error < 0.01,
