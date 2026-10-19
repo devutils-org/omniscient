@@ -516,8 +516,10 @@ Now, and not before: we have three real join types to generalize from.
       *Restated the same day: 1 % of a fast NVMe's 20 us 4K read, 200 ns a
       request, read on `null_blk` with the statistics off
       (`the_in_kernel_histogram_costs_a_two_million_iops_load_under_one_percent`).
-      With them on it read 417 ns; the run without them is the user's
-      `sysctl` to make.*
+      With them on it read 417 ns. Without them, on the doc comment's
+      `null_blk` (8 queues of 256, 4 KiB): 295 and 262 ns a request in two
+      runs (bare 3.21 M IOPS, 9.5 to 10.6 %), against 332 before `tp_btf`.
+      Not met: 60 to 95 ns over.*
 - [x] Exceeding the budget produces an **announced** degradation, not a loss.
       *The runner checks every 100 ms and, over the ceiling, moves the
       collection onto the next cheaper backend of its chain that this machine
