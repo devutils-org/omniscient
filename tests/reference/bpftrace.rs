@@ -232,18 +232,31 @@ fn unattached(stdout: &str, stderr: &str) -> Option<String> {
 /// printed fewer lines than there were events, so its count is refused
 /// rather than compared short.
 fn lossless(stdout: &str, stderr: &str) -> Result<(), String> {
-    let lost: u64 = stdout
-        .lines()
-        .chain(stderr.lines())
+    let lines = || stdout.lines().chain(stderr.lines()).map(str::trim);
+    // The total at exit, when bpftrace gives one (`WARNING: Total lost event
+    // count: 3` beside `Lost 3 events` on Rocky 9's 0.24): the two say the
+    // same events, so the total stands alone, and the batches are summed
+    // where there is no total.
+    let total: Option<u64> = lines()
         .filter_map(|l| {
-            let l = l.trim();
-            let count = match l.strip_prefix("Total lost event count:") {
-                Some(rest) => rest,
-                None => l.strip_prefix("Lost ")?.strip_suffix(" events")?,
-            };
-            count.trim().parse::<u64>().ok()
+            l.trim_start_matches("WARNING: ")
+                .strip_prefix("Total lost event count:")?
+                .trim()
+                .parse::<u64>()
+                .ok()
         })
-        .sum();
+        .max();
+    let lost = total.unwrap_or_else(|| {
+        lines()
+            .filter_map(|l| {
+                l.strip_prefix("Lost ")?
+                    .strip_suffix(" events")?
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
+            .sum()
+    });
     if lost > 0 {
         // The witness lost events: the pair skips quoting it, as perf trace's
         // does, rather than failing omn for the tool's shortfall (Debian 13
@@ -615,6 +628,11 @@ mod tests {
         let at_exit = format!("{}Total lost event count: 60\n", real("opensnoop"));
         let e = opensnoop(&at_exit, "").unwrap_err();
         assert!(e.contains("lost 60 events"), "{e}");
+        // Both forms of the same loss, as Rocky 9's bpftrace prints them:
+        // counted once.
+        let both = format!("{}Lost 3 events\n", real("opensnoop"));
+        let e = opensnoop(&both, "WARNING: Total lost event count: 3\n").unwrap_err();
+        assert!(e.contains("lost 3 events"), "{e}");
     }
 
     #[test]

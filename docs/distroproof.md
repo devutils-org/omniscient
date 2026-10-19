@@ -103,6 +103,10 @@ any of them -- `unprivileged_bpf_disabled` is 2 and a namespace's CAP_BPF is
 not the machine's -- and the perf sources are refused by the seccomp filter
 until CAP_PERFMON or CAP_SYS_ADMIN is added, which lifts it.
 
+Rerun whole on 2026-10-19 evening, after the day's fixes (the profile's
+discovery thread among them): the 24 guests and the 8 containers gave the
+same counts as above, and every judge passed on all 32.
+
 ## Findings
 
 Each finding is what was seen, what distroproof showed, the cause, the fix,
@@ -378,19 +382,22 @@ A planted cell checks that it fails on a wrong cause.
 
 Every pair (`tests/reference.rs`, [`docs/replaces.md`](replaces.md)) on six
 distributions, one at a time, against the release a user installs, with the
-witnesses each distribution packages. Three runs: before and after the pairs'
-own portability fixes (finding 10), and after findings 11 and 12, with the
+witnesses each distribution packages. Four runs: before and after the pairs'
+own portability fixes (finding 10), after findings 11 and 12, with the
 pairs added since (128 in all, the GPU ones now skipping for want of a GPU
-rather than failing for want of their workload file in the guest).
+rather than failing for want of their workload file in the guest), and on
+2026-10-19 evening with the witnesses xpac installs in each guest (the
+devutils chain, `scripts/distroproof/devutils/`) and the profile's
+discovery thread.
 
-| Distribution | Kernel | First run: held / did not hold | Second: held / did not hold / skipped | Third (2026-10-19) |
-|---|---|---|---|---|
-| Arch | 7.2.9 | 69 / 2 | 71 / 0 / 32 | **74 / 1** / 50 |
-| Fedora 44 | 6.19 | 68 / 3 | 68 / 3 / 32 | **72 / 2** / 51 (75 / 0 the run before) |
-| Rocky 9 | 5.14 (RHEL) | 43 / 3 | 61 / 1 / 41 | **66 / 0** / 59 |
-| Ubuntu 24.04 | 6.8 | 57 / 5 | 60 / 2 / 39 | **61 / 1** / 61 |
-| Debian 13 | 6.12 | 52 / 4 | 55 / 0 / 46 | **57 / 0** / 66 |
-| Debian 12 | 6.1 | 49 / 7 | 51 / 4 / 46 | **53 / 1** / 69 |
+| Distribution | Kernel | First run: held / did not hold | Second: held / did not hold / skipped | Third (2026-10-19) | Fourth, xpac's witnesses |
+|---|---|---|---|---|---|
+| Arch | 7.2.9 | 69 / 2 | 71 / 0 / 32 | **74 / 1** / 50 | **90 / 1** / 34 |
+| Fedora 44 | 6.19 | 68 / 3 | 68 / 3 / 32 | **72 / 2** / 51 (75 / 0 the run before) | **89 / 1** / 35 |
+| Rocky 9 | 5.14 (RHEL) | 43 / 3 | 61 / 1 / 41 | **66 / 0** / 59 | **77 / 1** / 47 |
+| Ubuntu 24.04 | 6.8 | 57 / 5 | 60 / 2 / 39 | **61 / 1** / 61 | **75 / 0** / 48 |
+| Debian 13 | 6.12 | 52 / 4 | 55 / 0 / 46 | **57 / 0** / 66 | **70 / 1** / 52 |
+| Debian 12 | 6.1 | 49 / 7 | 51 / 4 / 46 | **53 / 1** / 69 | **67 / 0** / 56 |
 
 (An `opensnoop` run whose bpftrace lost events is counted as skipped, by the
 rule the runner already applied to `perf trace`: a witness that lost events
@@ -412,6 +419,15 @@ have). What still does not hold:
   328 over perf's 1715 where 257 were allowed -- the pair's band was a share
   only, and sudo's and perf's own switches are a count: it has an absolute
   floor now.
+- **The fourth run's four** (one on each of four distributions), each taken
+  up the same evening (`8d827c3`): Rocky 9's `opensnoop` lost opens, now paced
+  one a millisecond (604 of 604 in three runs of four, the fourth a reported
+  loss, which the parser now reads in both of bpftrace's forms); Debian 13's
+  `biolatency` median moved two buckets on a guest's disk, now three runs';
+  Fedora's `dhat-total-blocks` 2.7 to 2.9 % over, valgrind's own effect on
+  the interpreter, now inside a 4 % band. Arch's `perf-trace-latency`, one
+  run of perf at 10.59 ms where every other distribution read 10.06 to 10.07,
+  is a guest's noise, left as such.
 - **Arch** (guest): `cpu.cache_misses`, omn 17 % over perf on separate runs,
   where on the development machine the same pair reads omn under perf
   (`docs/open-findings.md`): a shared last-level cache counted by two
