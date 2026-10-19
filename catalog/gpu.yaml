@@ -291,7 +291,11 @@
     # of the process's cpu on a launch-bound program, against the library
     # loaded and disarmed, and under 1 % on a compute- or memory-bound one.
     # The caveat on cost says so where a reader of `--budget` looks.
-    - {id: "vendor:cupti", requires: ["cupti"], cost: extreme}
+    # By regime, from the bench's GPU record (docs/bench.md): +82.75 % of a
+    # launch-bound program's cpu, 0.90 % computing (kept `med`, a tenth from
+    # the edge of `low`), 0.66 % moving memory.
+    - {id: "vendor:cupti", requires: ["cupti"], cost: extreme,
+       cost_by_regime: {launch: extreme, compute: med, memory: low}}
     # Unmeasured, and no cheaper than what they stand in for.
     - {id: "vendor:rocprof", requires: ["rocprofiler"], cost: extreme, equivalent: true}
     - {id: "vendor:l0", requires: ["level-zero"], cost: extreme, equivalent: true}
@@ -362,7 +366,10 @@
     # The worst regime's band: +11.3 % on a launch-bound program, +3.2 % on a
     # compute-bound one, nothing on a memory-bound one (docs/bench.md, "The
     # GPU tracers, nineteenth wave", record gpu-1791099533).
-    - {id: "preload", requires: ["dynamic-linking"], cost: high}
+    # By regime, from the bench's GPU record: +11.31 % launch-bound, +3.18 %
+    # computing, 0.65 % moving memory.
+    - {id: "preload", requires: ["dynamic-linking"], cost: high,
+       cost_by_regime: {launch: high, compute: med, memory: low}}
     # CUPTI's callback API from the injection library: every driver API call,
     # those through `cuGetProcAddress` included, and nothing that is not the
     # CUDA driver. A lock and a frame per call; not yet benched.

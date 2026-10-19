@@ -2053,8 +2053,8 @@ Below the milestones, and not scheduled:
   it and no measurement here is worse without it.
 - **The four open decisions were settled on 2026-10-19** (`DECISIONS.md`,
   "Settled on 2026-10-19"): the budget's 10 ms slack and `sched.wakeup` in
-  the latency session landed the same day; `cost_by_regime` and `tp_btf` for
-  the device reads (then the `null_blk` run, which needs a password) are next.
+  the latency session and `cost_by_regime` landed the same day; `tp_btf` for
+  the device reads (then the `null_blk` run, which needs a password) is next.
 - **An `lbr` collector** waits on a cpu with a branch call stack (Intel from
   Haswell) to be tested against, and **`sframe`** on a kernel that reads
   `.sframe` (none through 7.2).

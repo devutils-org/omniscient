@@ -253,6 +253,15 @@ backends are unwritten is out of reach, with each backend's reason below it.
 The resolver's order does not change: a request still resolves to an unwritten
 backend when no written one is viable, and is refused as the build's gap.
 
+**`cost_by_regime`** gives a backend's band per kind of program, where those
+are orders of magnitude apart: `gpu.kernel` through CUPTI is `{launch:
+extreme, compute: med, memory: low}`. `cost` stays the worst regime's band,
+which the loader checks, and is what the resolver ranks by and a budget is
+promised against; the regimes are what `--budget` prints beside a band past
+the ceiling, and what `cost.json` carries as `declared_by_regime`. The
+regimes are the GPU bench's three (`launch`, `compute`, `memory`), and the
+bench holds each row to its regime's band.
+
 Two fields a backend may carry beside `cost`, and each is a statement about what
 its events mean rather than about how it is reached:
 

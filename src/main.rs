@@ -1023,6 +1023,11 @@ fn budget_note(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> 
         ));
     }
 
+    let regimes = catalog
+        .get(source)
+        .and_then(|entry| entry.backend(&selected.id))
+        .and_then(|backend| by_regime(backend, ceiling))
+        .unwrap_or_default();
     let rungs = rungs(catalog, resolved, ceiling);
     let others = rungs.iter().any(|rung| rung.backend != selected.id);
     let passed = unweighed_mode_rungs(catalog, resolved)
@@ -1037,14 +1042,14 @@ fn budget_note(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> 
         [] => format!(
             "[{source}] --budget {budget}: `{}` declares `{}` ({}), and nothing below it in the \
              chain declares less, so a run that exceeds the ceiling will stop rather than \
-             degrade{passed}",
+             degrade{passed}{regimes}",
             selected.id,
             selected.cost,
             band(selected.cost),
         ),
         candidates => format!(
             "[{source}] --budget {budget}: `{}` declares `{}` ({}), so a run that exceeds the \
-             ceiling will degrade onto {}{}{}",
+             ceiling will degrade onto {}{}{}{regimes}",
             selected.id,
             selected.cost,
             band(selected.cost),
@@ -1059,6 +1064,39 @@ fn budget_note(catalog: &Catalog, resolved: &ResolvedRequest) -> Option<String> 
             passed,
         ),
     })
+}
+
+/// What a backend's `cost_by_regime` says against a ceiling: its band in
+/// each regime, and which regimes fit, since a band past the ceiling on the
+/// worst regime may well be within it on the program at hand.
+fn by_regime(backend: &omn::catalog::Backend, ceiling: f64) -> Option<String> {
+    if backend.cost_by_regime.is_empty() {
+        return None;
+    }
+    let bands: Vec<String> = backend
+        .cost_by_regime
+        .iter()
+        .map(|(regime, cost)| format!("{regime} `{cost}`"))
+        .collect();
+    let fit: Vec<&str> = backend
+        .cost_by_regime
+        .iter()
+        .filter(|(_, cost)| worst_case_percent(**cost) <= ceiling)
+        .map(|(regime, _)| regime.as_str())
+        .collect();
+    Some(format!(
+        ". Its band is its worst regime's; by regime it declares {}{}",
+        bands.join(", "),
+        if fit.is_empty() {
+            ", none within the ceiling".to_owned()
+        } else {
+            format!(
+                ", so a {}-bound program is within the ceiling and the measurement says which \
+                 this one is",
+                fit.join("- or ")
+            )
+        }
+    ))
 }
 
 /// The rungs a budget may step onto, resolved against this machine.
@@ -1210,6 +1248,10 @@ struct MeasuredCost {
     /// The band the catalog declares for that backend, so the claim and the
     /// measurement sit side by side.
     declared: &'static str,
+    /// The backend's band per regime, when the catalog gives one: which
+    /// programs pay `declared` and which pay less.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    declared_by_regime: BTreeMap<String, &'static str>,
     declared_worst_case_percent: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     budget_percent: Option<f64>,
@@ -2271,11 +2313,21 @@ fn measured_cost(
     resolved: &ResolvedRequest,
     collection: &collect::Collection,
 ) -> MeasuredCost {
-    let declared = catalog
+    let served = catalog
         .get(&resolved.request.source)
-        .and_then(|entry| entry.backend(served_last(collection)))
+        .and_then(|entry| entry.backend(served_last(collection)));
+    let declared = served
         .map(|backend| backend.cost)
         .unwrap_or(resolved.backend.cost);
+    let declared_by_regime = served
+        .map(|backend| {
+            backend
+                .cost_by_regime
+                .iter()
+                .map(|(regime, cost)| (regime.clone(), cost.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
     let measured_percent = collection.overhead.percent();
     let budget_percent = resolved.request.budget.map(|budget| budget.percent());
     MeasuredCost {
@@ -2289,6 +2341,7 @@ fn measured_cost(
         backend: served_last(collection).to_owned(),
         served_by: collection.served_by.clone(),
         declared: declared.as_str(),
+        declared_by_regime,
         declared_worst_case_percent: worst_case_percent(declared),
         budget_percent,
         // Over the ceiling on what is known is over it; under it is "held"
@@ -3935,6 +3988,24 @@ fn reject(rejections: &[Rejection]) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+
+    /// `gpu.kernel` through CUPTI is `extreme` on a launch-bound program and
+    /// `low` on a memory-bound one: a 5 % ceiling says which regimes fit.
+    #[test]
+    fn a_band_per_regime_says_which_programs_fit_the_ceiling() {
+        let catalog = Catalog::embedded().expect("the embedded catalog loads");
+        let entry = catalog.get(&"gpu.kernel".parse().unwrap()).unwrap();
+        let cupti = entry.backend("vendor:cupti").unwrap();
+        let note = by_regime(cupti, 5.0).expect("cupti gives its regimes");
+        assert!(note.contains("launch `extreme`"), "{note}");
+        assert!(
+            note.contains("a compute- or memory-bound program"),
+            "{note}"
+        );
+        let note = by_regime(cupti, 0.5).unwrap();
+        assert!(note.contains("none within the ceiling"), "{note}");
+        assert_eq!(by_regime(&entry.backends[1], 5.0), None);
+    }
     use super::*;
 
     fn normalized(args: &[&str]) -> Vec<String> {
@@ -4074,6 +4145,7 @@ mod tests {
             backend: "bpf:fentry".to_owned(),
             served_by: vec!["bpf:fentry".to_owned()],
             declared: "low",
+            declared_by_regime: BTreeMap::new(),
             declared_worst_case_percent: 5.0,
             budget_percent: None,
             within_budget: None,

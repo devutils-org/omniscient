@@ -241,7 +241,17 @@ pub struct Backend {
     /// The resolver probes each one; nothing here is assumed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
+    /// The worst regime's band: the one the bench gates, the resolver ranks
+    /// by and a budget is promised against.
     pub cost: Cost,
+    /// The band in each regime, where they are orders of magnitude apart:
+    /// `gpu.kernel` through CUPTI costs +64.5 % of a launch-bound program and
+    /// +0.15 % of a memory-bound one. `cost` stays the worst of them; this
+    /// says which programs pay it, for the budget's note and the run's cost
+    /// line, and the bench checks each regime's rows against its band
+    /// (`DECISIONS.md`, settled 2026-10-19).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cost_by_regime: BTreeMap<String, Cost>,
     /// What is lost relative to the backend above it in the chain. Required on
     /// every fallback that is not an `equivalent`: a degradation the user is
     /// not told about is a wrong number that looks right.
@@ -853,6 +863,47 @@ fn check_backend_units(entry: &Entry) -> Result<(), ParseError> {
     Ok(())
 }
 
+/// The regimes a band may be given for: the GPU bench's three, a program
+/// that launches many short kernels, one that computes, one that moves memory.
+pub const REGIMES: [&str; 3] = ["launch", "compute", "memory"];
+
+/// A backend's `cost_by_regime`: regimes the bench measures, no band above
+/// `cost`, and `cost` the worst of them -- `cost` is a promise, and a regime
+/// past it, or a `cost` past every regime, makes one of the two wrong.
+fn check_backend_regimes(entry: &Entry) -> Result<(), ParseError> {
+    for backend in &entry.backends {
+        if backend.cost_by_regime.is_empty() {
+            continue;
+        }
+        let complain = |what: String| {
+            Err(ParseError::new(format!(
+                "catalog entry `{}`: backend `{}` {what}",
+                entry.id, backend.id
+            )))
+        };
+        if let Some(unknown) = backend
+            .cost_by_regime
+            .keys()
+            .find(|regime| !REGIMES.contains(&regime.as_str()))
+        {
+            return complain(format!(
+                "gives a band for the regime `{unknown}`, which the bench does not measure (one of \
+                 {})",
+                REGIMES.join(", ")
+            ));
+        }
+        let worst = backend.cost_by_regime.values().max().copied();
+        if worst != Some(backend.cost) {
+            return complain(format!(
+                "declares `cost: {}` and its worst regime is `{}`: `cost` is the worst regime's band",
+                backend.cost,
+                worst.map_or("none", Cost::as_str)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The per-backend `modes` lists, in the same two directions as the targets:
 /// a backend cannot serve a mode the entry refuses, and a mode the entry
 /// declares has to be served by some backend, or a request the validator
@@ -1065,6 +1116,7 @@ impl Catalog {
             check_backend_emits(entry)?;
             check_backend_keys(entry)?;
             check_backend_units(entry)?;
+            check_backend_regimes(entry)?;
             check_equivalent_costs(entry)?;
             check_requirement_globs(entry)?;
         }
@@ -1657,6 +1709,39 @@ mod tests {
         // And it reads back from the catalog's own spelling.
         let yaml = serde_norway::to_string(&base.backends[1]).unwrap();
         assert!(yaml.contains("unit: ns"), "{yaml}");
+    }
+
+    /// A band per regime holds to `cost`: the GPU tracers declare theirs, a
+    /// regime the bench does not measure, a band past `cost` or a `cost` past
+    /// every regime is refused.
+    #[test]
+    fn a_band_per_regime_holds_to_the_worst_one() {
+        let kernel = catalog()
+            .get(&"gpu.kernel".parse().unwrap())
+            .unwrap()
+            .clone();
+        let cupti = kernel.backend("vendor:cupti").unwrap();
+        assert_eq!(cupti.cost_by_regime.get("memory"), Some(&Cost::Low));
+        assert_eq!(cupti.cost_by_regime.get("launch"), Some(&Cost::Extreme));
+        let refused = |edit: &dyn Fn(&mut Entry)| -> String {
+            let mut entry = kernel.clone();
+            edit(&mut entry);
+            Catalog::from_entries(vec![entry]).unwrap_err().to_string()
+        };
+        let error = refused(&|entry| {
+            entry.backends[0]
+                .cost_by_regime
+                .insert("idle".into(), Cost::Low);
+        });
+        assert!(error.contains("the regime `idle`"), "{error}");
+        let error = refused(&|entry| {
+            entry.backends[0]
+                .cost_by_regime
+                .insert("launch".into(), Cost::High);
+        });
+        assert!(error.contains("worst regime is `high`"), "{error}");
+        let yaml = serde_norway::to_string(cupti).unwrap();
+        assert!(yaml.contains("cost_by_regime"), "{yaml}");
     }
 
     /// The rule's ground truth is the chain: `io.size`'s `bpf:tp` stands in

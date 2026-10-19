@@ -785,6 +785,21 @@ fn band_faults(record: &GpuRecord, catalog: &Catalog) -> Vec<String> {
             ));
         }
         if let Some(cost) = recorded_cost(record, row) {
+            // A band given for the row's regime holds there, row by row,
+            // unless the row says why it stands.
+            let regime = find(catalog, &row.source)
+                .filter(|_| !row.verdict.starts_with("stands"))
+                .and_then(|entry| entry.backends.iter().find(|b| b.id == row.backend))
+                .and_then(|backend| backend.cost_by_regime.get(&row.workload));
+            if let Some(band) = regime.filter(|band| cost > band.worst_case_percent()) {
+                faults.push(format!(
+                    "{}: costs {cost:.2} %, over the `{}` its `cost_by_regime` gives `{}` ({} %)",
+                    label(row),
+                    band.as_str(),
+                    row.workload,
+                    band.worst_case_percent()
+                ));
+            }
             let key = (row.source.clone(), row.backend.clone());
             if worst.get(&key).is_none_or(|(kept, _)| cost > *kept) {
                 worst.insert(key, (cost, row.workload.clone()));
@@ -978,6 +993,25 @@ fn one_held_up_repetition_does_not_move_the_floor() {
         by_deviation > 10.0 * noisy,
         "the deviation's floor: {by_deviation}"
     );
+}
+
+/// `gpu.api` through `preload` gives `compute` the band `med`: a compute row
+/// at 3 % holds it, one at 8 % is named against it, under the `high` the
+/// backend declares as a whole.
+#[test]
+fn a_regime_over_its_own_band_is_named() {
+    let band = api_band();
+    let row = |dilation: &str| {
+        format!(
+            "| gpu.api | preload | trace | compute | 0.60 % | {dilation} | {dilation} | bare | \
+             0 of 1000 | {band} | {band} | within |"
+        )
+    };
+    let catalog = catalog();
+    let held = band_faults(&synthetic(&[&row("+3.00 %")]), &catalog);
+    assert!(held.is_empty(), "{held:?}");
+    let over = band_faults(&synthetic(&[&row("+8.00 %")]), &catalog);
+    says(&over, "its `cost_by_regime` gives `compute`");
 }
 
 #[test]
