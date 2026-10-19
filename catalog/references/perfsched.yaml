@@ -34,6 +34,28 @@
       sides, every run; the in-kernel count is exact, so any difference is a
       defect"
 
+- id: strace-c-vfs-read
+  source: io.vfs
+  tool: strace -c
+  use: "strace -c -f -e trace=read,pread64 -- prog  (how many reads a program makes)"
+  workload: [python3, tests/reference/workloads/bpftrace/act.py, vfsread, "20000"]
+  omn: [trace, io.vfs, -m, count, -k, op, -e, summary, --format, json, -o, "{out}"]
+  reference:
+    command: [strace, -c, -f, -e, "trace=read,pread64", --]
+    parse: strace_c
+    requires: [strace]
+    privileged: false
+  compare:
+    key: total.calls
+    omn: results[source=io.vfs].outputs[emit=summary].series[key=op:vfs_read].total
+    tolerance: {abs: 0}
+    why: "alternate runs of a deterministic workload: 20000 pread64 of one
+      byte and python3's own reads at startup. read(2) and pread64(2) each
+      call vfs_read once, so strace's total of the two is omn's vfs_read
+      count of the launched program: 20191 against 20191 here, two runs. A
+      read refused before it reaches the VFS (a bad descriptor) would be on
+      strace's side alone; the workload makes none"
+
 - id: strace-c-latency
   source: proc.syscall
   tool: strace -c
@@ -141,9 +163,13 @@
   workload: [python3, tests/reference/workloads/perfsched/sleeper.py, "100", "2"]
   omn: [trace, sched.switches, -m, count, -e, topk, --format, json, -o, "{out}"]
   reference:
-    command: [sh, -c, 'd=$(mktemp -d) && $SUDO perf sched record -q -o "$d/perf.data" -- "$@" >/dev/null 2>&1 && $SUDO perf sched latency -f -i "$d/perf.data"; r=$?; rm -rf "$d"; exit $r', sh]
+    # Debian 12's perf 6.1 reports 1 switch for the workload where its own
+    # `timehist` of the same recording counts 101: the witness is asked
+    # against itself, never its version, and a perf that disagrees is refused.
+    command: [sh, -c, 'd=$(mktemp -d) && $SUDO perf sched record -q -o "$d/perf.data" -- "$@" >/dev/null 2>&1 && l=$($SUDO perf sched latency -f -i "$d/perf.data"); r=$?; [ $r -ne 0 ] || { t=$($SUDO perf sched timehist -i "$d/perf.data" 2>/dev/null | awk ''$3 ~ /^omnref-sleep\[/ {n++} END {print n+0}''); s=$(printf "%s\n" "$l" | awk -F"|" ''$1 ~ /omnref-sleep:/ {n+=$3} END {print n+0}''); [ $((s * 2)) -ge "$t" ] || { echo "perf sched latency misreads its own recording: $s switches where perf sched timehist counts $t" >&2; r=1; }; }; printf "%s\n" "$l"; rm -rf "$d"; exit $r', sh]
     parse: perf_sched_latency
     requires: [perf, sh]
+    refused_when: ["perf sched latency misreads its own recording"]
     privileged: true
     sudo: perf
   compare:
@@ -258,3 +284,30 @@
       (losses.reasons, 61 to 122 a run, about 1 %) are the waits it saw begin
       and could not time, so omn reads a little under: 0.4 to 0.6 % over three
       runs"
+
+- id: perf-lock-contention-type
+  source: sched.lock
+  tool: perf lock contention
+  use: "perf lock contention -b -Y rwsem:W -- prog  (one type of kernel lock)"
+  workload: [python3, tests/reference/workloads/perfsched/contend.py, "8", "2"]
+  omn: [trace, sched.lock, -e, summary, --filter, 'kind == "write"', --format, json, -o, "{out}"]
+  run: tool_wraps_omn
+  reference:
+    # perf's type is the LCB_F_* bits of contention_begin read through its
+    # own table: `rwsem:W` is LCB_F_WRITE alone, which omn's `kind` spells
+    # `write`; `-t` keeps one row per thread, read by the workload's name.
+    command: [perf, lock, contention, -b, -t, -Y, "rwsem:W", --]
+    parse: perf_lock_contention
+    requires: [perf]
+    refused_when: ["not built-in because no BUILD_BPF_SKEL"]
+    privileged: true
+  compare:
+    key: comm:omnref-lock.contended
+    omn: results[source=sched.lock].outputs[emit=summary].series.*.count
+    tolerance: {rel: 0.02}
+    why: "one run, as perf-lock-contention: both keep the contentions whose
+      bits are LCB_F_WRITE alone (a writer waiting on an rw semaphore, the
+      workload's mmap and munmap on mmap_lock), perf by its type filter and
+      omn by `kind`, for the workload's threads alone; omn's losses are the
+      waits it saw begin and could not time, so it reads a little under:
+      7423 against 7423, 6250 against 6252, 8345 against 8347 over three runs"

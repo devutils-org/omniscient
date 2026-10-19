@@ -12,10 +12,10 @@
 # machine through. The two windows are each 2 s, offset by omn's start-up
 # (~60 ms before its window opens) against the tool's fork of `sleep`.
 #
-# The unprivileged `perf stat -a` and `turbostat --no-msr` pairs open cpu-wide
-# perf events, which the kernel refuses an unprivileged user above
-# perf_event_paranoid 0 (`omn` carries CAP_PERFMON; the tools do not): they
-# skip there, naming the setting.
+# `perf stat -a` and `turbostat` open cpu-wide perf events, which the kernel
+# refuses an unprivileged user above perf_event_paranoid 0 (`omn` carries
+# CAP_PERFMON; the tools do not): they run through `sudo -n` (`reference.sudo`),
+# and skip, naming the grant, where sudo does not give them root.
 
 - id: energy-perf-stat
   source: power.energy
@@ -26,10 +26,11 @@
   settle_ms: 100
   omn: [trace, power.energy, --system, -m, count, -e, summary, --format, json, -d, 2s]
   reference:
-    command: [perf, stat, -x, ",", -a, -e, power/energy-pkg/, --, sleep, "2"]
+    command: [sh, -c, '$SUDO perf stat -x , -a -e power/energy-pkg/ -- sleep 2']
     parse: power_perf_stat_energy
-    requires: [perf]
-    requires_setting: [{file: /proc/sys/kernel/perf_event_paranoid, at_most: 0}]
+    requires: [perf, sh]
+    privileged: true
+    sudo: perf
   compare:
     key: ""
     omn: results.0.outputs[emit=summary].series[key=system].mean
@@ -47,10 +48,14 @@
   settle_ms: 100
   omn: [trace, power.energy, --system, -m, count, -e, summary, --format, json, -d, 2s]
   reference:
-    command: [turbostat, --quiet, --no-msr, --Summary, --Joules, --show, "Pkg_J", sleep, "2"]
+    # Through `sudo -n`, as the other root witnesses: unprivileged, --no-msr
+    # reads through cpu-wide perf events, which need perf_event_paranoid at
+    # most 0, and the pair skipped on every machine left at the default 2.
+    command: [sh, -c, '$SUDO turbostat --quiet --no-msr --Summary --Joules --show Pkg_J sleep 2']
     parse: power_turbostat_summary
-    requires: [turbostat]
-    requires_setting: [{file: /proc/sys/kernel/perf_event_paranoid, at_most: 0}]
+    requires: [turbostat, sh]
+    privileged: true
+    sudo: turbostat
   compare:
     key: Pkg_J
     omn: results.0.outputs[emit=summary].series[key=system].mean
@@ -88,10 +93,11 @@
   settle_ms: 100
   omn: [trace, power.freq, --cpu, "1", -m, poll@2s, -e, summary, --format, json, -d, 2s]
   reference:
-    command: [turbostat, --quiet, --no-msr, --Summary, -c, "1", --show, "Avg_MHz,Busy%,Bzy_MHz", sleep, "2"]
+    command: [sh, -c, '$SUDO turbostat --quiet --no-msr --Summary -c 1 --show "Avg_MHz,Busy%,Bzy_MHz" sleep 2']
     parse: power_turbostat_summary
-    requires: [turbostat, /sys/devices/system/cpu/cpu1/cpufreq/cpuinfo_avg_freq]
-    requires_setting: [{file: /proc/sys/kernel/perf_event_paranoid, at_most: 0}]
+    requires: [turbostat, sh, /sys/devices/system/cpu/cpu1/cpufreq/cpuinfo_avg_freq]
+    privileged: true
+    sudo: turbostat
   compare:
     key: Bzy_Hz
     omn: results.0.outputs[emit=summary].series[key=cpu:1].last
@@ -102,6 +108,63 @@
           read a baseline and its one reading at the close the interval's. Every cpu is
           kept busy across the window, so the frequency is one plateau and `last` is
           that reading (3956 MHz against 3967, 2026-10-05)"
+
+- id: busy-turbostat
+  source: power.freq
+  tool: turbostat
+  use: "turbostat -c 1 --show Busy% -- sleep 2"
+  workload: [python3, tests/reference/workloads/power/duty.py, "1", "4", "0.5"]
+  run: alongside
+  # Let go at once and run 4 s: each observer opens its 2 s window when it
+  # has started (sudo for turbostat, omn's own start), so both windows fall
+  # inside the load. Let go after the observers, the earlier window held
+  # idle time and Avg_MHz read 3 to 5 % apart.
+  settle_ms: 0
+  omn: [trace, power.freq, --cpu, "1", -m, poll@2s, --value, busy, -e, summary, --format, json, -d, 2s]
+  reference:
+    command: [sh, -c, '$SUDO turbostat --quiet --Summary -c 1 --show "Avg_MHz,Busy%" sleep 2']
+    parse: power_turbostat_summary
+    requires: [turbostat, sh]
+    privileged: true
+    sudo: turbostat
+  compare:
+    key: Busy%
+    omn: results.0.outputs[emit=summary].series[key=cpu:1].last
+    omn_scale: 100
+    tolerance: {abs: 2}
+    why: "both are MPERF over the TSC across the window, for the cpu a duty-cycle
+          workload spins on half of every 10 ms: turbostat's Busy% from its own
+          read of the counters, omn's `busy` (`--value busy`) from the msr perf
+          unit's. Two 2 s windows of a steady load, offset by the tools' starts:
+          54.53 against 54.87, 56.18 against 56.26, 54.46 against 54.75"
+
+- id: avg-mhz-turbostat
+  source: power.freq
+  tool: turbostat
+  use: "turbostat -c 1 --show Avg_MHz -- sleep 2"
+  workload: [python3, tests/reference/workloads/power/duty.py, "1", "4", "0.5"]
+  run: alongside
+  # Let go at once and run 4 s: each observer opens its 2 s window when it
+  # has started (sudo for turbostat, omn's own start), so both windows fall
+  # inside the load. Let go after the observers, the earlier window held
+  # idle time and Avg_MHz read 3 to 5 % apart.
+  settle_ms: 0
+  omn: [trace, power.freq, --cpu, "1", -m, poll@2s, --value, avg_hz, -e, summary, --format, json, -d, 2s]
+  reference:
+    command: [sh, -c, '$SUDO turbostat --quiet --Summary -c 1 --show "Avg_MHz,Busy%" sleep 2']
+    parse: power_turbostat_summary
+    requires: [turbostat, sh]
+    privileged: true
+    sudo: turbostat
+  compare:
+    key: Avg_Hz
+    omn: results.0.outputs[emit=summary].series[key=cpu:1].last
+    tolerance: {rel: 0.03}
+    why: "APERF over the window's TSC time on both sides, the cycles the cpu ran
+          spread over the whole window, for the half-busy cpu of busy-turbostat:
+          turbostat's Avg_MHz, omn's `avg_hz` (`--value avg_hz`); two 2 s windows
+          of a steady load: 2464 against 2497 MHz, 2266 against 2270, 2328
+          against 2299 (within 1.4 %)"
 
 - id: freq-cpupower-mperf
   source: power.freq

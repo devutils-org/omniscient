@@ -19,9 +19,11 @@
 # with --cgroup. Every omn run writes to `-o {out}`, so a workload's or a
 # wrapping tool's stdout never lands inside omn's JSON.
 #
-# System-wide, `perf stat -a` wraps omn (`run: tool_wraps_omn`): perf's
-# per-cpu events are not inherited, so omn's file capabilities do not end
-# them at its exec (README, `tool_wraps_omn`). By pid and per cgroup, both
+# System-wide, omn launches `perf stat -a` through `sudo -n` (`run:
+# omn_launches_tool`): unprivileged at perf_event_paranoid 2, perf may not
+# count every cpu, and wrapping omn through sudo would run omn itself as root.
+# perf's window is inside omn's, so omn reads perf's start and exit besides,
+# and those tolerances are one-sided, above. By pid and per cgroup, both
 # observers start first and the workload runs inside both windows
 # (`attach`, `alongside`), so both count the whole of it.
 
@@ -203,46 +205,49 @@
     key: task-clock
     omn: results.0.lifetime.cpu_ns
     omn_scale: 0.000001
-    tolerance: {rel: 0.05, side: above}
-    why: "no source counts task-clock; every launched run carries the program's cpu time from the reap (wait4), in ns, which perf prints in msec. One run: omn launches perf stat, which launches the workload, so omn's cpu time is the workload's plus perf's own, never less (2.3 % more measured, three runs). Separate runs differed by 9 % under a loaded wave"
+    tolerance: {rel: 0.05, abs: 30, side: above}
+    why: "no source counts task-clock; every launched run carries the program's cpu time from the reap (wait4), in ns, which perf prints in msec. One run: omn launches perf stat, which launches the workload, so omn's cpu time is the workload's plus perf's own, never less (2.3 % more measured, three runs). perf's own is a cost of its start, not a share of the workload: 6.7 to 11.1 ms here, 16.2 ms on distroproof's Fedora 44 guest, whose perf loads more at start -- hence 30 ms beside the 5 %. Separate runs differed by 9 % under a loaded wave"
 
 - id: cpu.cycles.system
   source: cpu.cycles
   tool: perf stat
   use: "perf stat -a -e cycles -- prog (system-wide)"
   # Eight spinning interpreters: the machine's cycles over the window are
-  # theirs, so omn's own start and exit outside it -- about 0.1 s of cpu,
-  # 0.4 to 0.5e9 cycles -- are a fixed share of a known load rather than of
-  # whatever the machine idled at.
+  # theirs, so perf's and sudo's start and exit inside omn's window are a
+  # fixed share of a known load rather than of whatever the machine idled at.
   workload: [sh, -c, "for i in 1 2 3 4 5 6 7 8; do env PYTHONHASHSEED=0 python3 -S tests/reference/workloads/perfstat/spin.py 3000000 & done; wait"]
-  run: tool_wraps_omn
+  run: omn_launches_tool
   omn: [trace, cpu.cycles, --system, -m, count, -e, summary, --format, json, -o, "{out}"]
   reference:
-    command: [perf, stat, -a, -x, ",", -e, cycles, --]
+    command: [sh, -c, '$SUDO perf stat -a -x , -e cycles -- "$@"', sh]
     parse: perf_stat_csv
-    requires: [perf]
+    requires: [perf, sh]
+    privileged: true
+    sudo: perf
   compare:
     key: cycles
     omn: results.0.outputs[emit=summary].series.*.last
-    tolerance: {rel: 0.08, side: below}
-    why: "one run: perf counts every cpu for as long as omn lives, omn over the program it launched inside that, so perf's window is omn's plus omn's start and exit and omn can only read less. With the machine idle the difference was most of the count (-26 to -39 %, omn's start and exit against 0.4 to 0.9e9 idle cycles); over eight spinners it is a fixed 0.5e9 cycles against tens of billions, which the 8 % band holds whatever the machine idles at"
+    tolerance: {rel: 0.08, side: above}
+    why: "one run: omn counts every cpu for as long as the program it launched lives, which is sudo, then perf counting every cpu over the workload, so perf's window is inside omn's and omn can only read more, by sudo's and perf's start and exit; over eight spinners that is a fixed share of tens of billions of cycles, which the 8 % band holds whatever the machine idles at (+3.3, +3.2, +3.7 % over three runs). Wrapped by perf instead, omn ran as root through sudo, and unwrapped perf -a is refused at paranoid 2"
 
 - id: cpu.context_switches.system
   source: cpu.context_switches
   tool: perf stat
   use: "perf stat -a -e context-switches -- sleep N (system-wide)"
-  workload: []
-  run: tool_wraps_omn
-  omn: [trace, cpu.context_switches, --system, -d, 2s, -m, count, -e, summary, --format, json, -o, "{out}"]
+  workload: [sleep, "2"]
+  run: omn_launches_tool
+  omn: [trace, cpu.context_switches, --system, -m, count, -e, summary, --format, json, -o, "{out}"]
   reference:
-    command: [perf, stat, -a, -x, ",", -e, context-switches, --]
+    command: [sh, -c, '$SUDO perf stat -a -x , -e context-switches -- "$@"', sh]
     parse: perf_stat_csv
-    requires: [perf]
+    requires: [perf, sh]
+    privileged: true
+    sudo: perf
   compare:
     key: context-switches
     omn: results.0.outputs[emit=summary].series.*.last
-    tolerance: {rel: 0.15, side: below}
-    why: "one run, as for cycles: omn's window is inside perf's, so omn can only read less; switches are bursty, and omn's own start and exit switch a lot, so the time outside omn's window weighs more than for a steady counter (2.5 to 5 % measured)"
+    tolerance: {rel: 0.15, abs: 500, side: above}
+    why: "one run, as for cycles: perf's window is inside omn's, so omn can only read more; switches are bursty, and sudo's and perf's start and exit switch a lot, so the time outside perf's window weighs more than for a steady counter (+4.2, +2.8, +1.9 % over three runs here, of 85 000 to 131 000). Those switches are a count of their own, not a share: on distroproof's quiet two-cpu Fedora 44 guest the machine made 1715 in the window and omn read 328 more, hence 500 beside the 15 %"
 
 - id: cpu.instructions.cgroup
   source: cpu.instructions
