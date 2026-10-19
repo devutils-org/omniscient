@@ -1,0 +1,6 @@
+{
+  "debian": {"provider":"apt", "required":["python3","gcc","libc6-dev","sudo"], "optional":["linux-perf","bpftrace","bpfcc-tools","strace","sysstat","tcpdump","iproute2","fio","valgrind","heaptrack","htop","btop","numactl","procps","util-linux"]},
+  "ubuntu": {"provider":"apt", "required":["python3","gcc","libc6-dev","sudo"], "optional":["linux-tools-KERNEL","linux-tools-generic","bpftrace","bpfcc-tools","strace","sysstat","tcpdump","iproute2","fio","valgrind","heaptrack","htop","btop","numactl","procps","util-linux"]},
+  "fedora": {"provider":"dnf", "required":["python3","gcc","sudo"], "optional":["perf","bpftrace","bcc-tools","strace","sysstat","tcpdump","iproute","fio","valgrind","heaptrack","htop","btop","numactl","procps-ng","util-linux"]},
+  "arch": {"provider":"pacman", "required":["python","gcc","sudo"], "optional":["perf","bpftrace","bcc-libbpf-tools","strace","sysstat","tcpdump","iproute2","fio","valgrind","heaptrack","htop","btop","numactl","procps-ng","util-linux"]}
+}

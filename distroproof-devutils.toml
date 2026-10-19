@@ -1,0 +1,52 @@
+# Cross-tool installed-artifact campaign, using only disposable QEMU guests.
+# sh scripts/distroproof/devutils-build.sh
+# distroproof up -f distroproof-devutils.toml --no-tui --jobs 3 --json target/matrix/devutils.json
+[defaults]
+memory = "3G"
+cpus = 2
+timeout = "60m"
+
+[[target]]
+name = "chain-debian-12"
+image = "debian-12"
+
+[[target]]
+name = "chain-debian-13"
+image = "debian-13"
+
+[[target]]
+name = "chain-ubuntu-24.04"
+image = "ubuntu-24.04"
+
+[[target]]
+name = "chain-rocky-9"
+image = "rocky-9"
+
+[[target]]
+name = "chain-fedora-latest"
+image = "fedora-latest"
+
+[[target]]
+name = "chain-arch"
+image = "arch"
+
+[[target]]
+name = "chain-ubuntu-18.04"
+image = "ubuntu-18.04"
+
+[[target]]
+name = "chain-alpine"
+image = "alpine"
+
+[[target]]
+name = "chain-gentoo"
+image = "gentoo"
+
+[run]
+setup = "sh scripts/distroproof/witnesses.sh"
+command = "python3 scripts/distroproof/devutils/chain.py"
+as_user = "test"
+file_caps = { "/opt/omn/bin/omn" = ["bpf", "perfmon", "net_raw"] }
+collect = ["cross-tools.json", "witnesses.json", "xpac-history.json", "installed-packages.json", "reference.log"]
+exclude = ["*"]
+include = ["target/devutils-input", "scripts/distroproof", "catalog/references", "tests/reference/workloads", "tests/gpu_workload.py"]
