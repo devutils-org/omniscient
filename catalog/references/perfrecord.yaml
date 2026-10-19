@@ -57,21 +57,21 @@
 - id: stripped-library
   source: cpu.profile
   tool: perf record
-  use: "perf record -- python3 prog; perf report --sort dso,sym on stripped libraries"
+  use: "perf record -- python3 prog; perf report --sort dso on stripped libraries"
   run: attach
   settle_ms: 2000
   workload: [python3, tests/reference/workloads/perfrecord/split.py, "2"]
-  omn: [trace, cpu.profile, -m, sample@997hz, -e, stack, --pid, "{pid}", -d, 5s, --format, json, -o, "{out}"]
+  omn: [trace, cpu.profile, -m, sample@997hz, -k, object, -e, topk, --pid, "{pid}", -d, 5s, --format, json, -o, "{out}"]
   reference:
     command: [perf, record, -q, -F, "997", -p, "{pid}", -o, "{tmp}/perf.data"]
-    report: [perf, report, -i, "{tmp}/perf.data", --stdio, --no-children, -g, none, --sort, "dso,sym"]
-    parse: perf_report_self
+    report: [perf, report, -i, "{tmp}/perf.data", --stdio, --no-children, -g, none, --sort, dso]
+    parse: perf_report_dso
     requires: [perf, python3]
   compare:
     key: libcrypto.so.3
-    omn_parse: omn_profile_self
+    omn_parse: omn_topk_share
     tolerance: {abs: 0.05}
-    why: "60 % of the wall time hashes in libcrypto, whose internal functions are unnamed on both sides (a stripped library): each folds them into the object, so the share is the object's; one run, cycles against cpu-clock"
+    why: "60 % of the wall time hashes in libcrypto: the share is the object's on both sides, perf's by dso and omn's keyed by each sample's object, so a library whose functions are named (Fedora keeps libcrypto's symbols, found with distroproof) and one stripped (Arch) are compared alike; one run, cycles against cpu-clock"
 
 - id: live-top
   source: cpu.profile

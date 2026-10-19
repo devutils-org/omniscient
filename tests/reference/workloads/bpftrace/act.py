@@ -11,7 +11,12 @@ name is set at exec on purpose, not by prctl(PR_SET_NAME) once running:
 omn's proc.syscall keeps the comm an aggregate first saw, so a rename halfway
 through is invisible to its comm filter (docs/fixes/w22-bpftrace.md).
 
-It performs ACTION N times, and nothing else that the pair compares:
+It performs ACTION N times, and nothing else that the pair compares, then
+lingers LINGER seconds (0.5 by default): bpftrace -c stops when its child
+exits, and what is still in its output buffer then is dropped without a
+`Lost` line -- distroproof's Rocky 9 printed 474 and 575 of 604 opens.
+The linger is a sleep, which no pair counts; `spin` does not linger, since
+its pairs' medians would take the idle half second in.
 
   getppid   N getppid(2) calls                 syscount, proc.syscall
   open      N openat(2) of one regular file    opensnoop, proc.syscall
@@ -139,3 +144,5 @@ ACTIONS = {
 if __name__ == "__main__":
     action, n = sys.argv[1], int(sys.argv[2])
     ACTIONS[action](n)
+    if action != "spin":
+        time.sleep(float(os.environ.get("LINGER", "0.5")))

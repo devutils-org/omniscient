@@ -966,6 +966,24 @@ fn judge_omn(pair: &Pair, side: &Side, results: Option<&str>) -> Option<Outcome>
     // means, on its last line; the heuristics below are for a line it did
     // not print.
     let said = tail(&side.stderr, 1).pop().unwrap_or_default();
+    // Wrapped by the tool, omn's exit is the tool's to report, and a tool can
+    // exit 0 over a child that failed (`perf lock contention` on distroproof's
+    // Rocky 9 printed its table after omn's refusal): an empty `{out}` and
+    // omn's own last word, anywhere in the shared stderr, say what happened.
+    if side.status.success() && results.is_some_and(|r| r.trim().is_empty()) {
+        if let Some(lines) = omn_said(&side.stderr, OMN_MACHINE_REFUSED) {
+            return Some(
+                workload_fails_alone(pair)
+                    .unwrap_or_else(|| Outcome::Skip("omn cannot run this here".into(), lines)),
+            );
+        }
+        if let Some(lines) = omn_said(&side.stderr, OMN_RUN_FAILED) {
+            return Some(Outcome::Fail(format!(
+                "omn failed while running: {}",
+                lines[lines.len().saturating_sub(3)..].join(" | ")
+            )));
+        }
+    }
     match side.status.code() {
         Some(0) => None,
         Some(1) if said.contains(OMN_RUN_FAILED) => Some(Outcome::Fail(format!(
@@ -997,6 +1015,19 @@ fn judge_omn(pair: &Pair, side: &Side, results: Option<&str>) -> Option<Outcome>
             tail(&side.stderr, 3).join(" | ")
         ))),
     }
+}
+
+/// The eight lines of `stderr` that end with omn's `marker` line, when one is
+/// there: omn's own account inside output it shares with the tool.
+fn omn_said(stderr: &str, marker: &str) -> Option<Vec<String>> {
+    let lines: Vec<&str> = stderr.lines().collect();
+    let end = lines.iter().position(|l| l.contains(marker))?;
+    Some(
+        lines[end.saturating_sub(7)..=end]
+            .iter()
+            .map(|l| l.to_string())
+            .collect(),
+    )
 }
 
 /// `omn`'s last line on exit 1 (`src/main.rs`, `Unavailable::line`): the
@@ -2224,6 +2255,26 @@ compare: {omn: a, omn_jq: ".a", tolerance: {abs: 0, side: above, band: 2}, why: 
             "sh".into(),
         ];
         expect_pass(&p);
+
+        // A tool that exits 0 over an omn that refused, and prints after it
+        // (distroproof's Rocky 9): omn's refusal is read from the shared
+        // stderr, not an empty `{out}` failed as "not JSON".
+        let wrapped = p.clone();
+        p.omn[1] = "mkdir -p {out}; echo 'error: no viable backend' >&2; \
+                    echo 'exit 1: the machine refused the run; nothing was measured' >&2; exit 1"
+            .into();
+        p.reference.command[2] = "\"$@\"; echo 'the table' >&2; echo 5".into();
+        match run_pair(&p, &parsers(), Path::new(SH)) {
+            Outcome::Skip(why, lines) => {
+                assert_eq!(why, "omn cannot run this here");
+                assert!(
+                    lines.iter().any(|l| l.contains("no viable backend")),
+                    "{lines:?}"
+                );
+            }
+            other => panic!("expected a skip, got {other:?}"),
+        }
+        let mut p = wrapped;
 
         p.omn[1] = "echo '{\"a\":5}'".into();
         let problems = p.problems(&parsers()).join("\n");

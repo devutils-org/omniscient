@@ -42,4 +42,4 @@ as_user = "test"
 file_caps = { "/opt/omn/bin/omn" = ["bpf", "perfmon", "net_raw"] }
 collect = ["reference.log"]
 exclude = ["*"]
-include = ["target/dist", "target/dp-reference", "scripts/distroproof", "catalog/references", "tests/reference/workloads"]
+include = ["target/dist", "target/dp-reference", "scripts/distroproof", "catalog/references", "tests/reference/workloads", "tests/gpu_workload.py"]

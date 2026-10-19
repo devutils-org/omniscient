@@ -192,20 +192,43 @@ fn hist_scaled(stdout: &str, scale: f64) -> Result<Values, String> {
     Ok(values)
 }
 
-fn bpftrace_hist(stdout: &str, _stderr: &str) -> Result<Values, String> {
-    hist_scaled(stdout, 1.0)
+fn bpftrace_hist(stdout: &str, stderr: &str) -> Result<Values, String> {
+    hist_scaled(stdout, 1.0).map_err(|e| unattached(stdout, stderr).unwrap_or(e))
 }
 
 /// `biolatency` and `runqlat` histogram microseconds; omn reports
 /// nanoseconds, so the bounds are scaled here rather than in the pair.
-fn bpftrace_hist_usecs(stdout: &str, _stderr: &str) -> Result<Values, String> {
-    hist_scaled(stdout, 1000.0)
+fn bpftrace_hist_usecs(stdout: &str, stderr: &str) -> Result<Values, String> {
+    hist_scaled(stdout, 1000.0).map_err(|e| unattached(stdout, stderr).unwrap_or(e))
+}
+
+/// A witness whose probes this kernel does not have: bpftrace warns `could
+/// not attach probe` for each, skips it, and prints nothing more than its
+/// header. biosnoop.bt and biolatency.bt of bpftrace 0.17 and 0.20 (Debian
+/// 12, Ubuntu 24.04, found with distroproof) probe `blk_account_io_*`, which
+/// their 6.1 and 6.8 kernels no longer have. Asked only of an output with no
+/// data: the tool this machine has, refused, not a pair that failed.
+fn unattached(stdout: &str, stderr: &str) -> Option<String> {
+    let probes: Vec<&str> = stdout
+        .lines()
+        .chain(stderr.lines())
+        .filter_map(|l| l.trim().strip_prefix("WARNING: could not attach probe "))
+        .map(|p| p.trim_end_matches(", skipping."))
+        .collect();
+    (!probes.is_empty()).then(|| {
+        format!(
+            "{INCOMPLETE}the tool could not attach {} on this kernel and printed no data",
+            probes.join(", ")
+        )
+    })
 }
 
 /// The data lines of a snoop tool: those whose `numeric` column parses as an
 /// integer, which drops the banner, the header and bpftrace's own messages.
 /// bpftrace's own report that its output buffer overflowed (`Lost N
-/// events`, on either stream): a tool that printed one line per event
+/// events`, or at exit `Total lost event count: N`, as the bpftrace of
+/// distroproof's Fedora 44 (0.24) can say it, on either stream): a tool that
+/// printed one line per event
 /// printed fewer lines than there were events, so its count is refused
 /// rather than compared short.
 fn lossless(stdout: &str, stderr: &str) -> Result<(), String> {
@@ -213,8 +236,12 @@ fn lossless(stdout: &str, stderr: &str) -> Result<(), String> {
         .lines()
         .chain(stderr.lines())
         .filter_map(|l| {
-            let rest = l.trim().strip_prefix("Lost ")?;
-            rest.strip_suffix(" events")?.trim().parse::<u64>().ok()
+            let l = l.trim();
+            let count = match l.strip_prefix("Total lost event count:") {
+                Some(rest) => rest,
+                None => l.strip_prefix("Lost ")?.strip_suffix(" events")?,
+            };
+            count.trim().parse::<u64>().ok()
         })
         .sum();
     if lost > 0 {
@@ -243,17 +270,32 @@ fn comm(words: &[&str], before: usize, after: usize) -> Option<String> {
     (words.len() > before + after).then(|| words[before..words.len() - after].join(" "))
 }
 
-/// `TIME PID PPID ARGS`: one line per exec, `""` the total and
-/// `argv0:<path>` per program as it was executed.
+/// `TIME PID PPID ARGS`, or `TIME(ms) PID ARGS` from bpftrace 0.17 (Debian
+/// 12, found with distroproof): one line per exec, `""` the total and
+/// `argv0:<path>` per program as it was executed. The header says which
+/// column the arguments start at.
 fn execsnoop(stdout: &str, stderr: &str) -> Result<Values, String> {
     lossless(stdout, stderr)?;
+    // The rows are the lines after the header: before it, bpftrace's
+    // `Attaching 3 probes...` reads as a row of the three-column shape.
+    let header = stdout
+        .lines()
+        .enumerate()
+        .find_map(|(at, line)| Some((at, line.split_whitespace().position(|w| w == "ARGS")?)));
+    let (args, data) = match header {
+        Some((at, args)) => (
+            args,
+            stdout.lines().skip(at + 1).collect::<Vec<_>>().join("\n"),
+        ),
+        None => (3, stdout.to_string()),
+    };
     let mut values = vec![(String::new(), 0.0)];
-    for words in rows(stdout, 1) {
-        if words.len() < 4 || words[2].parse::<i64>().is_err() {
+    for words in rows(&data, 1) {
+        if words.len() <= args || words[1..args].iter().any(|w| w.parse::<i64>().is_err()) {
             continue;
         }
         values[0].1 += 1.0;
-        add(&mut values, &format!("argv0:{}", words[3]), 1.0);
+        add(&mut values, &format!("argv0:{}", words[args]), 1.0);
     }
     Ok(values)
 }
@@ -352,6 +394,11 @@ fn biosnoop(stdout: &str, stderr: &str) -> Result<Values, String> {
         values[0].1 += 1.0;
         add(&mut values, &format!("comm:{comm}"), 1.0);
         add(&mut values, &format!("lat_ms:{comm}"), lat);
+    }
+    if values[0].1 == 0.0 {
+        if let Some(refused) = unattached(stdout, stderr) {
+            return Err(refused);
+        }
     }
     Ok(values)
 }
@@ -533,11 +580,41 @@ mod tests {
     }
 
     #[test]
+    fn execsnoop_reads_both_shapes_of_its_header() {
+        let old = "Attaching 3 probes...\nTIME(ms)   PID   ARGS\n1809       1993  sh execs.sh 20\n1809       1994  /bin/true\n1811       1995  /bin/true\n";
+        let v = execsnoop(old, "").unwrap();
+        assert_eq!(get(&v, "argv0:/bin/true"), 2.0);
+        assert_eq!(get(&v, ""), 3.0);
+        let new =
+            "TIME            PID     PPID    ARGS\n08:59:18.035895 1986    1985    /bin/true\n";
+        assert_eq!(get(&execsnoop(new, "").unwrap(), "argv0:/bin/true"), 1.0);
+    }
+
+    #[test]
+    fn a_witness_that_attached_nothing_is_the_machine_s_refusal() {
+        let stderr = "Attaching 6 probes...\ncannot attach kprobe, probe entry may not exist\n\
+            WARNING: could not attach probe kprobe:__blk_account_io_done, skipping.\n\
+            WARNING: could not attach probe kprobe:blk_account_io_done, skipping.\n";
+        let stdout = "TIME(ms)     DISK    COMM             PID    LAT(ms)\n";
+        let e = biosnoop(stdout, stderr).unwrap_err();
+        assert!(e.starts_with(INCOMPLETE), "{e}");
+        assert!(e.contains("kprobe:blk_account_io_done"), "{e}");
+        let e = bpftrace_hist_usecs("Attaching 6 probes...\n", stderr).unwrap_err();
+        assert!(e.starts_with(INCOMPLETE), "{e}");
+        // An empty output with no such warning is still read, and the pair
+        // fails on the missing key.
+        assert_eq!(get(&biosnoop(stdout, "").unwrap(), ""), 0.0);
+    }
+
+    #[test]
     fn an_output_that_lost_events_is_refused() {
         let text = format!("{}Lost 197 events\n", real("opensnoop"));
         let e = opensnoop(&text, "").unwrap_err();
         assert!(e.contains("lost 197 events"), "{e}");
         assert!(biosnoop(&real("biosnoop"), "Lost 3 events\n").is_err());
+        let at_exit = format!("{}Total lost event count: 60\n", real("opensnoop"));
+        let e = opensnoop(&at_exit, "").unwrap_err();
+        assert!(e.contains("lost 60 events"), "{e}");
     }
 
     #[test]

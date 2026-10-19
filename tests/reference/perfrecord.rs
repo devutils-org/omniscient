@@ -24,6 +24,10 @@ pub fn parsers() -> Vec<Parser> {
             parse: perf_report_self,
         },
         Parser {
+            name: "perf_report_dso",
+            parse: perf_report_dso,
+        },
+        Parser {
             name: "perf_top_self",
             parse: perf_top_self,
         },
@@ -111,6 +115,29 @@ fn perf_report_self(stdout: &str, _stderr: &str) -> Result<Values, String> {
             .find_map(|marker| rest.split_once(&format!(" {marker} ")))
             .ok_or_else(|| format!("no `[.]`/`[k]` column in `{line}`"))?;
         add(&mut values, &function_key(object, symbol), share / 100.0);
+    }
+    if values.is_empty() {
+        return Err("no row with an overhead in perf report's output".into());
+    }
+    Ok(values)
+}
+
+/// `perf report --stdio --no-children -g none --sort dso`: each object's self
+/// overhead, as a share of the whole profile (0..1), keyed by its soname.
+fn perf_report_dso(stdout: &str, _stderr: &str) -> Result<Values, String> {
+    let mut values = Values::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let Some((share, object)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Some(share) = percent(share) else {
+            continue;
+        };
+        add(&mut values, &soname(object.trim()), share / 100.0);
     }
     if values.is_empty() {
         return Err("no row with an overhead in perf report's output".into());
@@ -253,8 +280,9 @@ fn omn_hist_mean(stdout: &str, _stderr: &str) -> Result<Values, String> {
 
 /// `omn trace <source> -e topk --format json`: each row's share of the
 /// events (the rows and the rest), under its key -- a cache line's
-/// `mem:[0x4040c0,0x404100)` is keyed by its start, `0x4040c0` -- and `top`
-/// for the row ranked first.
+/// `mem:[0x4040c0,0x404100)` is keyed by its start, `0x4040c0`, an
+/// `object:libz.so.1.3.2` by its soname, `libz.so.1` -- and `top` for the row
+/// ranked first.
 fn omn_topk_share(stdout: &str, _stderr: &str) -> Result<Values, String> {
     let result = omn_result(stdout)?;
     let output = emitted(&result, "topk")?;
@@ -270,15 +298,19 @@ fn omn_topk_share(stdout: &str, _stderr: &str) -> Result<Values, String> {
     let mut values = Values::new();
     for row in rows {
         let key = row["key"].as_str().unwrap_or("");
-        let key = key
-            .strip_prefix("mem:[")
-            .and_then(|k| k.split(',').next())
-            .unwrap_or(key);
+        let key = match key.strip_prefix("object:") {
+            Some(object) => soname(object),
+            None => key
+                .strip_prefix("mem:[")
+                .and_then(|k| k.split(',').next())
+                .unwrap_or(key)
+                .to_string(),
+        };
         let share = row["events"].as_f64().unwrap_or(0.0) / total;
         if values.is_empty() {
             values.push(("top".into(), share));
         }
-        add(&mut values, key, share);
+        add(&mut values, &key, share);
     }
     Ok(values)
 }
@@ -368,6 +400,43 @@ mod tests {
         let v = omn_topk_share(&capture("omn-sharing-share.json"), "").unwrap();
         assert!(get(&v, "top") > 0.9);
         assert_eq!(get(&v, "top"), get(&v, "0x4040c0"));
+    }
+
+    #[test]
+    fn a_profile_by_object_reads_alike_on_both_sides() {
+        let perf = perf_report_dso(
+            "# Overhead  Shared Object\n#\n    60.25%  libcrypto.so.3.5.5\n    38.10%  libz.so.1.3.1.zlib-ng\n     1.65%  [kernel.kallsyms]\n",
+            "",
+        )
+        .unwrap();
+        assert!(
+            perf.iter()
+                .any(|(key, share)| key == "libcrypto.so.3" && (share - 0.6025).abs() < 1e-9),
+            "{perf:?}"
+        );
+        assert!(
+            perf.iter()
+                .any(|(key, share)| key == "libz.so.1" && (share - 0.381).abs() < 1e-9),
+            "{perf:?}"
+        );
+        let omn = omn_topk_share(
+            r#"{"results": [{"outputs": [{"emit": "topk", "series": [
+                {"key": "object:libcrypto.so.3", "events": 60},
+                {"key": "object:libz.so.1.3.2", "events": 38}],
+                "rest": {"events": 2}}]}]}"#,
+            "",
+        )
+        .unwrap();
+        assert!(
+            omn.iter()
+                .any(|(key, share)| key == "libcrypto.so.3" && (share - 0.6).abs() < 1e-9),
+            "{omn:?}"
+        );
+        assert!(
+            omn.iter()
+                .any(|(key, share)| key == "libz.so.1" && (share - 0.38).abs() < 1e-9),
+            "{omn:?}"
+        );
     }
 
     #[test]

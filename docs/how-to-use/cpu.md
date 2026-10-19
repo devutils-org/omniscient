@@ -28,6 +28,7 @@ time). `cpu.profile` is the **time** profile.
 ```console
 omn trace cpu.profile -m sample@997hz -e stack -- ./prog
 omn trace cpu.profile -m sample@997hz -e stack --format folded -o out -- ./prog
+omn trace cpu.profile -m sample@997hz -k object -e topk -- ./prog   # perf report --sort dso
 omn trace cpu.instructions,cpu.cycles,cpu.ipc -m count -e summary -- ./prog
 omn trace cpu.oncpu_time -m count -e summary -- make -j8
 omn trace cpu.util -m poll@1s -e timeline --system -d 30s
@@ -60,6 +61,13 @@ target: `fp+leaf` for a binary built with frame pointers, `dwarf` for one
 without (8 KiB copied per sample, `high`), `fp` system-wide. The run's notes
 say which and why. `--stack dwarf` forces it. `--symbols debuginfod` names a
 stripped binary's frames from `DEBUGINFOD_URLS`.
+
+`-k object` keys each sample by the file its leaf was in (`libc.so.6`,
+`[kernel]`, `?` where no mapping covered it): `perf report --sort dso`. It
+is what to compare across machines where one library keeps its symbols and
+another is stripped, since a named function and an unnamed address of the
+same file land in the same row (pair `stripped-library`, 0.597 against perf's
+0.597).
 
 At `perf_event_paranoid` 2 without `CAP_PERFMON` the stacks are user-only,
 and the run says so.

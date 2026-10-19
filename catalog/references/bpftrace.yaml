@@ -80,7 +80,7 @@
     key: "comm:omnref"
     omn: results.0.outputs[emit=summary].series.*.count
     tolerance: {rel: 0.05}
-    why: "one opensnoop line per openat returned, failures included, against omn's openat calls; python3 opens only through openat, so open/openat2 add nothing; two runs, 500 opens plus about 120 at startup"
+    why: "one opensnoop line per openat returned, failures included, against omn's openat calls; python3 opens through openat, but for one open(2) on Fedora 44 (strace there: 594 openat and 1 open), inside the band; two runs, 500 opens plus about 120 at startup"
 
 - id: killsnoop
   source: proc.signals
