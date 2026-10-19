@@ -21,10 +21,10 @@ commit that fixed it. It is meant to be read as distroproof's living proof.
 
 | | |
 |---|---|
-| Distributions | **16** images on their own kernels -- Debian 10, 11, 12, 13 and sid; Ubuntu 18.04, 20.04, 22.04, 24.04; Rocky 8 and 9; Fedora 43 and 44; Arch; Gentoo; Alpine -- and **5** variants (paranoid 3, `kptr_restrict` 2, lockdown, no PMU, root); **3** arm64 images (Debian 13, Ubuntu 24.04, Fedora 44, emulated); **8** rootless podman containers (Debian and Alpine, four privilege levels) |
+| Distributions | **17** images on their own kernels -- Debian 10, 11, 12, 13 and sid; Ubuntu 18.04, 20.04, 22.04, 24.04; Rocky 8 and 9; Fedora 43 and 44; Arch; Gentoo; Alpine; NixOS -- and **5** variants (paranoid 3, `kptr_restrict` 2, lockdown, no PMU, root); **3** arm64 images (Debian 13, Ubuntu 24.04, Fedora 44, emulated); **8** rootless podman containers (Debian and Alpine, four privilege levels) |
 | Kernels | 4.15 to 7.2, RHEL's 4.18 and 5.14 with their backports |
 | Time | the 21 targets in about **12 minutes**, four at a time, from one command |
-| Findings in Omniscient | **26 defects** no test on the development machine had shown: **12 in the tool** (the release, the probes, the catalog, a collector) and **14 in its test suite** (a judge, the reference runner, twelve reference pairs) |
+| Findings in Omniscient | **27 defects** no test on the development machine had shown: **13 in the tool** (the release, the probes, the catalog, a collector) and **14 in its test suite** (a judge, the reference runner, twelve reference pairs) |
 | Claims refuted | **158** runs of a source Omniscient called usable that the kernel refused at start, in the first matrix; **0** after |
 | Cross-checked | every reason Omniscient gives for a refusal agrees with envprobe's independent reading of the same guest, on all 21 targets |
 | Back into distroproof | 3 images (Gentoo, Debian sid, Fedora 43), 2 boot fixes, 3 `[run]` options, 2 envprobe facts (pull requests [#4](https://github.com/devutils-org/distroproof/pull/4), [#5](https://github.com/devutils-org/distroproof/pull/5)) |
@@ -83,6 +83,7 @@ distributions with the witnesses their own packages carry.
 | `fedora-latest-lockdown` | 6.19 | `lockdown=confidentiality` | 55 |
 | `debian-12-nopmu` | 6.1 | no PMU | 76 |
 | `debian-12-root` | 6.1 | root | 94 |
+| `nixos` (musl archive) | 6.12, NixOS 25.05 | file capabilities | 96 |
 | `debian-13-arm64` | 6.12 arm64, emulated | file capabilities | 82 |
 | `ubuntu-24.04-arm64` | 6.8 arm64, emulated | file capabilities | 86 |
 | `fedora-latest-aarch64` | 6.19 aarch64, emulated | file capabilities | 88 |
@@ -359,6 +360,25 @@ CAP_SYS_ADMIN, and the 13 perf sources came back as soon as it was.
 (`Seccomp: 2` in `/proc/self/status`), is said to be the filter's, with what
 lifts it; the envprobe judge holds that reason to envprobe's `seccomp`.
 
+### 15. NixOS: a loader that is there and refuses everything
+
+**Seen.** On `nixos`, the release's `omn` would not start: "Could not start
+dynamically linked executable: /opt/omn/bin/omn -- NixOS cannot run
+dynamically linked executables intended for generic linux environments".
+
+**What distroproof showed.** NixOS keeps its loader in the store and puts a
+stub at `/lib64/ld-linux-x86-64.so.2` that refuses every program
+(`stub-ld`). The install script chose the glibc archive because the loader's
+path existed.
+
+**Fix.** The install script asks the loader to run (`--version`), not only
+whether it is there, and takes the static musl archive where it does not:
+`docs/install.md` says the same to a NixOS user. The cell then lists 96
+sources usable, like Fedora's and Arch's, every judge passing. To boot NixOS
+at all, distroproof gained Hydra's Proxmox image as a source
+([ddd4025](https://github.com/devutils-org/distroproof/commit/ddd4025)):
+NixOS publishes no generic cloud image, and that one carries cloud-init.
+
 ## The cross-check
 
 envprobe and Omniscient read the same guest independently, so their answers
@@ -464,10 +484,5 @@ developer does not have.
   with `perf sched timehist` and `strace` elsewhere).
 - **`cpu.cache_misses`** reads apart from perf on separate runs, in opposite
   directions here and in the Arch guest; **`cpu.ipc`** missed once on Fedora.
-- **NixOS** is not covered. It publishes no image a NoCloud seed configures:
-  Hydra's only cloud image is Amazon's, set up from EC2's metadata service,
-  which distroproof would have to serve, and building one needs `nix`. On
-  NixOS itself the glibc archive would not start (there is no
-  `/lib64/ld-linux-x86-64.so.2`); the static musl one would.
 - **aarch64 on hardware**: the arm64 cells are emulated, so their hardware
   counters are TCG's, not a core's.

@@ -6,8 +6,21 @@ set -eu
 
 # This machine's architecture, and musl or glibc: the archive whose loader
 # this system has.
+# A system with no working glibc loader where the glibc archive's binaries
+# look for it gets the static musl archive, which needs none: NixOS keeps its
+# loader in the store and puts a stub there that refuses every program
+# ("Could not start dynamically linked executable"), so the loader is asked
+# to run, not only looked for.
 arch=$(uname -m)
-if [ -e "/lib/ld-musl-$arch.so.1" ]; then libc=musl; else libc=gnu; fi
+case $arch in
+    aarch64) glibc_loader=/lib/ld-linux-aarch64.so.1 ;;
+    *) glibc_loader=/lib64/ld-linux-x86-64.so.2 ;;
+esac
+if [ -e "/lib/ld-musl-$arch.so.1" ] || ! "$glibc_loader" --version >/dev/null 2>&1; then
+    libc=musl
+else
+    libc=gnu
+fi
 archive=$(ls target/dist/omn-*-"$arch"-linux-$libc.tar.gz 2>/dev/null | head -n 1)
 [ -n "$archive" ] || { echo "setup: no $arch $libc archive under target/dist; run ARCH=$arch scripts/release.sh" >&2; exit 1; }
 mkdir -p /opt/omn

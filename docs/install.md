@@ -26,7 +26,7 @@ A release is two archives per architecture, each with its checksum, one per C li
 | Archive | For | What differs |
 |---|---|---|
 | `omn-<version>-x86_64-linux-gnu.tar.gz` | every glibc distribution, glibc 2.17 or later | everything below |
-| `omn-<version>-x86_64-linux-musl.tar.gz` | musl distributions (Alpine) | `omn` and `omn-mcp` linked statically, the shim linked against musl, no `libomn_cupti.so`: a static binary loads no library, so the NVIDIA sources (NVML, CUPTI) are refused, saying so |
+| `omn-<version>-x86_64-linux-musl.tar.gz` | musl distributions (Alpine), and NixOS, whose `/lib64/ld-linux-x86-64.so.2` is a stub that refuses generic binaries | `omn` and `omn-mcp` linked statically, the shim linked against musl, no `libomn_cupti.so`: a static binary loads no library, so the NVIDIA sources (NVML, CUPTI) are refused, saying so |
 | `omn-<version>-aarch64-linux-gnu.tar.gz`, `omn-<version>-aarch64-linux-musl.tar.gz` | the same, on arm64 | the same two archives, built with `ARCH=aarch64 scripts/release.sh`; checked on Debian 13, Ubuntu 24.04 and Fedora 44 arm64, emulated (`docs/distroproof.md`) |
 
 On Alpine the glibc archive also runs once `gcompat` is installed (`apk add

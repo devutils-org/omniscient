@@ -86,6 +86,11 @@ image = "gentoo"
 name = "alpine"
 image = "alpine"
 
+# --- NixOS: Hydra's Proxmox image, no FHS loader, so the musl archive
+[[target]]
+name = "nixos"
+image = "nixos"
+
 # --- aarch64, emulated on an x86_64 host (TCG): the arm64 kernels and
 # userspaces of three publishers, with the aarch64 archives
 # (`ARCH=aarch64 scripts/release.sh`). Slower by an order of magnitude, hence

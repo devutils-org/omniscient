@@ -1180,9 +1180,8 @@ explains it. So this phase does two things at once, on purpose:
 Added 2026-10-19, beyond the criteria: aarch64 (three arm64 images distroproof
 now emulates, with the aarch64 archives) and rootless podman containers (eight
 cells, `scripts/containers.sh`), each judged like the rest; two defects found
-(`docs/distroproof.md`, findings 13 and 14). Not this phase's, and why: NixOS,
-which publishes no image a NoCloud seed configures (the same document, "Open");
-the hardware sources (IBS, RAPL, a GPU) stay checked on the host, as in the
+(`docs/distroproof.md`, findings 13 and 14); and NixOS, from Hydra's Proxmox
+image, on the musl archive (finding 15). Not this phase's, and why: the hardware sources (IBS, RAPL, a GPU) stay checked on the host, as in the
 kernel matrix.
 
 ---
