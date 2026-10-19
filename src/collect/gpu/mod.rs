@@ -114,6 +114,9 @@ pub fn probe(requirement: &str) -> Option<Probe> {
     if let Some(name) = requirement.strip_prefix("hwmon:") {
         return Some(hwmon(name));
     }
+    if requirement == "nvidia:profiling" {
+        return Some(nvidia_profiling());
+    }
     let library = match requirement {
         "nvml" => return Some(nvml_probe()),
         "cupti" => "libcupti.so",
@@ -122,6 +125,68 @@ pub fn probe(requirement: &str) -> Option<Probe> {
         _ => return None,
     };
     Some(loadable(requirement, library))
+}
+
+/// Whether the NVIDIA driver lets this process read the GPU's performance
+/// counters, which CUPTI's profiler and PC sampling use: the
+/// `nvidia:profiling` requirement. The driver's default
+/// (`RmProfilingAdminOnly: 1` in `/proc/driver/nvidia/params`) keeps them to
+/// root and CAP_SYS_ADMIN, and CUPTI then answers
+/// CUPTI_ERROR_INSUFFICIENT_PRIVILEGES once the program runs: `gpu.profile`
+/// and `gpu.counters` were listed usable and every run of them came back
+/// empty, found when CUDA was installed on the development machine.
+fn nvidia_profiling() -> Probe {
+    let params = match std::fs::read_to_string("/proc/driver/nvidia/params") {
+        Ok(params) => params,
+        Err(error) => {
+            return Probe::Unknown(format!(
+                "/proc/driver/nvidia/params cannot be read ({error}), so whether the driver lets \
+                 this process read the GPU's performance counters is not known"
+            ))
+        }
+    };
+    profiling_allowed(&params, privileged())
+}
+
+fn profiling_allowed(params: &str, privileged: bool) -> Probe {
+    let admin_only = params
+        .lines()
+        .find_map(|line| line.strip_prefix("RmProfilingAdminOnly:"))
+        .map(|value| value.trim() != "0");
+    match admin_only {
+        Some(false) => Probe::Available,
+        Some(true) if privileged => Probe::Available,
+        Some(true) => Probe::Missing(
+            "the NVIDIA driver keeps the GPU's performance counters to root and CAP_SYS_ADMIN \
+             (`RmProfilingAdminOnly: 1` in /proc/driver/nvidia/params), and CUPTI's profiler \
+             would answer CUPTI_ERROR_INSUFFICIENT_PRIVILEGES: `options nvidia \
+             NVreg_RestrictProfilingToAdminUsers=0` in /etc/modprobe.d lifts it at the driver's \
+             next load"
+                .to_owned(),
+        ),
+        None => Probe::Unknown(
+            "/proc/driver/nvidia/params does not say `RmProfilingAdminOnly`, so whether this \
+             process may read the GPU's performance counters is not known"
+                .to_owned(),
+        ),
+    }
+}
+
+/// Root, or CAP_SYS_ADMIN in this process's effective set.
+fn privileged() -> bool {
+    if unsafe { libc::geteuid() } == 0 {
+        return true;
+    }
+    const CAP_SYS_ADMIN: u32 = 21;
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("CapEff:"))
+                .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
+        })
+        .is_some_and(|effective| effective & (1 << CAP_SYS_ADMIN) != 0)
 }
 
 /// Whether NVML initialises here and sees a device: the `nvml` requirement.
@@ -611,6 +676,19 @@ pub(crate) fn energy_counter_lock() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The driver's profiling restriction is read off its parameters, and
+    /// only root or CAP_SYS_ADMIN passes it.
+    #[test]
+    fn the_driver_s_profiling_restriction_is_a_requirement() {
+        let restricted = "ResmanDebugLevel: 4294967295\nRmProfilingAdminOnly: 1\n";
+        let open = "RmProfilingAdminOnly: 0\n";
+        assert!(matches!(profiling_allowed(restricted, false),
+            Probe::Missing(why) if why.contains("NVreg_RestrictProfilingToAdminUsers=0")));
+        assert!(matches!(profiling_allowed(restricted, true), Probe::Available));
+        assert!(matches!(profiling_allowed(open, false), Probe::Available));
+        assert!(matches!(profiling_allowed("", false), Probe::Unknown(_)));
+    }
 
     #[test]
     fn a_requirement_from_another_family_is_left_alone() {

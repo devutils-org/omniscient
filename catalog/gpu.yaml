@@ -412,7 +412,7 @@
   summary: "Counters inside a kernel, per launch: instructions, memory, cache"
   unit: count
   backends:
-    - {id: "vendor:cupti", requires: ["cupti"], cost: extreme}
+    - {id: "vendor:cupti", requires: ["cupti", "nvidia:profiling"], cost: extreme}
     - {id: "vendor:rocprof", requires: ["rocprofv3"], cost: extreme, equivalent: true}
   modes: [trace]
   emits: [raw, topk]
@@ -474,7 +474,7 @@
   summary: "Where time goes inside a kernel: sampled program counters and stall reasons"
   unit: count
   backends:
-    - {id: "vendor:cupti", requires: ["cupti"], cost: med}
+    - {id: "vendor:cupti", requires: ["cupti", "nvidia:profiling"], cost: med}
   modes: [trace]
   emits: [stack, topk, raw]
   stacks: device
