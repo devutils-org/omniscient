@@ -20,6 +20,9 @@ if [ ! -e "$tool" ]; then
 	for dir in /usr/share/bpftrace/tools /usr/sbin /usr/share/doc/bpftrace/tools /usr/local/share/bpftrace/tools; do
 		[ -e "$dir/$name" ] && { tool="$dir/$name"; break; }
 	done
+	# Alpine ships the scripts apart (bpftrace-tools): a machine without
+	# them refuses the pair rather than handing bpftrace a missing path.
+	[ -e "$tool" ] || { echo "under.sh: the bpftrace tool script $name is not installed here" >&2; exit 1; }
 fi
 args=""
 while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do

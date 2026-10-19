@@ -22,7 +22,8 @@
 # - `alongside`, for a source omn serves system-wide only (proc.exec,
 #   net.tcp.lifetime): omn `--system -d 6s` and the tool under `timeout -s
 #   INT` (bpftrace prints its END maps on SIGINT and exits 0, which
-#   `--preserve-status` passes on) start together; after `settle_ms` (bpftrace
+#   coreutils' `--preserve-status` passes on, and BusyBox's timeout -- Alpine's,
+#   which refuses that option -- by default) start together; after `settle_ms` (bpftrace
 #   compiles and attaches in about a second) the runner launches the workload;
 #   both observers end on their own clock.
 #
@@ -69,7 +70,9 @@
   tool: opensnoop.bt
   use: "opensnoop.bt: which process opens files, how often"
   workload: [tests/reference/workloads/bpftrace/omnref, tests/reference/workloads/bpftrace/act.py, open, "500"]
-  omn: [trace, proc.syscall, -m, count, -e, summary, --filter, 'syscall == "openat" && comm == "omnref"', --format, json]
+  # musl on x86_64 opens through open(2), glibc through openat(2) (Alpine
+  # 3.24: 176 open, no openat, for python3's opens); opensnoop.bt traces both.
+  omn: [trace, proc.syscall, -m, count, -e, summary, --filter, '(syscall == "openat" || syscall == "open") && comm == "omnref"', --format, json]
   reference:
     command: [sh, tests/reference/workloads/bpftrace/under.sh, /usr/share/bpftrace/tools/opensnoop.bt, --]
     parse: opensnoop
@@ -109,7 +112,7 @@
   run: alongside
   settle_ms: 2000
   reference:
-    command: [sh, -c, 't=$1; [ -e "$t" ] || t=/usr/sbin/$(basename "$t"); exec timeout --preserve-status -s INT 6 $SUDO bpftrace "$t"', sh, /usr/share/bpftrace/tools/execsnoop.bt]
+    command: [sh, -c, 't=$1; [ -e "$t" ] || t=/usr/sbin/$(basename "$t"); p=--preserve-status; timeout $p 1 true 2>/dev/null || p=; exec timeout $p -s INT 6 $SUDO bpftrace "$t"', sh, /usr/share/bpftrace/tools/execsnoop.bt]
     parse: execsnoop
     requires: [bpftrace, timeout]
     privileged: true
@@ -232,6 +235,9 @@
     command: [sh, tests/reference/workloads/bpftrace/under.sh, /usr/share/bpftrace/tools/tcpconnect.bt, --]
     parse: tcpconnect
     requires: [bpftrace]
+    # A kernel whose traceable functions bpftrace cannot read (Alpine\'s
+    # linux-virt without debugfs) attaches no kprobe: the machine refused.
+    refused_when: ["No matches for kprobe"]
     privileged: true
     sudo: bpftrace
   compare:
@@ -249,9 +255,12 @@
   run: alongside
   settle_ms: 2000
   reference:
-    command: [sh, -c, 't=$1; [ -e "$t" ] || t=/usr/sbin/$(basename "$t"); exec timeout --preserve-status -s INT 6 $SUDO bpftrace "$t"', sh, /usr/share/bpftrace/tools/tcplife.bt]
+    command: [sh, -c, 't=$1; [ -e "$t" ] || t=/usr/sbin/$(basename "$t"); p=--preserve-status; timeout $p 1 true 2>/dev/null || p=; exec timeout $p -s INT 6 $SUDO bpftrace "$t"', sh, /usr/share/bpftrace/tools/tcplife.bt]
     parse: tcplife
     requires: [bpftrace, timeout]
+    # A kernel whose traceable functions bpftrace cannot read (Alpine\'s
+    # linux-virt without debugfs) attaches no kprobe: the machine refused.
+    refused_when: ["No matches for kprobe"]
     privileged: true
     sudo: bpftrace
   compare:

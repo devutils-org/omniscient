@@ -754,6 +754,17 @@ pub fn run_pair(pair: &Pair, parsers: &[Parser], omn: &Path) -> Outcome {
             doc,
         });
         match (parser.parse)(&result.tool.stdout, &result.tool.stderr) {
+            // Nothing read from a tool that failed: its failure is the
+            // finding, not a missing key (BusyBox's timeout refusing
+            // `--preserve-status` on Alpine).
+            Ok(values) if values.is_empty() && !result.tool.status.success() => {
+                return Outcome::Fail(format!(
+                    "`{}` exited {} with nothing to read: {}",
+                    pair.tool,
+                    result.tool.status,
+                    tail(&result.tool.stderr, 3).join(" | ")
+                ));
+            }
             Ok(values) => tool_values.push(values),
             Err(e) if e.starts_with(INCOMPLETE) => {
                 return Outcome::Skip(e, tail(&result.tool.stderr, 3));
@@ -1115,6 +1126,12 @@ const REFUSALS: &[&str] = &[
     // `sudo -n` refusing a command the sudoers file does not grant without a
     // password: `sudo -l` cannot tell, since it lists rules that need one too.
     "sudo: a password is required",
+    // A witness this machine has but cannot start: Gentoo's binary bpftrace
+    // linked against another LLVM build than the one installed beside it.
+    "symbol lookup error",
+    "error while loading shared libraries",
+    // A bpftrace whose distribution ships its scripts apart (under.sh).
+    "tool script",
 ];
 
 /// The tool's stderr lines that say the machine refused it.
